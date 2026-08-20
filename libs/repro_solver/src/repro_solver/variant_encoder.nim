@@ -119,6 +119,21 @@ type
     allowedValues*: seq[string]
     contributions*: seq[VariantContribution]
     constraints*: seq[ConstraintExpr]
+    pinnedValue*: string
+      ## Named-Lock-Files NLF-M3 (§1.2) — the variant's value is DECIDED by a
+      ## governing committed lock, not chosen. Empty = unpinned, the ordinary
+      ## case.
+      ##
+      ## A pinned variant asserts ``variant_assigned`` as a FACT and emits no
+      ## cardinality rule, exactly as ``PackageDecl.pinned`` does for a
+      ## version. That distinction is the whole milestone: the measured
+      ## implementation forwarded a lock's variant assignments as ordinary
+      ## ``prSet`` contributions, which land in the ``#minimize`` objective as
+      ## WEIGHTS — a preference, which a model scoring better elsewhere can
+      ## outvote, and did. A lock that can be outvoted is not a lock.
+      ##
+      ## Encoding it as a one-element universe instead would be the same
+      ## mistake in a different costume: it states the answer as a search.
 
 # ---------------------------------------------------------------------------
 # Constructors (keep test-side construction terse)
@@ -126,21 +141,25 @@ type
 
 proc newBoolVariant*(name: string;
                      contributions: openArray[VariantContribution] = @[];
-                     constraints: openArray[ConstraintExpr] = @[]):
+                     constraints: openArray[ConstraintExpr] = @[];
+                     pinnedValue = ""):
                      VariantDecl =
   VariantDecl(name: name, kind: vkBool,
               allowedValues: @["true", "false"],
               contributions: @contributions,
-              constraints: @constraints)
+              constraints: @constraints,
+              pinnedValue: pinnedValue)
 
 proc newEnumVariant*(name: string; values: openArray[string];
                      contributions: openArray[VariantContribution] = @[];
-                     constraints: openArray[ConstraintExpr] = @[]):
+                     constraints: openArray[ConstraintExpr] = @[];
+                     pinnedValue = ""):
                      VariantDecl =
   VariantDecl(name: name, kind: vkEnum,
               allowedValues: @values,
               contributions: @contributions,
-              constraints: @constraints)
+              constraints: @constraints,
+              pinnedValue: pinnedValue)
 
 proc contribution*(priority: VariantPriority; value: string):
                   VariantContribution =
@@ -203,6 +222,11 @@ proc effectiveValues(v: VariantDecl): seq[string] =
   for c in v.contributions:
     if c.value notin result:
       result.add(c.value)
+  # A pinned value is part of the universe by construction: the pin is the
+  # answer, so a universe that cannot express it would make the program
+  # unsatisfiable for a reason that has nothing to do with the recipe.
+  if v.pinnedValue.len > 0 and v.pinnedValue notin result:
+    result.add(v.pinnedValue)
 
 # ---------------------------------------------------------------------------
 # Universe + cardinality
@@ -216,12 +240,30 @@ proc encodeUniverseFacts*(v: VariantDecl): string =
   for value in effectiveValues(v):
     parts.add("variant_value(\"" & aspQuote(v.name) & "\", \"" &
               aspQuote(value) & "\").")
+  if v.pinnedValue.len > 0:
+    # NLF-M3. A pinned assignment is STATED, not searched for. The fact has to
+    # be emitted (rather than merely deleting the choice) because every
+    # constraint and conditional dependency edge downstream is predicated on
+    # ``variant_assigned`` for this variant: dropping the choice without
+    # asserting the answer would silently stop those applying — coverage lost
+    # rather than a wrong answer, which is worse. Same shape, and same
+    # reasoning, as ``encodePackageUniverse``'s pinned-version fact.
+    parts.add("variant_assigned(\"" & aspQuote(v.name) & "\", \"" &
+              aspQuote(v.pinnedValue) & "\").")
   parts.join("\n")
 
 proc encodeCardinality*(v: VariantDecl): string =
   ## Emit a choice rule that forces exactly-one ``variant_assigned``
   ## per variant. Clingo's ``{ ... } = N`` form lifts the lower and
   ## upper bound onto the candidate set in one shot.
+  ##
+  ## A pinned variant gets no rule at all: its ``variant_assigned`` atom is
+  ## asserted as a fact by ``encodeUniverseFacts``, and emitting a cardinality
+  ## rule alongside that fact would re-open as a search the very thing the pin
+  ## settled — and would let the ``#minimize`` objective outvote it, which is
+  ## the measured defect (§1.2) this field exists to remove.
+  if v.pinnedValue.len > 0:
+    return ""
   "{ variant_assigned(\"" & aspQuote(v.name) & "\", X) : " &
     "variant_value(\"" & aspQuote(v.name) & "\", X) } = 1."
 
@@ -326,7 +368,9 @@ proc encodeVariants*(variants: openArray[VariantDecl]): string =
     let universe = encodeUniverseFacts(v)
     if universe.len > 0:
       sections.add(universe)
-    sections.add(encodeCardinality(v))
+    let cardinality = encodeCardinality(v)
+    if cardinality.len > 0:
+      sections.add(cardinality)
     let priorities = encodePriorityFacts(v)
     if priorities.len > 0:
       sections.add(priorities)

@@ -112,6 +112,8 @@ libs/repro_dsl_stdlib/tests/t_c1_dsl_realize_hash.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_c2_apt_index.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_c2_recursive_identity.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_catalog_claude_code.nim	nim	10
+libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_d2_dnf_index.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_d2_pacman_index.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_develop_dependency_source_is_read_not_solved.nim	nim	11
@@ -136,6 +138,7 @@ libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim	nim	39
 libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	9
+libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_versioned_provisioning_schema.nim	nim	31
 libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim	nim	4
 libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim	nim	21

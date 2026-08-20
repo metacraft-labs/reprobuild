@@ -442,7 +442,8 @@ proc encodeUnified*(variants: openArray[VariantDecl];
     VariantDecl(name: v.name, kind: v.kind,
                 allowedValues: v.allowedValues,
                 contributions: v.contributions,
-                constraints: kept)
+                constraints: kept,
+                pinnedValue: v.pinnedValue)
 
   for v in variants:
     if v.name notin seen:

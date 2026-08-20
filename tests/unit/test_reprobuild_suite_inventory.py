@@ -2099,7 +2099,16 @@ test "incomplete name" and:
         # Upstream 4294d5763 adds one standalone dependency-rerun cache test.
         # Upstream 84dd86a35 then adds the three membership-model sources
         # pinned above, so the regenerated graph contains 1240 Nim sources.
-        self.assertEqual(len(nim_specs), 1240)
+        #
+        # 1240 -> 1243: Named-Lock-Files NLF-M3 enrols three regressions for
+        # the committed lock becoming a PIN rather than a bias, all under
+        # `libs/repro_dsl_stdlib/tests/`:
+        #   t_committed_lock_pins_versions.nim
+        #   t_committed_lock_variants_are_hard.nim
+        #   t_unsatisfiable_lock_reports_conflict.nim
+        # Regenerated with `scripts/generate_test_edges.nim`, which reported
+        # 1243 Nim tests and no other movement.
+        self.assertEqual(len(nim_specs), 1243)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -2333,7 +2342,17 @@ test "incomplete name" and:
         # sources and one added to the existing schema-round-trip source.
         # The independently pinned platform-qualified census retains the
         # exact one-case Linux delta.
-        expected_nim_total = 7094 if sys.platform == "darwin" else 7095
+        #
+        # +21: Named-Lock-Files NLF-M3's three lock-pinning regressions, 8 + 7
+        # + 6 cases. ATTRIBUTED FROM THE STATIC SCAN, not from a live catalog
+        # read: `nim_total` here is the sum over BUILT BINARIES' `--list-json`,
+        # and the three new binaries are built by the suite's own edges, which
+        # a tree without a full build does not have. The static baseline TSV
+        # was regenerated and reports exactly 8 / 7 / 6 for the three sources,
+        # and every case is unconditional, so the Linux-vs-Darwin delta is
+        # still +1. Recorded as an attribution rather than presented as a
+        # measurement, on the same principle as the composed base above.
+        expected_nim_total = 7115 if sys.platform == "darwin" else 7116
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated

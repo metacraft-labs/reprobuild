@@ -16020,31 +16020,43 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     target = "."
 
   # ----------------------------------------------------------------
-  # MO-1 — consume the committed solved-graph lock.
+  # MO-1 / Named-Lock-Files NLF-M3 — consume the committed solved-graph lock,
+  # as PINS.
   #
   # When a committed lock is present at the canonical path (or at
-  # ``--lock <file>``), the build PINS the solved graph from it: the
-  # locked variant assignments are injected into ``REPRO_VARIANTS`` (the
-  # env the DSL solve honours) so the build reproduces the locked graph
-  # instead of a fresh re-solve that could differ. Explicit ``--variant``
-  # overrides already present win; only locked names not already set are
-  # added.
+  # ``--lock <file>``), the WHOLE solved graph it records — the resolved
+  # package VERSIONS as well as the variant assignments — is forwarded to the
+  # provider process as hard pins (``REPRO_LOCK_PINS`` / ``REPRO_LOCK_PATH``,
+  # the grammar in ``repro_solver/lock_pins``). The solve then asserts them as
+  # facts instead of searching for them, so the build reproduces the locked
+  # graph rather than re-solving to something that merely scores well.
+  #
+  # WHAT THIS REPLACED, and why the replacement is not cosmetic
+  # (Named-Lock-Files.md §1.2): this block used to fold only
+  # ``graph.solution.variants`` into ``REPRO_VARIANTS`` and never read
+  # ``graph.solution.packages`` at all. So the locked VERSIONS were dropped
+  # outright — version concretization re-ran fully unpinned with a lock
+  # present — and the variant half arrived as an ordinary contribution, which
+  # the encoder renders as a ``#minimize`` WEIGHT that a better-scoring model
+  # can outvote. The lock biased the solve; it did not pin it.
+  #
+  # The variants are NO LONGER injected into ``REPRO_VARIANTS``. That is
+  # required, not incidental: an explicit ``--variant`` still outranks the lock
+  # (§2.5 — the lock is mode-agnostic and CLI overrides layer above it), and
+  # the provider tells the two apart by exactly that env var. Injecting the
+  # lock's own variants there would disguise every one of them as an explicit
+  # override and no pin would ever apply.
+  #
+  # ``graph.lockPath`` is whichever lock was RESOLVED, so ``--lock <file>``
+  # reaches the pinning path with no separate wiring.
   # ----------------------------------------------------------------
   block lockConsumption:
     let projDir = resolveProjectDirFromTarget(splitTarget(target).base)
     let graph = resolveSolvedGraphForBuild(projDir, lockOverride, "")
     if graph.found and graph.source == "lock":
-      var existing = getEnv("REPRO_VARIANTS")
-      var present: seq[string] = @[]
-      for asg in existing.split(','):
-        let e = asg.find('=')
-        if e > 0: present.add(asg[0 ..< e].strip())
-      for name, value in graph.solution.variants:
-        if name in present: continue
-        if existing.len > 0: existing.add(',')
-        existing.add(name & "=" & value)
-      if existing.len > 0:
-        putEnv("REPRO_VARIANTS", existing)
+      putEnv(LockPinsEnvVar,
+             renderLockPins(graph.solution.packages, graph.solution.variants))
+      putEnv(LockPathEnvVar, graph.lockPath)
 
   # Apply the REPRO_TOOL_PROVISIONING env override before any dispatch so
   # both ``--list-targets`` and the engine build observe the same mode. A
@@ -48036,6 +48048,7 @@ type
     vValues: seq[string]
     vContribs: seq[VariantContribution]
     vConstraints: seq[ConstraintExpr]
+    vPinned: string
     pVersions: seq[string]
     pDepends: seq[DependencyDecl]
     pSource: string
@@ -48047,7 +48060,8 @@ proc flushFixtureBlock(s: var FixtureParserState) =
       name: s.currentName, kind: s.vKind,
       allowedValues: s.vValues,
       contributions: s.vContribs,
-      constraints: s.vConstraints))
+      constraints: s.vConstraints,
+      pinnedValue: s.vPinned))
   elif s.currentKind == "package":
     s.packages.add(PackageDecl(
       name: s.currentName, versions: s.pVersions,
@@ -48059,6 +48073,7 @@ proc flushFixtureBlock(s: var FixtureParserState) =
   s.vValues = @[]
   s.vContribs = @[]
   s.vConstraints = @[]
+  s.vPinned = ""
   s.pVersions = @[]
   s.pDepends = @[]
   s.pSource = ""
@@ -48075,6 +48090,7 @@ proc parseExplainFixture(text: string): tuple[
   ##   kind: bool|enum
   ##   values: a, b, c          (enum only)
   ##   default: <value>
+  ##   pinned: <value>          (NLF-M3 — assignment decided by a lock)
   ##   set: <value>             (vpSet contribution)
   ##   override: <value>        (vpOverride contribution)
   ##   force: <value>           (vpForce contribution)
@@ -48141,6 +48157,14 @@ proc parseExplainFixture(text: string): tuple[
         s.vContribs.add(contribution(vpOverride, val))
       of "force":
         s.vContribs.add(contribution(vpForce, val))
+      of "pinned":
+        # NLF-M3 — the variant's value is DECIDED by a governing committed
+        # lock. Round-tripped for the same reason the package-level `pinned`
+        # is: this reader is what re-solves a rendered fixture, and dropping
+        # the pin here would turn an asserted assignment back into a preference
+        # on the way in, so the re-solve would answer a different question than
+        # the solve that produced the text.
+        s.vPinned = val.strip()
       of "requires", "conflicts", "propagates":
         # Format: "<sourceValue> -> <target> = <value>"
         let arrow = val.find("->")
@@ -48496,6 +48520,15 @@ proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
     let protocolRoot = scratchRoot / "protocol"
     let cwd = if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
     putEnv(SolverInputsEmitEnvVar, emitPath)
+    # Named-Lock-Files NLF-M3 — a REFRESH must re-solve, never re-affirm. The
+    # provider now honours ``REPRO_LOCK_PINS`` as hard pins, so a probe that
+    # inherited them from an enclosing build would emit the OLD lock's answer
+    # as the new solve's inputs and every refresh would be a fixed point. The
+    # pins are removed for the probe's lifetime and put back afterwards.
+    let inheritedPins = getEnv(LockPinsEnvVar)
+    let inheritedLockPath = getEnv(LockPathEnvVar)
+    delEnv(LockPinsEnvVar)
+    delEnv(LockPathEnvVar)
     try:
       # A bare manifest request is enough: ``finalizeVariants()`` runs at the
       # provider's MODULE INITIALISATION (the variant decls + finalize call are
@@ -48509,6 +48542,8 @@ proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
           reason: girExplicitUserRequest))
     finally:
       delEnv(SolverInputsEmitEnvVar)
+      if inheritedPins.len > 0: putEnv(LockPinsEnvVar, inheritedPins)
+      if inheritedLockPath.len > 0: putEnv(LockPathEnvVar, inheritedLockPath)
     if not fileExists(extendedPath(emitPath)):
       return result
     let text = readFile(extendedPath(emitPath))
