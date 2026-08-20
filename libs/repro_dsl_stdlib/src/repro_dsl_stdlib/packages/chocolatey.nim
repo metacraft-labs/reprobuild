@@ -2,11 +2,20 @@
 ##
 ## WINDOWS ONLY, and not because the other arms are merely unwritten: Chocolatey
 ## is a Windows package manager and has no POSIX build. A recipe that needs it
-## should guard the dependency, e.g.
+## MUST guard the dependency, e.g.
 ##
 ##   uses:
 ##     when defined(windows):
 ##       "chocolatey"
+##
+## The guard is required because the DSL cannot express "this package exists
+## only on Windows" — platform is declarable per provisioning arm, never for the
+## package — so an unguarded `uses:` is accepted at authoring time and fails on
+## Linux with `adapter chain exhausted`, whose remediation text then advises
+## adding a catalog entry or putting the executable on PATH. Both are impossible
+## here. See reprobuild-specs Package-Model.md, "GAP: a package cannot declare
+## the platforms it exists on", which proposes a package-level `platforms:`
+## declaration that would make this guard unnecessary.
 ##
 ## WHAT CONSUMES THIS. The ``codetracer-*-recorder`` repos publish a Chocolatey
 ## package per release: ``packaging/chocolatey/`` holds the ``.nuspec`` and the
