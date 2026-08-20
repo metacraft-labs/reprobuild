@@ -30,6 +30,8 @@
 ##      recipe dir and the expected artefact path when the recipe
 ##      exists but its artefact hasn't been built.
 ##   6. ``REPRO_FROM_SOURCE_ROOT`` overrides the default recipe anchor.
+##   7. Long-running service executables use a supported, terminating probe
+##      rather than the generic ``--version`` convention.
 ##
 ## The test uses ``createTempDir`` to stand up a synthetic recipe tree
 ## so it does not depend on the production ``recipes/packages/source/``
@@ -113,6 +115,14 @@ suite "M9.Q from-source provisioning resolver":
     check profile.pathSearchList[0] == parentDir(absolutePath(artefact))
     check profile.lockIdentity.startsWith("from-source:meson:recipe:")
     check profile.adapterStrength == asStrong
+
+  test "test_m9q_sddm_probe_does_not_start_the_display_manager":
+    let probes = configuredProbes("sddm", "sddm")
+
+    check probes.len == 1
+    check probes[0].kind == tpkCapability
+    check probes[0].name == "help"
+    check probes[0].args == @["--help"]
 
   test "test_m9q_missing_recipe_raises_actionable_diagnostic":
     let scratch = createTempDir("repro-m9q-no-recipe-", "")

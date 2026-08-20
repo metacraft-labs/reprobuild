@@ -1008,7 +1008,7 @@ tests/integration/t_r9_systemd_boot.nim	nim	2
 tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	nim	1
 tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
 tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim	nim	3
-tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	5
+tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	6
 tests/integration/t_repro_build_test_aggregate_builds_every_test.nim	nim	2
 tests/integration/t_repro_core_binary_roundtrip.nim	nim	3
 tests/integration/t_repro_prompt_is_fast_and_silent_outside_workspace.nim	nim	1
@@ -1170,7 +1170,7 @@ tests/unit/t_hcr_agent_runtime.nim	nim	4
 tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_library_stage_alias.nim	nim	3
-tests/unit/t_m9q_from_source_provisioning.nim	nim	8
+tests/unit/t_m9q_from_source_provisioning.nim	nim	9
 tests/unit/t_m9r10a_cycle_break.nim	nim	7
 tests/unit/t_m9r10a_exec_name_audit.nim	nim	5
 tests/unit/t_m9r10b_synthesis_wiring.nim	nim	8
