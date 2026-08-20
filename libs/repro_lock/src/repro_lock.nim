@@ -490,10 +490,21 @@ proc joinNames(names: seq[string]): string =
   ## ``depends`` / ``tags`` are stored as a comma-joined string because the
   ## pinned ``nim-toml-serialization`` (and this module's inline-table reader)
   ## carries only quoted-string values inside an inline table, not nested
-  ## arrays. The list semantics are identical; only the surface differs.
+  ## arrays.
+  ##
+  ## THE SURFACE IS NOT LOSSLESS FOR EVERY POSSIBLE ELEMENT, and the limit is
+  ## stated here rather than assumed. ``splitNames`` splits on ``,``, strips
+  ## each element, and drops empties, so an element that CONTAINS a comma comes
+  ## back as two elements, and an empty / whitespace-only element is dropped
+  ## entirely. Both are outside the domain: a ``depends`` entry is a dependency
+  ## NAME and a ``tags`` entry is a selection tag, and the CLI surface that
+  ## produces tags (``repro sync --tags=a,b``) is itself comma-delimited, so
+  ## neither can carry a comma to begin with. If either domain ever widens, the
+  ## on-disk surface needs an escape — not a wider reader.
   names.join(",")
 
 proc splitNames(s: string): seq[string] =
+  ## Inverse of ``joinNames`` over that domain; see its limits.
   result = @[]
   for raw in s.split(','):
     let v = raw.strip()
