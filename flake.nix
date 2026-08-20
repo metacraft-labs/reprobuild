@@ -518,6 +518,39 @@
               language = "system";
               pass_filenames = false;
             };
+            # The suite case-count baseline gate, at the PUSH boundary.
+            #
+            # `just lint` already runs this check, but `just lint` is a
+            # multi-minute whole-tree compile, so it sits at the pre-commit
+            # stage where it is routinely bypassed -- and in CI it only
+            # answers after the commit has already reached the branch. A
+            # stale baseline therefore reached `dev` twice, and each
+            # subsequent branch had to carry someone else's regeneration.
+            #
+            # This hook is a source scan: no compiler, no built binaries,
+            # ~5s on the full tree. That is what makes it affordable at
+            # every push, and an affordable gate is one nobody has a reason
+            # to bypass.
+            hooks.suite-case-counts = {
+              enable = true;
+              name = "suite case-count baseline";
+              stages = [ "pre-push" ];
+              entry = "${pkgs.writeShellScript "reprobuild-check-suite-case-counts" ''
+                export PATH=${
+                  pkgs.lib.makeBinPath [
+                    pkgs.bash
+                    pkgs.coreutils
+                    pkgs.git
+                    pkgs.gnugrep
+                    pkgs.python3
+                  ]
+                }:$PATH
+                exec ${pkgs.bash}/bin/bash scripts/check_suite_case_counts.sh
+              ''}";
+              language = "system";
+              pass_filenames = false;
+              always_run = true;
+            };
           };
           reprobuildSource = ./.;
           runtimeLibraries = [
