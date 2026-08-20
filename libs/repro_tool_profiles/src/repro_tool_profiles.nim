@@ -349,6 +349,10 @@ proc configuredProbes*(packageSelector, executableName: string): seq[
   discard packageSelector
   if executableName == "tmux":
     return @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["-V"])]
+  if executableName == "sddm":
+    # SDDM 0.21 ignores --version and starts the display-manager daemon.
+    # Its documented --help path prints usage and exits immediately.
+    return @[ToolProbeSpec(kind: tpkCapability, name: "help", args: @["--help"])]
   if executableName == "xvfb-run":
     return @[ToolProbeSpec(kind: tpkVersion, name: "help", args: @["--help"])]
   @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["--version"])]

@@ -151,7 +151,7 @@ type
     visibility*: string       ## ``public`` / ``org`` / ``team`` / ``personal``.
     participation*: string    ## ``""`` (shared) / ``evidence-only``.
     depends*: seq[string]     ## develop-set dependency edges (by name).
-    groups*: seq[string]      ## manifest-group membership.
+    tags*: seq[string]        ## subset-selection tags (`repro sync --tags=`).
 
   LockedDependencies* = object
     ## The unified locked-dependency model (MO-8). It SUBSUMES the
@@ -413,7 +413,7 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
 # ---------------------------------------------------------------------------
 
 proc joinNames(names: seq[string]): string =
-  ## ``depends`` / ``groups`` are stored as a comma-joined string because the
+  ## ``depends`` / ``tags`` are stored as a comma-joined string because the
   ## pinned ``nim-toml-serialization`` (and this module's inline-table reader)
   ## carries only quoted-string values inside an inline table, not nested
   ## arrays. The list semantics are identical; only the surface differs.
@@ -560,7 +560,7 @@ proc lockedDepsFromPackages*(packages: seq[LockedPackage];
         coordinates: Coordinates(kind: ckStore, storeHash: storeHash),
         integrity: formatMultihash("blake3", storeHash),
         version: p.version, visibility: "public", participation: "",
-        depends: @[], groups: @[]))
+        depends: @[], tags: @[]))
     of pskRegistry:
       result.add(LockedDep(
         name: p.name, path: "",
@@ -569,7 +569,7 @@ proc lockedDepsFromPackages*(packages: seq[LockedPackage];
         integrity: solvedPackageRegistryIntegrity(
           src.registryName, p.name, p.version),
         version: p.version, visibility: "public", participation: "",
-        depends: @[], groups: @[]))
+        depends: @[], tags: @[]))
 
 proc coordKindString(k: CoordKind): string =
   case k
@@ -603,7 +603,7 @@ proc serializeDepInline(d: LockedDep): string =
   result.add(", visibility = \"" & tomlEscape(d.visibility) & "\"")
   result.add(", participation = \"" & tomlEscape(d.participation) & "\"")
   result.add(", depends = \"" & tomlEscape(joinNames(d.depends)) & "\"")
-  result.add(", groups = \"" & tomlEscape(joinNames(d.groups)) & "\"")
+  result.add(", tags = \"" & tomlEscape(joinNames(d.tags)) & "\"")
   result.add(" }")
 
 proc serializeLockedDependencies*(ld: LockedDependencies): string =
@@ -690,4 +690,4 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
         visibility: f.getOrDefault("visibility", ""),
         participation: f.getOrDefault("participation", ""),
         depends: splitNames(f.getOrDefault("depends", "")),
-        groups: splitNames(f.getOrDefault("groups", ""))))
+        tags: splitNames(f.getOrDefault("tags", ""))))

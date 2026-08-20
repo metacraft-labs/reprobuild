@@ -112,8 +112,10 @@ package consumer:
       actionId = "consumer.build.consume",
       deps = @[base.id],
       extraOutputs = @["build/consumed.txt"]).withToolIdentities(["prod"])
-    discard target("base", [base])
+    let baseTarget = target("base", [base])
     discard target("consume", [base, consume])
+    discard collect("test", actions = @[consume])
+    defaultTarget(baseTarget)
 """
 
 proc q(value: string): string = quoteShell(value)
@@ -239,3 +241,34 @@ created_at = "2026-07-02T00:00:00Z"
         let consumed = readFile(consumedMarker).strip()
         checkpoint("consumed.txt=" & consumed)
         check consumed == producerStamp
+
+      # Graph inspection runs in a fresh process, so it cannot inherit the
+      # producer splice recorded by the build above. It must rediscover the
+      # already-materialized public output from the producer contract instead
+      # of falling through to host PATH or the package recipe catalog.
+      let graphCmd = q(reproAbs) & " graph consume" &
+        " --tool-provisioning=path --format=json" &
+        " --action-cache-root=" & q(cacheRoot)
+      checkpoint("running: " & graphCmd)
+      let (graphCode, graphOutput) = run(graphCmd, consumerRoot)
+      checkpoint("graph exit=" & $graphCode)
+      checkpoint(graphOutput)
+      check graphCode == 0
+      if graphCode == 0:
+        let braceIdx = graphOutput.find('{')
+        check braceIdx >= 0
+        if braceIdx >= 0:
+          let payload = parseJson(graphOutput[braceIdx .. ^1])
+          let inspectionPath = payload{"toolInspectionPath"}.getStr("")
+          check fileExists(inspectionPath)
+          if fileExists(inspectionPath):
+            let inspection = parseFile(inspectionPath)
+            var resolvedProducer = ""
+            for profile in inspection{"profiles"}:
+              if profile{"executableName"}.getStr("") == "prod":
+                resolvedProducer =
+                  profile{"resolvedExecutablePath"}.getStr("")
+                break
+            checkpoint("graph resolved prod=" & resolvedProducer)
+            check normalizedPath(resolvedProducer) ==
+              normalizedPath(producerBinary)

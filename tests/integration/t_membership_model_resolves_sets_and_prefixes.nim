@@ -285,9 +285,11 @@ suite "membership model — resolution":
     repoFragment(root, "lib-a",
       "name = \"lib-a\"\npath = \"lib-a\"\n" &
       "url_prefix = \"acme\"\n" &
-      # Both present. `branch` wins: it is the field that only ever holds a
-      # branch name, so it is the one that is always a legal `--branch`
-      # argument. A pin belongs in the lock.
+      # Both present, and they answer different questions: `branch` is what the
+      # repo TRACKS, `revision` is where it SITS. Neither clobbers the other —
+      # see t_sync_honours_branch_and_revision_together for why a fragment
+      # legitimately wants both, and for the end-to-end proof that the pin
+      # reaches the checkout.
       "branch = \"dev\"\n" &
       "revision = \"v1.2.3\"\n")
     repoFragment(root, "lib-b",
@@ -310,7 +312,10 @@ suite "membership model — resolution":
     check resolved.repos.len == 2
     let a = findRepo(resolved, "lib-a")
     check a.branch == "dev"
-    check a.revision == "dev"
+    check a.revision == "v1.2.3"
+    # `branch` supplies `revision` only when the fragment pinned nothing, which
+    # is what keeps a branch-only fragment resolving to a legal `--branch`
+    # argument.
     let b = findRepo(resolved, "lib-b")
     check b.branch == ""
     check b.revision == "main"

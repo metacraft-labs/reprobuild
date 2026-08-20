@@ -104,7 +104,7 @@ suite "RA-6/WV-3 — repro workspace projects add (writes + pushes manifest)":
       # `repos add lib-x --project=myproj --remote=...`.
       let addRes = runShell(shellCommand(@[reproBin, "workspace", "repos",
         "add", "lib-x", "--project=myproj",
-        "--remote=https://example.invalid/lib-x.git",
+        "--remote=https://example.invalid/lib-x.git", "--branch=dev",
         "--workspace-root=" & workspaceRoot]))
       if addRes.code != 0:
         checkpoint("repo add output: " & addRes.output)

@@ -370,6 +370,41 @@ proc absoluteRepoPath(payload: GitVcsPayload; cwd: string): string =
   else:
     payload.repoPath
 
+proc removeCloneTargetSafely(target, cwd: string): tuple[ok: bool;
+    diagnostic: string] =
+  ## Delete a clone target, but only after proving it is one.
+  ##
+  ## Every `removeDir` in this file computes its argument from a
+  ## manifest-supplied checkout path, and the cleanup paths run on the failure
+  ## branches — a half-written clone, a checkout that died mid-filter — which
+  ## are exactly the branches nobody exercises by hand. A checkout path of `.`
+  ## makes that argument the workspace root and a `..` makes it a sibling, so
+  ## the recovery step becomes the incident.
+  ##
+  ## The manifest reader now refuses those shapes outright, which is the real
+  ## fix; this is the belt to that pair of braces. It costs one string compare
+  ## on a path that is about to be deleted recursively, and it holds for
+  ## payloads that never came from a manifest at all — a lock-derived record,
+  ## a synthesized action, a future caller. Refusing to delete is always
+  ## survivable here: the worst outcome is a directory left behind and a
+  ## diagnostic, against an unbounded recursive delete.
+  if cwd.len == 0:
+    return (false, "no workspace root to contain the delete within")
+  let root = try: absolutePath(cwd).normalizedPath
+             except CatchableError: return (false, "unresolvable workspace root")
+  let victim = try: absolutePath(target).normalizedPath
+               except CatchableError: return (false, "unresolvable clone target")
+  if victim.len <= root.len or not victim.startsWith(root & $DirSep):
+    return (false, "clone target '" & victim &
+      "' is not beneath the workspace root '" & root & "'")
+  if not dirExists(victim):
+    return (true, "")
+  try:
+    removeDir(victim)
+    (true, "")
+  except OSError as err:
+    (false, err.msg)
+
 proc gitVersionStringMatches(identityVersion: string;
                              observedVersion: string): bool =
   ## Loose equality: identity carries a canonical banner like
@@ -650,12 +685,13 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # half-cloned / interrupted-clone artifact (no receipt was written, so
     # the engine re-schedules this clone). Remove it so the re-run redoes
     # just this repo cleanly instead of being confused by the partial
-    # state. We only remove a non-git directory — a real tree above.
-    try:
-      removeDir(target)
-    except OSError as err:
+    # state. We only remove a non-git directory — a real tree above — and only
+    # one proven to sit beneath the workspace root.
+    let cleaned = removeCloneTargetSafely(target, cwd)
+    if not cleaned.ok:
       return failed("clone-partial-cleanup-failed",
-        "could not remove half-cloned target " & target & ": " & err.msg)
+        "could not remove half-cloned target " & target & ": " &
+          cleaned.diagnostic)
   # RA-14 acceleration flags. These are network/disk knobs that do NOT
   # change the working tree at the pinned revision (see
   # ``fingerprintPayload``): ``--single-branch`` narrows the fetched
@@ -704,9 +740,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # Best-effort fallback: drop the reference and clone standalone so a
     # broken/locked shared bare never breaks init. The RA-14 accelerators
     # are kept — they are independent of the shared bare.
-    if dirExists(target):
-      try: removeDir(target)
-      except OSError: discard
+    discard removeCloneTargetSafely(target, cwd)
     var plain = @["clone"]
     for f in accelFlags():
       plain.add(f)
@@ -725,9 +759,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # checkout and takes the UPDATE path, so the clone is never retried and the
     # repo stays half-checked-out indefinitely — the same trap the pinned-commit
     # branch below already guards against, reached by a different route.
-    if dirExists(target):
-      try: removeDir(target)
-      except OSError: discard
+    discard removeCloneTargetSafely(target, cwd)
     # git-lfs is the common cause of a checkout-stage failure, and its own
     # error names a filter rather than the repo, so the raw output reads as a
     # reprobuild bug. Say what actually happened and what can be done about it.
@@ -759,9 +791,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # takes the update path, so it never retries the clone and the repo stays
     # silently at the wrong revision forever.
     proc discardPartial() =
-      if dirExists(target):
-        try: removeDir(target)
-        except OSError: discard
+      discard removeCloneTargetSafely(target, cwd)
     let wanted = payload.revision
     let present = runGit(payload,
       ["-C", target, "cat-file", "-e", wanted & "^{commit}"])

@@ -272,7 +272,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " develop --list-overrides\n       " &
           programName &
-      " develop --all|--direct|--indirect|--transitive-of=PKG [--project=LIST] [--group=LIST] [--filter=GLOB] [--only=LIST] [--except=LIST] [--tier=LIST] [--at=REV] [--lock-store=KIND:LOCATION]... [--into=DIR] [--reset] [--strict] [--dry-run] [--json] [--workspace-root=PATH]\n       " &
+      " develop --all|--direct|--indirect|--transitive-of=PKG [--project=LIST] [--tag=LIST] [--filter=GLOB] [--only=LIST] [--except=LIST] [--tier=LIST] [--at=REV] [--lock-store=KIND:LOCATION]... [--into=DIR] [--reset] [--strict] [--dry-run] [--json] [--workspace-root=PATH]\n       " &
           programName &
       " develop <dependency> --into=PATH\n       " &
           programName &
@@ -538,7 +538,21 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
   let parts = splitTarget(target)
   if parts.fragment.len > 0:
     if dirExists(extendedPath(parts.base)):
-      let fragmentModule = parts.base / (parts.fragment & ".nim")
+      let fragmentFileName = parts.fragment & ".nim"
+      let fragmentModule = parts.base / fragmentFileName
+      # A named target may legitimately have the same name as the project
+      # file (for example ``repro build repro`` in a directory containing
+      # ``repro.nim``). Bare-name resolution represents that selector as
+      # ``.#repro``. Anchor that case in the project file instead of treating
+      # it as the legacy ``directory#module`` form.
+      if fragmentFileName in ProjectFileNames:
+        let projectMatch = resolveProjectFile(parts.base)
+        if projectMatch.fileName == fragmentFileName:
+          return ParsedBuildTarget(
+            modulePath: projectMatch.path,
+            outputName: splitFile(projectMatch.path).name,
+            selectedActionId: parts.fragment,
+            fragmentKind: tfkActionSelection)
       if fileExists(extendedPath(fragmentModule)):
         return ParsedBuildTarget(
           modulePath: fragmentModule,
@@ -3161,6 +3175,32 @@ type ProducerAuxPaths* = object
   pkgConfigDirs*: seq[string]
   cmakePrefixDirs*: seq[string]
   nimPathDirs*: seq[string]
+
+proc mergeProducerRuntimeIdentity*(identity: PathOnlyBuildIdentity;
+                                   binDirs: var seq[string];
+                                   aux: var ProducerAuxPaths) =
+  ## Project a consumed executable's declared runtime tools onto the same
+  ## PATH and auxiliary channels as the executable producer itself.
+  template addUnique(target: var seq[string]; value: string) =
+    if value.len > 0 and value notin target:
+      target.add(value)
+
+  for actionIdentity in identity.actionIdentities:
+    if actionIdentity.resolvedExecutablePath.len > 0:
+      binDirs.addUnique(parentDir(actionIdentity.resolvedExecutablePath))
+    for path in actionIdentity.pathSearchList:
+      binDirs.addUnique(path)
+    for path in actionIdentity.pkgConfigSearchList:
+      aux.pkgConfigDirs.addUnique(path)
+    for path in actionIdentity.cmakePrefixList:
+      aux.cmakePrefixDirs.addUnique(path)
+      let prefixBin = path / "bin"
+      if dirExists(extendedPath(prefixBin)):
+        binDirs.addUnique(prefixBin)
+    for path in actionIdentity.cpathList:
+      aux.includeDirs.addUnique(path)
+    for path in actionIdentity.libraryPathList:
+      aux.libDirs.addUnique(path)
 
 var producerMaterializedAuxPaths*: Table[string, ProducerAuxPaths] =
   initTable[string, ProducerAuxPaths]()
@@ -6480,6 +6520,142 @@ proc selectorFilesystemKey(selector: string): string =
   if result.len == 0:
     result = "package"
 
+proc producerSourceRoot(binding: ProducerBinding; selector,
+                        workspaceRoot: string;
+                        fetchMissingPinnedSource: bool): string =
+  ## Resolve the source root used by both producer builds and graph
+  ## inspection. Inspection normally finds an existing workspace sibling;
+  ## lock-only consumers may fetch the pinned source when requested.
+  case binding.kind
+  of pbkDevelopOverride:
+    result = binding.localPathAbsolute
+  of pbkLockPinned:
+    let sibling = findSiblingProjectFile(selector, workspaceRoot)
+    if sibling.len > 0:
+      result = parentDir(sibling)
+    elif fetchMissingPinnedSource:
+      result = fetchLockPinnedProducer(binding.lockedDep, workspaceRoot)
+  of pbkOnDiskSibling, pbkNotProducer:
+    discard
+
+proc recordProducerMaterialization(selector, producerRootAbs: string;
+                                   producerArtifact: ProjectInterfaceArtifact;
+                                   producerRuntimeIdentity: PathOnlyBuildIdentity;
+                                   binding: ProducerBinding): bool =
+  ## Discover a producer's already-materialized public outputs and project
+  ## them onto the consumer's executable/library channels. The build path
+  ## calls this after the producer sub-build; graph inspection calls it while
+  ## loading an existing graph. Keeping this projection shared prevents the
+  ## two surfaces from resolving different producer identities.
+  var binDirs: seq[string] = @[]
+  var realizedBinaries: seq[string] = @[]
+  for exe in producerArtifact.projectInterface.publicExecutables:
+    let binName =
+      if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
+    if binName.len == 0:
+      continue
+    let realized = producerRootAbs / "build" / "bin" /
+      addFileExt(binName, ExeExt)
+    if fileExists(extendedPath(realized)):
+      let binDir = parentDir(realized)
+      if binDir notin binDirs:
+        binDirs.add(binDir)
+      if realized notin realizedBinaries:
+        realizedBinaries.add(realized)
+
+  var aux = ProducerAuxPaths()
+  mergeProducerRuntimeIdentity(producerRuntimeIdentity, binDirs, aux)
+  var realizedLibraries: seq[string] = @[]
+  block libraryChannel:
+    let libOutDir = producerRootAbs / "build" / "lib"
+    let includeOutDir = producerRootAbs / "build" / "include"
+    let pkgConfigOutDir = libOutDir / "pkgconfig"
+    if not dirExists(extendedPath(libOutDir)):
+      break libraryChannel
+    for lib in producerArtifact.projectInterface.publicLibraries:
+      if lib.name.len == 0 or lib.kind == lkHeaderOnly:
+        continue
+      let stem = lib.name
+      let libStem = "lib" & lib.name
+      for entryKind, entryPath in walkDir(extendedPath(libOutDir)):
+        if entryKind != pcFile:
+          continue
+        let tail = splitPath(entryPath).tail
+        let dotIdx = tail.find('.')
+        let base = if dotIdx > 0: tail[0 ..< dotIdx] else: tail
+        if base == stem or base == libStem:
+          let realizedLib = libOutDir / tail
+          if realizedLib notin realizedLibraries:
+            realizedLibraries.add(realizedLib)
+    if realizedLibraries.len > 0:
+      if libOutDir notin aux.libDirs:
+        aux.libDirs.add(libOutDir)
+      if dirExists(extendedPath(includeOutDir)) and
+          includeOutDir notin aux.includeDirs:
+        aux.includeDirs.add(includeOutDir)
+      if dirExists(extendedPath(pkgConfigOutDir)) and
+          pkgConfigOutDir notin aux.pkgConfigDirs:
+        aux.pkgConfigDirs.add(pkgConfigOutDir)
+
+  for lib in producerArtifact.projectInterface.publicLibraries:
+    if lib.name.len == 0:
+      continue
+    let exported =
+      if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+    let nimSrcDir = producerRootAbs / exported
+    if dirExists(extendedPath(nimSrcDir)) and nimSrcDir notin aux.nimPathDirs:
+      aux.nimPathDirs.add(nimSrcDir)
+
+  let haveLibChannel = aux.libDirs.len > 0 or aux.includeDirs.len > 0 or
+    aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0 or
+    aux.nimPathDirs.len > 0
+  if realizedBinaries.len == 0 and not haveLibChannel:
+    return false
+
+  if binDirs.len > 0:
+    producerMaterializedBinDirs[selector] = binDirs
+  if haveLibChannel:
+    producerMaterializedAuxPaths[selector] = aux
+
+  realizedBinaries.sort()
+  realizedLibraries.sort()
+  var actionHashPayload = "cross-repo-producer-action-hash.v1\x00" &
+    selector & "\x00"
+  for realized in realizedBinaries:
+    actionHashPayload.add(extractFilename(realized))
+    actionHashPayload.add('\x00')
+    actionHashPayload.add(fileContentDigest(realized))
+    actionHashPayload.add('\x00')
+  for realizedLib in realizedLibraries:
+    actionHashPayload.add("lib:")
+    actionHashPayload.add(extractFilename(realizedLib))
+    actionHashPayload.add('\x00')
+    actionHashPayload.add(fileContentDigest(realizedLib))
+    actionHashPayload.add('\x00')
+  var runtimeFingerprints: seq[string] = @[]
+  for actionIdentity in producerRuntimeIdentity.actionIdentities:
+    runtimeFingerprints.add(actionIdentity.packageSelector & "\x00" &
+      actionIdentity.executableName & "\x00" &
+      digestHex(actionIdentity.actionFingerprint))
+  runtimeFingerprints.sort()
+  for runtimeFingerprint in runtimeFingerprints:
+    actionHashPayload.add("runtime:")
+    actionHashPayload.add(runtimeFingerprint)
+    actionHashPayload.add('\x00')
+  producerActionHashes[selector] =
+    digestHex(blake3DomainDigest(actionHashPayload.bytesOf(),
+      hdActionFingerprint))
+
+  case binding.kind
+  of pbkDevelopOverride:
+    producerSourceBindings[selector] = binding.overrideBinding
+  of pbkLockPinned:
+    producerSourceBindings[selector] =
+      lockPinnedSourceBinding(selector, binding.lockedDep)
+  of pbkOnDiskSibling, pbkNotProducer:
+    discard
+  true
+
 # ---------------------------------------------------------------------
 # Interface extraction as an ordinary build edge.
 #
@@ -7608,16 +7784,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # build that consumes no cross-repo producer is byte-identical to today.
   if not materializedOnly and not prepareOnly and
       result.projectRoot.len > 0:
-    # Producer discovery must inspect the full package-level ``uses:`` set,
-    # not the focused tool-provisioning subset in ``buildArtifact``. Library
-    # producers are deliberately not present on an action's ``toolIdentityRefs``
-    # yet: this pass materializes their aux channels first, and only then does
-    # ``attachProducerAuxRefs`` add them to the selected consumer actions. If
-    # we scope them out here, the later attachment has no producer to attach
-    # and a Nim library's ``nimPathDirs`` silently disappears. Ordinary host /
-    # catalog tools still resolve from ``buildArtifact`` below, so focused
-    # builds remain lightweight.
-    for useDef in artifact.projectInterface.toolUses:
+    # Producer materialization follows the selected action closure. Both typed
+    # calls and library-consuming actions carry their dependencies through
+    # ``toolIdentityRefs``; ``scopedToolArtifact`` retains only those refs.
+    # Package-wide ``uses:`` declarations remain available while compiling the
+    # provider and its public interface, but must not materialize producers for
+    # an unrelated target.
+    for useDef in buildArtifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
       if selector.len == 0:
         continue
@@ -7639,24 +7812,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # sibling on disk) builds the producer from its own repo source at the
       # pinned revision — identical to develop mode from the consuming action's
       # perspective.
-      var producerRoot = ""
-      case producer.kind
-      of pbkDevelopOverride:
-        producerRoot = producer.localPathAbsolute
-      of pbkLockPinned:
-        let sibling = findSiblingProjectFile(selector, result.projectRoot)
-        if sibling.len > 0:
-          producerRoot = parentDir(sibling)
-        else:
-          # SC-6: no sibling checkout on disk — fetch the pinned revision from
-          # the producer's VCS and verify integrity (raises loudly on an
-          # unreachable revision / integrity mismatch; never a silent fallback).
-          producerRoot = fetchLockPinnedProducer(
-            producer.lockedDep, result.projectRoot)
-      of pbkOnDiskSibling:
-        continue
-      of pbkNotProducer:
-        continue
+      let producerRoot = producerSourceRoot(producer, selector,
+        result.projectRoot, fetchMissingPinnedSource = true)
       if producerRoot.len == 0 or
           not dirExists(extendedPath(producerRoot)):
         continue
@@ -7712,8 +7869,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # must never compile or run the producer's test suite.
         let producerIface = producerOutDirBase / "producer-interface.rbsz"
         let producerStub = producerOutDirBase / "producer-interface.nim"
-        var binDirs: seq[string] = @[]
-        var realizedBinaries: seq[string] = @[]
+        var producerRuntimeIdentity = PathOnlyBuildIdentity()
         let producerArtifact =
           try:
             # The producer's OWN root is the consumer root for ITS recipe —
@@ -7740,6 +7896,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               "cross-repo producer \"" & selector & "\" at " &
               producerRootAbs & "'s interface could not be loaded to bind " &
               "the declared executable / library to its output.")
+        if producerArtifact.projectInterface.runtimeToolUses.len > 0:
+          var runtimeArtifact = producerArtifact
+          runtimeArtifact.projectInterface.toolUses =
+            producerArtifact.projectInterface.runtimeToolUses
+          runtimeArtifact.projectInterface.runtimeToolUses = @[]
+          producerRuntimeIdentity = toolBuildIdentity(runtimeArtifact,
+            effectiveMode, storeRoot = producerOutDirBase / "runtime-tool-store")
         # Decide whether the producer sub-build is required for the CONSUMED
         # artifact. A build is needed only when the producer exposes a
         # COMPILED artifact on disk:
@@ -7814,195 +7977,24 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           logSummary("cross-repo producer: consuming \"" & selector &
             "\" as a pure-Nim-source library — skipping producer sub-build " &
             "(no compiled artifact; src threaded via nimPathDirs).")
-        # Bind the producer's declared executable(s) to their output binaries
-        # by BASENAME (§4.2 point 2). The producer's
-        # ``executable <exp>: name: "<bin>"`` produces ``build/bin/<bin>``
-        # under the producer root; the bin dir spliced onto PATH is the parent
-        # of the realized binary. When the sub-build was skipped (pure-Nim
-        # library) there are no executables, so this loop is inert.
-        for exe in producerArtifact.projectInterface.publicExecutables:
-          let binName =
-            if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
-          if binName.len == 0:
-            continue
-          let realized = producerRootAbs / "build" / "bin" /
-            addFileExt(binName, ExeExt)
-          if fileExists(extendedPath(realized)):
-            let binDir = parentDir(realized)
-            if binDir notin binDirs:
-              binDirs.add(binDir)
-            if realized notin realizedBinaries:
-              realizedBinaries.add(realized)
-        # Cross-Repo-Source-Consumption SC-3 (§4.2 point 4, library channel) —
-        # extract the producer's declared ``library``'s producing edge, bound
-        # to the realized ``.so``/``.dylib``/``.dll`` by declared-output
-        # BASENAME (the same canonical basename rule SC-2 uses for the
-        # executable channel), and project the realized library's DIRECTORY
-        # onto the EXISTING aux channels: ``libDirs`` → ``LIBRARY_PATH`` +
-        # ``LD_LIBRARY_PATH``, ``includeDirs`` → ``CPATH`` (headers dir),
-        # ``pkgConfigDirs`` → ``PKG_CONFIG_PATH``, ``cmakePrefixDirs`` →
-        # ``CMAKE_PREFIX_PATH`` where the producer emits them. A NEW SOURCE
-        # feeding the SAME channels — no new channel is introduced
-        # (``repro_build_engine.nim:611-662,634-650``;
-        # ``repro_cli_support.nim`` ``mkToolIdentityResolver`` aux projection).
-        #
-        # Realized-library discovery: a producer's ``library <name>`` builds a
-        # ``lib<name>.{so,dylib,dll}`` (or ``<name>.{...}``) under the canonical
-        # ``build/lib`` output dir; a companion header lives under
-        # ``build/include``. We bind by basename over the declared library
-        # name(s), matching either the ``lib``-prefixed or bare form and any
-        # platform extension, so the realized file the producer's edge actually
-        # wrote is located regardless of the host's shared-library extension.
-        var aux = ProducerAuxPaths()
-        var realizedLibraries: seq[string] = @[]
-        block libraryChannel:
-          let libOutDir = producerRootAbs / "build" / "lib"
-          let includeOutDir = producerRootAbs / "build" / "include"
-          let pkgConfigOutDir = producerRootAbs / "build" / "lib" / "pkgconfig"
-          if not dirExists(extendedPath(libOutDir)):
-            break libraryChannel
-          for lib in producerArtifact.projectInterface.publicLibraries:
-            if lib.name.len == 0:
-              continue
-            # A header-only library exports no linkable artifact; its headers
-            # (if any) are still projected onto CPATH below.
-            if lib.kind == lkHeaderOnly:
-              continue
-            # Match the realized file by basename over the declared library
-            # name: ``lib<name>.<ext>`` or ``<name>.<ext>`` for any extension.
-            let stem = lib.name
-            let libStem = "lib" & lib.name
-            for entryKind, entryPath in walkDir(extendedPath(libOutDir)):
-              if entryKind != pcFile:
-                continue
-              let tail = splitPath(entryPath).tail
-              let dotIdx = tail.find('.')
-              let base =
-                if dotIdx > 0: tail[0 ..< dotIdx] else: tail
-              if base == stem or base == libStem:
-                let realizedLib = libOutDir / tail
-                if realizedLib notin realizedLibraries:
-                  realizedLibraries.add(realizedLib)
-          if realizedLibraries.len > 0:
-            if libOutDir notin aux.libDirs:
-              aux.libDirs.add(libOutDir)
-            if dirExists(extendedPath(includeOutDir)) and
-                includeOutDir notin aux.includeDirs:
-              aux.includeDirs.add(includeOutDir)
-            if dirExists(extendedPath(pkgConfigOutDir)) and
-                pkgConfigOutDir notin aux.pkgConfigDirs:
-              aux.pkgConfigDirs.add(pkgConfigOutDir)
-        # Cross-Repo-Source-Consumption SC-11 (§4.2a.2) — the PARALLEL Nim
-        # language channel. When a consumed producer declares a ``library
-        # <name>`` and its resolved source root carries an importable Nim
-        # source tree, add that directory to ``aux.nimPathDirs`` so the SC-11
-        # resolver projection (below / ``mkToolIdentityResolver``) threads it
-        # onto the consumer's ``nim c --path:<dir>`` — the Nim analogue of the
-        # SC-3 ``includeDirs`` header-root discovery for C/C++. Discovery is by
-        # the producer's declared ``library`` name + its source-root
-        # convention: the producer's declared ``exportedPath`` (§4.2a.4) when
-        # set, else the ``"src"`` default, so a bare ``library nim_everywhere``
-        # exports ``<root>/src`` unchanged. Unlike the C/C++ library channel
-        # this needs NO realized ``.so`` — a pure Nim library is consumed from
-        # source directly — so it runs independently of the ``.so`` discovery
-        # above.
-        for lib in producerArtifact.projectInterface.publicLibraries:
-          if lib.name.len == 0:
-            continue
-          let exported =
-            if lib.exportedPath.len > 0: lib.exportedPath else: "src"
-          let nimSrcDir = producerRootAbs / exported
-          if dirExists(extendedPath(nimSrcDir)) and
-              nimSrcDir notin aux.nimPathDirs:
-            aux.nimPathDirs.add(nimSrcDir)
-        let haveLibChannel = aux.libDirs.len > 0 or aux.includeDirs.len > 0 or
-          aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0 or
-          aux.nimPathDirs.len > 0
-        if binDirs.len == 0 and not haveLibChannel:
+        if not recordProducerMaterialization(selector, producerRootAbs,
+            producerArtifact, producerRuntimeIdentity, producer):
           raise newException(OSError,
             "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
-            " declares no executable whose ``build/bin/<name>`` output " &
-            "materialized and no library whose ``build/lib/<name>`` output " &
-            "or Nim ``src/`` source root materialized; nothing to splice " &
-            "onto PATH or the aux channels.")
-        if binDirs.len > 0:
-          producerMaterializedBinDirs[selector] = binDirs
-        if haveLibChannel:
-          producerMaterializedAuxPaths[selector] = aux
+            " declares no materialized executable, library, or Nim source " &
+            "output to splice onto the consumer's tool channels.")
+        if producerMaterializedBinDirs.hasKey(selector):
+          logSummary("cross-repo producer: spliced \"" & selector &
+            "\" bin dir(s) into tool identities: " &
+            producerMaterializedBinDirs[selector].join(", "))
+        if producerMaterializedAuxPaths.hasKey(selector):
+          let aux = producerMaterializedAuxPaths[selector]
           logSummary("cross-repo producer: spliced \"" & selector &
             "\" library aux dir(s): libDirs=" & aux.libDirs.join(", ") &
             (if aux.includeDirs.len > 0: " includeDirs=" &
               aux.includeDirs.join(", ") else: "") &
             (if aux.nimPathDirs.len > 0: " nimPathDirs=" &
               aux.nimPathDirs.join(", ") else: ""))
-        # SC-2 deliverable #2 sub-clause — "the producer edge's action-hash
-        # folds into the consuming action's cache key" (§4.2 point 3). Compute
-        # the producer edge's ACTION-HASH as a content digest over the
-        # producer's realized build product: its declared-executable output
-        # binaries, bound by basename (the same basename binding that maps
-        # ``executable <exp>: name: "<bin>"`` onto ``build/bin/<bin>`` above),
-        # each folded together with the producer selector + declared-output
-        # name so the digest tracks WHICH binary changed as well as its bytes.
-        # ``foldProducerActionHashes`` (below, called after the consumer graph
-        # is lowered) folds this into every consumer action naming the producer
-        # via ``toolIdentityRefs``. A changed producer build product (rebuilt
-        # binary bytes) shifts this hash and therefore the consumer cache key;
-        # an unchanged producer leaves it stable. This is the build-product
-        # arm of invalidation (§4.3's last paragraph: "the producer's build
-        # product changed" via the action-hash); the SOURCE-content arm
-        # (``foldOverridesIntoFingerprint`` on the develop ``contentIdentity``)
-        # is SC-4.
-        # SC-3 folds the realized LIBRARY artifacts into the SAME action-hash
-        # (§4.2 point 3, library channel): a rebuilt ``.so``/``.dylib``/``.dll``
-        # shifts the folded hash and rebuilds the consumer exactly as a rebuilt
-        # executable does. The digest tracks WHICH artifact changed (basename)
-        # as well as its bytes, over both the executable and library products.
-        realizedBinaries.sort()
-        realizedLibraries.sort()
-        var actionHashPayload = "cross-repo-producer-action-hash.v1\x00" &
-          selector & "\x00"
-        for realized in realizedBinaries:
-          actionHashPayload.add(extractFilename(realized))
-          actionHashPayload.add('\x00')
-          actionHashPayload.add(fileContentDigest(realized))
-          actionHashPayload.add('\x00')
-        for realizedLib in realizedLibraries:
-          actionHashPayload.add("lib:")
-          actionHashPayload.add(extractFilename(realizedLib))
-          actionHashPayload.add('\x00')
-          actionHashPayload.add(fileContentDigest(realizedLib))
-          actionHashPayload.add('\x00')
-        producerActionHashes[selector] =
-          digestHex(blake3DomainDigest(actionHashPayload.bytesOf(),
-            hdActionFingerprint))
-        # Cross-Repo-Source-Consumption SC-4 (§4.3) — record the producer's
-        # SOURCE identity for the ``foldOverridesIntoFingerprint`` fold. In
-        # develop mode this is the ``rpbkOverride`` binding the SC-1 hook
-        # returned (its ``contentIdentity`` folds the sibling checkout's
-        # local-path root mtime, ``computeOverrideContentIdentity``,
-        # ``override_resolution.nim:235-263``); in lock-pinned mode it is the
-        # producer ``LockedDep``'s pinned ``revision`` + ``integrity`` projected
-        # onto the SAME fold framing (``lockPinnedSourceBinding``). This is the
-        # SOURCE-content arm that complements the build-PRODUCT
-        # ``producerActionHashes`` above: "the producer's source changed"
-        # (contentIdentity / pin) AND "the producer's build product changed"
-        # (action-hash) BOTH invalidate the consumer (§4.3 last paragraph).
-        case producer.kind
-        of pbkDevelopOverride:
-          producerSourceBindings[selector] = producer.overrideBinding
-        of pbkLockPinned:
-          producerSourceBindings[selector] =
-            lockPinnedSourceBinding(selector, producer.lockedDep)
-        of pbkOnDiskSibling:
-          discard
-        of pbkNotProducer:
-          discard
-        # The identity resolver consumes ``producerMaterializedBinDirs``
-        # explicitly. Do not mutate the process PATH here: doing so changes the
-        # pathSearchList and profile fingerprint of every unrelated tool.
-        if binDirs.len > 0:
-          logSummary("cross-repo producer: spliced \"" & selector &
-            "\" bin dir(s) into tool identities: " & binDirs.join(", "))
       finally:
         if producerBuildStack.len > 0 and
             producerBuildStack[^1] == producerRootAbs:
@@ -9784,7 +9776,9 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  forceRefresh = false;
                                  mergeExtensions = true;
                                  includeDevEnvOnlyProvider = false;
-                                 lowerGraph = true): BuildGraphInspection
+                                 lowerGraph = true;
+                                 selectedActionOverride = ""):
+                                   BuildGraphInspection
 
 proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
                                extraPools: openArray[BuildPool] = []):
@@ -12340,6 +12334,12 @@ proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int
+# Workspace-Membership-Model.md — the ``post-merge`` hook's local-state
+# reconciliation. Returns one report line per checkout it changed or deferred
+# and NOTHING when the workspace is already consistent. Declared here because
+# the implementation needs ``repoRemovalBlockers``, which lives beside the
+# membership verbs far below.
+proc reconcileLocalStateForHook(workspaceRoot: string): seq[string]
 
 proc runHooksDispatchCommand(args: openArray[string]): int =
   ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
@@ -15503,7 +15503,7 @@ proc usesProducerLockedDep(selector, root: string;
         gitRef: facts.branch, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
-      depends: @[], groups: @[]))
+      depends: @[], tags: @[]))
   # Not discoverable on disk — carry an existing VCS lock pin forward if present.
   for d in existingDeps:
     if d.name == selector and d.coordinates.kind == ckVcs:
@@ -15575,7 +15575,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
         gitRef: facts.branch, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
-      depends: @[], groups: @[]))
+      depends: @[], tags: @[]))
     seenPaths.add(d.path)
     seenNames.add(d.name)
   for selector in usesSelectors:
@@ -15595,7 +15595,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
       gitRef: rootFacts.branch, revision: rootFacts.headSha),
     integrity: computeDepIntegrity(root, rootFacts.headSha),
     version: "", visibility: "public", participation: "",
-    depends: rootDepends, groups: @[]))
+    depends: rootDepends, tags: @[]))
   for d in siblingDeps:
     result.add(d)
 
@@ -15661,7 +15661,7 @@ proc committedLockDerivedProject(workspaceRoot: string):
         fetchUrl: d.coordinates.url, revision: d.coordinates.revision,
         vcs: defaultRepoVcs, stability: defaultRepoStability,
         visibility: visibilityFromLockString(d.visibility),
-        participation: d.participation, depends: d.depends, groups: d.groups))
+        participation: d.participation, depends: d.depends, tags: d.tags))
       lockedPaths.add(d.path)
       if d.path == ".":
         rootIdx = repos.high
@@ -16644,6 +16644,55 @@ proc effectiveProviderCompileRunQuotaBypass*(explicitBypass: bool): bool =
   ## environment fallback used by nested invocations.
   explicitBypass or runQuotaBypassedByEnv()
 
+proc recordMaterializedProducersForInspection(
+    artifact: ProjectInterfaceArtifact; projectRoot, outDir,
+    publicCliPath: string; mode: ToolProvisioningMode) =
+  ## Graph inspection does not execute producer build edges, but it must bind
+  ## producer outputs that a prior build has already materialized. Otherwise a
+  ## declared cross-repository executable falls through to the package catalog
+  ## and reports a misleading missing source-recipe error.
+  for useDef in artifact.projectInterface.toolUses:
+    let selector = useDef.packageSelector
+    if selector.len == 0 or producerMaterializedBinDirs.hasKey(selector) or
+        producerMaterializedAuxPaths.hasKey(selector):
+      continue
+    let binding = resolveProducerBinding(selector, projectRoot)
+    if not binding.declaresProducerEdge:
+      continue
+    let sourceRoot = producerSourceRoot(binding, selector, projectRoot,
+      fetchMissingPinnedSource = true)
+    if sourceRoot.len == 0 or not dirExists(extendedPath(sourceRoot)):
+      raise newException(IOError,
+        "cross-repo producer \"" & selector &
+        "\" has no source checkout available for graph inspection")
+    let sourceRootAbs = absolutePath(sourceRoot)
+    let projectFile = resolveProjectFile(sourceRootAbs).path
+    let producerOutDir = outDir / "cross-repo-producers" /
+      selectorFilesystemKey(selector)
+    createDir(extendedPath(producerOutDir))
+    var inspectionStats: BuildStats
+    let producerArtifact = extractInterfaceEdge(projectFile,
+      producerOutDir / "producer-interface.rbsz",
+      producerOutDir / "producer-interface.nim", reprobuildLibraryWorkDir(),
+      producerOutDir / "producer-iface-work",
+      projectRootForModule(projectFile), publicCliPath,
+      producerOutDir / "build-engine-cache", inspectionStats,
+      requireStub = false)
+    var runtimeIdentity = PathOnlyBuildIdentity()
+    if producerArtifact.projectInterface.runtimeToolUses.len > 0:
+      var runtimeArtifact = producerArtifact
+      runtimeArtifact.projectInterface.toolUses =
+        producerArtifact.projectInterface.runtimeToolUses
+      runtimeArtifact.projectInterface.runtimeToolUses = @[]
+      runtimeIdentity = toolBuildIdentity(runtimeArtifact, mode,
+        storeRoot = producerOutDir / "runtime-tool-store")
+    if not recordProducerMaterialization(selector, sourceRootAbs,
+        producerArtifact, runtimeIdentity, binding):
+      raise newException(IOError,
+        "cross-repo producer \"" & selector & "\" at " & sourceRootAbs &
+        " is not materialized; run `repro build` for the consuming target " &
+        "before inspecting its resolved graph")
+
 proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  publicCliPath: string;
                                  selectDefaultAction = false;
@@ -16651,7 +16700,9 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  forceRefresh = false;
                                  mergeExtensions = true;
                                  includeDevEnvOnlyProvider = false;
-                                 lowerGraph: bool): BuildGraphInspection =
+                                 lowerGraph: bool;
+                                 selectedActionOverride: string):
+                                   BuildGraphInspection =
   ## ``mergeExtensions`` (MO-6) folds any present ``projectExtension``
   ## sibling's fragments into this project's snapshot before lowering /
   ## target-export aggregation. It is set to ``false`` when this proc is
@@ -16698,6 +16749,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     projectName: artifact.projectInterface.projectName,
     interfaceFingerprint: artifact.interfaceFingerprint)
   if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
+    recordMaterializedProducersForInspection(artifact, projectRoot, outDir,
+      publicCliPath, effectiveMode)
     let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     identity = resolved.identity
     result.toolIdentityPath = resolved.identityPath
@@ -16834,7 +16887,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   if not lowerGraph:
     return
 
-  var selectedActionId = parsedTarget.selectedActionId
+  var selectedActionId =
+    if selectedActionOverride.len > 0:
+      selectedActionOverride
+    else:
+      parsedTarget.selectedActionId
   if selectDefaultAction and selectedActionId.len == 0:
     selectedActionId = result.defaultActionId
   result.selectedActionId = selectedActionId
@@ -18626,8 +18683,12 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
   var autoRunQuota = startAutoRunQuotaIfNeeded(false)
   try:
     let info = prepareBuildGraphInspection(target, mode, publicCliPath,
-      selectDefaultAction = targetWasOmitted or nameSelector.len > 0,
-      workRoot = workRoot)
+      # Preserve the project anchor while selecting the named target as the
+      # lowering root. This includes explicitly requested test/lint/bench
+      # closures that an unselected graph intentionally omits.
+      selectDefaultAction = targetWasOmitted,
+      workRoot = workRoot,
+      selectedActionOverride = nameSelector)
     if nameSelector.len > 0:
       var actionIds: seq[string] = @[]
       for action in info.actions:
@@ -20930,10 +20991,10 @@ type
                              ## commit-addressed record is keyed on the PRIMARY
                              ## project (Workspace-And-Develop-Mode.md §"The
                              ## Primary Project") whatever ``--project`` says.
-    groups: seq[string]      ## ``--group=<list>`` — keep only repos in these
-                             ## manifest groups (``repos/<repo>.toml``
-                             ## ``groups``; a repo with no declared groups is
-                             ## in the implicit ``default`` group).
+    tags: seq[string]        ## ``--tag=<list>`` — keep only repos carrying
+                             ## these manifest tags (``repos/<repo>.toml``
+                             ## ``tags``; a repo with no declared tags is
+                             ## in the implicit ``default`` tag).
     tiers: seq[string]       ## DS-8 ``--tier=<list>`` — restrict which TIERS'
                              ## backends contribute records at all. A SOURCE
                              ## axis flag: it narrows the lock set itself, not
@@ -21051,7 +21112,7 @@ type
       ## does this revision come from" is the question a lock-set listing
       ## answers; the assignment drives the routing diagnostics.
     pinBackendOf: Table[string, string]
-    groupsOf: Table[string, seq[string]]
+    tagsOf: Table[string, seq[string]]
       ## DS-7 — repo name -> its EFFECTIVE manifest groups (``groups`` when
       ## declared, else the implicit ``["default"]``), read from the resolved
       ## manifest membership. Carried on the lock set because selection runs
@@ -21061,7 +21122,7 @@ type
       ## contribute it. MEMBERSHIP only: lock-record lookup is keyed on the
       ## PRIMARY project regardless (see ``DevelopAllArgs.projects``).
     activeProjects: seq[string]        ## the active project set, in order
-    knownGroups: seq[string]           ## every group any participating repo is in
+    knownTags: seq[string]             ## every tag any participating repo carries
     keyNotes: seq[string]  ## DS-5 — one line per commit-addressed backend whose
                            ## record was found at an ANCESTOR of the requested
                            ## key rather than at the key itself
@@ -21148,7 +21209,7 @@ proc developSetFromLock(lock: LockedDependencies; composed: DevelopLockSet;
   ## the previous one:
   ##
   ##   1. mode (``--all`` | ``--direct`` | ``--indirect`` | ``--transitive-of``)
-  ##   2. ``--project``   3. ``--group``   4. ``--filter``
+  ##   2. ``--project``   3. ``--tag``     4. ``--filter``
   ##   5. ``--only``      6. ``--except``
   ##
   ## The order is fixed **so the result never depends on argv order**. Every
@@ -21252,14 +21313,14 @@ proc developSetFromLock(lock: LockedDependencies; composed: DevelopLockSet;
         if p in projectSet: return true
       false)
 
-  # ---- stage 3: --group ---------------------------------------------------
-  var groupSet = initHashSet[string]()
-  for g in args.groups: groupSet.incl(g)
-  narrow("group",
-    (if args.groups.len > 0: "--group=" & args.groups.join(",") else: ""),
+  # ---- stage 3: --tag -----------------------------------------------------
+  var tagSet = initHashSet[string]()
+  for t in args.tags: tagSet.incl(t)
+  narrow("tag",
+    (if args.tags.len > 0: "--tag=" & args.tags.join(",") else: ""),
     proc (n: string): bool =
-      for g in composed.groupsOf.getOrDefault(n, @[]):
-        if g in groupSet: return true
+      for t in composed.tagsOf.getOrDefault(n, @[]):
+        if t in tagSet: return true
       false)
 
   # ---- stage 4: --filter (a GLOB; may legitimately match nothing) ---------
@@ -21598,29 +21659,29 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       evidenceOnlyNames.add(d.name)
   evidenceOnlyNames.sort()
 
-  # DS-7 — GROUP attribution, for every repo in the union rather than only for
+  # DS-7 — TAG attribution, for every repo in the union rather than only for
   # those the MANIFEST pass reached.
   #
-  # ``composed.groupsOf`` is filled from the resolved manifest membership, and
+  # ``composed.tagsOf`` is filled from the resolved manifest membership, and
   # the composer only gets that far when some configuration layer declares a
   # route. "A workspace with no routing config resolves to the built-in public
   # default alone" (CLI/develop.md §"Composing the lock set") — the DS-1
   # compatibility baseline — so in exactly that shape the composer returns
-  # early and every group table is empty. `--group=<group>` then refused with
-  # "the declared groups are: (none)" for a group the committed lock ITSELF
+  # early and every tag table is empty. `--tag=<tag>` then refused with
+  # "the declared tags are: (none)" for a tag the committed lock ITSELF
   # declares, which is not a narrower answer but a false one.
   #
-  # A lock record carries the repo's ``groups``, so use it for any repo the
+  # A lock record carries the repo's ``tags``, so use it for any repo the
   # manifest pass did not attribute. The manifest values still win where both
-  # exist, and the implicit-``default`` rule is the same one ``effectiveGroups``
-  # applies: a repo that lists groups without naming `default` is not in it.
+  # exist, and the implicit-``default`` rule is the same one ``effectiveTags``
+  # applies: a repo that lists tags without naming `default` is not in it.
   for d in lock.deps:
-    if d.name.len == 0 or composed.groupsOf.hasKey(d.name): continue
-    let gs = if d.groups.len > 0: d.groups else: @[defaultManifestGroup]
-    composed.groupsOf[d.name] = gs
-    for g in gs:
-      if g notin composed.knownGroups: composed.knownGroups.add(g)
-  composed.knownGroups.sort()
+    if d.name.len == 0 or composed.tagsOf.hasKey(d.name): continue
+    let ts = if d.tags.len > 0: d.tags else: @[defaultManifestTag]
+    composed.tagsOf[d.name] = ts
+    for t in ts:
+      if t notin composed.knownTags: composed.knownTags.add(t)
+  composed.knownTags.sort()
   if not args.list:
     # ``--list`` shows each of these as a ROW with state `evidence-only`
     # (CLI/develop.md §"Evidence-only repos"), so repeating them as notices
@@ -21636,7 +21697,7 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
   #
   # "``--only`` and ``--except`` name repos EXACTLY; a name matching nothing is
   # a loud error, never a silent no-op." The same rule binds ``--project`` and
-  # ``--group``, which also name things exactly. Only ``--filter`` is a glob,
+  # ``--tag``, which also name things exactly. Only ``--filter`` is a glob,
   # and it alone may legitimately match nothing.
   #
   # Every exact-name selector is validated against the WHOLE lock set (or the
@@ -21683,13 +21744,13 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
             (if composed.activeProjects.len > 0:
                composed.activeProjects.join(", ")
              else: "(none recorded)"))
-    # ``--group`` — against the groups the participating manifest fragments
+    # ``--tag`` — against the tags the participating manifest fragments
     # actually declare (plus the implicit ``default``).
-    for g in args.groups:
-      if g notin composed.knownGroups:
-        unknownName("--group", g, "manifest group in this workspace",
-          "; the declared groups are: " &
-            (if composed.knownGroups.len > 0: composed.knownGroups.join(", ")
+    for t in args.tags:
+      if t notin composed.knownTags:
+        unknownName("--tag", t, "manifest tag in this workspace",
+          "; the declared tags are: " &
+            (if composed.knownTags.len > 0: composed.knownTags.join(", ")
              else: "(none)"))
     if outcomes.len > 0:
       return DevelopAllResult(outcomes: outcomes, notices: notices,
@@ -22293,7 +22354,7 @@ proc parseAdhocLockStore(spec: string): DevelopAdhocLockStore =
 
 proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ## ``repro develop --list|--all|--direct|--indirect|--transitive-of=<pkg>
-  ## [--project=<list>] [--group=<list>] [--filter=<glob>] [--only=<list>]
+  ## [--project=<list>] [--tag=<list>] [--filter=<glob>] [--only=<list>]
   ## [--except=<list>] [--tier=<list>] [--at=<rev>]
   ## [--lock-store=<kind>:<location>]... [--into=<dir>] [--reset] [--strict]
   ## [--dry-run] [--workspace-root=<path>]
@@ -22304,7 +22365,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ##
   ##   * SOURCE — ``--tier``, ``--at``, ``--lock-store``, ``--strict``: which
   ##     lock records contribute at all;
-  ##   * MEMBERSHIP — the mode flags, ``--project``, ``--group``, ``--filter``,
+  ##   * MEMBERSHIP — the mode flags, ``--project``, ``--tag``, ``--filter``,
   ##     ``--only``, ``--except``: which repos are selected, composed in the
   ##     FIXED order the spec fixes so the result never depends on argv order;
   ##   * ACTION — ``--list``, ``--dry-run``, ``--into``, ``--reset``, ``--json``:
@@ -22316,7 +22377,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ## promise one step further down: it resolves the set AND the placement plan
   ## and prints what WOULD happen.
   ##
-  ## ``--only`` / ``--except`` / ``--project`` / ``--group`` name things
+  ## ``--only`` / ``--except`` / ``--project`` / ``--tag`` name things
   ## EXACTLY; a name that matches nothing is a loud error, never a silent
   ## no-op. ``--filter`` is a glob and may legitimately match nothing.
   ##
@@ -22334,7 +22395,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   # "Selectors compose in a FIXED ORDER, **so the result never depends on argv
   # order**" (CLI/develop.md §"Membership axis"). The fixed stage order alone
   # does not deliver that promise: the list-valued selectors (`--only`,
-  # `--except`, `--project`, `--group`) ACCUMULATE and are order-free, but the
+  # `--except`, `--project`, `--tag`) ACCUMULATE and are order-free, but the
   # SINGLE-VALUED ones would silently take the LAST occurrence — so
   # `--all --direct` and `--direct --all` are the same flag set in two argv
   # orders and would answer differently, which is exactly what the rule
@@ -22390,8 +22451,8 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
     elif arg == "--project" or arg.startsWith("--project="):
       result.projects.add(parseCommaList(valueFromFlag(args, i, "--project")))
       sawSelector = true
-    elif arg == "--group" or arg.startsWith("--group="):
-      result.groups.add(parseCommaList(valueFromFlag(args, i, "--group")))
+    elif arg == "--tag" or arg.startsWith("--tag="):
+      result.tags.add(parseCommaList(valueFromFlag(args, i, "--tag")))
       sawSelector = true
     elif arg == "--tier" or arg.startsWith("--tier="):
       for t in parseCommaList(valueFromFlag(args, i, "--tier")):
@@ -22459,7 +22520,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
 proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
   ## The L1 develop-SET form is distinguished by a set-selection flag
   ## (``--all`` / ``--direct`` / ``--indirect`` / ``--transitive-of`` /
-  ## ``--only`` / ``--project`` / ``--group``) or by the SET-PATH ``--list``
+  ## ``--only`` / ``--project`` / ``--tag``) or by the SET-PATH ``--list``
   ## (DS-6). ``--into`` / ``--filter`` alone stay on the pre-L1
   ## single-dependency ``--into`` route (that route already owns ``--into``).
   ##
@@ -22479,7 +22540,7 @@ proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
         arg == "--transitive-of" or arg.startsWith("--transitive-of=") or
         arg == "--only" or arg.startsWith("--only=") or
         arg == "--project" or arg.startsWith("--project=") or
-        arg == "--group" or arg.startsWith("--group="):
+        arg == "--tag" or arg.startsWith("--tag="):
       return true
   false
 
@@ -24898,16 +24959,87 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
     var expectedRemotes = initHashSet[string]()
     for r in repo.remotes:
       expectedRemotes.incl(r.localName)
+    for r in repo.remotes:
       if r.localName in existingRemotes:
         let getRes = gitRunPlain(identity, ["-C", repoAbs, "remote", "get-url", r.localName])
         if getRes.code == 0 and getRes.output.strip() != r.fetchUrl:
           discard gitRunPlain(identity, ["-C", repoAbs, "remote", "set-url", r.localName, r.fetchUrl])
-      else:
-        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "add", r.localName, r.fetchUrl])
+        continue
+      # The declared name is absent. Before adding it — and letting step 3
+      # prune whatever carried the same URL under another name — look for THAT
+      # remote and RENAME it. Add-then-prune reaches the same URL under the
+      # same name, but it destroys `refs/remotes/<old>/*` and orphans every
+      # `branch.<b>.remote` that named it, so a checkout whose remote was named
+      # after its org (the predecessor tool's convention) silently loses its
+      # tracking configuration on the first sync after the rename.
+      var renamedFrom = ""
+      for existing in existingRemotes:
+        if existing in expectedRemotes:
+          continue
+        let urlRes = gitRunPlain(identity,
+          ["-C", repoAbs, "remote", "get-url", existing])
+        if urlRes.code == 0 and urlRes.output.strip() == r.fetchUrl:
+          renamedFrom = existing
+          break
+      if renamedFrom.len > 0:
+        let renamed = gitRunPlain(identity,
+          ["-C", repoAbs, "remote", "rename", renamedFrom, r.localName])
+        if renamed.code == 0:
+          existingRemotes.excl(renamedFrom)
+          existingRemotes.incl(r.localName)
+          continue
+      discard gitRunPlain(identity, ["-C", repoAbs, "remote", "add", r.localName, r.fetchUrl])
 
-    # 3. Clean up/remove unexpected remotes
-    for name in existingRemotes:
-      if name notin expectedRemotes:
+    # 3. Clean up/remove unexpected remotes.
+    #
+    # The invariant, stated as the outcome rather than as a property of the
+    # input: ALIGNMENT NEVER LEAVES A CHECKOUT WITH ZERO REMOTES. A tidying
+    # step has no business disconnecting a working tree from everywhere it
+    # came from, whatever the manifest happens to say.
+    #
+    # Guarding on "the declared set is empty" was the first attempt and it was
+    # too narrow, because it reasons about the input to a step whose damage
+    # depends on the OUTPUT. Two ways a non-empty declaration still strips
+    # everything:
+    #
+    #   * the declared name is one git will not accept — `git remote add ""`
+    #     exits 128 — so the add silently does nothing while the name still
+    #     counts as "expected", and the prune then removes the real remote;
+    #   * an add or rename fails for any other reason (a locked config, a
+    #     name collision) and the replacement that justified the prune was
+    #     never actually created.
+    #
+    # So the decision is made against what the checkout ACTUALLY has after the
+    # add/rename pass, re-read from git rather than from this proc's own
+    # bookkeeping — the bookkeeping is what was wrong in both cases above. If
+    # every surviving remote would be pruned, the whole prune is refused and
+    # SAID OUT LOUD, because at that point the manifest and the checkout
+    # disagree in a way no amount of quiet tidying can settle.
+    var actualRemotes: seq[string]
+    let afterAdds = gitRunPlain(identity, ["-C", repoAbs, "remote"])
+    if afterAdds.code == 0:
+      for line in afterAdds.output.strip().splitLines():
+        let name = line.strip()
+        if name.len > 0:
+          actualRemotes.add(name)
+    var prunable: seq[string]
+    var surviving = 0
+    for name in actualRemotes:
+      if name in expectedRemotes:
+        inc surviving
+      else:
+        prunable.add(name)
+    if prunable.len > 0 and surviving == 0:
+      stderr.writeLine("workspace: refusing to prune the remote(s) of '" &
+        repo.path & "' (" & prunable.join(", ") &
+        ") — the manifest declares " &
+        (if expectedRemotes.len == 0: "none"
+         else: "only remote(s) this checkout does not have and could not be " &
+           "given") &
+        ", so pruning would leave it with no remote at all. Left untouched; " &
+        "check what '" & repo.name & "' resolves to.")
+    else:
+      for name in prunable:
         discard gitRunPlain(identity, ["-C", repoAbs, "remote", "remove", name])
 
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
@@ -25665,11 +25797,11 @@ type
     dryRun: bool         ## RA-27 ``--dry-run``: print the plan and exit WITHOUT mutating.
     json: bool           ## RA-27 ``--json``: machine surface (plan + per-repo results).
     verbose: bool        ## RA-27 ``--verbose``/``-v``: include raw tool output diagnostics.
-    includeGroups: seq[string]
-      ## RA-18 ``--groups=a,b``: only repos in one of these groups (plus the
-      ## implicit ``default`` rule) are synced. Empty = no group filter.
-    excludeGroups: seq[string]
-      ## RA-18 ``--groups=-a`` / ``-a`` entries: repos in any of these groups
+    includeTags: seq[string]
+      ## RA-18 ``--tags=a,b``: only repos carrying one of these tags (plus the
+      ## implicit ``default`` rule) are synced. Empty = no tag filter.
+    excludeTags: seq[string]
+      ## RA-18 ``--tags=-a`` / ``-a`` entries: repos carrying any of these tags
       ## are excluded (exclusion wins over inclusion).
     report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
 
@@ -25736,20 +25868,21 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
     elif arg == "--jobs-checkout" or arg.startsWith("--jobs-checkout="):
       result.jobsCheckout = parseSyncJobsValue(
         valueFromFlag(args, i, "--jobs-checkout"), "--jobs-checkout")
-    elif arg == "--groups" or arg.startsWith("--groups="):
+    elif arg == "--tags" or arg.startsWith("--tags="):
       # RA-18 subset selection. A comma-separated list; an entry prefixed
-      # with ``-`` (e.g. ``--groups=default,-heavy``) is an EXCLUDE term,
-      # otherwise an INCLUDE term. Mirrors ``repo``'s ``--groups`` syntax.
-      for raw in valueFromFlag(args, i, "--groups").split(','):
+      # with ``-`` (e.g. ``--tags=default,-heavy``) is an EXCLUDE term,
+      # otherwise an INCLUDE term. Mirrors ``repo``'s ``--groups`` syntax,
+      # under the word the membership model left free for a filter.
+      for raw in valueFromFlag(args, i, "--tags").split(','):
         let term = raw.strip()
         if term.len == 0:
           continue
         if term.startsWith("-"):
-          let g = term[1 .. ^1]
-          if g.len > 0:
-            result.excludeGroups.add(g)
+          let t = term[1 .. ^1]
+          if t.len > 0:
+            result.excludeTags.add(t)
         else:
-          result.includeGroups.add(term)
+          result.includeTags.add(term)
     elif arg == "--no-interleaved":
       result.noInterleaved = true
     elif arg == "--fail-fast":
@@ -25902,14 +26035,27 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
     if membershipFromMetadata:
       extendWithActiveProjectSet(workspaceRoot, resolved)
     else: resolved
+  # Workspace-Membership-Model.md — a repo-set that is ENABLED is what used to
+  # be called a project, so `repo-sets/<name>.toml` joins THIS ladder too,
+  # under the same name and in the same last position `project_set.nim` gives
+  # it. Without this rung a workspace whose recorded active set predates the
+  # manifest repo's conversion keeps resolving through `project_set.nim` (which
+  # already knows repo-sets) while sync / pull / check — the verbs that come
+  # through here — fail with "no project or variant named …" for a name that is
+  # perfectly resolvable. Looked up LAST, so a manifest repo mid-conversion
+  # keeps preferring the project it already has and nothing resolves
+  # differently until the `projects/` file is actually gone.
+  let repoSetFile = manifestsRoot / repoSetsDirName / (name & ".toml")
   if fileExists(projectFile):
     return (withSet(resolveProject(projectFile)), none(WorkspaceLocal))
   if fileExists(variantFile):
     return (withSet(resolveVariant(variantFile)), none(WorkspaceLocal))
+  if fileExists(repoSetFile):
+    return (withSet(resolveRepoSet(repoSetFile)), none(WorkspaceLocal))
   raise newException(ValueError,
-    "no project or variant named '" & name & "' found under '" &
-      manifestsRoot & "' (looked for '" & projectFile & "' and '" &
-      variantFile & "')")
+    "no repo-set, project or variant named '" & name & "' found under '" &
+      manifestsRoot & "' (looked for '" & projectFile & "', '" &
+      variantFile & "' and '" & repoSetFile & "')")
 
 proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
   ## MO-9 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
@@ -28061,7 +28207,7 @@ proc lockedDepFromStoreRepo(source: LockSource; repo: ResolvedRepo): LockedDep =
     integrity: integrity, version: "",
     visibility: lockingTierLabel(repo.visibility),
     participation: repo.participation, depends: repo.depends,
-    groups: repo.groups)
+    tags: repo.tags)
 
 proc populateLockedDeps*(source: LockSource): LockedDependencies =
   ## MO-9 — the ONE entry point that fills the MO-8 ``LockedDependencies`` model
@@ -28291,7 +28437,7 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   result.locationOf = initTable[string, string]()
   result.pinTierOf = initTable[string, string]()
   result.pinBackendOf = initTable[string, string]()
-  result.groupsOf = initTable[string, seq[string]]()
+  result.tagsOf = initTable[string, seq[string]]()
   result.projectsOf = initTable[string, seq[string]]()
 
   # DS-8 — ``--tier=<list>``: which TIERS may contribute records at all. This
@@ -28532,11 +28678,11 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
 
   for r in resolved.repos:
     if r.name.len == 0: continue
-    let groups = effectiveGroups(r)
-    result.groupsOf[r.name] = groups
-    for g in groups:
-      if g notin result.knownGroups: result.knownGroups.add(g)
-  result.knownGroups.sort()
+    let tags = effectiveTags(r)
+    result.tagsOf[r.name] = tags
+    for t in tags:
+      if t notin result.knownTags: result.knownTags.add(t)
+  result.knownTags.sort()
 
   # DS-7 ``--project`` attribution. The active project set is the workspace's
   # recorded ``[workspace] projects``; each project is resolved on its own to
@@ -29487,17 +29633,17 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         kept.add(repo)
     resolved.repos = kept
 
-  # RA-18: subset selection by manifest group. ``--groups=a,b`` keeps only
-  # repos in one of the requested groups; ``-<group>`` excludes. A repo with
-  # no declared ``groups`` belongs to the implicit ``default`` group, so a
-  # plain ``--groups=default`` (or no filter at all) keeps every un-grouped
-  # repo. When no group flags are given the filter is a no-op and the repo
+  # RA-18: subset selection by manifest tag. ``--tags=a,b`` keeps only
+  # repos carrying one of the requested tags; ``-<tag>`` excludes. A repo with
+  # no declared ``tags`` carries the implicit ``default`` tag, so a
+  # plain ``--tags=default`` (or no filter at all) keeps every untagged
+  # repo. When no tag flags are given the filter is a no-op and the repo
   # set is exactly the resolved set (no regression for fragments without
-  # ``groups``).
-  if args.includeGroups.len > 0 or args.excludeGroups.len > 0:
+  # ``tags``).
+  if args.includeTags.len > 0 or args.excludeTags.len > 0:
     var kept: seq[ResolvedRepo]
     for repo in resolved.repos:
-      if repoSelectedByGroups(repo, args.includeGroups, args.excludeGroups):
+      if repoSelectedByTags(repo, args.includeTags, args.excludeTags):
         kept.add(repo)
     resolved.repos = kept
 
@@ -30238,6 +30384,10 @@ type
     ppoCloned              ## Missing checkout cloned + put on a tracking
                            ## branch at the manifest revision.
     ppoFailed              ## A clone / fetch / branch-attach step failed.
+    ppoSkippedWorkAtRisk   ## Converging would have repointed a branch (or
+                           ## moved HEAD off one) carrying work no remote
+                           ## carries. The checkout is left EXACTLY as it was
+                           ## and the report names what stopped it.
 
   WorkspacePullRepoEntry* = object
     ## One per declared repo after ``pull``. ``trackingBranch`` is the
@@ -30276,6 +30426,7 @@ proc pullOutcomeTag(outcome: WorkspacePullRepoOutcome): string =
   of ppoConvergedExisting: "converged"
   of ppoCloned: "cloned"
   of ppoFailed: "failed"
+  of ppoSkippedWorkAtRisk: "skipped_work_at_risk"
 
 proc toJsonNode*(report: WorkspacePullReport): JsonNode =
   result = newJObject()
@@ -30339,6 +30490,17 @@ proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
     result.add("workspace pull: STOPPED after a step failed — the manifest " &
       "repo was advanced and is NOT rolled back; rerun `repro workspace " &
       "pull` to resume from the partial state")
+  var skipped = 0
+  for entry in report.repos:
+    if entry.outcome == pullOutcomeTag(ppoSkippedWorkAtRisk):
+      inc skipped
+  if skipped > 0:
+    # Said once, at the end, in the summary position. The per-repo lines above
+    # already carry the detail; what a reader needs here is the count and the
+    # fact that the rest of the workspace DID converge, so a non-zero exit is
+    # not mistaken for "nothing happened".
+    result.add("workspace pull: " & $skipped & " checkout(s) left untouched " &
+      "to protect work that exists nowhere else; every other repo converged")
   for line in renderTrustReportLines("workspace pull", report.autoTrust):
     result.add(line)
 
@@ -30348,6 +30510,11 @@ type
     projectName: string
     toolProvisioning: ToolProvisioningMode
     report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
+    force: bool
+      ## Converge a repo even when doing so repoints a branch carrying commits
+      ## no remote has. Same spelling and same meaning as `disable --force` and
+      ## `remove --force`: the work-loss refusal is the default, and this is
+      ## how the operator says they have decided otherwise.
 
 proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
   ## ``repro workspace pull`` argv parser. Mirrors ``sync``'s shape: an
@@ -30364,6 +30531,8 @@ proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--force":
+      result.force = true
     elif consumeReportFlag(arg, result.report):
       discard
     elif arg.startsWith("-"):
@@ -30387,6 +30556,175 @@ proc resolveWorkspacePullProject(parsed: WorkspacePullArgs): ResolvedProject =
   ## workspace.toml can supply the project name).
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
     "`repro workspace pull`").resolved
+
+# ---- work-loss probes, shared by every destructive workspace verb ---------
+#
+# Three verbs in this file destroy local state that no remote carries:
+# `disable` deletes a checkout, `pull` repoints a branch ref, and `migrate`
+# moves a detached HEAD. They endanger DIFFERENT things, so they must ask
+# different questions — but they must ask them the same WAY, or the narrowest
+# implementation ends up in front of the widest destruction. Hence one probe
+# per question here, composed per verb below, rather than a single omnibus
+# check that each caller either over- or under-applies.
+#
+# The shared rule across all of them: a probe that FAILS is itself a blocker.
+# "We could not tell" and "there is nothing there" must never collapse into
+# the same answer when the consequence is irreversible.
+
+proc uncommittedChangesBlocker(identity: GitToolIdentity;
+                               repoDir: string): seq[string] =
+  let status = gitRunPlain(identity, ["-C", repoDir, "status", "--porcelain"])
+  if status.code != 0:
+    return @["could not read git status: " & status.output.strip()]
+  let body = status.output.strip()
+  if body.len > 0:
+    return @[$body.splitLines().len & " uncommitted change(s)"]
+  @[]
+
+proc unpushedCommitsBlocker(identity: GitToolIdentity;
+                            repoDir: string): seq[string] =
+  ## Commits on ANY local branch that no remote carries.
+  ##
+  ## `rev-list --branches --not --remotes` is every commit reachable from some
+  ## local branch and from no remote-tracking ref — exactly "work that would be
+  ## gone" when the whole checkout is deleted. Counting is enough; naming the
+  ## branches is the report's job.
+  let unpushed = gitRunPlain(identity,
+    ["-C", repoDir, "rev-list", "--count", "--branches", "--not", "--remotes"])
+  if unpushed.code != 0:
+    return @["could not check for unpushed commits: " & unpushed.output.strip()]
+  try:
+    let n = parseInt(unpushed.output.strip())
+    if n > 0:
+      return @[$n & " unpushed commit(s)"]
+  except ValueError:
+    return @["could not check for unpushed commits: unexpected output '" &
+      unpushed.output.strip() & "'"]
+  @[]
+
+proc branchAheadOfRemoteBlocker(identity: GitToolIdentity;
+                                repoDir, branch, remoteName: string):
+    seq[string] =
+  ## Commits on ONE branch that its remote-tracking ref does not carry.
+  ##
+  ## This is the question a branch REPOINT has to ask, and it is deliberately
+  ## narrower than the all-branches probe above. Repointing `dev` cannot harm a
+  ## commit on some unrelated feature branch, so refusing over one would make
+  ## the safe answer useless: nearly every real checkout has an unpushed branch
+  ## somewhere, and a gate that fires on all of them is a gate people pass
+  ## `--force` to by reflex.
+  if branch.len == 0:
+    return @[]
+  let localRef = "refs/heads/" & branch
+  if revParse(identity, repoDir, localRef).len == 0:
+    return @[]                    # no such local branch: nothing to repoint
+  let remoteRef = "refs/remotes/" & remoteName & "/" & branch
+  if revParse(identity, repoDir, remoteRef).len == 0:
+    # The branch exists locally and the remote-tracking ref does not, so
+    # EVERYTHING on it is unpublished by definition.
+    return @["local branch '" & branch & "' has no '" & remoteName &
+      "/" & branch & "' to compare against, so all of it is unpublished"]
+  let ahead = gitRunPlain(identity, ["-C", repoDir, "rev-list", "--count",
+    localRef, "--not", remoteRef])
+  if ahead.code != 0:
+    return @["could not compare '" & branch & "' against " & remoteName &
+      "/" & branch & ": " & ahead.output.strip()]
+  try:
+    let n = parseInt(ahead.output.strip())
+    if n > 0:
+      return @[$n & " commit(s) on '" & branch & "' that " & remoteName &
+        "/" & branch & " does not carry"]
+  except ValueError:
+    return @["could not compare '" & branch & "' against " & remoteName &
+      "/" & branch & ": unexpected output '" & ahead.output.strip() & "'"]
+  @[]
+
+proc detachedHeadOnlyCommits(identity: GitToolIdentity;
+                             repoDir: string): seq[string] =
+  ## Work that exists ONLY at a detached HEAD.
+  ##
+  ## The all-branches probe structurally cannot see it: a commit made while
+  ## HEAD is detached belongs to no branch, so it falls outside `--branches` by
+  ## construction. Both moving HEAD onto a branch and repointing the branch
+  ## HEAD is about to land on would leave such a commit reachable only from the
+  ## reflog, which is the exact loss these gates exist to prevent.
+  let res = gitRunPlain(identity, ["-C", repoDir, "rev-list", "--count",
+    "HEAD", "--not", "--branches", "--remotes"])
+  if res.code != 0:
+    return @["could not check for commits held only by the detached HEAD: " &
+      res.output.strip()]
+  try:
+    let n = parseInt(res.output.strip())
+    if n > 0:
+      return @[$n & " commit(s) reachable only from the detached HEAD"]
+  except ValueError:
+    return @["could not check for commits held only by the detached HEAD: " &
+      "unexpected output '" & res.output.strip() & "'"]
+  @[]
+
+proc stashBlocker(identity: GitToolIdentity; repoDir: string): seq[string] =
+  let stash = gitRunPlain(identity, ["-C", repoDir, "stash", "list"])
+  if stash.code != 0:
+    return @["could not read the stash list: " & stash.output.strip()]
+  let body = stash.output.strip()
+  if body.len > 0:
+    return @[$body.splitLines().len & " stash entr(ies)"]
+  @[]
+
+proc repoRemovalBlockers(identity: GitToolIdentity;
+                         repoDir: string): seq[string] =
+  ## Reasons this checkout must not be DELETED without an explicit override.
+  ##
+  ## Deleting the tree destroys everything in it, so this composes the widest
+  ## set: work in the working tree, on any local branch, or in the stash. A
+  ## checkout with none of them is reconstructible from its remote, which is
+  ## what makes deleting it a cheap, reversible act rather than data loss.
+  if not dirExists(repoDir):
+    return @[]
+  if not dirExists(repoDir / ".git"):
+    # Occupied, but not a checkout we can reason about. Its contents are not
+    # reconstructible from any remote and no probe below applies, so it is a
+    # blocker by construction: "we cannot tell" must never collapse into "there
+    # is nothing there" when the consequence is a recursive delete.
+    var entries = 0
+    for _ in walkDir(repoDir):
+      inc entries
+      break
+    if entries > 0:
+      return @["not a git checkout, and not empty"]
+    return @[]
+  result.add(uncommittedChangesBlocker(identity, repoDir))
+  result.add(unpushedCommitsBlocker(identity, repoDir))
+  result.add(stashBlocker(identity, repoDir))
+
+proc branchConvergenceBlockers(identity: GitToolIdentity;
+                               repoDir, branch, remoteName: string):
+    seq[string] =
+  ## Reasons this checkout must not be CONVERGED onto `branch` without an
+  ## explicit override.
+  ##
+  ## Narrower than the removal set, and deliberately so, because converging
+  ## destroys less: `checkout -B <branch> --track <remote>/<branch>` repoints
+  ## ONE branch ref and moves HEAD. It cannot touch another branch, and it
+  ## cannot touch the stash — so this asks about the working tree, about the
+  ## one branch being repointed, and about a detached HEAD whose commits would
+  ## be left unreferenced when HEAD moves away. The stash is checked anyway
+  ## because a stash entry means an interrupted piece of work whose owner is
+  ## almost certainly not expecting their branch to move underneath it, and the
+  ## probe is one cheap command.
+  if not dirExists(repoDir / ".git"):
+    return @[]
+  result.add(uncommittedChangesBlocker(identity, repoDir))
+  let attached = gitRunPlain(identity,
+    ["-C", repoDir, "symbolic-ref", "--short", "-q", "HEAD"])
+  if attached.code == 0 and attached.output.strip().len > 0:
+    result.add(branchAheadOfRemoteBlocker(identity, repoDir, branch,
+      remoteName))
+  else:
+    result.add(detachedHeadOnlyCommits(identity, repoDir))
+    result.add(branchAheadOfRemoteBlocker(identity, repoDir, branch,
+      remoteName))
+  result.add(stashBlocker(identity, repoDir))
 
 proc convergeRepoToManifestRevision(
     identity: GitToolIdentity;
@@ -30504,6 +30842,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     reference
 
   var anyFailure = false
+  var anySkipped = false
   for idx, repo in resolved.repos:
     let absPath = args.workspaceRoot / repo.path
     var entry = WorkspacePullRepoEntry(
@@ -30548,6 +30887,32 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     else:
       entry.outcome = pullOutcomeTag(ppoConvergedExisting)
 
+      # The work-loss gate. Convergence repoints `<revision>` to the remote
+      # tip, so any commit on it that the remote does not carry stops being
+      # referenced by anything — and until now nothing asked. `disable` refuses
+      # to delete a checkout over a single uncommitted file while `pull` would
+      # silently rewind that same checkout's branch; being reflog-recoverable
+      # is not a defence when nothing in the report tells the developer to go
+      # looking.
+      #
+      # Skipped, not fatal: the rest of the workspace still converges, which is
+      # the partial-advance contract every other verb here follows. A repo left
+      # behind is named with its remedy and counted in the exit code.
+      #
+      # Only an EXISTING checkout is gated. A tree this run just cloned has, by
+      # construction, no work in it that a remote does not carry.
+      if not args.force:
+        let blockers = branchConvergenceBlockers(identity, absPath,
+          repo.revision, gitRemoteNameFor(repo))
+        if blockers.len > 0:
+          entry.outcome = pullOutcomeTag(ppoSkippedWorkAtRisk)
+          entry.diagnostic = "converging to '" & repo.revision &
+            "' would put work at risk: " & blockers.join(", ") &
+            "; push or stash it and rerun, or pass --force to converge anyway"
+          report.repos.add(entry)
+          anySkipped = true
+          continue
+
     # Converge to the manifest revision on a local tracking branch.
     let converged = convergeRepoToManifestRevision(
       identity, absPath, repo.revision, remoteName = gitRemoteNameFor(repo))
@@ -30568,6 +30933,11 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     # rerun) rather than being silently reverted.
     if manifestAdvanced:
       report.manifestStopped = true
+  elif anySkipped:
+    # 2, matching every other verb here that declines to touch something to
+    # protect work. Distinct from 1: nothing went wrong, some repos are simply
+    # still waiting on a decision only their owner can make.
+    report.exitCode = 2
   else:
     report.exitCode = 0
     # On full success, record the converged branch in workspace metadata
@@ -30617,6 +30987,12 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
   ##         manifest had already advanced, it is NOT rolled back: the
   ##         report names the before→after SHAs and the partial state is
   ##         left for a rerun.
+  ##   - 2 — every repo that could be converged was, and at least one was
+  ##         SKIPPED because converging it would have repointed a branch
+  ##         carrying commits no remote has (or moved HEAD off commits held
+  ##         only by a detached HEAD). Those checkouts are untouched; the
+  ##         report names each one and its remedy. ``--force`` converges them
+  ##         anyway, which is the pre-gate behaviour.
   let parsed = parseWorkspacePullArgs(args)
   let outcome = executeWorkspacePull(parsed)
   writeWorkspacePullReport(outcome.report,
@@ -34361,6 +34737,38 @@ proc parseManifestRefreshArgs(args: openArray[string]):
       result.positional.add(arg)
     inc i
 
+proc reconcileLocalStateAfterHook(hookName, workspaceRoot,
+                                  timestamp: string) =
+  ## Workspace-Membership-Model.md — the automatic half of local-state
+  ## migration, run on the SAME hooks that already react to "the manifest may
+  ## have moved". That is the whole point: a developer who already has the
+  ## workspace checked out should need no more than `git pull`, and `git pull`
+  ## is precisely what fires `post-merge`.
+  ##
+  ## Three properties this must not lose, all of them the hook contract's:
+  ## it never blocks (the caller returns 0 regardless), it never raises
+  ## (`reconcileLocalStateForHook` catches everything), and it is SILENT when
+  ## the workspace is already consistent — which is the steady state after the
+  ## first pull, so the noisy case is the rare one.
+  ##
+  ## When it does act it reports to stderr as well as the log. Rewriting
+  ## somebody's git remotes without telling them is not an acceptable thing
+  ## for a hook to do quietly, and the log alone is a place nobody looks until
+  ## after they are already confused.
+  if workspaceRoot.len == 0:
+    return
+  let lines = reconcileLocalStateForHook(workspaceRoot)
+  if lines.len == 0:
+    return
+  stderr.writeLine("repro " & hookName & ": reconciled workspace-local git " &
+    "state against the manifest —")
+  for line in lines:
+    stderr.writeLine("  " & line)
+    appendManifestRefreshLog(timestamp & " " & hookName &
+      " local-state " & line)
+  stderr.writeLine("  `repro workspace migrate --dry-run` re-reports this " &
+    "at any time")
+
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int =
   ## Best-effort manifest-layer refresh for ``post-merge`` /
@@ -34396,6 +34804,7 @@ proc runManifestRefreshHookCommand*(hookName: string;
     # can correlate; never raise.
     appendManifestRefreshLog(timestamp & " " & hookName &
       " skipped: no workspace.toml at " & workspaceRoot)
+    reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
     return 0
 
   var report: ManifestRefreshReport
@@ -34404,15 +34813,19 @@ proc runManifestRefreshHookCommand*(hookName: string;
   except CatchableError as err:
     appendManifestRefreshLog(timestamp & " " & hookName &
       " fetch failed: " & err.msg & " (workspace=" & workspaceRoot & ")")
+    reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
     return 0
 
   if report.layers.len == 0:
     # workspace.toml exists but declares no [[manifest]] layers — the
-    # M9-init single-project metadata-only shape. Nothing to do; emit
-    # one log line so the operator can audit hook activity.
+    # M9-init single-project metadata-only shape, which is also the FLAT
+    # shape a manifest repo at the workspace root produces. Nothing to
+    # refresh, but the checkouts still have to be reconciled: that shape is
+    # exactly the one whose manifests arrive by a plain `git pull`.
     appendManifestRefreshLog(timestamp & " " & hookName &
       " noop: workspace declares no manifest layers (" &
       workspaceRoot & ")")
+    reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
     return 0
 
   for entry in report.layers:
@@ -34448,6 +34861,7 @@ proc runManifestRefreshHookCommand*(hookName: string;
         " fetch failed (layer=" & entry.provenance & "): " &
         entry.diagnostic)
 
+  reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
   return 0
 
 # ---- M18 / M23 / M26: `repro check --mode=pre-push` (publication gate) ----
@@ -48882,8 +49296,8 @@ proc normalizeWorkspaceNamespaceAlias*(args: seq[string]): seq[string] =
 #     when the user has not chosen an explicit set.
 #   * ``repro completion <shell>`` — emit a shell completion script
 #     (RA-26 ``prompt init`` style: print a snippet, mutate nothing).
-#   * ``repro workspace projects`` / ``repos`` — manifest-authoring verbs that
-#     write + commit + push project and repo DEFINITIONS to the manifest repo.
+#   * ``repro workspace sets`` / ``repos`` — manifest-authoring verbs that
+#     write + commit + push repo-set and repo DEFINITIONS to the manifest repo.
 
 const
   bootstrapEnvrcContent = """# shellcheck shell=bash
@@ -48906,20 +49320,20 @@ This is a multi-repo reprobuild workspace. Sibling repos are cloned
 side-by-side and coordinated through the workspace manifest. Read
 @workspace-projects.md for the active project set and per-repo descriptions.
 
-To activate a project in this workspace use `repro ws enable <project>`
-(and `repro ws disable <project>` to drop it). To DEFINE a new project or
-repo for everyone, use `repro ws projects add` / `repro ws repos add`; the
+To activate a repo-set in this workspace use `repro ws enable <set>`
+(and `repro ws disable <set>` to drop it). To DEFINE a new repo-set or
+repo for everyone, use `repro ws sets add` / `repro ws repos add`; the
 manifest is the workspace bill of materials. `workspace-projects.md` is
 generated from the manifest — do not edit it by hand.
 """
 
   bootstrapProjectsDocContent = """# Workspace Projects
 
-This file is generated from the workspace manifest. It lists the projects
-layered into this workspace and the repos each project contributes.
+This file is generated from the workspace manifest. It lists the repo-sets
+layered into this workspace and the repos each one contributes.
 
-Run `repro workspace projects list` to see every defined project and
-whether it is enabled here, and `repro workspace enable <project>` to layer
+Run `repro workspace sets list` to see every defined repo-set and
+whether it is enabled here, and `repro workspace enable <set>` to layer
 another one in.
 """
 
@@ -49151,6 +49565,25 @@ proc parseProjectsWorkspaceRoot(args: openArray[string]): string =
     return ascended
   result = absolutePath(result)
 
+proc readDefaultTemplateFromHostConfig(workspaceRoot: string): string =
+  ## Workspace-Membership-Model.md §"Templates" — the host bootstrap config's
+  ## `[projects] default_template`. Policy lives in ORG CONFIG, never hardcoded
+  ## in the binary, so an absent config or an absent key means "no default" and
+  ## the empty stub is what gets written.
+  ##
+  ## Best-effort in the same sense `[projects] default` is: an unreadable
+  ## config yields "" rather than failing the `add`. That is the safe
+  ## direction here — no template is the pre-template behaviour, whereas
+  ## refusing would make an unrelated config typo block authoring entirely.
+  let configPath = findBootstrapConfigPath(workspaceRoot)
+  if configPath.len == 0:
+    return ""
+  try:
+    let cfg = readWorkspaceBootstrap(configPath)
+    return cfg.projects.default_template.get("")
+  except CatchableError:
+    return ""
+
 proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
   ## RA-8 fallback source for ``enable --default``: the host bootstrap
   ## config's ``[projects] default`` set. Best-effort — a missing/malformed
@@ -49282,7 +49715,7 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
       discard
     elif arg == "--json" or arg == "--verbose" or arg == "--dry-run" or
         arg == "--write-report" or arg.startsWith("--write-report=") or
-        arg.startsWith("--jobs") or arg.startsWith("--groups="):
+        arg.startsWith("--jobs") or arg.startsWith("--tags="):
       forwarded.add(arg)
     elif arg.startsWith("-"):
       stderr.writeLine("repro workspace enable: unknown flag " & arg)
@@ -49381,59 +49814,591 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
     syncArgs.add(f)
   return runWorkspaceSyncCommand(syncArgs)
 
-proc repoRemovalBlockers(identity: GitToolIdentity;
-                         repoDir: string): seq[string] =
-  ## Reasons this checkout must not be deleted without an explicit override.
+# ---- Workspace-Membership-Model.md: local-state reconciliation -------------
+#
+# Manifests arrive by `git pull`; CHECKOUTS do not follow. Three facts about a
+# workspace live in `.git/config` and `.git/HEAD` rather than in any manifest,
+# so converting the manifest repo leaves every existing checkout stale in ways
+# no amount of re-resolving fixes:
+#
+#   * the primary remote may carry the URL-PREFIX name (`metacraft-labs`)
+#     instead of `origin`, which the model makes the always-primary binding;
+#   * a fork's `upstream` binding only became expressible with per-binding
+#     `url_prefix` / `url_suffix`, so no pre-existing checkout has one;
+#   * a checkout may sit on a DETACHED HEAD, which a branch declaration cannot
+#     move on its own.
+#
+# `alignWorkspaceRemotes` already converges the remote SET, but it converges
+# it by add-then-prune, and add-then-prune is not a rename: dropping
+# `metacraft-labs` deletes `refs/remotes/metacraft-labs/*` and orphans every
+# `branch.<b>.remote` that named it, so the developer's tracking configuration
+# evaporates while the URL looks right. Reconciliation renames, and says so.
+#
+# What it refuses to do, and why:
+#
+#   * It never touches a checkout `repoCheckoutRecognized` cannot identify as
+#     the manifest's repo — the same "observe, don't auto-modify an
+#     unrecognized checkout" contract sync already follows.
+#   * It never PRUNES an undeclared remote. Pruning belongs to sync, where the
+#     operator asked for convergence; a migration that also deleted somebody's
+#     personal fork remote would be doing a second, unrequested job.
+#   * It performs NO network I/O. It runs inside a git hook, so a fetch would
+#     make every `git pull` pay for a second round trip — and every question it
+#     asks (does this branch exist, is this commit published) is answerable
+#     from refs already on disk.
+#   * It moves a detached HEAD only when nothing would be lost, and it moves it
+#     with `checkout <branch>` rather than `checkout -B <branch>`, so no branch
+#     ref is ever repointed. `pull`'s converge step deliberately DOES reset;
+#     migration deliberately does not, because a migration nobody asked for
+#     must not be able to rewind anybody's branch.
+#
+# A note for whoever next reads this and wonders whether the RENAME path is
+# dead code: measured against the workspace this was written for, it is
+# currently inert. Every checkout there already has `origin`, and the only two
+# detached HEADs are commit-pinned fragments that are CORRECTLY detached (this
+# code defers them, because a pin declares no branch). That is a statement
+# about one workspace on one day, not about the code. The paths that carry
+# their weight today are `upstream` — which no pre-existing checkout has,
+# because per-binding `url_prefix` / `url_suffix` is what made a fork's
+# upstream expressible at all — and every OTHER developer's workspace, which
+# may predate any of this and is exactly the case that cannot be inspected
+# from here. Deleting the rename because the local `git remote -v` looks tidy
+# would remove the only thing standing between those workspaces and a silent
+# add-then-prune.
+
+type
+  LocalStateRepoReport* = object
+    ## One checkout's reconciliation outcome.
+    ##
+    ## `changes` are mutations that happened (or, under `--dry-run`, would);
+    ## `deferrals` are the ones this refused to make, each paired with the
+    ## `remedy` that unblocks it; `failures` are git operations that were
+    ## attempted and did not succeed. A checkout that needed nothing produces
+    ## an entry with all three empty, and the drivers drop it — silence is the
+    ## steady state, so a second run reports nothing at all.
+    name*: string
+    path*: string
+    changes*: seq[string]
+    deferrals*: seq[string]
+    remedy*: string
+    failures*: seq[string]
+
+  WorkspaceLocalStateReport* = object
+    ## Structured outcome of one `repro workspace migrate` invocation.
+    ## `membership` carries active-set entries that no longer name anything
+    ## resolvable — reported, never rewritten.
+    workspaceRoot*: string
+    project*: string
+    dryRun*: bool
+    inspected*: int
+    repos*: seq[LocalStateRepoReport]
+    membership*: seq[string]
+    exitCode*: int
+
+proc toJsonNode*(report: WorkspaceLocalStateReport): JsonNode =
+  result = newJObject()
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["project"] = %report.project
+  result["dryRun"] = %report.dryRun
+  result["inspected"] = %report.inspected
+  var repos = newJArray()
+  for entry in report.repos:
+    var node = newJObject()
+    node["name"] = %entry.name
+    node["path"] = %entry.path
+    node["changes"] = %entry.changes
+    node["deferrals"] = %entry.deferrals
+    node["remedy"] = %entry.remedy
+    node["failures"] = %entry.failures
+    repos.add(node)
+  result["repos"] = repos
+  result["membership"] = %report.membership
+  result["exitCode"] = %report.exitCode
+
+proc observedGitRemotes(identity: GitToolIdentity;
+                        repoDir: string): seq[tuple[name, url: string]] =
+  let names = gitRunPlain(identity, ["-C", repoDir, "remote"])
+  if names.code != 0:
+    return
+  for raw in names.output.strip().splitLines():
+    let name = raw.strip()
+    if name.len == 0:
+      continue
+    let url = gitRunPlain(identity, ["-C", repoDir, "remote", "get-url", name])
+    result.add((name: name,
+      url: (if url.code == 0: url.output.strip() else: "")))
+
+proc declaresExactPin(repo: ResolvedRepo): bool =
+  ## Does this fragment pin an exact commit, as opposed to tracking a branch?
   ##
-  ## Each reason names work that exists ONLY here: uncommitted changes, commits
-  ## on a local branch that no remote carries, and stash entries. A checkout
-  ## with none of them is reconstructible from its remote, which is what makes
-  ## deleting it a cheap, reversible act rather than data loss.
+  ## `branch` and `revision` are not alternatives once a fragment carries both:
+  ## `branch` says WHERE TO CLONE FROM and `revision` says WHERE TO SIT, and for
+  ## a vendored reference tree those are deliberately different — clone `main`,
+  ## then sit on the commit the consumer was built against. So a pin has to be
+  ## detected from `revision` ALONE. Reading it as "no pin, because a branch is
+  ## declared" is exactly the mistake that made this reconciler walk four
+  ## vendored trees off their pinned commits and onto whatever `main` had
+  ## reached.
   ##
-  ## A probe that FAILS is itself a blocker. "We could not tell" and "there is
-  ## nothing there" must not collapse into the same answer when the consequence
-  ## is an `rm -rf`.
-  if not dirExists(repoDir):
-    return @[]
-  if not dirExists(repoDir / ".git"):
-    # Occupied, but not a checkout we can reason about. Its contents are not
-    # reconstructible from any remote and no probe below applies, so it is a
-    # blocker by construction: "we cannot tell" must never collapse into "there
-    # is nothing there" when the consequence is a recursive delete.
-    var entries = 0
-    for _ in walkDir(repoDir):
-      inc entries
-      break
-    if entries > 0:
-      return @["not a git checkout, and not empty"]
-    return @[]
-  let status = gitRunPlain(identity, ["-C", repoDir, "status", "--porcelain"])
-  if status.code != 0:
-    result.add("could not read git status: " & status.output.strip())
-  elif status.output.strip().len > 0:
-    let changed = status.output.strip().splitLines().len
-    result.add($changed & " uncommitted change(s)")
-  # `rev-list --branches --not --remotes` is every commit reachable from some
-  # local branch and from no remote-tracking ref — exactly "work that would be
-  # gone". Counting is enough; naming the branches is the report's job.
-  let unpushed = gitRunPlain(identity,
-    ["-C", repoDir, "rev-list", "--count", "--branches", "--not", "--remotes"])
-  if unpushed.code != 0:
-    result.add("could not check for unpushed commits: " &
-      unpushed.output.strip())
+  ## Both pin spellings count: a commit id, and a fully-qualified ref
+  ## (`refs/tags/v1`), which names one commit just as narrowly.
+  repo.revision.len > 0 and
+    (looksLikeSha(repo.revision) or repo.revision.startsWith("refs/"))
+
+proc pinnedCommitFor(identity: GitToolIdentity; repoAbs: string;
+                     repo: ResolvedRepo): string =
+  ## The commit `declaresExactPin` refers to, resolved against this checkout,
+  ## or "" when it cannot be resolved here (an unfetched tag). Callers must
+  ## treat "" as "I cannot confirm this checkout is at its pin", never as "it
+  ## has no pin" — the two have opposite consequences.
+  if not declaresExactPin(repo):
+    return ""
+  if looksLikeSha(repo.revision):
+    return repo.revision
+  revParse(identity, repoAbs, repo.revision)
+
+proc declaredBranchFor(repo: ResolvedRepo): string =
+  ## The branch a detached checkout should land on, or "" when the fragment
+  ## does not name one.
+  ##
+  ## Only consulted for a repo that `declaresExactPin` says is NOT pinned; a
+  ## pinned one is answered before this is reached, because for those the
+  ## declared branch is the clone source rather than the resting place.
+  if repo.branch.len > 0:
+    return repo.branch
+  if repo.revision.len > 0 and not looksLikeSha(repo.revision) and
+      not repo.revision.startsWith("refs/"):
+    return repo.revision
+  ""
+
+proc primaryRemoteNameFor(repo: ResolvedRepo): string =
+  ## The LOCAL git remote name of the repo's primary binding. The model makes
+  ## that `origin` always; the fallbacks exist so a `ResolvedRepo` synthesized
+  ## outside the resolver (lock files, develop-set discovery) still answers.
+  for r in repo.remotes:
+    if r.localName == "origin":
+      return "origin"
+  if repo.remotes.len > 0 and repo.remotes[0].localName.len > 0:
+    return repo.remotes[0].localName
+  "origin"
+
+proc localStateMayBeStale(workspaceRoot: string; repo: ResolvedRepo): bool =
+  ## A SUBPROCESS-FREE pre-filter: could this checkout possibly need work?
+  ##
+  ## The managed `post-merge` hook fires in every participating repo, and a
+  ## workspace of this size has a couple of hundred of them. Probing each one
+  ## with git would cost ~800 process spawns on every merge, which is how a
+  ## helpful hook becomes the reason people disable hooks. Reading
+  ## `.git/HEAD` and `.git/config` answers the same question from two file
+  ## reads.
+  ##
+  ## Deliberately biased toward "yes": a false positive costs one full probe
+  ## that then decides correctly, so the filter can never change an outcome —
+  ## only how long reaching it takes. `repro workspace migrate` skips the
+  ## filter entirely and probes everything, which is what makes it the
+  ## debuggable surface.
+  let gitDir = workspaceRoot / repo.path / ".git"
+  if not dirExists(gitDir):
+    # A `.git` FILE (worktree / submodule link) or nothing at all. Not a shape
+    # this filter can read, so hand it to the full probe rather than guess.
+    return fileExists(gitDir)
+  try:
+    let head = readFile(gitDir / "HEAD").strip()
+    if not head.startsWith("ref:"):
+      return true                       # detached
+  except CatchableError:
+    return true
+  var config = ""
+  try:
+    config = readFile(gitDir / "config")
+  except CatchableError:
+    return true
+  for binding in repo.remotes:
+    if binding.localName.len == 0 or binding.fetchUrl.len == 0:
+      continue
+    # Look for the section header and, after it, the exact URL. Matching the
+    # url anywhere in the file would accept a correct URL filed under the WRONG
+    # remote name, which is the very drift being looked for.
+    let header = "[remote \"" & binding.localName & "\"]"
+    let at = config.find(header)
+    if at < 0:
+      return true
+    var section = config[(at + header.len) .. ^1]
+    let nextSection = section.find("\n[")
+    if nextSection >= 0:
+      section = section[0 ..< nextSection]
+    var sawUrl = false
+    for line in section.splitLines():
+      let trimmed = line.strip()
+      if trimmed.startsWith("url"):
+        let eq = trimmed.find('=')
+        if eq >= 0 and trimmed[(eq + 1) .. ^1].strip() == binding.fetchUrl:
+          sawUrl = true
+    if not sawUrl:
+      return true
+  false
+
+proc reconcileRepoLocalState(identity: GitToolIdentity;
+                             workspaceRoot: string; repo: ResolvedRepo;
+                             dryRun: bool): LocalStateRepoReport =
+  ## Reconcile ONE checkout's git remotes and HEAD attachment against its
+  ## resolved fragment. Idempotent: every step is expressed as "the observed
+  ## state differs from the declared state", so a second run finds no
+  ## difference, runs no git command, and reports nothing.
+  result.name = repo.name
+  result.path = repo.path
+  let repoAbs = workspaceRoot / repo.path
+  if not dirExists(repoAbs / ".git"):
+    # Not materialized. Cloning is sync's job; a migration invents no
+    # checkouts.
+    return
+
+  var live = observedGitRemotes(identity, repoAbs)
+  var urls: seq[string]
+  for r in live:
+    if r.url.len > 0 and r.url notin urls:
+      urls.add(r.url)
+  if not repoCheckoutRecognized(identity, repoAbs, repo, urls):
+    result.deferrals.add("its git remotes (" &
+      (if urls.len > 0: urls.join(", ") else: "<none>") &
+      ") match no manifest URL and its HEAD is not at the declared revision")
+    result.remedy = "inspect what is checked out at '" & repo.path &
+      "'; nothing in it was modified"
+    return
+
+  proc isDeclaredName(name: string): bool =
+    for b in repo.remotes:
+      if b.localName == name:
+        return true
+    false
+
+  # A template rather than a nested proc: the body appends to `result`, and a
+  # closure may not capture it.
+  template runGit(gitArgs: openArray[string]; description: string) =
+    if dryRun:
+      result.changes.add(description)
+    else:
+      let res = gitRunPlain(identity, gitArgs)
+      if res.code == 0:
+        result.changes.add(description)
+      else:
+        result.failures.add(description & " — failed: " & res.output.strip())
+
+  # ---- remotes -------------------------------------------------------------
+  for binding in repo.remotes:
+    if binding.localName.len == 0 or binding.fetchUrl.len == 0:
+      continue
+    var presentIdx = -1
+    for i, r in live:
+      if r.name == binding.localName:
+        presentIdx = i
+        break
+    if presentIdx >= 0:
+      if live[presentIdx].url != binding.fetchUrl:
+        runGit(["-C", repoAbs, "remote", "set-url", binding.localName,
+          binding.fetchUrl],
+          "remote '" & binding.localName & "' retargeted: " &
+            live[presentIdx].url & " -> " & binding.fetchUrl)
+        live[presentIdx].url = binding.fetchUrl
+      continue
+
+    # Absent under the declared name. Before adding a second remote, look for
+    # the SAME remote under a different name — the predecessor tool named the
+    # primary after the URL prefix — and RENAME it. `git remote rename` carries
+    # `refs/remotes/<old>/*` and rewrites every `branch.<b>.remote` that named
+    # it; add-then-prune silently discards both.
+    var renameFrom = -1
+    for i, r in live:
+      if r.url == binding.fetchUrl and not isDeclaredName(r.name):
+        renameFrom = i
+        break
+    if renameFrom < 0 and binding.localName == primaryRemoteNameFor(repo) and
+        repo.projectRemote.len > 0:
+      # No URL match. A remote named after this repo's URL PREFIX is still the
+      # predecessor spelling of the primary binding even when the URL has since
+      # drifted (an org rename is exactly that case), so rename it and correct
+      # the URL below rather than stranding it beside a new `origin`.
+      for i, r in live:
+        if r.name == repo.projectRemote and not isDeclaredName(r.name):
+          renameFrom = i
+          break
+    if renameFrom >= 0:
+      let oldName = live[renameFrom].name
+      runGit(["-C", repoAbs, "remote", "rename", oldName, binding.localName],
+        "remote '" & oldName & "' renamed to '" & binding.localName &
+          "' (tracking refs and branch upstreams carried over)")
+      live[renameFrom].name = binding.localName
+      if live[renameFrom].url != binding.fetchUrl:
+        runGit(["-C", repoAbs, "remote", "set-url", binding.localName,
+          binding.fetchUrl],
+          "remote '" & binding.localName & "' retargeted: " &
+            live[renameFrom].url & " -> " & binding.fetchUrl)
+        live[renameFrom].url = binding.fetchUrl
+    else:
+      runGit(["-C", repoAbs, "remote", "add", binding.localName,
+        binding.fetchUrl],
+        "remote '" & binding.localName & "' added at " & binding.fetchUrl)
+      live.add((name: binding.localName, url: binding.fetchUrl))
+
+  # ---- HEAD ----------------------------------------------------------------
+  #
+  # A pinned fragment is asking for a DETACHED HEAD at its pinned commit — that
+  # is what a pin is, and it is why the vendored reference trees sit detached.
+  # Answered BEFORE anything reads `branch`, because those fragments declare a
+  # branch too: it is the ref to clone, not the ref to rest on. Reading the
+  # branch first is what turned this reconciler into the "reference trees float
+  # off their pin" regression the retained pin exists to prevent.
+  let pinned = pinnedCommitFor(identity, repoAbs, repo)
+  if declaresExactPin(repo):
+    let head = localHeadOrEmpty(identity, repoAbs)
+    if head.len > 0 and pinned.len > 0 and
+        (head.startsWith(pinned) or pinned.startsWith(head)):
+      # Exactly where the manifest says it should be. Silent: a detached HEAD
+      # here is the steady state, not drift, and a reconciler that narrated it
+      # would report four repos on every merge forever.
+      return
+    let onBranch = gitRunPlain(identity,
+      ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+    if onBranch.code == 0 and onBranch.output.strip().len > 0:
+      # Pinned, but somebody has deliberately put it on a branch. Left alone
+      # and left unmentioned, for the same reason every other attached checkout
+      # is: being on a branch is a human decision this verb does not overrule.
+      # "Is this repo at its pinned revision" is a real question, but it
+      # belongs to `sync` (which converges it) and `workspace status` (which
+      # reports it); answering it a second time from inside a post-merge hook
+      # would just add a voice that fires on every merge.
+      return
+    # Detached and NOT at the pin. Attaching would move it to the branch TIP —
+    # further from the pin, not closer — so this is the one case where the
+    # reconciler must say something and do nothing.
+    result.deferrals.add("HEAD is detached at " &
+      (if pinned.len == 0: "an unknown commit"
+       else: localHeadOrEmpty(identity, repoAbs)) &
+      " but the fragment pins " & repo.revision &
+      (if pinned.len == 0: " (which this checkout cannot resolve)" else: ""))
+    result.remedy = "run `repro workspace sync` to bring '" & repo.path &
+      "' back to its pinned revision; attaching it to a branch would move it " &
+      "further away"
+    return
+
+  let attached = gitRunPlain(identity,
+    ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+  if attached.code == 0 and attached.output.strip().len > 0:
+    # Already on a branch. WHICH branch is not this command's business: a
+    # developer on a feature branch is working, not drifting, and moving them
+    # off it would be the data loss this whole gate exists to prevent.
+    return
+
+  let declared = declaredBranchFor(repo)
+  if declared.len == 0:
+    result.deferrals.add("HEAD is detached and the fragment declares no " &
+      "branch to attach it to")
+    result.remedy = "declare `branch = \"<name>\"` in the repo fragment for '" &
+      repo.name & "', then rerun `repro workspace migrate`"
+    return
+
+  var blockers = repoRemovalBlockers(identity, repoAbs)
+  for extra in detachedHeadOnlyCommits(identity, repoAbs):
+    blockers.add(extra)
+  if blockers.len > 0:
+    result.deferrals.add("HEAD is detached, but attaching it to '" & declared &
+      "' would put work at risk: " & blockers.join(", "))
+    result.remedy = "commit and push (or stash) the work in '" & repo.path &
+      "', then rerun `repro workspace migrate`; nothing in it was modified"
+    return
+
+  let remoteName = primaryRemoteNameFor(repo)
+  let tracking = "refs/remotes/" & remoteName & "/" & declared
+  if revParse(identity, repoAbs, "refs/heads/" & declared).len > 0:
+    runGit(["-C", repoAbs, "checkout", "--quiet", declared],
+      "detached HEAD attached to existing local branch '" & declared & "'")
+  elif revParse(identity, repoAbs, tracking).len > 0:
+    runGit(["-C", repoAbs, "checkout", "--quiet", "-b", declared,
+      "--track", tracking],
+      "detached HEAD attached to a new local branch '" & declared &
+        "' tracking " & remoteName & "/" & declared)
   else:
+    # No local branch and no remote-tracking ref on disk. Fetching would fix
+    # it, and fetching is exactly what this must not do from inside a hook.
+    result.deferrals.add("HEAD is detached and neither a local branch '" &
+      declared & "' nor '" & remoteName & "/" & declared & "' exists here")
+    result.remedy = "run `repro workspace sync` to fetch '" & declared &
+      "', then rerun `repro workspace migrate`"
+
+proc reconcileWorkspaceLocalState*(workspaceRoot: string;
+                                   repos: seq[ResolvedRepo];
+                                   identity: GitToolIdentity;
+                                   dryRun = false;
+                                   prefilter = false):
+    seq[LocalStateRepoReport] =
+  ## Reconcile every declared checkout. Only repos with something to say are
+  ## returned, so an already-consistent workspace yields an empty seq — which
+  ## is what lets the hook stay silent without a second "did anything happen"
+  ## test.
+  for repo in repos:
+    if prefilter and not localStateMayBeStale(workspaceRoot, repo):
+      continue
+    let entry = reconcileRepoLocalState(identity, workspaceRoot, repo, dryRun)
+    if entry.changes.len > 0 or entry.deferrals.len > 0 or
+        entry.failures.len > 0:
+      result.add(entry)
+
+proc unresolvableActiveSetNames(workspaceRoot: string): seq[string] =
+  ## Entries of the recorded active set that no longer name anything.
+  ##
+  ## A name that used to be a project and is now a repo-set needs no rewrite —
+  ## the resolution ladder consults `repo-sets/` too, so the same string keeps
+  ## resolving. What DOES need saying is a name that resolves nowhere. It is
+  ## reported and never rewritten: membership is the developer's statement
+  ## about which trees they want side by side, and guessing a replacement for a
+  ## vanished name would silently change what their workspace builds.
+  for name in activeProjectSetOrEmpty(workspaceRoot):
     try:
-      let n = parseInt(unpushed.output.strip())
-      if n > 0:
-        result.add($n & " unpushed commit(s)")
-    except ValueError:
-      result.add("could not check for unpushed commits: unexpected output '" &
-        unpushed.output.strip() & "'")
-  let stash = gitRunPlain(identity, ["-C", repoDir, "stash", "list"])
-  if stash.code != 0:
-    result.add("could not read the stash list: " & stash.output.strip())
-  elif stash.output.strip().len > 0:
-    result.add($stash.output.strip().splitLines().len & " stash entr(ies)")
+      discard resolveWorkspaceProjectByName(workspaceRoot, name)
+    except CatchableError:
+      result.add(name)
+
+proc renderLocalStateTextLines(report: WorkspaceLocalStateReport): seq[string] =
+  let verb = if report.dryRun: "would " else: ""
+  if report.repos.len == 0 and report.membership.len == 0:
+    result.add("repro workspace migrate: " & $report.inspected &
+      " checkout(s) already match the manifest; nothing to do")
+    return
+  for entry in report.repos:
+    result.add(entry.path & ":")
+    for change in entry.changes:
+      result.add("  " & verb & change)
+    for deferral in entry.deferrals:
+      result.add("  SKIPPED — " & deferral)
+    for failure in entry.failures:
+      result.add("  FAILED — " & failure)
+    if entry.remedy.len > 0:
+      result.add("  remedy: " & entry.remedy)
+  for name in report.membership:
+    result.add("active set entry '" & name & "' resolves to no repo-set, " &
+      "project or variant")
+    result.add("  remedy: `repro ws sets list` shows what exists; " &
+      "`repro ws disable " & name & "` drops it from this workspace")
+  var changed = 0
+  var deferred = 0
+  var failed = 0
+  for entry in report.repos:
+    if entry.changes.len > 0: inc changed
+    if entry.deferrals.len > 0: inc deferred
+    if entry.failures.len > 0: inc failed
+  result.add("repro workspace migrate: " & $report.inspected &
+    " checkout(s) inspected, " & $changed & " " & verb & "reconciled, " &
+    $deferred & " skipped, " & $failed & " failed")
+
+proc runWorkspaceMigrateCommand*(args: openArray[string]): int =
+  ## ``repro workspace migrate [--dry-run] [--json] [--workspace-root=PATH]``
+  ##
+  ## Reconcile every checkout's LOCAL git state with the resolved manifest:
+  ## rename the primary remote to `origin` carrying its URL and tracking refs,
+  ## add or correct a fork's `upstream`, and attach a detached HEAD to the
+  ## branch its fragment declares.
+  ##
+  ## Explicit AND automatic on purpose. The managed `post-merge` hook runs the
+  ## same reconciliation so `git pull` is genuinely all a developer needs, but a
+  ## hook is a bad place to LEARN what a tool did: it cannot be re-run on
+  ## demand, its output competes with git's, and a `--dry-run` of it does not
+  ## exist. This verb is the surface you point somebody at when the hook
+  ## reported something they did not expect.
+  ##
+  ## Exit codes follow sync's convention:
+  ##   0 — everything reconciled, or already consistent.
+  ##   1 — a git operation was attempted and failed.
+  ##   2 — at least one checkout was skipped to protect work that exists
+  ##       nowhere else. Nothing in it was modified.
+  var workspaceRoot = ""
+  var dryRun = false
+  var json = false
+  var reportSpec = ReportSpec()
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--dry-run":
+      dryRun = true
+    elif arg == "--json":
+      json = true
+    elif consumeReportFlag(arg, reportSpec):
+      discard
+    elif arg.startsWith("-"):
+      stderr.writeLine("repro workspace migrate: unknown flag " & arg)
+      return 2
+    else:
+      stderr.writeLine("repro workspace migrate: unexpected argument " & arg)
+      return 2
+    inc i
+  if workspaceRoot.len == 0:
+    workspaceRoot = getCurrentDir()
+  workspaceRoot = os.normalizedPath(absolutePath(workspaceRoot))
+
+  var report: WorkspaceLocalStateReport
+  report.workspaceRoot = workspaceRoot
+  report.dryRun = dryRun
+
+  let resolved = resolveWorkspaceProjectShared(workspaceRoot, "",
+    "`repro workspace migrate`").resolved
+  report.project = resolved.projectName
+  report.inspected = resolved.repos.len
+
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  report.repos = reconcileWorkspaceLocalState(workspaceRoot, resolved.repos,
+    identity, dryRun = dryRun)
+  report.membership = unresolvableActiveSetNames(workspaceRoot)
+
+  var anyFailure = false
+  var anyDeferral = false
+  for entry in report.repos:
+    if entry.failures.len > 0: anyFailure = true
+    if entry.deferrals.len > 0: anyDeferral = true
+  report.exitCode =
+    if anyFailure: 1
+    elif anyDeferral: 2
+    else: 0
+
+  let destination = reportDestination(reportSpec, workspaceRoot, "migrate")
+  if destination.len > 0:
+    createDir(parentDir(destination))
+    writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
+  stageFailureReport(reportSpec, workspaceRoot, "migrate", report.toJsonNode())
+  if json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderLocalStateTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
+proc reconcileLocalStateForHook(workspaceRoot: string): seq[string] =
+  ## The `post-merge` arm. Best-effort by construction: every failure path
+  ## becomes a log line and NOTHING propagates, because a checkout that could
+  ## not be reconciled is a thing to fix later, never a reason for somebody's
+  ## `git pull` to fail.
+  ##
+  ## Returns one line per checkout that changed or was deferred, and an empty
+  ## seq otherwise. A hook that speaks on every pull teaches its user to stop
+  ## reading it, so the quiet path has to be genuinely quiet.
+  try:
+    let resolved = resolveWorkspaceProjectShared(workspaceRoot, "",
+      "`repro hooks dispatch post-merge`").resolved
+    let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    for entry in reconcileWorkspaceLocalState(workspaceRoot, resolved.repos,
+        identity, dryRun = false, prefilter = true):
+      for change in entry.changes:
+        result.add(entry.path & ": " & change)
+      for deferral in entry.deferrals:
+        result.add(entry.path & ": SKIPPED — " & deferral &
+          (if entry.remedy.len > 0: " (remedy: " & entry.remedy & ")" else: ""))
+      for failure in entry.failures:
+        result.add(entry.path & ": FAILED — " & failure)
+    for name in unresolvableActiveSetNames(workspaceRoot):
+      result.add("active set entry '" & name & "' resolves to no repo-set, " &
+        "project or variant (remedy: `repro ws sets list`)")
+  except CatchableError as err:
+    result.add("local-state reconciliation skipped: " & err.msg)
 
 proc runWorkspaceDisableCommand*(args: openArray[string]): int =
   ## ``repro workspace disable <project>... [--keep-checkouts] [--force]`` —
@@ -49528,13 +50493,19 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
     # turn this into a recursive delete of the workspace or something outside
     # it. Manifest data is not trusted with that: refuse the individual removal
     # and say so, rather than resolving the path and hoping.
+    #
+    # The manifest reader now refuses those shapes at the schema boundary, so
+    # this is a second line rather than the only one — but it asks the SAME
+    # question, via `checkoutPathRejection`, instead of keeping a private copy
+    # of the rule. Two independently-written definitions of "degenerate path"
+    # is how one of them ends up narrower than the other, and the narrower one
+    # is always the one in front of the `removeDir`.
     let normalized = path.strip()
-    if normalized.len == 0 or normalized == "." or isAbsolute(normalized) or
-        ".." in normalized.split({'/', DirSep}):
+    let rejection = checkoutPathRejection(normalized)
+    if rejection.len > 0:
       inc removalFailures
       stderr.writeLine("repro workspace disable: refusing to remove the " &
-        "declared checkout path '" & path & "' — it is not a plain " &
-        "workspace-relative directory")
+        "declared checkout path '" & path & "' — it " & rejection)
       continue
     let dir = workspaceRoot / normalized
     if not dirExists(dir):
@@ -49818,6 +50789,10 @@ const reproWorkspaceSubcommands = [
   "publish-evidence",
   # RA-32 — the explicit lock-record repair. Never invoked implicitly.
   "migrate-locks",
+  # Workspace-Membership-Model.md — the explicit local-state reconciliation.
+  # Also runs automatically from the managed `post-merge` hook, so this
+  # spelling exists to be re-run and dry-run rather than to be required.
+  "migrate",
 ]
 
 proc renderCompletionSnippet(shell, reproBin: string): string =
@@ -49961,22 +50936,63 @@ proc remoteRevisionState(gitBin, remoteUrl, revision: string): tuple[
       return (rrsOk, "")
   (rrsMissing, "")
 
-proc projectManifestStub(project: string): string =
-  ## A NEW project has no repos and no remotes yet, so the stub carries
-  ## neither. The `includes` array is deliberately absent rather than empty:
-  ## a bare `includes = [ … ]` written directly under `[project]` is read as
-  ## a key OF that table and the manifest stops parsing (the pilot manifests
-  ## only work because their `[[remote]]` blocks sit between the two). The
-  ## array is created by `repos add` once the file has a `[[remote]]`
-  ## table for it to follow, which is the layout every hand-written manifest
-  ## in the pilot has.
+type
+  MembershipSeed = object
+    ## What a template contributes to a freshly scaffolded set: the same two
+    ## membership keys the set itself carries, so what is seeded reads as the
+    ## thing it produces.
+    memberSets: seq[string]
+    memberRepos: seq[string]
+
+proc renderMemberArray(key: string; members: openArray[string]): string =
+  ## One membership array, one entry per line — the shape `editSetMember`
+  ## expects to find later, so a seeded set stays editable by the same CLI that
+  ## created it.
+  result = key & " = [\n"
+  for m in members:
+    result.add("  \"" & m & "\",\n")
+  result.add("]\n")
+
+proc projectManifestStub(project: string; seed: MembershipSeed): string =
+  ## A NEW project has no remotes yet, so the stub carries none.
+  ##
+  ## The membership arrays are written BEFORE the `[project]` table, and the
+  ## order is load-bearing rather than stylistic: a bare `member_sets = [ … ]`
+  ## written AFTER `[project]` is standard-TOML-bound to that table, the strict
+  ## decode then rejects `project.member_sets`, and the file stops parsing.
+  ## (The old `includes` array had the same problem and was simply omitted from
+  ## the stub; a template has content to place, so it is placed where it
+  ## parses. Verified against the pinned reader in both orders.)
+  ##
+  ## Both keys are written whenever a template applies, even when it seeds only
+  ## one, because which one an entry belongs in is the whole point:
+  ## `member_sets` and `member_repos` are two NAMESPACES, and a file carrying
+  ## only one would invite the next entry into whichever happened to be there.
+  ##
+  ## No `default_revision`. The model removes it: revision is lock territory,
+  ## and the value it carried was org branching policy restated once per
+  ## project. A stub that keeps emitting it re-seeds, into every project
+  ## authored from now on, exactly the field a manifest conversion has just
+  ## finished deleting — and the next conversion would have to delete it again.
+  ## The reader still ACCEPTS the key, so manifests that predate the conversion
+  ## keep parsing; what stops is this tool authoring new ones.
+  ##
+  ## `trunk` stays. It is not the same kind of field: it is live data with no
+  ## other declaration site, selecting the workspace branch for `repro branch`,
+  ## `repro switch` and `workspace init`.
+  let membership =
+    if seed.memberSets.len > 0 or seed.memberRepos.len > 0:
+      renderMemberArray("member_sets", seed.memberSets) & "\n" &
+      renderMemberArray("member_repos", seed.memberRepos) & "\n"
+    else:
+      ""
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+  membership &
   "[project]\n" &
   "name = \"" & project & "\"\n" &
-  "default_revision = \"main\"\n" &
   "trunk = \"main\"\n"
 
-proc repoSetManifestStub(name: string): string =
+proc repoSetManifestStub(name: string; seed: MembershipSeed): string =
   ## Workspace-Membership-Model.md — a NEW repo-set: a name and an empty
   ## membership list, and nothing else. There is no `default_revision` and no
   ## `default_remote` to stub, deliberately: a set that carried them would make
@@ -49993,12 +51009,14 @@ proc repoSetManifestStub(name: string): string =
   ## Both keys are stubbed even though a new set has neither, because which one
   ## an entry belongs in is the whole point: `member_sets` and `member_repos`
   ## are two NAMESPACES, and a stub carrying only one would invite the next
-  ## entry into whichever happened to be there.
+  ## entry into whichever happened to be there. A template seeds those same two
+  ## arrays; an empty seed leaves them empty, which is the pre-template stub
+  ## byte for byte.
   "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
   "[repo-set]\n" &
   "name = \"" & name & "\"\n\n" &
-  "member_sets = [\n]\n\n" &
-  "member_repos = [\n]\n"
+  renderMemberArray("member_sets", seed.memberSets) & "\n" &
+  renderMemberArray("member_repos", seed.memberRepos)
 
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
@@ -50288,7 +51306,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
   let verb = "repro workspace " & spelling
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo verb & " list [--enabled|--disabled|--all] [--json]"
-    echo verb & " add <name> [-m DESC]"
+    echo verb & " add <name> [--template=NAME|--no-template] [-m DESC]"
     echo verb & " remove <name> [--prune-orphan-repos]"
     echo "  list   every DEFINED repo-set, marked enabled/disabled for this " &
       "workspace."
@@ -50296,6 +51314,10 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       (if spelling == "sets": "repo-set (repo-sets/<name>.toml)"
        else: "project (projects/<name>.toml)") &
       ". To activate an existing one, use `repro ws enable <name>`."
+    echo "  --template=NAME  scaffold from templates/<NAME>.toml. Without it, " &
+      "the host config's [projects] default_template applies — and is " &
+      "REPORTED when it does."
+    echo "  --no-template    opt out of that default and write the empty stub."
     echo "  remove delete the definition. Disable it here first."
     return 0
   let sub = if args.len > 0 and not args[0].startsWith("-"): args[0] else: "list"
@@ -50342,10 +51364,16 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       var arr = newJArray()
       for r in rows:
         arr.add(%*{"name": r.name, "enabled": r.enabled, "defined": r.defined})
-      echo (%*{"schema": "reprobuild.workspace-projects-list.v1",
+      # The machine surface names what the model has: repo-sets. "Project" was
+      # a ROLE a set plays when it is enabled, not a kind, so a schema keyed on
+      # it described a distinction that does not exist. Renaming the schema
+      # STRING (rather than only the array key) is deliberate: a consumer that
+      # keys off the schema breaks loudly on the shape change instead of
+      # reading a `sets` payload as though it were the old `projects` one.
+      echo (%*{"schema": "reprobuild.workspace-sets-list.v1",
                "workspaceRoot": workspaceRoot,
                "primary": (if active.len > 0: active[0] else: ""),
-               "projects": arr}).pretty
+               "sets": arr}).pretty
       return 0
     for r in rows:
       var line = r.name & "\t" & (if r.enabled: "enabled" else: "disabled")
@@ -50373,6 +51401,8 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
   of "add":
     var name = ""
     var desc = ""
+    var requestedTemplate = ""
+    var noTemplate = false
     var i = 0
     while i < rest.len:
       let a = rest[i]
@@ -50381,6 +51411,10 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
           desc = rest[i + 1]; inc i
       elif a.startsWith("--message="):
         desc = a["--message=".len .. ^1]
+      elif a.startsWith("--template="):
+        requestedTemplate = a["--template=".len .. ^1]
+      elif a == "--no-template":
+        noTemplate = true
       elif a.startsWith("--workspace-root="):
         discard
       elif a.startsWith("-"):
@@ -50391,6 +51425,13 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       inc i
     if name.len == 0:
       stderr.writeLine(verb & " add: missing <name>")
+      return 2
+    # Naming a template and opting out of templates in one invocation is a
+    # contradiction, and picking a winner would make one of the two flags a
+    # no-op the operator never sees. Refuse instead.
+    if requestedTemplate.len > 0 and noTemplate:
+      stderr.writeLine(verb & " add: --template=" & requestedTemplate &
+        " and --no-template contradict each other")
       return 2
     # The guard consults BOTH directories even though only one is scaffolded
     # into: `sets add codetracer` in a repo whose `projects/codetracer.toml`
@@ -50406,12 +51447,48 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       stderr.writeLine("  `" & spelling & " add` DEFINES a new one. To " &
         "activate this in this workspace: repro ws enable " & name)
       return 1
+    # ---- template resolution ------------------------------------------------
+    #
+    # Templates exist because an empty stub makes every new set hand-list
+    # whatever the last one had. A default that applied INVISIBLY would
+    # reproduce exactly that defect one level up — the operator would again not
+    # know what their set contains or why — so the default is reported on every
+    # application, and `--no-template` is how you decline it.
+    var templateName = requestedTemplate
+    var templateSource = "--template"
+    if templateName.len == 0 and not noTemplate:
+      templateName = readDefaultTemplateFromHostConfig(workspaceRoot)
+      templateSource = bootstrapConfigFileName & " [projects] default_template"
+    var seed = MembershipSeed()
+    if templateName.len > 0:
+      let templateRel = "templates/" & templateName & ".toml"
+      let templateAbs = manifestRoot / templateRel
+      if not fileExists(templateAbs):
+        # Loud in BOTH directions. An explicit `--template=` naming nothing is
+        # obviously an error; a configured default naming nothing is the more
+        # dangerous one, because silently falling back to the empty stub is
+        # indistinguishable from the template having been applied.
+        stderr.writeLine(verb & " add: template '" & templateName &
+          "' (from " & templateSource & ") does not exist at " & templateAbs)
+        if requestedTemplate.len == 0:
+          stderr.writeLine("  fix the host config, or pass --no-template to " &
+            "scaffold without one")
+        return 1
+      var loaded: TemplateManifest
+      try:
+        loaded = readTemplate(templateAbs)
+      except CatchableError as exc:
+        stderr.writeLine(verb & " add: cannot read " & templateRel & ": " &
+          exc.msg)
+        return 1
+      seed.memberSets = loaded.member_sets
+      seed.memberRepos = loaded.member_repos
     createDir(manifestRoot / addDir)
     let fileRel = addDir & "/" & name & ".toml"
     let fileAbs = manifestRoot / addDir / (name & ".toml")
     writeFile(fileAbs,
-      if addDir == "repo-sets": repoSetManifestStub(name)
-      else: projectManifestStub(name))
+      if addDir == "repo-sets": repoSetManifestStub(name, seed)
+      else: projectManifestStub(name, seed))
     var paths = @[fileRel]
     if desc.len > 0:
       let docRel = addDir & "/" & name & ".md"
@@ -50419,9 +51496,18 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
         "# " & name & "\n\n" & desc & "\n")
       paths.add(docRel)
     let msg = "Add " & (if addDir == "repo-sets": "repo-set " else: "project ") &
-      name & (if desc.len > 0: " (" & desc & ")" else: "")
+      name & (if desc.len > 0: " (" & desc & ")" else: "") &
+      (if templateName.len > 0: " from template " & templateName else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
     stdout.writeLine(verb & " add: " & name & " — " & res.diagnostic)
+    if templateName.len > 0:
+      # The reported line names the template AND where the choice came from, so
+      # "why does my new set contain these" is answerable from the transcript
+      # rather than by reading the org config.
+      stdout.writeLine(verb & " add: applied template '" & templateName &
+        "' (from " & templateSource & ") — seeded " &
+        $seed.memberSets.len & " member_sets, " &
+        $seed.memberRepos.len & " member_repos")
     stdout.writeLine(verb & " add: defined, not enabled — " &
       "`repro ws repos add <repo> --" &
       (if addDir == "repo-sets": "set=" else: "project=") & name &
@@ -50547,8 +51633,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo "repro workspace repos list [--set=NAME|--project=NAME] " &
       "[--enabled|--disabled|--all] [--json]"
-    echo "repro workspace repos add <repo> --remote=URL " &
-      "[--set=NAME|--project=NAME]... [--branch=B] [--revision=REV] " &
+    echo "repro workspace repos add <repo> --remote=URL --branch=B " &
+      "[--set=NAME|--project=NAME]... [--revision=REV] " &
       "[--path=DIR] [-m DESC]"
     echo "repro workspace repos remove <repo> " &
       "[--set=NAME|--project=NAME]... [--delete-fragment]"
@@ -50559,10 +51645,15 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     echo "  --remote=URL   reuses the matching url-prefix (or, for a project " &
       "target, the matching [[remote]]) when one already serves that URL; " &
       "otherwise adds one org-named prefix."
-    echo "  --branch=B     the branch the repo follows. Every fragment " &
-      "should declare one — nothing else determines its checkout."
-    echo "  --revision=REV pins the fragment (validated against the remote). " &
-      "Superseded by --branch; pins belong in lock files."
+    echo "  --branch=B     REQUIRED when declaring a new repo: the branch " &
+      "the fragment follows. Every fragment declares its own — there is no " &
+      "workspace default and none is inferred, so nothing else determines " &
+      "its checkout. Optional only when the fragment already exists, or " &
+      "when --revision pins an exact commit instead."
+    echo "  --revision=REV an exact commit this fragment sits at, validated " &
+      "against the remote. Use alongside --branch (\"tracks B, sits at " &
+      "REV\") for a vendored source tree. Ordinary repos take --branch " &
+      "alone and let a lock record the commit."
     echo "  --path=DIR     checkout directory; defaults to <repo>."
     echo "  -m DESC        writes repos/<repo>.md, the source of the " &
       "generated project docs."
@@ -50578,13 +51669,16 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     return 1
 
   if sub == "list":
-    var scopeProject = ""
+    # ONE namespace, whichever flag spelling named it. `--project=` is the
+    # retained spelling of `--set=`; the variable is named for the model rather
+    # than for the older of the two words.
+    var scopeSet = ""
     var wantEnabled = false
     var wantDisabled = false
     var asJson = false
     for arg in rest:
       if arg.startsWith("--project=") or arg.startsWith("--set="):
-        scopeProject = arg[arg.find('=') + 1 .. ^1]
+        scopeSet = arg[arg.find('=') + 1 .. ^1]
       elif arg == "--enabled": wantEnabled = true
       elif arg == "--disabled": wantDisabled = true
       elif arg == "--all": wantEnabled = false; wantDisabled = false
@@ -50606,12 +51700,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       except CatchableError:
         discard
     var scopePaths: seq[string]
-    if scopeProject.len > 0:
+    if scopeSet.len > 0:
       try:
-        scopePaths = projectSetRepoPaths(workspaceRoot, @[scopeProject])
+        scopePaths = projectSetRepoPaths(workspaceRoot, @[scopeSet])
       except CatchableError as err:
         stderr.writeLine("repro workspace repos list: cannot resolve " &
-          "project '" & scopeProject & "': " & err.msg)
+          "repo-set '" & scopeSet & "': " & err.msg)
         return 1
     let reposDir = manifestRoot / "repos"
     var files: seq[string]
@@ -50637,7 +51731,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         revision = m.repo.branch.get(m.repo.revision.get(""))
       except CatchableError:
         discard
-      if scopeProject.len > 0 and repoPath notin scopePaths:
+      if scopeSet.len > 0 and repoPath notin scopePaths:
         continue
       let enabled = repoPath in enabledPaths
       if wantEnabled and not enabled: continue
@@ -50651,9 +51745,13 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           (if revision.len > 0: revision else: "(inherited)") & "\t" &
           (if enabled: "enabled" else: "disabled"))
     if asJson:
-      echo (%*{"schema": "reprobuild.workspace-repos-list.v1",
+      # `set` rather than `project`: the scope flag accepts either spelling but
+      # names ONE namespace, and reporting it under the retired word would make
+      # the machine surface the last place the two look like different kinds.
+      # The schema string moves with the payload so the break is loud.
+      echo (%*{"schema": "reprobuild.workspace-set-repos-list.v1",
                "workspaceRoot": workspaceRoot,
-               "project": scopeProject,
+               "set": scopeSet,
                "repos": arr}).pretty
     else:
       for line in lines:
@@ -50787,6 +51885,43 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         stderr.writeLine("  the fragment is shared; edit " & fragmentRel &
           " directly if the declaration itself should change")
         return 1
+
+    # Workspace-Membership-Model.md — "every repo fragment declares its own
+    # branch … written once per repo, by hand, when the repo is added". A NEW
+    # fragment with neither `--branch` nor `--revision` would declare neither
+    # key, and this is where that has to be caught.
+    #
+    # It used to resolve anyway, by inheriting the project's
+    # `default_revision` — which is precisely the collection-level default the
+    # model removes, and the reason a fragment declaring nothing was writable
+    # in the first place. With that field gone from the stub, the same input
+    # writes a fragment that resolves to an empty revision: an invalid state,
+    # authored silently, discovered by whoever syncs next.
+    #
+    # The branch is NOT inferred to fill the gap. Deriving it from the remote's
+    # default was considered and rejected: measured across this workspace the
+    # remote default disagrees with the branch actually in use for roughly a
+    # third of the repos, so inference writes a confidently WRONG value where
+    # refusing writes an obviously missing one. The whole point of the model is
+    # that a fragment fully determines its own checkout, by hand.
+    #
+    # Placed before the first write of ANY file — ahead of the url-prefix
+    # minting in the loop below — so a refused `add` leaves nothing behind, and
+    # ahead of the remote probe so it costs no network round trip.
+    if not fragmentExisted and branch.len == 0 and revision.len == 0:
+      stderr.writeLine("repro workspace repos add: " & repo &
+        ": --branch is required when declaring a new repo")
+      stderr.writeLine("  Every repo fragment declares the branch it tracks. " &
+        "There is no workspace default and none is inferred, so a fragment " &
+        "that names no branch has no checkout to resolve to.")
+      stderr.writeLine("  Add the branch this repo's mainline lives on, e.g.:")
+      stderr.writeLine("    repro workspace repos add " & repo &
+        " --remote=" & remote & " --branch=dev")
+      stderr.writeLine("  Use --revision=<commit> INSTEAD only to pin a " &
+        "vendored source tree to an exact commit, or alongside --branch to " &
+        "say \"tracks <branch>, sits at <commit>\".")
+      stderr.writeLine("  Nothing was written.")
+      return 2
 
     # `--branch` is validated the same way `--revision` always was, and for the
     # same reason: a manifest naming a branch that does not exist authors fine
@@ -51793,6 +52928,23 @@ proc runThinAppDispatch(programName: string): int =
       stderr.writeLine("repro workspace lock: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "migrate":
+    # Workspace-Membership-Model.md — `repro workspace migrate`. Reconcile
+    # every checkout's LOCAL git state (remote names / URLs, detached HEADs)
+    # with the resolved manifest. The managed `post-merge` hook runs the same
+    # reconciliation automatically; this is the surface that can be re-run,
+    # dry-run, and read.
+    try:
+      let migrateArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceMigrateCommand(migrateArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace migrate: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "migrate-locks":
     # RA-32 — `repro workspace migrate-locks`. The EXPLICIT repair for a
     # manifest store holding a lock record at a non-canonical path. Same
@@ -52121,7 +53273,7 @@ proc runThinAppDispatch(programName: string): int =
     # the `repro switch`/`push` top-level arms above: routes to the same
     # handler `repro workspace sync` uses (``runWorkspaceSyncCommand``),
     # forwarding the remaining args unchanged so every flag (scoped
-    # ``<project>``, ``--jobs*``, ``--groups``, ``--force-sync``,
+    # ``<project>``, ``--jobs*``, ``--tags``, ``--force-sync``,
     # ``--dry-run``, ``--json``, ``--verbose``) behaves identically.
     try:
       let syncArgs =

@@ -10,11 +10,20 @@
 ## The command is IDEMPOTENT: re-running it never clobbers an existing file —
 ## each is reported as `skipped` and left byte-for-byte untouched.
 ##
+## The scaffolded guidance must name the verbs that EXIST. A scaffold is read
+## as instructions, so a stale verb in it teaches every newcomer a spelling the
+## CLI has retired — and retired spellings here fail as unknown rather than
+## warn, so the reader's first command is a hard error with no hint about the
+## current one. The definition verb for a repo-set is `repro ws sets add`; the
+## `projects` spelling it replaced is asserted ABSENT for that reason.
+##
 ## Falsifiability:
-##   * If bootstrap stopped writing any of the three files, the existence /
+##   * If bootstrap stopped writing any of the four files, the existence /
 ##     content assertions fail.
 ##   * If a re-run clobbered an existing file (or duplicated content), the
 ##     byte-equality assertion after the second run fails.
+##   * If the scaffold regressed to the retired `repro ws projects add` /
+##     `repro workspace projects list` spelling, the absence assertions fail.
 ##
 ## Hermetic: operates entirely on a tempdir; no network, no git required.
 
@@ -60,6 +69,17 @@ suite "RA-6 — repro workspace bootstrap (scaffolds host files)":
     check readFile(hostDir / ".gitignore").contains(".repro/")
     check readFile(hostDir / "AGENTS.md").contains("workspace-projects.md")
     check readFile(hostDir / "workspace-projects.md").contains("Workspace Projects")
+
+    # The scaffolded guidance names the CURRENT definition verbs. `sets add`
+    # scaffolds `repo-sets/<name>.toml`; the `projects add` spelling it
+    # replaced is retired, and a scaffold that still taught it would hand a
+    # newcomer a command that fails as unknown.
+    let agents = readFile(hostDir / "AGENTS.md")
+    check agents.contains("repro ws sets add")
+    check "repro ws projects add" notin agents
+    let projectsDoc = readFile(hostDir / "workspace-projects.md")
+    check projectsDoc.contains("repro workspace sets list")
+    check "repro workspace projects list" notin projectsDoc
 
     # The command reports each file it wrote.
     for name in expectedFiles:

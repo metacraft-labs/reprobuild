@@ -192,6 +192,10 @@ type
       ## declarations. Encoded in the v12 codec AFTER ``publicLibraries``
       ## and BEFORE ``toolUses``; v<12 readers treat it as empty.
     toolUses*: seq[InterfaceToolUse]
+    runtimeToolUses*: seq[InterfaceToolUse]
+      ## Package-level runtime dependencies retained separately from the
+      ## flattened tool-use surface. Cross-repository executable consumers use
+      ## this closure to launch the produced binary with its declared tools.
     provisioningContributions*: seq[InterfaceProvisioningContribution]
     publicSignatureDependencies*: seq[string]
     location*: SourceLocation
@@ -332,8 +336,11 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 13'u16
-    ## v13 (current): adds fingerprint-bound provisioning contributions and
+  EnvelopeVersion = 14'u16
+    ## v14 (current): retains package runtime dependencies in
+    ##                ``ProjectInterface.runtimeToolUses``. The block follows
+    ##                ``toolUses`` and precedes provisioning contributions.
+    ## v13: adds fingerprint-bound provisioning contributions and
     ##                contributor identity on Nix/tarball/Scoop records. The
     ##                contribution block follows ``toolUses``. Provisioning
     ##                payloads remain serialized but are omitted from the
@@ -923,6 +930,10 @@ proc encodeInterfacePayload*(value: ProjectInterface;
   result.writeU32Le(uint32(value.toolUses.len))
   for useDef in value.toolUses:
     result.writeToolUse(useDef, version, forFingerprint)
+  if version >= 14'u16:
+    result.writeU32Le(uint32(value.runtimeToolUses.len))
+    for useDef in value.runtimeToolUses:
+      result.writeToolUse(useDef, version, forFingerprint)
   if version >= 13'u16:
     result.writeU32Le(uint32(value.provisioningContributions.len))
     for contribution in value.provisioningContributions:
@@ -960,6 +971,11 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
     result.toolUses[i] = readToolUse(bytes, pos, version)
+  if version >= 14'u16:
+    let runtimeUseCount = int(readU32Le(bytes, pos))
+    result.runtimeToolUses = newSeq[InterfaceToolUse](runtimeUseCount)
+    for i in 0 ..< runtimeUseCount:
+      result.runtimeToolUses[i] = readToolUse(bytes, pos, version)
   if version >= 13'u16:
     let contributionCount = int(readU32Le(bytes, pos))
     result.provisioningContributions =
@@ -1381,6 +1397,8 @@ proc toProjectInterface*(pkg: PackageDef;
   result.location = SourceLocation(file: pkg.sourceFile, line: pkg.sourceLine)
   for useDef in pkg.toolUses:
     result.toolUses.add(toInterfaceToolUse(useDef, packages))
+  for useDef in pkg.runtimeDeps:
+    result.runtimeToolUses.add(toInterfaceToolUse(useDef, packages))
   for exe in pkg.executables:
     var normalizedExe = InterfaceExecutable(
       exportName: exe.exportName,
@@ -1742,6 +1760,7 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
     file: matches[0].sourceFile,
     line: matches[0].sourceLine)
   var seenToolUses: seq[string] = @[]
+  var seenRuntimeToolUses: seq[string] = @[]
   var seenSigDeps: seq[string] = @[]
   var seenResourceTypeIds: seq[string] = @[]
   for pkg in matches:
@@ -1763,6 +1782,12 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
         continue
       seenToolUses.add(key)
       result.toolUses.add(use)
+    for use in projection.runtimeToolUses:
+      let key = use.packageSelector & "\x1f" & use.executableName
+      if seenRuntimeToolUses.find(key) >= 0:
+        continue
+      seenRuntimeToolUses.add(key)
+      result.runtimeToolUses.add(use)
     for dep in projection.publicSignatureDependencies:
       if seenSigDeps.find(dep) >= 0:
         continue

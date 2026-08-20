@@ -11,34 +11,34 @@
 ## anything — it clones the heavyweight repo the user was explicitly excluding,
 ## which is exactly the outcome the flag was typed to prevent. The symmetric
 ## `--only` typo selects nothing and looks like a workspace with no lock set.
-## Before this milestone `--except`, `--project` and `--group` did not exist,
+## Before this milestone `--except`, `--project` and `--tag` did not exist,
 ## and `--only` was the only selector with the check.
 ##
-## The same rule binds `--project` and `--group`, which also name things
+## The same rule binds `--project` and `--tag`, which also name things
 ## exactly. Only `--filter` is a glob.
 ##
 ## Names are validated against the WHOLE lock set (and the whole active project
-## / declared group universe), never against whatever an earlier stage left:
+## / declared tag universe), never against whatever an earlier stage left:
 ## `--direct --except=X` for an X that exists but is not a direct edge is a
 ## legitimate no-op, and validating against a stage's input would additionally
 ## make the ERROR depend on argv order — the very thing the fixed composition
 ## order exists to prevent. This test asserts that too.
 ##
 ## Fixture (built ``./build/bin/repro``, black-box, fully offline): the same
-## multi-project, grouped workspace shape the fixed-order test uses, reduced to
-## what the loudness rule needs — two projects, three repos, two groups.
+## multi-project, tagged workspace shape the fixed-order test uses, reduced to
+## what the loudness rule needs — two projects, three repos, two tags.
 ##
 ## Asserts:
 ##   1. `--only=<unknown>` refuses (exit 2) and names the flag and the name;
 ##   2. `--except=<unknown>` refuses identically — the case that did not exist;
 ##   3. `--project=<unknown>` refuses and NAMES the workspace's active set;
-##   4. `--group=<unknown>` refuses and NAMES the declared groups;
+##   4. `--tag=<unknown>` refuses and NAMES the declared tags;
 ##   5. a typo among good names still refuses (one bad name is enough), and
 ##      NOTHING is mutated by the refusal;
 ##   6. `--filter=<glob matching nothing>` is NOT an error: exit 0, empty
 ##      selection, reported as such;
 ##   7. the refusal is argv-order independent and stage-independent: an
-##      `--except` naming a repo that a preceding `--group` already removed is
+##      `--except` naming a repo that a preceding `--tag` already removed is
 ##      accepted (it names a real repo), while an `--except` naming a repo that
 ##      does not exist at all is refused regardless of which other selectors
 ##      are present;
@@ -63,7 +63,7 @@
 ##
 ## Mutation check: dropping the `--except` arm of the exact-name block makes
 ## (2) exit 0 with the repo still selected; validating `--except` against the
-## post-`--group` stage input instead of the lock set makes (7) refuse a name
+## post-`--tag` stage input instead of the lock set makes (7) refuse a name
 ## that names a real repo; deleting the `contradictorySelection` block makes
 ## (9) exit 0 with an empty selection, and ordering it BEFORE the exact-name
 ## block makes (9)'s typo arm report a contradiction instead of the unknown
@@ -112,15 +112,15 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " push origin main")
   requireGit(q(gitBin) & " -C " & q(workPath) & " rev-parse HEAD").strip()
 
-proc repoFragment(name, remote: string; groups: seq[string]): string =
+proc repoFragment(name, remote: string; tags: seq[string]): string =
   result = "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & name & "\"\n" &
     "remote = \"" & remote & "\"\n" &
     "revision = \"main\"\n"
-  if groups.len > 0:
-    result.add("groups = [\"" & groups.join("\", \"") & "\"]\n")
+  if tags.len > 0:
+    result.add("tags = [\"" & tags.join("\", \"") & "\"]\n")
 
 proc selectedRepos(output: string): seq[string] =
   var inTable = false
@@ -253,14 +253,14 @@ suite "DS-7: exact-name selectors refuse a name that matches nothing":
       check "alpha, beta" in badProject.output
       check not dirExists(deps)
 
-      # ---- (4) --group=<unknown> refuses and names the declared groups. --
-      let badGroup = develop("--group=toolz")
-      check badGroup.code == 2
-      check "'--group=toolz' names no manifest group in this workspace" in
-        badGroup.output
-      # Every repo here DECLARES groups, so no repo falls into the implicit
-      # `default` group and `default` is correctly not among the declared ones.
-      check "the declared groups are: libs, tools" in badGroup.output
+      # ---- (4) --tag=<unknown> refuses and names the declared tags. --
+      let badTag = develop("--tag=toolz")
+      check badTag.code == 2
+      check "'--tag=toolz' names no manifest tag in this workspace" in
+        badTag.output
+      # Every repo here DECLARES tags, so no repo falls into the implicit
+      # `default` tag and `default` is correctly not among the declared ones.
+      check "the declared tags are: libs, tools" in badTag.output
       check not dirExists(deps)
 
       # ---- (5) one bad name among good ones is still a refusal. ----------
@@ -280,15 +280,15 @@ suite "DS-7: exact-name selectors refuse a name that matches nothing":
       check not dirExists(deps)
 
       # ---- (7) validated against the LOCK SET, not against a stage. ------
-      # `tool-b` is a real repo that `--group=libs` has already removed by the
+      # `tool-b` is a real repo that `--tag=libs` has already removed by the
       # time `--except` runs. Naming it is a legitimate no-op, NOT a typo.
-      let laterStage = list("--group=libs --except=tool-b")
+      let laterStage = list("--tag=libs --except=tool-b")
       check laterStage.code == 0
       check selectedRepos(laterStage.output) == @["lib-core"]
       # …while a name that exists nowhere is refused whatever else is present,
       # and in whatever argv order.
-      for flags in ["--group=libs --except=ghost",
-                    "--except=ghost --group=libs",
+      for flags in ["--tag=libs --except=ghost",
+                    "--except=ghost --tag=libs",
                     "--all --filter='lib-*' --except=ghost"]:
         let refused = list(flags)
         check refused.code == 2

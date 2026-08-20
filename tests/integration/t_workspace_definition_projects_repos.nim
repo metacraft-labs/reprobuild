@@ -182,7 +182,7 @@ suite "WV-3/WV-4 — workspace definition (projects / repos authoring)":
       let res = runRepro(fx, ["ws", "repos", "add", "lib-x",
         "--project=alpha", "--project=beta",
         "--remote=https://git.example.invalid/acme/lib-x.git",
-        "-m", "Shared library."])
+        "--branch=dev", "-m", "Shared library."])
       if res.code != 0:
         checkpoint("output: " & res.output)
       check res.code == 0
@@ -214,7 +214,8 @@ suite "WV-3/WV-4 — workspace definition (projects / repos authoring)":
 
       check runRepro(fx, ["ws", "repos", "add", "lib-y",
         "--project=alpha", "--project=beta",
-        "--remote=https://git.example.invalid/acme/lib-y.git"]).code == 0
+        "--remote=https://git.example.invalid/acme/lib-y.git",
+        "--branch=dev"]).code == 0
 
       # --delete-fragment is refused while another project still includes it.
       let refused = runRepro(fx, ["ws", "repos", "remove", "lib-y",

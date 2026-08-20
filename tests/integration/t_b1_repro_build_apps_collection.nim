@@ -110,6 +110,35 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
       check "cacheable = false" in appsBlock
       check "actionId = \"reprobuild.apps.repro-cache-daemon\"" in appsBlock
 
+  test "graph-built repro retains the entrypoint HTTPS capability":
+    let repoRoot = findRepoRoot()
+    let entrypoints = readFile(repoRoot / "apps" / "entrypoints.txt")
+    var reproEntrypoint = ""
+    for raw in entrypoints.splitLines:
+      let line = raw.strip()
+      if line.startsWith("repro "):
+        reproEntrypoint = line
+        break
+    check reproEntrypoint.contains("--define:ssl")
+
+    let projectText = readFile(repoRoot / "repro.nim")
+    let usesStart = projectText.find("  uses:")
+    let devEnvStart = projectText.find("  devEnv:", usesStart)
+    check usesStart >= 0
+    check devEnvStart > usesStart
+    if usesStart >= 0 and devEnvStart > usesStart:
+      check "\"openssl\"" in projectText[usesStart ..< devEnvStart]
+    let actionStart = projectText.find(
+      "source = \"apps/repro/repro.nim\"")
+    let actionEnd = projectText.find(
+      "actionId = \"reprobuild.apps.repro\"", actionStart)
+    check actionStart >= 0
+    check actionEnd > actionStart
+    if actionStart >= 0 and actionEnd > actionStart:
+      let actionBlock = projectText[actionStart .. actionEnd]
+      check "defines = @[\"release\", \"reproVendoredHash\", \"ssl\"]" in
+        actionBlock
+
   test "engine materialises every apps/entrypoints.txt binary":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /

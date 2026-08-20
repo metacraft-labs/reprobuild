@@ -225,6 +225,11 @@ package reprobuild:
     "nim >=2.2 <3.0"
     "gcc >=12"
     "just >=1"
+    # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
+    # link/runtime closure explicitly so graph-built binaries receive
+    # OpenSSL's library channels instead of depending on ambient
+    # ``NIX_LDFLAGS`` from the shell that launched repro.
+    "openssl"
     "sh"
 
     # Deferred-Item D1: ``python3`` is required by the in-graph Python
@@ -264,7 +269,7 @@ package reprobuild:
     # every checkout without a runquota develop override breaks.
     "runquotad"
 
-    # Note: the system hash libraries (libblake3, xxhash, sqlite3) and
+    # Note: the remaining system libraries (libblake3, xxhash, sqlite3) and
     # the source-only fixed inputs (nimcrypto, runquota,
     # ssz-serialization, ct_test_nim_unittest) are NOT listed here.
     # The path-mode resolver requires every ``uses:`` selector to be
@@ -900,7 +905,7 @@ package reprobuild:
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
       binary = "build/bin/repro",
-      defines = @["release", "reproVendoredHash"],
+      defines = @["release", "reproVendoredHash", "ssl"],
       paths = ioMonNimPaths & sourceOnlyNimPaths,
       passL = reproRuntimePassL,
       nimcache = "build/nimcache/repro",
@@ -1023,9 +1028,9 @@ package reprobuild:
     # ``cacheable = false`` until 2026-08-19; see the history note above.)
     #
     # ``ssl`` in ``defines`` is what the entrypoints file spells
-    # ``--define:ssl``; the ``nim.c`` alias appends OpenSSL's ``-L`` itself via
-    # ``opensslPassLForSsl``, which is the typed equivalent of the
-    # ``ssl_passl`` NIX_LDFLAGS scrape in the shell loop.
+    # ``--define:ssl``. The ``nim.c`` alias adds portable OpenSSL linker names
+    # and records the ``openssl`` tool identity ref, whose resolved library
+    # channels supply the platform-specific search path.
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-binary-cache/repro_binary_cache.nim",
       binary = "build/bin/repro-binary-cache",
