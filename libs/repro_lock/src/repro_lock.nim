@@ -55,9 +55,11 @@ import std/[algorithm, strutils, tables]
 
 import repro_solver
 import repro_multihash
+import repro_lock/identity
 
 export UnifiedSolution
 export repro_multihash
+export identity
 
 const SolvedGraphLockSchemaV1* = "reprobuild.solved-graph-lock.v1"
   ## The historical MO-1 schema string. NO LONGER a valid committed-lock
@@ -189,10 +191,8 @@ proc inputsDigestOf*(inputsText: string): string =
   ## The canonical ``inputs_digest`` value for a solver-inputs text body.
   "fnv1a64:" & fnv1a64Hex(inputsText)
 
-proc currentPlatformId*(): string =
-  ## The platform fact recorded in the lock and checked by ``validate``.
-  ## MO-1 uses the build host's ``cpu-os`` identity (e.g. ``amd64-linux``).
-  hostCPU & "-" & hostOS
+# ``currentPlatformId`` moved to ``repro_lock/identity`` (re-exported above) so
+# the build engine can read the same definition without importing the solver.
 
 # ---------------------------------------------------------------------------
 # Conversions: solution <-> lock
@@ -236,6 +236,75 @@ proc lockToSolution*(lock: SolvedGraphLock): UnifiedSolution =
     result.variants[v.name] = v.value
   for p in lock.packages:
     result.packages[p.name] = p.version
+
+# ---------------------------------------------------------------------------
+# Named-Lock-Files §6.2 — the canonical solved graph a lock identity hashes
+# ---------------------------------------------------------------------------
+
+proc canonicalSolvedGraph*(lock: SolvedGraphLock): CanonicalSolvedGraph =
+  ## Project a loaded lock onto §6.2's canonical solved graph.
+  ##
+  ## `schema`, `optimal` and `inputsDigest` are deliberately dropped. The
+  ## first two are reports about the FILE and the SOLVE; `inputsDigest` is a
+  ## digest over the solver INPUTS — the constraint set — and keying on it is
+  ## the formula §6.2 was corrected away from on 2026-08-18. See
+  ## `repro_lock/identity.nim`'s header for the full argument and corpus case
+  ## NLF-ID-7 for the regression.
+  ##
+  ## `LockedPackage.source` carries the source identity §6.2's formula asks
+  ## for. Today that is the solver-keyed definition identity for a bare
+  ## package and a `store` / `registry:<name>` descriptor for the lifted ones
+  ## (see the MO-11 note below); whichever it is, it is what the lock records
+  ## about WHERE the instance comes from, so it is what enters the key.
+  result = CanonicalSolvedGraph(
+    platform: lock.platform, packages: @[], graphVariants: @[])
+  for v in lock.variants:
+    result.graphVariants.add(
+      SolvedVariantAssignment(name: v.name, value: v.value))
+  for p in lock.packages:
+    result.packages.add(SolvedPackageInstance(
+      name: p.name, version: p.version, sourceIdentity: p.source,
+      variants: @[]))
+
+proc canonicalSolvedGraph*(sol: UnifiedSolution;
+                           platform: string): CanonicalSolvedGraph =
+  ## The projection for a LIVE solution, so an in-memory solved graph can be
+  ## identified without a round-trip through the serializer.
+  ##
+  ## This overload is load-bearing and not a convenience. `serializeSolvedGraphLock`
+  ## writes a `…lock.v1` document (`repro_lock.nim:297`) which
+  ## `parseSolvedGraphLock` REJECTS outright (`:406`), so the writer's own
+  ## output cannot be read back by this module's reader — a known open defect
+  ## recorded against this campaign. Identity per §6.2 is over the solved
+  ## graph, not over a serialized document, so nothing here serializes and
+  ## the defect cannot leak into a cache key.
+  ##
+  ## Source identity mirrors `solutionToLock`: MO-1 records the solver-keyed
+  ## definition identity, which for a live solution is the package name.
+  result = CanonicalSolvedGraph(
+    platform: platform, packages: @[], graphVariants: @[])
+  var vnames: seq[string] = @[]
+  for name in sol.variants.keys: vnames.add(name)
+  vnames.sort()
+  for name in vnames:
+    result.graphVariants.add(
+      SolvedVariantAssignment(name: name, value: sol.variants[name]))
+  var pnames: seq[string] = @[]
+  for name in sol.packages.keys: pnames.add(name)
+  pnames.sort()
+  for name in pnames:
+    result.packages.add(SolvedPackageInstance(
+      name: name, version: sol.packages[name], sourceIdentity: name,
+      variants: @[]))
+
+proc lockIdentityOf*(lock: SolvedGraphLock): LockIdentity =
+  ## §6.2's key for a loaded lock. The lock-file NAME is not a parameter and
+  ## cannot become one: it is a handle for CLI binding (§5) and provenance
+  ## (§6.3), never a key component.
+  lockIdentityOf(canonicalSolvedGraph(lock))
+
+proc lockIdentityOf*(sol: UnifiedSolution; platform: string): LockIdentity =
+  lockIdentityOf(canonicalSolvedGraph(sol, platform))
 
 proc sameSolution*(a, b: UnifiedSolution): bool =
   ## Structural equality of two solved graphs: identical variant and
@@ -440,6 +509,20 @@ proc solvedPartOf*(ld: LockedDependencies): SolvedGraphLock =
     schema: SolvedGraphLockSchemaV1, platform: ld.platform,
     optimal: ld.optimal, inputsDigest: ld.inputsDigest,
     variants: ld.variants, packages: ld.packages)
+
+proc canonicalSolvedGraph*(ld: LockedDependencies): CanonicalSolvedGraph =
+  ## §6.2's canonical solved graph for the unified v2 model, through its
+  ## solved-graph sub-part. `deps` adds coordinates and integrity for the
+  ## packages MO-11 lifts, but the sub-part is the authoritative record of the
+  ## SOLVE and is what every existing consumer (`lockToSolution`,
+  ## `solutionToLock`) reads, so the identity follows it rather than a
+  ## partially-populated `deps` set.
+  canonicalSolvedGraph(solvedPartOf(ld))
+
+proc lockIdentityOf*(ld: LockedDependencies): LockIdentity =
+  ## §6.2's key for a committed `…lock.v2` document. The lock-file NAME is
+  ## not a parameter and cannot become one.
+  lockIdentityOf(canonicalSolvedGraph(ld))
 
 # ---------------------------------------------------------------------------
 # MO-11 — non-VCS coordinates + integrity for solved packages, and the lift of
