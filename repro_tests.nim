@@ -8142,6 +8142,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim",
+    binary: "build/test-bin/t_platform_refusal_surfaces_through_realize_and_plan",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim",
     binary: "build/test-bin/t_post_commit_cache_push_propagates_objects_to_sibling_workspace",
     defines: @[],
