@@ -64,6 +64,7 @@ type
 const
   PartitionDeviceWaitTimeoutMs* = 10_000
   PartitionDevicePollMs* = 50
+  PartitionDeviceStablePolls* = 2
 
 # ---------------------------------------------------------------------
 # Top-level public entry point.
@@ -192,23 +193,43 @@ proc pathEntryExists(path: string): bool =
   except OSError:
     false
 
-proc waitForPartitionDevices*(devices: openArray[string];
-                              timeoutMs = PartitionDeviceWaitTimeoutMs;
-                              pollMs = PartitionDevicePollMs): seq[string] =
-  ## Return the partition nodes still absent after a bounded readiness poll.
-  ## ``getFileInfo`` intentionally accepts block devices as well as regular
-  ## files, which also keeps this primitive deterministic in unit tests.
+type PartitionDeviceProbe* = proc(path: string): bool {.closure.}
+
+proc waitForPartitionDevicesWithProbe*(devices: openArray[string];
+    timeoutMs: int; pollMs: int; stablePolls: int;
+    probe: PartitionDeviceProbe): seq[string] =
+  ## Return nodes that do not remain ready for consecutive observations.
+  ## Requiring stability avoids accepting stale nodes while the kernel and
+  ## udev replace devices from the previous partition-table generation.
   let intervalMs = max(1, pollMs)
   let checks = max(1, timeoutMs div intervalMs + 1)
+  let requiredStablePolls = max(1, stablePolls)
+  var consecutiveReady = 0
   for attempt in 0 ..< checks:
     result.setLen(0)
     for device in devices:
-      if not pathEntryExists(device):
+      if not probe(device):
         result.add(device)
     if result.len == 0:
-      return
+      inc consecutiveReady
+      if consecutiveReady >= requiredStablePolls:
+        return
+    else:
+      consecutiveReady = 0
     if attempt + 1 < checks:
       sleep(intervalMs)
+  if result.len == 0 and consecutiveReady < requiredStablePolls:
+    for device in devices:
+      result.add(device)
+
+proc waitForPartitionDevices*(devices: openArray[string];
+                              timeoutMs = PartitionDeviceWaitTimeoutMs;
+                              pollMs = PartitionDevicePollMs;
+                              stablePolls = PartitionDeviceStablePolls): seq[string] =
+  ## ``getFileInfo`` accepts block devices as well as regular files, which
+  ## keeps the readiness primitive deterministic in unit tests.
+  waitForPartitionDevicesWithProbe(devices, timeoutMs, pollMs, stablePolls,
+    pathEntryExists)
 
 proc applyDiskLayout*(layout: DiskLayout;
                      passphrases: Table[string, string] =
@@ -281,6 +302,9 @@ proc applyDiskLayout*(layout: DiskLayout;
         ctx.recordOperation(execTool("partprobe",
           @["partprobe", d.device]))
         diagSnapshot("after-partprobe-" & diskName, d.device)
+      if findExe("udevadm").len > 0:
+        ctx.recordOperation(execTool("udevadm",
+          @["udevadm", "settle", "--timeout=10"]))
       if not isDryRun():
         var expectedPartitions: seq[string]
         for partNum in 1 .. d.partitions.len:
