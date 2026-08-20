@@ -397,6 +397,7 @@ libs/repro_system_apply/tests/t_b1_dsl_lowering.nim	nim	10
 libs/repro_system_apply/tests/t_b1_dsl_parse.nim	nim	12
 libs/repro_system_apply/tests/t_b2_pipeline.nim	nim	15
 libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
+libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	nim	4
 recipes/packages/source/adwaita-icon-theme/test_adwaita_icon_theme_source.nim	nim	5
 recipes/packages/source/alsa-lib/test_alsa_lib_source.nim	nim	9
 recipes/packages/source/at-spi2-core/test_at_spi2_core_source.nim	nim	3

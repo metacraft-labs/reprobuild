@@ -86,3 +86,4 @@ libs/repro_workspace_vcs/src/git_tool.nim
 libs/repro_workspace_vcs/src/hg_actions.nim
 libs/repro_workspace_vcs/src/hg_tool.nim
 libs/repro_workspace_vcs/src/shared_clones.nim
+libs/repro_workspace_vcs/src/sibling_ignores.nim

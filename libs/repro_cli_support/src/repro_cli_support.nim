@@ -47,6 +47,7 @@ import repro_workspace_manifests
 import git_tool
 import git_actions
 import shared_clones
+import sibling_ignores
 import repro_tool_profiles
 import repro_local_store
 # M9.R.77.5 — R11 Layer-1 CAS facade. ``runCasCommand`` uses the narrow
@@ -25042,6 +25043,25 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
       for name in prunable:
         discard gitRunPlain(identity, ["-C", repoAbs, "remote", "remove", name])
 
+# ---- workspace sibling ignore set -----------------------------------------
+#
+# A workspace root is a git checkout whose siblings are OTHER checkouts, so
+# without an ignore set `git status` there reports one untracked directory per
+# participating repo. ``repro_workspace_vcs/sibling_ignores`` maintains a
+# marker-delimited block in the root's ``.git/info/exclude`` naming them; see
+# ``reprobuild-specs/Workspace-Sibling-Ignore-Set.md``.
+#
+# Regeneration is hooked into the verbs that can CHANGE the sibling set
+# (``init``, ``enable``, ``disable``, ``sync``, ``pull``). It is cheap and
+# idempotent — the marker block means a re-run rewrites only its own lines and
+# an unchanged result does not touch the file at all — so erring toward more
+# hooks is safe.
+#
+# Forward-declared: the sync/pull/init call sites precede
+# ``resolveWorkspaceReposForHook``, which supplies the DECLARED (possibly
+# nested) checkout paths so discovery is not reimplemented here.
+proc refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot: string)
+
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
@@ -25245,6 +25265,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     except CatchableError as err:
       stderr.writeLine("workspace init: could not generate workspace-projects.md: " & err.msg)
     alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
+    refreshWorkspaceSiblingIgnoresBestEffort(args.workspaceRoot)
 proc writeWorkspaceInitReport(report: WorkspaceInitReport;
                               destination: string) =
   ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
@@ -30343,6 +30364,10 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
       writeGeneratedWorkspaceProjects(parsed.workspaceRoot)
     except CatchableError as err:
       stderr.writeLine("workspace sync: could not generate workspace-projects.md: " & err.msg)
+    # A sync is exactly when checkouts appear (or a `--force-sync` removes
+    # one), so the sibling set is refreshed here. Skipped under `--dry-run`
+    # along with every other mutation.
+    refreshWorkspaceSiblingIgnoresBestEffort(outcome.report.workspaceRoot)
   if parsed.json:
     # RA-27 machine surface: the plan + per-repo results + summary digest as
     # one JSON document on stdout (the same shape persisted to
@@ -31004,6 +31029,7 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
     for entry in outcome.report.repos:
       branches.add(entry.trackingBranch)
     writePromptCache(outcome.report.workspaceRoot, "pull", branches)
+  refreshWorkspaceSiblingIgnoresBestEffort(outcome.report.workspaceRoot)
   for line in renderPullTextLines(outcome.report):
     stdout.writeLine(line)
   outcome.report.exitCode
@@ -34039,6 +34065,38 @@ proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
         return @[]
   except CatchableError:
     return @[]
+
+proc refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot: string) =
+  ## Regenerate the workspace root's managed sibling-ignore block (see the
+  ## forward declaration above for why the verbs call it).
+  ##
+  ## Best-effort in the strict sense: a workspace root that is not a git
+  ## checkout, a missing ``git`` on PATH, or an unwritable ``info/exclude``
+  ## leaves the workspace exactly as it was and never changes the exit code of
+  ## the verb that triggered it. The ignore set is an ergonomic convenience;
+  ## failing a sync over it would be a worse outcome than 132 untracked
+  ## directories.
+  ##
+  ## ``resolveWorkspaceReposForHook`` is reprobuild's existing workspace
+  ## enumeration (the same one the post-commit hook uses). Its repo paths are
+  ## passed through so NESTED checkouts — ``a/references/b`` — are covered
+  ## without a second discovery implementation; the top-level scan inside
+  ## ``collectSiblingIgnoreEntries`` covers standalone clones the manifest does
+  ## not declare.
+  if workspaceRoot.len == 0:
+    return
+  try:
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      return
+    var declared: seq[string]
+    for repo in resolveWorkspaceReposForHook(workspaceRoot):
+      if repo.path.len > 0:
+        declared.add(repo.path)
+    discard refreshWorkspaceSiblingIgnores(gitBin,
+      absolutePath(workspaceRoot), declared)
+  except CatchableError:
+    discard
 
 proc findRepoByWorkspacePath(workspaceRoot: string;
     repos: seq[ResolvedRepo]; repoAbsPath: string): Option[ResolvedRepo] =
@@ -49794,6 +49852,12 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   for p in readWorkspaceProjects(workspaceRoot):
     stdout.writeLine(p)
 
+  # The enlarged set can already have checkouts on disk (a re-enable), and the
+  # `--no-sync` / nothing-missing paths return without reaching the sync that
+  # would otherwise refresh. Refreshing here covers every exit; the sync path
+  # refreshes again and the second pass is a no-op.
+  refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot)
+
   # PS-3 — materialize what was just recorded. Only the repos the named
   # projects introduce are missing-checkout candidates; everything already on
   # disk is left untouched by the sync policy.
@@ -50518,6 +50582,10 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
       inc removalFailures
       stderr.writeLine("repro workspace disable: failed to remove " & path &
         ": " & err.msg)
+
+  # Removed checkouts must leave the ignore set, or the block keeps naming
+  # directories that no longer exist.
+  refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot)
 
   stdout.writeLine("repro workspace disable: disabled " &
     actuallyLeaving.join(", ") & "; active set: " &

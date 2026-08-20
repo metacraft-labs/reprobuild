@@ -3126,6 +3126,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim",
+    binary: "build/test-bin/t_workspace_sibling_ignore_set",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/adwaita-icon-theme/test_adwaita_icon_theme_source.nim",
     binary: "build/test-bin/test_adwaita_icon_theme_source",
     defines: @[],
