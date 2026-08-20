@@ -133,9 +133,13 @@ proc depsOfEveryCoordinateKind(): seq[LockedDep] =
 suite "a written lock document reads back":
 
   test "serializeSolvedGraphLock output parses back to the same solved graph":
-    # The direct regression. Before the fix this raised
-    # SolvedGraphLockParseError: unsupported lock schema
-    # 'reprobuild.solved-graph-lock.v1' (expected reprobuild.solved-graph-lock.v2).
+    # The direct regression. On the pre-fix tree this raised, verbatim:
+    #   Unhandled exception: unsupported lock schema
+    #   'reprobuild.solved-graph-lock.v1'
+    #   (expected reprobuild.solved-graph-lock.v2);
+    #   regenerate with `repro lock refresh` [SolvedGraphLockParseError]
+    # (The v1 diagnostic has since been reworded — see the rejection case
+    # below, which is what pins its current text.)
     let written = solvedGraph(
       @[("libfoo", "1.4.2"), ("nim", "2.2.0"), ("zlib", "1.3.1")],
       @[("compiler", "clang"), ("enableTLS", "true")])
