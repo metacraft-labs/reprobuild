@@ -17,7 +17,18 @@
 ##
 ## Exit codes: 0 = applied OR already-converged OR waiting (nothing to do
 ## yet); 1 = apply failed / source error (retryable — the timer retries);
-## 2 = rejected / ambiguous / usage error (non-retryable).
+## 2 = rejected / ambiguous / usage error (non-retryable). The outcome →
+## code mapping itself is ``deployAgentExitCode`` in
+## ``repro_deploy_agent/tick_status``, shared with the status record so the
+## number an operator reads from ``LastTaskResult`` and the number in the
+## record are the same number by construction.
+##
+## Every tick also leaves a durable, machine-readable record of its outcome
+## at ``<stateDir>/deploy-agent/<safe-target>.last-tick.json`` — on FAILURE
+## and success alike. Under Task Scheduler (how the ``windowsScheduledTask``
+## resource deploys this loop) stdout and stderr are discarded, so the echoes
+## below are not observability; that file is. See ``tick_status.nim`` for the
+## incident that made it necessary.
 
 import std/[os, strutils]
 
@@ -122,6 +133,16 @@ proc runDeployAgentCommand*(args: seq[string]): int =
     except CatchableError as e:
       stderr.writeLine("repro deploy-agent: could not load allowed-signers " &
         "file " & flags.allowedSigners & ": " & e.msg)
+      # Recorded, not just printed: an unreadable trust-anchor file wedges the
+      # loop exactly as hard as a failing apply, and this is the first point
+      # at which both the state dir and the target are known. Exit code
+      # unchanged (2 — the operator must act).
+      var rec = tickStatusForRaise(flags.target,
+        "could not load allowed-signers file " & flags.allowedSigners &
+          ": " & e.msg)
+      rec.exitCode = 2
+      rec.errorCode = "allowed_signers_unreadable"
+      recordTickStatus(flags.stateDir, flags.target, rec)
       return 2
 
   let cfg = AgentConfig(
@@ -169,13 +190,17 @@ proc runDeployAgentCommand*(args: seq[string]): int =
          else: "reprobuild-deploy-agent"),
       profileResolver = resolver))
 
-  let outcome =
-    try:
-      runAgentTick(cfg, deps)
-    except CatchableError as e:
-      stderr.writeLine("repro deploy-agent: tick failed: " & e.msg)
-      return 1
+  # `runAgentTickRecorded`, not `runAgentTick`: it runs the same tick, resolves
+  # the same exit code, and additionally leaves the durable record — including
+  # on the path where the tick RAISED and this command used to return 1 having
+  # written nothing anywhere. Writing the record is best-effort inside, so it
+  # can neither change the code returned here nor mask the error below.
+  let tick = runAgentTickRecorded(cfg, deps)
+  if tick.raised:
+    stderr.writeLine("repro deploy-agent: tick failed: " & tick.error)
+    return tick.exitCode
 
+  let outcome = tick.outcome
   echo "repro deploy-agent"
   echo "  target       : " & outcome.target
   echo "  outcome      : " & $outcome.kind
@@ -184,12 +209,10 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   if outcome.deploymentId.len > 0:
     echo "  deployment   : " & outcome.deploymentId
   echo "  message      : " & outcome.message
+  echo "  status file  : " & tickStatusPath(cfg)
 
-  case outcome.kind
-  of aoApplied, aoConverged, aoWaiting: return 0
-  of aoApplyFailed, aoSourceError: return 1
-  # `2` is the "operator must act" class, alongside a rejected or ambiguous
-  # manifest. A secrets failure is deliberately NOT `1`: retrying on the timer
-  # will not fix a wrong recipient key or a missing --secrets-key, and grouping
-  # it with the retryable failures would bury it in a loop that never converges.
-  of aoRejected, aoAmbiguous, aoSecretsFailed: return 2
+  # 0 for aoApplied/aoConverged/aoWaiting, 1 for aoApplyFailed/aoSourceError,
+  # 2 for aoRejected/aoAmbiguous/aoSecretsFailed — see `deployAgentExitCode`,
+  # which carries the rationale for each class (in particular why a secrets
+  # failure is deliberately NOT the retryable 1).
+  return tick.exitCode

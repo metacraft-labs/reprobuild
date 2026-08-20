@@ -151,9 +151,13 @@ type
 # successful apply. Absent file ⇒ nothing applied yet (sequence 0 floor).
 # ---------------------------------------------------------------------------
 
-proc safeTargetName(target: string): string =
+proc safeTargetName*(target: string): string =
   ## Filesystem-safe rendering of a target name (mirrors the Linux
   ## agent's ``safeTargetName``): keep alnum/._-, replace the rest.
+  ##
+  ## Exported because every per-target file under ``<stateDir>/deploy-agent``
+  ## must share ONE stem — the ``.seq`` file below and the tick-status record
+  ## in ``tick_status.nim`` — so a second copy of this rule cannot drift.
   result = newStringOfCap(target.len)
   for ch in target:
     if ch.isAlphaNumeric() or ch in {'.', '_', '-'}:

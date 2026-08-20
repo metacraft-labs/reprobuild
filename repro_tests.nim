@@ -790,6 +790,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_records_tick_status.nim",
+    binary: "build/test-bin/t_repro_deploy_agent_records_tick_status",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim",
     binary: "build/test-bin/t_repro_deploy_agent_rejects_wrong_signer",
     defines: @[],
