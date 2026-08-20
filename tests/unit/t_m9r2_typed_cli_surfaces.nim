@@ -40,7 +40,9 @@
 
 import std/[unittest]
 
+import repro_cli_support
 import repro_project_dsl
+import repro_tool_profiles
 # Each ``package`` block emits a top-level ``const <name>* = <Type>()``.
 # Module-name == const-name collision is resolved by aliasing the
 # module import as ``<name>_module`` (same convention as the package
@@ -184,6 +186,15 @@ suite "DSL-port M9.R.2 — cmake typed CLI surface":
     check cacheArg.alias == "-D"
     check cacheArg.format == cafConcat
     check cacheArg.repeated
+    let argv = argvForCall(action.call,
+      PathOnlyToolProfile(resolvedExecutablePath: "/tools/cmake"))
+    check argv == @[
+      "/tools/cmake",
+      "-S", "./src",
+      "-B", "./b",
+      "-G", "Ninja",
+      "-DCMAKE_BUILD_TYPE=Release",
+      "-DCMAKE_INSTALL_PREFIX=/usr"]
 
   test "cmake.build + cmake.install carry --build / --install":
     let buildAction = cmake.build(buildDir = "./b", target = "all",
@@ -206,6 +217,13 @@ suite "DSL-port M9.R.2 — cmake typed CLI surface":
     let compArg = installAction.argByName("component")
     check compArg.alias == "--component"
     check compArg.encodedValue == "runtime"
+    let profile = PathOnlyToolProfile(
+      resolvedExecutablePath: "/tools/cmake")
+    check argvForCall(buildAction.call, profile) == @[
+      "/tools/cmake", "--build", "./b", "--target", "all", "-j", "4"]
+    check argvForCall(installAction.call, profile) == @[
+      "/tools/cmake", "--install", "./b", "--prefix", "/usr/local",
+      "--component", "runtime"]
 
 # ---------------------------------------------------------------------------
 # ninja — single-mode ``call:``

@@ -12,6 +12,7 @@
 ##
 ##   * ``pkgConfigDirs``     → ``PKG_CONFIG_PATH``
 ##   * ``cmakePrefixDirs``   → ``CMAKE_PREFIX_PATH``
+##                              + ``QT_ADDITIONAL_PACKAGES_PREFIX_PATH``
 ##   * ``includeDirs``       → ``CPATH``
 ##   * ``libDirs``           → ``LIBRARY_PATH`` AND ``LD_LIBRARY_PATH``
 ##
@@ -109,6 +110,8 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       "/synth/wayland/lib/pkgconfig")
     check envValue(result, "CMAKE_PREFIX_PATH").startsWith(
       "/synth/wayland/usr")
+    check envValue(result, "QT_ADDITIONAL_PACKAGES_PREFIX_PATH").startsWith(
+      "/synth/wayland/usr")
     check envValue(result, "CPATH").startsWith(
       "/synth/wayland/include")
     # libDirs fan-out: ``LIBRARY_PATH`` (link-time) + ``LD_LIBRARY_PATH``
@@ -126,6 +129,8 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     applyResolvedAuxPathsTable(table, paths)
     check table["PKG_CONFIG_PATH"].startsWith("/synth/proto/share/pkgconfig")
     check table["CMAKE_PREFIX_PATH"].startsWith("/synth/proto/usr")
+    check table["QT_ADDITIONAL_PACKAGES_PREFIX_PATH"].startsWith(
+      "/synth/proto/usr")
     check table["CPATH"].startsWith("/synth/proto/include")
     check table["LIBRARY_PATH"].startsWith("/synth/proto/lib")
     check table["LD_LIBRARY_PATH"].startsWith("/synth/proto/lib")

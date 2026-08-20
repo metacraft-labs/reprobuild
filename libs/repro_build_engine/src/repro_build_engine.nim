@@ -3061,6 +3061,11 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_TARGET", paths.pkgConfigDirs)
   prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_BUILD", paths.pkgConfigDirs)
   prependEnvDirs(env, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
+  # Qt deliberately ignores CMAKE_PREFIX_PATH while resolving separately
+  # installed modules. Mirror the same declared package roots onto its
+  # companion channel so split Qt package profiles remain composable.
+  prependEnvDirs(env, "QT_ADDITIONAL_PACKAGES_PREFIX_PATH",
+    paths.cmakePrefixDirs)
   let includePaths = partitionCompilerIncludePaths(paths)
   prependEnvDirs(env, "CPATH", includePaths.regularDirs)
   let systemFlags = compilerSystemIncludeFlags(includePaths.systemDirs)
@@ -3111,6 +3116,8 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH_FOR_BUILD",
     paths.pkgConfigDirs)
   result = prependEnvDirsToArgvEnv(result, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
+  result = prependEnvDirsToArgvEnv(result,
+    "QT_ADDITIONAL_PACKAGES_PREFIX_PATH", paths.cmakePrefixDirs)
   let includePaths = partitionCompilerIncludePaths(paths)
   result = prependEnvDirsToArgvEnv(result, "CPATH",
     includePaths.regularDirs)

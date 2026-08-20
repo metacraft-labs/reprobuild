@@ -1566,7 +1566,8 @@ proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
         dirs.add(dir)
   dirs.join($PathSep)
 
-proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string] =
+proc argvForCall*(call: PublicCliCall;
+                  profile: PathOnlyToolProfile): seq[string] =
   result = @[profile.resolvedExecutablePath]
 
   proc encodedValues(arg: PublicCliArg): seq[string] =
@@ -1627,7 +1628,14 @@ proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string]
 
   for arg in beforeSubcommand:
     result.addFlagArg(arg)
-  if call.subcommand.len > 0:
+  # CMake's typed API names its three invocation modes for fluent recipe
+  # calls, but the real CLI encodes those modes entirely through flags:
+  # configure uses -S/-B, while build/install use --build/--install.
+  let hasLiteralSubcommand =
+    not (call.packageName == "cmake" and
+      call.executableName == "cmakeBin" and
+      call.subcommand in ["configure", "build", "install"])
+  if call.subcommand.len > 0 and hasLiteralSubcommand:
     result.add(call.subcommand)
   for arg in afterSubcommand:
     result.addFlagArg(arg)
