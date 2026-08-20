@@ -52,6 +52,7 @@ libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_emits_executio
 libs/repro_build_engine/tests/t_engine_multiple_outputs_produce_multiple_names.nim	nim	1
 libs/repro_build_engine/tests/t_engine_target_export_table_records_ambiguity.nim	nim	1
 libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph.nim	nim	1
+libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim	nim	6
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	9
 libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	1
@@ -195,6 +196,11 @@ libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
+libs/repro_lock/tests/t_lock_identity_feature_change_differs.nim	nim	3
+libs/repro_lock/tests/t_lock_identity_rename_invalidates_nothing.nim	nim	2
+libs/repro_lock/tests/t_lock_identity_solver_tie_no_collision.nim	nim	4
+libs/repro_lock/tests/t_lock_identity_two_names_one_content.nim	nim	3
+libs/repro_lock/tests/t_provenance_reports_shared_names.nim	nim	5
 libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_action_cache_reader_consults_peer_on_miss.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim	nim	1
