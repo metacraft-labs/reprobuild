@@ -17,7 +17,8 @@
 ## while the managed Reprobuild child receives the scrubbed environment and all
 ## unrelated environment values unchanged.
 
-import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import std/[algorithm, json, os, osproc, streams, strtabs, strutils, tempfiles,
+  unittest]
 
 import git_actions
 import git_tool
@@ -255,6 +256,36 @@ proc stableLockBody(content: string): string =
   for line in content.splitLines():
     if not line.startsWith("created_at = "):
       result.add(line & "\n")
+
+proc noticesText(document: JsonNode): string =
+  for notice in document["notices"]:
+    result.add(notice.getStr() & "\n")
+
+proc appendTreeSnapshot(directory, prefix: string;
+    entries: var seq[string]) =
+  ## Capture every non-Git file and directory byte-for-byte. Identity
+  ## refusals are required to happen before lock observation/publication; a
+  ## status-only assertion would miss an overwrite that retained the same
+  ## dirty/untracked shape.
+  for kind, path in walkDir(directory):
+    let name = path.lastPathPart()
+    if name == ".git":
+      continue
+    let relative = if prefix.len > 0: prefix / name else: name
+    case kind
+    of pcFile:
+      entries.add("file\0" & relative & "\0" & readFile(path))
+    of pcDir:
+      entries.add("dir\0" & relative)
+      appendTreeSnapshot(path, relative, entries)
+    of pcLinkToFile, pcLinkToDir:
+      entries.add("link\0" & relative & "\0" & expandSymlink(path))
+
+proc lockStoreSnapshot(fx: Fixture): string =
+  var entries: seq[string]
+  appendTreeSnapshot(fx.lockStore, "", entries)
+  entries.sort()
+  result = entries.join("\0")
 
 suite "linked-worktree pre-push repository-local environment isolation":
   test "canonical scrub removes the complete repository namespace only":
@@ -556,3 +587,199 @@ suite "linked-worktree pre-push repository-local environment isolation":
       let advertised = require(q(gitBin) & " -C " & q(fx.linked) &
         " ls-remote --heads origin refs/heads/blocked-by-dependency")
       check advertised.strip().len == 0
+
+  test "explicit linked root scopes a multi-project hook to its dependency closure":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      check gitBin.len > 0
+    else:
+      let fx = setup(gitBin)
+      defer: removeDir(fx.scratch)
+
+      # The ambient primary project owns only the unrelated checkout. The
+      # pushed project owns app -> dep. Both participate in one workspace, so
+      # selecting the workspace root is necessary but selecting its primary
+      # project's repo set as the hook scope is wrong.
+      writeFile(fx.workspace / "projects" / "ambient.toml",
+        "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+        "[project]\nname = \"ambient\"\ndefault_revision = \"main\"\n\n" &
+        "[[remote]]\nname = \"unrelated-origin\"\nfetch = \"" &
+          fileUrl(fx.unrelatedOrigin) & "\"\n\n" &
+        "includes = [\"repos/unrelated.toml\"]\n")
+      writeFile(fx.workspace / "projects" / "app.toml",
+        "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+        "[project]\nname = \"app\"\ndefault_revision = \"main\"\n\n" &
+        "[[remote]]\nname = \"app-origin\"\nfetch = \"" &
+          fileUrl(fx.appOrigin) & "\"\n\n" &
+        "[[remote]]\nname = \"dep-origin\"\nfetch = \"" &
+          fileUrl(fx.depOrigin) & "\"\n\n" &
+        "includes = [\"repos/app.toml\", \"repos/dep.toml\"]\n")
+      writeWorkspaceProjects(fx.workspace, @["ambient", "app"])
+      let relocked = run(q(fx.reproBin) & " workspace lock " &
+        "--workspace-root=" & q(fx.workspace))
+      if relocked.code != 0: checkpoint(relocked.output)
+      check relocked.code == 0
+
+      # Make both a real dependency and an ambient-only checkout disagree with
+      # the lock. The dependency's dirty file gives the gate a deterministic
+      # refusal before any lock publication; the advisory pass must mention
+      # dep but must not even observe unrelated.
+      writeFile(fx.dep / "new-dep.txt", "new dependency revision\n")
+      discard require(q(gitBin) & " -C " & q(fx.dep) & " add new-dep.txt")
+      discard require(q(gitBin) & " -C " & q(fx.dep) &
+        " commit -m 'advance dependency after lock'")
+      writeFile(fx.dep / "dirty-dep.txt", "legitimate closure blocker\n")
+      writeFile(fx.unrelated / "new-unrelated.txt", "ambient drift\n")
+      discard require(q(gitBin) & " -C " & q(fx.unrelated) &
+        " add new-unrelated.txt")
+      discard require(q(gitBin) & " -C " & q(fx.unrelated) &
+        " commit -m 'advance ambient repo after lock'")
+
+      writeFile(fx.linked / "multi-project-head.txt", "outgoing head\n")
+      discard require(q(gitBin) & " -C " & q(fx.linked) &
+        " add multi-project-head.txt")
+      discard require(q(gitBin) & " -C " & q(fx.linked) &
+        " commit -m 'multi-project outgoing head'")
+      let linkedSha = require(q(gitBin) & " -C " & q(fx.linked) &
+        " rev-parse HEAD").strip()
+      let refs = fx.scratch / "multi-project-refs.bin"
+      writeFile(refs, refsRecord("refs/heads/linked", linkedSha,
+        "refs/heads/multi-project", repeat('0', 40)))
+
+      let dispatched = runProcess(fx.reproBin,
+        ["hooks", "dispatch", "pre-push", "--protocol=2",
+         "--repo-root", fx.linked, "--refs-file", refs, "--",
+         "origin", fileUrl(fx.appOrigin)], childEnvironment([]))
+      check dispatched.code == 2
+      let checked = fx.report()
+      check checked["exitCode"].getInt() == 2
+      check checked["project"].getStr() == "ambient"
+      check expandFilename(checked["currentRepo"].getStr()) ==
+        expandFilename(fx.linked)
+      check checked["failures"].len == 1
+      check checked["failures"][0]["repo"].getStr() == "dep"
+      check checked["failures"][0]["property"].getStr() == "dirty"
+      let notices = noticesText(checked)
+      check "dep: checked out" in notices
+      check "unrelated: checked out" notin notices
+      check fileExists(fx.dep / "dirty-dep.txt")
+
+  test "same-remote second clone is not the explicit workspace repo":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      check gitBin.len > 0
+    else:
+      let fx = setup(gitBin)
+      defer: removeDir(fx.scratch)
+      let hostile = fx.workspace / "copies" / "app"
+      createDir(hostile.parentDir)
+      cloneRepo(gitBin, fx.appOrigin, hostile)
+      let hostileSha = require(q(gitBin) & " -C " & q(hostile) &
+        " rev-parse HEAD").strip()
+      let refs = fx.scratch / "same-remote-hostile-refs.bin"
+      writeFile(refs, refsRecord("refs/heads/main", hostileSha,
+        "refs/heads/hostile", repeat('0', 40)))
+
+      let lockBefore = lockStoreSnapshot(fx)
+
+      let dispatched = runProcess(fx.reproBin,
+        ["hooks", "dispatch", "pre-push", "--protocol=2",
+         "--repo-root", hostile, "--refs-file", refs, "--",
+         "origin", fileUrl(fx.appOrigin)], childEnvironment([]))
+      if dispatched.code != 2: checkpoint(dispatched.output)
+      check dispatched.code == 2
+      let checked = fx.report()
+      check checked["exitCode"].getInt() == 2
+      check checked["failures"].len == 1
+      check checked["failures"][0]["property"].getStr() ==
+        "current-repo-identity"
+      check "does not match a declared repo" in
+        checked["failures"][0]["evidence"].getStr()
+      check checked["notices"].len == 0
+      check lockStoreSnapshot(fx) == lockBefore
+
+      # A path that exists but is not a valid Git worktree is corruption, not
+      # an absent checkout. Remote identity must remain disabled in this state
+      # as well; otherwise the same hostile clone becomes authoritative merely
+      # because the declared checkout broke.
+      removeDir(fx.app)
+      createDir(fx.app)
+      writeFile(fx.app / "present-but-not-a-worktree", "corrupt checkout\n")
+      let corrupted = runProcess(fx.reproBin,
+        ["hooks", "dispatch", "pre-push", "--protocol=2",
+         "--repo-root", hostile, "--refs-file", refs, "--",
+         "origin", fileUrl(fx.appOrigin)], childEnvironment([]))
+      if corrupted.code != 2: checkpoint(corrupted.output)
+      check corrupted.code == 2
+      let corruptedReport = fx.report()
+      check corruptedReport["exitCode"].getInt() == 2
+      check corruptedReport["failures"].len == 1
+      check corruptedReport["failures"][0]["property"].getStr() ==
+        "current-repo-identity"
+      check corruptedReport["notices"].len == 0
+      check lockStoreSnapshot(fx) == lockBefore
+
+      # Remote identity remains available for its declared purpose: recovery
+      # when the canonical checkout is genuinely absent. This positive arm
+      # prevents the hardening above from silently deleting that behavior.
+      removeDir(fx.app)
+      let absent = runProcess(fx.reproBin,
+        ["hooks", "dispatch", "pre-push", "--protocol=2",
+         "--repo-root", hostile, "--refs-file", refs, "--",
+         "origin", fileUrl(fx.appOrigin)], childEnvironment([]))
+      if absent.code != 0: checkpoint(absent.output)
+      check absent.code == 0
+      let absentReport = fx.report()
+      check absentReport["exitCode"].getInt() == 0
+      check absentReport["failures"].len == 0
+      check expandFilename(absentReport["currentRepo"].getStr()) ==
+        expandFilename(hostile)
+
+  test "ambiguous missing-checkout remote identity fails closed":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      check gitBin.len > 0
+    else:
+      let fx = setup(gitBin)
+      defer: removeDir(fx.scratch)
+      writeFile(fx.workspace / "repos" / "ghost-a.toml",
+        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "[repo]\nname = \"ghost-a\"\npath = \"missing/a\"\n" &
+        "remote = \"app-origin\"\nrevision = \"main\"\n")
+      writeFile(fx.workspace / "repos" / "ghost-b.toml",
+        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "[repo]\nname = \"ghost-b\"\npath = \"missing/b\"\n" &
+        "remote = \"app-origin\"\nrevision = \"main\"\n")
+      let originalProject = readFile(fx.workspace / "projects" / "app.toml")
+      writeFile(fx.workspace / "projects" / "app.toml",
+        originalProject.replace(
+          "includes = [\"repos/app.toml\", \"repos/dep.toml\", " &
+            "\"repos/unrelated.toml\"]\n",
+          "includes = [\"repos/app.toml\", \"repos/dep.toml\", " &
+            "\"repos/unrelated.toml\", \"repos/ghost-a.toml\", " &
+            "\"repos/ghost-b.toml\"]\n"))
+      let hostile = fx.workspace / "copies" / "ambiguous"
+      createDir(hostile.parentDir)
+      cloneRepo(gitBin, fx.appOrigin, hostile)
+      let hostileSha = require(q(gitBin) & " -C " & q(hostile) &
+        " rev-parse HEAD").strip()
+      let refs = fx.scratch / "ambiguous-hostile-refs.bin"
+      writeFile(refs, refsRecord("refs/heads/main", hostileSha,
+        "refs/heads/ambiguous", repeat('0', 40)))
+
+      let lockBefore = lockStoreSnapshot(fx)
+
+      let dispatched = runProcess(fx.reproBin,
+        ["hooks", "dispatch", "pre-push", "--protocol=2",
+         "--repo-root", hostile, "--refs-file", refs, "--",
+         "origin", fileUrl(fx.appOrigin)], childEnvironment([]))
+      if dispatched.code != 2: checkpoint(dispatched.output)
+      check dispatched.code == 2
+      let checked = fx.report()
+      check checked["failures"].len == 1
+      check checked["failures"][0]["property"].getStr() ==
+        "current-repo-identity"
+      check "more than one declared repo" in
+        checked["failures"][0]["evidence"].getStr()
+      check checked["notices"].len == 0
+      check lockStoreSnapshot(fx) == lockBefore

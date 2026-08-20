@@ -26497,15 +26497,24 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
 
   var pathMatches: seq[int]
   var commonMatches: seq[int]
+  var missingDeclaredWorktrees = initHashSet[int]()
   for index, repo in repos:
     let declaredPath = workspaceRoot / repo.path
     if samePathIdentity(result.worktree.worktreeRoot, declaredPath):
       pathMatches.add(index)
       continue
     let declaredWorktree = discoverGitWorktree(identity, declaredPath)
-    if declaredWorktree.ok and
-        samePathIdentity(result.worktree.commonDir, declaredWorktree.commonDir):
-      commonMatches.add(index)
+    if declaredWorktree.ok:
+      if samePathIdentity(result.worktree.commonDir, declaredWorktree.commonDir):
+        commonMatches.add(index)
+    elif not dirExists(declaredPath) and not fileExists(declaredPath) and
+        not symlinkExists(declaredPath):
+      # Remote identity is a recovery path for an ABSENT declared checkout,
+      # not for one that exists but Git cannot validate. A present plain
+      # directory, broken worktree, unreadable checkout, or dangling symlink
+      # is workspace corruption; letting an arbitrary same-remote clone stand
+      # in for it would turn a failed structural check into authorization.
+      missingDeclaredWorktrees.incl(index)
 
   let structural = if pathMatches.len > 0: pathMatches else: commonMatches
   if structural.len == 1:
@@ -26525,7 +26534,13 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
     return
   var remoteMatches: seq[int]
   for index, repo in repos:
-    if sharesRemoteIdentity(actualRemotes, expectedRemoteDigests(repo)):
+    # A URL match is only a fallback for a manifest checkout that is absent.
+    # When the declared checkout exists with a different Git common directory,
+    # an arbitrary second clone of the same forge repository is not that
+    # workspace member. Treating it as one lets an explicit managed-hook root
+    # escape the workspace's structural identity boundary.
+    if index in missingDeclaredWorktrees and
+        sharesRemoteIdentity(actualRemotes, expectedRemoteDigests(repo)):
       remoteMatches.add(index)
   if remoteMatches.len == 1:
     result.found = true
@@ -37892,6 +37907,31 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.exitCode = 2
       return
 
+  let layerLocations = enumerateManifestLayerLocations(
+    parsed.workspaceRoot, workspaceLocal)
+  let currentManifestLayer = findCurrentManifestLayer(
+    layerLocations, parsed.currentRepo)
+  let membershipRoot = manifestsRoot(parsed.workspaceRoot)
+  let currentIsMembershipRepo = parsed.currentRepo.len > 0 and
+    sameFilesystemPath(absolutePath(membershipRoot), parsed.currentRepo) and
+    discoverGitWorktree(identity, membershipRoot).ok
+  if parsed.currentRepo.len > 0 and not currentRepoMatch.found and
+      currentManifestLayer.isNone and not currentIsMembershipRepo:
+    # An explicit managed-hook root is an authority boundary, not a hint. If
+    # it cannot be identified as a declared repo, manifest layer, or the
+    # membership repo, do not widen to the ambient workspace. That fallback
+    # audits an unrelated project and can turn an invalid green hook into the
+    # push authorization result.
+    result.failures.add(CheckFailure(
+      repo: "",
+      property: "current-repo-identity",
+      remediation: "run 'repro hooks ensure --vcs " & parsed.currentRepo &
+        "' from a checkout declared by this workspace, or repair the " &
+        "workspace membership before retrying the push",
+      evidence: currentRepoMatch.diagnostic))
+    result.exitCode = 2
+    return
+
   result.activeBranch = deriveCheckActiveBranch(
     parsed, workspaceLocal, resolved)
   var currentRepoBranch = ""
@@ -37904,31 +37944,6 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         result.activeBranch = currentRepoBranch
   let toolDigest = digestHex(identity)
   let observedAt = getTime().toUnix * 1000
-
-  # Lock coherence is ADVISORY, so it goes on the ``notices`` channel — the one
-  # documented never to touch ``exitCode``. It is reported BEFORE the gate's
-  # stages so an operator whose push is about to be refused still sees whether
-  # the workspace's locks agree with what is checked out; a disagreement here is
-  # frequently the reason the gate is unhappy.
-  try:
-    var pairs: seq[tuple[name, path: string]]
-    for repo in resolved.repos:
-      pairs.add((repo.name,
-        if repo.name == currentRepoName and parsed.currentRepo.len > 0:
-          parsed.currentRepo
-        else:
-          repo.path))
-    for line in renderCoherenceTextLines(lockCoherenceFor(identity,
-        parsed.workspaceRoot, resolved.projectName, pairs)):
-      result.notices.add(line)
-  except CatchableError:
-    # An advisory diff must never be able to fail a gate run.
-    discard
-
-  let layerLocations = enumerateManifestLayerLocations(
-    parsed.workspaceRoot, workspaceLocal)
-  let currentManifestLayer = findCurrentManifestLayer(
-    layerLocations, parsed.currentRepo)
 
   # Protocol v2 distinguishes the one ordinary outgoing commit Git is asking
   # this hook to approve from unrelated unpublished dependency state.  The
@@ -37992,35 +38007,55 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # closure can break a teammate's build of it, so an unrelated dirty repo
   # elsewhere in the workspace MUST NOT block the push. The closure is a
   # set of repo NAMES (pushed repo + everything reachable via the per-repo
-  # ``depends`` edges). When ``--current-repo`` does not resolve to a
-  # declared repo (the closure is empty), we fall back to the whole
-  # workspace so the gate can never silently under-check.
+  # ``depends`` edges). Recognized manifest-layer and membership pushes have
+  # their dedicated scopes below. An explicit root with no recognized identity
+  # has already failed closed above, so whole-workspace fallback cannot turn an
+  # unrelated checkout into an authorized push.
   #
   # ...except for the MEMBERSHIP repo, which is never a declared repo and would
   # therefore always take that fallback. Its scope is the repos whose manifest
   # fragments the pushed range modifies (Workspace-And-Develop-Mode.md §"Gate
   # scope when the pushed repo is the membership repo").
   var membershipScope = none(HashSet[string])
-  if currentRepoName.len == 0 and parsed.currentRepo.len > 0:
-    let membershipRoot = manifestsRoot(parsed.workspaceRoot)
-    if sameFilesystemPath(absolutePath(membershipRoot), parsed.currentRepo) and
-        discoverGitWorktree(identity, membershipRoot).ok:
-      let newTip =
-        if outgoing.headOid.len > 0: outgoing.headOid
-        else: gitRunPlain(identity,
-          ["-C", membershipRoot, "rev-parse", "HEAD"]).output.strip()
-      let oldTip =
-        if outgoing.remoteOldOid.len > 0 and not isZeroOid(outgoing.remoteOldOid):
-          outgoing.remoteOldOid
-        else: ""
-      membershipScope = some(membershipPushScope(
-        identity, resolved, membershipRoot, newTip, oldTip))
+  if currentRepoName.len == 0 and currentIsMembershipRepo:
+    let newTip =
+      if outgoing.headOid.len > 0: outgoing.headOid
+      else: gitRunPlain(identity,
+        ["-C", membershipRoot, "rev-parse", "HEAD"]).output.strip()
+    let oldTip =
+      if outgoing.remoteOldOid.len > 0 and not isZeroOid(outgoing.remoteOldOid):
+        outgoing.remoteOldOid
+      else: ""
+    membershipScope = some(membershipPushScope(
+      identity, resolved, membershipRoot, newTip, oldTip))
   let scope = prePushScope(resolved, currentRepoName, currentManifestLayer,
     membershipScope)
   let scopeClosure = scope.names
   let scopeIsWholeWorkspace = scope.wholeWorkspace
   proc repoInScope(name: string): bool =
     scopeIsWholeWorkspace or name in scopeClosure
+
+  # Lock coherence is advisory, but it still performs repository and lock
+  # observations. Apply the same pushed-repo dependency closure as the gate so
+  # an explicit managed-hook root cannot cause unrelated active projects to be
+  # inspected merely because they share an ambient workspace. Membership and
+  # manifest-layer pushes retain their purpose-built scopes above.
+  try:
+    var pairs: seq[tuple[name, path: string]]
+    for repo in resolved.repos:
+      if not repoInScope(repo.name):
+        continue
+      pairs.add((repo.name,
+        if repo.name == currentRepoName and parsed.currentRepo.len > 0:
+          parsed.currentRepo
+        else:
+          repo.path))
+    for line in renderCoherenceTextLines(lockCoherenceFor(identity,
+        parsed.workspaceRoot, resolved.projectName, pairs)):
+      result.notices.add(line)
+  except CatchableError:
+    # An advisory diff must never be able to fail a gate run.
+    discard
 
   # Walk the participating repos for the cleanliness + publication
   # passes. We gather the M4 evidence triple for every repo so the

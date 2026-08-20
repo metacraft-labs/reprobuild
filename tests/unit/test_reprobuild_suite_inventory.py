@@ -1644,21 +1644,22 @@ test "incomplete name" and:
                 "sourceCaseCount": 1,
                 "class": "integration",
             },
-            # The linked-worktree hook regression added by this branch. Its
-            # four cases independently cover the canonical scrub helper,
-            # Workspace-VCS selection under a poisoned repository-local Git
-            # environment, a real protocol-v2 pre-push through a linked
-            # worktree, and refusal when a declared dependency is dirty. Pin
-            # the exact source, generated binary, catalog size, and
-            # classification so the aggregate +1 source / +4 cases below
-            # cannot mask a missing or weakened enrollment.
+            # The linked-worktree hook regression's seven cases independently
+            # cover the canonical scrub helper, Workspace-VCS selection under
+            # a poisoned repository-local Git environment, a real protocol-v2
+            # pre-push through a linked worktree, refusal when a declared
+            # dependency is dirty, multi-project closure scoping, rejection of
+            # a same-remote second clone, and ambiguous-remote fail-closed
+            # behavior. Pin the exact source, generated binary, catalog size,
+            # and classification so aggregate movement cannot mask a missing
+            # or weakened enrollment.
             "tests/integration/"
             "t_linked_worktree_pre_push_repository_env.nim": {
                 "binary": "build/test-bin/"
                 "t_linked_worktree_pre_push_repository_env",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 4,
+                "sourceCaseCount": 7,
                 "class": "integration",
             },
             # Upstream 19613ab39 adds one graph member for the routed-lock
