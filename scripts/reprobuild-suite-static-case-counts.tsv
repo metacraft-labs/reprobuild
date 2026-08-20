@@ -1252,7 +1252,7 @@ tests/unit/t_m9r33_2_qt6_module_path_walker.nim	nim	11
 tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim	nim	8
 tests/unit/t_m9r3_library_api_block.nim	nim	8
 tests/unit/t_m9r40_1_probe_clean_env.nim	nim	3
-tests/unit/t_m9r42_1_disk_diag_hook.nim	nim	3
+tests/unit/t_m9r42_1_disk_diag_hook.nim	nim	4
 tests/unit/t_m9r4_library_api_exports.nim	nim	8
 tests/unit/t_m9r5a_recipe_sweep_smoke.nim	nim	12
 tests/unit/t_m9r5b_recipe_options_sweep.nim	nim	6
