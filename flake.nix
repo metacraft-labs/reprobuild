@@ -489,13 +489,25 @@
             hooks.just-lint = {
               enable = true;
               name = "just lint";
+              # The tool list is the hook's CONTRACT, not a convenience: a
+              # commit-time gate that reaches past it into the ambient PATH
+              # passes or fails depending on which shell the contributor
+              # happened to commit from. `just lint` grew a workflow check
+              # (actionlint, which shells out to shellcheck) and a suite
+              # case-count check (python3) without them being declared here,
+              # so committing from anywhere but the dev shell failed with
+              # "actionlint not found on PATH" on an unmodified checkout.
+              # Everything `just lint` runs must be named below.
               entry = "${pkgs.writeShellScript "reprobuild-just-lint" ''
                 export PATH=${
                   pkgs.lib.makeBinPath [
+                    pkgs.actionlint
                     pkgs.bash
                     pkgs.coreutils
                     pkgs.gnugrep
                     pkgs.just
+                    pkgs.python3
+                    pkgs.shellcheck
                     nimFork
                   ]
                 }:$PATH
