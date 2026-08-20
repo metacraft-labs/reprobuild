@@ -31075,6 +31075,23 @@ type
     path*: string
     reason*: string
 
+  WorkspaceLockUnmaterializedReport* = object
+    ## One per DECLARED repo the lock could not pin because the
+    ## workspace has no on-disk checkout of it. Mirrors the
+    ## ``[extensions] unmaterialized_repos`` record the lock document
+    ## carries, so the JSON report and the lock file agree.
+    name*: string
+    path*: string
+    reason*: string
+      ## The MACHINE-INDEPENDENT reason, and the only part that reaches
+      ## the committed lock document. A lock is shared history: an
+      ## absolute path from whoever happened to run the gate would make
+      ## two developers write different bytes for the same workspace
+      ## state, and would publish one of their home directories.
+    detail*: string
+      ## Host-local elaboration (the absolute path probed, a git
+      ## diagnostic). Report- and terminal-only; never serialized.
+
   WorkspaceLockReport* = object
     ## Structured outcome of one ``repro workspace lock`` invocation.
     ## ``lockFilePath`` is the absolute path the writer landed on;
@@ -31097,6 +31114,11 @@ type
     replacedExistingEntry*: bool
     repos*: seq[WorkspaceLockRepoEntry]
     dirty*: seq[WorkspaceLockDirtyEntry]
+    unmaterialized*: seq[WorkspaceLockUnmaterializedReport]
+      ## Declared repos with no on-disk checkout. They contribute no
+      ## revision (there is none to observe) but are NAMED here and in
+      ## the lock's ``[extensions] unmaterialized_repos`` — a skip the
+      ## lock states rather than a repo the lock silently drops.
     participation*: seq[ParticipationOutcome]
       ## MO-4 — per-repo participation recorded through each repo's ASSIGNED
       ## locking backend (empty unless the host bootstrap config declares
@@ -31137,7 +31159,32 @@ proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
     obj["reason"] = %entry.reason
     dirty.add(obj)
   result["dirty"] = dirty
+  var unmaterialized = newJArray()
+  for entry in report.unmaterialized:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["reason"] = %entry.reason
+    obj["detail"] = %entry.detail
+    unmaterialized.add(obj)
+  result["unmaterialized"] = unmaterialized
   result["exitCode"] = %report.exitCode
+
+proc unmaterializedLockNotice*(
+    entries: openArray[WorkspaceLockUnmaterializedReport]): string =
+  ## The single wording both ``repro workspace lock`` and the pre-push
+  ## gate use to surface repos the lock could not pin. Shared so the two
+  ## surfaces cannot drift, and so a test can assert one string.
+  ## Returns ``""`` for a fully materialized workspace.
+  if entries.len == 0:
+    return ""
+  var names: seq[string]
+  for entry in entries:
+    names.add(entry.path & " (" & entry.reason & ")")
+  "lock does not pin " & $entries.len &
+    " declared repo(s) with no on-disk checkout: " & names.join(", ") &
+    " — recorded under [extensions] unmaterialized_repos; run " &
+    "'repro workspace sync' to materialize and pin them"
 
 proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
   if report.exitCode == 0:
@@ -31174,6 +31221,9 @@ proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
       elif p.diagnostic.len > 0:
         result.add("workspace lock: failed to record " & p.repoName &
           " via " & p.backendKind & " backend: " & p.diagnostic)
+  let unmaterializedNotice = unmaterializedLockNotice(report.unmaterialized)
+  if unmaterializedNotice.len > 0:
+    result.add("workspace lock: " & unmaterializedNotice)
   for entry in report.dirty:
     result.add("workspace lock: refused — '" & entry.path &
       "' is dirty (" & entry.reason & ")")
@@ -31515,7 +31565,36 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # caller supplied one (the pre-push gate passes the pushed repo's
   # dependency closure). An empty scope means "consider every repo" (the
   # legacy whole-workspace behavior). A repo outside the scope still has
-  # its HEAD recorded in the lock, but its dirtiness/absence never refuses.
+  # its HEAD recorded in the lock, but its dirtiness never refuses.
+  #
+  # MATERIALIZATION IS NOT A PRECONDITION FOR LOCKING. This loop used to
+  # gate THREE distinct properties — "must exist", "must answer
+  # rev-parse", "must be clean" — on the single ``inDirtyScope`` flag, so
+  # a whole-workspace scope (an empty ``dirtyScopeNames``, which is what
+  # ``prePushScope``'s no-scope-information fallback yields) demanded that
+  # EVERY declared repo in the workspace be materialized before any lock
+  # could be written. In a multi-project workspace the declared set is the
+  # union of every active project (Workspace-And-Develop-Mode.md
+  # §"Multi-Project Workspaces"), so that turned "publish one manifest
+  # commit" into "clone every repo of every project, including formal-
+  # methods corpora nobody in this workspace builds".
+  #
+  # Existence is not the same property as cleanliness. A declared repo
+  # with no checkout is a legitimate, first-class state: membership is
+  # recorded before materialization (ibid. §"Membership and
+  # Materialization"), ``repro workspace sync`` materializes on demand
+  # (§"Missing local checkout for a develop-mode node" is a sync corner
+  # case, not a lock error), and the pre-push gate's OWN cleanliness /
+  # publication stage already decided what an absent checkout means —
+  # vacuously satisfied for a public repo, an actionable
+  # ``clone-required`` failure for a shared-private one (MO-5). Refusing
+  # again here contradicted the stage that had just passed.
+  #
+  # So an unobservable repo is RECORDED, never raised on: it contributes
+  # an ``[extensions] unmaterialized_repos`` entry naming it and why,
+  # instead of a revision it cannot honestly supply. Silence was the one
+  # option ruled out — a lock that is short by a repo, with no way for a
+  # consumer to tell, is worse than either refusing or saying so.
   let scopeDirty = args.dirtyScopeNames.len > 0
   for repo in resolved.repos:
     let repoPath =
@@ -31525,20 +31604,20 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
         args.workspaceRoot / repo.path
     let inDirtyScope = (not scopeDirty) or repo.name in args.dirtyScopeNames
     if not discoverGitWorktree(identity, repoPath).ok:
-      if inDirtyScope:
-        raise newException(ValueError,
-          "repo '" & repo.path &
-            "' has no on-disk checkout at '" & repoPath &
-            "'; run `repro workspace init` or `repro workspace sync` first")
-      # Out-of-scope repo without a checkout: skip it entirely (it can't
-      # contribute a HEAD to the lock and it is not part of the gate scope).
+      report.unmaterialized.add(WorkspaceLockUnmaterializedReport(
+        name: repo.name, path: repo.path,
+        reason: "no on-disk checkout",
+        detail: "probed '" & repoPath & "'"))
       continue
     let headRes = queryGitState(headShaQuery(repoPath), identity)
     if headRes.status != gqsOk:
-      if inDirtyScope:
-        raise newException(ValueError,
-          "could not query HEAD SHA for repo '" & repo.path &
-            "': " & headRes.diagnostic)
+      # A checkout that exists but cannot answer ``rev-parse HEAD`` (an
+      # unborn branch, a corrupt gitdir) is unobservable for the same
+      # reason and gets the same treatment — named, not fabricated.
+      report.unmaterialized.add(WorkspaceLockUnmaterializedReport(
+        name: repo.name, path: repo.path,
+        reason: "could not query HEAD SHA",
+        detail: headRes.diagnostic))
       continue
     headShas[repo.path] = headRes.headSha
     let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
@@ -31568,13 +31647,21 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     result.report = report
     return
 
+  # ``getOrDefault``, not ``[]``: since an unobservable repo is recorded
+  # rather than raised on, the trigger repo itself may now be one — and a
+  # ``KeyError`` would report that as "key not found" instead of the
+  # actionable sentence below. The ANCHOR is the one repo that genuinely
+  # must be observable: the record's path and identity are its commit, so
+  # there is no lock to write without it.
   let triggerSha =
     if args.triggerSha.len > 0: args.triggerSha
-    else: headShas[triggerRepo.path]
+    else: headShas.getOrDefault(triggerRepo.path)
   if triggerSha.len == 0:
     raise newException(ValueError,
       "could not determine trigger SHA for repo '" &
-        triggerRepo.name & "' at path '" & triggerRepo.path & "'")
+        triggerRepo.name & "' at path '" & triggerRepo.path &
+        "'; the lock is keyed by the trigger repo's commit, so that repo " &
+        "must have an on-disk checkout (run `repro workspace sync`)")
 
   let createdAt = isoTimestampNow()
   let createdBy = "repro workspace lock"
@@ -31584,12 +31671,12 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   elif resolved.trunk.len > 0:
     workspaceBranch = resolved.trunk
 
-  # RA-21 — record every repo we actually observed. In the normal
-  # (whole-workspace) path that is every declared repo; in a scoped
-  # pre-push refresh, an out-of-scope repo that has no on-disk checkout is
-  # skipped above and therefore omitted from the lock body (we cannot
-  # record a SHA we never observed). In-scope repos are always observed,
-  # so the lock always covers the pushed repo's dependency closure.
+  # Record every repo we actually observed. A declared repo we could not
+  # observe is not silently dropped: it was collected into
+  # ``report.unmaterialized`` above and is written into the lock's
+  # ``[extensions] unmaterialized_repos`` below, so the document's repo
+  # list and its stated omissions together account for the whole declared
+  # set.
   var lockRepos: seq[ResolvedRepo]
   for repo in resolved.repos:
     if repo.path in headShas:
@@ -31620,6 +31707,22 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     resolved = manifestRepos,
     headShasByPath = headShas,
     currentBranchesByPath = currentBranches)
+
+  # Carry the unobserved repos into the document itself. The report alone
+  # is not enough: the report is consumed by whoever ran the command, and
+  # the omission has to be legible to whoever READS THE LOCK later — the
+  # CI sibling resolver that finds no ``[[repo]]`` for a path needs to
+  # distinguish "not in this workspace" from "this workspace could not
+  # observe it".
+  for entry in report.unmaterialized:
+    var remoteName = ""
+    for repo in resolved.repos:
+      if repo.path == entry.path:
+        remoteName = repo.projectRemote
+        break
+    lock.unmaterialized.add(WorkspaceLockUnmaterializedEntry(
+      name: entry.name, path: entry.path, remoteName: remoteName,
+      reason: entry.reason))
 
   let lockPath = lockFilePath(manifestLayerRoot, resolved.projectName,
     triggerRepo.name, triggerSha)
@@ -33443,7 +33546,15 @@ proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
   var dryRun = false
   var manifestLayerRoot = ""
   var workspaceRoot = ""
-  var toolProvisioning = tpmUnspecified
+  # Every other verb's parser seeds ``tpmPathOnly`` and lets
+  # ``--tool-provisioning`` override it. This one seeded
+  # ``tpmUnspecified``, which ``resolveGitTool`` rejects outright ("no
+  # provisioning mode was selected before resolving git; callers must
+  # parse --tool-provisioning before invoking resolveGitTool") — so the
+  # documented invocation ``repro workspace migrate-locks --dry-run``
+  # could never run, and the flag the message tells you to parse was in
+  # fact optional everywhere else.
+  var toolProvisioning = tpmPathOnly
   var i = 0
   # ``--flag=VALUE`` and ``--flag VALUE`` both accepted, resolved inline: a
   # nested helper would have to capture ``args``, and an ``openArray`` cannot be
@@ -38394,10 +38505,21 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # ``locks/<p>/stripe/sync-engine/<sha>.toml`` — a depth-5 path that does
     # not exist — as the audit trail of a lock that had in fact been written
     # correctly at depth 4.
-    let lockRel = lockFileRepoRelativePath(
-      latest.lockKey.project, latest.lockKey.repo, latest.lockKey.sha)
-    result.lockUpdate.lockFilePath =
-      manifestLayerRoot / lockRel.replace('/', DirSep)
+    #
+    # …and only when there IS a manifest lock key to reconstruct from.
+    # ``lockMissing`` is false whenever a ROUTED backend contributed a
+    # record, which does not imply the manifest store did: ``latest.lockKey``
+    # is then all-empty and the join produced the degenerate
+    # ``<layer>/locks/.toml`` — a path that names no project, no repo and no
+    # commit, printed to the operator as "lock already current at …" as if it
+    # were an audit trail. Report a path only when one exists; the renderer
+    # already omits the line for an empty path.
+    if latest.lockKey.sha.len > 0 and latest.lockKey.repo.len > 0 and
+        latest.lockKey.project.len > 0:
+      let lockRel = lockFileRepoRelativePath(
+        latest.lockKey.project, latest.lockKey.repo, latest.lockKey.sha)
+      result.lockUpdate.lockFilePath =
+        manifestLayerRoot / lockRel.replace('/', DirSep)
     result.lockUpdate.indexFilePath = ""
     result.lockUpdate.triggerRepo = latest.lockKey.repo
     result.lockUpdate.triggerSha = latest.lockKey.sha
@@ -38439,6 +38561,16 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     result.lockUpdate.indexFilePath = lockOutcome.report.indexFilePath
     result.lockUpdate.triggerRepo = lockOutcome.report.triggerRepo
     result.lockUpdate.triggerSha = lockOutcome.report.triggerSha
+    # A declared repo with no checkout no longer refuses the lock, so the
+    # gate must SAY that the lock it just wrote is short and by how much.
+    # A notice, not a failure: materialization is the operator's choice
+    # (`repro workspace sync` on demand), and the repos that genuinely
+    # must be present for this push were already enforced by the
+    # cleanliness / publication / MO-5 stages above.
+    let unmaterializedNotice =
+      unmaterializedLockNotice(lockOutcome.report.unmaterialized)
+    if unmaterializedNotice.len > 0:
+      result.notices.add(unmaterializedNotice)
     result.lockUpdate.kind =
       if lockMissing: cluCreated else: cluRefreshed
     # HL-3 (§6 Decision 2) — surface the per-repo, tier-tagged participation

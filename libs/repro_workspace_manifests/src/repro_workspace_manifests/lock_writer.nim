@@ -28,6 +28,14 @@
 ##     revision = "<full HEAD SHA>"
 ##     branch = "<advisory branch>"             # optional
 ##
+##     # Only when the workspace declares repos it has not checked out
+##     # (§"Declared repos with no on-disk checkout"):
+##     [extensions]
+##     unmaterialized_repos = [
+##       { name = "<repo>", path = "<path>", remote = "<remote>",
+##         reason = "<why it could not be observed>" },
+##     ]
+##
 ## RA-1 aligns the writer with the ``repo-workspaces`` pilot (commit
 ## ``418f109``): locks live under a **per-repo directory**, keyed by
 ## the trigger repo whose commit produced the lock, and the filename
@@ -83,6 +91,24 @@ type
     revision*: string
     branch*: string
 
+  WorkspaceLockUnmaterializedEntry* = object
+    ## One per DECLARED repo the lock could not pin because the
+    ## workspace has no on-disk checkout of it.
+    ##
+    ## A declared-but-unmaterialized repo is a legitimate workspace
+    ## state, not an error: membership is recorded before
+    ## materialization (Workspace-And-Develop-Mode.md §"Membership and
+    ## Materialization") and ``repro workspace sync`` materializes on
+    ## demand. Such a repo cannot contribute a revision — a revision we
+    ## never observed would be a fabrication — but it must not vanish
+    ## from the lock either, or a consumer resolving siblings gets a
+    ## short answer with no way to tell that it is short. So the lock
+    ## NAMES what it could not pin, in ``[extensions]``.
+    name*: string
+    path*: string
+    remoteName*: string
+    reason*: string
+
   WorkspaceLockFile* = object
     ## In-memory model of one lock TOML. The CLI fills this in from
     ## the resolved project plus the per-repo HEAD-SHA observation,
@@ -92,6 +118,11 @@ type
     createdBy*: string
     workspaceBranch*: string
     repos*: seq[WorkspaceLockEntry]
+    unmaterialized*: seq[WorkspaceLockUnmaterializedEntry]
+      ## Declared repos with no on-disk checkout, serialized under
+      ## ``[extensions] unmaterialized_repos``. Empty for a fully
+      ## materialized workspace, which emits no ``[extensions]`` table
+      ## at all — so every such lock is byte-identical to before.
 
 # ---- helpers ---------------------------------------------------------------
 
@@ -276,6 +307,44 @@ proc serializeLockToToml*(lock: WorkspaceLockFile): string =
     emitKv(result, "revision", entry.revision)
     if entry.branch.len > 0:
       emitKv(result, "branch", entry.branch)
+
+  # A declared repo the workspace has not materialized cannot carry a
+  # ``revision``, so it is not a ``[[repo]]``. It is still NAMED, under
+  # the ``[extensions]`` table the Common Conventions section of
+  # Workspace-Manifests.md reserves for exactly this: "unknown keys
+  # nested under an explicit `[extensions]` table are preserved and
+  # ignored". That placement is deliberate — a reader that predates this
+  # key still parses the document (a top-level unknown key would be a
+  # hard error), and a reader that understands it can tell "this
+  # workspace did not observe repo X" apart from "repo X is not in this
+  # workspace", which silence cannot express.
+  #
+  # Emitted only when there is something to say, so a fully materialized
+  # workspace produces byte-identical output to before.
+  if lock.unmaterialized.len > 0:
+    result.add("\n[extensions]\n")
+    result.add("unmaterialized_repos = [\n")
+    for entry in lock.unmaterialized:
+      if entry.name.len == 0:
+        raiseManifestError("", "extensions.unmaterialized_repos[].name",
+          schemaLockV1, schemaLockV1,
+          "serializeLockToToml refuses to emit an unmaterialized entry " &
+            "with empty name")
+      if entry.path.len == 0:
+        raiseManifestError("", "extensions.unmaterialized_repos[].path",
+          schemaLockV1, schemaLockV1,
+          "serializeLockToToml refuses to emit an unmaterialized entry " &
+            "with empty path")
+      result.add("  { name = \"")
+      result.add(tomlEscape(entry.name))
+      result.add("\", path = \"")
+      result.add(tomlEscape(entry.path))
+      result.add("\", remote = \"")
+      result.add(tomlEscape(entry.remoteName))
+      result.add("\", reason = \"")
+      result.add(tomlEscape(entry.reason))
+      result.add("\" },\n")
+    result.add("]\n")
 
 proc writeLockFile*(lock: WorkspaceLockFile; path: string) =
   ## Serialize the lock and write it to ``path``. Creates the parent

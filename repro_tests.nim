@@ -7790,6 +7790,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim",
+    binary: "build/test-bin/t_pre_push_lock_records_unmaterialized_declared_repo",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim",
     binary: "build/test-bin/t_pre_push_membership_repo_scopes_to_touched_fragments",
     defines: @[],

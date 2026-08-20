@@ -34,13 +34,27 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-if ! command -v actionlint >/dev/null 2>&1; then
-  # Deliberately fatal rather than skipped. A check that quietly does nothing
-  # when its tool is missing is how a broken workflow reaches the remote: it
-  # reports success and proves nothing. actionlint ships in this repo's Nix
-  # devshell (flake.nix), so run `just lint` inside it.
-  echo "FAIL: actionlint not found on PATH." >&2
-  echo "      Run inside the Nix devshell (nix develop), or: nix shell nixpkgs#actionlint" >&2
+# Resolve actionlint ourselves rather than demanding the caller already be in
+# the devshell. The managed pre-commit hook runs `just lint` OUTSIDE `nix
+# develop`, so a PATH-only lookup made every commit in the repo fail once this
+# check was wired in -- a check that blocks honest work is no better than one
+# that proves nothing.
+#
+# Still fatal when no interpreter can be obtained: quietly doing nothing when
+# the tool is missing is how a broken workflow reaches the remote.
+ACTIONLINT=()
+if command -v actionlint >/dev/null 2>&1; then
+  ACTIONLINT=(actionlint)
+elif command -v nix >/dev/null 2>&1 \
+    && nix develop --command actionlint -version >/dev/null 2>&1; then
+  ACTIONLINT=(nix develop --command actionlint)
+elif command -v nix >/dev/null 2>&1 \
+    && nix shell nixpkgs#actionlint --command actionlint -version >/dev/null 2>&1; then
+  ACTIONLINT=(nix shell nixpkgs#actionlint --command actionlint)
+else
+  echo "FAIL: actionlint not found, and it could not be obtained via nix." >&2
+  echo "      Install it, run inside the Nix devshell (nix develop)," >&2
+  echo "      or: nix shell nixpkgs#actionlint" >&2
   exit 1
 fi
 
@@ -59,7 +73,7 @@ echo "== actionlint: self-test =="
 # minimal copy of the defect that broke the release pipeline; actionlint MUST
 # reject it.
 canary_status=0
-actionlint -no-color -oneline -ignore "${ignore_stylistic}" \
+"${ACTIONLINT[@]}" -no-color -oneline -ignore "${ignore_stylistic}" \
   -stdin-filename '.github/workflows/__canary__.yml' - >/dev/null 2>&1 <<'CANARY' || canary_status=$?
 name: canary
 on: workflow_dispatch
@@ -82,5 +96,5 @@ fi
 echo "ok: actionlint rejects a known-bad workflow"
 
 echo "== actionlint: .github/workflows =="
-actionlint -no-color -oneline -ignore "${ignore_stylistic}" .github/workflows/*.yml
+"${ACTIONLINT[@]}" -no-color -oneline -ignore "${ignore_stylistic}" .github/workflows/*.yml
 echo "ok: all workflow files load"
