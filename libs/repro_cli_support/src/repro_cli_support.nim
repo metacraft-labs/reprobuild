@@ -6600,6 +6600,142 @@ proc selectorFilesystemKey(selector: string): string =
   if result.len == 0:
     result = "package"
 
+proc producerSourceRoot(binding: ProducerBinding; selector,
+                        workspaceRoot: string;
+                        fetchMissingPinnedSource: bool): string =
+  ## Resolve the source root used by both producer builds and graph
+  ## inspection. Inspection normally finds an existing workspace sibling;
+  ## lock-only consumers may fetch the pinned source when requested.
+  case binding.kind
+  of pbkDevelopOverride:
+    result = binding.localPathAbsolute
+  of pbkLockPinned:
+    let sibling = findSiblingProjectFile(selector, workspaceRoot)
+    if sibling.len > 0:
+      result = parentDir(sibling)
+    elif fetchMissingPinnedSource:
+      result = fetchLockPinnedProducer(binding.lockedDep, workspaceRoot)
+  of pbkOnDiskSibling, pbkNotProducer:
+    discard
+
+proc recordProducerMaterialization(selector, producerRootAbs: string;
+                                   producerArtifact: ProjectInterfaceArtifact;
+                                   producerRuntimeIdentity: PathOnlyBuildIdentity;
+                                   binding: ProducerBinding): bool =
+  ## Discover a producer's already-materialized public outputs and project
+  ## them onto the consumer's executable/library channels. The build path
+  ## calls this after the producer sub-build; graph inspection calls it while
+  ## loading an existing graph. Keeping this projection shared prevents the
+  ## two surfaces from resolving different producer identities.
+  var binDirs: seq[string] = @[]
+  var realizedBinaries: seq[string] = @[]
+  for exe in producerArtifact.projectInterface.publicExecutables:
+    let binName =
+      if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
+    if binName.len == 0:
+      continue
+    let realized = producerRootAbs / "build" / "bin" /
+      addFileExt(binName, ExeExt)
+    if fileExists(extendedPath(realized)):
+      let binDir = parentDir(realized)
+      if binDir notin binDirs:
+        binDirs.add(binDir)
+      if realized notin realizedBinaries:
+        realizedBinaries.add(realized)
+
+  var aux = ProducerAuxPaths()
+  mergeProducerRuntimeIdentity(producerRuntimeIdentity, binDirs, aux)
+  var realizedLibraries: seq[string] = @[]
+  block libraryChannel:
+    let libOutDir = producerRootAbs / "build" / "lib"
+    let includeOutDir = producerRootAbs / "build" / "include"
+    let pkgConfigOutDir = libOutDir / "pkgconfig"
+    if not dirExists(extendedPath(libOutDir)):
+      break libraryChannel
+    for lib in producerArtifact.projectInterface.publicLibraries:
+      if lib.name.len == 0 or lib.kind == lkHeaderOnly:
+        continue
+      let stem = lib.name
+      let libStem = "lib" & lib.name
+      for entryKind, entryPath in walkDir(extendedPath(libOutDir)):
+        if entryKind != pcFile:
+          continue
+        let tail = splitPath(entryPath).tail
+        let dotIdx = tail.find('.')
+        let base = if dotIdx > 0: tail[0 ..< dotIdx] else: tail
+        if base == stem or base == libStem:
+          let realizedLib = libOutDir / tail
+          if realizedLib notin realizedLibraries:
+            realizedLibraries.add(realizedLib)
+    if realizedLibraries.len > 0:
+      if libOutDir notin aux.libDirs:
+        aux.libDirs.add(libOutDir)
+      if dirExists(extendedPath(includeOutDir)) and
+          includeOutDir notin aux.includeDirs:
+        aux.includeDirs.add(includeOutDir)
+      if dirExists(extendedPath(pkgConfigOutDir)) and
+          pkgConfigOutDir notin aux.pkgConfigDirs:
+        aux.pkgConfigDirs.add(pkgConfigOutDir)
+
+  for lib in producerArtifact.projectInterface.publicLibraries:
+    if lib.name.len == 0:
+      continue
+    let exported =
+      if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+    let nimSrcDir = producerRootAbs / exported
+    if dirExists(extendedPath(nimSrcDir)) and nimSrcDir notin aux.nimPathDirs:
+      aux.nimPathDirs.add(nimSrcDir)
+
+  let haveLibChannel = aux.libDirs.len > 0 or aux.includeDirs.len > 0 or
+    aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0 or
+    aux.nimPathDirs.len > 0
+  if realizedBinaries.len == 0 and not haveLibChannel:
+    return false
+
+  if binDirs.len > 0:
+    producerMaterializedBinDirs[selector] = binDirs
+  if haveLibChannel:
+    producerMaterializedAuxPaths[selector] = aux
+
+  realizedBinaries.sort()
+  realizedLibraries.sort()
+  var actionHashPayload = "cross-repo-producer-action-hash.v1\x00" &
+    selector & "\x00"
+  for realized in realizedBinaries:
+    actionHashPayload.add(extractFilename(realized))
+    actionHashPayload.add('\x00')
+    actionHashPayload.add(fileContentDigest(realized))
+    actionHashPayload.add('\x00')
+  for realizedLib in realizedLibraries:
+    actionHashPayload.add("lib:")
+    actionHashPayload.add(extractFilename(realizedLib))
+    actionHashPayload.add('\x00')
+    actionHashPayload.add(fileContentDigest(realizedLib))
+    actionHashPayload.add('\x00')
+  var runtimeFingerprints: seq[string] = @[]
+  for actionIdentity in producerRuntimeIdentity.actionIdentities:
+    runtimeFingerprints.add(actionIdentity.packageSelector & "\x00" &
+      actionIdentity.executableName & "\x00" &
+      digestHex(actionIdentity.actionFingerprint))
+  runtimeFingerprints.sort()
+  for runtimeFingerprint in runtimeFingerprints:
+    actionHashPayload.add("runtime:")
+    actionHashPayload.add(runtimeFingerprint)
+    actionHashPayload.add('\x00')
+  producerActionHashes[selector] =
+    digestHex(blake3DomainDigest(actionHashPayload.bytesOf(),
+      hdActionFingerprint))
+
+  case binding.kind
+  of pbkDevelopOverride:
+    producerSourceBindings[selector] = binding.overrideBinding
+  of pbkLockPinned:
+    producerSourceBindings[selector] =
+      lockPinnedSourceBinding(selector, binding.lockedDep)
+  of pbkOnDiskSibling, pbkNotProducer:
+    discard
+  true
+
 # ---------------------------------------------------------------------
 # Interface extraction as an ordinary build edge.
 #
@@ -7756,24 +7892,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # sibling on disk) builds the producer from its own repo source at the
       # pinned revision — identical to develop mode from the consuming action's
       # perspective.
-      var producerRoot = ""
-      case producer.kind
-      of pbkDevelopOverride:
-        producerRoot = producer.localPathAbsolute
-      of pbkLockPinned:
-        let sibling = findSiblingProjectFile(selector, result.projectRoot)
-        if sibling.len > 0:
-          producerRoot = parentDir(sibling)
-        else:
-          # SC-6: no sibling checkout on disk — fetch the pinned revision from
-          # the producer's VCS and verify integrity (raises loudly on an
-          # unreachable revision / integrity mismatch; never a silent fallback).
-          producerRoot = fetchLockPinnedProducer(
-            producer.lockedDep, result.projectRoot)
-      of pbkOnDiskSibling:
-        continue
-      of pbkNotProducer:
-        continue
+      let producerRoot = producerSourceRoot(producer, selector,
+        result.projectRoot, fetchMissingPinnedSource = true)
       if producerRoot.len == 0 or
           not dirExists(extendedPath(producerRoot)):
         continue
@@ -7829,8 +7949,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # must never compile or run the producer's test suite.
         let producerIface = producerOutDirBase / "producer-interface.rbsz"
         let producerStub = producerOutDirBase / "producer-interface.nim"
-        var binDirs: seq[string] = @[]
-        var realizedBinaries: seq[string] = @[]
         var producerRuntimeIdentity = PathOnlyBuildIdentity()
         let producerArtifact =
           try:
@@ -7939,206 +8057,24 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           logSummary("cross-repo producer: consuming \"" & selector &
             "\" as a pure-Nim-source library — skipping producer sub-build " &
             "(no compiled artifact; src threaded via nimPathDirs).")
-        # Bind the producer's declared executable(s) to their output binaries
-        # by BASENAME (§4.2 point 2). The producer's
-        # ``executable <exp>: name: "<bin>"`` produces ``build/bin/<bin>``
-        # under the producer root; the bin dir spliced onto PATH is the parent
-        # of the realized binary. When the sub-build was skipped (pure-Nim
-        # library) there are no executables, so this loop is inert.
-        for exe in producerArtifact.projectInterface.publicExecutables:
-          let binName =
-            if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
-          if binName.len == 0:
-            continue
-          let realized = producerRootAbs / "build" / "bin" /
-            addFileExt(binName, ExeExt)
-          if fileExists(extendedPath(realized)):
-            let binDir = parentDir(realized)
-            if binDir notin binDirs:
-              binDirs.add(binDir)
-            if realized notin realizedBinaries:
-              realizedBinaries.add(realized)
-        # Cross-Repo-Source-Consumption SC-3 (§4.2 point 4, library channel) —
-        # extract the producer's declared ``library``'s producing edge, bound
-        # to the realized ``.so``/``.dylib``/``.dll`` by declared-output
-        # BASENAME (the same canonical basename rule SC-2 uses for the
-        # executable channel), and project the realized library's DIRECTORY
-        # onto the EXISTING aux channels: ``libDirs`` → ``LIBRARY_PATH`` +
-        # ``LD_LIBRARY_PATH``, ``includeDirs`` → ``CPATH`` (headers dir),
-        # ``pkgConfigDirs`` → ``PKG_CONFIG_PATH``, ``cmakePrefixDirs`` →
-        # ``CMAKE_PREFIX_PATH`` where the producer emits them. A NEW SOURCE
-        # feeding the SAME channels — no new channel is introduced
-        # (``repro_build_engine.nim:611-662,634-650``;
-        # ``repro_cli_support.nim`` ``mkToolIdentityResolver`` aux projection).
-        #
-        # Realized-library discovery: a producer's ``library <name>`` builds a
-        # ``lib<name>.{so,dylib,dll}`` (or ``<name>.{...}``) under the canonical
-        # ``build/lib`` output dir; a companion header lives under
-        # ``build/include``. We bind by basename over the declared library
-        # name(s), matching either the ``lib``-prefixed or bare form and any
-        # platform extension, so the realized file the producer's edge actually
-        # wrote is located regardless of the host's shared-library extension.
-        var aux = ProducerAuxPaths()
-        mergeProducerRuntimeIdentity(producerRuntimeIdentity, binDirs, aux)
-        var realizedLibraries: seq[string] = @[]
-        block libraryChannel:
-          let libOutDir = producerRootAbs / "build" / "lib"
-          let includeOutDir = producerRootAbs / "build" / "include"
-          let pkgConfigOutDir = producerRootAbs / "build" / "lib" / "pkgconfig"
-          if not dirExists(extendedPath(libOutDir)):
-            break libraryChannel
-          for lib in producerArtifact.projectInterface.publicLibraries:
-            if lib.name.len == 0:
-              continue
-            # A header-only library exports no linkable artifact; its headers
-            # (if any) are still projected onto CPATH below.
-            if lib.kind == lkHeaderOnly:
-              continue
-            # Match the realized file by basename over the declared library
-            # name: ``lib<name>.<ext>`` or ``<name>.<ext>`` for any extension.
-            let stem = lib.name
-            let libStem = "lib" & lib.name
-            for entryKind, entryPath in walkDir(extendedPath(libOutDir)):
-              if entryKind != pcFile:
-                continue
-              let tail = splitPath(entryPath).tail
-              let dotIdx = tail.find('.')
-              let base =
-                if dotIdx > 0: tail[0 ..< dotIdx] else: tail
-              if base == stem or base == libStem:
-                let realizedLib = libOutDir / tail
-                if realizedLib notin realizedLibraries:
-                  realizedLibraries.add(realizedLib)
-          if realizedLibraries.len > 0:
-            if libOutDir notin aux.libDirs:
-              aux.libDirs.add(libOutDir)
-            if dirExists(extendedPath(includeOutDir)) and
-                includeOutDir notin aux.includeDirs:
-              aux.includeDirs.add(includeOutDir)
-            if dirExists(extendedPath(pkgConfigOutDir)) and
-                pkgConfigOutDir notin aux.pkgConfigDirs:
-              aux.pkgConfigDirs.add(pkgConfigOutDir)
-        # Cross-Repo-Source-Consumption SC-11 (§4.2a.2) — the PARALLEL Nim
-        # language channel. When a consumed producer declares a ``library
-        # <name>`` and its resolved source root carries an importable Nim
-        # source tree, add that directory to ``aux.nimPathDirs`` so the SC-11
-        # resolver projection (below / ``mkToolIdentityResolver``) threads it
-        # onto the consumer's ``nim c --path:<dir>`` — the Nim analogue of the
-        # SC-3 ``includeDirs`` header-root discovery for C/C++. Discovery is by
-        # the producer's declared ``library`` name + its source-root
-        # convention: the producer's declared ``exportedPath`` (§4.2a.4) when
-        # set, else the ``"src"`` default, so a bare ``library nim_everywhere``
-        # exports ``<root>/src`` unchanged. Unlike the C/C++ library channel
-        # this needs NO realized ``.so`` — a pure Nim library is consumed from
-        # source directly — so it runs independently of the ``.so`` discovery
-        # above.
-        for lib in producerArtifact.projectInterface.publicLibraries:
-          if lib.name.len == 0:
-            continue
-          let exported =
-            if lib.exportedPath.len > 0: lib.exportedPath else: "src"
-          let nimSrcDir = producerRootAbs / exported
-          if dirExists(extendedPath(nimSrcDir)) and
-              nimSrcDir notin aux.nimPathDirs:
-            aux.nimPathDirs.add(nimSrcDir)
-        let haveLibChannel = aux.libDirs.len > 0 or aux.includeDirs.len > 0 or
-          aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0 or
-          aux.nimPathDirs.len > 0
-        if binDirs.len == 0 and not haveLibChannel:
+        if not recordProducerMaterialization(selector, producerRootAbs,
+            producerArtifact, producerRuntimeIdentity, producer):
           raise newException(OSError,
             "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
-            " declares no executable whose ``build/bin/<name>`` output " &
-            "materialized and no library whose ``build/lib/<name>`` output " &
-            "or Nim ``src/`` source root materialized; nothing to splice " &
-            "onto PATH or the aux channels.")
-        if binDirs.len > 0:
-          producerMaterializedBinDirs[selector] = binDirs
-        if haveLibChannel:
-          producerMaterializedAuxPaths[selector] = aux
+            " declares no materialized executable, library, or Nim source " &
+            "output to splice onto the consumer's tool channels.")
+        if producerMaterializedBinDirs.hasKey(selector):
+          logSummary("cross-repo producer: spliced \"" & selector &
+            "\" bin dir(s) into tool identities: " &
+            producerMaterializedBinDirs[selector].join(", "))
+        if producerMaterializedAuxPaths.hasKey(selector):
+          let aux = producerMaterializedAuxPaths[selector]
           logSummary("cross-repo producer: spliced \"" & selector &
             "\" library aux dir(s): libDirs=" & aux.libDirs.join(", ") &
             (if aux.includeDirs.len > 0: " includeDirs=" &
               aux.includeDirs.join(", ") else: "") &
             (if aux.nimPathDirs.len > 0: " nimPathDirs=" &
               aux.nimPathDirs.join(", ") else: ""))
-        # SC-2 deliverable #2 sub-clause — "the producer edge's action-hash
-        # folds into the consuming action's cache key" (§4.2 point 3). Compute
-        # the producer edge's ACTION-HASH as a content digest over the
-        # producer's realized build product: its declared-executable output
-        # binaries, bound by basename (the same basename binding that maps
-        # ``executable <exp>: name: "<bin>"`` onto ``build/bin/<bin>`` above),
-        # each folded together with the producer selector + declared-output
-        # name so the digest tracks WHICH binary changed as well as its bytes.
-        # ``foldProducerActionHashes`` (below, called after the consumer graph
-        # is lowered) folds this into every consumer action naming the producer
-        # via ``toolIdentityRefs``. A changed producer build product (rebuilt
-        # binary bytes) shifts this hash and therefore the consumer cache key;
-        # an unchanged producer leaves it stable. This is the build-product
-        # arm of invalidation (§4.3's last paragraph: "the producer's build
-        # product changed" via the action-hash); the SOURCE-content arm
-        # (``foldOverridesIntoFingerprint`` on the develop ``contentIdentity``)
-        # is SC-4.
-        # SC-3 folds the realized LIBRARY artifacts into the SAME action-hash
-        # (§4.2 point 3, library channel): a rebuilt ``.so``/``.dylib``/``.dll``
-        # shifts the folded hash and rebuilds the consumer exactly as a rebuilt
-        # executable does. The digest tracks WHICH artifact changed (basename)
-        # as well as its bytes, over both the executable and library products.
-        realizedBinaries.sort()
-        realizedLibraries.sort()
-        var actionHashPayload = "cross-repo-producer-action-hash.v1\x00" &
-          selector & "\x00"
-        for realized in realizedBinaries:
-          actionHashPayload.add(extractFilename(realized))
-          actionHashPayload.add('\x00')
-          actionHashPayload.add(fileContentDigest(realized))
-          actionHashPayload.add('\x00')
-        for realizedLib in realizedLibraries:
-          actionHashPayload.add("lib:")
-          actionHashPayload.add(extractFilename(realizedLib))
-          actionHashPayload.add('\x00')
-          actionHashPayload.add(fileContentDigest(realizedLib))
-          actionHashPayload.add('\x00')
-        var runtimeFingerprints: seq[string] = @[]
-        for actionIdentity in producerRuntimeIdentity.actionIdentities:
-          runtimeFingerprints.add(actionIdentity.packageSelector & "\x00" &
-            actionIdentity.executableName & "\x00" &
-            digestHex(actionIdentity.actionFingerprint))
-        runtimeFingerprints.sort()
-        for runtimeFingerprint in runtimeFingerprints:
-          actionHashPayload.add("runtime:")
-          actionHashPayload.add(runtimeFingerprint)
-          actionHashPayload.add('\x00')
-        producerActionHashes[selector] =
-          digestHex(blake3DomainDigest(actionHashPayload.bytesOf(),
-            hdActionFingerprint))
-        # Cross-Repo-Source-Consumption SC-4 (§4.3) — record the producer's
-        # SOURCE identity for the ``foldOverridesIntoFingerprint`` fold. In
-        # develop mode this is the ``rpbkOverride`` binding the SC-1 hook
-        # returned (its ``contentIdentity`` folds the sibling checkout's
-        # local-path root mtime, ``computeOverrideContentIdentity``,
-        # ``override_resolution.nim:235-263``); in lock-pinned mode it is the
-        # producer ``LockedDep``'s pinned ``revision`` + ``integrity`` projected
-        # onto the SAME fold framing (``lockPinnedSourceBinding``). This is the
-        # SOURCE-content arm that complements the build-PRODUCT
-        # ``producerActionHashes`` above: "the producer's source changed"
-        # (contentIdentity / pin) AND "the producer's build product changed"
-        # (action-hash) BOTH invalidate the consumer (§4.3 last paragraph).
-        case producer.kind
-        of pbkDevelopOverride:
-          producerSourceBindings[selector] = producer.overrideBinding
-        of pbkLockPinned:
-          producerSourceBindings[selector] =
-            lockPinnedSourceBinding(selector, producer.lockedDep)
-        of pbkOnDiskSibling:
-          discard
-        of pbkNotProducer:
-          discard
-        # The identity resolver consumes ``producerMaterializedBinDirs``
-        # explicitly. Do not mutate the process PATH here: doing so changes the
-        # pathSearchList and profile fingerprint of every unrelated tool.
-        if binDirs.len > 0:
-          logSummary("cross-repo producer: spliced \"" & selector &
-            "\" bin dir(s) into tool identities: " & binDirs.join(", "))
       finally:
         if producerBuildStack.len > 0 and
             producerBuildStack[^1] == producerRootAbs:
@@ -9914,7 +9850,9 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  forceRefresh = false;
                                  mergeExtensions = true;
                                  includeDevEnvOnlyProvider = false;
-                                 lowerGraph = true): BuildGraphInspection
+                                 lowerGraph = true;
+                                 selectedActionOverride = ""):
+                                   BuildGraphInspection
 
 proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
                                extraPools: openArray[BuildPool] = []):
@@ -16780,6 +16718,55 @@ proc effectiveProviderCompileRunQuotaBypass*(explicitBypass: bool): bool =
   ## environment fallback used by nested invocations.
   explicitBypass or runQuotaBypassedByEnv()
 
+proc recordMaterializedProducersForInspection(
+    artifact: ProjectInterfaceArtifact; projectRoot, outDir,
+    publicCliPath: string; mode: ToolProvisioningMode) =
+  ## Graph inspection does not execute producer build edges, but it must bind
+  ## producer outputs that a prior build has already materialized. Otherwise a
+  ## declared cross-repository executable falls through to the package catalog
+  ## and reports a misleading missing source-recipe error.
+  for useDef in artifact.projectInterface.toolUses:
+    let selector = useDef.packageSelector
+    if selector.len == 0 or producerMaterializedBinDirs.hasKey(selector) or
+        producerMaterializedAuxPaths.hasKey(selector):
+      continue
+    let binding = resolveProducerBinding(selector, projectRoot)
+    if not binding.declaresProducerEdge:
+      continue
+    let sourceRoot = producerSourceRoot(binding, selector, projectRoot,
+      fetchMissingPinnedSource = true)
+    if sourceRoot.len == 0 or not dirExists(extendedPath(sourceRoot)):
+      raise newException(IOError,
+        "cross-repo producer \"" & selector &
+        "\" has no source checkout available for graph inspection")
+    let sourceRootAbs = absolutePath(sourceRoot)
+    let projectFile = resolveProjectFile(sourceRootAbs).path
+    let producerOutDir = outDir / "cross-repo-producers" /
+      selectorFilesystemKey(selector)
+    createDir(extendedPath(producerOutDir))
+    var inspectionStats: BuildStats
+    let producerArtifact = extractInterfaceEdge(projectFile,
+      producerOutDir / "producer-interface.rbsz",
+      producerOutDir / "producer-interface.nim", reprobuildLibraryWorkDir(),
+      producerOutDir / "producer-iface-work",
+      projectRootForModule(projectFile), publicCliPath,
+      producerOutDir / "build-engine-cache", inspectionStats,
+      requireStub = false)
+    var runtimeIdentity = PathOnlyBuildIdentity()
+    if producerArtifact.projectInterface.runtimeToolUses.len > 0:
+      var runtimeArtifact = producerArtifact
+      runtimeArtifact.projectInterface.toolUses =
+        producerArtifact.projectInterface.runtimeToolUses
+      runtimeArtifact.projectInterface.runtimeToolUses = @[]
+      runtimeIdentity = toolBuildIdentity(runtimeArtifact, mode,
+        storeRoot = producerOutDir / "runtime-tool-store")
+    if not recordProducerMaterialization(selector, sourceRootAbs,
+        producerArtifact, runtimeIdentity, binding):
+      raise newException(IOError,
+        "cross-repo producer \"" & selector & "\" at " & sourceRootAbs &
+        " is not materialized; run `repro build` for the consuming target " &
+        "before inspecting its resolved graph")
+
 proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  publicCliPath: string;
                                  selectDefaultAction = false;
@@ -16787,7 +16774,9 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  forceRefresh = false;
                                  mergeExtensions = true;
                                  includeDevEnvOnlyProvider = false;
-                                 lowerGraph: bool): BuildGraphInspection =
+                                 lowerGraph: bool;
+                                 selectedActionOverride: string):
+                                   BuildGraphInspection =
   ## ``mergeExtensions`` (MO-6) folds any present ``projectExtension``
   ## sibling's fragments into this project's snapshot before lowering /
   ## target-export aggregation. It is set to ``false`` when this proc is
@@ -16834,6 +16823,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     projectName: artifact.projectInterface.projectName,
     interfaceFingerprint: artifact.interfaceFingerprint)
   if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
+    recordMaterializedProducersForInspection(artifact, projectRoot, outDir,
+      publicCliPath, effectiveMode)
     let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     identity = resolved.identity
     result.toolIdentityPath = resolved.identityPath
@@ -16962,7 +16953,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   if not lowerGraph:
     return
 
-  var selectedActionId = parsedTarget.selectedActionId
+  var selectedActionId =
+    if selectedActionOverride.len > 0:
+      selectedActionOverride
+    else:
+      parsedTarget.selectedActionId
   if selectDefaultAction and selectedActionId.len == 0:
     selectedActionId = result.defaultActionId
   result.selectedActionId = selectedActionId
@@ -18753,8 +18748,12 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
   var autoRunQuota = startAutoRunQuotaIfNeeded(false)
   try:
     let info = prepareBuildGraphInspection(target, mode, publicCliPath,
-      selectDefaultAction = targetWasOmitted or nameSelector.len > 0,
-      workRoot = workRoot)
+      # Preserve the project anchor while selecting the named target as the
+      # lowering root. This includes explicitly requested test/lint/bench
+      # closures that an unselected graph intentionally omits.
+      selectDefaultAction = targetWasOmitted,
+      workRoot = workRoot,
+      selectedActionOverride = nameSelector)
     if nameSelector.len > 0:
       var actionIds: seq[string] = @[]
       for action in info.actions:
