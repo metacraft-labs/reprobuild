@@ -6070,6 +6070,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim",
+    binary: "build/test-bin/t_bearssl_source_resolution_rejects_stale_layout",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_b0_develop_mode_uses_local_source.nim",
     binary: "build/test-bin/t_b0_develop_mode_uses_local_source",
     defines: @[],

@@ -783,6 +783,7 @@ tests/integration/t_b4_repro_test_alias_covers_all.nim	nim	1
 tests/integration/t_b5_bootstrap_idempotent.nim	nim	2
 tests/integration/t_b5_full_suite_through_repro_test.nim	nim	2
 tests/integration/t_b5_repro_test_replaces_run_tests_sh.nim	nim	2
+tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	nim	5
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	14

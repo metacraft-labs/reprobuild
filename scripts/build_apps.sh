@@ -11,12 +11,18 @@ mkdir -p build/bin build/lib build/nimcache
 # shellcheck source=scripts/source_paths.sh
 source scripts/source_paths.sh
 
-if [ -z "${BEARSSL_SRC:-}" ]; then
-  bearssl_store_src="$(find /nix/store -maxdepth 1 -type d -name '*nim-bearssl-*' -print -quit 2>/dev/null || true)"
-  if [ -n "${bearssl_store_src}" ] && [ -f "${bearssl_store_src}/bearssl.nim" ]; then
-    export BEARSSL_SRC="${bearssl_store_src}"
-  fi
-fi
+# Peer-Cache-BearSSL: resolve nim-bearssl the same way every other sibling
+# source is resolved — explicit env value, then a local checkout, then the dev
+# shell's pinned input — and fail loudly when none of them carries the module
+# tree the build imports.
+#
+# This replaced a scan of /nix/store for anything matching `*nim-bearssl-*`.
+# That scan took the FIRST match and accepted it on the strength of a root file
+# every revision has, so on a host where some unrelated derivation had left an
+# older nim-bearssl behind it silently selected that one and the build failed
+# on a missing module, three layers down from the wrong path that caused it.
+bearssl_src="$(resolve_bearssl_src)"
+export BEARSSL_SRC="${bearssl_src}"
 
 nim_mode_flags=()
 case "${REPROBUILD_BUILD_MODE:-debug}" in
