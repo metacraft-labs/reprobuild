@@ -475,10 +475,13 @@ type
       ## second one must resolve exactly as it did before PMC-1.
     declaredPlatforms*: seq[PlatformConstraintDef]
       ## PMC-1: the declared coordinates, in source order. Empty for the ~262
-      ## stdlib entries that have not been converted yet;
-      ## ``inferredPackagePlatforms`` in ``runtime_core`` derives the
-      ## "wherever an arm exists" default for those, which is what PMC-5's
-      ## catalog-wide lint consumes.
+      ## stdlib entries that have not been converted yet, and nothing derives
+      ## a default for those — an undeclared package resolves exactly as it
+      ## did before PMC-1. PMC-1 did ship an "infer from whichever arms
+      ## exist" helper here, but it had no caller and could not see the
+      ## harvested ``VersionedProvisioning`` catalogs where most of the
+      ## platform truth lives, so it was removed rather than left as a trap
+      ## for PMC-5's catalog-wide lint to fall into.
     platformsMessage*: string
       ## PMC-1: optional author-supplied reason, Spack's ``msg=``. Reproduced
       ## verbatim in the unavailable-package diagnostic. The whole point is

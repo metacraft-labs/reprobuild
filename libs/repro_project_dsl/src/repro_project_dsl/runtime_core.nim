@@ -489,56 +489,6 @@ proc platformConstraintMatchesHost*(constraint: PlatformConstraintDef;
     hostOsNorm.len == 0 or hostOsNorm == "any" or osNorm == hostOsNorm
   cpuOk and osOk
 
-proc inferredPackagePlatforms*(pkg: PackageDef): seq[PlatformConstraintDef] =
-  ## PMC-1's DEFAULT: "wherever an arm exists".
-  ##
-  ## This reproduces, as an explicit value, the rule that was previously only
-  ## implicit — a package's availability was whatever set of provisioning arms
-  ## happened to be written. A ``nixPackage`` arm carries no platform of its
-  ## own and therefore contributes ``any``; a ``scoopApp`` arm is Windows by
-  ## construction; a ``tarball`` arm contributes its own ``cpu`` / ``os``
-  ## (empty = any). A package with no arms at all infers ``any``.
-  ##
-  ## It is NOT what the resolver gates on — see
-  ## ``PackageAvailability.declared``. An inference is a good default for a
-  ## lint and a bad basis for a refusal.
-  # The stored arm fields hold emittable SOURCE (see ``exprCode``): a literal
-  # arrives quoted, an expression arrives as its Nim text. Only a literal is
-  # knowable here; anything else widens to ``any``, which is the honest answer
-  # for a value this layer cannot evaluate.
-  proc literalOf(code: string): string =
-    if code.len >= 2 and code[0] == '"' and code[^1] == '"':
-      try:
-        result = code.unescape()
-      except CatchableError:
-        result = ""
-    else:
-      result = ""
-  proc addPlatform(res: var seq[PlatformConstraintDef]; cpu, os: string) =
-    let c = if cpu.len == 0: "any" else: cpu
-    let o = if os.len == 0: "any" else: os
-    for existing in res:
-      if existing.cpu == c and existing.os == o:
-        return
-    res.add(PlatformConstraintDef(cpu: c, os: o))
-  for _ in pkg.nixProvisioning:
-    addPlatform(result, "any", "any")
-  for _ in pkg.scoopProvisioning:
-    addPlatform(result, "any", "windows")
-  for arm in pkg.tarballProvisioning:
-    addPlatform(result,
-      canonicalPlatformCpuToken(literalOf(arm.cpu)),
-      canonicalPlatformOsToken(literalOf(arm.os)))
-  if result.len == 0:
-    addPlatform(result, "any", "any")
-
-proc effectivePackagePlatforms*(pkg: PackageDef): seq[PlatformConstraintDef] =
-  ## The declared set when the package declared one, the inferred set
-  ## otherwise. The single place that spells out "defaults to wherever an arm
-  ## exists".
-  if pkg.platformsDeclared: pkg.declaredPlatforms
-  else: inferredPackagePlatforms(pkg)
-
 proc declaredPackagePlatforms*(packageName: string):
     tuple[declared: bool; platforms: seq[PlatformConstraintDef];
           message: string] =

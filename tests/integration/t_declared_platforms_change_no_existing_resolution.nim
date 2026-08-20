@@ -40,22 +40,29 @@
 ##      nix-only entry is the case most at risk from an inferred default,
 ##      since it declares no platform anywhere.
 ##
-## Falsifiable: change the resolver to gate on ``inferredPackagePlatforms``
-## instead of on an explicit declaration and assertion (3) trips —
-## ``availability.declared`` becomes true for every registered package.
+## Falsifiable: change the resolver to gate on an inference over whichever
+## provisioning arms exist, instead of on an explicit declaration, and
+## assertion (3) trips — ``availability.declared`` becomes true for every
+## registered package.
 ##
-## MEASURED, not assumed: that mutation was applied (``declaredPackagePlatforms``
-## rewritten to return ``effectivePackagePlatforms`` with ``declared = true``)
-## and only (3) tripped. (4) and (5) held, and the reason is worth recording
-## because it is an argument about the inference itself: ``innounp`` has NO DSL
-## provisioning arms at all — its Windows-only-ness lives in a harvested
-## ``VersionedProvisioning`` catalog, which ``inferredPackagePlatforms`` does not
-## read — and ``atk``'s single ``nixPackage`` arm contributes ``any``. So both
-## infer "available everywhere" and the mutated gate stays silent for them. The
-## inference is blind to exactly the shape the milestone's own findings cite
-## (``packages/innounp.nim:98``), which is a second, independent reason not to
-## gate resolution on it; assertion (3) is therefore the load-bearing one, and
-## (4)/(5) pin the failure MESSAGES rather than the gate.
+## MEASURED, not assumed: that mutation was applied against PMC-1's
+## ``inferredPackagePlatforms`` / ``effectivePackagePlatforms`` helpers
+## (``declaredPackagePlatforms`` rewritten to return the effective set with
+## ``declared = true``) and only (3) tripped. (4) and (5) held, and the reason
+## is worth recording because it is an argument about the inference itself:
+## ``innounp`` has NO DSL provisioning arms at all — its Windows-only-ness
+## lives in a harvested ``VersionedProvisioning`` catalog, which an
+## arm-walking inference does not read — and ``atk``'s single ``nixPackage``
+## arm contributes ``any``. So both infer "available everywhere" and the
+## mutated gate stays silent for them. The inference is blind to exactly the
+## shape the milestone's own findings cite (``packages/innounp.nim:98``),
+## which is a second, independent reason not to gate resolution on it;
+## assertion (3) is therefore the load-bearing one, and (4)/(5) pin the
+## failure MESSAGES rather than the gate.
+##
+## (Those two helpers have since been deleted — no caller, no coverage, and
+## the blindness recorded above. The measurement stands; a future PMC-5 lint
+## should be written against a source that can see the harvested catalogs.)
 ##
 ## Hermetic: synthetic host targets throughout; the Scoop probe is pointed at
 ## a nonexistent root; no network, no PATH dependence (the chains under test

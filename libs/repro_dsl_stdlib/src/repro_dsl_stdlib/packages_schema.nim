@@ -197,11 +197,11 @@ type
     ##
     ## ``declared`` is the load-bearing field. It is ``true`` ONLY when
     ## the package wrote an explicit ``platforms:`` block. When it is
-    ## ``false`` the ``platforms`` seq still carries the set INFERRED
-    ## from whichever provisioning arms happen to exist (the status quo
-    ## before PMC-1: availability was never stated, only inferred), but
-    ## the resolver treats an undeclared package exactly as it did
-    ## before — it does NOT gate on an inference. Gating on a guess
+    ## ``false`` the ``platforms`` seq is EMPTY and carries no inferred
+    ## fallback: the resolver treats an undeclared package exactly as it
+    ## did before PMC-1 — availability was never stated, only implied by
+    ## whichever provisioning arms happened to exist, and that implication
+    ## stays where it was, in the adapter chain. Gating on a guess
     ## would change how existing catalog entries resolve, which PMC-1
     ## explicitly forbids; PMC-5 converts the inferences into
     ## declarations one entry at a time, and each conversion is what
