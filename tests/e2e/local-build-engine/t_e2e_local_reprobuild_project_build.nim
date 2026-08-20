@@ -1523,8 +1523,20 @@ suite "e2e_local_reprobuild_project_build":
 
       let progressOutput = buildCurrentProject(reproBin, projectRoot,
         getEnv("PATH"), extraArgs = ["--progress=bar-line"])
-      check not progressOutput.contains(
+      # Compiles-Are-Normal-Edges.md: the provider compile is an ordinary
+      # engine edge, so a warm build SCHEDULES it and the engine answers it
+      # from the action cache. It used to be absent from this log entirely,
+      # because the hand-written freshness gate returned before the engine was
+      # ever entered — and that gate could not see a dependency the compile
+      # acquired without an import statement. The warm-build property to hold
+      # on to is "no compile ran", i.e. ``launched=false``.
+      check progressOutput.contains(
         "providerCompileAction: __repro_provider_compile")
+      check progressOutput.contains(
+        "providerCompileAction: __repro_provider_compile status=")
+      check not progressOutput.contains(
+        "providerCompileAction: __repro_provider_compile status=asSucceeded" &
+          " launched=true")
       # Progress format per docs/progress.md (May 2026 refresh, commit d3fc445):
       # overlay bar `[####...####]` followed by `checked=N/M`. The legacy
       # `repro [` prefix and `100%` suffix were dropped; `checked=4/4` is the
@@ -1567,7 +1579,11 @@ suite "e2e_local_reprobuild_project_build":
       check not statsReport{"stats"}{"metrics"}.getElems().anyIt(
         it{"name"}.getStr() == "repro runquota probe")
       let providerCompileActions = statsReport{"providerCompileActions"}.getElems()
-      check providerCompileActions.len == 0
+      check providerCompileActions.len == 1
+      # Guarded: a failed length check must not abort the whole binary with an
+      # IndexDefect and take every later test in the suite with it.
+      if providerCompileActions.len > 0:
+        check not providerCompileActions[0]{"launched"}.getBool()
 
     test "graph why and debug artifact inspect the materialized build graph":
       let repoRoot = getCurrentDir()
@@ -1679,10 +1695,22 @@ suite "e2e_local_reprobuild_project_build":
 
       let second = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
         extraArgs = providerOnlyArgs)
-      check not second.contains(
+      # The "fast path" is now the engine's action cache rather than a
+      # hand-written freshness gate in front of it, so the edge IS scheduled
+      # and IS reported — it just does not launch a compile. See
+      # Compiles-Are-Normal-Edges.md.
+      check second.contains(
         "providerCompileAction: __repro_provider_compile")
+      check not second.contains(
+        "providerCompileAction: __repro_provider_compile status=asSucceeded" &
+          " launched=true")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      check secondReport{"providerCompileActions"}.getElems().len == 0
+      let secondProviderActions =
+        secondReport{"providerCompileActions"}.getElems()
+      check secondProviderActions.len == 1
+      # Guarded for the same reason as the sibling assertion above.
+      if secondProviderActions.len > 0:
+        check not secondProviderActions[0]{"launched"}.getBool()
 
       writeFile(projectRoot / "provider_salt.nim",
         "const providerSalt* = \"two\"\n")

@@ -4846,6 +4846,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/e2e/dev-env/t_e2e_dev_env_provider_compile_edge.nim",
+    binary: "build/test-bin/t_e2e_dev_env_provider_compile_edge",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/e2e/dev-env/t_e2e_develop_overrides_activity.nim",
     binary: "build/test-bin/t_e2e_develop_overrides_activity",
     defines: @[],

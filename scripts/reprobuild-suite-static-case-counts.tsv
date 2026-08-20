@@ -612,6 +612,7 @@ tests/e2e/dev-env/t_e2e_dev_env_export_nushell.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_export_pwsh.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_export_zsh.nim	nim	3
 tests/e2e/dev-env/t_e2e_dev_env_performance_gates.nim	nim	2
+tests/e2e/dev-env/t_e2e_dev_env_provider_compile_edge.nim	nim	2
 tests/e2e/dev-env/t_e2e_develop_overrides_activity.nim	nim	2
 tests/e2e/dev-env/t_e2e_hooks_shell_direnv.nim	nim	3
 tests/e2e/dev-env/t_e2e_native_shell_hooks.nim	nim	3

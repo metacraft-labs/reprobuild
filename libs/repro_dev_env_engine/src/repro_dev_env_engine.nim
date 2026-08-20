@@ -113,11 +113,15 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   action("__repro_provider_compile", command,
     cwd = compilerCwd,
     inputs = inputs,
-    outputs = @[plan.outputBinaryPath, artifactPath],
+    outputs = providerCompileOutputs(artifactPath, plan.outputBinaryPath),
     commandStatsId = "repro provider compile edge",
-    cacheable = true,
+    # Same monitor-injectability gate the CLI edge uses: on Linux a static-ELF
+    # compiler cannot be LD_PRELOAD-injected, so its evidence is incomplete and
+    # the edge must not publish. This was hard-coded ``true`` here.
+    cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
-    dependencyPolicy = automaticMonitorGatheringPolicy())
+    dependencyPolicy = automaticMonitorGatheringPolicy(
+      providerCompileIgnoredInputPrefixes(scratchDir)))
 
 proc providerCompileCliPath(config: DevEnvEdgeConfig): string =
   ## Dev-env tests may call this library from a test binary, so
@@ -453,16 +457,16 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       provisioningReceipts.add(receiptFile)
 
   var provider: ProviderCompileArtifact
-  let cachedProvider = readFreshProviderCompileArtifact(
+  let providerPlan = providerCompilePlan(active.modulePath,
+    result.providerBinaryPath, interfaceArtifact.interfaceFingerprint, workDir,
+    compileScratchDir)
+  let cachedProvider = staticFreshnessFallbackProvider(providerPlan,
     result.providerArtifactPath, active.modulePath, result.providerBinaryPath,
     interfaceArtifact.interfaceFingerprint, workDir)
   if cachedProvider.isSome:
     provider = cachedProvider.get()
     result.stats.providerBuildSkippedFresh = true
   else:
-    let providerPlan = providerCompilePlan(active.modulePath,
-      result.providerBinaryPath, interfaceArtifact.interfaceFingerprint, workDir,
-      compileScratchDir)
     invalidateStaleProviderCompileArtifact(providerPlan,
       result.providerArtifactPath)
     var providerAction = providerCompileBuildAction(providerPlan,
@@ -483,6 +487,16 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       result.providerCompileAction.launched
     result.stats.providerBuildCacheHit =
       result.providerCompileAction.status == asCacheHit
+    # ``providerBuildSkippedFresh`` used to mean "the hand-written freshness
+    # gate said the artifact was fresh, so we never entered the engine". With
+    # the gate gone it is re-derived from the engine's own decision: the edge
+    # was scheduled and the engine decided not to launch a compile, either by
+    # restoring the outputs from the CAS (``asCacheHit``) or by accepting the
+    # already-present outputs against a revalidated action-cache record
+    # (``asUpToDate``, which is what ``rebuildMissingOutputsOnCacheHit`` turns
+    # a hit into when the outputs are still on disk).
+    result.stats.providerBuildSkippedFresh =
+      result.providerCompileAction.status in {asCacheHit, asUpToDate}
     if result.providerCompileResult.hasFailedActions():
       raiseDevEnvEdge(providerCompileFailure(result.providerCompileResult))
     if not fileExists(extendedPath(result.providerArtifactPath)):

@@ -4279,87 +4279,6 @@ proc hasFailedActions(buildResult: BuildRunResult): bool =
     if item.status in {asFailed, asBlocked}:
       return true
 
-when defined(linux):
-  proc readU16Le(bytes: string; offset: int): uint16 =
-    if offset < 0 or offset + 2 > bytes.len:
-      return 0'u16
-    uint16(ord(bytes[offset])) or
-      (uint16(ord(bytes[offset + 1])) shl 8)
-
-  proc readU32Le(bytes: string; offset: int): uint32 =
-    if offset < 0 or offset + 4 > bytes.len:
-      return 0'u32
-    uint32(ord(bytes[offset])) or
-      (uint32(ord(bytes[offset + 1])) shl 8) or
-      (uint32(ord(bytes[offset + 2])) shl 16) or
-      (uint32(ord(bytes[offset + 3])) shl 24)
-
-  proc readU64Le(bytes: string; offset: int): uint64 =
-    if offset < 0 or offset + 8 > bytes.len:
-      return 0'u64
-    result = 0'u64
-    for i in 0 ..< 8:
-      result = result or (uint64(ord(bytes[offset + i])) shl (8 * i))
-
-  proc elfHasProgramInterpreter(path: string): bool =
-    ## True for ELF files that go through the dynamic loader. Linux io-mon uses
-    ## LD_PRELOAD, so a static ELF provider compiler cannot load the shim after
-    ## exec and must not make a cacheable monitor-completeness claim.
-    let raw = readFile(extendedPath(path))
-    if raw.len < 52:
-      return false
-    if raw[0] != char(0x7f) or raw[1] != 'E' or raw[2] != 'L' or raw[3] != 'F':
-      return false
-    if ord(raw[5]) != 1: # little-endian ELF
-      return false
-    const PtInterp = 3'u32
-    let elfClass = ord(raw[4])
-    var phoff: int
-    var phentsize: int
-    var phnum: int
-    case elfClass
-    of 1: # ELF32
-      phoff = int(readU32Le(raw, 28))
-      phentsize = int(readU16Le(raw, 42))
-      phnum = int(readU16Le(raw, 44))
-    of 2: # ELF64
-      if raw.len < 64:
-        return false
-      let phoff64 = readU64Le(raw, 32)
-      if phoff64 > uint64(int.high):
-        return false
-      phoff = int(phoff64)
-      phentsize = int(readU16Le(raw, 54))
-      phnum = int(readU16Le(raw, 56))
-    else:
-      return false
-    if phoff <= 0 or phentsize < 4 or phnum <= 0:
-      return false
-    for i in 0 ..< phnum:
-      let entry = phoff + i * phentsize
-      if entry < 0 or entry + 4 > raw.len:
-        return false
-      if readU32Le(raw, entry) == PtInterp:
-        return true
-    false
-
-  proc linuxElfWithoutProgramInterpreter(path: string): bool =
-    try:
-      let raw = readFile(extendedPath(path))
-      if raw.len < 4 or raw[0] != char(0x7f) or raw[1] != 'E' or
-          raw[2] != 'L' or raw[3] != 'F':
-        return false
-      not elfHasProgramInterpreter(path)
-    except CatchableError:
-      false
-
-proc providerCompileCacheable(plan: ProviderCompilePlan): bool =
-  when defined(linux):
-    if plan.compilerCommand.len > 0 and
-        linuxElfWithoutProgramInterpreter(plan.compilerCommand[0]):
-      return false
-  true
-
 proc providerCompileBuildAction(plan: ProviderCompilePlan;
                                 modulePath, interfacePath, artifactPath,
                                 helperCliPath, workDir: string;
@@ -4396,11 +4315,12 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   action("__repro_provider_compile", command,
     cwd = compilerCwd,
     inputs = inputs,
-    outputs = @[plan.outputBinaryPath, artifactPath],
+    outputs = providerCompileOutputs(artifactPath, plan.outputBinaryPath),
     commandStatsId = "repro provider compile edge",
     cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
-    dependencyPolicy = automaticMonitorGatheringPolicy())
+    dependencyPolicy = automaticMonitorGatheringPolicy(
+      providerCompileIgnoredInputPrefixes(scratchDir)))
 
 proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
                                             artifactPath: string) =
@@ -8242,18 +8162,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let providerCompileStart = statStart(statsEnabled)
     var providerCompileResult: BuildRunResult
     var provider: ProviderCompileArtifact
+    let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
+      artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
     let cachedProvider =
       if forceRebuild and not dryRun:
         none(ProviderCompileArtifact)
       else:
-        readFreshProviderCompileArtifact(providerArtifactPath,
+        staticFreshnessFallbackProvider(providerPlan, providerArtifactPath,
           modulePath, providerBinaryPath, artifact.interfaceFingerprint,
           compileWorkDir)
     if cachedProvider.isSome:
       provider = cachedProvider.get()
     else:
-      let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
-        artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
       invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
       let providerCompileAction = providerCompileBuildAction(providerPlan,
         modulePath, interfacePath, providerArtifactPath,
@@ -8847,8 +8767,14 @@ proc runProviderCompileHelper(args: openArray[string]): int =
       return 2
   try:
     let interfaceArtifact = readInterfaceArtifact(interfacePath)
+    # ``useFreshnessCache = false``: reaching this process at all means the
+    # engine already decided the edge must run, from monitored evidence that
+    # sees more than the recipe's import closure. Re-asking the narrower
+    # text-closure key here would veto that decision and re-publish the stale
+    # binary the edge was re-run to replace.
     discard compileProviderBinary(modulePath, outputPath,
-      interfaceArtifact.interfaceFingerprint, artifactPath, workDir, scratchDir)
+      interfaceArtifact.interfaceFingerprint, artifactPath, workDir,
+      scratchDir, useFreshnessCache = false)
     return 0
   except CatchableError as err:
     stderr.writeLine("repro provider compile: error: " & err.msg)
@@ -16788,19 +16714,19 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   result.providerCompileArtifactPath = providerArtifactPath
 
   var provider: ProviderCompileArtifact
+  let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
+    artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
   let cachedProvider =
     if forceRefresh:
       none(ProviderCompileArtifact)
     else:
-      readFreshProviderCompileArtifact(providerArtifactPath,
+      staticFreshnessFallbackProvider(providerPlan, providerArtifactPath,
         modulePath, providerBinaryPath, artifact.interfaceFingerprint,
         compileWorkDir)
   if cachedProvider.isSome:
     provider = cachedProvider.get()
     result.providerCompileCacheHit = true
   else:
-    let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
-      artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
     let providerCompileAction = providerCompileBuildAction(providerPlan,
       modulePath, interfacePath, providerArtifactPath,
@@ -16832,6 +16758,14 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       providerCompileConfig)
     if providerCompileResult.hasFailedActions():
       raise newException(OSError, providerCompileFailure(providerCompileResult))
+    # Re-derived from the engine's own decision now that the hand-written
+    # freshness gate is gone: the edge was scheduled, and the engine either
+    # restored its outputs from the CAS (``asCacheHit``) or accepted the
+    # already-present outputs against a revalidated action-cache record
+    # (``asUpToDate``). Either way no compile ran.
+    for item in providerCompileResult.results:
+      if item.id == providerCompileAction.id:
+        result.providerCompileCacheHit = item.status in {asCacheHit, asUpToDate}
     if not fileExists(extendedPath(providerArtifactPath)):
       raise newException(IOError,
         "provider compile edge did not write artifact: " & providerArtifactPath)
@@ -16983,14 +16917,15 @@ proc refreshRecipeProviderSnapshot(target: string;
   let providerBinaryPath = outDir / "provider" / "project-provider"
   let providerArtifactPath = outDir / "provider-compile.rbsz"
   var provider: ProviderCompileArtifact
+  let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
+    artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
   let cachedProvider =
-    readFreshProviderCompileArtifact(providerArtifactPath,
-      modulePath, providerBinaryPath, artifact.interfaceFingerprint)
+    staticFreshnessFallbackProvider(providerPlan, providerArtifactPath,
+      modulePath, providerBinaryPath, artifact.interfaceFingerprint,
+      compileWorkDir)
   if cachedProvider.isSome:
     provider = cachedProvider.get()
   else:
-    let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
-      artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
     let providerCompileAction = providerCompileBuildAction(providerPlan,
       modulePath, interfacePath, providerArtifactPath,

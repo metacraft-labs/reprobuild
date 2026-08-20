@@ -4655,6 +4655,151 @@ proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
   else:
     outputBinaryPath
 
+proc providerCompileNimcacheRoot*(): string =
+  ## Root of the SHARED provider nimcache (`providerCompileCommand` anchors
+  ## `--nimcache:` under it). Exported so the provider-compile edge can declare
+  ## it as an ignored input prefix — see `providerCompileIgnoredInputPrefixes`.
+  getTempDir() / "repro-nimcache-provider"
+
+proc providerCompileIgnoredInputPrefixes*(scratchDir = ""): seq[string] =
+  ## Prefixes the provider-compile edge's monitor must NOT record as inputs.
+  ##
+  ## The compile reads back what it just wrote into its own derived state: the
+  ## Nim incremental cache (`<temp>/repro-nimcache-provider/<key>`) and the
+  ## per-recipe scratch tree. Recording those as inputs is wrong twice over:
+  ##
+  ##   * the nimcache is SHARED by key across recipes and across `repro`
+  ##     sessions on purpose (cross-recipe `.o` reuse), so any OTHER provider
+  ##     compile that lands in the same directory rewrites files this edge
+  ##     recorded — and a warm build that changed nothing then misses its cache
+  ##     nondeterministically, depending only on what else ran;
+  ##   * the scratch tree contains freshly created directories that do not even
+  ##     exist on the next run.
+  ##
+  ## Everything here is machine-local derived state. The real inputs — the
+  ## recipe, the reprobuild libs, the toolchain, the config files — live
+  ## elsewhere and stay recorded. This mirrors the identical treatment the
+  ## interface-extraction edge gives its own scratch (`extractInterfaceEdge`).
+  result = @[absolutePath(providerCompileNimcacheRoot())]
+  if scratchDir.len > 0:
+    result.add(absolutePath(scratchDir))
+
+proc providerCompileOutputs*(artifactPath, outputBinaryPath: string):
+    seq[string] =
+  ## Every file one provider compile writes and that a later run reads back —
+  ## the provider binary, the compile artifact, and the freshness sidecar
+  ## (``<artifact>.inputs``, written by ``writeProviderFreshnessCacheRecord``).
+  ##
+  ## All three must be DECLARED outputs of the provider-compile edge, for the
+  ## same reason ``interfaceExtractionOutputs`` lists all four of the
+  ## extraction's: an action-cache hit restores exactly the declared set, so
+  ## declaring only the binary and the artifact would leave the sidecar
+  ## absent. The in-process freshness probe would then miss and every direct
+  ## (non-edge) caller would re-compile — a silent loss of the cache rather
+  ## than an error.
+  result = @[normalizedProviderOutputPath(outputBinaryPath), artifactPath]
+  result.add(providerFreshnessCachePath(artifactPath))
+
+when defined(linux):
+  # Linux io-mon injects its shim with ``LD_PRELOAD``. A statically linked ELF
+  # never consults the dynamic loader, so the shim cannot be loaded into it and
+  # its reads are unobservable. An edge whose compiler is such a binary must
+  # not make a monitor-completeness claim, hence must not be cacheable.
+  #
+  # This lives here rather than in ``repro_cli_support`` because BOTH edge
+  # constructors (``repro_cli_support`` and ``repro_dev_env_engine``) need the
+  # same answer; the dev-env one previously hard-coded ``cacheable = true``
+  # and would have published an incomplete-evidence entry in exactly this
+  # configuration.
+  proc elfU16At(bytes: string; offset: int): uint16 =
+    if offset < 0 or offset + 2 > bytes.len:
+      return 0'u16
+    uint16(ord(bytes[offset])) or
+      (uint16(ord(bytes[offset + 1])) shl 8)
+
+  proc elfU32At(bytes: string; offset: int): uint32 =
+    if offset < 0 or offset + 4 > bytes.len:
+      return 0'u32
+    uint32(ord(bytes[offset])) or
+      (uint32(ord(bytes[offset + 1])) shl 8) or
+      (uint32(ord(bytes[offset + 2])) shl 16) or
+      (uint32(ord(bytes[offset + 3])) shl 24)
+
+  proc elfU64At(bytes: string; offset: int): uint64 =
+    if offset < 0 or offset + 8 > bytes.len:
+      return 0'u64
+    result = 0'u64
+    for i in 0 ..< 8:
+      result = result or (uint64(ord(bytes[offset + i])) shl (8 * i))
+
+  proc elfHasProgramInterpreter(path: string): bool =
+    ## True for ELF files that go through the dynamic loader. Linux io-mon uses
+    ## LD_PRELOAD, so a static ELF provider compiler cannot load the shim after
+    ## exec and must not make a cacheable monitor-completeness claim.
+    let raw = readFile(extendedPath(path))
+    if raw.len < 52:
+      return false
+    if raw[0] != char(0x7f) or raw[1] != 'E' or raw[2] != 'L' or raw[3] != 'F':
+      return false
+    if ord(raw[5]) != 1: # little-endian ELF
+      return false
+    const PtInterp = 3'u32
+    let elfClass = ord(raw[4])
+    var phoff: int
+    var phentsize: int
+    var phnum: int
+    case elfClass
+    of 1: # ELF32
+      phoff = int(elfU32At(raw, 28))
+      phentsize = int(elfU16At(raw, 42))
+      phnum = int(elfU16At(raw, 44))
+    of 2: # ELF64
+      if raw.len < 64:
+        return false
+      let phoff64 = elfU64At(raw, 32)
+      if phoff64 > uint64(int.high):
+        return false
+      phoff = int(phoff64)
+      phentsize = int(elfU16At(raw, 54))
+      phnum = int(elfU16At(raw, 56))
+    else:
+      return false
+    if phoff <= 0 or phentsize < 4 or phnum <= 0:
+      return false
+    for i in 0 ..< phnum:
+      let entry = phoff + i * phentsize
+      if entry < 0 or entry + 4 > raw.len:
+        return false
+      if elfU32At(raw, entry) == PtInterp:
+        return true
+    false
+
+  proc linuxElfWithoutProgramInterpreter(path: string): bool =
+    try:
+      let raw = readFile(extendedPath(path))
+      if raw.len < 4 or raw[0] != char(0x7f) or raw[1] != 'E' or
+          raw[2] != 'L' or raw[3] != 'F':
+        return false
+      not elfHasProgramInterpreter(path)
+    except CatchableError:
+      false
+
+proc providerCompileMonitorInjectable*(compilerCommand: openArray[string]):
+    bool =
+  ## Whether io-mon can observe the compiler this plan will spawn. False only
+  ## on Linux with a static-ELF compiler (see above). When false the
+  ## provider-compile edge must be declared ``cacheable = false``: its monitor
+  ## evidence would be incomplete, and an edge that publishes on incomplete
+  ## evidence fails by serving a stale binary rather than by erroring.
+  when defined(linux):
+    if compilerCommand.len > 0 and
+        linuxElfWithoutProgramInterpreter(compilerCommand[0]):
+      return false
+  true
+
+proc providerCompileCacheable*(plan: ProviderCompilePlan): bool =
+  providerCompileMonitorInjectable(plan.compilerCommand)
+
 type
   ReproRtlMode* = enum
     ## Typed-Extension-Interfaces M4c — the RTL mode of a provider-LIBRARY
@@ -4908,6 +5053,24 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
                                        interfaceFingerprint: ContentDigest;
                                        workDir = getCurrentDir()):
     Option[ProviderCompileArtifact] =
+  ## UNSOUND AS A GATE IN FRONT OF THE PROVIDER-COMPILE EDGE. Its key is a
+  ## TEXT import walk of the recipe (``discoverNimSources``), so anything the
+  ## compile acquires without an ``import``/``include`` statement — a
+  ## ``staticRead`` payload, a ``staticExec`` result, a dependency a macro
+  ## resolves during expansion — is invisible to it, and it fails by serving a
+  ## stale provider binary behind a green build rather than by erroring. The
+  ## equivalent gate on the interface-extraction edge was removed for exactly
+  ## this reason (Compiles-Are-Normal-Edges.md; reprobuild 66bdb188).
+  ##
+  ## It survives for two callers only:
+  ##
+  ##   * the in-process ``compileProviderBinary`` path (tests, bootstrap),
+  ##     which has no engine to defer to; and
+  ##   * ``staticFreshnessFallbackProvider`` below, i.e. the one configuration
+  ##     where the engine edge provably cannot publish.
+  ##
+  ## Do NOT reintroduce it in front of a cacheable provider-compile edge. The
+  ## engine decides whether that edge re-runs, from the monitored read set.
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
   if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(normalizedOutputPath))):
     return none(ProviderCompileArtifact)
@@ -4933,16 +5096,64 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
   except CatchableError:
     return none(ProviderCompileArtifact)
 
+proc staticFreshnessFallbackProvider*(plan: ProviderCompilePlan;
+                                      artifactPath, modulePath,
+                                      outputBinaryPath: string;
+                                      interfaceFingerprint: ContentDigest;
+                                      workDir = getCurrentDir()):
+    Option[ProviderCompileArtifact] =
+  ## The ONLY surviving short-circuit in front of the provider-compile edge.
+  ##
+  ## In the normal configuration this returns ``none`` unconditionally: the
+  ## compile is an ordinary monitored edge and the engine's action cache — keyed
+  ## on the argv plus everything the compile was OBSERVED to read — is what
+  ## decides whether it re-runs. That is strictly stronger than the text
+  ## closure, and it is what makes a ``staticRead``/``staticExec`` dependency an
+  ## input by construction rather than by somebody's list.
+  ##
+  ## It returns the hand-keyed freshness answer in exactly one state: when
+  ## ``providerCompileCacheable(plan)`` is false, i.e. Linux with a static-ELF
+  ## compiler that ``LD_PRELOAD`` cannot inject the io-mon shim into. There the
+  ## edge can neither publish nor hit, and — because the compiler's own reads
+  ## are unobservable in that state — the engine's evidence is no more complete
+  ## than the text closure is. Without this fallback such a host would pay a
+  ## full provider compile (measured ~5 min) on EVERY build, for no gain in
+  ## soundness: a monitored edge is never eligible for the engine's
+  ## outputs-present short-circuit (``needsExecutionForPolicy``), so it always
+  ## launches when the action cache is unavailable.
+  ##
+  ## Narrowing it to that state is the point: on every host where the shim can
+  ## be injected, the unsound key is not consulted at all.
+  if providerCompileCacheable(plan):
+    return none(ProviderCompileArtifact)
+  readFreshProviderCompileArtifact(artifactPath, modulePath, outputBinaryPath,
+    interfaceFingerprint, workDir)
+
 proc compileProviderBinary*(modulePath, outputBinaryPath: string;
                             interfaceFingerprint: ContentDigest;
                             artifactPath = "";
                             workDir = getCurrentDir();
-                            scratchDir = ""): ProviderCompileArtifact =
+                            scratchDir = "";
+                            useFreshnessCache = true): ProviderCompileArtifact =
+  ## ``useFreshnessCache`` controls the built-in warm short-circuit. It is
+  ## ``false`` for exactly one caller: the child of the provider-compile EDGE
+  ## (``repro __repro-compile-provider``). This mirrors
+  ## ``extractInterfaceFromModule``'s ``useExtractionCache``.
+  ##
+  ## The short-circuit is keyed by ``providerFingerprintFor``, whose source
+  ## closure is an import walk of the recipe's TEXT. It cannot see a dependency
+  ## the compile acquires without an import statement — a ``staticRead``
+  ## payload, a ``staticExec`` result, a module a macro resolves during
+  ## expansion. When the engine has decided the edge must re-run, it did so
+  ## from monitored evidence that DOES see those files; consulting the narrower
+  ## key inside the child would veto the engine's decision and re-publish the
+  ## very stale binary the edge was re-run to replace.
   let plan = providerCompilePlan(modulePath, outputBinaryPath,
     interfaceFingerprint, workDir, scratchDir)
-  if artifactPath.len > 0 and providerCompileArtifactFresh(artifactPath,
-      plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint,
-      plan.workDir):
+  if useFreshnessCache and artifactPath.len > 0 and
+      providerCompileArtifactFresh(artifactPath,
+        plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint,
+        plan.workDir):
     return readProviderCompileArtifact(artifactPath)
   createDir(extendedPath(parentDir(plan.outputBinaryPath)))
   let compilerCwdRoot =
