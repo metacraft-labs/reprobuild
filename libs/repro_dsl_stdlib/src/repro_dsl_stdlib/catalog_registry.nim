@@ -60,6 +60,13 @@ import ./packages/cmake
 # the `conda` archiveType can realize conda-forge's Windows package; the
 # scaffold sat unimported while that was inexpressible.
 import ./packages/clingo
+# chocolatey: the Windows `choco` CLI. Unlike most entries this is an OUTPUT
+# tool — the codetracer-*-recorder repos run `choco pack` / `choco push` to
+# publish a release, the Windows sibling of their Homebrew/Scoop/AUR lanes.
+# Declared here so those projects can `uses: "chocolatey"` and get the same
+# pinned binary in a developer's dev env and in CI, instead of depending on
+# whatever a runner happened to have installed.
+import ./packages/chocolatey
 # zstd: dlopen'd by `repro cache substitute` to decompress binary-cache
 # payloads. The entry and its Windows slice (facebook/zstd v1.5.6 win64
 # release) already existed but were never imported, so the catalog could not

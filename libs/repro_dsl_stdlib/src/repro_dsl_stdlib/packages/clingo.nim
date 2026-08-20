@@ -58,8 +58,10 @@
 ## at conda-forge's own bytes. Whichever lands, keep the version and checksum
 ## in agreement with ``windows/toolchain-versions.env`` (CLINGO_VERSION /
 ## CLINGO_BUILD_STRING / CLINGO_SHA256) and with the clingo resource in
-## ``infra/machines/server/_windows-runner-001/system_windows_runner.nim``,
-## which provisions the same package for the CI runner.
+## ``infra/machines/server/_win-ci-vm-001/system_windows_runner.nim`` and its
+## ``_win-ci-bare-001`` sibling, which provision the same package for the CI
+## runners. (That host was ``_windows-runner-001`` when this was written; it has
+## since been renamed twice and split into a VM and a bare-metal box.)
 ##
 ## The bootstrap ordering is worth stating explicitly, because it does not go
 ## away once this entry is wired: ``repro`` needs clingo in order to run the
