@@ -36,6 +36,13 @@ import repro_profile
 
 const Target = "win-ci-bare-001"
 
+# Every tick now also reports to the Windows Application event log (see
+# `tick_event_log.nim`). That sink is ON by default because a production box
+# wants it; a test run must not deposit an entry per tick in the developer's
+# real event log, so this module switches it off. The mapping it would have
+# reported is asserted in `t_repro_deploy_agent_records_tick_history`.
+putEnv(TickEventLogEnvVar, "0")
+
 # The incident's own error text, verbatim in shape: the string an operator
 # needed and could not get. If the record does not carry it, this gate fails.
 const NimMissingError =

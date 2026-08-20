@@ -23,12 +23,23 @@
 ## number an operator reads from ``LastTaskResult`` and the number in the
 ## record are the same number by construction.
 ##
-## Every tick also leaves a durable, machine-readable record of its outcome
-## at ``<stateDir>/deploy-agent/<safe-target>.last-tick.json`` — on FAILURE
-## and success alike. Under Task Scheduler (how the ``windowsScheduledTask``
-## resource deploys this loop) stdout and stderr are discarded, so the echoes
-## below are not observability; that file is. See ``tick_status.nim`` for the
-## incident that made it necessary.
+## Every tick also leaves a durable, machine-readable record of its outcome —
+## on FAILURE and success alike — in three places, because three different
+## readers need three different shapes:
+##
+##   * ``<stateDir>/deploy-agent/<safe-target>.last-tick.json`` — the latest
+##     tick only, for a monitoring probe (``tick_status.nim``);
+##   * ``<stateDir>/deploy-agent/<safe-target>.tick-history.jsonl`` — one
+##     bounded, append-only line per tick, for reconstructing WHEN a box
+##     started failing and whether it flapped (``tick_history.nim``);
+##   * the Windows Application event log, source ``ReprobuildDeployAgent``,
+##     which survives the state dir and is queryable remotely with
+##     ``Get-WinEvent`` (``tick_event_log.nim``, Windows only).
+##
+## Under Task Scheduler (how the ``windowsScheduledTask`` resource deploys
+## this loop) stdout and stderr are discarded, so the echoes below are not
+## observability; those three are. See ``tick_status.nim`` for the incident
+## that made them necessary.
 
 import std/[os, strutils]
 
@@ -142,7 +153,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
           ": " & e.msg)
       rec.exitCode = 2
       rec.errorCode = "allowed_signers_unreadable"
-      recordTickStatus(flags.stateDir, flags.target, rec)
+      recordTick(flags.stateDir, flags.target, rec)
       return 2
 
   let cfg = AgentConfig(
@@ -210,6 +221,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
     echo "  deployment   : " & outcome.deploymentId
   echo "  message      : " & outcome.message
   echo "  status file  : " & tickStatusPath(cfg)
+  echo "  history file : " & tickHistoryPath(cfg)
 
   # 0 for aoApplied/aoConverged/aoWaiting, 1 for aoApplyFailed/aoSourceError,
   # 2 for aoRejected/aoAmbiguous/aoSecretsFailed — see `deployAgentExitCode`,

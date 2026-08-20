@@ -1737,12 +1737,20 @@ def write_static_case_counts(
     The scan walks and tokenizes every declared source, so doing it twice for
     one command is the difference between a check people run and one they
     stop running.
+
+    `newline="\\n"` is load-bearing, not tidiness. Without it Python's text
+    layer translates every "\\n" to "\\r\\n" on Windows, so regenerating this
+    tracked baseline there rewrites all ~1291 lines and buries the real
+    change in a whole-file diff that has to be hand-normalised before it can
+    be reviewed. The file is byte-identical across platforms now.
     """
     if counts is None:
         counts = static_case_counts(root)
     path = root / STATIC_CASE_COUNTS_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_static_case_counts(counts), encoding="utf-8")
+    path.write_text(
+        render_static_case_counts(counts), encoding="utf-8", newline="\n"
+    )
     return path
 
 
@@ -5472,16 +5480,28 @@ def main(argv: list[str]) -> int:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     case_catalog_path.parent.mkdir(parents=True, exist_ok=True)
     environment_report_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(tracked, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # `newline="\n"` throughout, for the same reason as
+    # `write_static_case_counts`: `json_path` and `report_path` are TRACKED,
+    # and without it a regeneration on Windows rewrites every line as CRLF.
+    json_path.write_text(
+        json.dumps(tracked, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     case_catalog_path.write_text(
-        json.dumps(case_detail, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(case_detail, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
     report_path.write_text(
         render_report(tracked, rel(json_path, root), case_detail),
         encoding="utf-8",
+        newline="\n",
     )
     environment_report_path.write_text(
-        render_environment_report(data, case_detail), encoding="utf-8"
+        render_environment_report(data, case_detail),
+        encoding="utf-8",
+        newline="\n",
     )
 
     print(f"wrote {rel(json_path, root)}")

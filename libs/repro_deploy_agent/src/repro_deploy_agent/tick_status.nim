@@ -44,6 +44,13 @@
 ##   * BEST EFFORT. Writing the record must never change the tick's exit code
 ##     nor mask the original error — a status file that turns a diagnosable
 ##     failure into a different failure is worse than no status file.
+##
+## This file is a SNAPSHOT, not a history: one record, overwritten every
+## tick. That is the right shape for an alert and the wrong shape for the
+## troubleshooting that follows it ("when did this start?", "did it flap?",
+## "what was the last good tick?"). The append-only companion that answers
+## those lives in `tick_history.nim` and reuses the record and the
+## serialisation defined here, so one reader parses both.
 
 import std/[json, os, times]
 
@@ -207,21 +214,9 @@ proc recordTickStatus*(stateDir, target: string; rec: TickStatusRecord) =
     except CatchableError:
       discard
 
-proc runAgentTickRecorded*(cfg: AgentConfig; deps: AgentDeps): RecordedTick =
-  ## One tick that ALWAYS leaves a durable record — the entry point the CLI
-  ## uses. `runAgentTick` itself stays pure with respect to observability so
-  ## the hermetic gates that assert on its return value keep working.
-  ##
-  ## The exit code is resolved here (from `deployAgentExitCode`) rather than
-  ## by the caller so the number in the record and the number the process
-  ## returns cannot drift apart.
-  try:
-    let outcome = runAgentTick(cfg, deps)
-    result = RecordedTick(outcome: outcome,
-      exitCode: deployAgentExitCode(outcome.kind), raised: false, error: "")
-    recordTickStatus(cfg.stateDir, cfg.target, tickStatusFor(outcome))
-  except CatchableError as e:
-    # Unchanged semantics: a raised tick is exit 1, the retryable class.
-    result = RecordedTick(exitCode: 1, raised: true, error: e.msg)
-    recordTickStatus(cfg.stateDir, cfg.target,
-      tickStatusForRaise(cfg.target, e.msg))
+# `runAgentTickRecorded` — the tick entry point that leaves the record — is
+# NOT here: it fans out to this snapshot, to the append-only history
+# (`tick_history`) and to the Windows Event Log (`tick_event_log`), and both
+# of those import this module for the record shape. It lives in
+# `tick_record.nim`, which imports all three. `RecordedTick` above stays here
+# with the rest of the record vocabulary.
