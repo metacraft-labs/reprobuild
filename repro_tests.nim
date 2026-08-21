@@ -7630,6 +7630,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim",
+    binary: "build/test-bin/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim",
     binary: "build/test-bin/t_manifest_copyfile_linkfile_materialized_after_sync",
     defines: @[],
@@ -7856,6 +7864,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_post_commit_cache_push_runs_opportunistic_gc.nim",
     binary: "build/test-bin/t_post_commit_cache_push_runs_opportunistic_gc",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_post_commit_lock_survives_a_repo_local_repro_dir.nim",
+    binary: "build/test-bin/t_post_commit_lock_survives_a_repo_local_repro_dir",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
