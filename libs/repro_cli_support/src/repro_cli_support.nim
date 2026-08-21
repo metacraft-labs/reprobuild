@@ -139,6 +139,12 @@ import repro_solver
 # consumption serialize/load ``UnifiedSolution`` through this module.
 # Distinct from the manifest-repo SHA lock in repro_workspace_manifests.
 import repro_lock
+# Named-Lock-Files NLF-M5 — lock GENERATION as build-graph edges. The four
+# CLI doors (`repro lock solve`, `repro lock refresh`, `--strategy`, and the
+# implicit solve during `repro build`) all reach the SAME edges through this
+# module; design §5.6 requires "one path, several doors, not three
+# implementations".
+import repro_lock_gen
 # Workspace-Manifest-Optional MO-3 — the abstract Lock/Manifest store
 # interface (``LockStore``) plus its portable backends. The git-checkout
 # backend (``GitCheckoutLockStore``) is defined HERE, in terms of the
@@ -15908,6 +15914,21 @@ proc resolveSolvedGraphForBuild(projectDir, lockOverride,
                                 inputsOverride: string): tuple[
     solution: UnifiedSolution, source: string, lockPath: string,
     found: bool]
+proc parseLockStrategy(raw: string; strategy: var LockStrategy): bool =
+  ## Named-Lock-Files §5.5's strategy set, parsed from the CLI spelling.
+  ## Defined here rather than beside the lock verbs because `repro build
+  ## --strategy` and `repro lock solve --strategy` must accept exactly the
+  ## same vocabulary, and two parsers is how a vocabulary drifts.
+  case raw
+  of "default": strategy = lsDefault; true
+  of "lowest": strategy = lsLowest; true
+  of "highest": strategy = lsHighest; true
+  else: false
+
+# Named-Lock-Files NLF-M5 §5.4 — the `--strategy` door. Body lives beside the
+# other lock-generation entry points (it needs `resolveRefreshSolverInputs`).
+proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
+                             committedLock: string): int
 
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
@@ -15915,6 +15936,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      eventSink: BuildCommandEventSink = nil;
                      cancelCheck: BuildCancelCallback = nil): int =
   let originalArgs = @args
+  # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
+  # stays false and the lock-consumption block below is byte-unchanged.
+  var buildStrategy = lsDefault
+  var strategyGiven = false
   var target = ""
   var positionalSelectors: seq[string] = @[]
   var mode = tpmUnspecified
@@ -16098,6 +16123,17 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       # handled elsewhere; the exact ``--lock`` / ``--lock=`` match here
       # never swallows it.
       lockOverride = valueFromFlag(args, i, "--lock")
+    elif arg == "--strategy" or arg.startsWith("--strategy="):
+      # Named-Lock-Files §5.5: `repro build --strategy lowest` is
+      # `--lock default=strategy:lowest` — "generate a lock file under the
+      # given strategy into a hidden, uncommitted location, then use it.
+      # Nothing else."
+      let raw = valueFromFlag(args, i, "--strategy")
+      if not parseLockStrategy(raw, buildStrategy):
+        stderr.writeLine("repro build: unknown --strategy '" & raw &
+          "' (expected: default, lowest, highest)")
+        return 2
+      strategyGiven = true
     elif arg == "--print-solved-graph":
       printSolvedGraph = true
     elif arg == "--variant" or arg.startsWith("--variant="):
@@ -16218,6 +16254,20 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # ----------------------------------------------------------------
   block lockConsumption:
     let projDir = resolveProjectDirFromTarget(splitTarget(target).base)
+    let effectiveLock =
+      if lockOverride.len > 0: absolutePath(lockOverride)
+      else: committedLockPath(projDir)
+    if strategyGiven:
+      # NLF-M5 §5.5's decision, which "must have a defined answer": a strategy
+      # OVERRIDES the committed lock for this invocation and NEVER writes it
+      # back. Overrides rather than errors, "because the primary use is exactly
+      # an application *with* a committed lock checking that its declared
+      # ranges still hold"; never writes back, because "under `lowest` a
+      # write-back would downgrade the whole project as a side effect of
+      # running a test".
+      let rc = applyStrategyHiddenLock(projDir, buildStrategy, effectiveLock)
+      if rc != 0: return rc
+      break lockConsumption
     let graph = resolveSolvedGraphForBuild(projDir, lockOverride, "")
     if graph.found and graph.source == "lock":
       putEnv(LockPinsEnvVar,
@@ -48683,6 +48733,25 @@ proc resolveSolvedGraphForBuild(projectDir, lockOverride,
   ##     (``source = "solve"``), matching the spec's "ordinary commands
   ##     solve implicitly when no lock is present".
   ##   * else → an empty graph (``found = false``).
+  ##
+  ## Named-Lock-Files NLF-M5 — the implicit-solve branch is now the GENERATION
+  ## PATH's ``runImplicitBuildSolve``, so ``repro build``'s implicit solve runs
+  ## the same edges ``repro lock solve`` and ``repro lock refresh`` run (design
+  ## §5.6, "one path, several doors"). It used to call ``solve()`` inline,
+  ## which is the deviation `Core-Invariants.md` §"Graph Construction Is Not
+  ## Side-Effect Execution" and `Build-Engine-And-Scheduler.md`
+  ## §"Universal Edge-Based Execution and Invalidation" both rule out.
+  ##
+  ## The lock branch is unchanged and still comes FIRST, which is the whole of
+  ## `Repository-And-Index-Format.md` §"Refresh Is Performed By Graph Edges"'s
+  ## "a pinned build refreshes nothing": with a lock present the generation
+  ## wave is never CONSTRUCTED, so there is no ``netFetch`` edge to skip.
+  ##
+  ## No registry is configured on this path, so an implicit solve emits no
+  ## metadata-fetch edge at all and consults only the declared candidate
+  ## versions — the same answer the pre-NLF-M5 inline ``solve()`` produced,
+  ## which is why the rewiring is not a behaviour change for any existing
+  ## workspace. ``--registry`` on the lock verbs is what turns the fetch on.
   let effectiveLock =
     if lockOverride.len > 0: lockOverride
     else: committedLockPath(projectDir)
@@ -48695,9 +48764,25 @@ proc resolveSolvedGraphForBuild(projectDir, lockOverride,
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let inputs = loadSolverInputsFile(inputsP)
-    let sol = solve(inputs.variants, inputs.packages)
-    return (solution: sol, source: "solve", lockPath: effectiveLock,
-            found: true)
+    let workDir = getTempDir() /
+      ("repro-implicit-solve-" & $getCurrentProcessId())
+    defer:
+      try: removeDir(extendedPath(workDir))
+      except CatchableError: discard
+    let generated = runImplicitBuildSolve(LockGenerationRequest(
+      variants: inputs.variants,
+      packages: inputs.packages,
+      inputsText: inputs.text,
+      platform: currentPlatformId(),
+      strategy: lsDefault,
+      endpoints: @[],
+      workDir: workDir,
+      extraDeps: @[],
+      entryPoint: lgeImplicitBuildSolve))
+    return (
+      solution: lockToSolution(
+        solvedPartOf(parseLockedDependencies(generated.lockDocument))),
+      source: "solve", lockPath: effectiveLock, found: true)
   (solution: UnifiedSolution(variants: initTable[string, string](),
                              packages: initTable[string, string](),
                              optimal: false),
@@ -48801,13 +48886,28 @@ proc renderUnsatCoreJson(entries: seq[UnsatCoreEntry];
     arr.add(j)
   result["core"] = arr
 
+type
+  LockVerbOptions = object
+    ## NLF-M5 — the generation-path flags shared by ``solve`` / ``refresh``.
+    strategy: LockStrategy
+    registries: seq[string]
+    write: bool
+
 proc parseLockVerbArgs(rest: openArray[string]; verb: string;
                        projectDir, inputsOverride, lockOverride,
-                       platformOverride: var string; asJson: var bool): int =
-  ## Shared arg parser for ``repro lock refresh`` / ``validate``:
+                       platformOverride: var string; asJson: var bool;
+                       gen: var LockVerbOptions): int =
+  ## Shared arg parser for ``repro lock solve`` / ``refresh`` / ``validate``:
   ## ``[<projectDir>] [--inputs <file>] [--lock <file>] [--platform <p>]
+  ## [--strategy <default|lowest|highest>] [--registry <url>] [--write]
   ## [--json]``. Returns 0 on success, 2 on a usage error (diagnostic
   ## already emitted).
+  ##
+  ## ``--strategy`` is `Named-Lock-Files.md` §5.5's whole-build spelling.
+  ## ``--registry`` names a metadata index the generation wave may reach; with
+  ## none given the generation emits no ``netFetch`` edge at all and the
+  ## declared candidate versions are the whole universe, which is the
+  ## behaviour every pre-NLF-M5 invocation had.
   var i = 0
   while i < rest.len:
     let arg = rest[i]
@@ -48817,6 +48917,16 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
       lockOverride = valueFromFlag(rest, i, "--lock")
     elif arg == "--platform" or arg.startsWith("--platform="):
       platformOverride = valueFromFlag(rest, i, "--platform")
+    elif arg == "--strategy" or arg.startsWith("--strategy="):
+      let raw = valueFromFlag(rest, i, "--strategy")
+      if not parseLockStrategy(raw, gen.strategy):
+        stderr.writeLine("repro lock " & verb & ": unknown --strategy '" &
+          raw & "' (expected: default, lowest, highest)")
+        return 2
+    elif arg == "--registry" or arg.startsWith("--registry="):
+      gen.registries.add(valueFromFlag(rest, i, "--registry"))
+    elif arg == "--write":
+      gen.write = true
     elif arg == "--json":
       asJson = true
     elif arg.startsWith("--"):
@@ -48993,78 +49103,180 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar", @[])
   return (false, @[], @[], "", "", @[])
 
-proc runReproLockRefresh(rest: openArray[string]): int =
-  ## ``repro lock refresh`` — re-solve the project's solver inputs and
-  ## (re)write the committed lock WITHOUT building. No build artifacts are
-  ## produced; only the lock file is written.
+proc buildLockGenerationRequest(projectDir, inputsOverride,
+                                platformOverride: string;
+                                gen: LockVerbOptions;
+                                entryPoint: LockGenerationEntryPoint;
+                                verb: string;
+                                request: var LockGenerationRequest): int =
+  ## Assemble the generation request the four CLI doors share.
   ##
   ## MO-12 — the solver inputs come from the COMPILED PROJECT PROVIDER (the
-  ## real recipe's ``solve()``) when available, falling back to the
-  ## ``repro.solver`` sidecar otherwise (see ``resolveRefreshSolverInputs``).
-  var projectDir, inputsOverride, lockOverride, platformOverride: string
-  var asJson = false
-  let rc = parseLockVerbArgs(rest, "refresh", projectDir, inputsOverride,
-                             lockOverride, platformOverride, asJson)
-  if rc != 0: return rc
-  let lockP =
-    if lockOverride.len > 0: absolutePath(lockOverride)
-    else: committedLockPath(projectDir)
+  ## real recipe's solve) when available, falling back to the ``repro.solver``
+  ## sidecar otherwise (see ``resolveRefreshSolverInputs``). FUP-M — the
+  ## workspace's participating repos become the request's ``extraDeps`` so the
+  ## generated lock carries their coordinates + integrity.
   let resolved =
     try: resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:
-      stderr.writeLine("repro lock refresh: failed to read inputs: " & e.msg)
+      stderr.writeLine("repro lock " & verb & ": failed to read inputs: " &
+        e.msg)
       return 1
   if not resolved.found:
-    stderr.writeLine("repro lock refresh: no solver inputs found for " &
+    stderr.writeLine("repro lock " & verb & ": no solver inputs found for " &
       projectDir & " (expected a compiled `" & CommittedLockFileName &
       "`-adjacent recipe, a `" & SolverInputsFileName &
       "` sidecar, or pass --inputs <file>)")
     return 1
-  let inputs = (variants: resolved.variants, packages: resolved.packages,
-                text: resolved.text)
-  var sol: UnifiedSolution
+  # MO-11 — overlay each package's DECLARED source provenance (the
+  # solver-inputs ``source:`` directive) onto the decls handed to the
+  # generation path, which re-attaches it to the solved-graph ``source`` field
+  # so the MO-11 lift can produce store / registry coordinates.
+  request = LockGenerationRequest(
+    variants: resolved.variants,
+    packages: resolved.packages,
+    inputsText: resolved.text,
+    platform:
+      if platformOverride.len > 0: platformOverride else: currentPlatformId(),
+    strategy: gen.strategy,
+    endpoints: gen.registries,
+    workDir: getTempDir() /
+      ("repro-lock-generation-" & $getCurrentProcessId() & "-" & verb),
+    extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors),
+    entryPoint: entryPoint)
+  return 0
+
+proc reportGeneratedLock(verb, lockP: string;
+                         generated: LockGenerationResult): int =
+  ## Sandbox-And-Monitoring.md §"The Network Dimension" rule 4: the network
+  ## classification must be "visible in logs, debugging output, per-action
+  ## explain output". Reporting the fetch-edge count and the wave count is the
+  ## generation path's end of that — an operator can see that a lock cost N
+  ## non-hermetic edges, and see it go to zero when nothing was reachable.
+  let ld = parseLockedDependencies(generated.lockDocument)
+  var fetches = 0
+  for wave in generated.fetchWaves: fetches += wave.len
+  stdout.writeLine("repro lock " & verb & ": " &
+    (if lockP.len > 0: "wrote " & lockP else: "generated (not written)") &
+    " (" & $ld.variants.len & " variant(s), " & $ld.packages.len &
+    " package(s), " & $ld.deps.len & " locked dep(s); platform " &
+    ld.platform & "; entry point " & $generated.entryPoint & "; " & $fetches &
+    " metadata fetch edge(s) in " & $generated.fetchWaves.len & " wave(s))")
+  stdout.writeLine("repro lock " & verb & ": lock identity " &
+    $generated.lockIdentity)
+  return 0
+
+proc runLockGenerationVerb(rest: openArray[string]; verb: string;
+                           entryPoint: LockGenerationEntryPoint;
+                           writeByDefault: bool): int =
+  ## The shared body of ``repro lock solve`` and ``repro lock refresh``.
+  ##
+  ## NLF-M5 §5.6: both are the SAME edges — metadata-fetch edges upstream, the
+  ## solve as a rule generator downstream — reached through different doors.
+  ## What differs is `writeByDefault`, which is §5.4's "where the file lands
+  ## and whether it is committed" and nothing else.
+  var projectDir, inputsOverride, lockOverride, platformOverride: string
+  var asJson = false
+  var gen = LockVerbOptions(strategy: lsDefault, registries: @[], write: false)
+  let rc = parseLockVerbArgs(rest, verb, projectDir, inputsOverride,
+                             lockOverride, platformOverride, asJson, gen)
+  if rc != 0: return rc
+  let lockP =
+    if lockOverride.len > 0: absolutePath(lockOverride)
+    else: committedLockPath(projectDir)
+  var request: LockGenerationRequest
+  let prc = buildLockGenerationRequest(projectDir, inputsOverride,
+    platformOverride, gen, entryPoint, verb, request)
+  if prc != 0: return prc
+  let writeTo = if writeByDefault or gen.write: lockP else: ""
   try:
-    sol = solve(inputs.variants, inputs.packages)
+    defer:
+      try: removeDir(extendedPath(request.workDir))
+      except CatchableError: discard
+    let generated =
+      case entryPoint
+      of lgeLockRefresh: runLockRefresh(request, writeTo)
+      else: runLockSolve(request, writeTo)
+    return reportGeneratedLock(verb, writeTo, generated)
   except EUnsatisfiable as e:
-    stderr.writeLine("repro lock refresh: solver UNSAT — cannot pin a " &
+    stderr.writeLine("repro lock " & verb & ": solver UNSAT — cannot pin a " &
       "lock: " & e.msg)
     return 3
-  let platform =
-    if platformOverride.len > 0: platformOverride else: currentPlatformId()
-  var solvedLock = solutionToLock(sol, platform, inputs.text)
-  # MO-11 — overlay each package's DECLARED source provenance (the solver-inputs
-  # ``source:`` directive) onto the solved-graph ``source`` field, so the lift
-  # below can produce store / registry coordinates. The solver itself drops the
-  # directive (it only solves name -> version); we re-attach it here from the
-  # parsed package decls. A package with no declared source keeps its historical
-  # definition identity (``source = name``) and is NOT lifted.
-  var declaredSource = initTable[string, string]()
-  for decl in inputs.packages:
-    if decl.source.len > 0:
-      declaredSource[decl.name] = decl.source
-  for i in 0 ..< solvedLock.packages.len:
-    let s = declaredSource.getOrDefault(solvedLock.packages[i].name, "")
-    if s.len > 0:
-      solvedLock.packages[i].source = s
-  # MO-8 — assemble the unified model: the v1 solved-graph payload (preserved
-  # as a sub-part) PLUS the per-dependency coordinates + self-describing
-  # integrity observed from the workspace's participating repos.
-  var ld = lockedDepsFromSolved(solvedLock)
-  ld.schema = SolvedGraphLockSchemaV2
-  ld.deps = lockedDepsForWorkspace(projectDir, resolved.usesSelectors)
-  # MO-11 — lift each store / registry solved package into a first-class
-  # ``LockedDep`` (coordinates + integrity) alongside the workspace repo deps.
-  ld.deps.add(lockedDepsFromPackages(ld.packages, platform))
-  try:
-    writeFile(extendedPath(lockP), serializeLockedDependencies(ld))
   except CatchableError as e:
-    stderr.writeLine("repro lock refresh: failed to write lock: " & e.msg)
+    stderr.writeLine("repro lock " & verb & ": generation failed: " & e.msg)
     return 1
-  stdout.writeLine("repro lock refresh: wrote " & lockP & " (" &
-    $ld.variants.len & " variant(s), " & $ld.packages.len &
-    " package(s), " & $ld.deps.len & " locked dep(s); platform " &
-    platform & ")")
-  return 0
+
+proc runReproLockRefresh(rest: openArray[string]): int =
+  ## ``repro lock refresh`` — re-solve the project's solver inputs and
+  ## (re)write the committed lock WITHOUT building. No build artifacts are
+  ## produced; only the lock file is written.
+  runLockGenerationVerb(rest, "refresh", lgeLockRefresh,
+    writeByDefault = true)
+
+proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
+                             committedLock: string): int =
+  ## `repro build --strategy <s>` / `repro test --strategy <s>` — the fourth
+  ## door of §5.6.
+  ##
+  ## §5.4 defines it exhaustively: "generate a lock file under the given
+  ## strategy into a **hidden, uncommitted** location, then use it. Nothing
+  ## else." So this runs the SAME `generateLock` the other three doors run,
+  ## into a scratch directory that is removed on the way out, and pins the
+  ## build from the result. The hidden lock is never written to
+  ## `committedLock`; that path is read only so the override can be REPORTED.
+  ##
+  ## §5.5: "A strategy invocation SHOULD report that it is overriding a
+  ## committed lock. A build whose inputs differ from committed state and says
+  ## nothing is the shape this campaign keeps finding."
+  var gen = LockVerbOptions(strategy: strategy, registries: @[], write: false)
+  var request: LockGenerationRequest
+  let prc = buildLockGenerationRequest(projectDir, "", "", gen,
+    lgeStrategyHiddenLock, "build --strategy", request)
+  if prc != 0: return prc
+  # NLF-M3 — a strategy invocation must SOLVE, not re-affirm. Any pins an
+  # enclosing context left in the environment would make the hidden lock a
+  # copy of the committed one and the whole experiment vacuous.
+  let inheritedPins = getEnv(LockPinsEnvVar)
+  let inheritedLockPath = getEnv(LockPathEnvVar)
+  delEnv(LockPinsEnvVar)
+  delEnv(LockPathEnvVar)
+  try:
+    defer:
+      try: removeDir(extendedPath(request.workDir))
+      except CatchableError: discard
+    let generated = runStrategyHiddenLock(request, strategy)
+    let solution = lockToSolution(
+      solvedPartOf(parseLockedDependencies(generated.lockDocument)))
+    putEnv(LockPinsEnvVar,
+           renderLockPins(solution.packages, solution.variants))
+    putEnv(LockPathEnvVar, generated.lockPath)
+    if fileExists(extendedPath(committedLock)):
+      stderr.writeLine("repro build: --strategy " & $strategy &
+        " OVERRIDES the committed lock " & committedLock &
+        " for this invocation; the committed lock is not modified")
+    stderr.writeLine("repro build: --strategy " & $strategy &
+      " hidden lock identity " & $generated.lockIdentity)
+    return 0
+  except CatchableError as e:
+    if inheritedPins.len > 0: putEnv(LockPinsEnvVar, inheritedPins)
+    if inheritedLockPath.len > 0: putEnv(LockPathEnvVar, inheritedLockPath)
+    stderr.writeLine("repro build: --strategy " & $strategy &
+      " could not generate a hidden lock: " & e.msg)
+    return 1
+
+proc runReproLockSolve(rest: openArray[string]): int =
+  ## ``repro lock solve [--strategy <s>] [--write]`` — generate a lock under a
+  ## strategy.
+  ##
+  ## **Behaviour change, stated rather than slipped in.** Before NLF-M5,
+  ## ``solve`` was accepted as a bare ALIAS of ``refresh`` and therefore always
+  ## wrote the committed lock. `Named-Lock-Files.md` §5.5 makes the two
+  ## spellings two intentions — "Writing back requires the generate operation
+  ## explicitly: `repro lock solve --lowest --write`. Two spellings, because
+  ## they are two intentions." — so ``solve`` now writes only under
+  ## ``--write``. A caller that wants the old behaviour spells ``refresh``,
+  ## which is unchanged.
+  runLockGenerationVerb(rest, "solve", lgeLockSolve, writeByDefault = false)
 
 proc runReproLockValidate(rest: openArray[string]): int =
   ## ``repro lock validate`` — check the committed lock is loadable,
@@ -49074,8 +49286,9 @@ proc runReproLockValidate(rest: openArray[string]): int =
   ## exit 1 = IO error.
   var projectDir, inputsOverride, lockOverride, platformOverride: string
   var asJson = false
+  var gen = LockVerbOptions(strategy: lsDefault, registries: @[], write: false)
   let rc = parseLockVerbArgs(rest, "validate", projectDir, inputsOverride,
-                             lockOverride, platformOverride, asJson)
+                             lockOverride, platformOverride, asJson, gen)
   if rc != 0: return rc
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
@@ -49251,20 +49464,24 @@ proc runReproLockCommand*(args: openArray[string]): int =
   ##
   ## MO-1 (Workspace-Manifest-Optional) lands the committed solved-graph
   ## lock verbs ``refresh`` / ``validate`` and folds in the existing M2e
-  ## ``explain``. The spec's ``solve`` / ``debug`` / ``visualize``
-  ## (Locking-And-Solver.md §"CLI Surface") are future work; ``solve`` is
-  ## accepted as an alias of ``refresh`` (it is the preflight-solve that
-  ## writes the lock).
+  ## ``explain``. Named-Lock-Files NLF-M5 promotes ``solve`` from an alias of
+  ## ``refresh`` to a verb of its own: both run the SAME generation edges
+  ## (§5.6), and they differ only in whether the result is written back —
+  ## ``refresh`` writes, ``solve`` writes under ``--write``, which is §5.5's
+  ## "two spellings, because they are two intentions". ``debug`` /
+  ## ``visualize`` (Locking-And-Solver.md §"CLI Surface") remain future work.
   if args.len == 0:
     stderr.writeLine("repro lock: error: missing verb " &
-      "(one of: refresh, validate, explain)")
+      "(one of: solve, refresh, validate, explain)")
     return 2
   let rest =
     if args.len > 1: args[1 .. ^1]
     else: @[]
   case args[0]
-  of "refresh", "solve":
+  of "refresh":
     return runReproLockRefresh(rest)
+  of "solve":
+    return runReproLockSolve(rest)
   of "validate":
     return runReproLockValidate(rest)
   of "explain":
