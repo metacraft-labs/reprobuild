@@ -23,7 +23,7 @@
 ## attachment below is the real attachment used by the `lockFile` macro; the
 ## diagnostics are the real strings the compiler and the CLI print.
 
-import std/[algorithm, strutils, tables]
+import std/[algorithm, exitprocs, os, strutils, tables]
 
 const
   DefaultLockFileName* = "default"
@@ -493,3 +493,87 @@ proc designationFor*(packageName, artifactName: string): string =
     if d.packageName == packageName and d.artifactName.len == 0:
       return d.lockFileName
   ""
+
+# ---------------------------------------------------------------------------
+# §4.2 consumer (1) — getting the declarations OUT of a compiled recipe
+# ---------------------------------------------------------------------------
+
+const LockFilesEmitEnvVar* = "REPRO_EMIT_LOCK_FILES"
+  ## When this names a writable path, a compiled recipe writes its declared
+  ## lock files there on exit.
+  ##
+  ## `repro lock list` runs in the CLI process; the declarations live in the
+  ## RECIPE process, because `lockFile hostTools` lowers to a `let` binding
+  ## whose initializer registers it at module init. Something has to carry
+  ## them across, and this is the same shape `REPRO_EMIT_SOLVER_INPUTS`
+  ## already uses for the solver inputs — one env var, honoured by the
+  ## compiled provider, ignored by every ordinary run.
+  ##
+  ## Emission is an EXIT PROC rather than a call at some chosen point, and
+  ## that is the load-bearing detail. A recipe may declare lock files and
+  ## nothing else — no packages, no variants, no `build:` block — so hanging
+  ## the emission off `finalizeVariants()` (where the solver-inputs emission
+  ## lives) would silently produce an empty listing for exactly the workspace
+  ## §4.2's example shows: a `workspace.nim` whose whole content is two
+  ## `lockFile` declarations.
+
+proc renderLockFileDeclarations*(decls: openArray[LockFileDecl]): string =
+  ## The emit format: one tab-separated record per declaration, and a header
+  ## naming the version so a reader can refuse a format it does not know
+  ## rather than mis-parsing one.
+  ##
+  ## Descriptions are newline-escaped, because a description is multi-line by
+  ## construction (§4.2's example has two lines) and an un-escaped newline
+  ## would make the record separator ambiguous — the §1.3 hazard in miniature.
+  result = "# repro lock files v1\tname\tpath\tsourceFile\tsourceLine\t" &
+    "sourceColumn\tdescription\n"
+  for d in decls:
+    result.add(d.name & "\t" & d.path & "\t" & d.sourceFile & "\t" &
+      $d.sourceLine & "\t" & $d.sourceColumn & "\t" &
+      d.description.replace("\\", "\\\\").replace("\n", "\\n") & "\n")
+
+proc parseLockFileDeclarations*(text: string): seq[LockFileDecl] =
+  ## Read back what `renderLockFileDeclarations` wrote.
+  result = @[]
+  for raw in text.splitLines():
+    if raw.len == 0 or raw.startsWith("#"): continue
+    let parts = raw.split('\t')
+    if parts.len < 6: continue
+    var description = ""
+    var i = 0
+    let encoded = parts[5]
+    while i < encoded.len:
+      if encoded[i] == '\\' and i + 1 < encoded.len:
+        case encoded[i + 1]
+        of 'n': description.add('\n')
+        of '\\': description.add('\\')
+        else: description.add(encoded[i + 1])
+        i += 2
+      else:
+        description.add(encoded[i])
+        inc i
+    var line = 0
+    var column = 0
+    try:
+      line = parseInt(parts[3])
+      column = parseInt(parts[4])
+    except ValueError:
+      discard
+    result.add(LockFileDecl(
+      name: parts[0], path: parts[1], sourceFile: parts[2],
+      sourceLine: line, sourceColumn: column, description: description,
+      predeclared: parts[2].len == 0))
+
+proc emitLockFileDeclarationsIfRequested*() =
+  ## Write the registry to `REPRO_EMIT_LOCK_FILES` when it is set.
+  ## Best-effort: a write failure never disturbs the process, exactly as the
+  ## solver-inputs emission is best-effort, because a diagnostic surface must
+  ## not be able to fail a build.
+  let path = getEnv(LockFilesEmitEnvVar)
+  if path.len == 0: return
+  try:
+    writeFile(path, renderLockFileDeclarations(declared))
+  except CatchableError:
+    discard
+
+addExitProc(emitLockFileDeclarationsIfRequested)

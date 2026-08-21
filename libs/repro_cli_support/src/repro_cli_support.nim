@@ -139,6 +139,9 @@ import repro_solver
 # consumption serialize/load ``UnifiedSolution`` through this module.
 # Distinct from the manifest-repo SHA lock in repro_workspace_manifests.
 import repro_lock
+# Named-Lock-Files NLF-M7 (§5.1) — the declared NAMES, the `--lock
+# <name>=<path>` binding grammar, and `repro lock list`'s listing renderer.
+import repro_lock_files
 # Named-Lock-Files NLF-M5 — lock GENERATION as build-graph edges. The four
 # CLI doors (`repro lock solve`, `repro lock refresh`, `--strategy`, and the
 # implicit solve during `repro build`) all reach the SAME edges through this
@@ -16160,6 +16163,12 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # exits WITHOUT building — the no-build inspection surface that exercises
   # the exact lock-consumption path the real build uses.
   var lockOverride = ""
+  var lockBindings = initLockBindings()
+    ## Named-Lock-Files NLF-M7 (§5.1). Every `--lock` occurrence lands here,
+    ## whichever of the two forms it took, so the "two bindings for `default`
+    ## in one invocation" case (NLF-CLI-4) is an error rather than a
+    ## precedence puzzle even when the two arrived through different
+    ## spellings.
   var printSolvedGraph = false
   var logModeExplicit = false
   # Default: use runquota when reachable; --no-runquota forces full bypass.
@@ -16306,10 +16315,26 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     elif arg == "--peer-cache" or arg.startsWith("--peer-cache="):
       peerCacheSpec = valueFromFlag(args, i, "--peer-cache")
     elif arg == "--lock" or arg.startsWith("--lock="):
-      # MO-1 alternate committed lock. ``--lock-slice`` is a distinct flag
-      # handled elsewhere; the exact ``--lock`` / ``--lock=`` match here
-      # never swallows it.
-      lockOverride = valueFromFlag(args, i, "--lock")
+      # MO-1 alternate committed lock, generalised by Named-Lock-Files §5.1.
+      # ``--lock-slice`` is a distinct flag handled elsewhere; the exact
+      # ``--lock`` / ``--lock=`` match here never swallows it.
+      #
+      # §5.1: "**One flag, not two.** `--lock` is the existing whole-build
+      # flag (§2.3) generalised: with an `=` it binds a named lock file,
+      # without one it binds `default`." And §5.2: "`--lock <path>` … is
+      # exactly `--lock default=<path>`. It is retained as the spelling for
+      # the overwhelmingly common single-lock-file case and is **not**
+      # deprecated. The two forms are distinguished by the presence of `=`."
+      let raw = valueFromFlag(args, i, "--lock")
+      try:
+        lockBindings.applyLockFlag(raw)
+      except LockFileError as err:
+        stderr.writeLine("repro build: " & err.msg)
+        return 2
+      # The un-named form keeps its existing meaning verbatim, so every
+      # pre-NLF-M7 invocation is byte-unchanged.
+      if lockBindings.byName.hasKey(DefaultLockFileName):
+        lockOverride = lockBindings.byName[DefaultLockFileName]
     elif arg == "--strategy" or arg.startsWith("--strategy="):
       # Named-Lock-Files §5.5: `repro build --strategy lowest` is
       # `--lock default=strategy:lowest` — "generate a lock file under the
@@ -50091,6 +50116,72 @@ proc validateCommittedLockAdvisory(repoRoot: string) =
   except CatchableError:
     discard
 
+proc lockFileDeclarationsFromCompiledProvider(projectDir: string):
+    seq[LockFileDecl] =
+  ## Named-Lock-Files NLF-M7 (§4.2 consumer 1) — the declared lock files of
+  ## the project at `projectDir`, obtained by running its compiled provider.
+  ##
+  ## `lockFile hostTools` lowers to a `let` binding whose initializer
+  ## registers the declaration at module init, so the declarations exist in
+  ## the RECIPE process and `repro lock list` runs in the CLI one. This
+  ## borrows the probe `repro lock refresh` already uses to get solver inputs
+  ## out of the same process, adding one env var: the recipe writes its
+  ## registry on exit and this reads it back.
+  ##
+  ## Best-effort in the same way and for the same reason as that probe. A
+  ## project with no recipe, or one whose provider cannot be compiled here,
+  ## yields the well-known set alone — which is the honest answer to "what
+  ## lock files are in scope" for a workspace that declares none, and is
+  ## never an error, because §5.3 makes an unbound lock file a non-error and
+  ## a fortiori an undeclared workspace one.
+  result = predeclaredLockFiles()
+  let emitPath = getTempDir() /
+    ("repro-lock-list-" & $getCurrentProcessId() & ".tsv")
+  putEnv(LockFilesEmitEnvVar, emitPath)
+  try:
+    discard solverInputsFromCompiledProvider(projectDir)
+    if fileExists(extendedPath(emitPath)):
+      let parsed = parseLockFileDeclarations(readFile(emitPath))
+      if parsed.len > 0:
+        result = parsed
+  except CatchableError:
+    discard
+  finally:
+    delEnv(LockFilesEmitEnvVar)
+    try: removeFile(extendedPath(emitPath))
+    except CatchableError: discard
+
+proc runReproLockList(rest: openArray[string]): int =
+  ## `repro lock list` — §4.2's first consumer of a captured doc comment, and
+  ## the reason the capture is a requirement rather than a nicety:
+  ##
+  ## > A `repro lock list` (or `--list-lock-files`) prints each declared name
+  ## > with its description. This is the primary surface: a workspace with
+  ## > three declared lock files is unusable if a reader cannot find out what
+  ## > each is *for* without grepping the recipes.
+  ##
+  ## §4.2 also records that this is the FIRST such consumer: "No CLI surface
+  ## prints a captured doc comment today … So `lockFile` would be the first
+  ## declaration form whose captured doc text has a working consumer."
+  var projectDir = ""
+  var i = 0
+  while i < rest.len:
+    let arg = rest[i]
+    if arg.startsWith("--"):
+      stderr.writeLine("repro lock list: unknown flag " & arg)
+      return 2
+    if projectDir.len > 0:
+      stderr.writeLine("repro lock list: at most one <projectDir> positional " &
+        "accepted")
+      return 2
+    projectDir = arg
+    inc i
+  if projectDir.len == 0:
+    projectDir = getCurrentDir()
+  stdout.write(listingTextOf(
+    lockFileDeclarationsFromCompiledProvider(absolutePath(projectDir))))
+  0
+
 proc runReproLockCommand*(args: openArray[string]): int =
   ## Top-level dispatcher for ``repro lock <verb> ...``.
   ##
@@ -50104,12 +50195,14 @@ proc runReproLockCommand*(args: openArray[string]): int =
   ## ``visualize`` (Locking-And-Solver.md §"CLI Surface") remain future work.
   if args.len == 0:
     stderr.writeLine("repro lock: error: missing verb " &
-      "(one of: solve, refresh, validate, explain)")
+      "(one of: list, solve, refresh, validate, explain)")
     return 2
   let rest =
     if args.len > 1: args[1 .. ^1]
     else: @[]
   case args[0]
+  of "list":
+    return runReproLockList(rest)
   of "refresh":
     return runReproLockRefresh(rest)
   of "solve":
