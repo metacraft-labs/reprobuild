@@ -1305,12 +1305,17 @@ proc resolveMonitorShimLibPath(): string =
     else:                  "so"
   let exePath = getAppFilename()
   if exePath.len > 0:
-    # exePath: <reprobuild-root>/build/bin/repro.exe
-    let candidate = exePath.parentDir.parentDir / "lib" /
-      ("librepro_monitor_shim." & dllExt)
-    if fileExists(extendedPath(candidate)):
+    let localSourceRoot =
+      reprobuildSourceRootFromBinaryLocation(exePath)
+    let candidate =
+      if localSourceRoot.len > 0:
+        localSourceRoot / "build" / "lib" /
+          ("librepro_monitor_shim." & dllExt)
+      else:
+        ""
+    if candidate.len > 0 and fileExists(extendedPath(candidate)):
       if getEnv("REPROBUILD_SOURCE_ROOT").len == 0:
-        putEnv("REPROBUILD_SOURCE_ROOT", exePath.parentDir.parentDir)
+        putEnv("REPROBUILD_SOURCE_ROOT", localSourceRoot)
       return candidate
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:

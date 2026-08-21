@@ -1269,9 +1269,7 @@ else:
       let sourceRoot = block:
         let env = getEnv("REPROBUILD_SOURCE_ROOT")
         if env.len > 0: env
-        else:
-          let exe = getAppFilename()
-          if exe.len > 0: exe.parentDir.parentDir else: ""
+        else: reprobuildSourceRootFromBinaryLocation()
       let rootTool =
         if sourceRoot.len > 0:
           sourceRoot / "tools" / "reprobuild-nix-daemon" /

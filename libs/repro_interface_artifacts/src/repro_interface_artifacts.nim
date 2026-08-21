@@ -2471,24 +2471,28 @@ proc reprobuildLibsRootFromEnv(): string =
     return repoRoot / "libs"
   ""
 
+proc reprobuildSourceRootFromBinaryLocation*(exePath = ""): string =
+  ## Derive the source checkout containing a local
+  ## ``<reprobuild-root>/build/bin/repro`` binary. Installed binaries do not
+  ## have this layout and deliberately return an empty string; their wrapper
+  ## supplies ``REPROBUILD_SOURCE_ROOT`` instead.
+  let resolvedExe = if exePath.len > 0: exePath else: getAppFilename()
+  if resolvedExe.len == 0:
+    return ""
+  let candidateRoot = resolvedExe.parentDir.parentDir.parentDir
+  let marker = candidateRoot / "libs" / "repro_project_dsl" / "src" /
+    "repro_project_dsl.nim"
+  if fileExists(extendedPath(marker)):
+    return candidateRoot
+  ""
+
 proc reprobuildLibsRootFromBinaryLocation(): string =
   ## When the running ``repro`` binary lives inside a reprobuild source
-  ## checkout (``<reprobuild-root>/build/bin/repro``) we can derive the
-  ## reprobuild libs root from the binary's path. This is the sibling-
-  ## repo detection equivalent of how dev-shell scripts probe for
-  ## ``../reprobuild/libs/`` next to the consumer repo, but anchored
-  ## from the binary instead of the consumer's workdir so it stays
-  ## correct regardless of where ``repro`` was invoked from.
-  let exePath = getAppFilename()
-  if exePath.len == 0:
+  ## checkout, derive the libs root from the validated checkout root.
+  let sourceRoot = reprobuildSourceRootFromBinaryLocation()
+  if sourceRoot.len == 0:
     return ""
-  # exePath: <reprobuild-root>/build/bin/repro.exe
-  let candidateRoot = exePath.parentDir.parentDir.parentDir
-  let candidate = candidateRoot / "libs"
-  let marker = candidate / "repro_project_dsl" / "src" / "repro_project_dsl.nim"
-  if fileExists(extendedPath(marker)):
-    return candidate
-  ""
+  sourceRoot / "libs"
 
 proc siblingReprobuildLibsRoot(workDir: string): string =
   ## When a recorder repo is checked out as a sibling of reprobuild
