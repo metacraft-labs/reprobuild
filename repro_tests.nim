@@ -534,6 +534,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim",
+    binary: "build/test-bin/t_lock_binding_governs_per_name",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim",
+    binary: "build/test-bin/t_lock_list_without_a_build_block",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
     binary: "build/test-bin/t_lock_publish_push_race_classification",
     defines: @[],
@@ -1696,6 +1712,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_lock_files/tests/t_cli_binding_forms.nim",
     binary: "build/test-bin/t_cli_binding_forms",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_lock_files/tests/t_declarations_are_emitted_eagerly.nim",
+    binary: "build/test-bin/t_declarations_are_emitted_eagerly",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
