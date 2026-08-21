@@ -15928,7 +15928,8 @@ proc parseLockStrategy(raw: string; strategy: var LockStrategy): bool =
 # Named-Lock-Files NLF-M5 §5.4 — the `--strategy` door. Body lives beside the
 # other lock-generation entry points (it needs `resolveRefreshSolverInputs`).
 proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
-                             committedLock: string): int
+                             committedLock: string;
+                             solved: var UnifiedSolution): int
 
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
@@ -16191,7 +16192,24 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     let rawTarget =
       if positionalSelectors.len > 0: positionalSelectors[0] else: ""
     let projDir = resolveProjectDirFromTarget(rawTarget)
-    let graph = resolveSolvedGraphForBuild(projDir, lockOverride, "")
+    # NLF-M5 §5.5 — a strategy OVERRIDES the committed lock for THIS
+    # invocation, and `--print-solved-graph` is an invocation. Printing the
+    # committed graph under `--strategy highest` would report the opposite of
+    # what was asked for, in the one command whose entire job is to say what
+    # the build will pin.
+    var graph =
+      if strategyGiven:
+        let committed =
+          if lockOverride.len > 0: absolutePath(lockOverride)
+          else: committedLockPath(projDir)
+        var strategySolution: UnifiedSolution
+        let rc = applyStrategyHiddenLock(projDir, buildStrategy, committed,
+                                         strategySolution)
+        if rc != 0: return rc
+        (solution: strategySolution, source: "strategy:" & $buildStrategy,
+         lockPath: committed, found: true)
+      else:
+        resolveSolvedGraphForBuild(projDir, lockOverride, "")
     var inputsTxt = ""
     let sip = solverInputsPath(projDir)
     if fileExists(extendedPath(sip)):
@@ -16265,7 +16283,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       # ranges still hold"; never writes back, because "under `lowest` a
       # write-back would downgrade the whole project as a side effect of
       # running a test".
-      let rc = applyStrategyHiddenLock(projDir, buildStrategy, effectiveLock)
+      var strategySolution: UnifiedSolution
+      let rc = applyStrategyHiddenLock(projDir, buildStrategy, effectiveLock,
+                                       strategySolution)
       if rc != 0: return rc
       break lockConsumption
     let graph = resolveSolvedGraphForBuild(projDir, lockOverride, "")
@@ -49214,7 +49234,8 @@ proc runReproLockRefresh(rest: openArray[string]): int =
     writeByDefault = true)
 
 proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
-                             committedLock: string): int =
+                             committedLock: string;
+                             solved: var UnifiedSolution): int =
   ## `repro build --strategy <s>` / `repro test --strategy <s>` — the fourth
   ## door of §5.6.
   ##
@@ -49245,10 +49266,10 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
       try: removeDir(extendedPath(request.workDir))
       except CatchableError: discard
     let generated = runStrategyHiddenLock(request, strategy)
-    let solution = lockToSolution(
+    solved = lockToSolution(
       solvedPartOf(parseLockedDependencies(generated.lockDocument)))
     putEnv(LockPinsEnvVar,
-           renderLockPins(solution.packages, solution.variants))
+           renderLockPins(solved.packages, solved.variants))
     putEnv(LockPathEnvVar, generated.lockPath)
     if fileExists(extendedPath(committedLock)):
       stderr.writeLine("repro build: --strategy " & $strategy &
