@@ -16074,16 +16074,30 @@ proc resolveSolvedGraphForBuild(projectDir, lockOverride,
                                 inputsOverride: string): tuple[
     solution: UnifiedSolution, source: string, lockPath: string,
     found: bool]
+const LockStrategyNames* = "default, lowest, highest, lowest-direct"
+  ## The valid strategy spellings, as ONE string.
+  ##
+  ## NLF-M6 / corpus NLF-STRAT-6 requires an unknown strategy to error "and
+  ## list the valid ones, rather than being silently dropped". A single
+  ## constant is what keeps the listed set and the accepted set the same set:
+  ## the previous shape repeated the list in two diagnostics, so adding
+  ## `lowest-direct` to the parser would have left both messages advertising
+  ## three strategies while four were accepted.
+
 proc parseLockStrategy(raw: string; strategy: var LockStrategy): bool =
   ## Named-Lock-Files §5.5's strategy set, parsed from the CLI spelling.
   ## Defined here rather than beside the lock verbs because `repro build
   ## --strategy` and `repro lock solve --strategy` must accept exactly the
   ## same vocabulary, and two parsers is how a vocabulary drifts.
-  case raw
-  of "default": strategy = lsDefault; true
-  of "lowest": strategy = lsLowest; true
-  of "highest": strategy = lsHighest; true
-  else: false
+  ##
+  ## Derived from the enum rather than from a hand-written `case`, so a
+  ## strategy that exists cannot fail to be spellable and a spelling that
+  ## parses cannot fail to exist.
+  for s in LockStrategy:
+    if $s == raw:
+      strategy = s
+      return true
+  false
 
 # Named-Lock-Files NLF-M5 §5.4 — the `--strategy` door. Body lives beside the
 # other lock-generation entry points (it needs `resolveRefreshSolverInputs`).
@@ -16292,7 +16306,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       let raw = valueFromFlag(args, i, "--strategy")
       if not parseLockStrategy(raw, buildStrategy):
         stderr.writeLine("repro build: unknown --strategy '" & raw &
-          "' (expected: default, lowest, highest)")
+          "' (expected: " & LockStrategyNames & ")")
         return 2
       strategyGiven = true
     elif arg == "--print-solved-graph":
@@ -49469,9 +49483,16 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
                        gen: var LockVerbOptions): int =
   ## Shared arg parser for ``repro lock solve`` / ``refresh`` / ``validate``:
   ## ``[<projectDir>] [--inputs <file>] [--lock <file>] [--platform <p>]
-  ## [--strategy <default|lowest|highest>] [--registry <url>] [--write]
-  ## [--json]``. Returns 0 on success, 2 on a usage error (diagnostic
-  ## already emitted).
+  ## [--strategy <default|lowest|highest|lowest-direct>] [--lowest]
+  ## [--highest] [--registry <url>] [--write] [--json]``. Returns 0 on
+  ## success, 2 on a usage error (diagnostic already emitted).
+  ##
+  ## ``--lowest`` / ``--highest`` are the spellings `Locking-And-Solver.md`
+  ## §"CLI Surface" names for `repro lock solve`, and NLF-M6 ships them as
+  ## SUGAR over ``--strategy``: they assign the same field, so there is one
+  ## strategy value and not two ways for it to be set. A later flag wins,
+  ## which is the ordinary last-flag-wins rule every other option here
+  ## follows.
   ##
   ## ``--strategy`` is `Named-Lock-Files.md` §5.5's whole-build spelling.
   ## ``--registry`` names a metadata index the generation wave may reach; with
@@ -49491,8 +49512,12 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
       let raw = valueFromFlag(rest, i, "--strategy")
       if not parseLockStrategy(raw, gen.strategy):
         stderr.writeLine("repro lock " & verb & ": unknown --strategy '" &
-          raw & "' (expected: default, lowest, highest)")
+          raw & "' (expected: " & LockStrategyNames & ")")
         return 2
+    elif arg == "--lowest":
+      gen.strategy = lsLowest
+    elif arg == "--highest":
+      gen.strategy = lsHighest
     elif arg == "--registry" or arg.startsWith("--registry="):
       gen.registries.add(valueFromFlag(rest, i, "--registry"))
     elif arg == "--write":
@@ -49734,6 +49759,25 @@ proc reportGeneratedLock(verb, lockP: string;
     " metadata fetch edge(s) in " & $generated.fetchWaves.len & " wave(s))")
   stdout.writeLine("repro lock " & verb & ": lock identity " &
     $generated.lockIdentity)
+  # NLF-M6, third folded criterion — a strategy that cannot take effect must
+  # SAY SO. NLF-M5 shipped `--strategy` accepted, printed in the run summary,
+  # and silently inert wherever no candidate universe existed to rank; the
+  # instance was fixed and the CLASS was not. This is the class: the report is
+  # produced by the generation path (`strategyEffectivenessReport`) and every
+  # door prints it, so a new door cannot acquire silence by omission.
+  if generated.strategyReport.len > 0:
+    stderr.writeLine("repro lock " & verb & ": " & generated.strategyReport)
+  # §5.7's two-phase lookup, made visible: whether the solve ran at all, and
+  # which recorded path set answered when it did not. An operator who cannot
+  # see that a lock came from cache cannot tell a working filter from a
+  # fingerprint that never changes — the exact confusion NLF-M6's exit criteria
+  # forbid a TEST from resting on, and the same argument applies to the log.
+  stdout.writeLine("repro lock " & verb & ": solve " &
+    (if generated.solveExecuted: "ran"
+     else: "served from recorded path set #" & $generated.pathSetHitIndex) &
+    " (" & $generated.pathSetsRecorded & " path set(s) under this weak " &
+    "fingerprint, " & $generated.pathSet.observations.len &
+    " consulted observation(s))")
   return 0
 
 proc runLockGenerationVerb(rest: openArray[string]; verb: string;
@@ -49827,6 +49871,8 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
         " for this invocation; the committed lock is not modified")
     stderr.writeLine("repro build: --strategy " & $strategy &
       " hidden lock identity " & $generated.lockIdentity)
+    if generated.strategyReport.len > 0:
+      stderr.writeLine("repro build: " & generated.strategyReport)
     return 0
   except CatchableError as e:
     if inheritedPins.len > 0: putEnv(LockPinsEnvVar, inheritedPins)
@@ -49836,8 +49882,12 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
     return 1
 
 proc runReproLockSolve(rest: openArray[string]): int =
-  ## ``repro lock solve [--strategy <s>] [--write]`` — generate a lock under a
-  ## strategy.
+  ## ``repro lock solve [--lowest|--highest|--strategy <s>] [--write]`` —
+  ## generate a lock under a strategy.
+  ##
+  ## NLF-M6 adds ``--lowest`` / ``--highest``, which is the spelling
+  ## `Locking-And-Solver.md` §"CLI Surface" and `Named-Lock-Files.md` §5.4 both
+  ## name; ``--strategy`` is the general form and the two set the same field.
   ##
   ## **Behaviour change, stated rather than slipped in.** Before NLF-M5,
   ## ``solve`` was accepted as a bare ALIAS of ``refresh`` and therefore always
