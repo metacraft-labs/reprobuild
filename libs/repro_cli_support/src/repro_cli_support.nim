@@ -9125,6 +9125,16 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
       responsePath)
   readProviderResponseFile(responsePath)
 
+const DevelopOverridesEnvVar = "REPRO_DEVELOP_OVERRIDES_FILE"
+  ## The env var naming the develop-override document. One spelling, because
+  ## the engine both SETS it (when it launches a provider that must see the
+  ## overrides) and WITHDRAWS it (when it probes a sibling, which must not).
+  ## It MUST match
+  ## ``repro_dsl_stdlib/configurables/develop_sources.readDevelopSources`` —
+  ## that module is std-only by design and shares this CONTRACT with the
+  ## engine rather than any code, so the two spellings have nothing but this
+  ## comment holding them together.
+
 proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
   let providerBinary = valueAfterFlag(args, "--provider-binary")
   let providerArtifactId = valueAfterFlag(args, "--provider-artifact-id")
@@ -9147,7 +9157,7 @@ proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
       return 2
   try:
     if developOverridesPath.len > 0:
-      putEnv("REPRO_DEVELOP_OVERRIDES_FILE", developOverridesPath)
+      putEnv(DevelopOverridesEnvVar, developOverridesPath)
     let cwd = if projectRoot.len > 0: projectRoot else: getCurrentDir()
     let manifestResponse = runStableProviderProtocol(providerBinary,
       protocolRoot, "manifest", cwd, ProviderGraphRequest(
@@ -9240,9 +9250,56 @@ proc runDevEnvShellRenderHelper(args: openArray[string]): int =
     return 1
 
 type
+  DevelopOverrideVariantDecl = object
+    ## Named-Lock-Files NLF-M2, the writer half — one variant DECLARATION
+    ## recorded against a develop override, in the shape
+    ## ``repro_dsl_stdlib/configurables/develop_sources.nim`` parses.
+    ##
+    ## A DECLARATION, never an assignment (owner decision Q-4, 2026-08-18:
+    ## "variants of a develop-mode package are SOLVED, not recorded"). The
+    ## name, the universe and the recipe's declared default are the shape of
+    ## the question; the answer stays the solve's to give, and the reader
+    ## turns ``default`` into a default-band contribution rather than a pin
+    ## precisely so it can be overruled.
+    ##
+    ## The name is the SIBLING's own, unqualified. Qualification by package is
+    ## the reader's job (``qualifiedVariantName``); doing it here as well would
+    ## produce ``libfoo.libfoo.enableTls`` and reach nothing.
+    name: string
+    kind: string             ## ``bool`` or ``enum`` — the reader's two shapes.
+    values: seq[string]      ## the enum universe; empty for ``bool``.
+    default: string          ## the declared default, or ``""`` when none.
+
   DevelopOverrideEntry = object
+    ## One entry of ``develop-overrides.json``. ``node`` and ``path`` are what
+    ## the engine has always written; ``version`` and ``variants`` are the two
+    ## fields `develop_sources.nim` has read since NLF-M2 and nothing produced.
+    ##
+    ## Both of the new fields are OMITTED when unknown rather than filled with
+    ## a stand-in, and that is the whole of the design. The consumer's version
+    ## chain is `an explicit version` -> `a VERSION file` -> a loud refusal;
+    ## writing `0.0.0`, a timestamp, or the declared range's lower bound would
+    ## short-circuit that chain with a value nobody observed — which is the
+    ## defect NLF-M2 removed from the solve, re-introduced one layer up with
+    ## better-looking provenance.
     node: string
     path: string
+    version: string
+      ## The upstream solved identity this override REPLACED, read from the
+      ## consumer's committed lock. Empty = the lock does not say, and the
+      ## field is not written at all.
+    variants: seq[DevelopOverrideVariantDecl]
+      ## The sibling's own variant declarations. Empty = none were obtained,
+      ## and the field is not written at all.
+      ##
+      ## "The sibling declares none" and "the sibling could not be asked" are
+      ## deliberately NOT distinguished here, because the probe that answers
+      ## the question cannot distinguish them either: a recipe with no
+      ## variants emits no solver inputs at all, which is the same `none` a
+      ## failed provider compile returns. Recording an empty array for one of
+      ## them would be a claim the engine is not in a position to make. The
+      ## consumer treats both as "no variants", so nothing downstream turns on
+      ## the difference.
 
   DevEnvCliSelection = object
     selector: string
@@ -9504,6 +9561,16 @@ proc developOverridesMetadataPath(projectRoot: string): string =
   projectRoot / ".repro" / "local" / "develop-overrides.json"
 
 proc readDevelopOverrides(path: string): seq[DevelopOverrideEntry] =
+  ## Read the document back. ``version`` and ``variants`` are read as well as
+  ## written, and that is load-bearing rather than symmetric-for-tidiness:
+  ## ``upsertDevelopOverride`` reads the whole document, edits one entry and
+  ## writes all of it back, so a reader that dropped the two fields would strip
+  ## them from every entry it did not touch. The damage would be silent and
+  ## would surface much later as the consumer's version fallback mysteriously
+  ## firing again for a sibling that had been fine.
+  ##
+  ## A document written before those fields existed simply has neither, which
+  ## is the ordinary case and reads as the empty defaults.
   if path.len == 0 or not fileExists(extendedPath(path)):
     return @[]
   let root = parseFile(extendedPath(path))
@@ -9514,8 +9581,25 @@ proc readDevelopOverrides(path: string): seq[DevelopOverrideEntry] =
       continue
     let node = item{"node"}.getStr()
     let localPath = item{"path"}.getStr()
-    if node.len > 0 and localPath.len > 0:
-      result.add(DevelopOverrideEntry(node: node, path: localPath))
+    if node.len == 0 or localPath.len == 0:
+      continue
+    var entry = DevelopOverrideEntry(node: node, path: localPath,
+      version: item{"version"}.getStr())
+    let recordedVariants = item{"variants"}
+    if not recordedVariants.isNil and recordedVariants.kind == JArray:
+      for declared in recordedVariants:
+        if declared.kind != JObject:
+          continue
+        var decl = DevelopOverrideVariantDecl(
+          name: declared{"name"}.getStr(),
+          kind: declared{"kind"}.getStr(),
+          default: declared{"default"}.getStr())
+        let values = declared{"values"}
+        if not values.isNil and values.kind == JArray:
+          for value in values:
+            decl.values.add(value.getStr())
+        entry.variants.add(decl)
+    result.add(entry)
 
 proc writeDevelopOverrides(path, projectRoot: string;
                            entries: openArray[DevelopOverrideEntry]) =
@@ -9523,10 +9607,27 @@ proc writeDevelopOverrides(path, projectRoot: string;
   sorted.sort(proc (a, b: DevelopOverrideEntry): int = cmp(a.node, b.node))
   var overrides = newJArray()
   for entry in sorted:
-    overrides.add(%*{
+    var rendered = %*{
       "node": entry.node,
       "path": entry.path
-    })
+    }
+    # Both fields are written ONLY when the engine actually has them. An
+    # entry it could say nothing about renders exactly as it always has, which
+    # is why landing this moves no action fingerprint: today's overrides carry
+    # `node` and `path` and the rendering for them is byte-unchanged.
+    if entry.version.len > 0:
+      rendered["version"] = %entry.version
+    if entry.variants.len > 0:
+      var declared = newJArray()
+      for decl in entry.variants:
+        var one = %*{"name": decl.name, "kind": decl.kind}
+        if decl.values.len > 0:
+          one["values"] = %decl.values
+        if decl.default.len > 0:
+          one["default"] = %decl.default
+        declared.add(one)
+      rendered["variants"] = declared
+    overrides.add(rendered)
   let payload = %*{
     "schemaId": "reprobuild.develop-overrides.v1",
     "projectRoot": projectRoot,
@@ -9540,6 +9641,15 @@ proc writeDevelopOverrides(path, projectRoot: string;
   moveFile(extendedPath(tmp), extendedPath(path))
 
 proc findDevEnvProjectRoot(startPath: string): string
+
+proc replacedSolvedVersion(projectRoot, dependency: string): string
+  ## Forward declaration: the body needs ``committedLockPath``, which is
+  ## declared with the rest of the lock plumbing far below this section.
+
+proc siblingVariantDeclarations(checkout: string):
+    seq[DevelopOverrideVariantDecl]
+  ## Forward declaration: the body needs the compiled-provider probe
+  ## (``solverInputsFromCompiledProvider``), which is declared far below.
 
 proc activeProjectRootFromCwd(): string =
   result = findDevEnvProjectRoot(getCurrentDir())
@@ -9570,15 +9680,37 @@ proc resolveDevelopOverrideCheckout(dependency, intoPath: string): string =
       candidates.join(" or "))
 
 proc upsertDevelopOverride(projectRoot, dependency, localPath: string): string =
+  ## Register (or re-point) the develop override for ``dependency``, recording
+  ## everything the engine knows about the substitution it is making.
+  ##
+  ## Named-Lock-Files NLF-M2 left this writer emitting ``node`` and ``path``
+  ## while `develop_sources.nim` read three fields, so the other two were a
+  ## contract with no producer: every develop sibling on disk fell through to
+  ## the `VERSION`-file source or to `EDevelopVersionUnknown`, and contributed
+  ## no variants at all. Both facts are known HERE, at registration:
+  ##
+  ##   * the version is the identity the override REPLACES, which the
+  ##     consumer's committed lock records;
+  ##   * the variants are the sibling's own declarations, which its recipe
+  ##     states and its compiled provider reports.
+  ##
+  ## Both are recomputed on every upsert, including a re-point of an existing
+  ## entry: the fields describe the checkout at ``localPath``, so carrying an
+  ## older entry's values across a path change would describe the wrong tree.
   result = developOverridesMetadataPath(projectRoot)
   var entries = readDevelopOverrides(result)
+  let version = replacedSolvedVersion(projectRoot, dependency)
+  let variants = siblingVariantDeclarations(localPath)
   var replaced = false
   for entry in entries.mitems:
     if entry.node == dependency:
       entry.path = localPath
+      entry.version = version
+      entry.variants = variants
       replaced = true
   if not replaced:
-    entries.add(DevelopOverrideEntry(node: dependency, path: localPath))
+    entries.add(DevelopOverrideEntry(node: dependency, path: localPath,
+      version: version, variants: variants))
   writeDevelopOverrides(result, projectRoot, entries)
 
 proc devEnvActivitySegment(activity: string): string =
@@ -14770,6 +14902,54 @@ proc committedLockPath*(projectDir: string): string =
 
 proc solverInputsPath*(projectDir: string): string =
   projectDir / SolverInputsFileName
+
+proc replacedSolvedVersion(projectRoot, dependency: string): string =
+  ## Named-Lock-Files NLF-M2, the writer half — the version a develop override
+  ## for ``dependency`` REPLACES, as the consumer's committed lock records it.
+  ##
+  ## `develop_sources.nim` names this source first and says why it needs no
+  ## other: "the engine knows the upstream solved identity the override
+  ## replaced, and when it records that, nothing else needs consulting". The
+  ## committed lock is the document that holds that identity — a develop
+  ## override substitutes a checkout for a solved node, and the solved node's
+  ## version is exactly what `repro.lock` pins.
+  ##
+  ## THE CHECKOUT IS DELIBERATELY NOT CONSULTED HERE. It is the consumer's
+  ## SECOND source, and reading it from the writer as well would collapse a
+  ## two-source chain into one place where a value could come from either —
+  ## so a checkout whose `VERSION` file changed after registration would keep
+  ## reporting the stale registration-time value, which is worse than having
+  ## no first source at all.
+  ##
+  ## Returns "" when the lock does not say, and "" means the field is not
+  ## written. There is deliberately no fallback: a synthesized version here
+  ## would be handed to a consumer that trusts source 1 unconditionally, which
+  ## is the defect NLF-M2 removed from the solve wearing better provenance.
+  if projectRoot.len == 0 or dependency.len == 0:
+    return ""
+  let lockP = committedLockPath(projectRoot)
+  if not fileExists(extendedPath(lockP)):
+    return ""
+  var lock: LockedDependencies
+  try:
+    lock = parseLockedDependencies(readFile(extendedPath(lockP)))
+  except CatchableError:
+    # An unreadable lock is "we do not know", not "there is no version". The
+    # caller writes nothing either way, and `repro lock validate` is the verb
+    # whose job it is to complain about the lock itself.
+    return ""
+  # The solved graph first: a develop override replaces a SOLVED node, and
+  # `packages` is where the solve's answer for that node lives. `deps` is
+  # consulted second because a workspace repo carries an empty `version` there
+  # (repro_lock.nim: "empty for a plain workspace repo") and only a
+  # source-with-a-version entry answers this question at all.
+  for pkg in lock.packages:
+    if pkg.name == dependency and pkg.version.len > 0:
+      return pkg.version
+  for dep in lock.deps:
+    if dep.name == dependency and dep.version.len > 0:
+      return dep.version
+  ""
 
 # ---------------------------------------------------------------------------
 # Cross-Repo-Source-Consumption SC-1 — the "resolve package binding" hook.
@@ -23224,7 +23404,10 @@ proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
       return false
   hasM22Marker
 
-proc runDevelopCommand(args: openArray[string]): int =
+proc runDevelopCommand*(args: openArray[string]): int =
+  ## `repro develop …`. Exported for the same reason `runReproLockCommand` is:
+  ## a test that asserts on what the verb WRITES has to reach the verb, and
+  ## reaching a private copy of its body instead would let the two drift.
   # L1 routing: a set-selection flag (``--all`` / ``--direct`` /
   # ``--transitive-of``) routes to the lock-driven develop-SET command that
   # clones every selected dependency at its locked revision (CLI/develop.md
@@ -50244,6 +50427,106 @@ proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
     delEnv(LockFilesEmitEnvVar)
     try: removeFile(extendedPath(emitPath))
     except CatchableError: discard
+
+proc siblingVariantDeclarations(checkout: string):
+    seq[DevelopOverrideVariantDecl] =
+  ## Named-Lock-Files NLF-M2, the variant half of the writer — the variant
+  ## DECLARATIONS the develop sibling at ``checkout`` makes.
+  ##
+  ## `develop_sources.nim`'s second KNOWN GAP names this work and says where it
+  ## belongs: "the engine does not write `variants` yet either … The durable
+  ## fix is for the engine to record the sibling's declarations when it
+  ## registers the override, since introspecting the sibling's recipe is work
+  ## it is already positioned to do."
+  ##
+  ## HOW IT IS INTROSPECTED, and why it is not cheaper. A recipe's variants are
+  ## `declareVariant` calls that run at the RECIPE process's module init; they
+  ## do not exist in the CLI's process and cannot be recovered from the
+  ## project-interface artifact, which carries no variant surface. The only
+  ## thing that knows them is the sibling's own compiled provider — so this
+  ## borrows the probe `repro lock refresh` and `repro lock list` already use,
+  ## with `requireSolverBinding = false` for the same reason `repro lock list`
+  ## passes it: a recipe that declares variants and no `build:` block would
+  ## otherwise never run the provider and would report nothing as though it
+  ## were the answer.
+  ##
+  ## Reading the recipe's TEXT instead would be cheap and is refused: a
+  ## hand-rolled scan of `name: variant T = default` lines is a second,
+  ## divergent implementation of the DSL's parser, and its failure mode is to
+  ## quietly report fewer variants than the recipe declares — a package
+  ## configured out of a universe nobody declared, which is precisely the
+  ## outcome the reader raises `EDevelopVariantsMalformed` to prevent.
+  ##
+  ## THE SIBLING'S OWN DECLARATIONS, and nobody else's. Any develop overrides
+  ## governing the CLI's process are withdrawn for the probe's lifetime: left
+  ## in place, the sibling's solve would fold in ITS develop siblings'
+  ## qualified variants and this entry would end up claiming declarations that
+  ## belong to a third package.
+  ##
+  ## Best-effort in the same way and for the same reason as the probe it
+  ## borrows: an empty result means the field is not written, and the reader's
+  ## behaviour for an override with no `variants` is unchanged from every
+  ## override on disk today. "Declares none" and "could not be asked" are not
+  ## distinguished, because the probe cannot distinguish them — a recipe with
+  ## no variants emits no solver inputs at all, which is the same `none` a
+  ## failed provider compile returns.
+  ##
+  ## KNOWN LIMITATION, recorded rather than papered over and pinned by
+  ## `a recipe with no build: block cannot be asked` in
+  ## `t_develop_override_records_the_identity_it_replaced`: a sibling whose
+  ## recipe has neither a `build:` nor a `devEnv:` body contributes nothing,
+  ## even when it declares variants. `buildCode` (`macros_b.nim`) emits the
+  ## provider's `runPackageProvider` entry point only for a recipe with one of
+  ## those bodies, so the compiled binary runs its module init — emitting the
+  ## solver inputs — and exits without answering the protocol, and the probe
+  ## discards the emission along with the failed request. Closing it means
+  ## teaching that probe to keep inputs the provider demonstrably wrote before
+  ## the request failed, which is a change to `repro lock refresh`'s source of
+  ## truth and belongs to its own milestone. A develop sibling is a project you
+  ## build, so the shape that misses out is the rare one.
+  result = @[]
+  if checkout.len == 0:
+    return
+  let inheritedOverrides = getEnv(DevelopOverridesEnvVar)
+  delEnv(DevelopOverridesEnvVar)
+  try:
+    let probed = solverInputsFromCompiledProvider(checkout,
+      requireSolverBinding = false)
+    if probed.isNone:
+      return
+    for decl in probed.get().variants:
+      if decl.name.len == 0:
+        continue
+      var recorded = DevelopOverrideVariantDecl(name: decl.name)
+      if decl.kind == vkBool:
+        # The bool universe is closed and the reader hard-codes it, so the
+        # probe's synthesized `["true", "false"]` value list is not carried:
+        # writing it would invite a later reader to treat it as declared.
+        recorded.kind = "bool"
+      else:
+        recorded.kind = "enum"
+        recorded.values = decl.allowedValues
+        if recorded.values.len == 0:
+          # The reader refuses an enum with no universe, and it is right to:
+          # a universe re-derived from contributions alone drops every value
+          # nobody contributed. Recording one anyway would turn that refusal
+          # into every consumer's problem, so the declaration is left out and
+          # the sibling contributes what it can.
+          continue
+      for contributed in decl.contributions:
+        # The DECLARED default only. A `set` / `override` / `force`
+        # contribution is somebody's ANSWER, and Q-4 keeps answers out of the
+        # record: recorded here it would reach the consumer's solve as this
+        # checkout's declared default and quietly configure a package the
+        # solve was supposed to configure.
+        if contributed.priority == vpDefault:
+          recorded.default = contributed.value
+      result.add(recorded)
+  except CatchableError:
+    result = @[]
+  finally:
+    if inheritedOverrides.len > 0:
+      putEnv(DevelopOverridesEnvVar, inheritedOverrides)
 
 proc runReproLockList(rest: openArray[string]): int =
   ## `repro lock list` — §4.2's first consumer of a captured doc comment, and

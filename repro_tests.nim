@@ -526,6 +526,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim",
+    binary: "build/test-bin/t_develop_override_records_the_identity_it_replaced",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim",
     binary: "build/test-bin/t_e2e_watch_via_adapter",
     defines: @[],
