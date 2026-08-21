@@ -966,6 +966,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_develop_sibling_variants_reach_the_solve.nim",
+    binary: "build/test-bin/t_develop_sibling_variants_reach_the_solve",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_doc_comment_malformed_directive_is_compile_error.nim",
     binary: "build/test-bin/t_doc_comment_malformed_directive_is_compile_error",
     defines: @[],
