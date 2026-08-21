@@ -169,6 +169,17 @@ type
       ## code at every typed-tool call site that constructs an instance of
       ## ``<T>`` from the call's actual flag values and passes it to
       ## ``implicitTargetNameFor<TitleExportName>``.
+    lockFile*: string
+      ## Named-Lock-Files NLF-M7 (§4.3) — the lock file designated at this
+      ## artifact by a ``lockFile <name>`` line in its body. Empty means
+      ## INHERIT, which §4.6's table makes the default for an ordinary
+      ## artifact: "Built under whatever lock file its consumer is under;
+      ## once per distinct consuming lock file."
+      ##
+      ## §4.3 puts the designation here rather than on the package because
+      ## "a package routinely declares both a host build tool and a shipped
+      ## binary … so package-level designation would be too coarse to express
+      ## the motivating case".
     sourceFile*: string
     sourceLine*: int
 
@@ -181,6 +192,10 @@ type
   LibraryDef* = object
     name*: string
     kind*: LibraryKind
+    lockFile*: string
+      ## Named-Lock-Files NLF-M7 (§4.3). See ``ExecutableDef.lockFile``; a
+      ## library designating one is §4.6's PINNED row and is the unusual
+      ## case — "a library's architecture is a property of who is using it".
     exportedPath*: string
       ## Cross-Repo-Source-Consumption SC-11 (§4.2a.4): the producer-relative
       ## directory a Nim library-consumer threads onto its ``nim c --path:``.
@@ -238,6 +253,31 @@ type
       ## compiler.value: of "gcc": "gcc >=12 <15"`` this is ``"gcc"``;
       ## for ``if enableTLS.value: "openssl >=3.3 <4.0"`` this is
       ## ``"true"`` (bool variants encode triggers as the string form).
+    depKind*: string
+      ## Named-Lock-Files NLF-M7 (§4.6) — WHICH of the three approved
+      ## dependency lists this entry was written in: ``"target"``
+      ## (``uses:`` / ``buildDeps:``), ``"native"`` (``nativeBuildDeps:``) or
+      ## ``"runtime"`` (``runtimeDeps:``).
+      ##
+      ## §4.6 is where this comes from and why it matters. The approved DSL
+      ## already declares the host/target split at list granularity —
+      ## "``nativeBuildDeps:`` resolves under the ``hostTools`` lock file;
+      ## ``buildDeps:`` and ``runtimeDeps:`` resolve under the consuming
+      ## artifact's lock file" — but §4.6 MEASURED that the distinction is
+      ## "erased before the solver ever sees it", because the three lists are
+      ## concatenated at serialization
+      ## (``pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps``).
+      ##
+      ## Tagging the entry is what un-erases it. The concatenated
+      ## ``toolUses`` field stays — a dozen convention-layer call sites read
+      ## it for tool-PATH construction, and splitting THAT is a different
+      ## change — but it is no longer lossy: every entry now says which list
+      ## it came from, so the platform tag survives the merge and reaches the
+      ## solver through ``registerSolverDependency``.
+      ##
+      ## Empty means untagged, which no in-tree collection site produces; it
+      ## is the zero value and is treated as ``"target"`` by consumers so a
+      ## `PackageUseDef` built by hand keeps its former meaning.
 
   NixPackageProvisioningDef* = object
     selector*: string
@@ -399,6 +439,10 @@ type
 
   PackageDef* = object
     packageName*: string
+    lockFile*: string
+      ## Named-Lock-Files NLF-M7 (§4.3) — the PACKAGE-level default, which
+      ## "remains available as a default that artifacts inherit and may
+      ## override". One rung below the artifact in the precedence chain.
     defaultToolProvisioning*: string
     executables*: seq[ExecutableDef]
     libraries*: seq[LibraryDef]

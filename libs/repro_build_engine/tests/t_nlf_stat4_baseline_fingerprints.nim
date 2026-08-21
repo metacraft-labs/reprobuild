@@ -14,12 +14,27 @@
 ## NLF-M4 changed anything. This module is the assertion half: it recomputes
 ## the corpus against the live engine and requires the bytes to match.
 ##
-## The gate is campaign-wide, not milestone-wide. NLF-M4 itself adds a carrier
-## field and an audit and must not move a single fingerprint; M5–M8 add lock
-## generation, materiality, the DSL surface and the diamond, and must not move
-## one either for a workspace that declares no lock files. Failing this test is
-## not "the fixture is stale" — it is the migration gate reporting that
-## incremental adoption now costs existing users a full rebuild.
+## ## What this gate means AFTER NLF-M7, which is not what it meant before
+##
+## Through NLF-M4, M5 and M6 the fixture was frozen at the pre-campaign values
+## and this file's job was to keep it there. **NLF-M7 moved it, once, on
+## purpose.** §7's keying became effective — the governing lock identity now
+## enters `weakFingerprint` — and `Named-Lock-Files.milestones.org` NLF-M7
+## names that as the milestone's own exit criterion: "the exit criterion is not
+## 'unchanged' here but 'changed exactly where designation differs, and nowhere
+## else'."
+##
+## So this file is no longer the whole gate; it is one half of it. It holds the
+## post-M7 values and catches any FURTHER movement. The other half —
+## `t_workspace_declaring_nothing_unchanged` — holds the frozen M4 record and
+## checks that the one move was exactly the keying and nothing else, row by
+## row. Read them together: this one says "nothing has moved since M7", that
+## one says "what moved at M7 was only this".
+##
+## Failing this test is still not "the fixture is stale". It is the migration
+## gate reporting that something has changed the fingerprint of an edge in a
+## workspace that declares no lock files, which for existing users is a full
+## rebuild.
 ##
 ## Test-double policy: NO mocks, doubles, or fakes. The corpus is built from
 ## the engine's real public constructors and the recorded digest is the real

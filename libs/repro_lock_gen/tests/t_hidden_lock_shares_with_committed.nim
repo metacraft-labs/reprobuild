@@ -18,23 +18,30 @@
 ## under each carries that same identity — so the two are one lock everywhere
 ## the identity is consulted.
 ##
-## **What is deliberately NOT asserted, and why.** The obvious stronger
-## assertion is that the two edges have the same WEAK FINGERPRINT and a
-## differing pair has different ones. That assertion cannot be made yet and
-## must not be made to pass. `Named-Lock-Files.milestones.org` records the
-## reason as a standing hazard:
+## **NLF-M7 INVERTED the assertion this file used to carry.** The M6 version of
+## this header recorded a standing hazard:
 ##
 ## > M4 deliberately did not mix the lock identity into `weakFingerprint`,
 ## > because NLF-STAT-4 requires fingerprints stay byte-identical across the
 ## > campaign, so §7's keying is not yet effective and becomes so at NLF-M7.
 ##
-## So an edge's weak fingerprint is today independent of its governing lock,
-## and a test asserting otherwise would either fail or force a change that
-## breaks the migration gate. When NLF-M7 makes §7's keying effective, the
-## `governingLockIdentity` assertions below should be tightened into
-## fingerprint assertions; until then the identity is the strongest thing
-## there is to check, and pretending otherwise would be the more misleading
-## choice.
+## and it therefore asserted, in the control test below, that two edges under
+## DIFFERING governing locks **share** a weak fingerprint — true only because
+## the identity was not in the key at all. It also said what to do about it:
+## "When NLF-M7 makes §7's keying effective, the `governingLockIdentity`
+## assertions below should be tightened into fingerprint assertions."
+##
+## NLF-M7 made it effective, so both halves are now asserted in the strong
+## form:
+##
+##   * the hidden lock and the identical committed one produce edges with the
+##     SAME weak fingerprint — which is what "they share every artifact"
+##     actually means, since the weak fingerprint is what the action cache
+##     looks up by;
+##   * two edges under DIFFERING locks produce DIFFERENT weak fingerprints —
+##     §7's "an edge built under two lock files is two actions with two cache
+##     entries. Cross-lock reuse of a cache entry is a correctness bug of the
+##     serve-a-stale-artifact class, not a performance regression."
 ##
 ## ## The control that stops this being a tautology
 ##
@@ -121,6 +128,14 @@ suite "NLF-STRAT-4 a hidden lock and an identical committed one are one lock":
         consumerEdgeUnder(committed.lockIdentity).governingLockIdentity
       check consumerEdgeUnder(hidden.lockIdentity).governingLockIdentity ==
         committed.lockIdentity
+
+      # NLF-M7: and now the assertion the M6 version could not make. Equal
+      # governing identities give equal WEAK FINGERPRINTS, which is what the
+      # action cache actually looks up by — so "they share every artifact" is
+      # asserted at the layer where sharing happens rather than one layer
+      # above it.
+      check hex(consumerEdgeUnder(hidden.lockIdentity).weakFingerprint) ==
+        hex(consumerEdgeUnder(committed.lockIdentity).weakFingerprint)
     finally:
       reg.shutdown()
 
@@ -138,13 +153,22 @@ suite "NLF-STRAT-4 a hidden lock and an identical committed one are one lock":
       check consumerEdgeUnder(lowest.lockIdentity).governingLockIdentity !=
         consumerEdgeUnder(highest.lockIdentity).governingLockIdentity
 
-      # The NLF-M7 hazard, asserted in the direction it currently holds so a
-      # reader is not left to discover it. Today the two edges share a weak
-      # fingerprint DESPITE differing governing locks, because M4 kept the
-      # identity out of it to hold NLF-STAT-4 byte-identical. When M7 makes
-      # §7's keying effective this assertion must be inverted, and its failure
-      # is the signal to do that rather than a regression.
-      check hex(consumerEdgeUnder(lowest.lockIdentity).weakFingerprint) ==
+      # INVERTED at NLF-M7. The M6 version of this file asserted that these
+      # two were EQUAL — true only because M4 kept the identity out of the key
+      # to hold NLF-STAT-4 byte-identical, and flagged here as the hazard M7
+      # would have to close. §7's keying is now effective, so two edges whose
+      # governing locks differ must not share a cache entry:
+      #
+      # > An edge built under two lock files is two actions with two cache
+      # > entries. Cross-lock reuse of a cache entry is a correctness bug of
+      # > the serve-a-stale-artifact class, not a performance regression.
+      #
+      # Note what makes this discriminating rather than trivial: the two edges
+      # are byte-identical in every OTHER respect — same id, same argv, same
+      # cwd, same inputs, same outputs (see `consumerEdgeUnder`). The
+      # governing lock is the only thing that differs, so it is the only thing
+      # that can be separating them.
+      check hex(consumerEdgeUnder(lowest.lockIdentity).weakFingerprint) !=
         hex(consumerEdgeUnder(highest.lockIdentity).weakFingerprint)
     finally:
       reg.shutdown()

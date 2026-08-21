@@ -143,6 +143,10 @@ proc crossAarch64LinuxGnuToolchain*(): Toolchain =
   let cc = resolveCrossAarch64Compiler()
   newToolchain(
     name = "cross-aarch64-linux-gnu-toolchain",
+    # The cross adapter drives a gcc; the FAMILY is what the mid-level
+    # operation dispatcher needs, and it is gcc even though the adapter
+    # identity is not.
+    compilerFamily = "gcc",
     cCompilerPath = cc,
     cxxCompilerPath = cc.replace("-gcc", "-g++"),
     linkerPath = cc,

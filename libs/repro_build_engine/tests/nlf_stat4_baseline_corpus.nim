@@ -45,15 +45,43 @@ import std/[algorithm, strutils]
 import repro_build_engine
 import repro_hash
 
-let CorpusLockIdentity = lockIdentityOutsideSolvedGraph()
+const CorpusPlatform* = "amd64-linux"
+  ## The platform the corpus's empty solved graph is taken FOR.
+  ##
+  ## Pinned rather than read from the host, and NLF-M7 is what forced the
+  ## question. A lock identity is content-derived and the platform is part of
+  ## that content (`repro_lock/identity.nim` §"What IS in the key beyond
+  ## §6.2's four components"), so once §7's keying became effective the
+  ## fingerprint column below would have become HOST-DEPENDENT — recorded on
+  ## `amd64-linux` and failing on `arm64-darwin` for a reason that has nothing
+  ## to do with the property under test.
+  ##
+  ## Pinning it is honest rather than a workaround: the corpus stands in for
+  ## "an existing workspace with no lock-file declarations", and which machine
+  ## that workspace is read on is not one of its facts. The value is a real
+  ## recompute over the empty graph for a NAMED platform, which is exactly
+  ## what `emptySolvedGraphIdentity` is for, and it is the same primitive
+  ## `repro_lock_gen` uses for a generation request that carries its own
+  ## platform.
+
+let CorpusLockIdentity = emptySolvedGraphIdentity(CorpusPlatform)
   ## `let`, not `const`: the identity is a real BLAKE3 recompute and the Nim
   ## VM cannot call the C hash at compile time.
+  ##
   ## Named-Lock-Files §7.2 — the corpus stands in for "a workspace with no
   ## lock-file declarations", so its edges are governed by the empty solved
-  ## graph. The value is deliberately NOT part of `canonicalMaterial` or of
-  ## `weakFingerprint`: NLF-STAT-4's property is that the DEFAULT PATH is
-  ## unchanged, and a carrier field that moved a fingerprint would be the
-  ## regression the case exists to catch.
+  ## graph.
+  ##
+  ## **NLF-M7 changed what this value does.** Through NLF-M4-M6 it was
+  ## deliberately NOT part of `weakFingerprint`: the identity was carried and
+  ## unused, because NLF-STAT-4 required byte-identical fingerprints while
+  ## §7's keying was not yet in force. NLF-M7 makes the keying effective, so
+  ## every row's `fingerprint` column below moves exactly once, and the
+  ## `material` column — which is frozen at the pre-NLF-M4 field list and
+  ## still excludes `governingLockIdentity` — does not move at all. That
+  ## split is what makes the diff explainable: a fingerprint change with an
+  ## unchanged material digest is the keying landing, and a material change
+  ## would be something else entirely.
 
 const BaselineFixtureRelPath* =
   "fixtures/nlf_stat4_baseline_fingerprints.tsv"
@@ -103,6 +131,14 @@ proc baselineCorpusActions*(): seq[BuildAction] =
   ## direct `BuildAction(...)` object construction for the kinds whose callers
   ## build them by hand today (`bakWorkspaceVcs`,
   ## `bakBinaryCacheSubstitute`, `bakForeignProvision`).
+  ##
+  ## The hand-constructed three compose their fingerprint with
+  ## `weakFingerprintFor`, which is `weakFingerprintFromText` keyed on the
+  ## governing lock — the same composition the two constructors apply
+  ## internally. §7.2's structural check reaches an object literal through
+  ## `{.requiresInit.}`, but a constructor's BODY cannot, so the third shape
+  ## is exactly where design A could be applied incompletely and is the shape
+  ## this corpus exists to keep covered.
   result = @[]
 
   # --- process edges, via `action()` ------------------------------------
@@ -171,7 +207,7 @@ proc baselineCorpusActions*(): seq[BuildAction] =
     id: "stat4/vcs-clone",
     outputs: @["checkout/.git"],
     cacheable: false,
-    weakFingerprint: weakFingerprintFromText("stat4/vcs-clone"),
+    weakFingerprint: weakFingerprintFor("stat4/vcs-clone", CorpusLockIdentity),
     builtinText: "clone\thttps://example.invalid/repo.git\tcheckout"))
   result.add(BuildAction(
     governingLockIdentity: CorpusLockIdentity,
@@ -179,7 +215,7 @@ proc baselineCorpusActions*(): seq[BuildAction] =
     id: "stat4/substitute-zlib",
     outputs: @["store/zlib.stamp"],
     cacheable: true,
-    weakFingerprint: weakFingerprintFromText("stat4/substitute-zlib"),
+    weakFingerprint: weakFingerprintFor("stat4/substitute-zlib", CorpusLockIdentity),
     builtinText: "0123456789abcdef\thttps://cache.example.invalid"))
   result.add(BuildAction(
     governingLockIdentity: CorpusLockIdentity,
@@ -187,7 +223,7 @@ proc baselineCorpusActions*(): seq[BuildAction] =
     id: "stat4/provision-nix",
     outputs: @["store/foreign.stamp"],
     cacheable: true,
-    weakFingerprint: weakFingerprintFromText("stat4/provision-nix"),
+    weakFingerprint: weakFingerprintFor("stat4/provision-nix", CorpusLockIdentity),
     builtinText: "nix\t/nix/store/aaaa-foo"))
 
 proc postBaselineCorpusActions*(): seq[BuildAction] =

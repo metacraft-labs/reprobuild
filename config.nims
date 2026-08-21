@@ -269,6 +269,15 @@ for libName in [
   # lock consumption. Separate from the manifest-repo SHA lock
   # (``repro_workspace_manifests/lock_writer.nim``).
   "repro_lock",
+  # Named-Lock-Files NLF-M7: declared lock-file NAMES, their doc comments,
+  # the designation stack and precedence chain, the `--lock <name>=<path>`
+  # binding, and §4.1/§4.6 propagation down the closure. A `std`-only LEAF:
+  # the project DSL's macros, the stdlib build context, the CLI and the
+  # lock-generation path all depend on it, and a leaf is the only shape all
+  # four can take. Deliberately holds no lock IDENTITY type — §6.2 forbids
+  # the name from entering a key, and keeping the name library and the
+  # identity library disjoint is how that is made structural.
+  "repro_lock_files",
   # Named-Lock-Files NLF-M5: lock GENERATION as build-graph edges —
   # metadata-fetch edges upstream, the solve as a rule-generator edge
   # downstream, the lock as its rule-set artifact. A leaf ABOVE both the

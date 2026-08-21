@@ -1109,6 +1109,75 @@ proc textBytes(text: string): seq[byte] =
 proc weakFingerprintFromText*(text: string): ContentDigest =
   blake3DomainDigest(text.textBytes(), hdActionFingerprint)
 
+proc keyedOnGoverningLock*(fingerprint: ContentDigest;
+                           governingLockIdentity: LockIdentity): ContentDigest =
+  ## Named-Lock-Files §7 — mix the governing lock identity into an action's
+  ## weak fingerprint.
+  ##
+  ## §7's requirement: "Every action for an edge, and for that edge's
+  ## transitive dependency closure, MUST key on the identity of the lock file
+  ## governing it (§6). An edge built under two lock files is two actions with
+  ## two cache entries. **Cross-lock reuse of a cache entry is a correctness
+  ## bug of the serve-a-stale-artifact class, not a performance regression.**"
+  ##
+  ## §7.1 records the design fork and its settlement: design **A**, key on the
+  ## lock file, rather than **B**, partition the output namespace. Q-7 was
+  ## settled on 2026-08-18 on a factual ground — B "requires every action's
+  ## outputs to sit under a root Reprobuild controls, and
+  ## `Foreign-Provisioner-Contracts.md` exists precisely because some package
+  ## instances are materialised by provisioners Reprobuild does not own. **B
+  ## is unsound here, not merely less convenient.**"
+  ##
+  ## ## Why this is applied in the CONSTRUCTOR and not at the call sites
+  ##
+  ## A's one real weakness is that it can be applied INCOMPLETELY, and §7.2 is
+  ## blunt about the consequence: "a single edge whose fingerprint forgets the
+  ## governing lock identity is a **silent** poisoning vector — it serves one
+  ## lock file's artifacts to another and reports success." §7.2 closes that
+  ## "by a **structural check**, not by care".
+  ##
+  ## So `action()` and `builtinAction()` apply this to whatever fingerprint
+  ## they are handed — the default derived from the id, or one the caller
+  ## computed itself. A caller cannot opt out by supplying its own
+  ## fingerprint, which is the shape "by construction" has to take here: every
+  ## `weakFingerprint =` argument in the tree is a caller who computed a
+  ## fingerprint over what its edge DOES, and none of them knows about lock
+  ## files.
+  ##
+  ## ## Why it is not simply `hash(text & identity)`
+  ##
+  ## The mix is over a length-framed two-field rendering, so no two distinct
+  ## (fingerprint, identity) pairs can collide by concatenation ambiguity.
+  ## §1.3 makes that a hard prerequisite for anything that becomes a key: a
+  ## non-canonical rendering "does not fail loudly. It produces two different
+  ## keys for one lock file — a silent cache miss and a duplicated build", and
+  ## the mirror-image collision serves one lock file's artifacts to another.
+  ##
+  ## ## When this MOVED the fingerprints
+  ##
+  ## NLF-M4 landed the carrier field and the whole-graph audit but deliberately
+  ## kept the identity OUT of the key, because NLF-STAT-4 required byte-
+  ## identical fingerprints across that milestone. NLF-M7 is where §7's keying
+  ## becomes effective, and the NLF-STAT-4 baseline fixture moves here — once,
+  ## uniformly, for every edge, because every edge acquires the same new
+  ## component. What does NOT move is the RELATIVE structure: two edges under
+  ## one lock file still key identically, which is NLF-STAT-3.
+  var framed = "action-fingerprint\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  let lock = string(governingLockIdentity)
+  framed.add($lock.len & "\x1f" & lock & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
+proc weakFingerprintFor*(id: string;
+                         governingLockIdentity: LockIdentity): ContentDigest =
+  ## The fingerprint `action()` / `builtinAction()` would compute for an edge
+  ## with this id under this lock. For the call sites that construct a
+  ## `BuildAction` object literally rather than through a constructor — §7.2's
+  ## `{.requiresInit.}` field reaches those, but the constructor's mixing
+  ## cannot, so they compose it here instead of re-deriving it.
+  keyedOnGoverningLock(weakFingerprintFromText(id), governingLockIdentity)
+
 proc legacyDepfileGatheringPolicy(depfile: string;
                                   ignoredInputPrefixes: openArray[string]):
     DependencyGatheringPolicy =
@@ -1168,7 +1237,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     memoryBytes: memoryBytes,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
-    weakFingerprint: weakFingerprint,
+    weakFingerprint: keyedOnGoverningLock(weakFingerprint,
+      governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
@@ -1203,7 +1273,8 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     cwd: cwd,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
-    weakFingerprint: weakFingerprint,
+    weakFingerprint: keyedOnGoverningLock(weakFingerprint,
+      governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     dependencyPolicy: automaticMonitorGatheringPolicy(),
     builtinText: text,

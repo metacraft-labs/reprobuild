@@ -52,7 +52,15 @@ import repro_binary_cache_server/types as bcsTypes
 import repro_project_dsl/install_mirror_resolver
 import repro_project_dsl/shell_fetch
 import repro_project_dsl/source_cache_identity
+# Named-Lock-Files NLF-M7: declared lock-file NAMES, the designation stack and
+# the artifact-designation registry. A `std`-only leaf, so the dependency adds
+# nothing transitively; the `package` macro needs it to emit §4.3's
+# designation registration and §4.9's compile-time check, and re-exporting it
+# is what lets the emitted code resolve those names inside a recipe.
+import repro_lock_files
+import repro_lock_files/ct_registry
 export cache_key, bcsTypes, install_mirror_resolver, shell_fetch
+export repro_lock_files, ct_registry
 
 proc extendedPath(path: string): string =
   when defined(windows):

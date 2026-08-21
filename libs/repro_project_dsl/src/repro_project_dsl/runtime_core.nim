@@ -115,6 +115,58 @@ type
     toolchainSlot*: RootRef
     crossTargetSlot*: RootRef
     featureSetSlot*: RootRef
+    lockFileSlot*: RootRef
+      ## Named-Lock-Files NLF-M7 (§4.4) — the FIFTH slot, and deliberately a
+      ## copy of the four above rather than a new mechanism.
+      ##
+      ## §4.4 corrects the stdlib spec's description of the build context
+      ## ("four interface handles as Nim-typed fields") with what is actually
+      ## here: one ``state`` field and four accessor procs over ``RootRef``
+      ## slots, each lazily filling its slot, with matching setters. It then
+      ## says where the lock file belongs: "**The lock file belongs in that
+      ## same structure**, as a fifth ``lockFileSlot`` with a
+      ## ``lockFile*(ctx)`` accessor and a ``setLockFile``. The accessor-proc
+      ## shape makes this *cheaper* than the spec's 'typed fields' wording
+      ## suggests, not harder: the slot pattern, the lazy fill, and the setter
+      ## all already exist four times over — the fifth is a copy."
+      ##
+      ## ``RootRef`` for the same layering reason as the other four: the
+      ## designation type is owned above this library, and the stdlib accessor
+      ## in ``active_context.nim`` does the downcast.
+      ##
+      ## The slot is a MIRROR, not the authority. What the typed-tool wrappers
+      ## resolve against is the designation stack in ``repro_lock_files``,
+      ## because ``withLockFile`` (§4.4) and the per-call argument (§4.5) nest
+      ## INSIDE one artifact's build body and a single slot cannot represent a
+      ## region narrower than the frame that owns it. ``setLockFile`` writes
+      ## both, so the two never disagree; the slot is what an author reads
+      ## when they ask the context which lock file the ARTIFACT is under.
+    toolchainSlotLockFile*: string
+    crossTargetSlotLockFile*: string
+      ## Named-Lock-Files NLF-M7 (§4.4) — the designation the lazily-filled
+      ## toolchain / cross-target slot was resolved UNDER.
+      ##
+      ## §4.4's requirement is that the build context now carries "a lock file
+      ## field that can differ between two regions of one build body". A slot
+      ## filled once per frame cannot do that: the first `withLockFile` region
+      ## would fill it and every later region in the same body would be served
+      ## the first region's toolchain. That is not a cosmetic caching bug — it
+      ## is the §4.9 shape again, a well-formed build emitting edges under a
+      ## toolchain nobody designated, and it was found by the test rather than
+      ## reasoned about, which is why the fields are recorded here rather than
+      ## the invalidation being left implicit.
+      ##
+      ## Empty string is a legal designation and means "resolved with nothing
+      ## designated". An ADAPTER-INSTALLED slot is marked with
+      ## ``ExplicitSlotDesignation`` so a re-resolve never clobbers it: an
+      ## adapter that wrote the slot directly is exercising the documented
+      ## bypass and outranks the variant-driven default.
+
+const ExplicitSlotDesignation* = "\x00explicit"
+  ## Sentinel written into ``toolchainSlotLockFile`` /
+  ## ``crossTargetSlotLockFile`` by ``setToolchain`` / ``setCrossTarget``. It
+  ## cannot collide with a real lock-file name because a declared name is a
+  ## Nim identifier and cannot contain a NUL.
 
 var activeBuilds {.threadvar.}: seq[PackageBuildState]
 
