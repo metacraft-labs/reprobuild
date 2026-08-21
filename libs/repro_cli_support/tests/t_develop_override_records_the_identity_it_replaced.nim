@@ -176,7 +176,8 @@ proc writeSibling(root, recipe: string; versionFile = ""): string =
   if versionFile.len > 0:
     writeFile(result / "VERSION", versionFile & "\n")
 
-proc developInto(consumerRoot, checkout: string): string =
+proc developInto(consumerRoot, checkout: string;
+                 dependency = DevelopedPackage): string =
   ## Run the real `repro develop <dependency> --into=PATH` verb and return the
   ## metadata path it reports. The verb resolves its project root from the
   ## CURRENT DIRECTORY, which is how a user invokes it, so the cwd is moved
@@ -194,7 +195,7 @@ proc developInto(consumerRoot, checkout: string): string =
     let sink = open(captured, fmWrite)
     discard dup2(sink.getFileHandle(), stdout.getFileHandle())
     setCurrentDir(consumerRoot)
-    rc = runDevelopCommand([DevelopedPackage, "--into=" & checkout])
+    rc = runDevelopCommand([dependency, "--into=" & checkout])
     flushFile(stdout)
     sink.close()
   doAssert rc == 0, "repro develop exited " & $rc
@@ -204,6 +205,16 @@ proc developInto(consumerRoot, checkout: string): string =
   raise newException(ValueError,
     "repro develop reported no metadata path; it printed: " &
       readFile(captured))
+
+proc entryFor(metadataPath, node: string): JsonNode =
+  ## The override entry for ``node`` in the document the verb wrote.
+  let doc = parseJson(readFile(metadataPath))
+  doAssert doc["schemaId"].getStr() == "reprobuild.develop-overrides.v1"
+  for item in doc["overrides"]:
+    if item["node"].getStr() == node:
+      return item
+  raise newException(ValueError,
+    "no override for '" & node & "' in " & readFile(metadataPath))
 
 proc overrideEntry(metadataPath: string): JsonNode =
   ## The single override entry of the document the verb just wrote.
@@ -474,3 +485,23 @@ suite "an override document written before this change still loads":
     let after = overrideEntry(variantSibling.metadataPath)
     check after["version"] == before["version"]
     check after["variants"] == before["variants"]
+
+  test "registering a second dependency leaves the first entry alone":
+    # The case that actually exercises the READER, and it has to be a
+    # different dependency: an upsert of the SAME one recomputes both fields
+    # from scratch, so it would still look right with a reader that dropped
+    # them. Registering a second entry rewrites the whole document without
+    # recomputing the first, so anything the reader forgot is gone from disk.
+    #
+    # Runs last because it adds an entry the single-entry helper above would
+    # refuse.
+    let before = entryFor(variantSibling.metadataPath, DevelopedPackage)
+    check before.hasKey("version")
+    check before.hasKey("variants")
+    check developInto(variantSibling.root / "app", variantSibling.checkout,
+                      dependency = "libbar") == variantSibling.metadataPath
+    let after = entryFor(variantSibling.metadataPath, DevelopedPackage)
+    check after["version"] == before["version"]
+    check after["variants"] == before["variants"]
+    # And the premise: the second registration really did rewrite the file.
+    check parseJson(readFile(variantSibling.metadataPath))["overrides"].len == 2
