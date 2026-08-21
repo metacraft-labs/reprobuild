@@ -158,6 +158,28 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
     finally:
       clearCurrentOwningPackageOverride()
 
+  test "post-install commands receive the staged install root":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("postInstallPkg")
+    try:
+      let pkg = autotools_package(
+        srcDir = "./src",
+        postInstallCommands = @[
+          "printf post-install > \"$REPRO_AUTOTOOLS_INSTALL_ROOT/post-install.txt\"",
+        ])
+      var cleanupArgv = ""
+      for arg in pkg.installEdge.call.arguments:
+        if arg.name == "argv":
+          cleanupArgv = arg.encodedValue
+      let exportPos = cleanupArgv.find("REPRO_AUTOTOOLS_INSTALL_ROOT")
+      let postInstallPos = cleanupArgv.find("printf post-install")
+      let cleanupPos = cleanupArgv.find("-name '*.la'")
+      check exportPos >= 0
+      check postInstallPos > exportPos
+      check cleanupPos > postInstallPos
+    finally:
+      clearCurrentOwningPackageOverride()
+
   test "recognized make depfiles replace monitoring on both edges":
     resetDslPortFetchState()
     setCurrentOwningPackageOverride("depfileMakePkg")

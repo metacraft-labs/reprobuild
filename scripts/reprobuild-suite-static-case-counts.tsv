@@ -198,9 +198,9 @@ libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	1
+libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	2
 libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim	nim	8
 libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim	nim	9
-libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	2
 libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim	nim	3
 libs/repro_interface_artifacts/tests/t_windows_dynlib_staging.nim	nim	4
 libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim	nim	2
@@ -820,6 +820,7 @@ tests/integration/t_action_cache_per_edge_no_global_log_no_growth.nim	nim	2
 tests/integration/t_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing.nim	nim	3
 tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	nim	6
 tests/integration/t_apply_if_binds_config_by_workspace_path.nim	nim	1
+tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim	nim	1
 tests/integration/t_b0_develop_mode_uses_local_source.nim	nim	1
 tests/integration/t_b0_repro_build_runquota_daemon.nim	nim	1
 tests/integration/t_b0_runquota_repro_nim_compiles.nim	nim	2
@@ -875,6 +876,7 @@ tests/integration/t_d4_evidence_collection_scales_linearly.nim	nim	2
 tests/integration/t_d5_collection_member_selector.nim	nim	5
 tests/integration/t_d6_runner_test_timeout.nim	nim	3
 tests/integration/t_daemon_accept_loop_survives_probe.nim	nim	3
+tests/integration/t_declared_platforms_change_no_existing_resolution.nim	nim	1
 tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim	nim	3
 tests/integration/t_dependency_report_and_converter_paths.nim	nim	1
 tests/integration/t_dev_env_allow.nim	nim	1
@@ -1017,11 +1019,12 @@ tests/integration/t_nested_lock_push_capability_security.nim	nim	10
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nix_daemon_ipc.nim	nim	4
-tests/integration/t_nix_daemon_provisioner.nim	nim	2
+tests/integration/t_nix_daemon_provisioner.nim	nim	3
 tests/integration/t_no_runtime_compilation_in_tests.nim	nim	2
 tests/integration/t_output_cleanup_executor.nim	nim	10
 tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	nim	1
 tests/integration/t_pkgconf_bootstrap_provisioning.nim	nim	1
+tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim	nim	1
 tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim	nim	1
 tests/integration/t_post_commit_cache_push_runs_opportunistic_gc.nim	nim	1
 tests/integration/t_post_commit_lock_survives_a_repo_local_repro_dir.nim	nim	2
@@ -1138,6 +1141,8 @@ tests/integration/t_ti2_separate_module_producer.nim	nim	2
 tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	nim	1
 tests/integration/t_ti3_fingerprint_split.nim	nim	3
 tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim	nim	1
+tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
+tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1
 tests/integration/t_unrouted_private_repo_refuses_loudly.nim	nim	1
 tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim	nim	1
 tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim	nim	1
@@ -1240,7 +1245,7 @@ tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	10
 tests/unit/t_m9r13b_1_toolchain_pin.nim	nim	4
 tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	nim	6
 tests/unit/t_m9r13c_2_shim_lib_resolution.nim	nim	4
-tests/unit/t_m9r14c_1_autotools_parallel_make.nim	nim	10
+tests/unit/t_m9r14c_1_autotools_parallel_make.nim	nim	11
 tests/unit/t_m9r14c_2_binutils_cycle_break.nim	nim	5
 tests/unit/t_m9r14c_4_inline_exec_path_enrichment.nim	nim	2
 tests/unit/t_m9r14c_5_autotools_stage_copy.nim	nim	4

@@ -21,6 +21,20 @@ import repro_local_store
 # `index.db` records every prefix the system has materialized
 # regardless of which adapter produced it.
 
+proc hostToolEnvironment(): StringTableRef =
+  ## A provisioned target profile may export libraries that are ABI-incompatible
+  ## with host bootstrap tools such as Nix. Keep those loader controls at the
+  ## action boundary instead of forwarding them into host processes.
+  result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    case key
+    of "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG",
+       "LD_DEBUG_OUTPUT", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+       "DYLD_INSERT_LIBRARIES":
+      discard
+    else:
+      result[key] = value
+
 type
   ToolProvisioningMode* = enum
     tpmUnspecified
@@ -1388,7 +1402,8 @@ else:
           if '^' in plan.nixSelector: plan.nixSelector
           else: plan.nixSelector & "^*"
         nixArgs.add(selector)
-      let direct = execCmdEx(shellCommand(nixArgs))
+      let direct = uncontrolledExecCmdEx(shellCommand(nixArgs),
+        env = hostToolEnvironment())
       if direct.exitCode != 0:
         raise newException(OSError,
           "tool-resolution failed: nix package realized outputs without " &

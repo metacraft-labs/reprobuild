@@ -2621,7 +2621,7 @@ test "incomplete name" and:
         # measurement, on the same principle as the composed base above.
         # The Nix-daemon host-loader regression adds one unconditional case
         # to an existing source, so the platform delta remains exactly one.
-        expected_nim_total = 7116 if sys.platform == "darwin" else 7117
+        expected_nim_total = 7118 if sys.platform == "darwin" else 7119
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
