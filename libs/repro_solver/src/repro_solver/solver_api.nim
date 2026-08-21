@@ -427,7 +427,8 @@ proc solveForUnsatCore*(variants: openArray[VariantDecl];
                         packages: openArray[PackageDecl]): seq[string]
 
 proc solve*(variants: openArray[VariantDecl];
-            packages: openArray[PackageDecl]): UnifiedSolution =
+            packages: openArray[PackageDecl];
+            preference: VersionPreference = vpNone): UnifiedSolution =
   ## Combined variant + package version solve. Encodes both via
   ## ``encodeUnified``, runs clingo, parses both
   ## ``variant_assigned/2`` and ``package_chosen/2`` from the optimum
@@ -444,7 +445,14 @@ proc solve*(variants: openArray[VariantDecl];
   ## existed; ``windows/ensure-clingo.ps1`` now installs the real
   ## clingo.dll (5.8.0) from conda-forge so the standard solver runs
   ## on every supported host.
-  let program = encodeUnified(variants, packages)
+  ##
+  ## NLF-M6 — ``preference`` is the version-selection objective (§5.5's
+  ## strategy set, as the solver sees it). ``vpNone`` emits no directive, so
+  ## the program text and therefore the answer are byte-unchanged from every
+  ## pre-NLF-M6 call. The yield loop below already keeps the LAST model, which
+  ## under clingo's default ``opt`` mode is the optimum, so an objective needs
+  ## no change to the driver.
+  let program = encodeUnified(variants, packages, preference)
   result = UnifiedSolution(variants: initTable[string, string](),
                            packages: initTable[string, string](),
                            selected: initTable[string, SelectionStatus](),

@@ -60,7 +60,7 @@
 ## its own (the existing M2b tests don't pull in the version surface).
 ## The unified entry point lives at the boundary in ``encodeUnified``.
 
-import std/[options, strutils, tables, sets]
+import std/[algorithm, options, strutils, tables, sets]
 
 import variant_encoder
 import version_constraints
@@ -133,6 +133,48 @@ type
       ## remain solved — owner decision Q-4, and the reason this is a field on
       ## the package rather than the package's removal from the program.
       ## ``versions`` must hold exactly one entry when this is set.
+
+  VersionPreference* = enum
+    ## Named-Lock-Files NLF-M6 (§5.5) — the *version-selection rule* a solve
+    ## runs under, as the SOLVER sees it.
+    ##
+    ## This is deliberately not `repro_lock_gen.LockStrategy`. A lock strategy
+    ## is a user-facing rule for producing a lock file; a version preference is
+    ## an objective function over `package_chosen/2`. The generation path maps
+    ## one onto the other. Keeping them apart is what lets the solver stay a
+    ## leaf below the generation path — the layering `repro_lock_gen`'s header
+    ## records as structural rather than tidy.
+    ##
+    ## `vpNone` emits NOTHING, so the program text of every pre-NLF-M6 caller
+    ## is byte-unchanged and no fingerprint moves. That is a requirement, not
+    ## an optimisation: NLF-STAT-4 freezes the default path.
+    ##
+    ## ## Why this is an ASP objective rather than candidate narrowing
+    ##
+    ## NLF-M5 implemented `lowest`/`highest` by narrowing each package's
+    ## candidate universe to its extreme published version before encoding.
+    ## That is wrong as soon as a declared range is involved, and the failure
+    ## is not subtle: `libfoo` publishing 1.0 … 1.9 under `uses: ">=1.2 <2.0"`
+    ## narrows to `{1.0}` under `lowest`, and the solve then reports UNSAT for
+    ## a workspace that has a perfectly good answer at 1.2. A preference is a
+    ## soft objective over the FULL universe, so the hard range constraints
+    ## still decide what is admissible and the objective only orders what
+    ## remains. This is the "interaction with declared ranges" NLF-M5 left
+    ## open.
+    ##
+    ## ## `vpLowestDirect`
+    ##
+    ## Direct dependencies take the lowest admissible version; everything
+    ## reached only transitively takes the highest. That is Cargo's
+    ## `-Z direct-minimal-versions` shape, and the asymmetry is the point: a
+    ## workspace's own declared lower bounds are what it is responsible for and
+    ## what `lowest` exists to falsify, while a transitive package's bounds
+    ## belong to the intermediate package's author. `lowest` fails on THEIR
+    ## under-declaration; `lowest-direct` does not.
+    vpNone = "none"
+    vpLowest = "lowest"
+    vpHighest = "highest"
+    vpLowestDirect = "lowest-direct"
 
 # ---------------------------------------------------------------------------
 # Constructors (terse construction for tests / lib code)
@@ -420,6 +462,134 @@ proc encodeCrossPackagePropagation*(packages: openArray[PackageDecl]): string =
   lines.join("\n")
 
 # ---------------------------------------------------------------------------
+# Version preference (NLF-M6, §5.5)
+# ---------------------------------------------------------------------------
+
+proc rootPackageNames*(packages: openArray[PackageDecl]): HashSet[string] =
+  ## The packages nothing in the declaration set depends on.
+  ##
+  ## The same "no incoming edge" predicate `encodeSelectionRoots` seeds
+  ## selection from, exported because NLF-M6 needs it twice more (the
+  ## `lowest-direct` objective and the materiality interval derivation) and a
+  ## second definition of "root" is a second thing to drift.
+  var depended: HashSet[string]
+  for p in packages:
+    for d in p.depends:
+      depended.incl(d.name)
+  for p in packages:
+    if p.name notin depended:
+      result.incl(p.name)
+
+proc directDependencyNames*(packages: openArray[PackageDecl]): HashSet[string] =
+  ## The packages a ROOT package declares a dependency on.
+  ##
+  ## "Direct" is relative to the request, so it is the roots' `depends` and
+  ## nothing deeper. A package reachable both directly and transitively counts
+  ## as direct — the workspace does declare a bound on it, so the workspace is
+  ## answerable for that bound, which is the whole basis of the split.
+  ##
+  ## Conditional (variant-gated) arms are INCLUDED, for the same
+  ## over-approximation reason `fetchPlan` includes them: which arm is live is
+  ## the solve's own output, so a gate-respecting walk here would need the
+  ## answer it is helping to produce. Over-approximating "direct" costs a
+  ## dormant package a preference term that never fires, because the term is
+  ## conditioned on `package_chosen` and a dormant package still chooses.
+  ## Measured consequence, stated rather than implied: a dormant direct arm
+  ## does get a term, and it is harmless because §5.7's interval derivation
+  ## records nothing for an UNSELECTED package.
+  let roots = rootPackageNames(packages)
+  for p in packages:
+    if p.name notin roots: continue
+    for d in p.depends:
+      result.incl(d.name)
+
+proc encodeVersionRanks*(packages: openArray[PackageDecl]): string =
+  ## Emit `version_rank("pkg", "version", N).` — the position of each candidate
+  ## in that package's semver-ascending order.
+  ##
+  ## The rank is per-package and dense from 0, so the objective's weight is
+  ## bounded by the candidate count rather than by the version numbers, and two
+  ## packages contribute comparable magnitudes. Encoding the version itself as
+  ## a weight would let a package that happens to number its releases in the
+  ## thousands outvote every other package in the sum.
+  ##
+  ## A candidate whose string does not parse as semver keeps its raw-string
+  ## position in the order rather than aborting the encode: the registry's
+  ## naming is not the encoder's to police, and the resulting order is still
+  ## total and still deterministic.
+  ##
+  ## A PINNED package gets no ranks. Its `package_chosen` atom is a fact, so a
+  ## preference term over it could only ever evaluate to a constant, and
+  ## emitting one would put a constant in the objective sum that a reader would
+  ## reasonably mistake for a live choice.
+  var lines: seq[string] = @[]
+  for p in packages:
+    if p.pinned: continue
+    var sorted = p.versions
+    sorted.sort(proc(a, b: string): int =
+      try:
+        cmpSemver(parseSemver(a), parseSemver(b))
+      except ESemverParse:
+        cmp(a, b))
+    for i, v in sorted:
+      lines.add("version_rank(\"" & aspQuote(p.name) & "\", \"" &
+                aspQuote(v) & "\", " & $i & ").")
+  lines.join("\n")
+
+proc encodeVersionPreference*(packages: openArray[PackageDecl];
+                              preference: VersionPreference): string =
+  ## The objective directives for `preference`, or `""` for `vpNone`.
+  ##
+  ## ## The priority level, and why it is negative
+  ##
+  ## `variant_encoder`'s priority objective sits at clingo's DEFAULT level
+  ## (`@0`). Version preference is emitted at `@-1` (and `@-2`), which clingo
+  ## optimises AFTER level 0. So a variant priority always outranks a version
+  ## preference, and a `--strategy lowest` invocation cannot silently overturn
+  ## a `prForce` contribution. Sharing level 0 would have summed unrelated
+  ## weights — a variant band (1…4) against a candidate rank (0…N) — and made
+  ## the trade-off between them depend on how many versions a registry
+  ## happened to publish.
+  ##
+  ## ## `vpLowestDirect` is two directives, at two levels
+  ##
+  ## Direct packages minimise at `@-1`; everything else maximises at `@-2`. Two
+  ## levels rather than one summed level, because at one level a single direct
+  ## package's rank could be traded against a transitive package's rank and the
+  ## answer would depend on candidate counts. Lexicographic levels make "direct
+  ## minimal, then transitive maximal" mean exactly that.
+  if preference == vpNone:
+    return ""
+  var sections: seq[string] = @[]
+  let ranks = encodeVersionRanks(packages)
+  if ranks.len > 0:
+    sections.add(ranks)
+  case preference
+  of vpNone:
+    discard
+  of vpLowest:
+    sections.add("#minimize { R@-1, P : package_chosen(P, V), " &
+      "version_rank(P, V, R) }.")
+  of vpHighest:
+    sections.add("#maximize { R@-1, P : package_chosen(P, V), " &
+      "version_rank(P, V, R) }.")
+  of vpLowestDirect:
+    var directFacts: seq[string] = @[]
+    var directs: seq[string] = @[]
+    for name in directDependencyNames(packages):
+      directs.add(name)
+    directs.sort()
+    for name in directs:
+      directFacts.add("version_direct(\"" & aspQuote(name) & "\").")
+    if directFacts.len > 0:
+      sections.add(directFacts.join("\n"))
+    sections.add("#minimize { R@-1, P : package_chosen(P, V), " &
+      "version_rank(P, V, R), version_direct(P) }.")
+    sections.add("#maximize { R@-2, P : package_chosen(P, V), " &
+      "version_rank(P, V, R), not version_direct(P) }.")
+  sections.join("\n")
+
+# ---------------------------------------------------------------------------
 # Show directive
 # ---------------------------------------------------------------------------
 
@@ -462,7 +632,8 @@ proc encodePackages*(packages: openArray[PackageDecl]): string =
   sections.join("\n") & "\n"
 
 proc encodeUnified*(variants: openArray[VariantDecl];
-                    packages: openArray[PackageDecl]): string =
+                    packages: openArray[PackageDecl];
+                    preference: VersionPreference = vpNone): string =
   ## Emit the combined variant + package encoding. The variant section
   ## comes from the M2b ``encodeVariants`` (sans its ``#show`` line
   ## which is replaced by the unified version), the package section
@@ -552,5 +723,11 @@ proc encodeUnified*(variants: openArray[VariantDecl];
     sections.add(packageText)
   if propagation.len > 0:
     sections.add(propagation)
+  # NLF-M6 — the version-selection objective. Emitted LAST among the rule
+  # sections and empty for `vpNone`, so every pre-NLF-M6 program is byte-for-
+  # byte what it was.
+  let preferenceText = encodeVersionPreference(packages, preference)
+  if preferenceText.len > 0:
+    sections.add(preferenceText)
   sections.add(encodeUnifiedShow())
   sections.join("\n") & "\n"
