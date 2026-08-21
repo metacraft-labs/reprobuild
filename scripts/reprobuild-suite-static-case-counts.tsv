@@ -152,6 +152,7 @@ libs/repro_dsl_stdlib/tests/t_smoke_configurables.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim	nim	39
 libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
+libs/repro_dsl_stdlib/tests/t_solver_inputs_canonical_under_random_permutations.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	9
 libs/repro_dsl_stdlib/tests/t_undeclared_lock_file_is_compile_error.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
