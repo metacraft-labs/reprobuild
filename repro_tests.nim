@@ -1590,6 +1590,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_lock/tests/t_selection_is_not_the_same_as_absence.nim",
+    binary: "build/test-bin/t_selection_is_not_the_same_as_absence",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_lock/tests/t_selection_status_survives_the_lock_round_trip.nim",
+    binary: "build/test-bin/t_selection_status_survives_the_lock_round_trip",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim",
     binary: "build/test-bin/t_lock_generation_one_path_four_entry_points",
     defines: @[],
@@ -2880,6 +2896,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim",
     binary: "build/test-bin/t_rss_ssz_envelope_roundtrip",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_solver/tests/t_unselected_package_is_recorded_as_unselected.nim",
+    binary: "build/test-bin/t_unselected_package_is_recorded_as_unselected",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

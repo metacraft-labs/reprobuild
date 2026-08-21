@@ -19397,6 +19397,61 @@ proc renderWhyActionText(info: BuildGraphInspection; actionId: string): string =
     lines.add("lastResult: no build-report.json entry")
   lines.join("\n")
 
+const
+  WhySelectedReason* =
+    "a non-dormant edge in this solved graph required this package"
+    ## NLF-M9 — the `repro why` wording for a SELECTED package instance.
+    ## Exported so a test asserts on the product's own string rather than a
+    ## copy of it that can drift.
+  WhyUnselectedReason* =
+    "nothing selected it — no non-dormant edge in this solved graph " &
+    "required this package"
+    ## NLF-M9 — the wording for an UNSELECTED instance.
+    ##
+    ## **Phrased as information, not as a warning**, and deliberately so. §5.6
+    ## leaves open whether such an instance should appear in the lock at all,
+    ## whether it enters `lockIdentity`, and whether its metadata is material;
+    ## a diagnostic that said "warning" or "unused — remove it" would be this
+    ## command answering those questions on the user's behalf. It reports what
+    ## the solve recorded and stops.
+
+proc selectionStatusOf(sol: UnifiedSolution; name: string): SelectionStatus =
+  ## The recorded status of one package instance, for a name already known to
+  ## be IN `sol.packages`.
+  ##
+  ## Absence of an entry is not "unselected": both producers (`solve()` and
+  ## `lockToSolution`) populate an entry for every package they put in the
+  ## graph, so a missing entry means the record predates NLF-M9, and the
+  ## status-quo reading of such a record is that every instance was required.
+  if name in sol.selected: sol.selected[name] else: ssSelected
+
+proc renderWhyPackageText(sol: UnifiedSolution; name, graphSource,
+                          lockPath: string): string =
+  let status = selectionStatusOf(sol, name)
+  var lines: seq[string] = @[]
+  lines.add("package: " & name)
+  lines.add("version: " & sol.packages[name])
+  lines.add("selection: " & $status)
+  lines.add("why: " &
+    (if status == ssSelected: WhySelectedReason else: WhyUnselectedReason))
+  lines.add("graph: " & graphSource &
+    (if graphSource == "lock" and lockPath.len > 0: " (" & lockPath & ")"
+     else: ""))
+  lines.join("\n")
+
+proc whyPackageJson(sol: UnifiedSolution; name, graphSource,
+                    lockPath: string): JsonNode =
+  let status = selectionStatusOf(sol, name)
+  result = newJObject()
+  result["package"] = %name
+  result["version"] = %sol.packages[name]
+  result["selection"] = %($status)
+  result["reason"] = %(
+    if status == ssSelected: WhySelectedReason else: WhyUnselectedReason)
+  result["graphSource"] = %graphSource
+  if graphSource == "lock":
+    result["lockPath"] = %lockPath
+
 proc runWhyCommand(args: openArray[string]; publicCliPath: string): int =
   var subject = ""
   var target = ""
@@ -19493,11 +19548,53 @@ proc runWhyCommand(args: openArray[string]; publicCliPath: string): int =
   if target.len == 0:
     target = "."
 
+  # NLF-M9 (design §5.6, owner decision 2026-08-21) — the package-level
+  # answer. `repro why <package>` can now say why a package is in the solved
+  # graph, and "nothing selected it" is a FIRST-CLASS answer rather than the
+  # absence of one: before the solve recorded selection, this command could
+  # only say "package-level why is not implemented".
+  #
+  # It is computed lazily and consulted only AFTER the action lookup fails, so
+  # a name that resolves as a build action keeps resolving as one and this
+  # cannot shadow it.
+  proc packageSelectionAnswer(): string =
+    if explicitAction:
+      return ""
+    let projDir =
+      try: resolveProjectDirFromTarget(target)
+      except CatchableError: return ""
+    var graph: tuple[solution: UnifiedSolution, source: string,
+                     lockPath: string, found: bool]
+    try:
+      graph = resolveSolvedGraphForBuild(projDir, "", "")
+    except CatchableError:
+      return ""
+    if not graph.found or subject notin graph.solution.packages:
+      return ""
+    case format
+    of gofJson:
+      $whyPackageJson(graph.solution, subject, graph.source, graph.lockPath)
+    else:
+      renderWhyPackageText(graph.solution, subject, graph.source,
+                           graph.lockPath)
+
   var autoRunQuota = startAutoRunQuotaIfNeeded(false)
   try:
-    let info = prepareBuildGraphInspection(target, mode, publicCliPath,
-      selectDefaultAction = true,
-      workRoot = workRoot)
+    let info =
+      try:
+        prepareBuildGraphInspection(target, mode, publicCliPath,
+          selectDefaultAction = true,
+          workRoot = workRoot)
+      except CatchableError:
+        # A lock-only project (no `repro.nim`) has no build graph to inspect,
+        # and that is exactly the shape the package-level question is asked
+        # in. Fall back to it; re-raise unchanged when the subject is not a
+        # package either, so a genuine graph failure is never swallowed.
+        let answer = packageSelectionAnswer()
+        if answer.len == 0:
+          raise
+        echo answer
+        return 0
     # Named-Targets M5: route the subject through the shared
     # ``resolveTargetExportSelector`` helper so the bare implicit name
     # and qualified ``<package>:<name>`` forms reach the same action id
@@ -19536,6 +19633,11 @@ proc runWhyCommand(args: openArray[string]; publicCliPath: string): int =
     except ValueError:
       if explicitAction:
         raise
+      # NLF-M9 — the subject is not an action; try the package question.
+      let answer = packageSelectionAnswer()
+      if answer.len > 0:
+        echo answer
+        return 0
       raise newException(ValueError,
         "package-level why is not implemented for this project context yet, " &
           "and no build action named " & subject & " exists")

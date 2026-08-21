@@ -332,19 +332,36 @@ proc solveVariants*(variants: openArray[VariantDecl]): VariantSolution =
 # Internal helpers for the unified driver
 # --------------------------------------------------------------------
 
+proc dequoteAtomArg(s: string): string =
+  ## Strip surrounding clingo string quotes from one rendered argument.
+  let t = s.strip()
+  if t.len >= 2 and t[0] == '"' and t[^1] == '"':
+    return t[1 ..< ^1]
+  t
+
 proc parseUnifiedSymbol(rendered: string;
                         variants: var Table[string, string];
-                        packages: var Table[string, string]) =
-  ## Dispatch on the predicate name. The shape of the two predicates
-  ## is identical so we share the same parsing core (lifted from
-  ## ``parseModelSymbol``) and choose the output table on the head
-  ## token.
+                        packages: var Table[string, string];
+                        selected: var HashSet[string]) =
+  ## Dispatch on the predicate name. The shape of the two binary
+  ## predicates is identical so we share the same parsing core (lifted
+  ## from ``parseModelSymbol``) and choose the output table on the head
+  ## token. NLF-M9's ``package_selected/1`` is unary and lands in
+  ## ``selected`` — a set, because the atom's PRESENCE is the fact.
   let stripped = rendered.strip()
   var head = ""
   if stripped.startsWith("variant_assigned("):
     head = "variant_assigned("
   elif stripped.startsWith("package_chosen("):
     head = "package_chosen("
+  elif stripped.startsWith("package_selected("):
+    if not stripped.endsWith(")"):
+      return
+    let pkg = dequoteAtomArg(
+      stripped["package_selected(".len .. ^2])
+    if pkg.len > 0:
+      selected.incl(pkg)
+    return
   else:
     return
   if not stripped.endsWith(")"):
@@ -359,13 +376,8 @@ proc parseUnifiedSymbol(rendered: string;
       break
   if splitAt < 0:
     return
-  proc dequote(s: string): string =
-    let t = s.strip()
-    if t.len >= 2 and t[0] == '"' and t[^1] == '"':
-      return t[1 ..< ^1]
-    t
-  let name = dequote(body[0 ..< splitAt])
-  let value = dequote(body[splitAt + 1 .. ^1])
+  let name = dequoteAtomArg(body[0 ..< splitAt])
+  let value = dequoteAtomArg(body[splitAt + 1 .. ^1])
   if name.len == 0:
     return
   if head == "variant_assigned(":
@@ -435,7 +447,9 @@ proc solve*(variants: openArray[VariantDecl];
   let program = encodeUnified(variants, packages)
   result = UnifiedSolution(variants: initTable[string, string](),
                            packages: initTable[string, string](),
+                           selected: initTable[string, SelectionStatus](),
                            optimal: false)
+  var chosenSelected = initHashSet[string]()
 
   var control: ClingoControlPtr = nil
   var handle: ClingoSolveHandlePtr = nil
@@ -481,11 +495,13 @@ proc solve*(variants: openArray[VariantDecl];
             "clingo_model_symbols failed: " & lastError())
       var pendingVariants = initTable[string, string]()
       var pendingPackages = initTable[string, string]()
+      var pendingSelected = initHashSet[string]()
       for s in syms:
         parseUnifiedSymbol(symbolToString(s),
-                           pendingVariants, pendingPackages)
+                           pendingVariants, pendingPackages, pendingSelected)
       result.variants = pendingVariants
       result.packages = pendingPackages
+      chosenSelected = pendingSelected
       if not clingo_solve_handle_resume(handle):
         raise newException(CatchableError,
           "clingo_solve_handle_resume failed: " & lastError())
@@ -515,6 +531,15 @@ proc solve*(variants: openArray[VariantDecl];
       raise e
 
     result.optimal = (solveResult and clingoSolveResultExhausted) != 0
+
+    # NLF-M9 (§5.6) — record the fact for EVERY package instance in the
+    # graph, not only the selected ones. A table that carried only the
+    # selected names would make "unselected" and "not a package here"
+    # indistinguishable at the lookup, which is exactly the conflation the
+    # decision forbids: selected, unselected and absent are three states.
+    for name in result.packages.keys:
+      result.selected[name] =
+        if name in chosenSelected: ssSelected else: ssUnselected
   finally:
     if not handle.isNil:
       discard clingo_solve_handle_close(handle)

@@ -205,6 +205,8 @@ libs/repro_lock/tests/t_lock_identity_solver_tie_no_collision.nim	nim	4
 libs/repro_lock/tests/t_lock_identity_two_names_one_content.nim	nim	3
 libs/repro_lock/tests/t_lock_writer_output_reads_back.nim	nim	9
 libs/repro_lock/tests/t_provenance_reports_shared_names.nim	nim	5
+libs/repro_lock/tests/t_selection_is_not_the_same_as_absence.nim	nim	4
+libs/repro_lock/tests/t_selection_status_survives_the_lock_round_trip.nim	nim	4
 libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim	nim	10
 libs/repro_lock_gen/tests/t_pinned_build_touches_no_network.nim	nim	4
 libs/repro_lock_gen/tests/t_variant_conditioned_uses_over_approximated.nim	nim	10
@@ -367,6 +369,7 @@ libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
 libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	4
 libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim	nim	4
 libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim	nim	4
+libs/repro_solver/tests/t_unselected_package_is_recorded_as_unselected.nim	nim	3
 libs/repro_standard_provider/tests/test_ada_direct_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim	nim	20
 libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim	nim	9
@@ -824,7 +827,7 @@ tests/integration/t_cli_repro_lock_explain.nim	nim	5
 tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim	nim	2
 tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	nim	1
 tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	nim	1
-tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	nim	3
+tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	nim	4
 tests/integration/t_committed_lock_records_canonical_remote_url_when_not_named_origin.nim	nim	1
 tests/integration/t_compiler_scratch_isolation.nim	nim	2
 tests/integration/t_completion_emits_shell_script.nim	nim	2
