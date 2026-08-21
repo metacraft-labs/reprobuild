@@ -84,18 +84,33 @@ lockFile hostTooling
     # the displayed description — `Configurable-System.md` §"Comment
     # Attachment" rule 7, and the reason the description is what a listing can
     # print verbatim.
+    #
+    # Two details here are load-bearing, and both were found by mutating the
+    # scanner away and watching this control keep passing:
+    #
+    #   * the assertion is in a `static:` block, because the probe runs `nim
+    #     check`, which type-checks the module without executing its
+    #     module-init code — so a RUN-TIME `doAssert` over the registry never
+    #     fires and reports a pass against a scanner that stored `@id
+    #     host-tools` verbatim;
+    #   * it reads `lockFileDescriptionInScope`, the FULL captured text, not
+    #     the in-scope LISTING, which prints only each description's first
+    #     line. A directive is never on the first line, so the listing view
+    #     reports extraction that did not happen.
     let probe = checkRecipeSource(Header & """
 ## Tools that run on the build machine.
 ## @id host-tools
 lockFile hostTooling
 
-import repro_lock_files
 import std/strutils
-for d in lockFileDeclarations():
-  if d.name == "hostTooling":
-    doAssert d.description == "Tools that run on the build machine.",
-      "description was: " & d.description
-    doAssert "@id" notin d.description
+const captured = lockFileDescriptionInScope("hostTooling")
+static:
+  doAssert captured == "Tools that run on the build machine.",
+    "description was: " & captured
+  doAssert "@id" notin captured,
+    "the @id directive was not extracted: " & captured
+  doAssert "host-tools" notin captured,
+    "the @id VALUE was not extracted: " & captured
 """, "doc5-control")
     if not probe.ok:
       checkpoint("the well-formed directive was rejected:\n" & probe.output)

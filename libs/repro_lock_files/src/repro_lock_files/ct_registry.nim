@@ -104,6 +104,22 @@ macro lockFileNamesInScope*(): untyped =
   for n in names:
     result[1].add(newLit(n))
 
+macro lockFileDescriptionInScope*(name: static string): untyped =
+  ## The FULL captured description of `name`, as a string literal, read out of
+  ## the compile-time registry.
+  ##
+  ## Distinct from `lockFileScopeListing` on purpose: that renderer prints the
+  ## first line of each description, because a diagnostic's in-scope block has
+  ## to stay readable. A test that needs to know whether a directive line was
+  ## EXTRACTED has to see every line — the directive is never on the first one,
+  ## and a first-line-only view reports extraction that did not happen.
+  ## Measured: NLF-DOC-5's control passed against a hand-rolled scanner until
+  ## this existed.
+  for d in declaredCT:
+    if d.name == name:
+      return newLit(d.description)
+  newLit("")
+
 macro lockFileScopeListing*(): untyped =
   ## The compile-time registry's `in scope here:` listing, as a string
   ## literal. Lets a test assert that the compile error's listing and the
