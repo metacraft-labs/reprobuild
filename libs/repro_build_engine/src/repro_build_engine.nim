@@ -3221,7 +3221,7 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
       if packageEnd < 0: normalized[packageStart .. ^1]
       else: normalized[packageStart ..< packageEnd]
     if packageName == "glibc" or packageName == "readline" or
-        packageName == "python3" or
+        packageName == "perl" or packageName == "python3" or
         packageName.startsWith("python3-"):
       return true
   const storePrefix = "/nix/store/"
@@ -3238,6 +3238,7 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
   let packageName = storeEntry[hashSeparator + 1 .. ^1]
   packageName == "glibc" or packageName.startsWith("glibc-") or
     packageName == "readline" or packageName.startsWith("readline-") or
+    packageName == "perl" or packageName.startsWith("perl-") or
     packageName == "python3" or packageName.startsWith("python3-")
 
 proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
@@ -3368,19 +3369,6 @@ proc applyCompilerSystemIncludeArgs*(argv: openArray[string];
   for i in base + 1 ..< argv.len:
     result.add(argv[i])
 
-proc sourcePerlModuleDirs(libDirs: openArray[string]): seq[string] =
-  ## A relocated source Perl keeps core modules under usr/lib/perl5, while
-  ## its compiled-in @INC still names the original host prefix.
-  var seen = initHashSet[string]()
-  const sourcePerlMarker = "/packages/source/perl/"
-  for libDir in libDirs:
-    if sourcePerlMarker notin libDir.replace('\\', '/'):
-      continue
-    let moduleDir = libDir / "perl5"
-    if moduleDir notin seen:
-      seen.incl(moduleDir)
-      result.add(moduleDir)
-
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
   ## StringTable-style env mutator. Used by the bypass-spawn path. Each
@@ -3432,7 +3420,6 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   # libc into the action process can cross GLIBC_PRIVATE ABIs.
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
-  prependEnvDirs(env, "PERL5LIB", sourcePerlModuleDirs(paths.libDirs))
   prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     # macOS' dynamic loader ignores LD_LIBRARY_PATH; DYLD_LIBRARY_PATH is the
@@ -3479,8 +3466,6 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
-  result = prependEnvDirsToArgvEnv(result, "PERL5LIB",
-    sourcePerlModuleDirs(paths.libDirs))
   result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", runtimeLibDirs)
