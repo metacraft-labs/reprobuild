@@ -45,6 +45,13 @@
 ##    Y, contributes a forced assignment against a matching variant in
 ##    Y. The ``depends_on(Y, X)`` predicate gates the propagation so
 ##    independent packages remain decoupled.
+## 7. **Selection.** ``package_selected("p").`` records whether anything
+##    required ``p`` — the Named-Lock-Files §5.6 fact (owner decision
+##    2026-08-21). Seeded on the packages nothing depends on and
+##    propagated along dependency edges, with a conditional edge's
+##    ``variant_assigned`` gate in the body so a DORMANT arm propagates
+##    nothing. See ``encodeSelectionRoots`` for why this is derived in the
+##    ASP rather than post-computed in Nim.
 ##
 ## ## Why a separate encoder
 ##
@@ -306,6 +313,62 @@ proc encodeDependencyEdges*(p: PackageDecl): string =
     body.add("package_chosen(" & child & ", V)")
     body.add("not version_in_range(" & child & ", V, " & rangeAtom & ")")
     lines.add(":- " & body.join(", ") & ".")
+    # NLF-M9 (§5.6) — selection propagates along the edge, gated by the SAME
+    # ``variant_assigned`` atom that gates the range constraint. One gate, two
+    # consequences: if the arm is dormant the range does not fire AND nothing
+    # downstream of it is selected.
+    #
+    # The body is ``package_selected(parent)``, not ``package_chosen(parent, _)``:
+    # every declared package is ``package_active`` and therefore chooses a
+    # version, so gating on ``package_chosen`` would make every edge propagate
+    # and the fact would be vacuously true everywhere. Selection is reachability
+    # from a root, which is transitive, and this is what makes it so.
+    var selBody = newSeq[string]()
+    selBody.add("package_selected(" & parent & ")")
+    if d.conditional.isSome:
+      let g = d.conditional.get
+      selBody.add("variant_assigned(\"" & aspQuote(g.variantName) &
+                  "\", \"" & aspQuote(g.triggerValue) & "\")")
+    lines.add("package_selected(" & child & ") :- " &
+              selBody.join(", ") & ".")
+  lines.join("\n")
+
+# ---------------------------------------------------------------------------
+# Selection roots (NLF-M9, design §5.6)
+# ---------------------------------------------------------------------------
+
+proc encodeSelectionRoots*(packages: openArray[PackageDecl]): string =
+  ## Seed the selection relation: every declared package that NOTHING declares
+  ## a dependency on is selected by the request itself.
+  ##
+  ## §5.6 defines the fact as "whether any non-dormant edge required it". A
+  ## root has no incoming edge at all, so read literally the definition would
+  ## report the very package the solve was asked for as unselected — a false
+  ## report, and the one that would make the fact useless. The request is the
+  ## edge; it is simply not spelled in the package set. This seeds it.
+  ##
+  ## "Nothing depends on it" is a STATIC property of the declaration set, not
+  ## a solver outcome, so the seed is grounded here rather than derived through
+  ## negation inside the program. That keeps the ASP free of negation-as-failure
+  ## over a recursive predicate — ``package_selected`` is defined by positive
+  ## rules only, so its least model is its unique answer and no stratification
+  ## question arises.
+  ##
+  ## **Why the relation is derived in the ASP at all**, rather than post-computed
+  ## in Nim from ``sol.variants`` plus the declarations: the gate a dormant arm
+  ## turns on is `variant_assigned/2`, the exact atom the range constraint is
+  ## gated on. Recomputing "was this arm taken" in Nim would be a second
+  ## implementation of the gate, free to drift from the one the solver enforced
+  ## — and drift between them is invisible, because both would still produce a
+  ## plausible answer.
+  var depended: HashSet[string]
+  for p in packages:
+    for d in p.depends:
+      depended.incl(d.name)
+  var lines: seq[string] = @[]
+  for p in packages:
+    if p.name notin depended:
+      lines.add("package_selected(\"" & aspQuote(p.name) & "\").")
   lines.join("\n")
 
 # ---------------------------------------------------------------------------
@@ -361,10 +424,12 @@ proc encodeCrossPackagePropagation*(packages: openArray[PackageDecl]): string =
 # ---------------------------------------------------------------------------
 
 proc encodeUnifiedShow(): string =
-  ## Surface both ``variant_assigned`` and ``package_chosen`` atoms so
-  ## the unified driver can parse a single model into the unified
-  ## solution. Other predicates stay hidden to keep the parse simple.
-  "#show variant_assigned/2.\n#show package_chosen/2."
+  ## Surface ``variant_assigned``, ``package_chosen`` and (NLF-M9)
+  ## ``package_selected`` atoms so the unified driver can parse a single
+  ## model into the unified solution. Other predicates stay hidden to keep
+  ## the parse simple.
+  "#show variant_assigned/2.\n#show package_chosen/2.\n" &
+    "#show package_selected/1."
 
 # ---------------------------------------------------------------------------
 # Public entry points
@@ -389,6 +454,11 @@ proc encodePackages*(packages: openArray[PackageDecl]): string =
   let ranges = groundVersionInRange(packages)
   if ranges.len > 0:
     sections.add(ranges)
+  # NLF-M9 — the selection seed. Emitted after the edges so the whole
+  # ``package_selected`` block reads together in a dumped program.
+  let roots = encodeSelectionRoots(packages)
+  if roots.len > 0:
+    sections.add(roots)
   sections.join("\n") & "\n"
 
 proc encodeUnified*(variants: openArray[VariantDecl];

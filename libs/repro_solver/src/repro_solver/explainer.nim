@@ -55,6 +55,25 @@ import version_constraints
 # at the same name as before.
 
 type
+  SelectionStatus* = enum
+    ## Named-Lock-Files §5.6 (owner decision, 2026-08-21) — whether anything
+    ## SELECTED a package instance: whether any non-dormant edge required it.
+    ##
+    ## Two values, and the enum is deliberately not widened to a third
+    ## "unknown". The third state the decision names is a package **absent
+    ## from the solved graph entirely**, and that state is carried by the
+    ## graph's shape — no entry — not by a value inside an entry. Folding it
+    ## in here would let a consumer that never looked at the graph produce a
+    ## plausible answer for a package that is not in it.
+    ##
+    ## ``ssSelected`` is the ZERO VALUE on purpose: it is the status quo, what
+    ## every consumer assumed of every instance before the fact was recorded.
+    ## A record built without naming the field therefore reports what that
+    ## consumer already believed, rather than silently inventing the unusual
+    ## claim.
+    ssSelected = "selected"
+    ssUnselected = "unselected"
+
   UnifiedSolution* = object
     ## Outcome of a combined variant + package version solve.
     ## ``variants`` maps each variant's declared name to the resolved
@@ -62,8 +81,25 @@ type
     ## resolved version string; ``optimal`` carries clingo's
     ## ``exhausted`` bit so callers can detect when the solver proved
     ## optimality vs. terminated on the first model.
+    ##
+    ## ``selected`` is the Named-Lock-Files §5.6 fact (owner decision
+    ## 2026-08-21): per package instance, whether ANYTHING required it —
+    ## whether any non-dormant edge reached it from a root. It is keyed by
+    ## the same names as ``packages`` and the solve populates an entry for
+    ## every one of them, so **no entry means "not a package in this graph",
+    ## never "unselected"** — the two must not be conflated, which is why
+    ## lookups here should use ``in`` / ``[]`` (loud on a missing key) and
+    ## never ``getOrDefault`` (which would answer ``ssSelected`` for a
+    ## package the graph does not contain).
+    ##
+    ## **It is a fact, not a policy.** Nothing in this record's consumers
+    ## filters on it: `solutionToLock` still copies every package,
+    ## `lockIdentityOf` still hashes every instance, and §5.7 materiality is
+    ## unchanged. Those are three independent downstream questions, and
+    ## answering them was being conflated with establishing the fact.
     variants*: Table[string, string]
     packages*: Table[string, string]
+    selected*: Table[string, SelectionStatus]
     optimal*: bool
 
   EUnsatisfiable* = object of CatchableError

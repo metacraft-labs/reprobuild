@@ -88,12 +88,12 @@ suite "NLF-M9: the solve records what it selected":
     check "zlib" in sol.packages
 
     # 3. THE FACT. Nothing required either of them.
-    check sol.selected["openssl"] == false
-    check sol.selected["zlib"] == false
+    check sol.selected["openssl"] == ssUnselected
+    check sol.selected["zlib"] == ssUnselected
 
     # 4. The root of the request is selected: `app` is what the solve was
     #    asked for, and "nothing selected it" would be a false report.
-    check sol.selected["app"] == true
+    check sol.selected["app"] == ssSelected
 
   test "the same package under a live arm is recorded selected":
     let enableTls = newBoolVariant("enableTLS",
@@ -101,10 +101,10 @@ suite "NLF-M9: the solve records what it selected":
     let sol = solve([enableTls], packageSet())
 
     check sol.variants["enableTLS"] == "true"
-    check sol.selected["app"] == true
-    check sol.selected["openssl"] == true
+    check sol.selected["app"] == ssSelected
+    check sol.selected["openssl"] == ssSelected
     # Transitive: reached through a now-live parent.
-    check sol.selected["zlib"] == true
+    check sol.selected["zlib"] == ssSelected
     # And the range constraint fired, as it always did.
     check sol.packages["openssl"] in ["3.0.0"]
 
