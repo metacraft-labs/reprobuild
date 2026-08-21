@@ -16084,6 +16084,18 @@ const LockStrategyNames* = "default, lowest, highest, lowest-direct"
   ## `lowest-direct` to the parser would have left both messages advertising
   ## three strategies while four were accepted.
 
+proc unknownStrategyDiagnostic*(command, raw: string): string =
+  ## The exact line every `--strategy` refusal writes.
+  ##
+  ## Exported, and built here rather than at each call site, for the reason
+  ## NLF-STRAT-6 asks about: "an unknown strategy errors and LISTS THE VALID
+  ## ONES". Two hand-written copies of that list is how the listed set and the
+  ## accepted set come apart — and the wrong direction of that drift tells a
+  ## user a working spelling is invalid. Exporting it also lets a test assert
+  ## on the text without capturing a process's stderr, which is not portable.
+  command & ": unknown --strategy '" & raw & "' (expected: " &
+    LockStrategyNames & ")"
+
 proc parseLockStrategy(raw: string; strategy: var LockStrategy): bool =
   ## Named-Lock-Files §5.5's strategy set, parsed from the CLI spelling.
   ## Defined here rather than beside the lock verbs because `repro build
@@ -16305,8 +16317,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       # Nothing else."
       let raw = valueFromFlag(args, i, "--strategy")
       if not parseLockStrategy(raw, buildStrategy):
-        stderr.writeLine("repro build: unknown --strategy '" & raw &
-          "' (expected: " & LockStrategyNames & ")")
+        stderr.writeLine(unknownStrategyDiagnostic("repro build", raw))
         return 2
       strategyGiven = true
     elif arg == "--print-solved-graph":
@@ -49511,8 +49522,8 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
     elif arg == "--strategy" or arg.startsWith("--strategy="):
       let raw = valueFromFlag(rest, i, "--strategy")
       if not parseLockStrategy(raw, gen.strategy):
-        stderr.writeLine("repro lock " & verb & ": unknown --strategy '" &
-          raw & "' (expected: " & LockStrategyNames & ")")
+        stderr.writeLine(
+          unknownStrategyDiagnostic("repro lock " & verb, raw))
         return 2
     elif arg == "--lowest":
       gen.strategy = lsLowest
