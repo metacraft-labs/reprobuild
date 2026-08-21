@@ -340,28 +340,72 @@ network, grant access), then re-run `repro push`.
 
 > `personal lock backend git-checkout at ~/.repro/personal-manifests is
 > unreachable; personal repo 'my-scratch-fork' participation was not
-> recorded — run \`repro lock refresh\` when it is reachable`
+> recorded — run \`repro workspace lock --workspace-root=<root>\` when it
+> is reachable`
 
 Your **personal** backend was unreachable. Because it is *your own*
 backend and only you depend on it, this is a **warning — the push still
 succeeds (exit 0)**. Your personal participation just wasn't recorded
-this time; run `repro lock refresh` once the backend is reachable to
+this time; run `repro workspace lock` once the backend is reachable to
 re-pin it. It never blocks your push to a public or team repo.
 
-### `locked-integrity-mismatch` (a tampered or corrupt lock)
+### Which lock verb? `repro workspace lock` vs `repro lock refresh`
+
+Reprobuild has **two** lock artifacts, and they are not interchangeable.
+A refusal names the verb for the artifact it is about; run the other one
+and it will fail no matter how often you retry.
+
+| Artifact | What it is | Re-pin it with |
+|---|---|---|
+| Committed lock | `repro.lock` at a repo root, schema `reprobuild.solved-graph-lock.v2`, solved from a recipe's solver inputs | `repro lock refresh [<path>]` |
+| Workspace lock | `locks/<project>/<repo>/<sha>.toml` inside a tier's backend (a git-checkout manifest store, an external DB, …) | `repro workspace lock [<project>] [--workspace-root=PATH]` |
+
+`repro lock refresh` needs solver inputs. Run at a workspace root that
+has none it answers `no solver inputs found for <path> (expected a
+compiled repro.lock-adjacent recipe, a repro.solver sidecar, or pass
+--inputs <file>)` and exits 1 — so it is never the answer to a
+team/personal backend record.
+
+`repro workspace lock` resolves a bare invocation against the **current
+directory**, with no upward search. The gate speaks from inside the
+pushed repo, so its remedies spell out `--workspace-root=` and can be
+pasted as printed.
+
+### `locked-integrity-mismatch` (a lock that no longer verifies)
+
+This **refuses (exit 2)** for every tier, including personal (a
+corruption is not a mere unreachable backend). The diagnostic names the
+tier, the backend, and a machine-readable `cause=` in its evidence.
+There are two distinct causes and they are not repaired the same way.
+
+**`cause=locked-revision-unreachable` — the revision is gone.**
+
+> `the locked revision 8f0786b5… for '<repo>' is not present in the
+> checkout, so the locked record cannot be verified (tier=team
+> backend=git-checkout location=…). A force-push or history rewrite
+> upstream is the usual cause — the revision is GONE, not changed.
+> Restore it in the team backend, or re-pin at the current revision with
+> \`repro workspace lock --workspace-root=<root>\``
+
+Nothing was tampered with: the commit the lock pins no longer exists in
+the checkout. Either restore it in the backend (push it back from a
+clone that still has it), or accept the new history and re-pin.
+
+**`cause=content-mismatch` — the content changed under a revision that
+is still there.**
 
 > `the content at the locked coordinates no longer matches the recorded
-> integrity for '<repo>' (tier=team backend=git-checkout); restore the
-> locked revision in the team backend or run \`repro lock refresh\` to
-> re-pin`
+> integrity for '<repo>' (tier=team backend=git-checkout location=…);
+> restore the locked revision in the team backend or run \`repro
+> workspace lock --workspace-root=<root>\` to re-pin`
 
-A locked entry's recorded integrity no longer matches the content at its
-coordinates — the locked revision is missing/unreachable, or the record
-was tampered with. This **refuses (exit 2)** for every tier, including
-personal (a corruption is not a mere unreachable backend). The
-diagnostic names the tier and backend. Remedy: restore the locked
-revision in that backend, or run `repro lock refresh` to re-pin to the
-current state.
+The record or the materialized content was rewritten after it was
+locked. Investigate before re-pinning — this is the shape a tamper
+takes.
+
+A **public / committed-lock** entry reports the same two causes, but its
+remedy names `repro lock refresh` because the committed `repro.lock` is
+the artifact that failed.
 
 ### `lock_references_private_repo` (private repo in the public lock)
 

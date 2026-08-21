@@ -15359,12 +15359,29 @@ type
     repos*: seq[ResolvedRepo]
     store*: LockStore
 
+  LockedIntegrityCause* = enum
+    ## WHY a locked entry failed verification. "the content changed" and "the
+    ## revision is gone" are different failures with different repairs, and a
+    ## refusal that conflates them sends the operator looking for a tamper that
+    ## never happened. The gate renders the remedy prose from this, and emits it
+    ## as a ``cause=`` token in the failure's evidence so a consumer can branch
+    ## on it without parsing English.
+    ##
+    ## ``licContentMismatch`` is first so a default-constructed failure claims
+    ## only the weaker, always-true thing ("what we obtained is not what was
+    ## locked") rather than asserting an unreachable revision.
+    licContentMismatch      ## obtained content ≠ recorded integrity
+    licRevisionUnreachable  ## the locked revision's object is absent/unreachable
+    licNoRevisionPinned     ## a VCS-native integrity with no revision to verify at
+
   LockedIntegrityFailure* = object
     ## One dependency whose obtained content did not match its locked integrity.
     name*: string
     path*: string
     expected*: string   ## the locked integrity multihash
     observed*: string   ## recomputed from the content at the locked coordinates
+    revision*: string   ## the locked VCS revision, when the entry pins one
+    cause*: LockedIntegrityCause
     diagnostic*: string
 
 proc populateLockedDeps*(source: LockSource): LockedDependencies
@@ -27506,6 +27523,79 @@ proc lockingTierLabel*(v: WorkspaceVisibility): string =
   of wvTeam: "team"
   of wvPersonal: "personal"
 
+# ---------------------------------------------------------------------------
+# The two lock ARTIFACTS, and the verb that re-pins each.
+#
+# Reprobuild has two locks and they are not interchangeable:
+#
+#   * the COMMITTED lock — ``repro.lock``, schema
+#     ``reprobuild.solved-graph-lock.v2``, solved from a recipe's solver inputs.
+#     ``repro lock refresh`` re-pins it, and it needs those inputs: run at a
+#     workspace root that has none it answers "no solver inputs found …" and
+#     exits 1.
+#   * the WORKSPACE lock — ``locks/<project>/<repo>/<sha>.toml`` inside a
+#     tier's backend (a git-checkout manifest store, an external DB, …).
+#     ``repro workspace lock`` re-pins it.
+#
+# A refusal about the workspace lock that names ``repro lock refresh`` sends
+# the operator to a command that cannot succeed however many times it is
+# retried — which is exactly what happened. These two builders are the single
+# place either verb is named, so the artifact a refusal is about decides the
+# command it prints.
+# ---------------------------------------------------------------------------
+
+proc workspaceLockCommand*(workspaceRoot: string): string =
+  ## The copy-pasteable ``repro workspace lock`` invocation that re-pins the
+  ## WORKSPACE lock. ``--workspace-root`` is spelled out because the pre-push
+  ## hook, the post-commit hook and ``repro push`` all speak from INSIDE a
+  ## participating repo, and the verb resolves a bare invocation against the
+  ## current directory with no upward search: without the flag the command
+  ## works only if the operator first guesses a ``cd``.
+  if workspaceRoot.len == 0: "repro workspace lock"
+  else: "repro workspace lock --workspace-root=" & workspaceRoot
+
+proc committedLockCommand*(workspaceRoot: string): string =
+  ## The copy-pasteable ``repro lock refresh`` invocation that re-pins the
+  ## COMMITTED ``repro.lock``. It takes the workspace as a positional.
+  if workspaceRoot.len == 0: "repro lock refresh"
+  else: "repro lock refresh " & workspaceRoot
+
+proc lockedIntegrityCauseToken*(c: LockedIntegrityCause): string =
+  ## The machine-readable ``cause=`` token a refusal's EVIDENCE carries, so a
+  ## consumer can tell "the revision vanished" from "the content changed"
+  ## without parsing the prose.
+  case c
+  of licContentMismatch: "content-mismatch"
+  of licRevisionUnreachable: "locked-revision-unreachable"
+  of licNoRevisionPinned: "no-revision-pinned"
+
+proc lockedIntegrityRemedy*(f: LockedIntegrityFailure; qualifier: string;
+                            restoreWhere, repinCommand: string): string =
+  ## The ONE wording every ``locked-integrity-mismatch`` refusal carries,
+  ## rendered from the failure's CAUSE so the prose and the evidence agree.
+  ##
+  ## ``qualifier`` is the ``(tier=… backend=… location=…)`` parenthetical (empty
+  ## for the committed lock's single unqualified source), ``restoreWhere`` names
+  ## where the locked revision would be restored, and ``repinCommand`` is the
+  ## verb for the artifact this refusal is about.
+  let where = if qualifier.len > 0: " " & qualifier else: ""
+  case f.cause
+  of licRevisionUnreachable:
+    "the locked revision " & f.revision & " for '" & f.path &
+      "' is not present in the checkout, so the locked record cannot be " &
+      "verified" & where & ". A force-push or history rewrite upstream is " &
+      "the usual cause — the revision is GONE, not changed. Restore it in " &
+      restoreWhere & ", or re-pin at the current revision with `" &
+      repinCommand & "`"
+  of licNoRevisionPinned:
+    "the locked record for '" & f.path & "' pins no concrete revision to " &
+      "verify its recorded integrity at" & where & "; re-pin at the current " &
+      "revision with `" & repinCommand & "`"
+  of licContentMismatch:
+    "the content at the locked coordinates no longer matches the recorded " &
+      "integrity for '" & f.path & "'" & where & "; restore the locked " &
+      "revision in " & restoreWhere & " or run `" & repinCommand & "` to re-pin"
+
 proc visibilityMatchesRouteLabel(v: WorkspaceVisibility; label: string): bool =
   case label.strip().toLowerAscii()
   of "public": v == wvPublic
@@ -29295,6 +29385,7 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
           # skipping silently, so a stale/malformed lock is named, not ignored.
           result.add(LockedIntegrityFailure(name: d.name, path: d.path,
             expected: d.integrity, observed: "",
+            cause: licNoRevisionPinned,
             diagnostic: "lock records a git-native integrity " & d.integrity &
               " for '" & d.path & "' but pins no concrete revision to verify " &
               "it at (regenerate the lock at the repo's current revision)"))
@@ -29308,6 +29399,8 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
         if rp.exitCode != 0 or rp.output.strip().len == 0:
           result.add(LockedIntegrityFailure(name: d.name, path: d.path,
             expected: d.integrity, observed: "",
+            revision: d.coordinates.revision,
+            cause: licRevisionUnreachable,
             diagnostic: "locked revision " & d.coordinates.revision &
               " is not present/reachable in '" & d.path & "'"))
           continue
@@ -33219,8 +33312,13 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     let parsedStray = parseLockRecordRelPath(stray)
     stderr.writeLine("repro: not publishing '" & stray & "': " &
       parsedStray.diagnostic)
+    # Name the STORE. ``migrate-locks`` defaults to ``<cwd>/.repro/manifests``,
+    # and a routed team/personal backend is somewhere else entirely — a bare
+    # invocation would then plan a repair of the wrong store (or none) and
+    # report "nothing to do" about a store that is still wedged.
     stderr.writeLine("repro:   repair it with 'repro workspace migrate-locks " &
-      "--dry-run' (then '--apply'); publication of the other records in " &
+      "--dry-run --manifest-layer-root=" & manifestRepoRoot &
+      "' (then '--apply'); publication of the other records in " &
       "this store is unaffected")
 
   if canonicalToStage.len > 0:
@@ -33371,8 +33469,8 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     result.diagnostic = result.diagnostic & " — this store also holds " &
       $strayRecords.len & " lock record(s) at a non-canonical path (" &
       strayRecords[0] & (if strayRecords.len > 1: ", ..." else: "") &
-      "); repair with 'repro workspace migrate-locks --dry-run', then " &
-      "'--apply'"
+      "); repair with 'repro workspace migrate-locks --dry-run " &
+      "--manifest-layer-root=" & manifestRepoRoot & "', then '--apply'"
 
 # ---------------------------------------------------------------------------
 # RA-32 — `repro workspace migrate-locks`: the EXPLICIT lock-record repair.
@@ -37288,6 +37386,8 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
     if rp.code != 0 or rp.output.strip().len == 0:
       result.add(LockedIntegrityFailure(name: d.name, path: d.path,
         expected: d.integrity, observed: "",
+        revision: d.coordinates.revision,
+        cause: licRevisionUnreachable,
         diagnostic: "locked revision " & d.coordinates.revision &
           " is not present/reachable in the received objects for '" &
           (if d.path.len > 0: d.path else: ".") & "'"))
@@ -37767,7 +37867,8 @@ proc gateDecideUnreadableRepo*(repo: ResolvedRepo; store: LockStore;
 #     naming the repo path + tier + backend kind & location + the underlying
 #     diagnostic + a single copy-pasteable next step;
 #   - personal backend        ⇒ WARN but ALLOW (exit unchanged), advising
-#     ``repro lock refresh``.
+#     ``repro workspace lock`` — the verb that records the missed participation
+#     in that backend once it is reachable again.
 # The signal is a per-repo ``ParticipationOutcome`` that ATTEMPTED a write
 # (``attempted == true``, i.e. a real backend, not the committed-lock no-op)
 # and did NOT succeed (``recorded == false``). HL-2 discarded this by tier; HL-3
@@ -37798,15 +37899,21 @@ proc backendUnreachableRemedy(outc: ParticipationOutcome): string =
   s.add("; make the backend reachable and re-run `repro push`")
   s
 
-proc personalBackendWarning(outc: ParticipationOutcome): string =
+proc personalBackendWarning(outc: ParticipationOutcome;
+                            workspaceRoot: string): string =
   ## §6 Decision 2 personal-tier warning: name the repo, the personal backend,
-  ## and ``repro lock refresh``.
+  ## and the verb that records the participation once the backend is back.
+  ##
+  ## That record is a WORKSPACE lock entry in the personal backend, so the verb
+  ## is ``repro workspace lock``. It used to say ``repro lock refresh``, which
+  ## re-pins the committed solved-graph ``repro.lock`` instead and exits 1 with
+  ## "no solver inputs found" in a workspace that has no recipe.
   let loc =
     if outc.backendLocation.len > 0: " at " & outc.backendLocation else: ""
   "personal lock backend " & outc.backendKind & loc &
     " is unreachable; personal repo '" & outc.repoPath &
-    "' participation was not recorded — run `repro lock refresh` when it is " &
-    "reachable"
+    "' participation was not recorded — run `" &
+    workspaceLockCommand(workspaceRoot) & "` when it is reachable"
 
 proc applyParticipationTierPolicy(report: var CheckReport) =
   ## HL-3 (§6 Decision 2) — inspect each per-repo ``ParticipationOutcome`` by
@@ -37836,7 +37943,7 @@ proc applyParticipationTierPolicy(report: var CheckReport) =
            else: "")))
       report.exitCode = 2
     else:
-      report.notices.add(personalBackendWarning(outc))
+      report.notices.add(personalBackendWarning(outc, report.workspaceRoot))
 
 proc evidenceReadBackendUnreachable(verdict: UnreadableRepoVerdict): bool =
   ## HL-6 (§7.3) — distinguish an evidence-only failure that stems from the
@@ -37847,13 +37954,15 @@ proc evidenceReadBackendUnreachable(verdict: UnreadableRepoVerdict): bool =
   ## itself reports must FAIL regardless of tier.
   verdict in {urvEvidenceNoBackend, urvEvidenceMissing}
 
-proc evidenceReadUnreachableWarning(repoPath, backendKind: string): string =
+proc evidenceReadUnreachableWarning(repoPath, backendKind,
+                                    workspaceRoot: string): string =
   ## §7.3 personal-tier warning for an unreachable evidence READ, shaped like
-  ## the write-side ``personalBackendWarning`` (names the personal backend +
-  ## ``repro lock refresh``).
+  ## the write-side ``personalBackendWarning`` — and naming the same verb, for
+  ## the same reason: the record is a WORKSPACE lock entry.
   "personal lock backend " & backendKind &
     " is unreachable for the evidence read of personal repo '" & repoPath &
-    "' — run `repro lock refresh` when it is reachable"
+    "' — run `" & workspaceLockCommand(workspaceRoot) &
+    "` when it is reachable"
 
 type
   EvidenceReadGateDecision* = enum
@@ -38214,7 +38323,8 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         result.notices.add(outcome.notice)
       of ergdWarnAllow:
         result.notices.add(
-          evidenceReadUnreachableWarning(repo.path, asg.backendKind))
+          evidenceReadUnreachableWarning(repo.path, asg.backendKind,
+            parsed.workspaceRoot))
       of ergdRefuse:
         result.failures.add(outcome.failure)
         result.exitCode = 2
@@ -38523,10 +38633,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.failures.add(CheckFailure(
         repo: f.path,
         property: "locked-integrity-mismatch",
-        remediation: "the content at the locked coordinates no longer matches " &
-          "the committed lock's recorded integrity for '" & f.path &
-          "'; restore the locked revision or run `repro lock refresh` to re-pin",
-        evidence: f.diagnostic))
+        remediation: lockedIntegrityRemedy(f,
+          qualifier = "(tier=public backend=committed-lock)",
+          restoreWhere = "the committed `repro.lock`",
+          repinCommand = committedLockCommand(parsed.workspaceRoot)),
+        evidence: "cause=" & lockedIntegrityCauseToken(f.cause) & " " &
+          f.diagnostic))
       result.exitCode = 2
       return
     result.lockUpdate.kind = cluNone
@@ -38714,11 +38826,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         result.failures.add(CheckFailure(
           repo: f.path,
           property: "locked-integrity-mismatch",
-          remediation: "the content at the locked coordinates no longer " &
-            "matches the committed lock's recorded integrity for '" & f.path &
-            "' (tier=public backend=committed-lock); restore the locked " &
-            "revision or run `repro lock refresh` to re-pin",
-          evidence: "tier=public backend=committed-lock " & f.diagnostic))
+          remediation: lockedIntegrityRemedy(f,
+            qualifier = "(tier=public backend=committed-lock)",
+            restoreWhere = "the committed `repro.lock`",
+            repinCommand = committedLockCommand(parsed.workspaceRoot)),
+          evidence: "tier=public backend=committed-lock cause=" &
+            lockedIntegrityCauseToken(f.cause) & " " & f.diagnostic))
         result.exitCode = 2
         return
     # (b) ROUTED repos (team / personal / other): verify EACH against ITS OWN
@@ -38749,14 +38862,19 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         result.failures.add(CheckFailure(
           repo: f.path,
           property: "locked-integrity-mismatch",
-          remediation: "the content at the locked coordinates no longer " &
-            "matches the recorded integrity for '" & f.path & "' (tier=" &
-            tierLbl & " backend=" & asg.backendKind &
-            (if loc.len > 0: " location=" & loc else: "") &
-            "); restore the locked revision in the " & tierLbl &
-            " backend or run `repro lock refresh` to re-pin",
+          # The artifact this refusal is about is the WORKSPACE lock —
+          # ``locks/<project>/<repo>/<sha>.toml`` in this tier's backend — so
+          # the verb it names is ``repro workspace lock``, NOT the committed
+          # lock's ``repro lock refresh``. The gate speaks from inside the
+          # pushed repo, so the command carries ``--workspace-root``.
+          remediation: lockedIntegrityRemedy(f,
+            qualifier = "(tier=" & tierLbl & " backend=" & asg.backendKind &
+              (if loc.len > 0: " location=" & loc else: "") & ")",
+            restoreWhere = "the " & tierLbl & " backend",
+            repinCommand = workspaceLockCommand(parsed.workspaceRoot)),
           evidence: "tier=" & tierLbl & " backend=" & asg.backendKind &
             (if loc.len > 0: " location=" & loc else: "") &
+            " cause=" & lockedIntegrityCauseToken(f.cause) &
             " " & f.diagnostic))
         result.exitCode = 2
         return
@@ -39380,12 +39498,14 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
                  else: "") & " diagnostic=" & opub.diagnostic))
             report.exitCode = 2
           else:
-            # Personal backend — WARN but ALLOW (exit unchanged), advise
-            # ``repro lock refresh`` (§6 Decision 2).
+            # Personal backend — WARN but ALLOW (exit unchanged), advise the
+            # WORKSPACE lock verb (§6 Decision 2): the unpublished record is a
+            # ``locks/<project>/<repo>/<sha>.toml`` entry in that backend.
             let warn = "personal lock backend " & target.backendKind & loc &
               " is unreachable; personal repo participation was not published " &
-              "(" & opub.diagnostic & ") — run `repro lock refresh` when it is " &
-              "reachable"
+              "(" & opub.diagnostic & ") — run `" &
+              workspaceLockCommand(report.workspaceRoot) &
+              "` when it is reachable"
             stderr.writeLine("repro check: " & warn)
             report.notices.add(warn)
     writeCheckReport(report,

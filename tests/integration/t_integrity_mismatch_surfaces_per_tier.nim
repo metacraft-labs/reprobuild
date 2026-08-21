@@ -284,21 +284,38 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
 
       # ==== CASE C — TAMPER the PERSONAL backend record → REFUSE (personal) ===
       # The external-cli DB stores each key's base64 of the FRAMED store record
-      # (``encodeRecord``). ``latestLock(mix, secret)`` reads the ``latest/...``
-      # key → the DB file ``latest_mix_secret``. Decode it, swap the pinned
-      # ``secret`` HEAD for a bogus SHA whose commit object is ABSENT from the
-      # ``secret`` checkout, and re-encode — WITHOUT touching secret's HEAD. Only
-      # a per-tier integrity check that reads the PERSONAL backend and recomputes
-      # at the coordinates can catch this. Personal-tier integrity mismatch
+      # (``encodeRecord``). ``putLock`` writes the SAME framed record under
+      # THREE keys — ``lock/<p>/<r>/<sha>``, ``latest/<p>/<r>`` and
+      # ``latest/<p>`` — so a corrupt backend is one where every copy carries
+      # the bad coordinate, and the gate must refuse whichever copy its read
+      # path happens to prefer.
+      #
+      # Tampering only ONE copy pins a read-priority detail rather than the
+      # behaviour: this case used to rewrite ``latest_mix_secret`` alone, and
+      # went silently green-to-red when ``lockedShaFromStore`` started
+      # consulting the project-wide ``latestLockShas`` (``latest/<p>``, the
+      # partition-aware read) BEFORE the repo-keyed one — the gate read an
+      # untampered copy and passed. Rewrite every copy instead.
+      #
+      # The swap points ``secret`` at a bogus SHA whose commit object is ABSENT
+      # from the ``secret`` checkout, WITHOUT touching secret's HEAD. Only a
+      # per-tier integrity check that reads the PERSONAL backend and recomputes
+      # at the coordinates can catch it. Personal-tier integrity mismatch
       # REFUSES (a corruption/tamper, distinct from HL-3's unreachable backend
       # which WARNS for personal).
-      let latestFile = db / "latest_mix_secret"
-      check fileExists(latestFile)
-      let framed = base64.decode(readFile(latestFile).strip())
-      check framed.contains(secretSha)
-      let tamperedFramed = framed.replace(secretSha, bogusSha)
-      check tamperedFramed != framed
-      writeFile(latestFile, base64.encode(tamperedFramed))
+      var tamperedCopies = 0
+      for entry in walkDir(db):
+        if entry.kind != pcFile: continue
+        var framed = ""
+        try:
+          framed = base64.decode(readFile(entry.path).strip())
+        except CatchableError:
+          continue
+        if not framed.contains(secretSha): continue
+        writeFile(entry.path, base64.encode(framed.replace(secretSha, bogusSha)))
+        inc tamperedCopies
+      # ``lock/…``, ``latest/mix/secret`` and ``latest/mix`` all pin it.
+      check tamperedCopies >= 3
 
       let gatePersonal = gate("secret")
       checkpoint("personal-tamper gate output: " & gatePersonal.output)
