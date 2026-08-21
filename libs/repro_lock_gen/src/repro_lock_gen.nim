@@ -511,7 +511,14 @@ proc installGenerationExecutors*(req: LockGenerationRequest) =
     result = ActionResult(id: action.id, status: asSucceeded, exitCode: 0,
       launched: true, runQuotaBackend: "metadata-fetch")
     try:
-      let retrieved = fetchMetadataObject(action.builtinText)
+      # Under `-d:ssl` the in-process fetch path reaches `http_pool`'s cached
+      # `SslContext` global, so it is not gcsafe. The cast is narrowed to the
+      # retrieval and is sound for the reason the solve executor's is: the
+      # executor hooks are per-thread (`{.threadvar.}`) and the generation
+      # wave runs at `maxParallelism = 1`.
+      var retrieved: RetrievedMetadata
+      {.cast(gcsafe).}:
+        retrieved = fetchMetadataObject(action.builtinText)
       let outPath = action.outputs[0]
       createDir(parentDir(outPath))
       writeFile(outPath, retrieved.body)
