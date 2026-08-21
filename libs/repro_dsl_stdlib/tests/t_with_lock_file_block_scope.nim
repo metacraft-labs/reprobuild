@@ -4,19 +4,37 @@
 ## block affects exactly the edges emitted within it; typed-tool wrappers pick
 ## it up through `currentBuildContext()` with no new parameters."
 ##
-## ## A corpus gap, recorded rather than papered over
+## ## Corpus case **NLF-PROP-6** — a `withLockFile` region governs its body,
+## ## and only its body
 ##
-## `Named-Lock-Files.milestones.org` flags this test as the one exception in
-## NLF-M7's list: "NOTE: the corpus has **no** case for block scoping — every
-## other test here names an `NLF-*` id and this one cannot. A corpus case must
-## be added before this milestone is worked, per the convention that a
-## milestone whose tests are not named is not ready."
+## NLF-M7 shipped this file with no corpus id, and recorded the gap here
+## rather than papering over it: the campaign's convention is that a test
+## without an id is not ready to be worked. The id was added to
+## `Named-Lock-Files-Test-Corpus.md` on 2026-08-21 and this file now carries
+## it. The case, in full:
 ##
-## The corpus case has NOT been added — `Named-Lock-Files-Test-Corpus.md` is
-## in the spec repository and this change's spec edits are scoped to the
-## `targetTriple` reconciliation. So this file is written against the DESIGN
-## text rather than against a corpus id, and the gap is stated here so a
-## reader is not left to infer that the id was simply forgotten.
+## > **Input.** One `build:` block containing two sequential `withLockFile`
+## > regions naming different lock files, with an edge declared before the
+## > first region, one inside each region, and one after the second.
+## > **Expect.** The two enclosed edges are governed by their respective
+## > regions; the edge before and the edge after are governed by the
+## > package-level default. A designation set inside a region does not survive
+## > past its `finally`.
+##
+## It names two defects: "the push/pop being a set rather than a stack (the
+## second region would leak into the trailing edge), and a lazily-filled slot
+## filled once per *frame* rather than once per *region* — which serves the
+## second region the first region's answer. That second defect was found
+## during NLF-M7 by a test written for something else, which is why this case
+## exists: §4.4 requires a designation to 'differ between two regions of one
+## build body', and nothing in groups §3–§8 exercises two regions in
+## sequence."
+##
+## The "two regions in sequence" shape is the last test in this file. Every
+## other test here predates the id and covers ONE region; they are kept
+## because each isolates a different clause, and the sequential case is added
+## rather than substituted because it is the only one that can observe the
+## second defect at all.
 ##
 ## ## The three properties, and why each is separately falsifiable
 ##
@@ -155,6 +173,45 @@ suite "withLockFile scopes exactly its own body":
       # which is what the `try`-scoped body permits.
       let generated = binary & ".c"
       check generated == "build/tablegen.c"
+    finally:
+      endBuildBlock(state)
+
+  test "NLF-PROP-6: two SEQUENTIAL regions, and four edges around them":
+    # The corpus case as written. Four edge positions — before, inside the
+    # first, inside the second, after — because the two defects the case
+    # names are each invisible from three of them:
+    #
+    #   * a push/pop implemented as a SET rather than a stack leaves the
+    #     second region's name in place, so only the edge AFTER can see it;
+    #   * a slot filled once per FRAME rather than once per region serves the
+    #     second region the FIRST region's answer, so only the edge inside
+    #     the SECOND region can see it. Nesting cannot: an inner region of a
+    #     nested pair is entered while the outer one is still live, so a
+    #     once-per-frame slot and a once-per-region slot agree there.
+    #
+    # Every assertion is made through `currentBuildContext()`, which is what
+    # §4.4 says a typed-tool wrapper reads, rather than through the
+    # designation stack — an implementation whose stack was right and whose
+    # context accessor was memoised would pass the stack assertion.
+    let state = beginBuildBlock("mytool", "executable", "app")
+    try:
+      # The edge before the first region: the package-level default.
+      check currentBuildContext().lockFileName == DefaultLockFileName
+
+      withLockFile "hostTools":
+        check currentBuildContext().lockFileName == "hostTools"
+
+      # Between the regions, back to the default — not carried by the first.
+      check currentBuildContext().lockFileName == DefaultLockFileName
+
+      withLockFile "targetRuntime":
+        # The second region gets its OWN answer. A once-per-frame slot
+        # answers `hostTools` here.
+        check currentBuildContext().lockFileName == "targetRuntime"
+
+      # The edge after the second region: the package-level default again. A
+      # set-not-a-stack implementation answers `targetRuntime` here.
+      check currentBuildContext().lockFileName == DefaultLockFileName
     finally:
       endBuildBlock(state)
 
