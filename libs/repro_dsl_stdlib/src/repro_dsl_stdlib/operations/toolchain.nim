@@ -2,22 +2,39 @@
 ##
 ## The mid-level operation overloads (``compile``, ``link``,
 ## ``archive``, ``strip`` under ``operations/``) call ``currentCompiler()``
-## to pick the per-compiler implementation. The dispatcher reads the
-## solver-resolved ``compiler`` variant; when no variant resolution is
-## available (test fixtures that haven't run the solver) it falls back
-## to a thread-local override (``setCompilerOverride``) and finally to
-## ``cfGcc``.
+## to pick the per-compiler implementation.
 ##
-## The variant-read path mirrors ``active_context.nim``'s
-## ``resolveToolchain`` and ``resolveCrossTarget`` — same accessor
-## (``hasSolverSolution`` / ``lastSolverSolution`` / ``sol.variants``)
-## per [[file:Reprobuild-Standard-Library.md][Reprobuild-Standard-Library]]
-## §"Toolchain dispatch".
+## ## What NLF-M7 changed here, and why it had to
+##
+## This module used to make its OWN read of ``lastSolverSolution().variants``
+## for the ``compiler`` variant, in parallel with ``active_context.nim``'s
+## ``resolveToolchain`` / ``resolveCrossTarget``. Its former doc comment
+## conceded the duplication in terms ("The variant-read path mirrors
+## ``active_context.nim``'s ``resolveToolchain``").
+##
+## `Named-Lock-Files.md` §4.4 names removing that duplication a
+## **prerequisite** for the lock-file slot, and the reason is not tidiness:
+##
+## > Both look variant names up as plain strings in
+## > ``lastSolverSolution().variants`` … A lock-file slot added to only one of
+## > them would be honoured by some typed-tool calls and silently ignored by
+## > others — precisely the §4.9 failure shape, and worse because it would be
+## > intermittent.
+##
+## So ``currentCompiler`` now resolves through the ACTIVE BUILD CONTEXT — the
+## same ``Toolchain`` the ``compile`` / ``link`` helpers would reach through
+## ``currentBuildContext().toolchain`` — and falls back to the single shared
+## resolver in ``toolchain_policy.nim`` when no build block is active. There
+## is exactly one place left in the stdlib that reads a solved graph to make a
+## toolchain decision, and ``t_one_toolchain_resolution_path`` asserts it by
+## construction.
 
-import std/[strutils, tables]
+import std/strutils
 
 import repro_project_dsl
-import ../configurables/variants
+
+import ../active_context
+import ../toolchain_policy
 
 type
   CompilerFamily* = enum
@@ -34,11 +51,11 @@ var
   compilerOverride {.threadvar.}: string
     ## Thread-local override for test fixtures that need to drive the
     ## dispatcher without running the variant solver. Empty means
-    ## "no override; read the solver solution".
+    ## "no override; read the resolved toolchain".
 
 proc setCompilerOverride*(name: string) =
   ## Test-fixture helper. Pass ``""`` to clear the override and fall
-  ## back to the solver-resolved value (or the ``cfGcc`` default).
+  ## back to the resolved toolchain (or the ``cfGcc`` default).
   compilerOverride = name
 
 proc parseCompilerFamily*(name: string): CompilerFamily =
@@ -56,12 +73,16 @@ proc currentCompiler*(): CompilerFamily =
   ## Resolve the active compiler family. Lookup order:
   ##
   ##   1. Thread-local override (test fixtures use this).
-  ##   2. Solver-resolved ``compiler`` variant.
-  ##   3. Default ``cfGcc``.
+  ##   2. The ACTIVE BUILD CONTEXT's resolved ``Toolchain``, whose family the
+  ##      adapter declares. This is the unification: the dispatcher and the
+  ##      context now agree by construction rather than by two lookups that
+  ##      happen to read the same variant.
+  ##   3. The shared resolver, for calls made outside any ``build:`` block.
+  ##   4. Default ``cfGcc``.
   if compilerOverride.len > 0:
     return parseCompilerFamily(compilerOverride)
-  if hasSolverSolution():
-    let sol = lastSolverSolution()
-    if "compiler" in sol.variants:
-      return parseCompilerFamily(sol.variants["compiler"])
-  cfGcc
+  if tryCurrentBuildState() != nil:
+    let family = currentBuildContext().toolchain.compilerFamily
+    if family.len > 0:
+      return parseCompilerFamily(family)
+  parseCompilerFamily(activeSolvedVariants().compiler)

@@ -50,6 +50,7 @@ proc clangToolchain*(): Toolchain =
   ## the ``compiler`` variant resolves to ``"clang"``.
   newToolchain(
     name = "clang-toolchain",
+    compilerFamily = "clang",
     cCompilerPath = "clang",
     cxxCompilerPath = "clang++",
     linkerPath = "clang",

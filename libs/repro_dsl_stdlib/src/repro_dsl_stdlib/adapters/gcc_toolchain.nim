@@ -65,6 +65,7 @@ proc gccToolchain*(): Toolchain =
   ## ``compiler`` variant resolves to ``"gcc"`` (the M3 default).
   newToolchain(
     name = "gcc-toolchain",
+    compilerFamily = "gcc",
     cCompilerPath = "gcc",
     cxxCompilerPath = "g++",
     linkerPath = "gcc",
