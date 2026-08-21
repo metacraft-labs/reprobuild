@@ -70,14 +70,30 @@ proc serveLoop(state: ptr MetadataServerState) {.thread.} =
       if parts.len < 2 or parts[0] != "GET":
         client.respond("400 Bad Request", "")
       else:
-        let name = parts[1].rsplit('/', maxsplit = 1)[^1]
-        let path = state.root / name
-        if fileExists(path):
-          state.requests.atomicInc()
-          client.respond("200 OK", readFile(path))
+        # NLF-M6 serves a real path hierarchy, not just a basename: the
+        # `Repository-And-Index-Format.md` object kinds live at
+        # `/metadata/index/<shard>.shard`, `/metadata/acquisition/…` and
+        # `/metadata/repository.manifest`, so a basename-only server would map
+        # a shard and a package with the same name to one file. The prefix
+        # before the LAST `/metadata/` is stripped and the remainder is the
+        # path under `root`; `..` is refused rather than normalised, because a
+        # test server that could be walked out of would make the served bytes
+        # something other than what the test published.
+        var rel = parts[1]
+        const marker = "/metadata/"
+        let at = rel.rfind(marker)
+        if at >= 0:
+          rel = rel[at + marker.len .. ^1]
+        rel = rel.strip(chars = {'/'})
+        state.requests.atomicInc()
+        if rel.len == 0 or rel.contains(".."):
+          client.respond("400 Bad Request", "")
         else:
-          state.requests.atomicInc()
-          client.respond("404 Not Found", "")
+          let path = state.root / rel
+          if fileExists(path):
+            client.respond("200 OK", readFile(path))
+          else:
+            client.respond("404 Not Found", "")
     except CatchableError:
       discard
     try: client.close()
@@ -112,6 +128,27 @@ proc publish*(server: MetadataServer; packageName: string;
   var body = ""
   for v in versions: body.add(v & "\n")
   writeFile(server.state.root / (packageName & ".versions"), body)
+
+proc publishAt*(server: MetadataServer; relPath, body: string) =
+  ## Publish an arbitrary metadata object at `relPath` under the served root.
+  ##
+  ## NLF-M6's folded criterion needs one object of each
+  ## `Repository-And-Index-Format.md` kind published, and the four
+  ## non-version-list kinds live at paths this server had no way to write.
+  ## Still fixture DATA over a real socket — nothing about the retrieval path
+  ## is substituted; see the header's test-double note.
+  let full = server.state.root / relPath
+  createDir(parentDir(full))
+  writeFile(full, body)
+
+proc withdraw*(server: MetadataServer; packageName: string) =
+  ## Unpublish a package's version-metadata record.
+  ##
+  ## The registry rollback case: an upstream that published a version and then
+  ## yanked it. NLF-M6's two-phase lookup is only observable if upstream can be
+  ## moved BACK to a state a previously recorded path set was taken over.
+  let path = server.state.root / (packageName & ".versions")
+  if fileExists(path): removeFile(path)
 
 proc stop*(server: MetadataServer) =
   ## Shut the listener down and JOIN the serving thread, so that after this
