@@ -84,7 +84,7 @@
 ## objects are the real files wave 1 retrieved over a real socket, and the
 ## digest is the real `repro_hash` BLAKE3.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, strutils, tables]
 
 import repro_hash
 import repro_solver
@@ -111,10 +111,18 @@ type
     subject*: string
       ## The object's key within its kind — package name, shard letter,
       ## `<package>@<version>`, or empty for the repository-wide kinds.
-    objectPath*: string
-      ## Where wave 1 landed the object. Replay reads THIS file, not the URL:
-      ## the observation is over what the solve read, and what the solve read
-      ## is what the fetch edge wrote.
+    recordedAt*: string
+      ## Where wave 1 landed the object WHEN THE OBSERVATION WAS TAKEN.
+      ##
+      ## **Diagnostic only. Replay must never read it**, and the reason is a
+      ## measured defect rather than a stylistic rule: a generation's work
+      ## directory is per-invocation, so a replay that opened this path would
+      ## open the file the PREVIOUS generation fetched, compare it against the
+      ## digest taken over itself, and report a match forever. That is a cache
+      ## that never invalidates — exactly the failure NLF-M6's exit criteria
+      ## say a one-sided test cannot distinguish from a working filter. Replay
+      ## resolves the object through `observationLocator` against the CURRENT
+      ## wave's plan instead.
     filter*: MaterialityFilterKind
     low*, high*: string
     highInclusive*: bool
@@ -180,6 +188,16 @@ proc digestOfBody*(body: string): string =
   ## The whole-content fingerprint used for the non-enumeration kinds.
   hexOf(digestOfText("body\x1f" & body))
 
+proc observationLocator*(kind: MetadataObjectKind;
+                         subject: string): string =
+  ## The stable identity of one metadata object across invocations: its kind
+  ## and its key within that kind, and nothing about where a particular
+  ## generation happened to put it on disk.
+  $kind & "\x1c" & subject
+
+proc observationLocator*(obs: SolveObservation): string =
+  observationLocator(obs.kind, obs.subject)
+
 proc observeObject*(kind: MetadataObjectKind; subject, objectPath: string;
                     iv: ConsultedInterval): SolveObservation =
   ## Take one observation over the object at `objectPath`.
@@ -190,7 +208,7 @@ proc observeObject*(kind: MetadataObjectKind; subject, objectPath: string;
   ## upstream, and a lookup that skipped it would treat the object appearing
   ## later as no change at all.
   result = SolveObservation(kind: kind, subject: subject,
-    objectPath: objectPath, filter: iv.kind, low: iv.low, high: iv.high,
+    recordedAt: objectPath, filter: iv.kind, low: iv.low, high: iv.high,
     highInclusive: iv.highInclusive, selection: iv.selection,
     reason: iv.reason)
   let body =
@@ -210,9 +228,13 @@ proc observeObject*(kind: MetadataObjectKind; subject, objectPath: string;
     result.reason = "a " & $kind & " is a document, not an enumeration"
     result.memberDigest = digestOfBody(body)
 
-proc replayObservation*(obs: SolveObservation): string =
-  ## Recompute `memberDigest` against the CURRENT contents of `obs.objectPath`,
+proc replayObservation*(obs: SolveObservation; currentPath: string): string =
+  ## Recompute `memberDigest` against the CURRENT contents of `currentPath`,
   ## replaying the RECORDED filter.
+  ##
+  ## `currentPath` comes from the caller's live fetch plan, never from
+  ## `obs.recordedAt`; see that field for why reading the recorded path would
+  ## produce a cache that can never miss.
   ##
   ## The filter comes off the record and is not re-derived. A re-derived filter
   ## would be derived from the state being checked, so an upstream change that
@@ -221,7 +243,7 @@ proc replayObservation*(obs: SolveObservation): string =
   ## NLF-M6's exit criteria call out as indistinguishable from a working filter
   ## unless both directions are measured.
   let body =
-    if fileExists(obs.objectPath): readFile(obs.objectPath) else: ""
+    if fileExists(currentPath): readFile(currentPath) else: ""
   if isEnumerationKind(obs.kind) and obs.filter == mfInterval:
     let iv = ConsultedInterval(packageName: obs.subject, kind: obs.filter,
       selection: obs.selection, low: obs.low, high: obs.high,
@@ -236,7 +258,7 @@ proc replayObservation*(obs: SolveObservation): string =
 
 proc renderObservation(obs: SolveObservation): string =
   "kind=" & $obs.kind & "\x1f" & "subject=" & obs.subject & "\x1f" &
-    "path=" & obs.objectPath & "\x1f" & "filter=" & $obs.filter & "\x1f" &
+    "filter=" & $obs.filter & "\x1f" &
     "low=" & obs.low & "\x1f" & "high=" & obs.high & "\x1f" &
     "highIncl=" & (if obs.highInclusive: "1" else: "0") & "\x1f" &
     "selection=" & obs.selection & "\x1f" &
@@ -282,7 +304,6 @@ proc parsePathSet*(text: string): SolvePathSet =
             matched = true
         if not matched: return SolvePathSet(observations: @[])
       of "subject": obs.subject = value
-      of "path": obs.objectPath = value
       of "filter":
         obs.filter = if value == $mfInterval: mfInterval else: mfRaw
       of "low": obs.low = value
@@ -330,7 +351,8 @@ proc recordedEntries(dir: string): seq[string] =
   for i in countdown(stems.high, 0):
     result.add(stems[i])
 
-proc lookupPathSet*(root, weakHex: string): PathSetLookup =
+proc lookupPathSet*(root, weakHex: string;
+                    livePaths: Table[string, string]): PathSetLookup =
   ## Phase 2: replay each recorded path set against live metadata.
   ##
   ## Returns the FIRST match. "First" is well defined because the entries are
@@ -360,10 +382,16 @@ proc lookupPathSet*(root, weakHex: string): PathSetLookup =
       continue
     var matched = true
     for obs in ps.observations:
-      if replayObservation(obs) != obs.memberDigest:
+      # An object the recorded path set observed and the CURRENT wave does not
+      # fetch resolves to `""`, which reads as absent and therefore as a
+      # mismatch. That is the right direction: a plan that stopped retrieving
+      # something the answer depended on has changed what the answer depends
+      # on.
+      let live = livePaths.getOrDefault(observationLocator(obs), "")
+      if replayObservation(obs, live) != obs.memberDigest:
         matched = false
-        result.missReason = "observation over " & $obs.kind & " '" &
-          obs.subject & "' no longer matches"
+        result.missReason = "observation over " & $obs.kind & " \'" &
+          obs.subject & "\' no longer matches"
         break
     if matched:
       return PathSetLookup(hit: true, index: parseInt(stem),

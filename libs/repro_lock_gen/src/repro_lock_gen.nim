@@ -755,7 +755,11 @@ proc installGenerationExecutors*(req: LockGenerationRequest) =
         # amendment's "tried in order against live metadata" is literally what
         # happens. A lookup performed before the fetch would be replaying the
         # recorded filter against the state that produced it.
-        let lookup = lookupPathSet(pathSetRoot, weakHex)
+        var livePaths = initTable[string, string]()
+        for entry in plan:
+          livePaths[observationLocator(entry.kind, entry.subject)] =
+            entry.objectPath
+        let lookup = lookupPathSet(pathSetRoot, weakHex, livePaths)
         if lookup.hit:
           writeFile(outPath, lookup.lockDocument)
           lastPathSetHitIndex = lookup.index
