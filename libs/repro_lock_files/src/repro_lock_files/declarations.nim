@@ -108,12 +108,18 @@ proc isDeclaredLockFile*(name: string; ownerPackage = ""): bool =
 
 proc originOf*(d: LockFileDecl): string =
   ## What the §4.9 listing prints in parentheses after a name.
-  if d.predeclared:
-    "stdlib, predeclared"
-  elif d.sourceFile.len == 0:
-    "declared"
-  else:
+  ##
+  ## A recorded source position wins over the predeclared marker. §4.2 makes
+  ## the well-known names re-declarable — `lockFile default, path = "…"` is
+  ## §4.10's whole-graph retargeting spelling — and a listing that kept
+  ## reporting `(stdlib, predeclared)` for a name the workspace has since
+  ## declared would send a reader looking in the wrong file.
+  if d.sourceFile.len > 0:
     d.sourceFile & ":" & $d.sourceLine
+  elif d.predeclared:
+    "stdlib, predeclared"
+  else:
+    "declared"
 
 proc declareLockFile*(name: string; path = ""; description = "";
                       sourceFile = ""; sourceLine = 0; sourceColumn = 0;
@@ -231,13 +237,25 @@ proc editDistance(a, b: string): int =
     for j in 0 .. b.len: prev[j] = cur[j]
   prev[b.len]
 
-proc suggestLockFileName*(typo: string; ownerPackage = ""): string =
-  ## The §4.9 `did you mean` candidate, or `""` when nothing is close enough.
-  ## The bound is deliberately tight: a suggestion that is not the name the
-  ## author meant is worse than none, because it invites a second wrong edit.
+proc suggestIn*(decls: openArray[LockFileDecl]; typo: string;
+                ownerPackage = ""): string =
+  ## The §4.9 `did you mean` candidate over an EXPLICIT declaration list, or
+  ## `""` when nothing is close enough. The bound is deliberately tight: a
+  ## suggestion that is not the name the author meant is worse than none,
+  ## because it invites a second wrong edit.
+  ##
+  ## Every renderer below takes its declaration list as a parameter rather
+  ## than reading the module's registry, and that is load-bearing rather than
+  ## stylistic: the same rendering has to run against the COMPILE-TIME
+  ## registry (`ct_registry.nim`, which is where §4.9's error is raised) and
+  ## against the run-time one (`repro lock list`). Nim cannot read another
+  ## module's global from the VM, so a renderer that closed over the registry
+  ## could only ever serve one of the two — and the two would drift, which for
+  ## a diagnostic means the compile error and the listing disagreeing about
+  ## what is in scope.
   var best = ""
   var bestScore = high(int)
-  for d in declared:
+  for d in decls:
     if d.ownerPackage.len > 0 and d.ownerPackage != ownerPackage: continue
     let score = editDistance(typo.toLowerAscii(), d.name.toLowerAscii())
     if score < bestScore or (score == bestScore and d.name < best):
@@ -246,7 +264,8 @@ proc suggestLockFileName*(typo: string; ownerPackage = ""): string =
   let bound = max(1, typo.len div 3)
   if bestScore <= bound: best else: ""
 
-proc inScopeListingLines*(ownerPackage = ""): seq[string] =
+proc inScopeListingLinesIn*(decls: openArray[LockFileDecl];
+                            ownerPackage = ""): seq[string] =
   ## The `in scope here:` block of §4.9, one line per declared name.
   ##
   ## Each line carries the name, its origin, AND its description. §4.2
@@ -257,7 +276,7 @@ proc inScopeListingLines*(ownerPackage = ""): seq[string] =
   result = @[]
   var width = 0
   var visible: seq[LockFileDecl] = @[]
-  for d in declared:
+  for d in decls:
     if d.ownerPackage.len > 0 and d.ownerPackage != ownerPackage: continue
     visible.add(d)
     width = max(width, d.name.len)
@@ -269,9 +288,10 @@ proc inScopeListingLines*(ownerPackage = ""): seq[string] =
       line.add("\n      " & firstLine)
     result.add(line)
 
-proc undeclaredLockFileDiagnostic*(name: string; sourceFile: string;
-                                   sourceLine, sourceColumn: int;
-                                   ownerPackage = ""): string =
+proc undeclaredDiagnosticIn*(decls: openArray[LockFileDecl];
+                             name: string; sourceFile: string;
+                             sourceLine, sourceColumn: int;
+                             ownerPackage = ""): string =
   ## §4.9's diagnostic, verbatim in shape:
   ##
   ## ```text
@@ -301,13 +321,28 @@ proc undeclaredLockFileDiagnostic*(name: string; sourceFile: string;
     result.add("      " & spaces("lockFile ".len) & "^\n")
   result.add("  no lock file with that name is declared in scope.\n\n")
   result.add("  in scope here:\n")
-  for line in inScopeListingLines(ownerPackage):
+  for line in inScopeListingLinesIn(decls, ownerPackage):
     result.add(line & "\n")
-  let suggestion = suggestLockFileName(name, ownerPackage)
+  let suggestion = suggestIn(decls, name, ownerPackage)
   if suggestion.len > 0:
     result.add("\n  did you mean `" & suggestion & "`?\n")
 
-proc lockFileListingText*(): string =
+proc suggestLockFileName*(typo: string; ownerPackage = ""): string =
+  ## `suggestIn` against the run-time registry.
+  suggestIn(declared, typo, ownerPackage)
+
+proc inScopeListingLines*(ownerPackage = ""): seq[string] =
+  ## `inScopeListingLinesIn` against the run-time registry.
+  inScopeListingLinesIn(declared, ownerPackage)
+
+proc undeclaredLockFileDiagnostic*(name: string; sourceFile: string;
+                                   sourceLine, sourceColumn: int;
+                                   ownerPackage = ""): string =
+  ## `undeclaredDiagnosticIn` against the run-time registry.
+  undeclaredDiagnosticIn(declared, name, sourceFile, sourceLine,
+    sourceColumn, ownerPackage)
+
+proc listingTextOf*(decls: openArray[LockFileDecl]): string =
   ## What `repro lock list` prints: §4.2 consumer (1). "A workspace with three
   ## declared lock files is unusable if a reader cannot find out what each is
   ## *for* without grepping the recipes."
@@ -316,10 +351,10 @@ proc lockFileListingText*(): string =
   ## but not what they currently resolve to would answer half the question an
   ## operator has.
   var width = 0
-  for d in declared:
+  for d in decls:
     width = max(width, d.name.len)
   result = ""
-  for d in declared:
+  for d in decls:
     result.add(d.name & spaces(width - d.name.len) & "  (" & originOf(d) & ")\n")
     if d.path.len > 0:
       result.add("    path: " & d.path & "\n")
@@ -327,6 +362,10 @@ proc lockFileListingText*(): string =
       let stripped = line.strip()
       if stripped.len > 0:
         result.add("    " & stripped & "\n")
+
+proc lockFileListingText*(): string =
+  ## `listingTextOf` against the run-time registry.
+  listingTextOf(declared)
 
 # ---------------------------------------------------------------------------
 # §4.3 / §4.4 / §4.5 — the designation stack and the precedence chain
@@ -401,3 +440,56 @@ proc resolveLockFilePath*(name: string; bindings: Table[string, string]):
   if name == DefaultLockFileName:
     return ""
   resolveLockFilePath(DefaultLockFileName, bindings)
+
+# ---------------------------------------------------------------------------
+# §4.3 — the artifact / package designation registry
+# ---------------------------------------------------------------------------
+
+type
+  ArtifactDesignation* = object
+    ## One `lockFile <name>` written at an `executable` / `library` / package
+    ## declaration. §4.3: "**The artifact declaration, not the package, is the
+    ## designation site.** … A package routinely declares both a host build
+    ## tool and a shipped binary — the example above is the canonical shape —
+    ## so package-level designation would be too coarse to express the
+    ## motivating case."
+    packageName*: string
+    artifactName*: string
+      ## Empty for the package-level default, which "remains available as a
+      ## default that artifacts inherit and may override".
+    lockFileName*: string
+    sourceFile*: string
+    sourceLine*: int
+
+var designations: seq[ArtifactDesignation] = @[]
+
+proc resetArtifactDesignations*() =
+  designations.setLen(0)
+
+proc registerArtifactLockFile*(packageName, artifactName, lockFileName: string;
+                               sourceFile = ""; sourceLine = 0) =
+  ## Record a designation. Emitted by the `package` macro's expansion, so the
+  ## compiled recipe carries its own designation table and the propagation
+  ## input can be built from the recipe rather than re-parsed out of it.
+  designations.add(ArtifactDesignation(
+    packageName: packageName, artifactName: artifactName,
+    lockFileName: lockFileName, sourceFile: sourceFile,
+    sourceLine: sourceLine))
+
+proc artifactDesignations*(): seq[ArtifactDesignation] =
+  designations
+
+proc designationFor*(packageName, artifactName: string): string =
+  ## §4.3's precedence chain, restricted to the two DECLARATION rungs (the
+  ## block and per-call rungs are dynamic and live on the designation stack).
+  ##
+  ## Narrowest wins: an artifact designation outranks its package's default,
+  ## and the absence of both is `""` — inherit, per §4.6's table.
+  for d in designations:
+    if d.packageName == packageName and d.artifactName == artifactName and
+        artifactName.len > 0:
+      return d.lockFileName
+  for d in designations:
+    if d.packageName == packageName and d.artifactName.len == 0:
+      return d.lockFileName
+  ""

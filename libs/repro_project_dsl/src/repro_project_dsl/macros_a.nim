@@ -523,6 +523,30 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
   if not isRoot:
     commands.add(result)
 
+proc parseLockFileDesignation(stmt: NimNode; owner: string): string =
+  ## Named-Lock-Files NLF-M7 (§4.3) — the one-line designation
+  ## ``lockFile <name>`` written at an artifact or at a package.
+  ##
+  ## The argument is a bare identifier, not a string, and §4.9 says why that
+  ## is the design and not a preference: "Being a bare **symbol** rather than
+  ## a string is what makes this diagnostic possible … strings are for names
+  ## that cross a boundary and cannot be checked; symbols are for names the
+  ## compiler can verify."
+  ##
+  ## Both spellings the parser meets are accepted: ``lockFile hostTools``
+  ## (Command, argument at [1]) and ``lockFile: hostTools`` (Call with a
+  ## synthetic StmtList), the same unwrap ``name:`` already needs.
+  if stmt.len < 2:
+    error("lockFile expects a declared lock-file name, e.g. " &
+      "`lockFile hostTools` (" & owner & ")", stmt)
+  var nameNode = stmt[1]
+  if nameNode.kind == nnkStmtList and nameNode.len == 1:
+    nameNode = nameNode[0]
+  if nameNode.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    error("lockFile expects a bare identifier naming a declared lock file, " &
+      "not " & $nameNode.kind & " (" & owner & ")", nameNode)
+  identText(nameNode)
+
 proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
   let loc = lineFile(node)
   result.exportName = identText(node[1])
@@ -545,6 +569,9 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       if nameNode.kind == nnkStmtList and nameNode.len == 1:
         nameNode = nameNode[0]
       result.binaryName = stringLiteral(nameNode)
+    of "lockfile":
+      result.lockFile = parseLockFileDesignation(stmt,
+        "executable " & result.exportName)
     of "cli":
       let cliBody = stmt[1]
       var commands: seq[CliCommandDef] = @[]
@@ -701,6 +728,9 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
     return
   for stmt in body:
     case calleeName(stmt).normalize
+    of "lockfile":
+      result.lockFile = parseLockFileDesignation(stmt,
+        "library " & result.name)
     of "kind":
       if stmt.len < 2:
         error("library kind: requires a value", stmt)
@@ -1071,9 +1101,32 @@ proc collectUsesGated(node: NimNode; policyPath: seq[string];
   else:
     discard
 
+const
+  DepKindTarget* = "target"
+    ## ``uses:`` / ``buildDeps:`` — HOST-platform libraries the produced
+    ## binaries link against.
+  DepKindNative* = "native"
+    ## ``nativeBuildDeps:`` — BUILD-platform tools and code generators.
+  DepKindRuntime* = "runtime"
+    ## ``runtimeDeps:`` — HOST-platform tools/libraries needed at run time.
+
 proc collectUses(node: NimNode; policyPath: seq[string];
-                 output: var seq[PackageUseDef]) =
+                 output: var seq[PackageUseDef];
+                 depKind = DepKindTarget) =
+  ## Named-Lock-Files NLF-M7 (§4.6): every entry is tagged with the list it
+  ## was written in, AFTER the recursive walk rather than through it.
+  ##
+  ## Tagging on the way out rather than threading a parameter down eleven
+  ## recursive call sites is deliberate: the tag is a property of the BLOCK
+  ## the walk was entered for, not of any node inside it, so a parameter
+  ## threaded through the recursion would be eleven places for a future arm
+  ## to forget it and one place for the tag to be silently wrong. §4.6's whole
+  ## finding is that this distinction gets erased somewhere downstream; not
+  ## adding eleven new places to erase it is the point.
+  let before = output.len
   collectUsesGated(node, policyPath, "", "", output)
+  for i in before ..< output.len:
+    output[i].depKind = depKind
 
 proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
   let loc = lineFile(node)
@@ -1620,6 +1673,11 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       if provisioning.normalize notin ["path", "nix", "tarball", "scoop", "from-source"]:
         error("defaultToolProvisioning must be one of: path, nix, tarball, scoop, from-source", stmt[1])
       result.defaultToolProvisioning = provisioning
+    elif calleeName(stmt).normalize == "lockfile":
+      # §4.3's package-level rung: "A **package-level** `lockFile` remains
+      # available as a default that artifacts inherit and may override."
+      result.lockFile = parseLockFileDesignation(stmt,
+        "package " & result.packageName)
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
         collectUses(stmt[i], @[], result.toolUses)
@@ -1641,14 +1699,14 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       # ``PackageDef`` so it does NOT leak into ``toolUses`` (the
       # downstream solver / cross-project surface).
       for i in 1 ..< stmt.len:
-        collectUses(stmt[i], @[], result.nativeBuildDeps)
+        collectUses(stmt[i], @[], result.nativeBuildDeps, DepKindNative)
     elif calleeName(stmt).normalize == "runtimedeps":
       # DSL-port M9.R.1: ``runtimeDeps:`` carries HOST-platform
       # tools/libraries consumers need at runtime or link time.
       # Parsed with the same minispec grammar as ``uses:`` /
       # ``buildDeps:``; stored in a separate slot on ``PackageDef``.
       for i in 1 ..< stmt.len:
-        collectUses(stmt[i], @[], result.runtimeDeps)
+        collectUses(stmt[i], @[], result.runtimeDeps, DepKindRuntime)
     elif calleeName(stmt).normalize == "provisioning":
       if stmt.len < 2:
         error("provisioning expects a body", stmt)
@@ -1828,11 +1886,16 @@ proc packageUseSeqLiteral(uses: seq[PackageUseDef]): string =
     result.add("], sourceFile: " & escForCode(useDef.sourceFile) &
       ", sourceLine: " & $useDef.sourceLine &
       ", gateVariant: " & escForCode(useDef.gateVariant) &
-      ", gateValue: " & escForCode(useDef.gateValue) & ")")
+      ", gateValue: " & escForCode(useDef.gateValue) &
+      # Named-Lock-Files NLF-M7 (§4.6): the platform tag rides ALONG WITH the
+      # entry, so the concatenation below no longer erases which of the three
+      # lists it came from.
+      ", depKind: " & escForCode(useDef.depKind) & ")")
   result.add("]")
 
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
+    ", lockFile: " & escForCode(pkg.lockFile) &
     ", defaultToolProvisioning: " & escForCode(pkg.defaultToolProvisioning) &
     ", nixProvisioning: @["
   for provisioningIndex, provisioning in pkg.nixProvisioning:
@@ -1951,6 +2014,7 @@ proc packageLiteral(pkg: PackageDef): string =
       result.add(", ")
     result.add("ExecutableDef(exportName: " & escForCode(exe.exportName) &
       ", binaryName: " & escForCode(exe.binaryName) &
+      ", lockFile: " & escForCode(exe.lockFile) &
       ", hasImplicitTargetNameHook: " & $exe.hasImplicitTargetNameHook &
       ", implicitTargetNameHookCallType: " &
         escForCode(exe.implicitTargetNameHookCallType) &
@@ -2023,6 +2087,7 @@ proc packageLiteral(pkg: PackageDef): string =
       if lib.exportedPath.len == 0: "\"\"" else: lib.exportedPath
     result.add("LibraryDef(name: " & escForCode(lib.name) &
       ", kind: " & $lib.kind &
+      ", lockFile: " & escForCode(lib.lockFile) &
       ", exportedPath: " & exportedPathCode &
       ", sourceFile: " & escForCode(lib.sourceFile) &
       ", sourceLine: " & $lib.sourceLine & ")")

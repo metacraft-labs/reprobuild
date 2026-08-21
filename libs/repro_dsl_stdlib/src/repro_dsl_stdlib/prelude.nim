@@ -2,8 +2,10 @@ import repro_project_dsl
 import repro_dsl_stdlib/fs
 import repro_dsl_stdlib/configurables
 import repro_dsl_stdlib/active_context
+import repro_dsl_stdlib/lock_file_decl
 
 export repro_project_dsl
 export fs
 export configurables
 export active_context
+export lock_file_decl

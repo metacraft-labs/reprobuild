@@ -103,6 +103,21 @@ type
     rng*: string
     gateVariant*: string
     gateValue*: string
+    depKind*: string
+      ## Named-Lock-Files NLF-M7 (§4.6) — which of the three approved
+      ## dependency lists this edge was written in: ``"target"``
+      ## (``uses:`` / ``buildDeps:``), ``"native"`` (``nativeBuildDeps:``) or
+      ## ``"runtime"`` (``runtimeDeps:``).
+      ##
+      ## §4.6's rule is that "``nativeBuildDeps:`` resolves under the
+      ## ``hostTools`` lock file; ``buildDeps:`` and ``runtimeDeps:`` resolve
+      ## under the consuming artifact's lock file", and this is the field that
+      ## carries the fact far enough to act on. Before NLF-M7 the `package`
+      ## macro registered ONLY the ``uses:``/``buildDeps:`` list, so the
+      ## BUILD-platform half of the split never reached the solver at all.
+      ##
+      ## Empty is read as ``"target"`` so a record built by hand keeps its
+      ## former meaning.
 
 var pendingSolverPackages {.threadvar.}: seq[SolverPackageInput]
   ## Spec-Implementation M2d: thread-local registry of solver-bound
@@ -193,7 +208,8 @@ proc resetVariantState*() =
   hasUnifiedSolution = false
 
 proc registerSolverDependency*(parentPackage, depPackage, rng: string;
-                                gateVariant = ""; gateValue = "") =
+                                gateVariant = ""; gateValue = "";
+                                depKind = "target") =
   ## Spec-Implementation M2d: append one solver-bound dependency record.
   ## The ``package`` macro emits one of these per ``PackageUseDef``
   ## immediately after ``registerPackageDef``; ``finalizeVariants()``
@@ -208,7 +224,8 @@ proc registerSolverDependency*(parentPackage, depPackage, rng: string;
     depPackage: depPackage,
     rng: rng,
     gateVariant: gateVariant,
-    gateValue: gateValue))
+    gateValue: gateValue,
+    depKind: depKind))
 
 proc pendingSolverDependencies*(): seq[SolverPackageInput] =
   ## Test-facing accessor for the queued solver-package list. Returns a

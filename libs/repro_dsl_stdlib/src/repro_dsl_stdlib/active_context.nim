@@ -225,8 +225,17 @@ type
     ## layering reason the other four are.
     name*: string
 
-proc lockFile*(ctx: BuildContext): string =
+proc lockFileName*(ctx: BuildContext): string =
   ## The lock file governing the active build region, as a NAME.
+  ##
+  ## §4.4 spells this accessor ``lockFile*(ctx)``. It is ``lockFileName``
+  ## here for one measured reason: ``lockFile`` is also the DECLARATION
+  ## keyword (§4.2), and a one-typed-parameter ``lockFile(ctx: BuildContext)``
+  ## in the same scope as the declaration macro makes ``lockFile hostTools``
+  ## fail overload resolution — Nim types the argument against the proc
+  ## candidate and reports `undeclared identifier: 'hostTools'`, which is a
+  ## confusing way to be told two names collide. The normative spelling is
+  ## the DECLARATION's, so the accessor moved.
   ##
   ## The fifth accessor, mirroring ``toolchain`` / ``crossTarget``: it fills
   ## its slot lazily when nothing has designated one, and the value it fills

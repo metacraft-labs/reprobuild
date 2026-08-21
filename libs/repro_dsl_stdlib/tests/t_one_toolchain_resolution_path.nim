@@ -126,8 +126,8 @@ suite "NLF-M7 exactly one toolchain-resolution path":
         check currentCompiler() == cfGcc
       # And the slot follows the region, not the frame.
       withLockFile "hostTools":
-        check currentBuildContext().lockFile == "hostTools"
-      check currentBuildContext().lockFile == "default"
+        check currentBuildContext().lockFileName == "hostTools"
+      check currentBuildContext().lockFileName == "default"
     finally:
       endBuildBlock(state)
 
@@ -139,7 +139,7 @@ suite "NLF-M7 exactly one toolchain-resolution path":
     try:
       check currentBuildContext().toolchain.name == "gcc-toolchain"
       check currentCompiler() == cfGcc
-      check currentBuildContext().lockFile == "default"
+      check currentBuildContext().lockFileName == "default"
     finally:
       endBuildBlock(state)
 
