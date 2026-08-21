@@ -94,6 +94,26 @@ const
     ## `GIT_CONFIG_COUNT` expands to an arbitrary number of indexed key/value
     ## variables, so the complete local environment cannot be a fixed list.
 
+  GitObjectStoreEnv* = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_QUARANTINE_PATH"]
+    ## The subset of the repository-local bindings that names an OBJECT STORE
+    ## rather than a repository. Scrubbing them is right for a cross-repository
+    ## call (`git -C <sibling>` must not read the invoking repository's
+    ## objects) and wrong for a call that operates on the invoking repository
+    ## itself while its objects are still QUARANTINED.
+    ##
+    ## Git delivers a push's objects into a temporary quarantine directory and
+    ## names it to the `pre-receive` hook through these variables; the objects
+    ## are moved into the repository's own store only once the hook accepts. A
+    ## `pre-receive`-time reader that drops them therefore sees a repository
+    ## that does not contain the commit being pushed — every read of the pushed
+    ## content comes back empty, which is indistinguishable from "the push
+    ## carries nothing to check". A server-side gate built on such a reader
+    ## silently accepts everything it exists to reject, so a reader that runs
+    ## inside `pre-receive` must keep these three.
+
 proc isRepositoryLocalGitEnvKey(key: string): bool =
   for candidate in GitRepositoryLocalEnv:
     if key == candidate:
@@ -102,12 +122,25 @@ proc isRepositoryLocalGitEnvKey(key: string): bool =
     if key.startsWith(prefix):
       return true
 
-proc scrubbedGitRepositoryEnv*(): StringTableRef =
+proc isGitObjectStoreEnvKey*(key: string): bool =
+  ## True for the object-store bindings above — the ones a `pre-receive`-time
+  ## reader of the pushed content must preserve.
+  for candidate in GitObjectStoreEnv:
+    if key == candidate:
+      return true
+
+proc scrubbedGitRepositoryEnv*(preserveObjectStore = false): StringTableRef =
   ## Return the ambient process environment without Git's repository-local
   ## bindings. All unrelated environment entries are preserved byte-for-byte.
+  ##
+  ## `preserveObjectStore` keeps `GitObjectStoreEnv` — set it only for a call
+  ## that reads the INVOKING repository (never a sibling) at a moment when the
+  ## objects it must see live in the push quarantine rather than in the
+  ## repository's own store.
   result = newStringTable(modeCaseSensitive)
   for key, value in envPairs():
-    if not isRepositoryLocalGitEnvKey(key):
+    if not isRepositoryLocalGitEnvKey(key) or
+        (preserveObjectStore and isGitObjectStoreEnvKey(key)):
       result[key] = value
 
 proc modeName(mode: ToolProvisioningMode): string =

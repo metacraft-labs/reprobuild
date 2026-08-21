@@ -36818,16 +36818,25 @@ const
     ## deterministically regardless of git's join.
 
 proc gitNoteRun(gitBin: string;
-                args: openArray[string]): tuple[code: int; output: string] =
+                args: openArray[string];
+                preserveObjectStore = false):
+    tuple[code: int; output: string] =
   ## Free-standing argv runner for the notes commands (same shape as
   ## ``gitRunPlain`` but takes a bare git binary path so the transport layer
   ## does not require a resolved ``GitToolIdentity``).
+  ##
+  ## ``preserveObjectStore`` keeps Git's object-store bindings
+  ## (``GitObjectStoreEnv``) instead of scrubbing them. Set it ONLY for a read
+  ## of the invoking repository during ``pre-receive``, where the objects being
+  ## examined are still in the push quarantine and are reachable through those
+  ## variables alone. Every other caller keeps the default: a cross-repository
+  ## ``git -C <sibling>`` must never inherit the invoking repository's objects.
   var cmd = quoteShell(gitBin)
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-    env = scrubbedGitRepositoryEnv())
+    env = scrubbedGitRepositoryEnv(preserveObjectStore = preserveObjectStore))
   (code: res.exitCode, output: res.output)
 
 proc framedCertificateRecord(cert: TestCertificate): string =
@@ -36880,7 +36889,8 @@ proc attachCertificate*(gitBin, repoPath, commit: string;
   (ok: true, diagnostic: "")
 
 proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
-                             commit: string): string =
+                             commit: string;
+                             preserveObjectStore = false): string =
   ## Read the note blob attached to ``commit`` straight out of a raw
   ## NOTES-COMMIT SHA (not a ref). ``git notes --ref <raw-sha>`` does NOT work
   ## (``--ref`` resolves a ref NAME, not a commit-ish), but a notes tree maps
@@ -36892,7 +36902,8 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
   ## moved into place (the objects are already present; only the ref update is
   ## pending). Returns "" when there is no note for ``commit``.
   let ls = gitNoteRun(gitBin,
-    ["-C", repoPath, "ls-tree", "-r", notesCommitSha])
+    ["-C", repoPath, "ls-tree", "-r", notesCommitSha],
+    preserveObjectStore = preserveObjectStore)
   if ls.code != 0:
     return ""
   for rawLine in ls.output.splitLines():
@@ -36907,14 +36918,17 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
     let path = line[tabIdx + 1 .. ^1].strip()
     if path.replace("/", "") == commit:
       let blob = gitNoteRun(gitBin,
-        ["-C", repoPath, "cat-file", "blob", objSha])
+        ["-C", repoPath, "cat-file", "blob", objSha],
+        preserveObjectStore = preserveObjectStore)
       if blob.code == 0:
         return blob.output
       return ""
   ""
 
 proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
-                                      notesRef: string): seq[TestCertificate] =
+                                      notesRef: string;
+                                      preserveObjectStore = false):
+    seq[TestCertificate] =
   ## Like ``readAttachedCertificates`` but reads from an EXPLICIT notes ref
   ## (a ref name OR a raw notes-commit SHA). The receiving-side gateway (TC-6)
   ## needs this: in a ``pre-receive`` hook the certificate note arrives as a
@@ -36932,10 +36946,12 @@ proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
   let looksLikeSha = notesRef.len == 40 and
     notesRef.allCharsInSet(HexDigits)
   if looksLikeSha:
-    noteBody = noteBlobFromNotesCommit(gitBin, repoPath, notesRef, commit)
+    noteBody = noteBlobFromNotesCommit(gitBin, repoPath, notesRef, commit,
+      preserveObjectStore = preserveObjectStore)
   else:
     let res = gitNoteRun(gitBin,
-      ["-C", repoPath, "notes", "--ref", notesRef, "show", commit])
+      ["-C", repoPath, "notes", "--ref", notesRef, "show", commit],
+      preserveObjectStore = preserveObjectStore)
     if res.code == 0:
       noteBody = res.output
   if noteBody.len == 0:
@@ -37418,8 +37434,18 @@ proc gatewayReadPushedLock(gitBin, gatewayBareDir, commit: string): string =
   ## ``repro.lock`` (a public-tier-less repo) or on any git error — the caller
   ## treats "no lock" as "nothing to gate", never as a pass-through of a bad
   ## lock.
+  ##
+  ## ``preserveObjectStore`` is REQUIRED here and is the whole reason the read
+  ## works: in ``pre-receive`` the pushed commit is not in the bare's own object
+  ## store yet — it sits in the push quarantine that Git names through
+  ## ``GIT_OBJECT_DIRECTORY`` / ``GIT_QUARANTINE_PATH``. Dropping those makes
+  ## every read of the pushed content fail, which this proc reports as "" —
+  ## i.e. as "this push carries no lock" — and the gate then accepts a lock it
+  ## never actually saw. The gate that exists to reject cannot be allowed to
+  ## mistake blindness for absence.
   let res = gitNoteRun(gitBin,
-    ["-C", gatewayBareDir, "show", commit & ":" & committedLockPathInTree])
+    ["-C", gatewayBareDir, "show", commit & ":" & committedLockPathInTree],
+    preserveObjectStore = true)
   if res.code != 0:
     return ""
   res.output
@@ -37450,9 +37476,13 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
     if not d.integrity.startsWith("git-sha"): continue
     if d.coordinates.revision.len == 0: continue
     # The locked revision's object must be present among the received objects.
+    # ``preserveObjectStore`` keeps the push quarantine visible: without it the
+    # objects this push delivered are unreachable and EVERY locked revision
+    # would look "not present", turning a clean push into a false refusal.
     let rp = gitNoteRun(gitBin,
       ["-C", gatewayBareDir, "rev-parse", "--verify", "--quiet",
-       d.coordinates.revision & "^{commit}"])
+       d.coordinates.revision & "^{commit}"],
+      preserveObjectStore = true)
     if rp.code != 0 or rp.output.strip().len == 0:
       result.add(LockedIntegrityFailure(name: d.name, path: d.path,
         expected: d.integrity, observed: "",
@@ -37566,13 +37596,20 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
     # Read the certs that arrived for this commit. Prefer the incoming notes
     # SHA (pre-receive: ref not yet updated); fall back to the well-known ref
     # for a post-receive / already-updated read.
+    # ``preserveObjectStore``: the certificate note arrives in the SAME push as
+    # the commit it attests, so its objects are in the push quarantine too. A
+    # scrubbed read finds no certificate for any commit and a ``required``
+    # gate then refuses every push — including the covered ones it is meant to
+    # let through.
     var attached: seq[TestCertificate]
     if notesSha.len > 0 and notesSha != zeroSha:
       attached = readAttachedCertificatesFromRef(
-        gitBin, gatewayBareDir, pushedCommit, notesSha)
+        gitBin, gatewayBareDir, pushedCommit, notesSha,
+        preserveObjectStore = true)
     if attached.len == 0:
       attached = readAttachedCertificatesFromRef(
-        gitBin, gatewayBareDir, pushedCommit, certificateNotesRef)
+        gitBin, gatewayBareDir, pushedCommit, certificateNotesRef,
+        preserveObjectStore = true)
     # Drop every cert that is not a registered-signed, unrevoked, valid-sig
     # attestation (TC-5) BEFORE coverage (TC-1).
     var trusted: seq[TestCertificate]
