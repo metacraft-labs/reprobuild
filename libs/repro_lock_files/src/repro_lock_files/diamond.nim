@@ -267,6 +267,16 @@ type
       ## The dependency path from the binary, e.g.
       ## `@["app", "libimaging", "libfoo"]`. §9.4: "The demanding **paths**,
       ## not just the demanding packages, are the load-bearing part."
+    pathVersions*: seq[string]
+      ## The solved version of each hop on `path`, same length and same
+      ## order. `""` where a hop's version is not known (the root artifact's
+      ## own package, which nothing selected a version FOR).
+      ##
+      ## §9.4's rendering carries them — `app -> libimaging 3.1.0 -> libfoo`
+      ## — and they are not decoration: an author told only that
+      ## "`libimaging` wants `>=2.0`" still has to go and find out WHICH
+      ## `libimaging`, and the answer is what decides whether relaxing that
+      ## constraint is a version bump or a patch.
     constraint*: string
       ## The range the LAST edge on the path demanded.
     demander*: string
@@ -343,7 +353,7 @@ proc linkClosures*(roots: openArray[PropRoot];
     var closure = LinkClosure(binary: r.artifact, package: r.package,
       lockFile: rootLock, reached: @[])
 
-    proc walk(pkg, lock: string; path: seq[string];
+    proc walk(pkg, lock: string; path, pathVersions: seq[string];
               onPath: HashSet[string]) =
       if not byName.hasKey(pkg): return
       for dep in byName[pkg].deps:
@@ -354,19 +364,21 @@ proc linkClosures*(roots: openArray[PropRoot];
           PropDep(name: dep.name, platform: dep.platform), depPin)
         let key = dep.name & "\x1f" & childLock
         if key in onPath: continue
+        let version = versionOf(pkg, dep.name, childLock)
         let childPath = path & @[dep.name]
+        let childVersions = pathVersions & @[version]
         closure.reached.add(ReachedInstance(
-          library: dep.name,
-          version: versionOf(pkg, dep.name, childLock),
+          library: dep.name, version: version,
           lockFile: childLock, path: childPath,
+          pathVersions: childVersions,
           constraint: dep.constraint, demander: pkg))
         var nextOnPath = onPath
         nextOnPath.incl(key)
-        walk(dep.name, childLock, childPath, nextOnPath)
+        walk(dep.name, childLock, childPath, childVersions, nextOnPath)
 
     var seed = initHashSet[string]()
     seed.incl(r.package & "\x1f" & rootLock)
-    walk(r.package, rootLock, @[r.package], seed)
+    walk(r.package, rootLock, @[r.package], @[""], seed)
     result.add(closure)
 
 # ---------------------------------------------------------------------------
@@ -401,6 +413,19 @@ type
     constraints*: seq[string]
     lockFiles*: seq[string]
 
+  SolvedInstance* = object
+    ## One library instance the solve actually produced, as the split report
+    ## needs to see it. Deliberately a flat record of strings rather than the
+    ## solver's own `CoalescedInstance`: `repro_lock_files` is a `std`-only
+    ## leaf (see `repro_lock_files.nim`'s header), and taking the solver's
+    ## type here would put clingo under the project DSL's macros.
+    library*: string
+    version*: string
+    lockFile*: string
+    constraint*: string
+      ## One range that demanded this instance. Several entries may share a
+      ## (library, version) and differ here; the report unions them.
+
 proc versionsIn(instances: openArray[ReachedInstance]): seq[string] =
   var seen = initHashSet[string]()
   result = @[]
@@ -411,10 +436,23 @@ proc versionsIn(instances: openArray[ReachedInstance]): seq[string] =
     result.add(i.version)
   result.sort()
 
-proc renderPath(path: openArray[string]; constraint: string): string =
-  result = path.join("  ->  ")
-  if constraint.len > 0:
-    result.add("  " & constraint)
+proc renderPath(instance: ReachedInstance): string =
+  ## §9.4's `app  ->  libimaging 3.1.0  ->  libfoo >=2.0 <3.0`.
+  ##
+  ## Every hop but the last prints its SOLVED version; the last prints the
+  ## RANGE that demanded it, because the last hop's solved version is already
+  ## on the line above and the range is the thing the author would edit.
+  var hops: seq[string] = @[]
+  for i, name in instance.path:
+    if i == instance.path.high:
+      hops.add(
+        if instance.constraint.len > 0: name & " " & instance.constraint
+        else: name)
+    elif i < instance.pathVersions.len and instance.pathVersions[i].len > 0:
+      hops.add(name & " " & instance.pathVersions[i])
+    else:
+      hops.add(name)
+  hops.join("  ->  ")
 
 proc unificationFailureText*(instances: openArray[ReachedInstance]): string =
   ## §9.4's "unification was attempted and failed: no version satisfies both
@@ -520,8 +558,7 @@ proc renderColinkingError*(conflict: ColinkingConflict): string =
     conflict.lockFile & "`) requires both:\n\n")
   for instance in conflict.instances:
     result.add("    " & conflict.library & " " & instance.version & "\n")
-    result.add("      " & renderPath(instance.path, instance.constraint) &
-      "\n")
+    result.add("      " & renderPath(instance) & "\n")
   result.add("\n  " & conflict.unificationFailure & ".\n")
   result.add("\n  resolutions:\n")
   result.add("    - relax one constraint so a single version satisfies " &
@@ -532,6 +569,45 @@ proc renderColinkingError*(conflict: ColinkingConflict): string =
     "      in its `api:` block — see §9.3 for when this is true\n")
   result.add("    - separate the consumers into different lock files, if " &
     "they need not\n      share a binary at all\n")
+
+proc findSplits*(instances: openArray[SolvedInstance]): seq[SplitReport] =
+  ## NLF-DIA-7 — one report per library that came out of the solve at more
+  ## than one version.
+  ##
+  ## **The predicate is the instance count, not the objection.** A library
+  ## that declares `multiVersion allowed` is split silently unless something
+  ## says so, and that is the case the corpus is written about: "A build that
+  ## quietly produces two copies of a library is how a closure doubles without
+  ## anyone noticing." So this proc never consults a policy, and it is a
+  ## separate proc from `findColinkingConflicts` for exactly that reason —
+  ## folding the two together is how the report would come to inherit the
+  ## error's condition.
+  ##
+  ## Every list in the result is sorted, so a report is a function of the
+  ## solved graph and not of the order the instances happened to arrive in
+  ## (§1.3, applied to a diagnostic).
+  var byLibrary = initOrderedTable[string, SplitReport]()
+  for inst in instances:
+    if inst.version.len == 0: continue
+    if not byLibrary.hasKey(inst.library):
+      byLibrary[inst.library] = SplitReport(library: inst.library,
+        versions: @[], constraints: @[], lockFiles: @[])
+    var report = byLibrary[inst.library]
+    if inst.version notin report.versions:
+      report.versions.add(inst.version)
+    if inst.lockFile.len > 0 and inst.lockFile notin report.lockFiles:
+      report.lockFiles.add(inst.lockFile)
+    if inst.constraint.len > 0 and inst.constraint notin report.constraints:
+      report.constraints.add(inst.constraint)
+    byLibrary[inst.library] = report
+  result = @[]
+  for _, report in byLibrary.pairs:
+    if report.versions.len < 2: continue
+    var entry = report
+    entry.versions.sort()
+    entry.lockFiles.sort()
+    entry.constraints.sort()
+    result.add(entry)
 
 proc renderSplitReport*(report: SplitReport): string =
   ## NLF-DIA-7 — a split is reported, not silent.
