@@ -23,7 +23,7 @@
 ## attachment below is the real attachment used by the `lockFile` macro; the
 ## diagnostics are the real strings the compiler and the CLI print.
 
-import std/[algorithm, exitprocs, os, strutils, tables]
+import std/[algorithm, os, strutils, tables]
 
 const
   DefaultLockFileName* = "default"
@@ -121,6 +121,12 @@ proc originOf*(d: LockFileDecl): string =
   else:
     "declared"
 
+proc emitLockFileDeclarationsIfRequested*()
+  ## Forward declaration. The emission is defined below, next to the format
+  ## it writes; `declareLockFile` calls it so the document on disk is current
+  ## the moment a declaration exists. See `LockFilesEmitEnvVar` for why it is
+  ## not an exit proc.
+
 proc declareLockFile*(name: string; path = ""; description = "";
                       sourceFile = ""; sourceLine = 0; sourceColumn = 0;
                       ownerPackage = ""): string {.discardable.} =
@@ -153,11 +159,13 @@ proc declareLockFile*(name: string; path = ""; description = "";
       declared[existing].sourceFile = sourceFile
       declared[existing].sourceLine = sourceLine
       declared[existing].sourceColumn = sourceColumn
+    emitLockFileDeclarationsIfRequested()
     return name
   declared.add(LockFileDecl(
     name: name, path: path, description: description,
     sourceFile: sourceFile, sourceLine: sourceLine,
     sourceColumn: sourceColumn, ownerPackage: ownerPackage))
+  emitLockFileDeclarationsIfRequested()
   name
 
 # ---------------------------------------------------------------------------
@@ -500,7 +508,7 @@ proc designationFor*(packageName, artifactName: string): string =
 
 const LockFilesEmitEnvVar* = "REPRO_EMIT_LOCK_FILES"
   ## When this names a writable path, a compiled recipe writes its declared
-  ## lock files there on exit.
+  ## lock files there as it declares them.
   ##
   ## `repro lock list` runs in the CLI process; the declarations live in the
   ## RECIPE process, because `lockFile hostTools` lowers to a `let` binding
@@ -509,13 +517,37 @@ const LockFilesEmitEnvVar* = "REPRO_EMIT_LOCK_FILES"
   ## already uses for the solver inputs — one env var, honoured by the
   ## compiled provider, ignored by every ordinary run.
   ##
-  ## Emission is an EXIT PROC rather than a call at some chosen point, and
-  ## that is the load-bearing detail. A recipe may declare lock files and
-  ## nothing else — no packages, no variants, no `build:` block — so hanging
-  ## the emission off `finalizeVariants()` (where the solver-inputs emission
-  ## lives) would silently produce an empty listing for exactly the workspace
-  ## §4.2's example shows: a `workspace.nim` whose whole content is two
-  ## `lockFile` declarations.
+  ## ## Why the emission is EAGER, and not an exit proc
+  ##
+  ## NLF-M7 hung it off `addExitProc`, reasoning that a recipe may declare
+  ## lock files and nothing else — no packages, no variants, no `build:`
+  ## block — so hanging it off `finalizeVariants()` (where the solver-inputs
+  ## emission lives) would silently produce an empty listing for exactly the
+  ## workspace §4.2's example shows. That reasoning is right and the exit proc
+  ## was the wrong way to act on it.
+  ##
+  ## **[MEASURED] NLF-M8.** An exit proc that reads a module-level global
+  ## SEGFAULTS. `exitprocs.callClosures` runs after ORC has destroyed module
+  ## globals, so `declared`'s strings are freed by the time the closure walks
+  ## them and `strutils.replace` faults on a nil payload. Three lines
+  ## reproduce it: import this module, set the variable, exit.
+  ##
+  ## The consequence is worse than a crash, and it is the reason this is
+  ## documented here at length rather than fixed quietly. The crash happened
+  ## in the PROVIDER child process; the CLI saw exit 139 as a failed command,
+  ## caught it with the probe's `except CatchableError`, and printed the
+  ## well-known set — which is indistinguishable from "this workspace
+  ## declares nothing". A listing that reports confidently about the wrong
+  ## thing is the defect class this whole campaign exists to catch, and it had
+  ## got inside the feature's own diagnostics, behind two layers of silence.
+  ##
+  ## So the write happens at DECLARATION time, while the globals are alive and
+  ## while a failure would still be attributable. Each declaration rewrites
+  ## the file, so the last one leaves a complete document; there are a handful
+  ## of declarations in a workspace and the cost is not measurable. A recipe
+  ## that declares nothing writes nothing, and the reader falls back to the
+  ## well-known set — which for that recipe is the true answer rather than a
+  ## masked failure.
 
 proc renderLockFileDeclarations*(decls: openArray[LockFileDecl]): string =
   ## The emit format: one tab-separated record per declaration, and a header
@@ -566,14 +598,19 @@ proc parseLockFileDeclarations*(text: string): seq[LockFileDecl] =
 
 proc emitLockFileDeclarationsIfRequested*() =
   ## Write the registry to `REPRO_EMIT_LOCK_FILES` when it is set.
+  ##
+  ## Called from `declareLockFile` — see `LockFilesEmitEnvVar` for why that
+  ## and not an exit proc.
+  ##
   ## Best-effort: a write failure never disturbs the process, exactly as the
   ## solver-inputs emission is best-effort, because a diagnostic surface must
-  ## not be able to fail a build.
+  ## not be able to fail a build. Note what that sentence does NOT license:
+  ## the failure this replaced was not a write failure but a SIGSEGV, which no
+  ## `except` clause catches, and "best-effort" is not a licence to run code
+  ## at a point where the data it reads may already be gone.
   let path = getEnv(LockFilesEmitEnvVar)
   if path.len == 0: return
   try:
     writeFile(path, renderLockFileDeclarations(declared))
   except CatchableError:
     discard
-
-addExitProc(emitLockFileDeclarationsIfRequested)

@@ -2233,30 +2233,25 @@ proc packageLiteral(pkg: PackageDef): string =
     # convention layer's tool-PATH setup (the convention reads only
     # ``projectInterface.toolUses`` for PATH prepending — see the
     # consumers at ``libs/repro_cli_support/src/repro_cli_support.nim``
-    # lines 3213, 5050, 10492, 14161). The per-kind separation is
-    # preserved at the ``registeredBuildDeps`` /
-    # ``registeredNativeBuildDeps`` / ``registeredRuntimeDeps``
-    # accessors (M9.R.1) and at the M9.R.7 ``cachePlatformTagFor``
-    # site where the resolver caller threads the right ``DepKind``;
-    # this fold only affects the surface the convention's PATH
-    # builder sees, which is exactly what M9.R.5a needs. The
-    # ``nativeBuildDeps:`` slot below still emits the kind-tagged
-    # seq so any downstream consumer that needs the BUILD-platform
-    # subset can read it directly.
+    # NLF-M8 (Named-Lock-Files, third criterion folded in from NLF-M7) —
+    # **the three lists are no longer concatenated here.**
     #
-    # M9.R.53: the same fold widens to include ``runtimeDeps``.
-    # Recipes that shell out to a build-time driver script (e.g.
-    # ``recipes/reproos-image``) declare the tools the script invokes
-    # in ``runtimeDeps:`` — semantically correct for a shell action
-    # since the tools are the SCRIPT's runtime — but that slot didn't
-    # reach the resolver until now, so callers had to duplicate every
-    # entry into ``uses:`` to get M9.N Batch B path-mode resolution
-    # to fire.  Widening the fold to include ``pkg.runtimeDeps``
-    # collapses the twin declaration.  Backward-compatible: existing
-    # from-source recipes use ``runtimeDeps: discard`` (empty seq)
-    # so the union is byte-identical to pre-M9.R.53 for them.
-    ", toolUses: " &
-      packageUseSeqLiteral(pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps) &
+    # M9.R.5a and M9.R.53 widened this slot to the union of ``pkg.toolUses``,
+    # ``pkg.nativeBuildDeps`` and ``pkg.runtimeDeps`` so the convention
+    # layer's tool-PATH builder would see every declared tool. The need was
+    # real; the place was wrong. Merging at SERIALIZATION made a runtime
+    # ``PackageDef.toolUses`` hold something different from the macro-time
+    # one of the same name, and §4.6 measured the cost: "the platform
+    # distinction the recipe expressed is **erased before the solver ever
+    # sees it**."
+    #
+    # The union now has a name — ``PackageDef.allToolUses`` — and every site
+    # that wanted it asks for it, in the same order, so nothing downstream
+    # sees a different sequence. ``ProjectInterface.toolUses`` in particular
+    # is byte-identical: ``repro_interface_artifacts`` takes the union when
+    # it builds the interface, which is where the ~14 tool-PATH readers get
+    # theirs.
+    ", toolUses: " & packageUseSeqLiteral(pkg.toolUses) &
     # DSL-port M9.R.1: emit the two new package-level dep slots.
     # Empty seqs serialize as ``@[]`` so legacy recipes that don't
     # declare either block round-trip byte-identically to their

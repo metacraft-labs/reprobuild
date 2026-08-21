@@ -4293,6 +4293,14 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
 ##   * ``pkgConfig "<name>"``                — pkg-config module name.
 ##   * ``soname "<name>"`` / ``sover "<v>"`` — shared-object metadata.
 ##   * ``linkKind static | shared | both``    — consumer link mode.
+##   * ``multiVersion forbidden | allowed``   — Named-Lock-Files §9.3: may
+##                                              two versions of this library
+##                                              be linked into one binary?
+##                                              Omitted means the answer is
+##                                              INHERITED from the language
+##                                              convention (Q-11), and the
+##                                              terminus of that inheritance
+##                                              is ``forbidden``.
 ##   * ``languageStandard <feature>``         — minimum language standard
 ##                                              (e.g. ``cxx_std_17``,
 ##                                              ``c_std_11``); always
@@ -4392,6 +4400,28 @@ type
       ## How consumers link against this library — static archive,
       ## shared object, or both. ``llkUnset`` when ``linkKind`` was
       ## omitted from the ``api:`` block.
+    multiVersion*: MultiVersionPolicy
+      ## Named-Lock-Files NLF-M8 (§9.3) — whether several versions of THIS
+      ## library may be linked into one binary.
+      ##
+      ## It lives in `api:` beside `linkKind` / `soname` / `sover` because it
+      ## is consumption metadata of exactly that kind, and it belongs to the
+      ## library rather than to the linkage site because "whether two versions
+      ## of it can share one binary is a fact only its author knows" (§9.5,
+      ## closing Q-2).
+      ##
+      ## `mvUnset` — the default — is NOT `mvAllowed`. §9.3: "the property is
+      ## named such that **silence means safe**: a library that declares
+      ## nothing is `forbidden`". The resolution from `mvUnset` to an
+      ## effective answer runs through the per-language conventions (Q-11) in
+      ## `repro_lock_files/diamond.resolveMultiVersion`, and the diagnostic
+      ## says which convention it came from.
+    multiVersionSourceFile*: string
+      ## §9.4 requires the co-linking error to cite "the declaration's
+      ## file:line". Captured at macro-expansion time from the `multiVersion`
+      ## line's own position, not the library's, because the line the author
+      ## has to change is the one that made the claim.
+    multiVersionSourceLine*: int
     languageStandard*: string
       ## CMake ``target_compile_features``-equivalent minimum language
       ## standard (e.g. ``cxx_std_17``, ``c_std_11``). Always

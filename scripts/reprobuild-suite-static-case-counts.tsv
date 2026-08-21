@@ -73,6 +73,8 @@ libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	7
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	nim	8
+libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim	nim	6
+libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim	nim	5
 libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	7
 libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	nim	17
 libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	2
@@ -154,7 +156,7 @@ libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	9
 libs/repro_dsl_stdlib/tests/t_undeclared_lock_file_is_compile_error.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_versioned_provisioning_schema.nim	nim	31
-libs/repro_dsl_stdlib/tests/t_with_lock_file_block_scope.nim	nim	7
+libs/repro_dsl_stdlib/tests/t_with_lock_file_block_scope.nim	nim	8
 libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim	nim	4
 libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim	nim	21
 libs/repro_elevation/tests/t_sandbox_m1_fhssandbox_driver.nim	nim	37
@@ -219,9 +221,19 @@ libs/repro_lock/tests/t_provenance_reports_shared_names.nim	nim	5
 libs/repro_lock/tests/t_selection_is_not_the_same_as_absence.nim	nim	4
 libs/repro_lock/tests/t_selection_status_survives_the_lock_round_trip.nim	nim	4
 libs/repro_lock_files/tests/t_cli_binding_forms.nim	nim	10
+libs/repro_lock_files/tests/t_declarations_are_emitted_eagerly.nim	nim	5
 libs/repro_lock_files/tests/t_declared_but_unbound_falls_back.nim	nim	6
+libs/repro_lock_files/tests/t_default_is_restrictive.nim	nim	5
 libs/repro_lock_files/tests/t_doc_comment_attachment_rules.nim	nim	8
+libs/repro_lock_files/tests/t_inherited_default_is_traceable.nim	nim	7
+libs/repro_lock_files/tests/t_multi_version_allowed_builds.nim	nim	3
+libs/repro_lock_files/tests/t_opaque_consumption_never_refused.nim	nim	5
+libs/repro_lock_files/tests/t_split_is_reported.nim	nim	6
+libs/repro_lock_files/tests/t_two_versions_one_link_forbidden_errors.nim	nim	7
+libs/repro_lock_files/tests/t_two_versions_separate_binaries_allowed.nim	nim	4
+libs/repro_lock_files/tests/t_unification_attempted_before_splitting.nim	nim	5
 libs/repro_lock_gen/tests/t_designation_propagates_to_closure.nim	nim	4
+libs/repro_lock_gen/tests/t_develop_checkout_once_products_per_lock_file.nim	nim	5
 libs/repro_lock_gen/tests/t_hidden_lock_shares_with_committed.nim	nim	3
 libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim	nim	10
 libs/repro_lock_gen/tests/t_materiality_interval_covers_the_gap.nim	nim	5
@@ -360,6 +372,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim	nim	3
 libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim	nim	7
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim	nim	4
+libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim	nim	5
 libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim	nim	5
 libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim	nim	1
 libs/repro_project_dsl/tests/t_dsl_implicit_target_name_hook_compiles.nim	nim	1

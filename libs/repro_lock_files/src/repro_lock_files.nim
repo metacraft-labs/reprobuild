@@ -1,12 +1,16 @@
 ## Named lock files: the declared NAME and everything that follows from it.
 ##
-## Named-Lock-Files NLF-M7. The umbrella over three leaves, split by §3's three
-## concepts so that nothing accidentally couples two of them:
+## Named-Lock-Files NLF-M7 and NLF-M8. The umbrella over four leaves, the first
+## three split by §3's three concepts so that nothing accidentally couples two
+## of them:
 ##
 ##   * `declarations` — the **name**: what is declared, its doc comment, the
 ##     designation stack and the two diagnostics.
 ##   * `binding` — the **binding**: `--lock <name>=<path>`, one invocation.
 ##   * `propagation` — how a designation reaches a closure (§4.1 / §4.6).
+##   * `diamond` — what happens where two of those closures meet in one
+##     binary (§9): the per-library `multiVersion` property, the per-language
+##     defaults Q-11 settles, the link-closure scoping, and the diagnostic.
 ##
 ## The **file** — one solved graph, pinned — is deliberately NOT here. It lives
 ## in `repro_lock`, which owns identity, and keeping the two libraries apart is
@@ -22,7 +26,9 @@
 import ./repro_lock_files/declarations
 import ./repro_lock_files/binding
 import ./repro_lock_files/propagation
+import ./repro_lock_files/diamond
 
 export declarations
 export binding
 export propagation
+export diamond

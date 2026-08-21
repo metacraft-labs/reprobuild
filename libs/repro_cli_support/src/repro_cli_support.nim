@@ -1737,10 +1737,19 @@ const CommittedLockFileNameForIdentity = "repro.lock"
   ## through this resolver, so a divergence fails a test rather than going
   ## unnoticed).
 
-const DefaultLockFileName* = "default"
-  ## Named-Lock-Files §3.1 — "The stdlib declares one well-known lock file,
-  ## `default`." A workspace that declares nothing, binds nothing and passes
-  ## nothing is governed by it.
+# Named-Lock-Files §3.1 — "The stdlib declares one well-known lock file,
+# `default`." A workspace that declares nothing, binds nothing and passes
+# nothing is governed by it.
+#
+# NLF-M8: this file used to declare its OWN `DefaultLockFileName` const
+# alongside the one in `repro_lock_files/declarations.nim`. Both said
+# `"default"`, so nothing was wrong — until a consumer imported both modules,
+# at which point every mention of the name became an ambiguous identifier.
+# Two definitions of one well-known name is the drift hazard §4.2 records for
+# lock-file declarations themselves ("is that one lock file mentioned twice,
+# or a conflict?"), so the declaration leaf owns it and this module
+# re-exports.
+export repro_lock_files.DefaultLockFileName
 
 var lockProvenanceTable {.threadvar.}: LockProvenance
 var lockProvenanceInit {.threadvar.}: bool
@@ -1767,15 +1776,34 @@ proc lockProvenance*(): LockProvenance =
 var workspaceLockIdentityCache {.threadvar.}: Table[string, LockIdentity]
 var workspaceLockIdentityCacheInit {.threadvar.}: bool
 
-proc workspaceGoverningLockIdentity*(projectRoot: string): LockIdentity =
-  ## The identity of the lock file governing every edge in `projectRoot`.
+proc governingLockIdentityFor*(projectRoot, lockFileName: string):
+    LockIdentity =
+  ## The identity of the lock file NAMED `lockFileName` in `projectRoot`.
+  ##
+  ## Named-Lock-Files NLF-M8, folded from NLF-M7 — **`--lock <name>=<path>` is
+  ## consumed per name by the build path.** M7 landed the flag's grammar, its
+  ## validation, its errors and §5.3's resolution, and then this resolver read
+  ## only `default`, so a binding for any other name parsed and governed
+  ## nothing.
+  ##
+  ## The path comes from §5.3, in its order and with no fourth case:
+  ##
+  ##   1. an explicit `--lock <name>=<path>` binding for THIS invocation;
+  ##   2. the declaration's committed `path =` field;
+  ##   3. otherwise the workspace lock file — "and there is **no third case,
+  ##      and in particular no error for an unbound lock file**".
+  ##
+  ## Steps 1 and 2 are `repro_lock_files.activeLockFilePath`; step 3 is the
+  ## committed lock at the project root, which is the one thing that library
+  ## cannot know and this one does. An invocation that binds nothing therefore
+  ## resolves every name to exactly the file it resolved before NLF-M8, and
+  ## every identity is byte-unchanged — NLF-STAT-4's requirement, restated at
+  ## the resolver.
   ##
   ## Named-Lock-Files §3.1: a workspace that declares no lock files has
   ## exactly one — `default` — and it governs everything, "precisely the
   ## behaviour specified in §2.1: one workspace lock file, committed, unifying
-  ## versions **and** variants across every package in the workspace". Until
-  ## NLF-M7 lands the declaration and designation surface, that is every
-  ## workspace, so this single resolver is the whole binding.
+  ## versions **and** variants across every package in the workspace".
   ##
   ## The identity is content-derived (§6.2) from the committed lock's SOLVED
   ## GRAPH. Two consequences worth stating because they are the properties
@@ -1798,10 +1826,22 @@ proc workspaceGoverningLockIdentity*(projectRoot: string): LockIdentity =
   if not workspaceLockIdentityCacheInit:
     workspaceLockIdentityCache = initTable[string, LockIdentity]()
     workspaceLockIdentityCacheInit = true
-  if workspaceLockIdentityCache.hasKey(projectRoot):
-    return workspaceLockIdentityCache[projectRoot]
+  let name =
+    if lockFileName.len > 0: lockFileName else: DefaultLockFileName
+  # §5.3 steps 1 and 2. Empty means "no explicit path", which is step 3.
+  let bound = activeLockFilePath(name)
+  let lockPath =
+    if bound.len > 0: absolutePath(bound)
+    else: projectRoot / CommittedLockFileNameForIdentity
+  # The memo is keyed on the RESOLVED PATH as well as the name, so a second
+  # invocation in one process (which is what a test is) cannot be served the
+  # first one's answer for a binding it changed. Keying on the name alone
+  # would make the cache a place where a stale identity survives a rebinding,
+  # and a stale governing identity is a wrong cache key, not a slow one.
+  let cacheKey = projectRoot & "\x1f" & name & "\x1f" & lockPath
+  if workspaceLockIdentityCache.hasKey(cacheKey):
+    return workspaceLockIdentityCache[cacheKey]
   var identity = lockIdentityOutsideSolvedGraph()
-  let lockPath = projectRoot / CommittedLockFileNameForIdentity
   if fileExists(extendedPath(lockPath)):
     try:
       identity = lockIdentityOf(
@@ -1813,13 +1853,28 @@ proc workspaceGoverningLockIdentity*(projectRoot: string): LockIdentity =
       # outside-the-solved-graph identity keeps one diagnostic instead of
       # two, and cannot mask the failure: the build still stops.
       identity = lockIdentityOutsideSolvedGraph()
-  workspaceLockIdentityCache[projectRoot] = identity
-  # Named-Lock-Files §6.3: record the binding in the provenance side table.
-  # Until NLF-M7 lands the declaration surface there is exactly one name —
-  # `default`, the stdlib's well-known lock file (§3.1) — and recording it
-  # here means `repro why` can already say which lock file governs an edge.
-  recordLockBinding(DefaultLockFileName, identity)
+  workspaceLockIdentityCache[cacheKey] = identity
+  # Named-Lock-Files §6.3: record the binding in the provenance side table,
+  # under the NAME that was resolved. Two names bound to one file resolve to
+  # one identity and both are recorded against it, which §6.3 calls sharing
+  # rather than a collision — and it is what lets `repro why` answer "which
+  # lock file governs this edge" with every name that does.
+  recordLockBinding(name, identity)
   identity
+
+proc workspaceGoverningLockIdentity*(projectRoot: string): LockIdentity =
+  ## The identity governing an edge that designated nothing — §4.3's final
+  ## rung, which is `default`.
+  ##
+  ## **Stated bound, because it is the honest half of the criterion above.**
+  ## A designation made in a recipe (`lockFile hostTools` on an artifact, or a
+  ## `withLockFile` region) does not reach this call site today: the lowered
+  ## graph the CLI receives over the provider protocol carries no per-edge
+  ## lock-file name, so the CLI cannot ask for one. `governingLockIdentityFor`
+  ## resolves whatever name it is given, and the remaining work is
+  ## transporting the name — a protocol and codec change, not a resolution
+  ## one.
+  governingLockIdentityFor(projectRoot, DefaultLockFileName)
 
 proc noScheduledAction*(): BuildAction =
   ## A `BuildAction` value for a slot that carries NO scheduled edge — the
@@ -16338,6 +16393,14 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       # pre-NLF-M7 invocation is byte-unchanged.
       if lockBindings.byName.hasKey(DefaultLockFileName):
         lockOverride = lockBindings.byName[DefaultLockFileName]
+      # NLF-M8, folded from NLF-M7 — and this is the line that makes
+      # `--lock <name>=<path>` mean something for a name other than
+      # `default`. `lockOverride` above is the VERSION-pinning half and only
+      # `default` has one; `setActiveLockBindings` is the IDENTITY half, and
+      # `governingLockIdentityFor` resolves every name through it. Without
+      # this the flag parses, validates, errors correctly on a typo — and
+      # then governs one graph.
+      setActiveLockBindings(lockBindings)
     elif arg == "--strategy" or arg.startsWith("--strategy="):
       # Named-Lock-Files §5.5: `repro build --strategy lowest` is
       # `--lock default=strategy:lowest` — "generate a lock file under the
@@ -49605,7 +49668,9 @@ const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
   ## — the env var the compiled provider's ``finalizeVariants()`` honours to
   ## emit the solved inputs.
 
-proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
+proc solverInputsFromCompiledProvider(projectDir: string;
+                                      requireSolverBinding = true):
+    Option[tuple[
     variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string;
     usesSelectors: seq[string]]] =
@@ -49628,7 +49693,19 @@ proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
   if match.path.len == 0:
     return result
   let modulePath = absolutePath(match.path)
-  if not moduleHasBuildBlock(modulePath):
+  if requireSolverBinding and not moduleHasBuildBlock(modulePath):
+    # NLF-M8, folded from NLF-M7. This return, and the `toolUses` one below,
+    # are correct for the SOLVER-INPUTS caller: a recipe with no `build:`
+    # block and no solver-bound `uses:` has no non-trivial solve, and the
+    # expensive provider compile would buy nothing.
+    #
+    # They were NOT correct for `repro lock list`, which borrowed this probe
+    # to get the DECLARATIONS out of the same process. A workspace whose
+    # whole content is two `lockFile` declarations — §4.2's own example —
+    # took this branch, never ran the provider, and the listing silently fell
+    # back to the well-known set. A listing that reports confidently about
+    # the wrong thing is the defect class this campaign exists to catch, and
+    # it had got inside the feature's own diagnostics.
     return result
   let scratchRoot = getTempDir() /
     ("repro-lock-provider-" & $getCurrentProcessId())
@@ -49657,7 +49734,7 @@ proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
     # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.
-    if artifact.projectInterface.toolUses.len == 0:
+    if requireSolverBinding and artifact.projectInterface.toolUses.len == 0:
       return result
     # FUP-M — capture the recipe's declared ``uses:`` producer selectors so
     # ``lockedDepsForWorkspace`` can fold each sibling PRODUCER edge into the
@@ -50119,7 +50196,7 @@ proc validateCommittedLockAdvisory(repoRoot: string) =
   except CatchableError:
     discard
 
-proc lockFileDeclarationsFromCompiledProvider(projectDir: string):
+proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
     seq[LockFileDecl] =
   ## Named-Lock-Files NLF-M7 (§4.2 consumer 1) — the declared lock files of
   ## the project at `projectDir`, obtained by running its compiled provider.
@@ -50137,12 +50214,26 @@ proc lockFileDeclarationsFromCompiledProvider(projectDir: string):
   ## lock files are in scope" for a workspace that declares none, and is
   ## never an error, because §5.3 makes an unbound lock file a non-error and
   ## a fortiori an undeclared workspace one.
+  ##
+  ## NLF-M8, folded from NLF-M7 — it borrows the probe but NOT the probe's
+  ## early returns. `requireSolverBinding = false` is the whole of the fix and
+  ## the reason is stated where the returns are: a project with no `build:`
+  ## block, or none with a solver-bound `uses:`, never ran the provider, so
+  ## the listing fell back to the well-known set and printed it as though it
+  ## were the answer. The fallback is indistinguishable from "this workspace
+  ## declares nothing", which is exactly the two-things-look-the-same failure
+  ## the campaign is about — and §4.2's own worked example, a `workspace.nim`
+  ## whose entire content is two `lockFile` declarations, took that branch.
   result = predeclaredLockFiles()
   let emitPath = getTempDir() /
     ("repro-lock-list-" & $getCurrentProcessId() & ".tsv")
   putEnv(LockFilesEmitEnvVar, emitPath)
   try:
-    discard solverInputsFromCompiledProvider(projectDir)
+    # `requireSolverBinding = false` — the two early returns that are right
+    # for the solver-inputs caller are wrong for this one. See the comment at
+    # the first of them.
+    discard solverInputsFromCompiledProvider(projectDir,
+      requireSolverBinding = false)
     if fileExists(extendedPath(emitPath)):
       let parsed = parseLockFileDeclarations(readFile(emitPath))
       if parsed.len > 0:

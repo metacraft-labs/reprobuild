@@ -851,7 +851,7 @@ proc packageDeclaredDependencyConstraints(pkg: PackageDef): seq[string] =
   ## sort after user-declared entries.
   var indexed: seq[M9R81IndexedDep] = @[]
   var idx = 0
-  for use in pkg.toolUses:
+  for use in pkg.allToolUses():
     indexed.add(M9R81IndexedDep(
       raw: use.rawConstraint,
       sourceLine: if use.sourceLine <= pkg.sourceLine: high(int)

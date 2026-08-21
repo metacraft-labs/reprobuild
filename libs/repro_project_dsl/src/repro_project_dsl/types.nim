@@ -268,12 +268,17 @@ type
       ## concatenated at serialization
       ## (``pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps``).
       ##
-      ## Tagging the entry is what un-erases it. The concatenated
-      ## ``toolUses`` field stays — a dozen convention-layer call sites read
-      ## it for tool-PATH construction, and splitting THAT is a different
-      ## change — but it is no longer lossy: every entry now says which list
-      ## it came from, so the platform tag survives the merge and reaches the
-      ## solver through ``registerSolverDependency``.
+      ## Tagging the entry is what un-erased it for NLF-M7: the platform tag
+      ## survived the concatenation and reached the solver through
+      ## ``registerSolverDependency``.
+      ##
+      ## NLF-M8 then removed the concatenation itself (``allToolUses``), so
+      ## ``toolUses`` now holds what its name says at run time as well as at
+      ## macro-expansion time. The tag stays, and is now the ANSWER rather
+      ## than a repair: a consumer that needs to know which list an entry
+      ## came from reads it here instead of inferring it from a position in a
+      ## merged seq, and `repro_lock_files`'s propagation reads it to decide
+      ## which lock file the edge resolves under (§4.6).
       ##
       ## Empty means untagged, which no in-tree collection site produces; it
       ## is the zero value and is treated as ``"target"`` by consumers so a
@@ -1021,6 +1026,34 @@ type
     sourceFile*: string
     sourceLine*: int
 
+proc allToolUses*(pkg: PackageDef): seq[PackageUseDef] =
+  ## Every dependency entry a TOOL-PATH consumer needs, in one seq:
+  ## ``uses:``/``buildDeps:``, then ``nativeBuildDeps:``, then
+  ## ``runtimeDeps:``.
+  ##
+  ## Named-Lock-Files NLF-M8, the third criterion folded in from NLF-M7 —
+  ## **un-merge the three dependency lists at serialization.** Until this,
+  ## `packageLiteral` emitted `pkg.toolUses & pkg.nativeBuildDeps &
+  ## pkg.runtimeDeps` into the `toolUses:` slot, so a RUNTIME `PackageDef`'s
+  ## `toolUses` meant something different from a MACRO-TIME one's: the same
+  ## field name, two contents, one of them the union. §4.6 measured the
+  ## consequence — "the platform distinction the recipe expressed is **erased
+  ## before the solver ever sees it**".
+  ##
+  ## M9.R.5a and M9.R.53 widened that fold for a real reason: the convention
+  ## layer's PATH builder needs the union, and recipes that declare a tool in
+  ## `nativeBuildDeps:` or `runtimeDeps:` must still get it on PATH. So the
+  ## union does not go away — it becomes EXPLICIT at each site that wants it,
+  ## and the field stops lying about what it holds. Every call site that used
+  ## to read the merged field now reads this, so the union is byte-identical
+  ## wherever it was before and absent wherever it never should have been.
+  ##
+  ## The order is the concatenation order the merge used, and that is
+  ## load-bearing rather than tidy: `buildPackageDevEnv` hashes this sequence
+  ## into the implicit dev-env floor, and a reordering would move that hash
+  ## for every package — a fingerprint change with no change behind it.
+  pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps
+
 proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
   ## Windows-dev-env M1: a package exposes a ``gpkDevEnvIntrospection``
   ## entry point — so ``repro exec`` / ``repro shell`` / the direnv hook
@@ -1036,4 +1069,4 @@ proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
   ##   the dev-env result's tool requirements for BOTH cases, so the
   ##   implicit case reuses the exact same derivation with an empty
   ##   "extra" dev-env body.
-  pkg.hasDevEnv or pkg.toolUses.len > 0
+  pkg.hasDevEnv or pkg.allToolUses().len > 0
