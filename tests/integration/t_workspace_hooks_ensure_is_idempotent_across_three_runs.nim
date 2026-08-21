@@ -417,11 +417,20 @@ suite "M17 — repro hooks ensure --vcs (workspace-aware)":
       # reprobuild hooks ensure" and the dispatcher marker line) so
       # the installer still recognises the file as Reprobuild-owned,
       # but mutate the body so it no longer matches canonical content.
+      #
+      # The injection point is the shebang, which every generated body starts
+      # with and no change to the body can remove. Keying it on an interior
+      # token instead made the "drift" a silent no-op the day that token was
+      # edited out of the hook: the file was rewritten byte-identically and
+      # the test then asserted a refresh that had nothing to refresh. The
+      # `!=` check below is what caught it, and it stays.
       let managedPath = fx.workspaceRoot / "lib-a" / ".git" / "hooks" /
         "post-commit.repro-managed"
       let originalManaged = readFile(managedPath)
+      const shebang = "#!/usr/bin/env sh\n"
+      check originalManaged.startsWith(shebang)
       let driftedManaged = originalManaged.replace(
-        "exit $?", "echo drifted >&2\nexit $?")
+        shebang, shebang & "echo drifted >&2\n")
       check driftedManaged != originalManaged
       check driftedManaged.contains("managed-by: reprobuild hooks ensure")
       writeFile(managedPath, driftedManaged)
