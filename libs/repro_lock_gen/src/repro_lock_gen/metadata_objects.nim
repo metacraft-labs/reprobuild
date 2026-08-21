@@ -35,11 +35,18 @@
 ## ``PackageDecl.versions`` field — M2c does not (yet) fetch a remote
 ## catalog."
 ##
-## The richer objects that document enumerates (root manifest, index shards,
-## acquisition records, curator snapshot indexes) are the same shape — one
-## `netFetch` edge per retrieved object, content-addressed by what it
-## retrieved — and are not implemented here. Stated rather than implied: this
-## module ships ONE object kind.
+## NLF-M6 adds the remaining kinds `Repository-And-Index-Format.md`
+## §"Data Model Overview" enumerates — the repository root manifest, an index
+## shard, an acquisition record and a curator snapshot index. They are the same
+## edge shape (one `netFetch` edge per retrieved object, content-addressed by
+## what it retrieved) and differ in exactly two things: their URL, and the
+## `MetadataObjectKind` tag they carry into the recorded path set.
+##
+## **The tag is the load-bearing part**, and NLF-M6's folded criterion says why:
+## without it, materiality cannot discriminate between kinds, so a change to a
+## curator snapshot index and a change to a package's version list would be the
+## same observation. They are not: one is an enumeration a strategy filters to
+## an interval, the other is a document read whole.
 ##
 ## ## Content addressing, and what "after the fact" means
 ##
@@ -56,6 +63,42 @@ import repro_binary_cache_client/http_pool
 import repro_multihash
 
 type
+  MetadataObjectKind* = enum
+    ## The metadata object types `Repository-And-Index-Format.md`
+    ## §"Data Model Overview" enumerates, restricted to those a SOLVE consults.
+    ##
+    ## Five of that document's eight. The three absent ones are absent for a
+    ## stated reason rather than by omission:
+    ##
+    ##   * **Package metadata envelope** — its solve-relevant content (the
+    ##     version list, the dependency constraint summary) is what
+    ##     `mokVersionList` carries; a second object holding the same facts
+    ##     would be two sources for one answer.
+    ##   * **Artifact manifest** and **mirror closure index** — consumed when
+    ##     REALIZING a solved graph, not when solving one. A fetch edge for
+    ##     them belongs to the second wave, and putting them here would put a
+    ##     `netFetch` edge upstream of a solve that never reads it.
+    ##
+    ## The order is the enumeration order of the source document, not
+    ## alphabetical, so the two lists can be diffed by eye.
+    mokRootManifest = "root-manifest"
+      ## §1. Repository identity, index format version, shard list, pointers.
+      ## Read WHOLE: it is a document, not an enumeration, so no interval
+      ## filter applies to it and its observation is always raw.
+    mokIndexShard = "index-shard"
+      ## §2 + §"Sharding Strategy". The package-name index, partitioned. One
+      ## object per first-letter partition, which is the scheme that document
+      ## lists first ("first-letter or prefix partition").
+    mokVersionList = "version-list"
+      ## §4. The list of published versions of one package. The ONLY kind that
+      ## is an ENUMERATION, and therefore the only one a §5.7 interval filter
+      ## can narrow. NLF-M5 shipped this kind alone.
+    mokAcquisitionRecord = "acquisition-record"
+      ## §5. How to obtain one package version's payload. Per (package,
+      ## version), read whole.
+    mokCuratorSnapshotIndex = "curator-snapshot-index"
+      ## §7. Named composed distributions a curator advertises. Read whole.
+
   MetadataFetchError* = object of CatchableError
     ## The object could not be retrieved. Raised rather than returning an
     ## empty version list: an empty list is a legitimate answer ("this package
@@ -91,13 +134,67 @@ proc metadataFetchAttempts*(): int =
 proc resetMetadataFetchAttempts*() =
   metadataFetchAttemptCount = 0
 
-proc metadataObjectUrl*(endpoint, packageName: string): string =
-  ## The URL of one package's version-metadata record under `endpoint`.
+proc indexShardOf*(packageName: string): string =
+  ## The shard a package name falls in, under the first-letter partition.
+  ##
+  ## Lowercased, and a name that does not start with an ASCII letter lands in
+  ## `_`. A partition function that could answer "no shard" would leave a
+  ## package whose metadata is reachable but whose index entry is not.
+  if packageName.len == 0: return "_"
+  let c = packageName[0]
+  if c in {'a'..'z'}: $c
+  elif c in {'A'..'Z'}: $char(int(c) + 32)
+  else: "_"
+
+proc metadataObjectUrl*(endpoint: string; kind: MetadataObjectKind;
+                        subject: string): string =
+  ## The URL of one metadata object under `endpoint`.
   ##
   ## One naming rule, used by both the planner and the executor, so a plan
-  ## cannot name an object the executor would look for somewhere else.
-  endpoint.strip(leading = false, chars = {'/'}) & "/" & packageName &
-    ".versions"
+  ## cannot name an object the executor would look for somewhere else. The
+  ## `subject` is the object's key within its kind: a package name for
+  ## `mokVersionList`, a shard letter for `mokIndexShard`, `<package>@<version>`
+  ## for `mokAcquisitionRecord`, and empty for the two repository-wide kinds.
+  let base = endpoint.strip(leading = false, chars = {'/'})
+  case kind
+  of mokRootManifest: base & "/repository.manifest"
+  of mokIndexShard: base & "/index/" & subject & ".shard"
+  of mokVersionList: base & "/" & subject & ".versions"
+  of mokAcquisitionRecord: base & "/acquisition/" & subject & ".acquisition"
+  of mokCuratorSnapshotIndex: base & "/snapshots.index"
+
+proc metadataObjectUrl*(endpoint, packageName: string): string =
+  ## Back-compatible spelling for the one kind NLF-M5 shipped.
+  ##
+  ## Kept so a caller that only ever wanted a version list does not have to
+  ## name the kind, and so the NLF-M5 URL shape is provably unchanged: this
+  ## delegates rather than re-deriving, which is the difference between "the
+  ## shape is the same" and "the shape looks the same".
+  metadataObjectUrl(endpoint, mokVersionList, packageName)
+
+proc metadataObjectFileName*(kind: MetadataObjectKind;
+                             subject: string): string =
+  ## Where wave 1 lands one retrieved object, relative to the metadata
+  ## directory. Mirrors the URL's kind separation so two kinds that happen to
+  ## share a subject cannot collide on disk.
+  case kind
+  of mokRootManifest: "repository.manifest"
+  of mokIndexShard: "index-" & subject & ".shard"
+  of mokVersionList: subject & ".versions"
+  of mokAcquisitionRecord:
+    "acquisition-" & subject.replace('/', '_').replace('@', '_') &
+      ".acquisition"
+  of mokCuratorSnapshotIndex: "snapshots.index"
+
+proc isEnumerationKind*(kind: MetadataObjectKind): bool =
+  ## Whether a §5.7 interval filter can apply to this kind at all.
+  ##
+  ## Only the version list is an enumeration. The other four are documents, and
+  ## a document has no members to filter, so its observation is a whole-content
+  ## read. Stating this as a predicate rather than as a `case` inside the path
+  ## set keeps "which kinds are enumerable" in one place — the question
+  ## materiality must not answer twice.
+  kind == mokVersionList
 
 proc metadataDestinationOf*(endpoint: string): string =
   ## The tracked fetch destination a fetch against `endpoint` declares —

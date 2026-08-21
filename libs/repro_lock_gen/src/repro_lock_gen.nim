@@ -89,8 +89,10 @@ import repro_lock
 import repro_solver
 
 import repro_lock_gen/metadata_objects
+import repro_lock_gen/solve_path_set
 
 export metadata_objects
+export solve_path_set
 
 type
   LockStrategy* = enum
@@ -98,16 +100,31 @@ type
     ## producing one answer", and `default` is named explicitly "so 'no
     ## strategy given' is a value rather than a hole".
     ##
-    ## NLF-M5 carries the strategy as a first-class input — it is in the solve
-    ## edge's weak fingerprint, "because two strategies over identical
-    ## constraints are two different computations" — and narrows the candidate
-    ## universe accordingly. The *materiality* half (§5.7's filtered-interval
-    ## enumeration, so a `lowest` lock does not invalidate on an upstream
-    ## release that cannot change its answer) is milestone NLF-M6 and is NOT
-    ## implemented here.
+    ## The strategy is a first-class input: it is in the solve edge's weak
+    ## fingerprint, "because two strategies over identical constraints are two
+    ## different computations" (`Locking-And-Solver.md` §"Solver Cache").
+    ##
+    ## ## What NLF-M6 changed about what these MEAN
+    ##
+    ## NLF-M5 implemented `lowest`/`highest` by narrowing each package's
+    ## candidate universe to its extreme published version before encoding.
+    ## That ignores declared ranges, and it does not fail quietly: `libfoo`
+    ## publishing 1.0 … 1.9 under `uses: ">=1.2 <2.0"` narrowed to `{1.0}` and
+    ## the solve reported UNSAT for a workspace with a good answer at 1.2.
+    ##
+    ## NLF-M6 replaces the narrowing with a SOLVER OBJECTIVE
+    ## (`VersionPreference`): the full universe is encoded, the declared ranges
+    ## remain hard constraints, and the strategy only ORDERS what is
+    ## admissible. `lowest-direct` ships alongside, which the narrowing form
+    ## could not express at all.
     lsDefault = "default"
     lsLowest = "lowest"
     lsHighest = "highest"
+    lsLowestDirect = "lowest-direct"
+      ## Direct dependencies take their lowest admissible version; anything
+      ## reached only transitively takes its highest. Cargo's
+      ## `-Z direct-minimal-versions` shape. See `VersionPreference` for why
+      ## the asymmetry is the point rather than a compromise.
 
   LockGenerationEntryPoint* = enum
     ## The four doors §5.6 requires to be one path.
@@ -161,10 +178,36 @@ type
       ## v1-emitting writer alongside a v2 reader; see
       ## `repro_lock.serializeSolvedGraphLock`.
     entryPoint*: LockGenerationEntryPoint
+    objectKinds*: set[MetadataObjectKind]
+      ## Which `Repository-And-Index-Format.md` object kinds wave 1 retrieves.
+      ##
+      ## Empty means `{mokVersionList}` — the one kind NLF-M5 shipped — so
+      ## every pre-NLF-M6 caller's fetch plan is byte-unchanged and the
+      ## NLF-GEN-5/6/7 fetch counts do not move. A caller that wants the richer
+      ## objects asks for them. This is a request field rather than a global
+      ## because which objects a repository publishes is a property of the
+      ## repository, not of the build.
+    cacheRoot*: string
+      ## The PERSISTENT root of the solve edge's two-phase path-set store
+      ## (§5.7). Empty means `workDir / "solve-cache"`, which is
+      ## per-invocation and therefore never hits — correct for a one-shot
+      ## generation and useless for measuring materiality, so the NLF-M6 tests
+      ## give it a stable value. Deliberately NOT `workDir`: the wave's
+      ## artifacts are scratch and the CLI deletes them, while the path-set
+      ## store is exactly the thing that must survive between invocations.
 
   MetadataFetchPlanEntry* = object
     ## One planned `bakMetadataFetch` edge — one retrieved object.
+    kind*: MetadataObjectKind
+    subject*: string
+      ## The object's key within its kind. For `mokVersionList` this is the
+      ## package name; for `mokIndexShard` the shard letter; for
+      ## `mokAcquisitionRecord` `<package>@<version>`; empty for the two
+      ## repository-wide kinds.
     packageName*: string
+      ## The package this object belongs to, or `""` for a repository-wide
+      ## object. Equal to `subject` for `mokVersionList`, which is the field's
+      ## NLF-M5 meaning and is preserved.
     arms*: seq[string]
       ## Every variant arm that asks for this package, as `variant=value`,
       ## sorted; `"*"` for an unconditioned `uses:`. Recorded rather than
@@ -190,6 +233,36 @@ type
       ## Attempts made during this generation, read off the in-process
       ## fetcher's counter.
     lockPath*: string
+    solveExecuted*: bool
+      ## Whether the CLINGO SOLVE ran, as distinct from whether a lock was
+      ## produced. NLF-GEN-3 requires assertion on this and says why: "Assert
+      ## on whether the solve RAN, not only on lock content, or the raw
+      ## fallback passes as though it were the target." A raw path set
+      ## invalidates on every upstream publication, re-solves, and produces a
+      ## byte-identical lock — so every content assertion still passes while
+      ## the property under test is absent.
+    pathSetHitIndex*: int
+      ## Which recorded path set served this generation, or `-1` when the
+      ## solve ran. Distinguishes "hit the entry we wrote last time" from "hit
+      ## an OLDER entry", which is the only observable difference between a
+      ## two-phase store and a one-entry cache.
+    pathSetsRecorded*: int
+      ## How many path sets the weak fingerprint carries after this
+      ## generation.
+    pathSet*: SolvePathSet
+      ## The observations this generation recorded (or matched). Read by the
+      ## folded criterion that the object KIND is distinguishable in the
+      ## recorded path set.
+    strategyReport*: string
+      ## Non-empty when the requested strategy had NO candidate universe to
+      ## narrow, naming why.
+      ##
+      ## NLF-M6's third folded criterion: NLF-M5 found `--strategy` "accepted,
+      ## printed in the run summary, and silently inert on every project in
+      ## this workspace, because none configures a registry. The fix landed;
+      ## the *class* has not been closed." A strategy that cannot take effect
+      ## must SAY SO. Empty for `lsDefault`, which is not a narrowing rule and
+      ## therefore cannot fail to be one.
 
 const
   LockGenerationPool* = "lock-generation"
@@ -319,10 +392,53 @@ proc fetchPlan*(req: LockGenerationRequest): seq[MetadataFetchPlanEntry] =
   ## Over-fetching costs metadata bandwidth, not correctness. §5.7 shrinks even
   ## that: metadata for an arm the solve never consulted must not invalidate
   ## anything.
+  ##
+  ## NLF-M6 extends the plan past the single version-list kind NLF-M5 shipped.
+  ## The additional kinds are the same edge shape and are planned from STATIC
+  ## inputs only, so the wave stays closed after one round:
+  ##
+  ##   * `mokRootManifest` / `mokCuratorSnapshotIndex` — one repository-wide
+  ##     object each;
+  ##   * `mokIndexShard` — one per first-letter partition of the package names
+  ##     the plan already knows about;
+  ##   * `mokAcquisitionRecord` — one per (package, DECLARED candidate
+  ##     version). Over-approximated over the recipe's declared universe, for
+  ##     the same reason the version-list plan over-approximates variant arms:
+  ##     which version will be selected is the solve's output, so a plan that
+  ##     waited for it would be the fixpoint §5.6 dissolves. A package whose
+  ##     universe comes only from the registry contributes no acquisition
+  ##     record in wave 1 — stated rather than implied, because that is a real
+  ##     limit of planning acquisition from static inputs.
   result = @[]
   if req.endpoints.len == 0:
     return
+  let kinds =
+    if req.objectKinds == {}: {mokVersionList} else: req.objectKinds
   let endpoint = req.endpoints[0]
+  let destination = metadataDestinationOf(endpoint)
+  let digest = req.solveInputsDigestHex()
+
+  proc entry(kind: MetadataObjectKind; subject, packageName: string;
+             arms: seq[string]): MetadataFetchPlanEntry =
+    MetadataFetchPlanEntry(
+      kind: kind,
+      subject: subject,
+      packageName: packageName,
+      arms: arms,
+      url: metadataObjectUrl(endpoint, kind, subject),
+      destination: destination,
+      objectPath: req.workDir / "metadata" /
+        metadataObjectFileName(kind, subject),
+      # The KIND is in the action id, and it has to be: a package named `a`
+      # and an index shard `a` would otherwise be one edge with two outputs.
+      # This moves the version-list fetch edges' ids (and therefore their weak
+      # fingerprints) from their NLF-M5 spelling. No frozen fixture covers
+      # them — NLF-STAT-4's corpus carries `bakMetadataFetch` under its own
+      # hand-written id — and a generation-path edge id is not a migration
+      # surface, but the change is stated rather than left to be discovered.
+      actionId: "lockgen/" & digest & "/fetch/" & $kind &
+        (if subject.len > 0: "/" & subject else: ""))
+
   var arms = initTable[string, seq[string]]()
   var order: seq[string] = @[]
   proc note(name, arm: string) =
@@ -342,23 +458,51 @@ proc fetchPlan*(req: LockGenerationRequest): seq[MetadataFetchPlanEntry] =
           "*"
       note(d.name, arm)
   order.sort()
-  let digest = req.solveInputsDigestHex()
-  for name in order:
-    var armList = arms[name]
-    armList.sort()
-    result.add(MetadataFetchPlanEntry(
-      packageName: name,
-      arms: armList,
-      url: metadataObjectUrl(endpoint, name),
-      destination: metadataDestinationOf(endpoint),
-      objectPath: req.workDir / "metadata" / (name & ".versions"),
-      actionId: "lockgen/" & digest & "/fetch/" & name))
+
+  # Repository-wide objects first: they are what a real client reads before it
+  # knows where anything else lives.
+  if mokRootManifest in kinds:
+    result.add(entry(mokRootManifest, "", "", @[]))
+  if mokCuratorSnapshotIndex in kinds:
+    result.add(entry(mokCuratorSnapshotIndex, "", "", @[]))
+  if mokIndexShard in kinds:
+    var shards: seq[string] = @[]
+    for name in order:
+      let shard = indexShardOf(name)
+      if shard notin shards: shards.add(shard)
+    shards.sort()
+    for shard in shards:
+      result.add(entry(mokIndexShard, shard, "", @[]))
+  if mokVersionList in kinds:
+    for name in order:
+      var armList = arms[name]
+      armList.sort()
+      result.add(entry(mokVersionList, name, name, armList))
+  if mokAcquisitionRecord in kinds:
+    var declared = initTable[string, seq[string]]()
+    for p in req.packages:
+      declared[p.name] = p.versions
+    for name in order:
+      var versions = declared.getOrDefault(name, @[])
+      versions.sort()
+      for v in versions:
+        result.add(entry(mokAcquisitionRecord, name & "@" & v, name, @[]))
 
 proc generatedLockPath*(req: LockGenerationRequest): string =
   req.workDir / "generated.lock"
 
 proc solveActionId*(req: LockGenerationRequest): string =
   "lockgen/" & req.solveInputsDigestHex() & "/solve"
+
+proc solvePathSetRoot*(req: LockGenerationRequest): string =
+  ## Where the solve edge's two-phase path-set store lives for this request.
+  ##
+  ## `workDir / "solve-cache"` when the request names no persistent root, which
+  ## is per-invocation and therefore always a miss. That default is honest
+  ## rather than convenient: a one-shot `repro lock solve` into a temp
+  ## directory genuinely has nothing to hit, and inventing a shared location
+  ## for it would make one invocation's answer depend on another's scratch.
+  if req.cacheRoot.len > 0: req.cacheRoot else: req.workDir / "solve-cache"
 
 # ---------------------------------------------------------------------------
 # Wave 1, as build actions
@@ -407,32 +551,22 @@ proc generationWaveOne*(req: LockGenerationRequest): seq[BuildAction] =
 # The executors
 # ---------------------------------------------------------------------------
 
-proc applyStrategy(versions: seq[string]; strategy: LockStrategy): seq[string] =
-  ## Narrow a fetched candidate universe under the strategy.
+proc versionPreferenceOf*(strategy: LockStrategy): VersionPreference =
+  ## Map a user-facing lock strategy onto the solver's version objective.
   ##
-  ## Scope, stated plainly rather than implied by silence: this is candidate
-  ## NARROWING over the retrieved version list and nothing more. `lowest` and
-  ## `highest` become "the extreme published version" here. The full §5.5
-  ## semantics — a strategy interacting with declared ranges, `lowest-direct`,
-  ## and §5.7's filtered-interval materiality — are milestone NLF-M6. What
-  ## NLF-M5 owes is that the strategy is an INPUT to the generation and reaches
-  ## the answer; that much is real.
-  if versions.len == 0 or strategy == lsDefault:
-    return versions
-  var sorted = versions
-  sorted.sort(proc(a, b: string): int =
-    # Semver order, through the solver's own comparator, so "lowest" here and
-    # "lowest" inside the encoder cannot mean two different orderings. A
-    # version the parser rejects sorts by its raw string rather than aborting
-    # the generation: the registry's naming is not this module's to police.
-    try:
-      cmpSemver(parseSemver(a), parseSemver(b))
-    except CatchableError:
-      cmp(a, b))
+  ## The whole of NLF-M6's strategy semantics is this one function plus
+  ## `encodeVersionPreference`. NLF-M5's `applyStrategy` — which narrowed each
+  ## candidate universe to its extreme published version before encoding — is
+  ## GONE, and its removal is the fix rather than a refactor: narrowing ignores
+  ## the declared ranges, so `>=1.2 <2.0` over a universe of 1.0 … 1.9 narrowed
+  ## to `{1.0}` under `lowest` and the solve reported UNSAT. A preference is a
+  ## soft objective over the FULL universe; the ranges stay hard constraints
+  ## and decide admissibility, and the strategy only orders what survives them.
   case strategy
-  of lsLowest: @[sorted[0]]
-  of lsHighest: @[sorted[^1]]
-  of lsDefault: versions
+  of lsDefault: vpNone
+  of lsLowest: vpLowest
+  of lsHighest: vpHighest
+  of lsLowestDirect: vpLowestDirect
 
 proc mergeFetchedVersions(req: LockGenerationRequest;
                           plan: seq[MetadataFetchPlanEntry]):
@@ -447,32 +581,37 @@ proc mergeFetchedVersions(req: LockGenerationRequest;
   ## in-recipe versions alongside it would let the solve select a version the
   ## registry does not carry.
   ##
-  ## The strategy is applied to EVERY non-pinned candidate universe, fetched or
-  ## declared. Applying it only to FETCHED universes was a real defect, caught
-  ## by driving the CLI by hand rather than by any test here: a project with no
-  ## registry configured -- which is every project today -- got `--strategy
-  ## lowest` accepted, reported, and silently ignored, because the strategy
-  ## only ever touched bytes that came off the wire. A strategy is a rule for
-  ## producing an answer over whatever candidate set exists; where that set
-  ## came from is orthogonal. "Silently did the opposite of what was asked" is
-  ## the precise failure shape this campaign designs against.
+  ## **The strategy is NOT applied here.** NLF-M5 narrowed each universe to its
+  ## extreme published version at this point; NLF-M6 removed that and moved the
+  ## whole of strategy semantics into the solver's objective
+  ## (`versionPreferenceOf` → `encodeVersionPreference`). The reason is not
+  ## tidiness: narrowing happens BEFORE the declared ranges are applied, so
+  ## `>=1.2 <2.0` over a published universe of 1.0 … 1.9 narrowed to `{1.0}`
+  ## and the solve reported UNSAT for a workspace whose answer is 1.2. The
+  ## universe this proc produces is now the FULL consulted universe, which is
+  ## also what §5.7's interval filter must be replayed against — a narrowed
+  ## universe would have made the recorded interval a filter over a set the
+  ## registry never published.
   ##
   ## A PINNED package is untouched, and must be: its version is OBSERVED rather
   ## than selected (NLF-M2), so there is no choice for a selection rule to
   ## make.
+  ##
+  ## Only `mokVersionList` objects contribute. The other kinds are documents
+  ## (`isEnumerationKind`), and a document carries no candidate versions to
+  ## fold in — parsing one as a version list would invent candidates out of
+  ## whatever lines it happened to contain.
   var byName = initTable[string, int]()
   result = @[]
   for p in req.packages:
     byName[p.name] = result.len
-    var narrowed = p
-    if not p.pinned:
-      narrowed.versions = applyStrategy(p.versions, req.strategy)
-    result.add(narrowed)
+    result.add(p)
   for entry in plan:
+    if entry.kind != mokVersionList:
+      continue
     if not fileExists(entry.objectPath):
       continue
-    let fetched = applyStrategy(
-      parseVersionList(readFile(entry.objectPath)), req.strategy)
+    let fetched = parseVersionList(readFile(entry.objectPath))
     if fetched.len == 0:
       continue
     if byName.hasKey(entry.packageName):
@@ -510,6 +649,40 @@ proc renderLockDocument(req: LockGenerationRequest;
   ld.deps = req.extraDeps
   ld.deps.add(lockedDepsFromPackages(ld.packages, req.platform))
   serializeLockedDependencies(ld)
+
+var solveExecutionCount {.threadvar.}: int
+  ## How many times a CLINGO SOLVE has actually run on this thread.
+  ##
+  ## The counterpart to `metadataFetchAttempts`, and it exists for the reason
+  ## NLF-GEN-3 states: "Assert on whether the solve RAN, not only on lock
+  ## content, or the raw fallback passes as though it were the target." A raw
+  ## path set invalidates on every upstream publication, re-solves, and emits a
+  ## byte-identical lock — so a test that only compares locks reports success
+  ## for an implementation with no filtered interval in it at all.
+  ##
+  ## Incremented immediately BEFORE `solve` is called, so a solve that raised
+  ## still counts. "Tried to solve" is the property; "produced an answer" is a
+  ## different one and is carried by the result.
+
+proc solveExecutions*(): int =
+  ## The running solve count for this thread.
+  solveExecutionCount
+
+proc resetSolveExecutions*() =
+  solveExecutionCount = 0
+
+var lastPathSetHitIndex {.threadvar.}: int
+var lastPathSet {.threadvar.}: SolvePathSet
+  ## The observations the most recent solve edge recorded or matched, handed
+  ## back to `generateLock` out of band.
+  ##
+  ## Out of band because the engine's `ActionResult` carries stdout/stderr and
+  ## an exit code, not a typed payload, and encoding a path set through stdout
+  ## would need a second serializer for it — a second thing to drift, which is
+  ## the reason `installGenerationExecutors` is a closure rather than data in
+  ## `builtinText` in the first place. Sound for the same reason that is:
+  ## the executor hooks are `{.threadvar.}` and the generation wave runs at
+  ## `maxParallelism = 1`.
 
 proc installGenerationExecutors*(req: LockGenerationRequest) =
   ## Bind the two NLF-M5 executors to `req` for the duration of one
@@ -554,10 +727,15 @@ proc installGenerationExecutors*(req: LockGenerationRequest) =
       result.stderr = err.msg
   )
 
+  let weakHex = req.solveInputsDigestHex()
+  let pathSetRoot = req.solvePathSetRoot()
+
   registerSolveLockExecutor(proc(action: BuildAction): ActionResult
       {.gcsafe.} =
     result = ActionResult(id: action.id, status: asSucceeded, exitCode: 0,
       launched: true, runQuotaBackend: "solve-lock")
+    lastPathSetHitIndex = -1
+    lastPathSet = SolvePathSet(observations: @[])
     try:
       # `solve` reaches clingo through a `{.dynlib.}` FFI and is not marked
       # gcsafe. The cast is narrowed to this statement and is sound for the
@@ -566,11 +744,77 @@ proc installGenerationExecutors*(req: LockGenerationRequest) =
       # `maxParallelism = 1`, so no second thread is inside the solver while
       # this one is.
       {.cast(gcsafe).}:
-        let packages = mergeFetchedVersions(req, plan)
-        let sol = solve(req.variants, packages)
         let outPath = action.outputs[0]
         createDir(parentDir(outPath))
-        writeFile(outPath, renderLockDocument(req, sol))
+
+        # ---- Phase 2 (§5.7): replay the recorded path sets ----------------
+        #
+        # This runs INSIDE the solve edge rather than in place of it, and the
+        # ordering is what makes it correct: the metadata-fetch edges upstream
+        # have already run, so `objectPath` holds LIVE metadata and the
+        # amendment's "tried in order against live metadata" is literally what
+        # happens. A lookup performed before the fetch would be replaying the
+        # recorded filter against the state that produced it.
+        var livePaths = initTable[string, string]()
+        for entry in plan:
+          livePaths[observationLocator(entry.kind, entry.subject)] =
+            entry.objectPath
+        let lookup = lookupPathSet(pathSetRoot, weakHex, livePaths)
+        if lookup.hit:
+          writeFile(outPath, lookup.lockDocument)
+          lastPathSetHitIndex = lookup.index
+          lastPathSet = parsePathSet(
+            readFile(pathSetDir(pathSetRoot, weakHex) /
+              (align($lookup.index, 4, '0') & ".pathset")))
+          result.stdout = "solve-lock: path-set hit #" & $lookup.index &
+            " after " & $lookup.candidatesTried & " candidate(s)"
+          return
+
+        # ---- The solve ----------------------------------------------------
+        let packages = mergeFetchedVersions(req, plan)
+        let preference = versionPreferenceOf(req.strategy)
+        inc solveExecutionCount
+        let sol = solve(req.variants, packages, preference)
+        let document = renderLockDocument(req, sol)
+        writeFile(outPath, document)
+
+        # ---- Record what the solve consulted ------------------------------
+        #
+        # The intervals come from the SOLVER (it knows the selection, the
+        # ranges it searched and, since NLF-M9, which instances anything
+        # selected). The path set pairs them with the objects wave 1 actually
+        # retrieved, so the recorded fact is over what was read rather than
+        # over what was declared.
+        let intervals = deriveConsultedIntervals(packages, sol, preference)
+        var byPackage = initTable[string, ConsultedInterval]()
+        for iv in intervals:
+          byPackage[iv.packageName] = iv
+        var ps = SolvePathSet(observations: @[])
+        for entry in plan:
+          if not fileExists(entry.objectPath):
+            continue
+          if entry.kind == mokVersionList:
+            # A version list for a package the solve did not consult —
+            # unselected, pinned, or absent from the graph — contributes NO
+            # observation. That is §5.7's whole claim, and NLF-M9 is what makes
+            # it statable: the metadata was fetched (over-approximation) and
+            # then not consulted, so keying on it would over-invalidate on a
+            # publication that cannot move the answer.
+            if not byPackage.hasKey(entry.packageName):
+              continue
+            ps.observations.add(observeObject(entry.kind, entry.subject,
+              entry.objectPath, byPackage[entry.packageName]))
+          else:
+            # A document kind is read whole. `observeObject` classifies it and
+            # ignores the interval it is handed, so passing an empty one is
+            # honest rather than a placeholder.
+            ps.observations.add(observeObject(entry.kind, entry.subject,
+              entry.objectPath, ConsultedInterval(kind: mfRaw)))
+        lastPathSet = ps
+        lastPathSetHitIndex = -1
+        discard recordPathSet(pathSetRoot, weakHex, ps, document)
+        result.stdout = "solve-lock: solved; recorded " &
+          $ps.observations.len & " observation(s)"
     except CatchableError as err:
       result.status = asFailed
       result.exitCode = 1
@@ -580,6 +824,54 @@ proc installGenerationExecutors*(req: LockGenerationRequest) =
 proc clearGenerationExecutors*() =
   clearMetadataFetchExecutor()
   clearSolveLockExecutor()
+
+proc strategyEffectivenessReport*(req: LockGenerationRequest): string =
+  ## `""` when the requested strategy had something to decide; otherwise a
+  ## diagnostic saying it did not.
+  ##
+  ## NLF-M6's third folded criterion, quoted because the wording is the
+  ## requirement: NLF-M5 found `--strategy` "accepted, printed in the run
+  ## summary, and silently inert on every project in this workspace, because
+  ## none configures a registry. The fix landed; the *class* has not been
+  ## closed. A test must assert that a strategy with no candidate universe to
+  ## narrow is **reported**, not accepted quietly."
+  ##
+  ## "Something to decide" is measured, not assumed: it is whether ANY
+  ## non-pinned package's consulted candidate universe holds more than one
+  ## version, AFTER the fetch. A universe of one is a universe a selection rule
+  ## cannot rank; a universe of none is worse. Both are the state in which a
+  ## user who asked for `lowest` gets whatever `default` would have produced,
+  ## and gets it silently.
+  ##
+  ## Deliberately measured over the CONSULTED universe rather than over the
+  ## request, because the defect NLF-M5 hit was exactly the gap between the two:
+  ## the strategy was a live field on a request that then had no candidates for
+  ## it to act on.
+  ##
+  ## `lsDefault` reports nothing. It is not a narrowing rule, so "it could not
+  ## narrow anything" is not a claim about it — and a warning on every default
+  ## invocation would be noise that trains readers to ignore the real one.
+  if req.strategy == lsDefault:
+    return ""
+  let packages = mergeFetchedVersions(req, req.fetchPlan())
+  var rankable = 0
+  var singletons: seq[string] = @[]
+  for p in packages:
+    if p.pinned: continue
+    if p.versions.len > 1:
+      inc rankable
+    else:
+      singletons.add(p.name & "(" & $p.versions.len & ")")
+  if rankable > 0:
+    return ""
+  singletons.sort()
+  result = "strategy '" & $req.strategy & "' had no candidate universe to " &
+    "rank: no unpinned package offers more than one version"
+  if req.endpoints.len == 0:
+    result.add("; no registry is configured, so the declared versions are " &
+      "the whole universe")
+  if singletons.len > 0:
+    result.add(" [" & singletons.join(", ") & "]")
 
 # ---------------------------------------------------------------------------
 # The one path
@@ -601,6 +893,14 @@ proc generateLock*(req: LockGenerationRequest): LockGenerationResult =
   createDir(req.workDir)
   createDir(req.workDir / "metadata")
   let before = metadataFetchAttempts()
+  let solvesBefore = solveExecutions()
+  # Reset the out-of-band executor channel BEFORE the build, not after. The
+  # engine's own action cache may serve the solve edge without calling the
+  # executor at all (same weak fingerprint, unchanged file inputs), and a
+  # leftover value from an earlier generation in the same process would then be
+  # reported as this one's.
+  lastPathSetHitIndex = -1
+  lastPathSet = SolvePathSet(observations: @[])
 
   # Wave expansion, under the engine's explicit-wave driver. The expander
   # returns nothing: §5.6's generation expansion is closed after one wave BY
@@ -640,15 +940,20 @@ proc generateLock*(req: LockGenerationRequest): LockGenerationResult =
       if a.kind == bakMetadataFetch: ids.add(a.id)
     if ids.len > 0: waves.add(ids)
 
+  let weakHex = hexOf(weakFingerprintFromText(canonicalSolveInputs(req)))
   LockGenerationResult(
     entryPoint: req.entryPoint,
     lockDocument: document,
     lockIdentity: lockIdentityOf(parseLockedDependencies(document)),
-    solveWeakFingerprint:
-      hexOf(weakFingerprintFromText(canonicalSolveInputs(req))),
+    solveWeakFingerprint: weakHex,
     fetchWaves: waves,
     fetchAttempts: metadataFetchAttempts() - before,
-    lockPath: lockPath)
+    lockPath: lockPath,
+    solveExecuted: solveExecutions() > solvesBefore,
+    pathSetHitIndex: lastPathSetHitIndex,
+    pathSetsRecorded: recordedPathSetCount(req.solvePathSetRoot(), weakHex),
+    pathSet: lastPathSet,
+    strategyReport: strategyEffectivenessReport(req))
 
 # ---------------------------------------------------------------------------
 # The four doors
