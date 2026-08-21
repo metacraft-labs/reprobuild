@@ -446,11 +446,28 @@ proc mergeFetchedVersions(req: LockGenerationRequest;
   ## the registry is the authority on what is published, and keeping stale
   ## in-recipe versions alongside it would let the solve select a version the
   ## registry does not carry.
+  ##
+  ## The strategy is applied to EVERY non-pinned candidate universe, fetched or
+  ## declared. Applying it only to FETCHED universes was a real defect, caught
+  ## by driving the CLI by hand rather than by any test here: a project with no
+  ## registry configured -- which is every project today -- got `--strategy
+  ## lowest` accepted, reported, and silently ignored, because the strategy
+  ## only ever touched bytes that came off the wire. A strategy is a rule for
+  ## producing an answer over whatever candidate set exists; where that set
+  ## came from is orthogonal. "Silently did the opposite of what was asked" is
+  ## the precise failure shape this campaign designs against.
+  ##
+  ## A PINNED package is untouched, and must be: its version is OBSERVED rather
+  ## than selected (NLF-M2), so there is no choice for a selection rule to
+  ## make.
   var byName = initTable[string, int]()
   result = @[]
   for p in req.packages:
     byName[p.name] = result.len
-    result.add(p)
+    var narrowed = p
+    if not p.pinned:
+      narrowed.versions = applyStrategy(p.versions, req.strategy)
+    result.add(narrowed)
   for entry in plan:
     if not fileExists(entry.objectPath):
       continue

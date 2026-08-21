@@ -194,3 +194,48 @@ suite "NLF-GEN-7 the non-hermetic edge exists on the generation path only":
 
     for a in generationWaveOne(req):
       check a.networkMode == netDenied
+
+  test "a strategy still applies when no registry is configured":
+    # Regression for a defect found by driving the CLI by hand, not by any
+    # assertion in this campaign: the strategy was applied only to FETCHED
+    # candidate universes, so a project with no registry — which is every
+    # project today — had `--strategy lowest` accepted, reported, and silently
+    # ignored. It returned the objective's answer while claiming to have
+    # returned the lowest.
+    #
+    # The premise is measured, not assumed: the control case asserts what the
+    # unconstrained objective picks, so "lowest differs from it" is a real
+    # difference and not a coincidence.
+    let scratch = createTempDir("repro-nlf-gen7-strategy-", "")
+    defer: removeDir(scratch)
+    proc offline(workDir: string; strategy: LockStrategy):
+        LockGenerationRequest =
+      LockGenerationRequest(
+        variants: @[],
+        packages: @[
+          newPackage(App, @["1.0.0"], @[newDependency(LibFoo, ">=1.2 <2.0")]),
+          newPackage(LibFoo, @Published)],
+        inputsText: "nlf-gen-7 offline strategy fixture",
+        platform: currentPlatformId(),
+        strategy: strategy,
+        endpoints: @[],
+        workDir: scratch / workDir,
+        entryPoint: lgeStrategyHiddenLock)
+
+    resetMetadataFetchAttempts()
+    let free = runStrategyHiddenLock(offline("free", lsDefault), lsDefault)
+    let lowest = runStrategyHiddenLock(offline("lowest", lsLowest), lsLowest)
+    let highest = runStrategyHiddenLock(
+      offline("highest", lsHighest), lsHighest)
+    check metadataFetchAttempts() == 0
+
+    let freeSol = lockToSolution(parseSolvedGraphLock(free.lockDocument))
+    let lowSol = lockToSolution(parseSolvedGraphLock(lowest.lockDocument))
+    let highSol = lockToSolution(parseSolvedGraphLock(highest.lockDocument))
+    check lowSol.packages[LibFoo] == Published[0]
+    check highSol.packages[LibFoo] == Published[^1]
+    # The premise: at least one strategy has to disagree with the free answer,
+    # or the two assertions above are satisfied by an implementation that
+    # ignores the strategy entirely.
+    check (freeSol.packages[LibFoo] != lowSol.packages[LibFoo] or
+           freeSol.packages[LibFoo] != highSol.packages[LibFoo])
