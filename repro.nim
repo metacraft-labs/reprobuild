@@ -50,6 +50,10 @@ import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 import repro_dsl_stdlib/fs as dslfs
 import repro_dsl_stdlib/types
+              # Windows-Cacheable-Builds-Session-Residuals S1: the four
+              # side-by-side Windows monitor artefact names live in one module
+              # so the recipe and the regression test spell them once.
+import repro_dsl_stdlib/monitor_shim_artifacts
 
 proc sanitizeStaticExec(val: string): string =
   var cleanLines: seq[string] = @[]
@@ -235,6 +239,57 @@ proc newestDirWith(root, probe: string): string =
     if newest.len == 0 or path > newest:
       newest = path
   newest
+
+proc windowsI686Gcc(): string =
+  ## Absolute path to a 32-bit (i686) mingw ``gcc``, or "" when the host has
+  ## none. Mirrors the resolution order in ``io-mon/scripts/build_shim.sh``:
+  ## the ``IO_MON_I686_GCC`` override first, then a cross-prefixed driver on
+  ## PATH, then the MSYS2 ``mingw32`` prefix under the metacraft DIY root.
+  ##
+  ## Deliberately NOT resolved by putting the i686 bin dir on the ambient
+  ## PATH. A bare ``gcc`` there would win over the 64-bit driver for the
+  ## 64-bit shim edge too, and that build then dies on a pointer-size assert
+  ## rather than on anything naming the cause. The path is handed to the
+  ## 32-bit edges explicitly instead (``gccExe`` / ``gccLinkerExe``), and the
+  ## bin directory is scoped to those edges' own env.
+  ##
+  ## ``IO_MON_I686_GCC`` is AUTHORITATIVE when set. A value naming a file
+  ## that does not exist reports "no toolchain" — which takes the
+  ## degradation path and says out loud what will not be monitored — rather
+  ## than falling through to a different compiler than the operator named.
+  ## Silently substituting one would reintroduce the failure shape this
+  ## whole initiative exists to remove.
+  let fromEnv = getEnv("IO_MON_I686_GCC")
+  if fromEnv.len > 0:
+    return (if fileExists(fromEnv): fromEnv else: "")
+  let onPath = uncontrolledFindExe("i686-w64-mingw32-gcc")
+  if onPath.len > 0:
+    return onPath
+  let diyRoot = windowsDiyInstallRoot()
+  if diyRoot.len > 0:
+    let msys2I686 =
+      diyRoot / "msys2" / "msys64" / "mingw32" / "bin" / "gcc.exe"
+    if fileExists(msys2I686):
+      return msys2I686
+  ""
+
+proc missingI686ToolchainNote(): string =
+  ## The degradation message, in one place so the ``build:`` block and the
+  ## ``devEnv:`` block cannot drift apart. It names the artefacts, what stops
+  ## being monitored without them, and the fix — because the failure it
+  ## describes produces no error of its own downstream: the injector meets a
+  ## 32-bit child, finds no shim, refuses, and the subtree simply goes
+  ## unobserved.
+  var missing: seq[string] = @[]
+  for name in windowsCrossBitnessArtifactNames():
+    missing.add(monitorArtifactPath(name))
+  "no i686 (32-bit) toolchain found, so " & missing.join(", ") &
+    " will NOT be built. 32-bit child processes (scoop PATH shims and " &
+    "older toolchain binaries are i386) cannot be injected without them; " &
+    "their subtrees run UNMONITORED, which grades as an unknown-scope " &
+    "evidence loss and makes the owning action uncacheable. Install one " &
+    "with 'pacman -S mingw-w64-i686-gcc', or point IO_MON_I686_GCC at an " &
+    "existing i686 gcc.exe."
 
 proc pinnedToolDir(root, tool, version, probe: string): string =
   ## ``<root>/<tool>/<version>`` when it exists and carries `probe`, else
@@ -482,6 +537,22 @@ package reprobuild:
 
       for i in countdown(libraryPath.high, 0):
         prependPath "LIBRARY_PATH", libraryPath[i]
+
+      # Windows-Cacheable-Builds-Session-Residuals S1 — degradation policy.
+      #
+      # Without an i686 toolchain the build still succeeds and still produces
+      # a working 64-bit shim, but the installation it produces cannot
+      # monitor 32-bit children at all. That has to be VISIBLE rather than
+      # latent, because what it produces downstream — an unmonitored subtree
+      # — looks exactly like a process that genuinely had no dependencies,
+      # and no layer below reports it.
+      #
+      # A dev-env diagnostic is the channel that actually renders: the
+      # provider's own stderr is drained by ``runProviderProtocol`` and
+      # replayed only when the provider exits non-zero, so a warning printed
+      # from the ``build:`` block never reaches a successful ``repro build``.
+      if windowsI686Gcc().len == 0:
+        diagnostic(missingI686ToolchainNote(), dedsWarning)
 
   # Library declaration — every ``.nim`` file under ``libs/<name>/src``
   # that ``config.nims`` adds to ``--path`` is importable when this
@@ -1567,7 +1638,7 @@ package reprobuild:
       # of ``scripts/build_apps.sh`` and io-mon's ``build_shim.sh``.
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "windows_interpose.nim",
-        binary = "build/lib/librepro_monitor_shim.dll",
+        binary = monitorArtifactPath(MonitorShim64Name),
         appLib = true,
         threadsOn = true,
         paths = @[ioMonSrc, stackableHooksSrc],
@@ -1575,6 +1646,127 @@ package reprobuild:
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
       reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
+
+      # Windows-Cacheable-Builds-Session-Residuals S1 — the cross-bitness
+      # companions.
+      #
+      # A 64-bit shim cannot be injected into a 32-bit child: LoadLibraryW
+      # returns NULL on the machine-type mismatch. The injector then refuses
+      # the child, its whole subtree runs unmonitored, and the action is
+      # graded an unknown-scope loss — which costs the build its cache
+      # publication. 32-bit children are not exotic here: scoop's PATH shims
+      # are i386, so a bare ``nim`` on this host already resolves to one.
+      #
+      # Three artefacts, all located BY CONVENTION beside the 64-bit shim
+      # (see ``monitor_shim_artifacts.nim`` and nim-stackable-hooks'
+      # ``wow64ShimPathFor`` / ``wow64ProbePathFor`` /
+      # ``inject64HelperPathFor``). Until S1 the graph built none of them:
+      # they existed on the developer's host only because they had been
+      # copied out of ``io-mon/build/lib`` by hand after each
+      # ``scripts/build_shim.sh`` run, so on a clean checkout every one of
+      # this session's cross-bitness fixes was inert.
+      let i686Gcc = windowsI686Gcc()
+      if i686Gcc.len > 0:
+        # The i686 ``gcc.exe`` spawns ``cc1.exe`` out of its sibling
+        # ``libexec`` tree, and cc1 links ``libgcc_s_dw2-1.dll`` /
+        # ``libwinpthread-1.dll`` from the compiler's BIN dir. cc1's own
+        # directory is not that bin dir, so without it on PATH cc1 fails to
+        # START: gcc exits 1 emitting nothing, and nim reports it as
+        # "execution of an external compiler program ... failed with exit
+        # code: 1" against whichever .c file happened to be first. Scoped to
+        # these edges' env on purpose — see ``windowsI686Gcc``.
+        let i686PathEnv = @[
+          ("PATH", i686Gcc.parentDir & $PathSep & getEnv("PATH"))]
+
+        # ``--kill-at`` is load-bearing rather than cosmetic. 32-bit mingw
+        # decorates stdcall exports with the callee's argument-byte count, so
+        # ``repro_runtime_init`` ships as ``repro_runtime_init@4`` while the
+        # 64-bit build — where there is no stdcall to decorate — exports it
+        # plain. Every lookup asks for the undecorated name. Without the
+        # flag LoadLibraryW still succeeds, the shim sits in the child with
+        # no hooks installed, the process reports no records at all, and the
+        # run still grades complete: the exact silent-loss shape this whole
+        # initiative exists to remove.
+        let shim32Nimcache = "build/nimcache/repro_monitor_shim32"
+        reprobuildTestFixturesActions.add(nim.c(
+          source = ioMonSrc / "io_mon" / "shim" / "windows_interpose.nim",
+          binary = monitorArtifactPath(MonitorShim32Name),
+          appLib = true,
+          threadsOn = true,
+          mm = "orc",
+          cpu = "i386",
+          cc = "gcc",
+          gccExe = i686Gcc,
+          gccLinkerExe = i686Gcc,
+          passL = @["-static-libgcc", "-Wl,--kill-at"],
+          paths = @[ioMonSrc, stackableHooksSrc],
+          extraEnv = i686PathEnv,
+          nimcache = shim32Nimcache,
+          dependencyPolicy =
+            makeDepfilePolicy(shim32Nimcache / "nim-compile.d"),
+          actionId = "reprobuild.test_fixtures.monitor_shim32"))
+        reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
+
+        # The WOW64 probe. A 64-bit injector cannot load a 32-bit image to
+        # read its export table, so it asks this 32-bit console binary for
+        # the kernel32 addresses it needs and reads the answer off the exit
+        # code.
+        let probe32Nimcache = "build/nimcache/stackable_hooks_wow64_probe32"
+        reprobuildTestFixturesActions.add(nim.c(
+          source = stackableHooksSrc / "stackable_hooks" / "tools" /
+            "wow64_proc_probe.nim",
+          binary = monitorArtifactPath(Wow64Probe32Name),
+          cpu = "i386",
+          cc = "gcc",
+          gccExe = i686Gcc,
+          gccLinkerExe = i686Gcc,
+          passL = @["-static-libgcc"],
+          paths = @[ioMonSrc, stackableHooksSrc],
+          extraEnv = i686PathEnv,
+          nimcache = probe32Nimcache,
+          dependencyPolicy =
+            makeDepfilePolicy(probe32Nimcache / "nim-compile.d"),
+          actionId = "reprobuild.test_fixtures.wow64_probe32"))
+        reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
+
+        # The 64-bit injection helper — built with the DEFAULT toolchain and
+        # deliberately WITHOUT the i686 bin dir on its env, since a 64-bit
+        # link that picks up the i686 driver dies on a pointer-size assert.
+        # It is grouped with the 32-bit block because its only caller is the
+        # 32-bit shim: a WOW64 process cannot inject into a 64-bit child
+        # itself (VirtualAllocEx / CreateRemoteThread go through the WOW64
+        # thunk layer, which does not reach a 64-bit address space), so it
+        # delegates. With no 32-bit shim there is nothing to delegate.
+        let inject64Nimcache = "build/nimcache/stackable_hooks_inject64"
+        reprobuildTestFixturesActions.add(nim.c(
+          source = stackableHooksSrc / "stackable_hooks" / "tools" /
+            "inject_helper.nim",
+          binary = monitorArtifactPath(Inject64HelperName),
+          passL = @["-static-libgcc"],
+          paths = @[ioMonSrc, stackableHooksSrc],
+          nimcache = inject64Nimcache,
+          dependencyPolicy =
+            makeDepfilePolicy(inject64Nimcache / "nim-compile.d"),
+          actionId = "reprobuild.test_fixtures.inject64_helper"))
+        reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
+      else:
+        # DEGRADATION POLICY (S1). The 64-bit shim above still builds and the
+        # build still succeeds — but the resulting installation cannot
+        # monitor 32-bit children, and that has to be VISIBLE rather than
+        # latent. A silent skip is the worst possible outcome here, because
+        # what it produces downstream is an unmonitored subtree, and an
+        # unmonitored subtree is indistinguishable from a process that
+        # genuinely had no dependencies. Name the artefacts, name what stops
+        # being monitored, and name the fix.
+        #
+        # Two channels, because neither one alone reaches everybody. Provider
+        # stdout/stderr is drained by ``runProviderProtocol`` and only
+        # replayed when the provider EXITS NON-ZERO, so this line is visible
+        # to anyone running the provider directly but not during a
+        # successful ``repro build``. The ``devEnv:`` block above therefore
+        # registers the same text as a ``dedsWarning`` diagnostic, which
+        # ``repro dev-env`` renders.
+        stderr.writeLine("reprobuild: warning: " & missingI686ToolchainNote())
     else:
       # The Linux shim exports a version-scripted, interposed ``dlsym``
       # (``.symver …,dlsym@GLIBC_2.2.5`` / ``@GLIBC_2.34`` in

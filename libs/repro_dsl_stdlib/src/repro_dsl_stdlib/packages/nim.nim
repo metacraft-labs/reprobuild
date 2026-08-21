@@ -122,11 +122,31 @@ package nim:
         flag mm is string,
           alias = "--mm:",
           format = concat
+        # Windows-Cacheable-Builds-Session-Residuals S1: ``--cpu:`` makes a
+        # cross-bitness compile expressible in the DSL. The Windows monitor
+        # stack needs a 32-bit shim (``librepro_monitor_shim32.dll``) and a
+        # 32-bit WOW64 probe beside the 64-bit shim; without a typed ``cpu``
+        # flag those two artefacts could only be produced by shelling out to
+        # ``io-mon/scripts/build_shim.sh``, which is neither cacheable nor
+        # described by the graph. The flag is generic - every other
+        # cross-compile target (``--cpu:arm64``, ``--cpu:amd64``) goes through
+        # the same declaration.
+        flag cpu is string,
+          alias = "--cpu:",
+          format = concat
         flag cc is string,
           alias = "--cc:",
           format = concat
         flag gccExe is string,
           alias = "--gcc.exe:",
+          format = concat
+        # ``--gcc.exe:`` selects the COMPILER driver only; nim keeps invoking
+        # whatever ``gcc.linkerexe`` names (default: a bare ``gcc`` resolved
+        # off PATH) for the link step. A cross-bitness build that sets only
+        # ``gccExe`` therefore compiles 32-bit objects and then hands them to
+        # the host's 64-bit linker. Both have to be named.
+        flag gccLinkerExe is string,
+          alias = "--gcc.linkerexe:",
           format = concat
         boolFlag threadsOn is bool, alias = "--threads:on"
         flag parallelBuild is int,
@@ -392,8 +412,10 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
         imports: seq[string] = @[];
+        cpu = "";
         cc = "";
         gccExe = "";
+        gccLinkerExe = "";
         mm = "";
         passC: seq[string] = @[];
         passL: seq[string] = @[];
@@ -420,6 +442,14 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   ## ``repro.nim`` can express ``nim c --app:lib --threads:on`` and
   ## backend ``--passC:`` / ``--passL:`` flags through the
   ## ``binary``-shorthand surface the rest of the build block uses.
+  ##
+  ## Windows-Cacheable-Builds-Session-Residuals S1: ``cpu`` / ``gccLinkerExe``
+  ## make a cross-bitness compile expressible through this shorthand - the
+  ## 32-bit monitor shim and WOW64 probe are ordinary graph edges rather than
+  ## a shell-out to ``io-mon/scripts/build_shim.sh``. Give every ``cpu``-varying
+  ## edge its OWN ``nimcache``: nim keys the cache directory by nothing but the
+  ## path it is handed, so two bitnesses sharing one would link 32-bit objects
+  ## into a 64-bit image.
   ##
   ## L3 PUBLISH-SCOPE: ``publish`` / ``publishAs`` control binary-cache
   ## publication of the resulting artifact (see the block comment above).
@@ -462,7 +492,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
 
   result = c(pkg = pkg, source = source, output = effectiveBinary,
     defines = defines,
-    cc = cc, gccExe = gccExe, mm = mm,
+    cpu = cpu, cc = cc, gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
     paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
     appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
     actionId = actionId,
