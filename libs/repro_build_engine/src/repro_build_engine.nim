@@ -111,6 +111,53 @@ type
     bakBinaryCacheSubstitute
     # Provisioning task delegating to Nix Evaluation Daemon or other foreign provisioners
     bakForeignProvision
+    # Named-Lock-Files NLF-M5 (§5.6): one retrieved metadata object — a
+    # repository root manifest, an index shard, a package's version list.
+    # An explicitly NON-HERMETIC, cacheable fetch edge whose output is
+    # content-addressed by what it actually retrieved, and which exists on
+    # the lock-GENERATION path only. It carries ``netFetch`` (see
+    # ``NetworkMode``) so the non-hermeticity is visible in the graph
+    # before the action runs. Dispatched through the executor registered
+    # by ``repro_lock_gen``, which rides the in-process fetch path
+    # (``http_pool``) — a metadata fetch MUST NOT shell out to a solved
+    # tool, because that tool is an output of the solve the fetch
+    # precedes.
+    bakMetadataFetch
+    # Named-Lock-Files NLF-M5 (§5.6): THE SOLVE, as a **rule generator**
+    # in the sense of ``Package-Model.md`` §"Rule Generators And Dynamic
+    # Rule Discovery". Its generated rule-set artifact is the LOCK FILE,
+    # which the evaluator then expands into the concrete build actions of
+    # the second wave. It is not an ordinary peer edge of the actions it
+    # determines; see ``expandGraphInWaves``.
+    bakSolveLock
+
+  NetworkMode* = enum
+    ## Sandbox-And-Monitoring.md §"The Network Dimension" (NLF-M5
+    ## amendment, 2026-08-21) — the per-action half of the policy layer's
+    ## second dimension.
+    ##
+    ## ``netDenied`` is FIRST deliberately: it is the enum's zero value, so
+    ## an action that says nothing about the network is denied by
+    ## construction rather than by a defaulting rule somebody has to
+    ## remember to write. That is amendment rule 1 — "Default deny; silence
+    ## is denial. An action with no network policy is ``netDenied``. Adding
+    ## the dimension must not turn unclassified into permitted." — made
+    ## structural.
+    netDenied
+      ## The action is hermetic in the strict sense and reaches no
+      ## destination. Any attempt is a policy violation, handled exactly as
+      ## a denied-path access is.
+    netFetch
+      ## The action is an explicitly non-hermetic, cacheable fetch edge. It
+      ## may reach the destinations its policy classifies as tracked; its
+      ## output is content-addressed by what it actually retrieved; and its
+      ## cache behaviour is revalidation under a freshness policy, never an
+      ## assumption that a past result still holds.
+      ##
+      ## Amendment rule 2 — "Non-hermeticity is declared, not inferred" —
+      ## is why this lives in the action's DEFINITION: the fact is visible
+      ## in the graph before the action runs, and an attempted access under
+      ## ``netDenied`` is a violation, never a silent promotion to here.
 
   EngineTypedOutput* = object
     ## Typed-Outputs M1: engine-side mirror of
@@ -309,6 +356,34 @@ type
       ## direct fork. The DSL's ``BuildActionDef.requiresElevation``
       ## field propagates here through ``lowerGraphAction`` so the
       ## engine consumes the same flag the build-graph author set.
+    networkMode*: NetworkMode
+      ## Sandbox-And-Monitoring.md §"The Network Dimension" — this
+      ## action's network mode. The zero value is ``netDenied``, so every
+      ## action that predates the dimension, and every action whose author
+      ## says nothing, is denied. There is no ambient or global "network
+      ## allowed" switch: a build in which some edge reaches the network
+      ## is a build in which THAT edge declared it.
+    netDestinations*: seq[string]
+      ## The destinations this action's policy classifies as **tracked
+      ## fetch destinations** — the only class that makes a
+      ## network-touching edge cacheable. A destination is named by
+      ## scheme, host, optional port and optional path prefix
+      ## (``https://index.example/pkgs/``), so "this edge may reach the
+      ## package index" is expressible without granting the host
+      ## generally.
+      ##
+      ## Empty under ``netDenied`` and non-empty under ``netFetch``; both
+      ## halves are enforced by ``auditNetworkPolicy`` from
+      ## ``validateGraph``, because a ``netFetch`` edge with no declared
+      ## destination is a permission with no subject, and a ``netDenied``
+      ## edge that names one is an author who believed they had granted
+      ## something and did not.
+      ##
+      ## The recorded destination set is HALF the evidence a ``netFetch``
+      ## edge produces; the other half is the content digest of what it
+      ## retrieved. Per the amendment this is deliberately NOT a sixth
+      ## observed-input class — a network access is not a filesystem fact
+      ## — so it is recorded alongside the path set, never inside it.
 
   BuildPool* = object
     name*: string
@@ -1109,7 +1184,13 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
                     weakFingerprint = weakFingerprintFromText(id);
                     actionCachePolicy = ffpTimestamp;
                     text = ""; entries: openArray[string] = [];
+                    networkMode = netDenied;
+                    netDestinations: openArray[string] = [];
                     governingLockIdentity: LockIdentity): BuildAction =
+  ## ``networkMode`` defaults to ``netDenied`` and ``netDestinations`` to the
+  ## empty set — Sandbox-And-Monitoring.md §"The Network Dimension" rule 1,
+  ## "silence is denial". A caller that wants a fetch edge must say so at the
+  ## call site, which is what makes the non-hermeticity greppable.
   if kind == bakProcess:
     raise newException(BuildEngineError, "builtinAction requires a built-in action kind")
   BuildAction(
@@ -1126,7 +1207,9 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     actionCachePolicy: actionCachePolicy,
     dependencyPolicy: automaticMonitorGatheringPolicy(),
     builtinText: text,
-    builtinEntries: @entries)
+    builtinEntries: @entries,
+    networkMode: networkMode,
+    netDestinations: @netDestinations)
 
 proc pool*(name: string; capacity: uint32): BuildPool =
   BuildPool(name: name, capacity: capacity)
@@ -1271,6 +1354,189 @@ proc formatLockIdentityAudit*(findings: seq[LockIdentityAuditFinding]): string =
         break
       result.add("\n      " & id)
 
+# ---------------------------------------------------------------------------
+# Sandbox-And-Monitoring.md §"The Network Dimension" — the graph-level audit.
+# ---------------------------------------------------------------------------
+
+const NetworkFetchCapableKinds* = {bakMetadataFetch, bakBinaryCacheSubstitute,
+                                   bakForeignProvision}
+  ## The edge kinds that may carry ``netFetch``.
+  ##
+  ## The amendment's closing paragraph asks for exactly this: the
+  ## network-touching actions that already exist — ``bakBinaryCacheSubstitute``
+  ## (the `fetch:`-block / substituter shape) and ``bakForeignProvision``
+  ## (weak-fingerprinted, revalidated against self-reported observed inputs) —
+  ## "should be classified under this dimension rather than each carrying an
+  ## implicit per-kind exemption", and "the metadata-fetch edges of
+  ## `Named-Lock-Files.md` §5.6 are `netFetch` edges by construction".
+  ##
+  ## An allowlist rather than a free-for-all because rule 3 is a *structural*
+  ## claim — "a non-hermetic edge is never a silent input to a build that
+  ## believes itself pinned" — and a compile edge that could quietly be marked
+  ## ``netFetch`` would make that claim unenforceable.
+
+type
+  NetworkPolicyAuditFinding* = object
+    ## One action whose network policy is internally inconsistent, plus the
+    ## reason. Keyed per ACTION rather than per kind (unlike the lock-identity
+    ## audit) because the three failures below are authoring mistakes at a call
+    ## site, not a construction path that forgot a field.
+    actionId*: string
+    kind*: BuildActionKind
+    reason*: string
+
+proc auditNetworkPolicy*(g: BuildGraph): seq[NetworkPolicyAuditFinding] =
+  ## Assert the network dimension holds together across a whole graph.
+  ##
+  ## Three checks, one per way the dimension can be stated incoherently:
+  ##
+  ##   1. ``netFetch`` with no declared destination — a permission with no
+  ##      subject. The edge would be cacheable on evidence ("what I retrieved
+  ##      from where") whose second half is empty.
+  ##   2. ``netDenied`` with declared destinations — an author who believed
+  ##      they had granted something. Silence is denial, so this reads as a
+  ##      grant and behaves as a denial; that gap is the amendment's rule 1
+  ##      failing in the direction it cannot detect at run time.
+  ##   3. ``netFetch`` on an edge kind that is not fetch-capable. Rule 3 says
+  ##      network-touching edges exist on the generation path only; an
+  ##      arbitrary compile or copy edge promoting itself to ``netFetch``
+  ##      would put one inside a build that believes itself pinned.
+  result = @[]
+  for action in g.actions:
+    case action.networkMode
+    of netFetch:
+      if action.kind notin NetworkFetchCapableKinds:
+        result.add(NetworkPolicyAuditFinding(actionId: action.id,
+          kind: action.kind,
+          reason: "edge kind " & $action.kind & " may not declare netFetch"))
+      elif action.netDestinations.len == 0:
+        result.add(NetworkPolicyAuditFinding(actionId: action.id,
+          kind: action.kind,
+          reason: "netFetch declares no tracked destination"))
+    of netDenied:
+      if action.netDestinations.len > 0:
+        result.add(NetworkPolicyAuditFinding(actionId: action.id,
+          kind: action.kind,
+          reason: "netDenied action names " & $action.netDestinations.len &
+            " destination(s); silence is denial, so the grant would not hold"))
+
+proc formatNetworkPolicyAudit*(
+    findings: seq[NetworkPolicyAuditFinding]): string =
+  ## The audit's diagnostic. Rule 4 of the amendment requires the
+  ## classification be visible "in logs, debugging output, per-action explain
+  ## output"; this is the graph-construction end of that requirement.
+  if findings.len == 0:
+    return ""
+  result = "network policy is incoherent on " & $findings.len &
+    " action(s) — Sandbox-And-Monitoring.md §\"The Network Dimension\""
+  for f in findings:
+    result.add("\n      " & f.actionId & " (" & $f.kind & "): " & f.reason)
+
+# ---------------------------------------------------------------------------
+# Package-Model.md §"Rule Generators And Dynamic Rule Discovery" — explicit
+# wave expansion.
+# ---------------------------------------------------------------------------
+
+const DefaultMaxExpansionWaves* = 8
+  ## The bounded iteration policy's bound.
+  ##
+  ## The quoted requirement is "expand the graph in explicit waves until a
+  ## closed frontier is reached, **with cycle detection and a bounded
+  ## iteration policy**" — two separate obligations, and this constant is the
+  ## second. Cycle detection catches a generator that re-emits an action it
+  ## already emitted; the bound catches a generator that emits a NEW action
+  ## every wave and therefore never repeats itself, which no cycle detector
+  ## can see. Without the bound that case is an infinite loop that looks like
+  ## a hang.
+  ##
+  ## Eight rather than two, because the value has to admit the shapes the
+  ## corpus already contemplates (a rule generator producing rule generators)
+  ## while still terminating fast enough that a runaway is a failed build
+  ## rather than a wedged one. Named-Lock-Files §5.6's own expansion needs
+  ## exactly ONE wave — the over-approximated fetch is deliberately not a
+  ## fixpoint — so this bound is headroom for other generators, not for it.
+
+type
+  WaveExpansion* = object
+    ## The record of an explicit wave expansion. Kept as a value rather than
+    ## folded into one flat action list because "how many waves" is itself an
+    ## asserted property: Named-Lock-Files §5.6 resolves variant-conditioned
+    ## ``uses:`` by over-approximation and says so in terms — "One wave, no
+    ## iteration" — and a flat list cannot distinguish that from a fixpoint
+    ## that happened to converge after one step.
+    waves*: seq[seq[BuildAction]]
+    closed*: bool
+      ## True when expansion stopped because a wave produced nothing further
+      ## — the "closed frontier" of the quoted text. False is unreachable
+      ## today (both other outcomes raise); the field exists so a caller
+      ## reads the reason rather than inferring it from an absence.
+
+  WaveExpansionCycle* = object of BuildEngineError
+    ## A rule generator re-emitted an action id an earlier wave already
+    ## produced. Distinct from the bound so a caller — and a reader of the
+    ## failure — can tell "this generator is looping" from "this generator is
+    ## productive but deep".
+
+  WaveExpansionBoundExceeded* = object of BuildEngineError
+    ## Expansion did not reach a closed frontier within the bound.
+
+proc actionIds*(actions: seq[BuildAction]): seq[string] =
+  result = @[]
+  for a in actions: result.add(a.id)
+
+proc expandGraphInWaves*(seed: seq[BuildAction];
+                         expand: proc(previousWave: seq[BuildAction]):
+                           seq[BuildAction] {.closure.};
+                         maxWaves = DefaultMaxExpansionWaves): WaveExpansion =
+  ## Expand a graph in explicit waves until a closed frontier is reached.
+  ##
+  ## `Package-Model.md` §"Rule Generators And Dynamic Rule Discovery":
+  ## "Because the output changes graph shape, an action that depends on
+  ## generated rules must not run until the relevant rule-generator artifacts
+  ## have been materialized and stitched into the graph. If rule generators
+  ## can themselves produce more rule-generator actions, the engine should
+  ## expand the graph in explicit waves until a closed frontier is reached,
+  ## with cycle detection and a bounded iteration policy."
+  ##
+  ## `seed` is wave 1. `expand` is handed the wave that was just materialized
+  ## and returns the actions stitched in behind it; an empty return closes the
+  ## frontier. Both failure modes RAISE rather than truncating: a silently
+  ## truncated expansion produces a graph that is missing edges and reports
+  ## success, which is the silent-wrong-answer direction this campaign
+  ## designs against throughout.
+  if seed.len == 0:
+    raiseEngine("wave expansion requires a non-empty seed wave")
+  if maxWaves < 1:
+    raiseEngine("wave expansion bound must be at least 1, got " & $maxWaves)
+  result = WaveExpansion(waves: @[seed], closed: false)
+  var seen = initHashSet[string]()
+  for a in seed: seen.incl(a.id)
+  while true:
+    let next = expand(result.waves[^1])
+    if next.len == 0:
+      result.closed = true
+      return
+    for a in next:
+      if seen.contains(a.id):
+        raise newException(WaveExpansionCycle,
+          "rule-generator expansion cycle: action '" & a.id &
+          "' was emitted again in wave " & $(result.waves.len + 1) &
+          " after an earlier wave already produced it")
+      seen.incl(a.id)
+    if result.waves.len >= maxWaves:
+      raise newException(WaveExpansionBoundExceeded,
+        "rule-generator expansion did not reach a closed frontier within " &
+        $maxWaves & " wave(s); wave " & $(maxWaves + 1) &
+        " would have added " & $next.len & " action(s) (" &
+        next.actionIds.join(", ") & ")")
+    result.waves.add(next)
+
+proc allActions*(expansion: WaveExpansion): seq[BuildAction] =
+  ## Every action across every wave, in wave order then declaration order.
+  result = @[]
+  for wave in expansion.waves:
+    for a in wave: result.add(a)
+
 proc validateGraph(g: BuildGraph) =
   # Named-Lock-Files §7.2 — the second half of the structural check, and the
   # release gate. `{.requiresInit.}` on `BuildAction.governingLockIdentity` is
@@ -1286,6 +1552,15 @@ proc validateGraph(g: BuildGraph) =
   let lockFindings = auditGoverningLockIdentity(g)
   if lockFindings.len > 0:
     raiseEngine(formatLockIdentityAudit(lockFindings))
+
+  # Sandbox-And-Monitoring.md §"The Network Dimension" — the same shape of
+  # gate, for the same reason. An incoherent network policy is silent at run
+  # time in the dangerous direction: an author who wrote a grant that does not
+  # hold gets a hermetic action, and an author who wrote a fetch edge with no
+  # destination gets an edge cached on half its evidence.
+  let netFindings = auditNetworkPolicy(g)
+  if netFindings.len > 0:
+    raiseEngine(formatNetworkPolicyAudit(netFindings))
 
   var ids = initHashSet[string]()
   var byId = initTable[string, BuildAction]()
@@ -1413,7 +1688,10 @@ proc pathExists(path: string): bool =
 
 proc outputPathReady(action: BuildAction; path: string): bool =
   # M2: bakWorkspaceVcs receipts are plain files, same readiness rule.
-  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs, bakForeignProvision} and
+  # NLF-M5: a metadata-fetch object and a generated lock are plain files
+  # written by their executors, so they take the same readiness rule.
+  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs,
+                     bakForeignProvision, bakMetadataFetch, bakSolveLock} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
@@ -3812,8 +4090,30 @@ type
     ## Indirect dispatch keeps the engine library free of a hard
     ## dependency on the client library.
 
+  MetadataFetchExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Named-Lock-Files NLF-M5: hook installed by ``repro_lock_gen``. The
+    ## engine routes every ``bakMetadataFetch`` action through the registered
+    ## executor, which retrieves the object over the IN-PROCESS fetch path
+    ## and writes it to the action's single output.
+    ##
+    ## Indirect dispatch is load-bearing here beyond the usual layering
+    ## reason. The generation path needs the solver (to know what to fetch
+    ## for) and the solver loads ``libclingo`` through a ``{.dynlib.}`` FFI at
+    ## module-init; making the engine dispatch directly would give every
+    ## engine binary a clingo runtime dependency, which
+    ## ``repro_lock/identity.nim``'s header exists to prevent.
+
+  SolveLockExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Named-Lock-Files NLF-M5: hook installed by ``repro_lock_gen`` for the
+    ## ``bakSolveLock`` rule-generator edge. The executor reads the metadata
+    ## its upstream ``bakMetadataFetch`` edges retrieved, runs the solve, and
+    ## writes the LOCK — the generated rule-set artifact — to the action's
+    ## single output.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
+var metadataFetchExecutor {.threadvar.}: MetadataFetchExecutor
+var solveLockExecutor {.threadvar.}: SolveLockExecutor
 
 proc registerWorkspaceVcsExecutor*(executor: WorkspaceVcsExecutor) =
   ## Register the per-thread executor for ``bakWorkspaceVcs`` actions.
@@ -3838,6 +4138,23 @@ proc registerBinaryCacheSubstituteExecutor*(
 
 proc clearBinaryCacheSubstituteExecutor*() =
   binaryCacheSubstituteExecutor = nil
+
+proc registerMetadataFetchExecutor*(executor: MetadataFetchExecutor) =
+  ## Register the per-thread executor for ``bakMetadataFetch`` actions
+  ## (NLF-M5). ``repro_lock_gen`` calls this; tests that drive the generation
+  ## path in-process call it explicitly.
+  metadataFetchExecutor = executor
+
+proc clearMetadataFetchExecutor*() =
+  metadataFetchExecutor = nil
+
+proc registerSolveLockExecutor*(executor: SolveLockExecutor) =
+  ## Register the per-thread executor for the ``bakSolveLock`` rule-generator
+  ## edge (NLF-M5).
+  solveLockExecutor = executor
+
+proc clearSolveLockExecutor*() =
+  solveLockExecutor = nil
 
 proc builtinPath(action: BuildAction; path: string): string =
   materialPath(action.cwd, path)
@@ -4151,6 +4468,40 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       result.launched = subRes.launched
       result.runQuotaBackend = if subRes.runQuotaBackend.len > 0:
         subRes.runQuotaBackend else: "binary-cache-substitute"
+      return
+    of bakMetadataFetch:
+      # NLF-M5 dispatch. Fail CLOSED when nothing is registered: a
+      # metadata-fetch edge that quietly no-ops would leave the solve edge
+      # downstream of it reading an empty version universe and reporting a
+      # lock, which is the silent-wrong-answer direction.
+      if metadataFetchExecutor.isNil:
+        raiseEngine(
+          "bakMetadataFetch action requires registerMetadataFetchExecutor " &
+          "before runBuild: " & action.id)
+      let mdRes = metadataFetchExecutor(action)
+      result.status = mdRes.status
+      result.exitCode = mdRes.exitCode
+      result.stdout = mdRes.stdout
+      result.stderr = mdRes.stderr
+      result.reason = mdRes.reason
+      result.launched = mdRes.launched
+      result.runQuotaBackend = if mdRes.runQuotaBackend.len > 0:
+        mdRes.runQuotaBackend else: "metadata-fetch"
+      return
+    of bakSolveLock:
+      if solveLockExecutor.isNil:
+        raiseEngine(
+          "bakSolveLock action requires registerSolveLockExecutor before " &
+          "runBuild: " & action.id)
+      let solveRes = solveLockExecutor(action)
+      result.status = solveRes.status
+      result.exitCode = solveRes.exitCode
+      result.stdout = solveRes.stdout
+      result.stderr = solveRes.stderr
+      result.reason = solveRes.reason
+      result.launched = solveRes.launched
+      result.runQuotaBackend = if solveRes.runQuotaBackend.len > 0:
+        solveRes.runQuotaBackend else: "solve-lock"
       return
     of bakForeignProvision:
       when defined(windows):

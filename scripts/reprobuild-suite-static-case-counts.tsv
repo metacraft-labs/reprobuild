@@ -205,6 +205,9 @@ libs/repro_lock/tests/t_lock_identity_solver_tie_no_collision.nim	nim	4
 libs/repro_lock/tests/t_lock_identity_two_names_one_content.nim	nim	3
 libs/repro_lock/tests/t_lock_writer_output_reads_back.nim	nim	9
 libs/repro_lock/tests/t_provenance_reports_shared_names.nim	nim	5
+libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim	nim	10
+libs/repro_lock_gen/tests/t_pinned_build_touches_no_network.nim	nim	4
+libs/repro_lock_gen/tests/t_variant_conditioned_uses_over_approximated.nim	nim	10
 libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_action_cache_reader_consults_peer_on_miss.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim	nim	1

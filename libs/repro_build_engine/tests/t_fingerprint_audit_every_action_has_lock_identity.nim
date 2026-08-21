@@ -53,6 +53,14 @@
 ## the engine's real constructors, the audit under test is the engine's own
 ## `auditGoverningLockIdentity`, and the gate assertion runs the real
 ## `runBuild`.
+##
+## The corpus read here is `everyEdgeKindActions()` — the NLF-STAT-4 baseline
+## graph PLUS the edge kinds introduced after that baseline was recorded
+## (NLF-M5's `bakMetadataFetch` / `bakSolveLock`). §7.2's audit is a
+## whole-graph property and must cover every kind; the NLF-STAT-4 fixture is a
+## frozen recording of the pre-campaign default path and must not grow rows.
+## Those are two different obligations over two different graphs, which is why
+## `nlf_stat4_baseline_corpus` now exposes both lists.
 
 import std/[os, strutils, tempfiles, unittest]
 
@@ -83,7 +91,7 @@ suite "NLF-ID-6 whole-graph governing-lock-identity audit":
     check assertEveryEdgeKindCovered() == ""
 
   test "every action in a fully constructed graph carries an identity":
-    let actions = baselineCorpusActions()
+    let actions = everyEdgeKindActions()
     check actions.len > 0
     let findings = auditGoverningLockIdentity(graph(actions))
     if findings.len > 0:
@@ -95,7 +103,7 @@ suite "NLF-ID-6 whole-graph governing-lock-identity audit":
     # kind. A per-kind loop is what makes this a whole-graph assertion: an
     # audit that happened to notice `bakProcess` and skip the built-ins would
     # pass a single-kind mutation test and fail this one.
-    let clean = baselineCorpusActions()
+    let clean = everyEdgeKindActions()
     for kind in BuildActionKind:
       let mutated = mutateOneEdgeKind(clean, kind)
       let findings = auditGoverningLockIdentity(graph(mutated))
@@ -130,7 +138,7 @@ suite "NLF-ID-6 whole-graph governing-lock-identity audit":
     # `" "` and a truncated hex fragment, both of which are just as unusable
     # as a key as an empty string.
     for bogus in ["", " ", "blake3:", "not-a-multihash", "blake3:zzzz"]:
-      var actions = baselineCorpusActions()
+      var actions = everyEdgeKindActions()
       actions[0].governingLockIdentity = LockIdentity(bogus)
       let findings = auditGoverningLockIdentity(graph(actions))
       check findings.len == 1

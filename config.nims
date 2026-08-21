@@ -269,6 +269,13 @@ for libName in [
   # lock consumption. Separate from the manifest-repo SHA lock
   # (``repro_workspace_manifests/lock_writer.nim``).
   "repro_lock",
+  # Named-Lock-Files NLF-M5: lock GENERATION as build-graph edges —
+  # metadata-fetch edges upstream, the solve as a rule-generator edge
+  # downstream, the lock as its rule-set artifact. A leaf ABOVE both the
+  # engine and the solver: the engine must not import the solver (clingo
+  # dynlib at module-init, see ``repro_lock/identity.nim``) and the solver
+  # must not import the engine, so the path that needs both lives here.
+  "repro_lock_gen",
   # Workspace-Manifest-Optional MO-8: self-describing, algorithm-tagged
   # content digests (``<alg>:<digest>`` multihash) + the BLAKE3 own-file
   # NAR-style tree hash. ``repro_lock`` (the committed-lock integrity) and
