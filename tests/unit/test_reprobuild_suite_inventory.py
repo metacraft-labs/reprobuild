@@ -2619,7 +2619,9 @@ test "incomplete name" and:
         # and every case is unconditional, so the Linux-vs-Darwin delta is
         # still +1. Recorded as an attribution rather than presented as a
         # measurement, on the same principle as the composed base above.
-        expected_nim_total = 7115 if sys.platform == "darwin" else 7116
+        # The Nix-daemon host-loader regression adds one unconditional case
+        # to an existing source, so the platform delta remains exactly one.
+        expected_nim_total = 7116 if sys.platform == "darwin" else 7117
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
