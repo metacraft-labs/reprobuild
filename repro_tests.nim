@@ -2926,6 +2926,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
+    binary: "build/test-bin/t_dependency_lists_are_not_merged_at_serialization",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
     defines: @[],

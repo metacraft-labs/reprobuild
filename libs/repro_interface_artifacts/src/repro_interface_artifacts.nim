@@ -1395,7 +1395,12 @@ proc toProjectInterface*(pkg: PackageDef;
   result.defaultToolProvisioning = pkg.defaultToolProvisioning
   result.publicSignatureDependencies = pkg.publicSignatureDependencies
   result.location = SourceLocation(file: pkg.sourceFile, line: pkg.sourceLine)
-  for useDef in pkg.toolUses:
+  # NLF-M8 — `PackageDef.toolUses` is no longer the concatenation of the
+  # three dependency lists (`allToolUses` is), so the union is taken HERE.
+  # `ProjectInterface.toolUses` keeps exactly the content it had, byte for
+  # byte and in the same order, because the ~14 tool-PATH sites downstream
+  # read it and this change is not theirs.
+  for useDef in pkg.allToolUses():
     result.toolUses.add(toInterfaceToolUse(useDef, packages))
   for useDef in pkg.runtimeDeps:
     result.runtimeToolUses.add(toInterfaceToolUse(useDef, packages))

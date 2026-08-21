@@ -26,7 +26,7 @@ when defined(reproProviderMode):
     # implicit-dev-env hash pass. Hash the final floor here as well so those
     # packages never expose a manifest entry with an empty body hash.
     var floorRepr = pkg.packageName & ".dev-env.implicit-floor.v1\n"
-    for useDef in pkg.toolUses:
+    for useDef in pkg.allToolUses():
       floorRepr.add(useDef.rawConstraint & "\x1f" & useDef.packageSelector &
         "\x1f" & useDef.executableName & "\x1f" &
         useDef.policyPath.join("/") & "\x1f" & useDef.gateVariant & "\x1f" &
@@ -302,7 +302,7 @@ when defined(reproProviderMode):
           kind: "file-read",
           identity: input.identity,
           digest: input.digest))
-    for useDef in pkg.toolUses:
+    for useDef in pkg.allToolUses():
       result.toolRequirements.add(DevEnvToolRequirement(
         logicalName: useDef.executableName,
         packageSelector: useDef.packageSelector,
