@@ -34389,20 +34389,74 @@ proc toJsonNode*(report: PostCommitReport): JsonNode =
   result["pendingRecords"] = %report.pendingRecords
   result["strandedRecords"] = %report.strandedRecords
 
+proc selfAndAncestors(startPath: string): seq[string] =
+  ## ``startPath`` and every directory above it, nearest first.
+  result = @[]
+  if startPath.len == 0:
+    return
+  var probe = absolutePath(startPath)
+  while probe.len > 1:
+    result.add(probe)
+    let parent = parentDir(probe)
+    if parent == probe: break
+    probe = parent
+
+proc enclosingWorkspaceRoot*(startPath: string): string =
+  ## The nearest ancestor of ``startPath`` (inclusive) that is a WORKSPACE, or
+  ## "" when there is none.
+  ##
+  ## A managed hook fires inside a participating repo and has to walk up to the
+  ## workspace. The marker for that walk is the WORKSPACE, never a ``.repro/``
+  ## directory: every repo Reprobuild has built carries a repo-local
+  ## ``.repro/`` (build reports, engine caches — including the ones the hooks
+  ## themselves write), so a walk keyed on ``.repro/`` resolves a participating
+  ## repo to ITSELF and never reaches the workspace above it. The strict lock
+  ## writer then refuses the directory it was handed —
+  ##
+  ##   `repro workspace lock` requires either `.repro/workspace.toml` or a
+  ##   <project> argument; neither was present at <repo>
+  ##
+  ## — and because post-commit is non-blocking by design that refusal is
+  ## silent: no lock is written for any commit in any built repo, and the
+  ## report naming the failure is filed under the REPO's own ``.repro/`` where
+  ## nothing looks for it.
+  ##
+  ## So the nearest ancestor carrying ``.repro/workspace.toml`` or a resolved
+  ## manifest checkout wins. Only when there is no such ancestor does the
+  ## manifest-optional marker (MO-2, a committed ``repro.lock``) decide, and
+  ## then the nearest one wins — a standalone committed-lock repo really is its
+  ## own workspace, and a repo nested inside a real workspace is not.
+  let ancestors = selfAndAncestors(startPath)
+  for candidate in ancestors:
+    if fileExists(workspaceTomlPath(candidate)) or
+        hasResolvedManifestCheckout(candidate):
+      return candidate
+  for candidate in ancestors:
+    if hasCommittedLockWorkspaceMarker(candidate):
+      return candidate
+  ""
+
+proc enclosingReproShell*(startPath: string): string =
+  ## The nearest ancestor of ``startPath`` (inclusive) holding a ``.repro/``
+  ## directory, or "".
+  ##
+  ## This is NOT a workspace test — a bare ``.repro/`` is explicitly not a
+  ## workspace (``isInitializedWorkspace``). It is only the place to FILE a
+  ## report when ``enclosingWorkspaceRoot`` found nothing: a half-bootstrapped
+  ## parent still deserves a trace saying "not a workspace" rather than
+  ## silence.
+  for candidate in selfAndAncestors(startPath):
+    if dirExists(candidate / ".repro"):
+      return candidate
+  ""
+
 proc resolvePostCommitWorkspaceRoot(currentRepo, workspaceRoot: string): string =
-  ## Walk up from ``--current-repo`` to find ``.repro/``. Matches the M18
-  ## ``parseCheckArgs`` heuristic so the dispatch wiring stays uniform.
+  ## The workspace this post-commit run belongs to. An explicit
+  ## ``--workspace-root`` wins outright; otherwise walk up from
+  ## ``--current-repo``.
   if workspaceRoot.len > 0:
     return absolutePath(workspaceRoot)
-  if currentRepo.len > 0:
-    var probe = absolutePath(currentRepo)
-    while probe.len > 1:
-      if dirExists(probe / ".repro"):
-        return probe
-      let parent = parentDir(probe)
-      if parent == probe: break
-      probe = parent
-  ""
+  enclosingWorkspaceRoot(currentRepo)
 
 proc writePostCommitReport(workspaceRoot: string;
                            report: PostCommitReport) =
@@ -34987,17 +35041,26 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   # yet) still runs, while a genuine non-workspace skips silently. A
   # commit must never be blocked by hook failure, so this always exits 0.
   if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
+    # No workspace to enforce — but still leave a trace. When the walk found no
+    # workspace at all, the report is filed at the nearest ``.repro/`` shell
+    # above the repo (a half-bootstrapped parent), which is where an operator
+    # looking for one would go. Silence here is what turned this branch into a
+    # black hole in the field.
+    let reportAnchor =
+      if workspaceRoot.len > 0: workspaceRoot
+      else: enclosingReproShell(parsed.currentRepo)
+    report.workspaceRoot = reportAnchor
     report.outcome = postCommitOutcomeTag(pcoSkippedNoWorkspace)
     report.publication = postCommitPublicationTag(pcpNoRecord)
     report.diagnostic =
-      if workspaceRoot.len == 0:
+      if reportAnchor.len == 0:
         "no workspace root found from --current-repo=" & parsed.currentRepo
       else:
         "not a workspace; nothing to enforce (no resolved manifest " &
-          "checkout at " & workspaceRoot & ")"
-    if workspaceRoot.len > 0:
-      writePostCommitReport(workspaceRoot, report)
-      appendPostCommitLog(workspaceRoot,
+          "checkout at " & reportAnchor & ")"
+    if reportAnchor.len > 0:
+      writePostCommitReport(reportAnchor, report)
+      appendPostCommitLog(reportAnchor,
         timestamp & " " & report.outcome & " " & report.diagnostic)
     return 0
 
@@ -35048,12 +35111,37 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   lockArgs.toolProvisioning = parsed.toolProvisioning
   # RA-10: an initialized workspace may resolve from a single
   # ``projects/*.toml`` with no metadata-only ``workspace.toml`` yet. The
-  # strict lock resolver needs an explicit project name in that case
-  # (it only auto-recovers a name from a present workspace.toml), so we
-  # supply the name the canonical marker detected. When a workspace.toml
-  # is present this is harmless: the compositional / metadata-only path
-  # ignores ``projectName``.
-  lockArgs.projectName = detectWorkspaceProjectName(workspaceRoot)
+  # strict lock resolver needs an explicit project name in THAT case — and
+  # only that case.
+  #
+  # Supplying it unconditionally was NOT harmless. A non-empty
+  # ``projectName`` sends ``resolveWorkspaceLockProject`` down its explicit
+  # named-project branch, and that branch deliberately does NOT union the
+  # active project set: an operator who names a project is asking for that
+  # project. Post-commit was naming one nobody asked for, so in a
+  # multi-project workspace every commit in a repo outside the PRIMARY
+  # project was resolved against the primary's repo set alone and the lock
+  # refused —
+  #
+  #   triggering repo at '<repo>' is not declared in project '<primary>';
+  #   no lock can be anchored at it
+  #
+  # — silently, because post-commit never blocks. A lock with no ``<project>``
+  # is a snapshot of the WORKSPACE and pins every repo of the active set,
+  # which is exactly what a commit hook wants. So we let the workspace speak
+  # for itself whenever it can, and name a project only when it cannot.
+  lockArgs.projectName = ""
+  block resolveProjectNameOnlyWhenNeeded:
+    let workspaceToml = workspaceTomlPath(workspaceRoot)
+    var recorded = ""
+    if fileExists(workspaceToml):
+      try:
+        recorded = readWorkspaceLocal(
+          absolutePath(workspaceToml)).workspace.project
+      except CatchableError:
+        discard
+    if recorded.len == 0:
+      lockArgs.projectName = detectWorkspaceProjectName(workspaceRoot)
 
   var raised = false
   var raisedDiagnostic = ""
@@ -35742,20 +35830,19 @@ proc parseCheckArgs*(args: openArray[string]): CheckArgs =
   if result.workspaceRoot.len == 0:
     # When invoked from inside a participating repo (the usual hook
     # call site) we walk up from ``--current-repo`` to discover the
-    # workspace root. Failing that, use the current repo itself so the
+    # workspace root. The walk keys on the WORKSPACE, not on a ``.repro/``
+    # directory: a built repo has one of its own, so the old ``.repro/``
+    # walk stopped at the repo and handed the gate a "workspace" that was
+    # really just the repo. Failing that, fall back to the nearest
+    # ``.repro/`` shell and then to the current repo itself, so the
     # canonical workspace marker can decide that this is a non-workspace
     # and no-op. Falling back to the process cwd is unsafe for managed
     # hooks: test runners and nested invocations often run from a real
     # workspace while dispatching against an unrelated standalone repo.
     if result.currentRepo.len > 0:
-      var probe = absolutePath(result.currentRepo)
-      while probe.len > 1:
-        if dirExists(probe / ".repro"):
-          result.workspaceRoot = probe
-          break
-        let parent = parentDir(probe)
-        if parent == probe: break
-        probe = parent
+      result.workspaceRoot = enclosingWorkspaceRoot(result.currentRepo)
+      if result.workspaceRoot.len == 0:
+        result.workspaceRoot = enclosingReproShell(result.currentRepo)
     if result.workspaceRoot.len == 0:
       result.workspaceRoot =
         if result.currentRepo.len > 0: absolutePath(result.currentRepo)
@@ -39835,15 +39922,12 @@ proc parsePushArgs(args: openArray[string]): PushArgs =
   elif not wantSync and not explicitFlavor:
     result.syncMode = psmNone
   if result.workspaceRoot.len == 0:
+    # Same walk as the gate: key on the WORKSPACE, not on a ``.repro/``
+    # directory a built repo carries of its own.
     if result.currentRepo.len > 0:
-      var probe = absolutePath(result.currentRepo)
-      while probe.len > 1:
-        if dirExists(probe / ".repro"):
-          result.workspaceRoot = probe
-          break
-        let parent = parentDir(probe)
-        if parent == probe: break
-        probe = parent
+      result.workspaceRoot = enclosingWorkspaceRoot(result.currentRepo)
+      if result.workspaceRoot.len == 0:
+        result.workspaceRoot = enclosingReproShell(result.currentRepo)
     if result.workspaceRoot.len == 0:
       result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
