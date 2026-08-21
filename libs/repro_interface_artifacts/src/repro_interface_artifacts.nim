@@ -1,6 +1,41 @@
 import std/[algorithm, options, os, osproc, sequtils, sets, streams, strutils,
             tables, tempfiles, times]
 
+when defined(windows):
+  type
+    ProviderLockHandle = pointer
+    ProviderLockDword = uint32
+    ProviderLockWideString = WideCString
+
+  const
+    ProviderLockInvalidHandle = cast[ProviderLockHandle](-1'i64)
+    ProviderLockGenericRead = 0x80000000'u32
+    ProviderLockGenericWrite = 0x40000000'u32
+    ProviderLockOpenAlways = 4'u32
+    ProviderLockFileAttributeNormal = 0x80'u32
+    ProviderLockSharingViolation = 32'u32
+
+  proc providerLockCreateFileW(
+      path: ProviderLockWideString;
+      desiredAccess, shareMode: ProviderLockDword;
+      securityAttributes: pointer;
+      creationDisposition, flagsAndAttributes: ProviderLockDword;
+      templateFile: ProviderLockHandle): ProviderLockHandle
+    {.stdcall, dynlib: "kernel32", importc: "CreateFileW".}
+
+  proc providerLockCloseHandle(handle: ProviderLockHandle): int32
+    {.stdcall, dynlib: "kernel32", importc: "CloseHandle".}
+
+  proc providerLockGetLastError(): ProviderLockDword
+    {.stdcall, dynlib: "kernel32", importc: "GetLastError".}
+else:
+  import std/posix
+
+  const ProviderLockExclusive = 2.cint
+
+  proc providerLockFlock(fd: cint; operation: cint): cint
+    {.importc: "flock", header: "<sys/file.h>".}
+
 import cbor
 import repro_core
 import repro_core/paths as corepaths
@@ -4138,6 +4173,83 @@ proc providerNimcacheMode(): string =
   let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
   if mode.len == 0: "shared" else: mode.toLowerAscii()
 
+type ProviderNimcacheLock = object
+  held: bool
+  when defined(windows):
+    handle: ProviderLockHandle
+  else:
+    fd: cint
+
+proc providerNimcachePath(command: openArray[string]): string =
+  for arg in command:
+    if arg.startsWith("--nimcache:"):
+      return arg["--nimcache:".len .. ^1]
+  raise newException(ValueError,
+    "provider compiler command has no --nimcache path")
+
+proc acquireProviderNimcacheLock(command: openArray[string]):
+    ProviderNimcacheLock =
+  ## Nim's incremental cache is reusable across provider recipes but is not
+  ## safe for concurrent writers. Serialize commands that carry the same
+  ## ``--nimcache`` path while leaving independent sessions fully parallel.
+  let lockPath = providerNimcachePath(command) & ".compile.lock"
+  createDir(extendedPath(parentDir(lockPath)))
+  when defined(windows):
+    let wide = newWideCString(lockPath)
+    while true:
+      let handle = providerLockCreateFileW(
+        wide,
+        ProviderLockGenericRead or ProviderLockGenericWrite,
+        0,
+        nil,
+        ProviderLockOpenAlways,
+        ProviderLockFileAttributeNormal,
+        nil)
+      if cast[int](handle) != cast[int](ProviderLockInvalidHandle):
+        return ProviderNimcacheLock(held: true, handle: handle)
+      let error = providerLockGetLastError()
+      if error != ProviderLockSharingViolation:
+        raise newException(IOError,
+          "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
+      sleep(50)
+  else:
+    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT, Mode(0o600))
+    if fd < 0:
+      raise newException(IOError,
+        "open(" & lockPath & ") failed, errno=" & $errno)
+    while providerLockFlock(fd, ProviderLockExclusive) != 0:
+      if errno == EINTR:
+        continue
+      let lockError = errno
+      discard posix.close(fd)
+      raise newException(IOError,
+        "flock(" & lockPath & ") failed, errno=" & $lockError)
+    return ProviderNimcacheLock(held: true, fd: fd)
+
+proc releaseProviderNimcacheLock(lock: var ProviderNimcacheLock) =
+  if not lock.held:
+    return
+  when defined(windows):
+    if cast[int](lock.handle) != cast[int](ProviderLockInvalidHandle):
+      discard providerLockCloseHandle(lock.handle)
+      lock.handle = ProviderLockInvalidHandle
+  else:
+    if lock.fd >= 0:
+      discard posix.close(lock.fd)
+      lock.fd = -1
+  lock.held = false
+
+proc runProviderCompilerCommand*(command: openArray[string]; cwd = ""):
+    ProviderCompileExecutionResult =
+  ## Execute a provider compiler command under the lock for its shared Nim
+  ## cache. The lock is kernel-owned, so process termination releases it even
+  ## though the small lock file remains available for later sessions.
+  var lock = acquireProviderNimcacheLock(command)
+  try:
+    result = runCommand(command, cwd = cwd)
+  finally:
+    releaseProviderNimcacheLock(lock)
+
 proc providerDynamicEnabled(): bool =
   ## Returns true when ``REPRO_PROVIDER_DYNAMIC`` selects the Tier 1
   ## shared DSL runtime DLL link mode (see
@@ -5209,7 +5321,7 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   # Keep the immutable library lookup root (`workDir`) out of the write path.
   # Nim emits relative linker response files in CWD even though `--nimcache`
   # and `--out` are absolute.
-  let execution = runCommand(plan.compilerCommand, cwd = compilerCwd)
+  let execution = runProviderCompilerCommand(plan.compilerCommand, compilerCwd)
   if not fileExists(extendedPath(plan.outputBinaryPath)):
     raise newException(IOError,
       "provider compilation did not write binary: " & plan.outputBinaryPath &

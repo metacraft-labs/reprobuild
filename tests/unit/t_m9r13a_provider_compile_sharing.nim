@@ -97,6 +97,29 @@ import std/[os, osproc, sequtils, streams, strutils, times, unittest]
 import repro_interface_artifacts
 import repro_tool_profiles
 
+const
+  ProviderLockRunnerFlag = "--provider-lock-runner"
+  ProviderLockPayloadFlag = "--provider-lock-payload"
+
+if paramCount() >= 1 and paramStr(1) == ProviderLockPayloadFlag:
+  writeFile(paramStr(2), "entered\n")
+  sleep(parseInt(paramStr(3)))
+  quit(0)
+
+if paramCount() >= 1 and paramStr(1) == ProviderLockRunnerFlag:
+  let nimcache = paramStr(2)
+  writeFile(paramStr(3), "started\n")
+  let execution = runProviderCompilerCommand(@[
+    getAppFilename(),
+    ProviderLockPayloadFlag,
+    paramStr(4),
+    paramStr(5),
+    "--nimcache:" & nimcache,
+  ])
+  if execution.exitCode != 0:
+    stderr.write(execution.output)
+  quit(execution.exitCode)
+
 # ---------------------------------------------------------------------------
 # Test fixture helpers
 # ---------------------------------------------------------------------------
@@ -200,6 +223,13 @@ proc compileWithMeasuredCpu(nimExe, nimcache, source, outBin: string): float =
       "synthetic compile failed (exit " & $exitCode & "): " & cmd.join(" ") &
         "\nstdout+stderr:\n" & output)
 
+proc waitForFile(path: string; timeoutMs: int): bool =
+  let deadline = epochTime() + timeoutMs.float / 1000.0
+  while epochTime() < deadline:
+    if fileExists(path):
+      return true
+    sleep(20)
+
 # ---------------------------------------------------------------------------
 # Arms
 # ---------------------------------------------------------------------------
@@ -266,6 +296,38 @@ suite "M9.R.13a provider-compile cache sharing":
     if not hasParallelLimit:
       checkpoint("command: " & command.join(" "))
     check hasParallelLimit
+
+  test "concurrent provider commands serialize a shared nimcache":
+    let scratch = getTempDir() /
+      ("repro-provider-lock-" & $getCurrentProcessId())
+    createDir(scratch)
+    defer:
+      try: removeDir(scratch)
+      except CatchableError: discard
+    let nimcache = scratch / "nimcache"
+    let firstStarted = scratch / "first-started"
+    let firstEntered = scratch / "first-entered"
+    let secondStarted = scratch / "second-started"
+    let secondEntered = scratch / "second-entered"
+    let runner = getAppFilename()
+
+    let first = startProcess(runner, args = @[
+      ProviderLockRunnerFlag, nimcache, firstStarted, firstEntered, "2000"],
+      options = {poParentStreams})
+    check waitForFile(firstEntered, 5000)
+
+    let second = startProcess(runner, args = @[
+      ProviderLockRunnerFlag, nimcache, secondStarted, secondEntered, "0"],
+      options = {poParentStreams})
+    check waitForFile(secondStarted, 5000)
+    sleep(150)
+    check not fileExists(secondEntered)
+
+    check first.waitForExit() == 0
+    first.close()
+    check second.waitForExit() == 0
+    second.close()
+    check fileExists(secondEntered)
 
   test "test_provider_compile_command_prefers_runtime_cc_on_posix":
     ## A warm repro binary can outlive the direnv compiler wrapper it was built
