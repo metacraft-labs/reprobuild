@@ -133,6 +133,30 @@ type
       ## remain solved — owner decision Q-4, and the reason this is a field on
       ## the package rather than the package's removal from the program.
       ## ``versions`` must hold exactly one entry when this is set.
+    instanceOf*: string
+      ## Named-Lock-Files NLF-M8 (§9.1) — the BASE package this decl is one
+      ## instance of, or ``""`` when ``name`` is itself the base.
+      ##
+      ## §9 is "two edges under different lock files feeding one artifact",
+      ## and the encoder before NLF-M8 could not represent that at all: one
+      ## ``package_chosen/2`` per NAME means one instance per package, so two
+      ## irreconcilable demanders were a bare UNSAT — the exact failure §9.4
+      ## forbids ("It MUST NOT report a bare unsat").
+      ##
+      ## An instance is an ordinary package in every other respect: same
+      ## candidate universe, same cardinality rule, same range constraints.
+      ## What ``instanceOf`` adds is the join the unification OBJECTIVE is
+      ## written over (``encodeUnificationObjective``), so the solver prefers
+      ## to land every instance of a base on ONE version and introduces a
+      ## second only when the constraints leave it no choice. That is §9.1's
+      ## "unification is therefore an optimisation objective, not a
+      ## precondition" — Spack's ``when_possible`` objective without Spack's
+      ## round structure, which §14.3.1 rejects for making the outcome
+      ## history-dependent.
+      ##
+      ## A package set with no instances emits NO objective and NO join
+      ## facts, so its program text is byte-for-byte what it was. That is
+      ## NLF-STAT-4, and it is why this is a field rather than a mode.
 
   VersionPreference* = enum
     ## Named-Lock-Files NLF-M6 (§5.5) — the *version-selection rule* a solve
@@ -195,9 +219,19 @@ proc newPackage*(name: string;
                  versions: openArray[string];
                  depends: openArray[DependencyDecl] = @[];
                  variants: openArray[VariantDecl] = @[];
-                 pinned = false): PackageDecl =
+                 pinned = false; instanceOf = ""): PackageDecl =
   PackageDecl(name: name, versions: @versions, depends: @depends,
-              variants: @variants, pinned: pinned)
+              variants: @variants, pinned: pinned, instanceOf: instanceOf)
+
+proc newInstance*(instanceName, baseName: string;
+                  versions: openArray[string];
+                  depends: openArray[DependencyDecl] = @[];
+                  variants: openArray[VariantDecl] = @[]): PackageDecl =
+  ## Named-Lock-Files NLF-M8 — one INSTANCE of ``baseName``. See
+  ## ``PackageDecl.instanceOf``. ``instanceName`` must be unique across the
+  ## declaration set, because it is the ``package_chosen/2`` key.
+  newPackage(instanceName, versions, depends, variants,
+             pinned = false, instanceOf = baseName)
 
 proc newPinnedPackage*(name, version: string;
                        depends: openArray[DependencyDecl] = @[];
@@ -536,8 +570,89 @@ proc encodeVersionRanks*(packages: openArray[PackageDecl]): string =
                 aspQuote(v) & "\", " & $i & ").")
   lines.join("\n")
 
+proc instanceBases*(packages: openArray[PackageDecl]):
+    OrderedTable[string, seq[string]] =
+  ## Base package name → the instance names declared for it, in declaration
+  ## order. Only bases with at least ONE instance appear; a base with exactly
+  ## one instance is kept, because "one instance today, two tomorrow" is a
+  ## property of the workspace and not of the encoder, and a table that
+  ## silently dropped singletons would make the two cases encode differently
+  ## for a reason nobody wrote down.
+  result = initOrderedTable[string, seq[string]]()
+  for p in packages:
+    if p.instanceOf.len == 0: continue
+    if not result.hasKey(p.instanceOf):
+      result[p.instanceOf] = @[]
+    result[p.instanceOf].add(p.name)
+
+proc hasUnificationChoice*(packages: openArray[PackageDecl]): bool =
+  ## Whether any base has TWO OR MORE instances — the only case in which
+  ## unification is a question at all, and therefore the only case in which
+  ## anything is emitted.
+  for _, instances in instanceBases(packages).pairs:
+    if instances.len >= 2:
+      return true
+  false
+
+proc encodeUnificationObjective*(packages: openArray[PackageDecl]): string =
+  ## Named-Lock-Files NLF-M8, design §9.1 — **unify first, and only then
+  ## diverge**, as a soft objective over the full instance set.
+  ##
+  ## The encoding is two rules and one directive per base:
+  ##
+  ## ```
+  ## instance_version("libfoo", V) :- package_chosen("libfoo@hostTools", V).
+  ## instance_version("libfoo", V) :- package_chosen("libfoo@targetRuntime", V).
+  ## #minimize { 1@-1, B, V : instance_version(B, V) }.
+  ## ```
+  ##
+  ## `instance_version/2` is a SET: two instances that choose the same version
+  ## contribute one tuple, two that disagree contribute two. Minimising its
+  ## cardinality is therefore exactly "use as few distinct versions of each
+  ## library as the constraints permit", which is §9.1's three consequences —
+  ## shared dependencies collapse, divergence is confined to what genuinely
+  ## could not agree, and nothing needs to coordinate for content-derived
+  ## identity to share the rest.
+  ##
+  ## ## Why an objective and not a constraint
+  ##
+  ## A hard constraint saying "all instances agree" would turn every genuine
+  ## disagreement back into the bare UNSAT §9.4 forbids. A soft objective
+  ## finds the split, and the split is what the §9.4 diagnostic is written
+  ## about. This is the difference the corpus draws between NLF-DIA-6 (ranges
+  ## overlap: one instance) and NLF-DIA-2 (ranges do not: two instances and an
+  ## error naming both) — one encoder answers both.
+  ##
+  ## ## The priority level, and why it is above the version preference
+  ##
+  ## `@-1`, with `encodeVersionPreference` moved down to `@-2`/`@-3` whenever
+  ## this fires. clingo optimises higher levels first, so unification
+  ## outranks `--strategy lowest`/`highest`. That ordering is §9.1's
+  ## "divergence is a fallback, not a starting point" made mechanical: a
+  ## version preference that outranked unification could split a library the
+  ## constraints permitted to unify, purely to reach a lower or higher
+  ## version, and the split would be invisible in the answer.
+  ##
+  ## Variant priorities keep `@0` and still outrank both, so a `prForce`
+  ## contribution is never overturned to save an instance.
+  ##
+  ## Emits `""` when no base has two instances, so every pre-NLF-M8 program
+  ## is byte-unchanged (NLF-STAT-4).
+  if not hasUnificationChoice(packages):
+    return ""
+  var lines: seq[string] = @[]
+  let bases = instanceBases(packages)
+  for base, instances in bases.pairs:
+    if instances.len < 2: continue
+    for inst in instances:
+      lines.add("instance_version(\"" & aspQuote(base) & "\", V) :- " &
+        "package_chosen(\"" & aspQuote(inst) & "\", V).")
+  lines.add("#minimize { 1@-1, B, V : instance_version(B, V) }.")
+  lines.join("\n")
+
 proc encodeVersionPreference*(packages: openArray[PackageDecl];
-                              preference: VersionPreference): string =
+                              preference: VersionPreference;
+                              levelBase = -1): string =
   ## The objective directives for `preference`, or `""` for `vpNone`.
   ##
   ## ## The priority level, and why it is negative
@@ -558,8 +673,20 @@ proc encodeVersionPreference*(packages: openArray[PackageDecl];
   ## package's rank could be traded against a transitive package's rank and the
   ## answer would depend on candidate counts. Lexicographic levels make "direct
   ## minimal, then transitive maximal" mean exactly that.
+  ##
+  ## ## `levelBase`, and why it is a parameter rather than a constant
+  ##
+  ## NLF-M8 adds a unification objective (§9.1), which must outrank the
+  ## version preference — see `encodeUnificationObjective`. It takes `@-1`,
+  ## and this one steps down to `@-2`/`@-3` when it does. The step is a
+  ## PARAMETER so that a program with no unification choice keeps `@-1`/`@-2`
+  ## and stays byte-identical to every pre-NLF-M8 program: NLF-STAT-4 freezes
+  ## the default path, and a renumbering applied unconditionally would move
+  ## the text of every existing `--strategy` invocation for no reason.
   if preference == vpNone:
     return ""
+  let l1 = "@" & $levelBase
+  let l2 = "@" & $(levelBase - 1)
   var sections: seq[string] = @[]
   let ranks = encodeVersionRanks(packages)
   if ranks.len > 0:
@@ -568,10 +695,10 @@ proc encodeVersionPreference*(packages: openArray[PackageDecl];
   of vpNone:
     discard
   of vpLowest:
-    sections.add("#minimize { R@-1, P : package_chosen(P, V), " &
+    sections.add("#minimize { R" & l1 & ", P : package_chosen(P, V), " &
       "version_rank(P, V, R) }.")
   of vpHighest:
-    sections.add("#maximize { R@-1, P : package_chosen(P, V), " &
+    sections.add("#maximize { R" & l1 & ", P : package_chosen(P, V), " &
       "version_rank(P, V, R) }.")
   of vpLowestDirect:
     var directFacts: seq[string] = @[]
@@ -583,9 +710,9 @@ proc encodeVersionPreference*(packages: openArray[PackageDecl];
       directFacts.add("version_direct(\"" & aspQuote(name) & "\").")
     if directFacts.len > 0:
       sections.add(directFacts.join("\n"))
-    sections.add("#minimize { R@-1, P : package_chosen(P, V), " &
+    sections.add("#minimize { R" & l1 & ", P : package_chosen(P, V), " &
       "version_rank(P, V, R), version_direct(P) }.")
-    sections.add("#maximize { R@-2, P : package_chosen(P, V), " &
+    sections.add("#maximize { R" & l2 & ", P : package_chosen(P, V), " &
       "version_rank(P, V, R), not version_direct(P) }.")
   sections.join("\n")
 
@@ -723,10 +850,20 @@ proc encodeUnified*(variants: openArray[VariantDecl];
     sections.add(packageText)
   if propagation.len > 0:
     sections.add(propagation)
+  # NLF-M8 (§9.1) — unification, as an objective, BEFORE the version
+  # preference both in the text and in the priority lattice. Empty unless
+  # some base carries two instances, which is what keeps every pre-NLF-M8
+  # program byte-identical (NLF-STAT-4).
+  let unificationText = encodeUnificationObjective(packages)
+  if unificationText.len > 0:
+    sections.add(unificationText)
   # NLF-M6 — the version-selection objective. Emitted LAST among the rule
   # sections and empty for `vpNone`, so every pre-NLF-M6 program is byte-for-
-  # byte what it was.
-  let preferenceText = encodeVersionPreference(packages, preference)
+  # byte what it was. NLF-M8 steps its levels down by one when the
+  # unification objective is present, so unification outranks it — see
+  # `encodeVersionPreference`'s `levelBase`.
+  let preferenceText = encodeVersionPreference(packages, preference,
+    levelBase = (if unificationText.len > 0: -2 else: -1))
   if preferenceText.len > 0:
     sections.add(preferenceText)
   sections.add(encodeUnifiedShow())

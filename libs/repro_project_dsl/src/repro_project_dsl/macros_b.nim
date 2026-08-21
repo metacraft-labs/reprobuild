@@ -3016,6 +3016,25 @@ proc m9r3LinkKindLit(text: string; node: NimNode): NimNode =
           "(got '" & text & "')", node)
     ident("llkUnset")
 
+proc nlfM8MultiVersionLit(text: string; node: NimNode): NimNode =
+  ## Named-Lock-Files NLF-M8 (§9.3) — lower a ``multiVersion`` literal to a
+  ## ``MultiVersionPolicy`` enum value.
+  ##
+  ## The two spellings §9.3 writes are the only two accepted. In particular
+  ## there is no ``multiVersion unset``: writing the line is the act of making
+  ## a claim, so a spelling that means "I wrote a line that says nothing"
+  ## would be a way to look like an author who considered the question without
+  ## having answered it — which is the state §9.3's naming exists to keep
+  ## distinguishable from silence.
+  case text.normalize
+  of "forbidden": ident("mvForbidden")
+  of "allowed":   ident("mvAllowed")
+  else:
+    error("library api: multiVersion must be one of: forbidden, allowed " &
+          "(got '" & text & "'). See Named-Lock-Files.md §9.3 — omitting the " &
+          "line inherits `forbidden` from the language convention.", node)
+    ident("mvForbidden")
+
 proc m9r3IdentOrStrText(node: NimNode): tuple[ok: bool; text: string] =
   ## Project a single-token AST node onto the string the registry
   ## stores. Accepts string literals (use ``strVal``), bare identifiers
@@ -3382,6 +3401,28 @@ proc emitM9R3LibraryApis*(packageName: string;
         let kindLit = m9r3LinkKindLit(parsed.text, valueNode)
         setters.add(quote do:
           `apiSym`.linkKind = `kindLit`)
+      of "multiversion":
+        # Named-Lock-Files NLF-M8, design §9.3 — the per-library property,
+        # beside `linkKind` because it is consumption metadata of the same
+        # kind. The source position recorded is the `multiVersion` LINE's,
+        # because §9.4's diagnostic cites the declaration the author has to
+        # change and the library's own line is not that.
+        if fieldStmt.len < 2:
+          error("library api: multiVersion requires a value " &
+                "(forbidden | allowed)", fieldStmt)
+        let valueNode = fieldStmt[1]
+        let parsed = m9r3IdentOrStrText(valueNode)
+        if not parsed.ok:
+          error("library api: multiVersion must be one of: forbidden, allowed",
+                valueNode)
+        let policyLit = nlfM8MultiVersionLit(parsed.text, valueNode)
+        let info = fieldStmt.lineInfoObj
+        let fileLit = newLit(info.filename)
+        let lineLit = newLit(info.line)
+        setters.add(quote do:
+          `apiSym`.multiVersion = `policyLit`
+          `apiSym`.multiVersionSourceFile = `fileLit`
+          `apiSym`.multiVersionSourceLine = `lineLit`)
       of "headers":
         if fieldStmt.len >= 2:
           let body = fieldStmt[^1]
