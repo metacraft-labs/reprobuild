@@ -159,15 +159,69 @@ type
     imInstallerInnoSetup = "installer-inno-setup"
 
   PlatformCpu* = enum
-    ## Coarse CPU enum. Matches the ``cpu_arch`` tokens the
+    ## The CPU **family** axis. Matches the ``cpu_arch`` tokens the
     ## reprobuild runtime already uses (see
     ## ``repro_core``). The ``pcAny`` variant is reserved for
     ## architecture-independent artifacts (rare — most installers are
     ## arch-specific even on Windows).
+    ##
+    ## PMC-2 (Platform-And-Microarchitecture-Constraints,
+    ## Package-Model.md §"The CPU axis, which is where a flat string
+    ## breaks first"): this enum is deliberately UNCHANGED. It was the
+    ## whole of "CPU" before PMC-2 and is now one of two coordinates —
+    ## the family — with ``MicroarchLevel`` carrying the other. Keeping
+    ## the family enum byte-identical is what makes "every existing
+    ## catalog entry resolves exactly as before" checkable rather than
+    ## hoped for: no catalog literal, no serialized form and no test
+    ## that names ``pcX86_64`` had to move.
     pcAny = "any"
     pcX86_64 = "x86_64"
     pcAArch64 = "aarch64"
     pcX86 = "x86"
+
+  MicroarchLevel* = enum
+    ## PMC-2: the microarchitecture axis, as the x86-64 psABI levels.
+    ##
+    ## These are the coarse axis the milestone chose deliberately: the
+    ## levels form a LINEAR CHAIN, so "artifact requires >= v2, host
+    ## provides v3" is an integer comparison rather than a walk over
+    ## archspec's is-a graph. This org's CI already labels hosts
+    ## ``x86-64-v2`` / ``x86-64-v3``, so the vocabulary predates the code.
+    ##
+    ## The enum's ORDER is the comparison. ``mlNone`` sorts below every
+    ## real level so that "no floor" compares as "the least demanding
+    ## artifact", which is exactly its meaning on the artifact side.
+    ##
+    ## On the HOST side ``mlNone`` means "this host has not stated a
+    ## level", which is NOT the same as "v1" and is deliberately treated
+    ## as unsatisfying for any arm that declares a floor — see
+    ## ``satisfiesFloor``. Feature sets finer than a level (AVX-512 in
+    ## particular is not one level) are PMC-3.
+    mlNone = "none"
+    mlX86_64_v1 = "x86-64-v1"
+    mlX86_64_v2 = "x86-64-v2"
+    mlX86_64_v3 = "x86-64-v3"
+    mlX86_64_v4 = "x86-64-v4"
+
+  PlatformTarget* = object
+    ## PMC-2 deliverable 1: the structured target — a CPU family plus an
+    ## OPTIONAL microarchitecture level.
+    ##
+    ## Read in two directions, and the direction changes what ``level``
+    ## means:
+    ##
+    ##   * on an ARTIFACT (``PlatformBinary.cpu`` + ``.cpu_level``) the
+    ##     level is the FLOOR the artifact needs — the minimum the host
+    ##     must provide for the binary not to trap;
+    ##   * on a HOST (``PlatformTarget`` passed to selection) the level is
+    ##     what the host PROVIDES.
+    ##
+    ## Compatibility is therefore an ORDERING (``provided >= floor``), not
+    ## the equality the flat enum could express. ``mlNone`` on the
+    ## artifact side is what ``pcAny`` used to mean implicitly: no floor,
+    ## runs anywhere in the family.
+    family*: PlatformCpu
+    level*: MicroarchLevel
 
   PlatformOs* = enum
     poAny = "any"
@@ -222,6 +276,25 @@ type
     ## carries ``bin/javac.exe`` directly. Empty ``extract_path`` =
     ## no inner dir.
     cpu*: PlatformCpu
+    cpu_level*: MicroarchLevel
+                           ## PMC-2: the microarchitecture FLOOR this
+                           ## slice requires, or ``mlNone`` (the default,
+                           ## and the state of every catalog entry that
+                           ## exists today) for "no floor — runs on any
+                           ## host of this family".
+                           ##
+                           ## A floor is a REQUIREMENT, not a preference:
+                           ## a slice built with ``-march=x86-64-v3``
+                           ## carries instructions a v2 host does not
+                           ## have, and running it there is a ``SIGILL``
+                           ## far from its cause. Selection therefore
+                           ## refuses such a slice rather than ranking it
+                           ## lower (``selectPlatformBinaryEx``).
+                           ##
+                           ## Serialization emits this field ONLY when it
+                           ## is non-``mlNone``, so every checked-in
+                           ## ``packages/<tool>.nim`` round-trips
+                           ## byte-identical through ``serializeAsCode``.
     os*: PlatformOs
     url*: string
     sha256*: string        ## hex-encoded (64 chars); empty if another
@@ -460,6 +533,64 @@ type
                                       ## simpler cross-platform shape.
 
 # ---------------------------------------------------------------------------
+# PMC-2 — the microarchitecture axis: an ORDER, not an equality
+# ---------------------------------------------------------------------------
+#
+# Everything below is pure and total. It is deliberately free of any ambient
+# read (no env, no ``hostCPU``, no OS probe): detection lives in
+# ``repro_home_apply/package_catalog.nim`` where it can be supplied through the
+# resolution entry points' DEFAULT PARAMETERS. That separation is the reason
+# every microarchitecture test in this campaign is hermetic — a test names a
+# synthetic ``PlatformTarget`` and never needs v2/v3 hardware. Do not add a
+# global lookup here.
+
+proc initPlatformTarget*(family: PlatformCpu; level = mlNone): PlatformTarget =
+  ## Construct a target. ``level`` defaults to ``mlNone``: on the host side
+  ## that means "this host has not stated what it provides", which refuses
+  ## every arm that declares a floor (see ``satisfiesFloor``).
+  PlatformTarget(family: family, level: level)
+
+proc levelFamily*(level: MicroarchLevel): PlatformCpu =
+  ## The CPU family a microarchitecture level belongs to. Every level
+  ## defined today is an x86-64 psABI level; ``mlNone`` belongs to no
+  ## family in particular and answers ``pcAny``.
+  ##
+  ## Exists so the validator can refuse ``cpu: pcAArch64,
+  ## cpu_level: mlX86_64_v3`` at authoring time rather than letting a
+  ## nonsense pair reach selection, where it would simply never match and
+  ## look like a missing arm.
+  case level
+  of mlNone: pcAny
+  of mlX86_64_v1, mlX86_64_v2, mlX86_64_v3, mlX86_64_v4: pcX86_64
+
+proc describeMicroarchLevel*(level: MicroarchLevel): string =
+  ## ``x86-64-v3``; ``mlNone`` renders as ``none``. The spelling is the
+  ## psABI one and the one this org's CI labels already use, so a
+  ## diagnostic can be pasted into a runner label search.
+  $level
+
+proc satisfiesFloor*(hostLevel, floor: MicroarchLevel): bool =
+  ## Does a host PROVIDING ``hostLevel`` satisfy an artifact whose FLOOR is
+  ## ``floor``? This is the ordering the milestone asks for.
+  ##
+  ## Two asymmetric rules, and the asymmetry is the point:
+  ##
+  ##   * ``floor == mlNone`` — no floor. Always satisfied, on any host,
+  ##     including one that has stated nothing. This is what keeps every
+  ##     catalog entry that exists today selecting exactly as it did.
+  ##   * ``hostLevel == mlNone`` with a real floor — REFUSED. An
+  ##     unstated host level is not "v1"; it is "unknown", and the
+  ##     failure mode of guessing high is ``SIGILL`` inside someone
+  ##     else's build. Compare with ``platformMatchesHost``, which
+  ##     fails OPEN for an unrecognised CPU family: there the cost of
+  ##     guessing wrong is a resolution that finds nothing, here it is a
+  ##     binary that runs and traps. The two directions are chosen per
+  ##     consequence, not by a single house rule.
+  if floor == mlNone: true
+  elif hostLevel == mlNone: false
+  else: ord(hostLevel) >= ord(floor)
+
+# ---------------------------------------------------------------------------
 # Construction helpers
 # ---------------------------------------------------------------------------
 
@@ -470,10 +601,11 @@ proc initPlatformBinary*(cpu: PlatformCpu; os: PlatformOs; url: string;
                          msi_admin_install = false;
                          archive_format_override = afZip;
                          has_archive_format_override = false;
-                         bin_relpath_override: seq[string] = @[]):
+                         bin_relpath_override: seq[string] = @[];
+                         cpu_level = mlNone):
     PlatformBinary =
   PlatformBinary(
-    cpu: cpu, os: os, url: url,
+    cpu: cpu, cpu_level: cpu_level, os: os, url: url,
     sha256: sha256, sha512: sha512, sha1: sha1,
     extract_path: extract_path,
     nested_7z: nested_7z,
@@ -529,6 +661,16 @@ proc validatePlatformBinaryEx*(pb: PlatformBinary; index: int;
   let prefix = "platforms[" & $index & "] (" & $pb.cpu & "-" & $pb.os & "): "
   if pb.url.len == 0:
     result.add(prefix & "url is required")
+  # PMC-2: a microarchitecture floor must belong to the arm's own family.
+  # ``cpu: pcAArch64, cpu_level: mlX86_64_v3`` is not a narrow arm, it is a
+  # contradiction, and without this check it would simply never be selected —
+  # indistinguishable at the point of failure from a missing arm.
+  if pb.cpu_level != mlNone and pb.cpu != levelFamily(pb.cpu_level):
+    result.add(prefix & "cpu_level " & describeMicroarchLevel(pb.cpu_level) &
+      " belongs to cpu family " & $levelFamily(pb.cpu_level) &
+      ", but this slice declares cpu " & $pb.cpu &
+      ". A microarchitecture floor constrains a family it is part of; " &
+      "set cpu to " & $levelFamily(pb.cpu_level) & " or drop cpu_level.")
   let hasSha256 = pb.sha256.len > 0
   let hasSha512 = pb.sha512.len > 0
   let hasSha1   = pb.sha1.len > 0
@@ -603,7 +745,15 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
   var seenPairs: seq[string] = @[]
   for i, pb in vp.platforms:
     result.add(validatePlatformBinaryEx(pb, i, warnings))
-    let key = $pb.cpu & "-" & $pb.os
+    # PMC-2: the uniqueness key gained the microarchitecture floor. Several
+    # slices for the SAME (cpu, os) at DIFFERENT floors is the whole point of
+    # the milestone — v1/v2/v3 builds of one tool for one OS — so keying on
+    # (cpu, os) alone would reject exactly the shape the feature exists to
+    # express. The rendered key is unchanged for a levelless slice, so every
+    # existing duplicate-pair diagnostic reads byte-identically.
+    let key = $pb.cpu & "-" & $pb.os &
+      (if pb.cpu_level == mlNone: ""
+       else: " " & describeMicroarchLevel(pb.cpu_level))
     if key in seenPairs:
       result.add("platforms[" & $i & "]: duplicate (cpu, os) pair '" &
         key & "'")
@@ -747,6 +897,29 @@ proc parsePlatformCpuToken*(token: string):
   of "x86", "i386", "i686":    (true, pcX86)
   else:             (false, pcAny)
 
+proc parseMicroarchLevelToken*(token: string):
+    tuple[ok: bool; level: MicroarchLevel] =
+  ## PMC-2: map a microarchitecture token onto ``MicroarchLevel``.
+  ##
+  ## Accepts the psABI spelling (``x86-64-v3``), the underscore variant
+  ## the CPU-family vocabulary uses (``x86_64_v3`` / ``x86_64-v3``), and
+  ## the bare level (``v3``) for use where the family is already fixed by
+  ## context. Empty and ``none`` mean "no level".
+  ##
+  ## Rejects anything else rather than widening to ``mlNone``: a typo'd
+  ## floor that silently became "no floor" is a v3 binary shipped to a v2
+  ## host, which is the exact failure the milestone exists to prevent.
+  var norm = token.strip().toLowerAscii()
+  for i in 0 ..< norm.len:
+    if norm[i] == '_': norm[i] = '-'
+  case norm
+  of "", "none":                            (true, mlNone)
+  of "v1", "x86-64-v1", "x86-64v1":         (true, mlX86_64_v1)
+  of "v2", "x86-64-v2", "x86-64v2":         (true, mlX86_64_v2)
+  of "v3", "x86-64-v3", "x86-64v3":         (true, mlX86_64_v3)
+  of "v4", "x86-64-v4", "x86-64v4":         (true, mlX86_64_v4)
+  else:                                     (false, mlNone)
+
 proc parsePlatformOsToken*(token: string):
     tuple[ok: bool; os: PlatformOs] =
   ## Map a ``platforms:`` OS token onto ``PlatformOs``. Empty or ``any``
@@ -859,29 +1032,157 @@ proc describeHostTarget*(availability: PackageAvailability;
 # Per-platform resolution
 # ---------------------------------------------------------------------------
 
+type
+  PlatformSelection* = object
+    ## PMC-2: the outcome of arm selection, widened so that "no arm's
+    ## floor is satisfied" is DISTINGUISHABLE from "no arm exists for
+    ## this (cpu, os)".
+    ##
+    ## The two need different remediations and, more to the point,
+    ## different diagnostics: the first is "your host is below the floor
+    ## this artifact needs" and the second is "nobody built this for your
+    ## platform". Collapsing them into one ``found = false`` is how a
+    ## microarchitecture shortfall would reach the reader as a generic
+    ## no-matching-arm message, which is where PMC-1 started.
+    found*: bool
+    binary*: PlatformBinary
+    refusedForLevel*: bool
+      ## True when at least one arm matched the (cpu, os) coordinate and
+      ## every such arm declared a floor above what the host provides.
+    requiredLevel*: MicroarchLevel
+      ## The LOWEST floor among the refused arms — the least the host
+      ## would have to provide for something to select. Naming the lowest
+      ## rather than the highest is deliberate: it is the actionable
+      ## number.
+    hostLevel*: MicroarchLevel
+      ## What the host said it provides, echoed so the caller can render
+      ## "needs x86-64-v3, host provides x86-64-v2" without re-deriving it.
+
+proc armPreferenceTier(pb: PlatformBinary;
+                       cpu: PlatformCpu; os: PlatformOs): int =
+  ## The pre-PMC-2 four-step preference, reified as a rank.
+  ##
+  ##   0 = exact (cpu, os); 1 = (pcAny, os); 2 = (cpu, poAny);
+  ##   3 = (pcAny, poAny); -1 = does not apply to this host at all.
+  ##
+  ## Scanning tiers in order and taking the first arm in the first
+  ## non-empty tier is EXACTLY what the four sequential loops did, which
+  ## is what makes ``t_levelless_catalog_selection_is_unchanged`` a
+  ## statement about equivalence rather than a hope.
+  if pb.cpu == cpu and pb.os == os: 0
+  elif pb.cpu == pcAny and pb.os == os: 1
+  elif pb.cpu == cpu and pb.os == poAny: 2
+  elif pb.cpu == pcAny and pb.os == poAny: 3
+  else: -1
+
+proc selectPlatformBinaryEx*(vp: VersionedProvisioning;
+                             target: PlatformTarget; os: PlatformOs):
+    PlatformSelection =
+  ## PMC-2 deliverable 3: selection as "filter to what the host can run,
+  ## then take the highest floor".
+  ##
+  ## The order of operations is the substance:
+  ##
+  ##   1. FILTER to arms whose (cpu, os) applies to this host AND whose
+  ##      microarchitecture floor the host satisfies. Filtering first is
+  ##      what makes an unsatisfiable arm invisible rather than merely
+  ##      unranked — a v3 arm on a v2 host must not be able to win by
+  ##      being the most specific.
+  ##   2. Among the survivors take the BEST preference tier — the
+  ##      pre-PMC-2 exact-then-``any`` order, unchanged.
+  ##   3. Within that tier take the HIGHEST floor: the best the host can
+  ##      actually run. "Refuses what it cannot run" and "picks the best
+  ##      it can run" are separate properties and this step is the second
+  ##      one.
+  ##   4. Ties (equal tier, equal floor) go to the first declared arm,
+  ##      which is what the four sequential loops did.
+  ##
+  ## DEGENERATE CASE — and this is the compatibility guarantee for the
+  ## entire existing stdlib: when NO arm declares a level, every
+  ## applicable arm survives step 1 (``satisfiesFloor`` is unconditionally
+  ## true for ``mlNone``) and every survivor has the same floor, so steps
+  ## 3 and 4 collapse and the result is "first arm of the best non-empty
+  ## tier" — the four-step order, arm for arm.
+  ##
+  ## Tier BEFORE floor, not the other way round: the (cpu, os) coordinate
+  ## is an availability statement and the floor is a capability one, and a
+  ## same-family exact arm is a stronger claim than an ``any``-family arm
+  ## that happens to be tuned higher. In the shape this milestone is for —
+  ## v1/v2/v3 builds of one tool for one (family, os) — every candidate
+  ## shares a tier and the floor decides outright.
+  result.hostLevel = target.level
+  result.requiredLevel = mlNone
+  var bestTier = high(int)
+  var haveBest = false
+  for pb in vp.platforms:
+    let tier = armPreferenceTier(pb, target.family, os)
+    if tier < 0:
+      continue
+    if not satisfiesFloor(target.level, pb.cpu_level):
+      # Applicable coordinate, unreachable floor. Remember the LOWEST such
+      # floor so the diagnostic can name what the host would need.
+      if not result.refusedForLevel or
+         ord(pb.cpu_level) < ord(result.requiredLevel):
+        result.requiredLevel = pb.cpu_level
+      result.refusedForLevel = true
+      continue
+    if not haveBest or tier < bestTier or
+       (tier == bestTier and ord(pb.cpu_level) > ord(result.binary.cpu_level)):
+      haveBest = true
+      bestTier = tier
+      result.binary = pb
+  result.found = haveBest
+  if haveBest:
+    # Something selected, so this is not a shortfall — clear the refusal so
+    # a caller cannot render a warning about an arm it did not need.
+    result.refusedForLevel = false
+    result.requiredLevel = mlNone
+
+proc describeMicroarchShortfall*(sel: PlatformSelection): string =
+  ## PMC-2 deliverable 4: the shortfall sentence —
+  ## "needs x86-64-v3, host provides x86-64-v2".
+  ##
+  ## The milestone writes its example with the host side abbreviated
+  ## ("host provides v2"); this spells both sides in full psABI form
+  ## deliberately, and the difference is not cosmetic. The string is the
+  ## same vocabulary this org's CI runner labels use (``x86-64-v3`` appears
+  ## verbatim in ``services/github-runners/common.nix``), so a reader can
+  ## paste either half into a label search. A bare ``v2`` is also the one
+  ## spelling that stops being unambiguous the moment PMC-3 adds a second
+  ## family's ladder.
+  ##
+  ## A host that stated nothing gets the honest phrasing instead of being
+  ## reported as some level it never claimed; the remediation differs
+  ## (declare the host's level vs. get a better host) and a wrong noun
+  ## here sends the reader to the wrong fix.
+  if not sel.refusedForLevel:
+    return ""
+  let provides =
+    if sel.hostLevel == mlNone: "no declared microarchitecture level"
+    else: describeMicroarchLevel(sel.hostLevel)
+  "needs " & describeMicroarchLevel(sel.requiredLevel) &
+    ", host provides " & provides
+
 proc selectPlatformBinary*(vp: VersionedProvisioning;
                            cpu: PlatformCpu; os: PlatformOs):
     tuple[found: bool; binary: PlatformBinary] =
-  ## Pick the ``PlatformBinary`` for the (cpu, os) tuple. Resolution
-  ## order:
+  ## Pre-PMC-2 signature, preserved. Resolution order:
   ##   1. exact match (cpu, os);
   ##   2. (pcAny, os) fallback;
   ##   3. (cpu, poAny) fallback;
   ##   4. (pcAny, poAny) fallback.
   ## Returns ``(false, PlatformBinary())`` if no entry matches.
-  for pb in vp.platforms:
-    if pb.cpu == cpu and pb.os == os:
-      return (true, pb)
-  for pb in vp.platforms:
-    if pb.cpu == pcAny and pb.os == os:
-      return (true, pb)
-  for pb in vp.platforms:
-    if pb.cpu == cpu and pb.os == poAny:
-      return (true, pb)
-  for pb in vp.platforms:
-    if pb.cpu == pcAny and pb.os == poAny:
-      return (true, pb)
-  (false, PlatformBinary())
+  ##
+  ## PMC-2: this is now ``selectPlatformBinaryEx`` with a target whose
+  ## level is ``mlNone`` — a host that has stated nothing about its
+  ## microarchitecture. For a catalog declaring no floors (every catalog
+  ## that exists today) that is bit-for-bit the old behaviour. For a
+  ## catalog that does declare floors it refuses them all, which is the
+  ## safe direction for a caller that has not been taught to supply a
+  ## host level, and the caller loses only the ability to SAY SO — use
+  ## ``selectPlatformBinaryEx`` to get the shortfall.
+  let sel = selectPlatformBinaryEx(vp, initPlatformTarget(cpu), os)
+  (sel.found, sel.binary)
 
 proc selectDefault*(catalog: openArray[VersionedProvisioning]):
     tuple[found: bool; entry: VersionedProvisioning] =
@@ -931,6 +1232,17 @@ proc cpuIdent(cpu: PlatformCpu): string =
   of pcX86_64: "pcX86_64"
   of pcAArch64: "pcAArch64"
   of pcX86: "pcX86"
+
+proc microarchLevelIdent(level: MicroarchLevel): string =
+  ## PMC-2: the Nim ENUM IDENTIFIER, not the psABI spelling. The
+  ## serializer emits Nim source that must re-evaluate under this module,
+  ## and ``x86-64-v3`` is not an identifier.
+  case level
+  of mlNone: "mlNone"
+  of mlX86_64_v1: "mlX86_64_v1"
+  of mlX86_64_v2: "mlX86_64_v2"
+  of mlX86_64_v3: "mlX86_64_v3"
+  of mlX86_64_v4: "mlX86_64_v4"
 
 proc osIdent(os: PlatformOs): string =
   case os
@@ -996,13 +1308,22 @@ proc serializePlatformBinary(pb: PlatformBinary): string =
   # vast majority of catalog entries (all non-nested archives) keep
   # their compact one-line shape and the existing harvester output
   # bytes-equal-trees against the M67/M68 baseline.
-  result = "PlatformBinary(cpu: " & cpuIdent(pb.cpu) &
-    ", os: " & osIdent(pb.os) &
+  result = "PlatformBinary(cpu: " & cpuIdent(pb.cpu)
+  # PMC-2: cpu_level emitted ONLY when a floor is declared. No checked-in
+  # catalog declares one, so every packages/<tool>.nim round-trips through
+  # ``serializeAsCode`` byte-identically — the widened type is NOT a
+  # serialized-form change for anything that exists today. (When a floor IS
+  # declared the emitted form gains a field, which a pre-PMC-2 build of this
+  # module could not parse; that is a forward-compatibility break confined to
+  # catalogs that opt in.)
+  if pb.cpu_level != mlNone:
+    result.add(", cpu_level: " & microarchLevelIdent(pb.cpu_level))
+  result.add(", os: " & osIdent(pb.os) &
     ", url: " & escapeString(pb.url) &
     ", sha256: " & escapeString(pb.sha256) &
     ", sha512: " & escapeString(pb.sha512) &
     ", sha1: " & escapeString(pb.sha1) &
-    ", extract_path: " & escapeString(pb.extract_path)
+    ", extract_path: " & escapeString(pb.extract_path))
   if pb.nested_7z:
     result.add(", nested_7z: true")
   # M4: msi_admin_install emitted only when true so the M67/M68 baseline
