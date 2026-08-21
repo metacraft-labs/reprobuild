@@ -2690,27 +2690,6 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
   result.kind = trkUnknown
   result.suggestions = topLevenshteinCandidates(selector, known)
 
-proc lowerMaterializedProviderSnapshot(snapshot: ProviderGraphSnapshot;
-    projectRoot: string):
-    tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
-  ## Lower only explicitly tagged public-interface actions. Materialized
-  ## publication never launches an edge, so resolving the full graph's tool
-  ## profiles and dependency closure would add irrelevant provisioning side
-  ## effects and can fail on absent per-artifact outputs.
-  let profiles = initTable[string, PathOnlyToolProfile]()
-  for fragment in snapshot.fragments:
-    for node in fragment.nodes:
-      if node.kind == gnkAction:
-        let payload = decodeBuildActionPayload(toBytes(node.payload))
-        if payload.publishToBinaryCache and
-            payload.cacheEntryIdentity.isSome:
-          result.actions.add(lowerGraphAction(node, profiles, projectRoot))
-      elif node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-pool.v1":
-        let poolDef = decodeBuildPoolPayload(toBytes(node.payload))
-        result.pools.add(
-          repro_build_engine.pool(poolDef.name, poolDef.capacity))
-
 proc materializedCachePrefix(action: BuildAction): string =
   let raw =
     if action.declaredOutputs.len == 1:
@@ -2783,7 +2762,8 @@ proc materializedSubstitutionConfigured(): bool =
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
                             projectRoot: string;
-                            selectedActionIds: openArray[string]):
+                            selectedActionIds: openArray[string];
+                            publishableOnly = false):
     tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
   ## Named-Targets M2: accept multiple selectors and union their
   ## dependency closures in a single engine pass. Each selector may be
@@ -2854,6 +2834,12 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     node.payload = actionPayload(publicPayload(item.payload))
     lowerGraphAction(node, profiles, projectRoot)
 
+  proc shouldLower(item: tuple[node: GraphNode;
+                               payload: BuildActionDef]): bool =
+    not publishableOnly or
+      (item.payload.publishToBinaryCache and
+        item.payload.cacheEntryIdentity.isSome)
+
   # When no selector is provided, schedule every emitted edge — the
   # legacy "build everything" behavior preserved from the single-target
   # entry point.
@@ -2871,7 +2857,8 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
         for aid in target.actions:
           excludedActionIds.incl(aid)
     for item in actionNodes:
-      if not excludedActionIds.contains(item.payload.id):
+      if not excludedActionIds.contains(item.payload.id) and
+          shouldLower(item):
         result.actions.add(lowerItem(item))
     return
 
@@ -3118,7 +3105,7 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     else:
       includeClosure(root)
   for item in actionNodes:
-    if selected.contains(item.payload.id):
+    if selected.contains(item.payload.id) and shouldLower(item):
       result.actions.add(lowerItem(item))
 
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
@@ -3134,6 +3121,16 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     lowerProviderSnapshot(snapshot, identity, projectRoot, [""])
   else:
     lowerProviderSnapshot(snapshot, identity, projectRoot, [selectedActionId])
+
+proc lowerMaterializedProviderSnapshot*(snapshot: ProviderGraphSnapshot;
+    projectRoot: string; selectedActionIds: openArray[string]):
+    tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
+  ## Resolve the requested target closure through the normal named-target
+  ## machinery, but lower only explicitly tagged public-interface actions.
+  ## Materialized publication never launches an edge, so an empty identity is
+  ## sufficient and avoids provisioning tools for the omitted build actions.
+  lowerProviderSnapshot(snapshot, PathOnlyBuildIdentity(), projectRoot,
+    selectedActionIds, publishableOnly = true)
 
 proc poolsFromSnapshot*(snapshot: ProviderGraphSnapshot): seq[BuildPool] =
   ## Gather the recipe's declared build pools DIRECTLY from the provider-graph
@@ -8230,7 +8227,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       let lowered =
         if materializedOnly:
           lowerMaterializedProviderSnapshot(
-            refresh.snapshot, result.projectRoot)
+            refresh.snapshot, result.projectRoot, selectorList)
         elif selectorList.len == 0:
           lowerProviderSnapshot(refresh.snapshot, synthIdentity,
             result.projectRoot, "")
@@ -8580,7 +8577,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         progressRenderer.renderPhase("lowering project graph")
         let computed =
           if materializedOnly:
-            lowerMaterializedProviderSnapshot(refresh.snapshot, projectRoot)
+            lowerMaterializedProviderSnapshot(refresh.snapshot, projectRoot,
+              selectorList)
           elif selectorList.len == 0:
             lowerProviderSnapshot(refresh.snapshot, identity,
               projectRoot, "")

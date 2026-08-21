@@ -558,6 +558,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim",
+    binary: "build/test-bin/t_materialized_publication_respects_target_selection",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
     binary: "build/test-bin/t_partition_plan_json_round_trip",
     defines: @[],

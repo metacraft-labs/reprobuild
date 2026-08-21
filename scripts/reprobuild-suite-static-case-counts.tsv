@@ -76,6 +76,7 @@ libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.ni
 libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	2
 libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim	nim	19
 libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim	nim	11
+libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim	nim	3
 libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim	nim	3
 libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim	nim	1
 libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim	nim	1
