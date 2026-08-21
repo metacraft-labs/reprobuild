@@ -335,10 +335,35 @@ function Get-CommandSource {
     return $cmd.Source
 }
 
+function Get-ToolPathWithVersion {
+    # Report the version the binary ITSELF claims, not the one implied by the
+    # directory it happens to sit in.
+    #
+    # `GCC_VERSION` in windows/toolchain-versions.env is a FALLBACK pin, not a
+    # hard one: `Test-CompilerOnPath` deliberately skips provisioning whenever
+    # any sane gcc is already on PATH (MSYS2, a system mingw), so the installed
+    # tree keeps whatever directory name it was given when it was first
+    # provisioned. On this box that produced
+    # `D:\metacraft-dev-deps\gcc\15.2.0\bin\gcc.exe` -- a junction into a
+    # WinLibs package that reports 16.1.0. Every log line and every status
+    # summary then repeated 15.2.0, which is the sort of thing discovered
+    # months later while bisecting a miscompile.
+    param([string]$Name)
+    $source = Get-CommandSource $Name
+    if ($source -eq "(not on PATH)") { return $source }
+    try {
+        $line = & $source --version 2>&1 | Select-Object -First 1
+        if ("$line" -match '([0-9]+\.[0-9]+(\.[0-9]+)?)') {
+            return "$source  (reports $($Matches[1]))"
+        }
+    } catch {}
+    return $source
+}
+
 Write-Host ""
 Write-Host "reprobuild dev environment ready."
 Write-Host "  nim          = $(Get-CommandSource 'nim')"
-Write-Host "  gcc          = $(Get-CommandSource 'gcc')"
+Write-Host "  gcc          = $(Get-ToolPathWithVersion 'gcc')"
 Write-Host "  just         = $(Get-CommandSource 'just')"
 Write-Host "  bash         = $(if ($bashPath) { $bashPath } else { '(missing -- the build scripts cannot run)' })"
 Write-Host "  clingo       = $(if ($clingoDir) { Join-Path $clingoDir 'clingo.dll' } else { '(skipped -- repro.exe will not start)' })"
