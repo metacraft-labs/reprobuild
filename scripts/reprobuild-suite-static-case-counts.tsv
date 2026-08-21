@@ -72,6 +72,7 @@ libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	4
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	7
+libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim	nim	16
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	nim	8
 libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim	nim	6
 libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim	nim	5
