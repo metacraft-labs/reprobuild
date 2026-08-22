@@ -62,13 +62,13 @@ pkgs.stdenv.mkDerivation {
     runHook preBuild
     export HOME="$TMPDIR"
 
-    echo "[nim-fork] 1/3 bootstrap stage-0 nim from csources_v3"
+    echo "[nim-fork] 1/4 bootstrap stage-0 nim from csources_v3"
     cp -r ${csourcesSrc} csources_v3
     chmod -R u+w csources_v3
     make -C csources_v3 -j"$NIX_BUILD_CORES" CC="$CC"
     test -x bin/nim
 
-    echo "[nim-fork] 2/3 vendor the fork compiler's deps under dist/"
+    echo "[nim-fork] 2/4 vendor the fork compiler's deps under dist/"
     mkdir -p dist
     cp -r ${traceFormatSrc} dist/codetracer-trace-format-nim
     cp -r ${stewSrc}        dist/nim-stew
@@ -81,7 +81,42 @@ pkgs.stdenv.mkDerivation {
     cp -r ${nimonySrc}      dist/nimony
     chmod -R u+w dist
 
-    echo "[nim-fork] 3/3 compile the fork compiler proper (koch-boot-free)"
+    # `nimpretty` is the FORMATTER half of the toolchain, and it has to come
+    # from the FORK for the same reason the compiler does. `scripts/
+    # format_sources.sh` (and therefore `just format`, a command CLAUDE.md
+    # documents) guards its nimpretty arm with `command -v nimpretty`, and this
+    # derivation shipped none — the fork's `bin/` carries only `nim`, `nim-gdb`
+    # and `nim-gdb.bat` — so `just format` formatted `flake.nix` and exited 0
+    # having touched ZERO Nim files. Silently.
+    #
+    # The obvious repair, adding nixpkgs' `nim` wrapper (which does bundle
+    # nimpretty) to the dev shell, is the WRONG one and was correctly declined
+    # before: that nimpretty is built from Nim 2.2.4 while this tree is compiled
+    # by a 2.3.1 fork, so the formatter's parser and the compiler's parser would
+    # be different programs. A formatter that cannot parse what the compiler
+    # accepts rewrites or mangles it. Building nimpretty from `${forkSrc}`
+    # removes the skew by construction: same lexer, same parser, same layouter
+    # source as the compiler installed next to it.
+    #
+    # Built with the STAGE-0 compiler, deliberately. Only codegen depends on
+    # which compiler builds it; nimpretty's BEHAVIOUR comes from the fork's
+    # `compiler/{lexer,parser,layouter,...}` modules, which are the ones being
+    # compiled here either way. Using stage-0 also keeps the buildPhase rule
+    # below intact — the freshly built fork `bin/nim` must not be RUN before
+    # installPhase patchelfs its RUNPATH. This must therefore stay BEFORE the
+    # step that overwrites `bin/nim`.
+    #
+    # `nimpretty/nimpretty.nim.cfg` supplies `--define:nimpretty`, which the
+    # source hard-requires ({.error.} without it); `--skipParentCfg` does not
+    # suppress a project's own cfg, only parent-directory ones.
+    echo "[nim-fork] 3/4 build nimpretty from the fork (formatter/compiler skew)"
+    ./bin/nim c -d:release \
+      --skipUserCfg --skipParentCfg --noNimblePath \
+      --warning:BareExcept:off --warning:UnusedImport:off \
+      -o:bin/nimpretty nimpretty/nimpretty.nim
+    test -x bin/nimpretty
+
+    echo "[nim-fork] 4/4 compile the fork compiler proper (koch-boot-free)"
     ./bin/nim c -d:release -d:nimKochBootstrap \
       --skipUserCfg --skipParentCfg --noNimblePath \
       --warning:BareExcept:off --warning:UnusedImport:off \
@@ -113,6 +148,17 @@ pkgs.stdenv.mkDerivation {
           pkgs.stdenv.cc.cc.lib
         ]
       }" "$out/bin/nim"
+      # Same treatment for the fork-built nimpretty: `dontPatchELF` is on for
+      # Linux, so nothing else will give it a RUNPATH, and it links the same
+      # compiler modules `nim` does.
+      patchelf --set-rpath "${
+        pkgs.lib.makeLibraryPath [
+          pkgs.zstd
+          pkgs.pcre
+          pkgs.openssl
+          pkgs.stdenv.cc.cc.lib
+        ]
+      }" "$out/bin/nimpretty"
     ''}
     ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
       # Darwin: the Mach-O equivalent — add each dependency's store lib dir as an
