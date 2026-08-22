@@ -1,4 +1,5 @@
-import std/[algorithm, options, os, osproc, sets, strutils, tables, times]
+import std/[algorithm, monotimes, options, os, osproc, sets, strutils,
+            tables, times]
 
 when defined(posix):
   import std/posix
@@ -77,6 +78,65 @@ type
     metadata*: FileMetadata
     blob*: CasBlobRef
     permissions*: set[FilePermission]
+    changeTimeNs*: uint64
+      ## POSIX `st_ctime` of the output at record time; 0 when the platform
+      ## cannot report it (Windows) or when no witness sidecar was found.
+      ##
+      ## NOT serialized into the RBAR frame -- carried in the witness
+      ## sidecar (`writeWitnessSidecar`), so the record format is unchanged
+      ## and older binaries sharing a cache root are unaffected.
+      ##
+      ## This is the field that makes in-place output tampering detectable
+      ## at zero extra cost. `kind`/`size`/`mtime` are all settable from
+      ## userspace -- `utimensat(2)` restores an mtime exactly, and a write
+      ## that stays inside the file leaves the size alone -- so a metadata
+      ## comparison over those three accepts a silently corrupted artifact.
+      ## `st_ctime` is maintained by the kernel on every inode change and
+      ## has no userspace setter, so any write to the file moves it and it
+      ## cannot be moved back. It costs nothing: it arrives in the same
+      ## `lstat(2)` that already produces kind/size/mtime.
+      ##
+      ## It is deliberately NOT part of `FileMetadata`: inputs keep exactly
+      ## their previous comparison semantics (and `strongIdentityPayload`
+      ## keeps producing identical fingerprints), so this cannot cause a
+      ## spurious input invalidation or invalidate an existing cache.
+      ##
+      ## WINDOWS: this stays 0. NTFS does maintain an unsettable ChangeTime,
+      ## reachable through `GetFileInformationByHandleEx(FileBasicInfo)`, but
+      ## `fingerprintMetadata`'s Windows path uses `GetFileAttributesExW`,
+      ## which does not report it. Until that is wired up, the defect this
+      ## field exists to close remains OPEN on Windows: a regular-file output
+      ## rewritten in place with its size and write time restored still
+      ## compares equal there.
+    linkTarget*: string
+      ## `readlink()` of the output at record time, empty when it was not a
+      ## symlink. `fingerprintMetadata` reports a symlink-to-file as
+      ## `ffkRegular` carrying the LINK's own lstat size and mtime, so a
+      ## retargeted link whose mtime is restored with
+      ## `utimensat(..., AT_SYMLINK_NOFOLLOW)` compares equal on every
+      ## recorded field. Comparing the target string is O(1) and exact.
+    treeDigest*: uint64
+      ## Order-independent digest over the recursive METADATA of a directory
+      ## output (relative path, kind, size, mtime, change time per entry).
+      ## Meaningful only when `hasTreeDigest`.
+      ##
+      ## A directory's own recorded metadata is deliberately empty --
+      ## `fingerprintMetadata` zeroes `sizeBytes`/`mtimeNs` for
+      ## `ffkDirectory` -- so comparing it asks only "does the directory
+      ## still exist". That leaves an opaque directory output completely
+      ## unprotected, which is a shipped shape (the JS/TS convention declares
+      ## `node_modules/`). This digest is the comparison that actually says
+      ## something.
+      ##
+      ## It costs one `lstat(2)` per entry in the tree on every warm
+      ## consultation of an edge that declares a directory output -- O(tree
+      ## entries), no content reads. That is a real and openly acknowledged
+      ## cost for such edges. The cheaper alternatives were all unsound: the
+      ## directory's own mtime/ctime move only for top-level entry changes
+      ## and say nothing about a nested file being rewritten. An edge that
+      ## cannot afford the walk should be made payload-backed (CAS directory
+      ## snapshot plus digest verification), not left unchecked.
+    hasTreeDigest*: bool
 
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
@@ -151,6 +211,10 @@ type
   HotMetadataProbe* = object
     weakFingerprint*: ContentDigest
     policy*: FileFingerprintPolicy
+    outputRoot*: string
+      ## The action's cwd, used to resolve the record's relative output
+      ## paths so the whole-build fast path can revalidate output state
+      ## (Incremental-Invalidation.md §"Minimum check set" Step 3.3).
 
   HotMetadataScanStatus* = enum
     hmssUnavailable
@@ -158,15 +222,29 @@ type
     hmssMissingRecord
     hmssInputChanged
     hmssCorrupt
+    hmssOutputChanged
 
   HotMetadataScan* = object
     status*: HotMetadataScanStatus
     recordCount*: int
     inputCount*: int
     checkedInputCount*: int
+    detail*: string
 
 const
   ActionRecordMagic = "RBAR"
+  # DELIBERATELY NOT BUMPED. The output witnesses this file adds (change
+  # time, symlink target, directory metadata digest) live in a SIDECAR file
+  # next to the `.rec`, not inside the RBAR frame -- see `OutputWitness` and
+  # `writeWitnessSidecar`. Growing the frame would have required a version
+  # bump, and a bump is not backward-tolerable here: verified against a
+  # binary built from the base commit, a v4 frame makes
+  # `loadPerEdgeRecords` return ZERO records (the per-frame
+  # `except EnvelopeError: break` swallows it), so every edge this binary
+  # wrote becomes a permanent cache miss for any older `repro` sharing the
+  # per-user cache root; and `decodeActionResultRecord`, the public codec
+  # the peer cache and the dependency-evidence reader use, raises outright.
+  # An 8-byte field does not justify that.
   ActionRecordVersion = 3'u16
   # Per-edge record file: a small self-describing container holding the
   # edge's bounded record set. Each contained record is the existing
@@ -728,6 +806,113 @@ proc fingerprintMetadata(path: string): FileMetadata =
     result.sizeBytes = 0
     result.mtimeNs = 0
 
+type
+  OutputWitness* = object
+    ## The evidence about ONE declared output that the recorded
+    ## `FileMetadata` cannot carry. See `OutputBlob` for why each field
+    ## exists. Collected at record time, compared at lookup time.
+    changeTimeNs*: uint64
+    linkTarget*: string
+    treeDigest*: uint64
+    hasTreeDigest*: bool
+
+# Unsynchronized process-global counters. Safe today because the scheduler
+# runs single-threaded (it spawns tool subprocesses, never `createThread`);
+# they would need atomics or per-thread accumulation if that ever changes.
+var
+  outputStateCheckCalls = 0
+  outputStateCheckNanos = 0'i64
+  revalidateDirWalks = 0
+  revalidateDirEntries = 0'i64
+  recordDirWalks = 0
+  recordDirEntries = 0'i64
+
+proc symlinkTargetOf(path: string): string =
+  ## `readlink()` or "" when `path` is not a symlink. Never follows.
+  when defined(posix):
+    var st: Stat
+    if lstat(extendedPath(path).cstring, st) == 0 and S_ISLNK(st.st_mode):
+      try:
+        return expandSymlink(extendedPath(path))
+      except OSError:
+        return ""
+  ""
+
+proc directoryMetadataDigest(root: string; entriesWalked: var int64): uint64 =
+  ## Order-independent digest over the recursive metadata of `root`.
+  ##
+  ## Entries are folded in with a commutative accumulator (wrapping sum)
+  ## rather than a sorted hash, so no O(n log n) sort of path strings is
+  ## needed for what can be a very large tree. Order independence also means
+  ## the result does not depend on `walkDirRec`'s traversal order, which is
+  ## filesystem-defined. This is LOCAL INVALIDATION evidence, in the sense of
+  ## Incremental-Invalidation.md §"Hash-function strategy": it must be fast
+  ## and reliable against honest workloads, not collision-resistant against
+  ## an adversary. It never crosses a machine boundary.
+  ##
+  ## Cost is one `lstat(2)` and one small hash per entry. The per-entry
+  ## payload is packed as raw little-endian bytes rather than formatted
+  ## text: decimal formatting of five integers per entry measured ~3x the
+  ## cost of the syscall it was describing.
+  var entries = 0'u64
+  var scratch = newSeq[byte](0)
+  for entry in walkDirRec(extendedPath(root),
+      yieldFilter = {pcFile, pcLinkToFile, pcDir, pcLinkToDir},
+      relative = true):
+    inc entries
+    let full = root / entry
+    scratch.setLen(0)
+    for c in entry:
+      scratch.add(byte(c))
+    when defined(posix):
+      var st: Stat
+      if lstat(extendedPath(full).cstring, st) == 0:
+        scratch.writeU64Le(uint64(st.st_mode))
+        scratch.writeU64Le(if st.st_size < 0: 0'u64 else: uint64(st.st_size))
+        scratch.writeU64Le(uint64(cast[int64](st.st_mtim.tv_sec)) *
+          1_000_000_000'u64 + uint64(st.st_mtim.tv_nsec))
+        scratch.writeU64Le(uint64(cast[int64](st.st_ctim.tv_sec)) *
+          1_000_000_000'u64 + uint64(st.st_ctim.tv_nsec))
+        if S_ISLNK(st.st_mode):
+          for c in symlinkTargetOf(full):
+            scratch.add(byte(c))
+    else:
+      let m = fingerprintMetadata(full)
+      scratch.writeU64Le(uint64(ord(m.kind)))
+      scratch.writeU64Le(m.sizeBytes)
+      scratch.writeU64Le(m.mtimeNs)
+    result = result + localHash(scratch).value
+  # Fold the count in so that an empty tree and a missing tree differ, and so
+  # that a pair of entries cannot cancel out.
+  entriesWalked = int64(entries)
+  result = result xor (entries * 0x9E3779B97F4A7C15'u64)
+
+proc observeOutputWitness(path: string; metadata: FileMetadata): OutputWitness =
+  ## One `lstat(2)` for the scalar fields, plus a recursive walk only when
+  ## the output is a directory.
+  when defined(posix):
+    var st: Stat
+    if lstat(extendedPath(path).cstring, st) == 0:
+      result.changeTimeNs = uint64(cast[int64](st.st_ctim.tv_sec)) *
+        1_000_000_000'u64 + uint64(st.st_ctim.tv_nsec)
+      if S_ISLNK(st.st_mode):
+        try:
+          result.linkTarget = expandSymlink(extendedPath(path))
+        except OSError:
+          discard
+  if metadata.kind == ffkDirectory:
+    try:
+      var walked = 0'i64
+      result.treeDigest = directoryMetadataDigest(path, walked)
+      result.hasTreeDigest = true
+      # Attributed to the RECORD phase. Folding it into the revalidation
+      # counters made a COLD build report "revalidate dir walks = 1" for work
+      # that was not revalidation at all.
+      inc recordDirWalks
+      recordDirEntries += walked
+    except OSError, IOError:
+      result.hasTreeDigest = false
+
 proc initFileMetadataCache*(): FileMetadataCache =
   FileMetadataCache(entries: initTable[string, FileMetadata]())
 
@@ -950,6 +1135,213 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
+const
+  WitnessMagic = "RBOW"
+  WitnessVersion = 2'u16
+  WitnessFileExt = ".octime"
+
+proc witnessFileName(strongHex: string): string =
+  strongHex & WitnessFileExt
+
+proc isEmpty(w: OutputWitness): bool =
+  w.changeTimeNs == 0'u64 and w.linkTarget.len == 0 and not w.hasTreeDigest
+
+proc encodeWitnesses(witnesses: Table[string, OutputWitness];
+                     recordWriteSequence: uint64): seq[byte] =
+  for i in 0 ..< 4:
+    result.add(byte(ord(WitnessMagic[i])))
+  result.writeU16Le(WitnessVersion)
+  # Back-reference to the `.rec` this sidecar describes. A reader that finds a
+  # different sequence in the record file treats the sidecar as absent. This
+  # is what makes an OLD binary rewriting `<hex>.rec` -- which cannot know
+  # about the sidecar -- safe: the stale witness is discarded rather than
+  # compared against outputs it no longer describes.
+  result.writeU64Le(recordWriteSequence)
+  result.writeU32Le(uint32(witnesses.len))
+  for path, w in witnesses:
+    result.writeString(path)
+    result.writeU64Le(w.changeTimeNs)
+    result.writeString(w.linkTarget)
+    result.add(if w.hasTreeDigest: 1'u8 else: 0'u8)
+    result.writeU64Le(w.treeDigest)
+
+proc decodeWitnesses(raw: openArray[byte]):
+    tuple[recordWriteSequence: uint64; witnesses: Table[string, OutputWitness]] =
+  result.witnesses = initTable[string, OutputWitness]()
+  if raw.len < 18:
+    return
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(WitnessMagic[i])):
+      return
+  var pos = 4
+  let version = readU16Le(raw, pos)
+  if version != WitnessVersion:
+    return
+  result.recordWriteSequence = readU64Le(raw, pos)
+  let count = int(readU32Le(raw, pos))
+  for _ in 0 ..< count:
+    let path = readString(raw, pos)
+    var w: OutputWitness
+    w.changeTimeNs = readU64Le(raw, pos)
+    w.linkTarget = readString(raw, pos)
+    w.hasTreeDigest = readByte(raw, pos) == 1
+    w.treeDigest = readU64Le(raw, pos)
+    result.witnesses[path] = w
+
+proc witnessesOf(records: openArray[ActionResultRecord]):
+    tuple[witnesses: Table[string, OutputWitness]; any: bool] =
+  ## Merge the witnesses carried by `records`. All records in one `.rec` share
+  ## a strong fingerprint, so they describe the same outputs; a non-empty
+  ## witness always wins over an empty one.
+  result.witnesses = initTable[string, OutputWitness]()
+  for record in records:
+    for output in record.outputs:
+      let w = OutputWitness(changeTimeNs: output.changeTimeNs,
+        linkTarget: output.linkTarget, treeDigest: output.treeDigest,
+        hasTreeDigest: output.hasTreeDigest)
+      if not w.isEmpty:
+        result.any = true
+        result.witnesses[output.path] = w
+      elif output.path notin result.witnesses:
+        result.witnesses[output.path] = w
+
+proc attachWitnesses(record: var ActionResultRecord;
+                     witnesses: Table[string, OutputWitness]) {.used.} =
+  for i in 0 ..< record.outputs.len:
+    let w = witnesses.getOrDefault(record.outputs[i].path)
+    record.outputs[i].changeTimeNs = w.changeTimeNs
+    record.outputs[i].linkTarget = w.linkTarget
+    record.outputs[i].treeDigest = w.treeDigest
+    record.outputs[i].hasTreeDigest = w.hasTreeDigest
+
+proc resetOutputStateCheckStats*() =
+  ## Zero the accumulators. The engine calls this at the start of every build:
+  ## these are process-global, and a process that runs more than one build
+  ## (the daemon, the test binaries, `repro watch`) would otherwise report
+  ## each build's cost plus every earlier build's.
+  outputStateCheckCalls = 0
+  outputStateCheckNanos = 0'i64
+  revalidateDirWalks = 0
+  revalidateDirEntries = 0'i64
+  recordDirWalks = 0
+  recordDirEntries = 0'i64
+
+proc outputStateCheckStats*(): tuple[calls: int; nanos: int64;
+                                     revalidateDirWalks: int;
+                                     revalidateDirEntries: int64;
+                                     recordDirWalks: int;
+                                     recordDirEntries: int64] =
+  ## Accumulated cost of EVERY `outputStateMismatch` call in this process.
+  ##
+  ## Counted inside the proc, not at the call sites, deliberately: the check
+  ## runs from three places (the whole-build fast-noop scan, the per-edge
+  ## metadata-only lookup, and the per-edge candidate walk), two of which are
+  ## inside this module where the engine's stats plumbing does not reach.
+  ## Instrumenting one call site and reporting the number as "the cost of the
+  ## check" would under-count it by the other two.
+  (calls: outputStateCheckCalls, nanos: outputStateCheckNanos,
+   revalidateDirWalks: revalidateDirWalks,
+   revalidateDirEntries: revalidateDirEntries,
+   recordDirWalks: recordDirWalks, recordDirEntries: recordDirEntries)
+
+proc outputStateMismatchImpl(record: ActionResultRecord;
+                             outputRoot: string): string =
+  ## Incremental-Invalidation.md §"Minimum check set per target
+  ## consultation", Step 3.3: "For an in-place local build, declared outputs
+  ## must already exist **and match the recorded output metadata**."
+  ##
+  ## Returns "" when every declared output still matches, otherwise a short
+  ## human-readable reason naming the first output that does not. The engine
+  ## turns a non-empty result into `aclRejectedCorruptOutput` / `cdRejected`
+  ## and re-executes, which is the fail-closed behaviour the same document's
+  ## §"Rebuild Decision Model" requires.
+  ##
+  ## Cost is one `lstat(2)` per declared output on a cache hit. The engine
+  ## already stats every output to decide whether it exists at all, so this
+  ## is not a new class of work; it is the same class of work, comparing
+  ## more of what the syscall already returned.
+  ##
+  ## What it does NOT do is hash the output. Hashing every output on every
+  ## consultation would be correct and would also make the warm no-op path
+  ## scale with total artifact bytes instead of artifact count. The change
+  ## time is what buys tamper evidence without that: see `OutputBlob`.
+  for output in record.outputs:
+    if output.metadata.kind == ffkMissing:
+      # Nothing was recorded for this output; there is nothing to compare
+      # against and inventing a rule here would reject valid records.
+      continue
+    let path = materialPath(outputRoot, output.path)
+    let live = fingerprintMetadata(path)
+    if live.kind == ffkMissing:
+      return "output missing: " & output.path
+    if live != output.metadata:
+      return "output metadata changed: " & output.path
+
+    # -- symlink -----------------------------------------------------------
+    # A recorded link target means the output WAS a symlink. `live` cannot
+    # distinguish that case (a symlink to a file reports as ffkRegular), so
+    # the target string is the whole comparison.
+    if output.linkTarget.len > 0:
+      let liveTarget = symlinkTargetOf(path)
+      if liveTarget.len == 0:
+        return "output is no longer a symlink: " & output.path
+      if liveTarget != output.linkTarget:
+        return "symlink output retargeted: " & output.path
+      # NO early exit. A symlink to a DIRECTORY is classified `ffkDirectory`
+      # and therefore carries a tree digest; returning here once the target
+      # matched left that digest uncompared, so tampering INSIDE the linked
+      # tree survived as a hit. The link target and the kind-specific check
+      # are additive.
+
+    # -- directory ---------------------------------------------------------
+    if output.metadata.kind == ffkDirectory:
+      if not output.hasTreeDigest:
+        # `fingerprintMetadata` zeroes size and mtime for a directory, so
+        # everything compared above was vacuous and the only thing actually
+        # established is that the directory still exists. With no tree
+        # digest there is no way to answer the question, so fail closed --
+        # Incremental-Invalidation.md §"Rebuild Decision Model": "If any
+        # required condition cannot be checked, Reprobuild MUST fail closed."
+        # This is what makes a pre-existing record (written before witnesses
+        # existed) re-execute ONCE; the replacement record carries a digest.
+        return "directory output has no recorded tree digest: " & output.path
+      var liveDigest = 0'u64
+      try:
+        var walked = 0'i64
+        liveDigest = directoryMetadataDigest(path, walked)
+        inc revalidateDirWalks
+        revalidateDirEntries += walked
+      except OSError, IOError:
+        return "directory output could not be walked: " & output.path
+      if liveDigest != output.treeDigest:
+        return "directory output contents changed: " & output.path
+      continue
+
+    # -- regular file ------------------------------------------------------
+    if output.metadata.kind == ffkRegular:
+      if output.changeTimeNs == 0'u64:
+        # Either the record predates witnesses, or the platform reports no
+        # change time (Windows). Degrading to the kind/size/mtime comparison
+        # above is what every record did before this change, so this is not
+        # a new hole -- but it IS the hole, and it stays open for records in
+        # an existing cache until each edge next executes.
+        continue
+      let liveCtime = observeOutputWitness(path, live).changeTimeNs
+      if liveCtime != 0'u64 and liveCtime != output.changeTimeNs:
+        # Size and mtime match but the inode changed after the action wrote
+        # it. Something rewrote, chmod'd or relinked the artifact behind the
+        # build's back; the recorded result no longer describes what is on
+        # disk. Fail closed.
+        return "output changed after it was recorded: " & output.path
+  ""
+
+proc outputStateMismatch*(record: ActionResultRecord;
+                          outputRoot: string): string =
+  let started = getMonoTime()
+  result = outputStateMismatchImpl(record, outputRoot)
+  inc outputStateCheckCalls
+  outputStateCheckNanos += (getMonoTime() - started).inNanoseconds
+
 proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
                      outputRoot = "") =
   if record.outputPayloadKind != opkCasBlobs:
@@ -1134,11 +1526,25 @@ proc legacyHotRecordPath(cache: ActionCache; weak: ContentDigest): string =
   cache.hotRoot / perEdgeDirName(weak)
 
 proc hotMetadataRecord(record: ActionResultRecord): ActionResultRecord =
+  ## The metadata-only projection used by the warm in-place reuse paths.
+  ##
+  ## It drops everything needed to RESTORE an output (the CAS blob refs, and
+  ## with them `opkCasBlobs`) and the strong fingerprint, because a
+  ## metadata-only result "MUST NOT be treated as a remote-cache hit or as a
+  ## local restore hit" (Caching-Architecture.md §"Memoization Layer").
+  ##
+  ## It deliberately KEEPS the per-output metadata. That is precisely what
+  ## Caching-Architecture.md says a metadata-only record carries -- "output
+  ## entries record existence/type, timestamp/size where relevant,
+  ## permissions" -- and what Incremental-Invalidation.md §Step 3.3 requires
+  ## the reuse decision to compare against. Discarding it here is what made
+  ## every warm consultation accept an output it had never looked at.
   result = record
   result.inputs.setLen(0)
   for input in record.inputs:
     result.inputs.add(metadataOnly(input))
-  result.outputs.setLen(0)
+  for i in 0 ..< result.outputs.len:
+    result.outputs[i].blob = CasBlobRef()
   result.outputPayloadKind = opkMetadataOnly
   result.strongFingerprint = ContentDigest()
 
@@ -1368,10 +1774,39 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest):
         decoded = decodePerEdgeFileWithSeq(bytes(readFile(path)))
       except OSError, IOError:
         continue
+      except EnvelopeError:
+        # A `.rec` this binary cannot decode -- most often a record written
+        # by a NEWER reprobuild sharing the same cache root, since the record
+        # version is bumped whenever the schema grows. Treat it as absent:
+        # the edge simply misses and re-executes. Letting the envelope error
+        # escape would abort an otherwise healthy build over a cache file,
+        # which is the opposite of the fail-closed rule in
+        # Failure-Semantics.md.
+        continue
       # Tie-break key from the file's own strong-fp nonce (its base name), so
       # even legacy/seq-0 files or a hypothetical duplicate sequence still sort
       # deterministically.
       let strongHex = path.splitFile.name
+      # Attach the witness sidecar, when present, to the records it belongs
+      # to. One extra small read per `.rec`; absent/undecodable means "no
+      # witness", which is the pre-change behaviour, not a hard failure.
+      var witnesses = initTable[string, OutputWitness]()
+      let witnessPath = dirPath / witnessFileName(strongHex)
+      if fileExists(extendedPath(witnessPath)):
+        try:
+          let sidecar = decodeWitnesses(bytes(readFile(witnessPath)))
+          # The back-reference must name the record file we just read. If an
+          # older binary rewrote the `.rec` (it cannot know about sidecars),
+          # the sequence moved and this witness describes outputs that have
+          # since been replaced -- discard it rather than fail closed against
+          # stale evidence.
+          if sidecar.recordWriteSequence == decoded.writeSequence:
+            witnesses = sidecar.witnesses
+        except OSError, IOError, EnvelopeError:
+          witnesses = initTable[string, OutputWitness]()
+      if witnesses.len > 0:
+        for i in 0 ..< decoded.records.len:
+          decoded.records[i].attachWitnesses(witnesses)
       recFiles.add((seq: decoded.writeSequence, strongHex: strongHex,
         recs: decoded.records))
     recFiles.sort(proc (a, b: tuple[seq: uint64; strongHex: string;
@@ -1402,6 +1837,17 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
   ## Stamps a FRESH durable write sequence so a convergent rewrite of the same
   ## path-set becomes strictly newest (higher sequence) than every sibling.
   createDir(extendedPath(dirPath))
+  # Read the sequence of the record we are replacing BEFORE the rename, so a
+  # witness-free republish can tell "the sidecar belongs to the record I am
+  # replacing" from "the sidecar is stale".
+  var priorWriteSequence = 0'u64
+  let priorRecPath = dirPath / finalName
+  if fileExists(extendedPath(priorRecPath)):
+    try:
+      priorWriteSequence =
+        decodePerEdgeFileWithSeq(bytes(readFile(priorRecPath))).writeSequence
+    except OSError, IOError, EnvelopeError:
+      priorWriteSequence = 0'u64
   let writeSequence = cache.nextWriteSequence()
   let now = getTime()
   let tmpPath = dirPath / (finalName & ".tmp." &
@@ -1414,6 +1860,79 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
     if fileExists(extendedPath(tmpPath)):
       removeFile(extendedPath(tmpPath))
     raise
+  # Output witnesses go in a SIDECAR beside the `.rec`, never inside the RBAR
+  # frame. Every reader of an edge directory -- including binaries built
+  # before this change -- filters on `PerEdgeRecFileExt`, so a `.octime` file
+  # is invisible to them and the record format stays at v3. Best-effort: a
+  # sidecar that fails to write, or is lost, simply means "no witness", and
+  # the lookup degrades exactly as a pre-witness record does.
+  #
+  # DURABILITY: the `.rec` renames first and the `.octime` second, neither is
+  # fsynced, and a sidecar write that fails is swallowed below. A crash in
+  # that window leaves a record with no witness. For a regular-file output
+  # that silently reopens the corruption hole until the edge next executes;
+  # for a directory it fails closed. The store is a cache and is not crash-
+  # durable by design (see `writeRecFileAtomically`'s "fsync-less" note), so
+  # this is consistent with the rest of it -- but it is a real gap, not an
+  # oversight, and a mode that needs durable evidence needs payload-backed
+  # records rather than metadata-only ones.
+  #
+  # CRITICAL: a WITNESS-FREE record must never overwrite a witnessed sidecar.
+  # Records are republished by writers that never saw the filesystem: the
+  # cache daemon decodes a record out of its shared-memory slot -- a plain
+  # record frame, witness-free by construction -- and republishes it here,
+  # and the peer cache installs a remote record the same way. Writing
+  # all-zero witnesses on their behalf destroyed the evidence within seconds
+  # of it being recorded, silently reverting every shm-eligible edge to the
+  # size+mtime comparison this whole mechanism replaces. Such a republish
+  # does not touch the outputs, so the existing witness still describes them:
+  # carry it forward, re-stamped against the new record sequence.
+  if records.len > 0:
+    let witnessPath = dirPath / witnessFileName(finalName.splitFile.name)
+    let merged = witnessesOf(records)
+    var payload: seq[byte] = @[]
+    var write = true
+    if merged.any:
+      payload = encodeWitnesses(merged.witnesses, writeSequence)
+    else:
+      # Carry forward only a sidecar that genuinely belonged to the record we
+      # are replacing; anything else is stale and must not be resurrected.
+      #
+      # NOTE on peer installs: `installActionBundle` writes a REMOTE record
+      # here, whose output metadata describes another machine's bytes, and
+      # this staples the LOCAL witness onto it. That is sound -- the witness
+      # still describes the local outputs, and the change time is monotone
+      # and kernel-owned, so a carried witness is never LESS restrictive than
+      # having none -- but it does mean that for a peer-installed record a
+      # hit no longer asserts "the local outputs match this record's blobs",
+      # only "the local outputs are unchanged since this machine last
+      # produced them".
+      var carried = false
+      if priorWriteSequence != 0'u64 and fileExists(extendedPath(witnessPath)):
+        try:
+          let prior = decodeWitnesses(bytes(readFile(witnessPath)))
+          if prior.recordWriteSequence == priorWriteSequence and
+              prior.witnesses.len > 0:
+            payload = encodeWitnesses(prior.witnesses, writeSequence)
+            carried = true
+        except OSError, IOError, EnvelopeError:
+          discard
+      if not carried:
+        # No witness to write and none to keep: drop any stale sidecar so a
+        # later reader cannot pair it with an unrelated record.
+        write = false
+        if fileExists(extendedPath(witnessPath)):
+          try: removeFile(extendedPath(witnessPath))
+          except OSError: discard
+    if write:
+      let witnessTmp = tmpPath & WitnessFileExt
+      try:
+        writeFile(extendedPath(witnessTmp), byteString(payload))
+        moveFile(extendedPath(witnessTmp), extendedPath(witnessPath))
+      except OSError, IOError:
+        if fileExists(extendedPath(witnessTmp)):
+          try: removeFile(extendedPath(witnessTmp))
+          except OSError: discard
 
 proc capRecFiles(cache: ActionCache; dirPath: string) =
   ## Bound the per-edge directory: keep at most `MaxRecFilesPerEdge` `.rec`
@@ -1432,6 +1951,18 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
         discard
       entries.add((seq: writeSequence, strongHex: path.splitFile.name,
         path: path))
+  # Reap sidecars whose `.rec` is gone BEFORE the cap check. An older binary's
+  # eviction removes the record without knowing the sidecar exists, and an
+  # edge directory almost never holds more than `MaxRecFilesPerEdge` files --
+  # so a reap placed after the early return below would essentially never run.
+  for kind, path in walkDir(extendedPath(dirPath)):
+    if kind == pcFile and path.endsWith(WitnessFileExt):
+      let owner = path.parentDir / (path.splitFile.name & PerEdgeRecFileExt)
+      if not fileExists(extendedPath(owner)):
+        try:
+          removeFile(extendedPath(path))
+        except OSError:
+          discard
   if entries.len <= MaxRecFilesPerEdge:
     return
   entries.sort(proc (a, b: tuple[seq: uint64; strongHex, path: string]): int =
@@ -1443,6 +1974,15 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
       removeFile(entries[i].path)
     except OSError:
       discard
+    # Drop the evicted record's witness sidecar too, or it leaks.
+    let witness = entries[i].path.parentDir /
+      witnessFileName(entries[i].strongHex)
+    if fileExists(extendedPath(witness)):
+      try:
+        removeFile(extendedPath(witness))
+      except OSError:
+        discard
+
 
 proc migrateLegacyFile(cache: ActionCache; weak: ContentDigest) =
   ## If a pre-AC-1b single FILE sits at `hot-records/<key>` (the same path the
@@ -1591,6 +2131,17 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
               metadataCache) != input.metadata:
             return HotMetadataScan(status: hmssInputChanged,
               recordCount: totalRecords, checkedInputCount: checkedInputs)
+        # Same rule as `lookupActionResultImpl`: unchanged inputs are only
+        # half the hit condition. The declared outputs on disk must still be
+        # the ones this record describes (Incremental-Invalidation.md
+        # §"Minimum check set" Step 3.3). Without this the whole-build fast
+        # path would keep accepting an artifact that was overwritten after
+        # the build produced it.
+        let outputMismatch = outputStateMismatch(record, probe.outputRoot)
+        if outputMismatch.len > 0:
+          return HotMetadataScan(status: hmssOutputChanged,
+            recordCount: totalRecords, checkedInputCount: checkedInputs,
+            detail: outputMismatch)
   HotMetadataScan(status: hmssHit, recordCount: totalRecords,
     checkedInputCount: checkedInputs)
 
@@ -2031,7 +2582,11 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    let sourceMetadata = fingerprintMetadata(source, metadataCache)
+    # Read straight from the inode we just wrote, not through
+    # `metadataCache`: the engine invalidates that entry right after
+    # execution anyway, and the witness is only meaningful fresh.
+    let sourceMetadata = fingerprintMetadata(source)
+    let observed = observeOutputWitness(source, sourceMetadata)
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.
@@ -2054,7 +2609,10 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
       else:
         CasBlobRef()
     result.outputs.add(OutputBlob(path: path, metadata: sourceMetadata,
-      blob: blob, permissions: perms))
+      blob: blob, permissions: perms,
+      changeTimeNs: observed.changeTimeNs, linkTarget: observed.linkTarget,
+      treeDigest: observed.treeDigest,
+      hasTreeDigest: observed.hasTreeDigest))
   cache.writePerEdgeRecord(result)
 
 proc recordActionResult*(cache: var ActionCache; cas: var Store;
@@ -2075,7 +2633,11 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    let sourceMetadata = fingerprintMetadata(source, metadataCache)
+    # Read straight from the inode we just wrote, not through
+    # `metadataCache`: the engine invalidates that entry right after
+    # execution anyway, and the witness is only meaningful fresh.
+    let sourceMetadata = fingerprintMetadata(source)
+    let observed = observeOutputWitness(source, sourceMetadata)
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.
@@ -2094,7 +2656,10 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
       else:
         CasBlobRef()
     result.outputs.add(OutputBlob(path: path, metadata: sourceMetadata,
-      blob: blob, permissions: perms))
+      blob: blob, permissions: perms,
+      changeTimeNs: observed.changeTimeNs, linkTarget: observed.linkTarget,
+      treeDigest: observed.treeDigest,
+      hasTreeDigest: observed.hasTreeDigest))
   cache.writePerEdgeRecord(result)
 
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
@@ -2172,7 +2737,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
                                   policy: FileFingerprintPolicy;
                                   verifyOutputBlobs = true;
                                   allowMetadataOnlyHit = false;
-                                  metadataCache: ptr FileMetadataCache = nil):
+                                  metadataCache: ptr FileMetadataCache = nil;
+                                  outputRoot = ""):
                                   ActionCacheLookup =
   if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
@@ -2186,12 +2752,30 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
           changedInput = input.path
           break
       if not changed:
+        # Inputs are unchanged, so this record still describes the right
+        # computation. It is still only a hit if the DECLARED OUTPUTS on disk
+        # are the ones the record describes -- Incremental-Invalidation.md
+        # §"Minimum check set" Step 3.3. Existence alone (which is all the
+        # engine's `allOutputsExist` pre-check establishes) is not enough.
+        let outputMismatch = outputStateMismatch(hot.record, outputRoot)
+        if outputMismatch.len > 0:
+          return ActionCacheLookup(status: aclRejectedCorruptOutput,
+            record: hot.record, message: outputMismatch)
         return ActionCacheLookup(status: aclHit, record: hot.record)
-      return ActionCacheLookup(
-        status: aclMissInputChanged,
-        record: hot.record,
-        message: "input metadata changed: " & changedInput,
-        changedInputPath: changedInput)
+      if policy != ffpHybrid:
+        return ActionCacheLookup(
+          status: aclMissInputChanged,
+          record: hot.record,
+          message: "input metadata changed: " & changedInput,
+          changedInputPath: changedInput)
+      # ffpHybrid, metadata moved: this is exactly the case the hybrid
+      # policy exists for -- "compare timestamp metadata first; when the
+      # metadata changed, compute the local content hash. If the content
+      # hash is unchanged ... cut off without rebuilding dependents"
+      # (Incremental-Invalidation.md §"File Fingerprint Policies"). Reporting
+      # a miss from here made hybrid behave identically to timestamp on the
+      # warm path, so the cutoff in §"Validation Criteria" never happened.
+      # Fall through to the full candidate walk below, which implements it.
 
   let records = cache.loadRecordsForWeak(weak)
   if records.len == 0:
@@ -2233,6 +2817,16 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
       except CacheIntegrityError as err:
         return ActionCacheLookup(status: aclRejectedCorruptOutput,
           record: candidate, message: err.msg)
+    elif allowMetadataOnlyHit:
+      # In-place local reuse: the bytes stay at their declared paths, so the
+      # CAS verification above is not what protects them. Revalidate the
+      # workspace copies against the recorded output state instead.
+      # `verifyOutputBlobs` mode is the restore mode and materializes over
+      # whatever is there, so it needs no such check.
+      let outputMismatch = outputStateMismatch(candidate, outputRoot)
+      if outputMismatch.len > 0:
+        return ActionCacheLookup(status: aclRejectedCorruptOutput,
+          record: candidate, message: outputMismatch)
     if hybridCutoff:
       cache.writePerEdgeRecord(candidate)
       return ActionCacheLookup(status: aclHybridCutoff, record: candidate)
@@ -2254,18 +2848,22 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
                          verifyOutputBlobs = true;
                          allowMetadataOnlyHit = false;
-                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
+                         metadataCache: ptr FileMetadataCache = nil;
+                         outputRoot = ""): ActionCacheLookup =
   cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
-    metadataCache = metadataCache)
+    metadataCache = metadataCache,
+    outputRoot = outputRoot)
 
 proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
                          verifyOutputBlobs = true;
                          allowMetadataOnlyHit = false;
-                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
+                         metadataCache: ptr FileMetadataCache = nil;
+                         outputRoot = ""): ActionCacheLookup =
   cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
-    metadataCache = metadataCache)
+    metadataCache = metadataCache,
+    outputRoot = outputRoot)

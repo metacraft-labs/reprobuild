@@ -302,6 +302,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_action_cache_output_integrity.nim",
+    binary: "build/test-bin/t_action_cache_output_integrity",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim",
     binary: "build/test-bin/t_annotation_perturbs_no_fingerprint",
     defines: @[],

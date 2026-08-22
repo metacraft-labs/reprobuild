@@ -379,9 +379,15 @@ suite "integration_action_cache_fingerprint_policies":
         let defaultHit = hotReloaded.lookupActionResult(hotCas,
           weakFor("hot-metadata-record"), ffpHybrid, verifyOutputBlobs = false)
         check defaultHit.status == aclHit
+        # A metadata-only hit now revalidates the declared outputs against
+        # the record (Incremental-Invalidation.md §"Minimum check set"
+        # Step 3.3), so the lookup has to be told where those outputs live --
+        # the same root the record was written with. Omitting it leaves the
+        # record's relative `out.txt` unresolvable and the lookup fails
+        # closed, which is the intended direction for an unanswerable check.
         let hotHit = hotReloaded.lookupActionResult(hotCas,
           weakFor("hot-metadata-record"), ffpHybrid, verifyOutputBlobs = false,
-          allowMetadataOnlyHit = true)
+          allowMetadataOnlyHit = true, outputRoot = hotActionRoot)
         check hotHit.status == aclHit
         check hotHit.record.inputs.len == 1
         check hotHit.record.inputs[0].path == inputPath
