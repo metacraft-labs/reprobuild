@@ -1388,7 +1388,39 @@
               pkgs.grub2_efi
               pkgs.kmod
             ];
-            shellHook = pre-commit-check.shellHook;
+            shellHook = pre-commit-check.shellHook + ''
+              # git-hooks.nix's shellHook, immediately above, runs
+              # pre-commit's installer on EVERY dev-shell entry: it first
+              # uninstalls the hook types pre-commit manages, then installs
+              # its own. This repo's .pre-commit-config.yaml declares only a
+              # `pre-commit` stage, so that uninstall pass DELETES
+              # .git/hooks/pre-push — the Reprobuild dispatcher that runs the
+              # publication gate — and leaves pre-push.repro-managed orphaned
+              # beside it. Nothing put it back, so pushes stopped being
+              # gated, no workspace lock was published for the commits that
+              # followed, and CI failed much later unable to resolve
+              # siblings. Re-assert the managed hooks here, in the same shell
+              # entry that removed them, so the window is closed rather than
+              # merely repaired at the next commit.
+              #
+              # Never fails the shell: a dev shell that refuses to open
+              # because a hook could not be written is worse than the drift.
+              # It does, however, say so loudly, and `repro health` reports
+              # the same gap with a remedy.
+              _repro_hook_bin=""
+              if [ -x "$PWD/build/bin/repro" ]; then
+                _repro_hook_bin="$PWD/build/bin/repro"
+              elif command -v repro >/dev/null 2>&1; then
+                _repro_hook_bin="$(command -v repro)"
+              fi
+              if [ -n "$_repro_hook_bin" ]; then
+                "$_repro_hook_bin" hooks ensure --vcs "$PWD" >/dev/null || \
+                  echo "warning: 'repro hooks ensure --vcs $PWD' failed; the pre-push publication gate may be uninstalled. Run it by hand and read its diagnostic." >&2
+              else
+                echo "warning: no 'repro' binary found; the pre-push publication gate cannot be re-asserted after pre-commit's installer. Build it with 'just build' and re-enter the shell." >&2
+              fi
+              unset _repro_hook_bin
+            '';
           };
         };
     };

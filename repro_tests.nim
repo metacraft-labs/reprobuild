@@ -7430,6 +7430,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim",
+    binary: "build/test-bin/t_hooks_ensure_reconciles_a_git_backed_workspace_root",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
     binary: "build/test-bin/t_hooks_noop_outside_initialized_workspace",
     defines: @[],

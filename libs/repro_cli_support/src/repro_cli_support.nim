@@ -12345,6 +12345,13 @@ type
     vheoInstalled ## A fresh install or a missing file was created.
     vheoChainedUserHook ## A pre-existing non-managed hook was preserved as ``<name>.repro-local``.
     vheoRefreshedDrifted ## Sentinel present but body diverged; rewrote canonical content.
+    vheoReclaimedShadowed
+      ## The dispatcher had been overwritten at the canonical path by a
+      ## foreign installer re-running over an ALREADY-chained copy of
+      ## itself, and was reinstalled. Distinct from ``chained-user-hook``
+      ## because it reports an interval during which the managed hook did
+      ## not run at all — for ``pre-push`` that is an interval during which
+      ## the publication gate was silently off.
 
 proc sanitizePreCommitLegacyHook(hooksDir, hookName: string): bool =
   ## RA-4: pre-commit's ``hook-impl`` shim chains into
@@ -12367,13 +12374,15 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string): VcsHookEnsureOutcome =
   ## in the JSON report and the human-readable summary line.
   ##
   ## Outcome priority (the higher-impact change wins when several apply):
-  ##   chained-user-hook  >  refreshed-drifted  >  installed  >  already-up-to-date
+  ##   reclaimed-shadowed  >  chained-user-hook  >  refreshed-drifted  >
+  ##   installed  >  already-up-to-date
   createDir(extendedPath(hooksDir))
   let standard = hookPath(hooksDir, hookName)
   let local = localHookPath(hooksDir, hookName)
   let managed = managedHookPath(hooksDir, hookName)
 
   var chainedUser = false
+  var reclaimedShadowed = false
   var anyChange = false
   var refreshedDrift = false
 
@@ -12390,13 +12399,44 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string): VcsHookEnsureOutcome =
   if fileExists(extendedPath(standard)) and
       not isReprobuildVcsHook(standard, hookName):
     if fileExists(extendedPath(local)):
-      raise newException(ValueError,
-        "cannot install " & hookName & ": " & standard &
-          " is user-owned and " & local & " already exists")
-    moveFileReplacing(standard, local)
-    ensureExecutable(local)
-    chainedUser = true
-    anyChange = true
+      # RE-SHADOWING. A foreign installer (pre-commit's ``pre-commit
+      # install`` is the one that happens in practice) has taken the
+      # canonical path a SECOND time, after ``ensure`` already chained its
+      # first copy to ``<hook>.repro-local``. This is not a new user hook
+      # competing with an old one — it is the same hook body written again
+      # over the dispatcher, and it is the state every shadowed repo is
+      # actually found in.
+      #
+      # Refusing here made the documented remedy for a shadowed hook
+      # ("run repro hooks ensure --vcs <repo>") fail precisely when it was
+      # needed, so a repo that lost its pre-push gate stayed ungated and
+      # published no workspace lock for any of its commits.
+      #
+      # Byte-identical to the copy we already preserve => nothing to keep
+      # that we are not already keeping. Drop the duplicate and let the
+      # dispatcher be rewritten below; the chain still runs it first.
+      if readFile(extendedPath(standard)) == readFile(extendedPath(local)):
+        discard removeFileIfExists(standard)
+        ensureExecutable(local)
+        reclaimedShadowed = true
+        anyChange = true
+      else:
+        # Two DIFFERENT foreign hooks. There is no basis for discarding
+        # either, and silently picking one would lose a user's checks, so
+        # refuse — but name both files and the way out.
+        raise newException(ValueError,
+          "cannot install " & hookName & ": " & standard &
+            " is user-owned and " & local &
+            " already holds a different preserved hook. Reconcile them by " &
+            "hand: merge the checks you want into " & local &
+            " (which the dispatcher runs first), delete " & standard &
+            ", then re-run 'repro hooks ensure --vcs " &
+            parentDir(parentDir(hooksDir)) & "'.")
+    else:
+      moveFileReplacing(standard, local)
+      ensureExecutable(local)
+      chainedUser = true
+      anyChange = true
 
   # Detect drift: file exists, sentinel matches, body diverges from canonical.
   let canonicalManaged = vcsManagedHookContent(hookName)
@@ -12414,6 +12454,8 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string): VcsHookEnsureOutcome =
   let dispatcherChanged = writeExecutableIfChanged(standard, canonicalDispatcher)
   anyChange = anyChange or managedChanged or dispatcherChanged
 
+  if reclaimedShadowed:
+    return vheoReclaimedShadowed
   if chainedUser:
     return vheoChainedUserHook
   if refreshedDrift:
@@ -12430,6 +12472,63 @@ proc ensureVcsHook(hooksDir, hookName: string): bool =
   ## the workspace-aware M17 ``ensure`` path was added.
   let outcome = ensureVcsHookDetailed(hooksDir, hookName)
   outcome != vheoAlreadyUpToDate
+
+proc selfHealManagedHooks*(repoRoot: string): seq[string] =
+  ## Re-assert this repo's managed hook set from a hook that is CURRENTLY
+  ## RUNNING, and return one report line per hook that had to be repaired
+  ## (empty when everything was already wired).
+  ##
+  ## Why a hook repairs its own siblings
+  ## -----------------------------------
+  ##
+  ## The managed hooks live in ``.git/hooks``, which is outside version
+  ## control, and they share that directory with whatever else installs hooks.
+  ## The one that collides in practice is pre-commit, driven from the Nix dev
+  ## shell: ``git-hooks.nix`` sets ``shellHook = pre-commit-check.shellHook``,
+  ## so EVERY dev-shell entry runs pre-commit's installer, which first
+  ## uninstalls the hook types it manages and then installs its own. Depending
+  ## on the repo's ``.pre-commit-config.yaml`` that either overwrites the
+  ## managed ``pre-push`` dispatcher or DELETES it outright — and it happens
+  ## again every time anyone cd's into the repo. A one-off ``repro hooks
+  ## ensure`` cannot survive that; the gate silently stops running, no
+  ## workspace lock is published for any subsequent commit, and CI fails much
+  ## later with "No workspace lock for <repo>".
+  ##
+  ## The hooks pre-commit is NOT configured for keep running, so they are the
+  ## natural repair point: a shell entry can remove ``pre-push``, but the very
+  ## next commit / merge / checkout in that repo puts it back, before any push
+  ## can slip past the gate. This needs no per-repo flake or ``.envrc`` edit,
+  ## which is what makes it hold across every repo in the workspace.
+  ##
+  ## Never raises and never blocks the git operation that invoked it: a hook
+  ## that fails a commit because it could not repair a DIFFERENT hook would be
+  ## a worse failure than the one it is fixing. A repair it cannot make safely
+  ## (two competing foreign hooks) is reported here and surfaced again, with a
+  ## remedy, by the ``vcs-hooks`` check in ``repro health``.
+  if repoRoot.len == 0:
+    return
+  let top = gitTopLevel(repoRoot)
+  if top.len == 0:
+    return
+  let hooksDir = gitHooksDir(top)
+  for hookName in VcsHookNames:
+    try:
+      let outcome = ensureVcsHookDetailed(hooksDir, hookName)
+      case outcome
+      of vheoAlreadyUpToDate, vheoChainedUserHook:
+        discard
+      of vheoInstalled:
+        result.add("repro hooks: repaired " & hookName & " in " & top &
+          " (installed)")
+      of vheoRefreshedDrifted:
+        result.add("repro hooks: repaired " & hookName & " in " & top &
+          " (refreshed-drifted)")
+      of vheoReclaimedShadowed:
+        result.add("repro hooks: repaired " & hookName & " in " & top &
+          " (reclaimed-shadowed)")
+    except CatchableError as err:
+      result.add("repro hooks: could NOT repair " & hookName & " in " & top &
+        ": " & err.msg)
 
 type
   VcsHookEntry* = object
@@ -12462,6 +12561,7 @@ proc vcsHookOutcomeTag(outcome: VcsHookEnsureOutcome): string =
   of vheoInstalled: "installed"
   of vheoChainedUserHook: "chained-user-hook"
   of vheoRefreshedDrifted: "refreshed-drifted"
+  of vheoReclaimedShadowed: "reclaimed-shadowed"
 
 proc toJsonNode*(report: HooksEnsureReport): JsonNode =
   result = newJObject()
@@ -12545,17 +12645,32 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
   ## Returns ``(mode, projectName, repos)``. ``mode`` is
   ## ``"workspace"`` when the workspace shell (workspace.toml or a
   ## resolvable project file) is present, ``"single-repo"`` otherwise.
-  # An explicitly targeted Git worktree is a single-repo hook target even when
-  # it happens to contain manifest-shaped ``projects/`` and ``repos/`` data.
-  # This is the normal shape of the manifest lock backend itself. Treating it
-  # as a workspace would enumerate non-existent ``<manifest>/<repo.path>``
-  # children, install zero hooks, and make the printed ensure remediation
-  # ineffective.
   let explicitGitRoot = gitTopLevel(workspaceRoot)
-  if explicitGitRoot.len > 0 and
-      sameFile(explicitGitRoot, workspaceRoot):
-    result.mode = "single-repo"
-    return
+  let rootIsItsOwnRepo = explicitGitRoot.len > 0 and
+    sameFile(explicitGitRoot, workspaceRoot)
+  # DECLARES a workspace — i.e. carries ``.repro/workspace.toml``, whether
+  # that file lists ``[[manifest]]`` layers or only records the active
+  # project. This, and NOT "the directory happens to hold ``projects/`` and
+  # ``repos/``", is what separates a workspace root from the manifest lock
+  # backend, which has the manifest-shaped directories and no
+  # ``.repro/workspace.toml``.
+  #
+  # The distinction is load-bearing. A single guard — "an explicitly targeted
+  # Git worktree is a single-repo hook target" — used to run FIRST, ahead of
+  # both workspace branches. Every real workspace root is a checked-out Git
+  # repo (the manifests live in ``metacraft-labs/workspace``), so the guard
+  # matched every time: ``repro hooks ensure --vcs`` run at a workspace root
+  # reconciled the root repo alone and reported success. Participating repos
+  # kept whatever hooks they had — in ~30 of them, none — so their pre-push
+  # publication gate never ran, no workspace lock was published for their
+  # commits, and CI failed far downstream with "No workspace lock for <repo>".
+  #
+  # The guard itself is still right, and still applies below: a checkout that
+  # merely CONTAINS manifest-shaped data without declaring a workspace must
+  # stay a single-repo target. Enumerating that as a workspace would look for
+  # non-existent ``<manifest>/<repo.path>`` children, install zero hooks, and
+  # make the printed remediation ineffective. It just has to be asked SECOND.
+  let declaresWorkspace = fileExists(workspaceTomlPath(workspaceRoot))
   if isCompositionalWorkspaceToml(workspaceRoot):
     let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
     # PS-2: hooks are installed in EVERY participating repo, so the hook
@@ -12567,6 +12682,28 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
     for repo in resolved.repos:
       result.repos.add(HookRepoTarget(name: repo.name,
         repoPath: workspaceRoot / repo.path))
+    # The workspace root repo participates too: it is pushed like any other,
+    # and before this branch existed it was the ONLY repo the root-invoked
+    # ensure reached. Appending it keeps that coverage instead of trading one
+    # gap for another. Guarded against a manifest that already declares a repo
+    # at ``path = "."``.
+    if rootIsItsOwnRepo:
+      var declared = false
+      for target in result.repos:
+        if dirExists(target.repoPath) and
+            sameFile(target.repoPath, workspaceRoot):
+          declared = true
+          break
+      if not declared:
+        result.repos.add(HookRepoTarget(name: lastPathPart(workspaceRoot),
+          repoPath: workspaceRoot))
+    return
+  # An explicitly targeted Git worktree that DECLARES no workspace is a
+  # single-repo hook target (see the note above). ``detectWorkspaceProjectName``
+  # below would otherwise accept it on the strength of a lone
+  # ``projects/*.toml``, which is exactly the manifest lock backend's shape.
+  if rootIsItsOwnRepo and not declaresWorkspace:
+    result.mode = "single-repo"
     return
   let projectName = detectWorkspaceProjectName(workspaceRoot)
   if projectName.len > 0:
@@ -12588,6 +12725,20 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
       for repo in resolved.repos:
         result.repos.add(HookRepoTarget(name: repo.name,
           repoPath: workspaceRoot / repo.path))
+      # The workspace root repo participates too: it is pushed like any
+      # other, and before this branch was reachable it was the ONLY repo the
+      # root-invoked ensure reached. Appending it keeps that coverage instead
+      # of trading one gap for another.
+      if rootIsItsOwnRepo:
+        var declared = false
+        for target in result.repos:
+          if dirExists(target.repoPath) and
+              sameFile(target.repoPath, workspaceRoot):
+            declared = true
+            break
+        if not declared:
+          result.repos.add(HookRepoTarget(name: lastPathPart(workspaceRoot),
+            repoPath: workspaceRoot))
       return
   result.mode = "single-repo"
   result.projectName = ""
@@ -12939,6 +13090,12 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # ``<workspace>/.repro/workspace/post-commit-lock.log`` and writes
     # the JSON report to ``post-commit-report.json`` so the operator
     # can introspect the latest outcome.
+    # Repair any managed hook a foreign installer removed or overwrote since
+    # the last git operation — see ``selfHealManagedHooks``. Done BEFORE the
+    # lock refresh so a repo whose ``pre-push`` was deleted by a dev-shell
+    # entry has its gate back before the commit's push can happen.
+    for line in selfHealManagedHooks(repoRoot):
+      stderr.writeLine(line)
     var postArgs: seq[string]
     if repoRoot.len > 0:
       postArgs.add("--current-repo=" & repoRoot)
@@ -12950,6 +13107,11 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # (post-checkout: ``<prev> <new> <flag>``; post-merge: the squash
     # flag) appear after ``--`` and are forwarded so the wrapper can
     # short-circuit when ``prev == new``.
+    # Same self-heal as the post-commit arm: a dev-shell entry immediately
+    # followed by a checkout / merge (and no commit) must not leave the
+    # publication gate uninstalled either.
+    for line in selfHealManagedHooks(repoRoot):
+      stderr.writeLine(line)
     var refreshArgs: seq[string]
     if repoRoot.len > 0:
       refreshArgs.add("--current-repo=" & repoRoot)
@@ -42583,6 +42745,7 @@ type
     hfStartDaemon     ## Start the per-user store daemon.
     hfCloneSiblings   ## Clone the missing develop-mode siblings.
     hfWorkspaceErgonomics ## Repair workspace-projects.md, gitignore, and AGENTS.md.
+    hfEnsureVcsHooks  ## Reinstall the managed VCS hooks in every participating repo.
 
   HealthCheck* = object
     ## One diagnosed layer. ``remedy`` is the exact command the user (or
@@ -42881,6 +43044,79 @@ proc gatherHealthChecks(parsed: HealthArgs):
         remedy: self & " hooks ensure --vcs",
         fixKind: hfNone))
 
+  # 8b. Managed VCS hooks in every participating repo.
+  #
+  #     The pre-push publication gate is the only thing that publishes a
+  #     workspace lock for a commit, and it runs from a hook file that lives
+  #     OUTSIDE version control, in each repo's ``.git/hooks``. Nothing about
+  #     a repo's tracked content records whether that file is present, so a
+  #     hook that stops running stops running SILENTLY: commits keep landing,
+  #     pushes keep succeeding, and the absence surfaces only much later as a
+  #     CI job that cannot resolve its siblings.
+  #
+  #     Two distinct ways it stops, both seen in the fleet:
+  #
+  #       * missing — the repo never got hooks (``ensure`` never reached it);
+  #       * shadowed — a foreign installer (pre-commit) overwrote the
+  #         dispatcher at the canonical path while the managed body sits
+  #         beside it, unreferenced.
+  #
+  #     Shadowed is the more dangerous of the two precisely because it LOOKS
+  #     installed: ``.git/hooks/pre-push`` exists and is executable.
+  block hooksCheck:
+    var missing: seq[string]
+    var shadowed: seq[string]
+    var okCount = 0
+    var reposInspected = 0
+    let enumerated = enumerateParticipatingRepos(parsed.workspaceRoot)
+    for repo in enumerated.repos:
+      if gitTopLevel(repo.repoPath).len == 0:
+        continue        # not materialized; the siblings check owns that.
+      inc reposInspected
+      let hooksDir = gitHooksDir(repo.repoPath)
+      for hookName in VcsHookNames:
+        let standard = hookPath(hooksDir, hookName)
+        let managed = managedHookPath(hooksDir, hookName)
+        let wired = fileExists(extendedPath(standard)) and
+          isReprobuildVcsHook(standard, hookName)
+        if wired and fileExists(extendedPath(managed)):
+          inc okCount
+        elif fileExists(extendedPath(managed)) and
+            fileExists(extendedPath(standard)):
+          shadowed.add(repo.name & "/" & hookName)
+        else:
+          missing.add(repo.name & "/" & hookName)
+    let remedy = self & " hooks ensure --vcs " & parsed.workspaceRoot
+    if enumerated.mode != "workspace":
+      checks.add(HealthCheck(
+        name: "vcs-hooks",
+        status: hsOk,
+        detail: "single-repo target; workspace hook enumeration not applicable",
+        remedy: "", fixKind: hfNone))
+    elif shadowed.len > 0:
+      checks.add(HealthCheck(
+        name: "vcs-hooks",
+        status: hsFail,
+        detail: $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
+          "installer and not running: " & shadowed.join(", "),
+        remedy: remedy,
+        fixKind: hfEnsureVcsHooks))
+    elif missing.len > 0:
+      checks.add(HealthCheck(
+        name: "vcs-hooks",
+        status: hsFail,
+        detail: $missing.len & " managed hook(s) missing across " &
+          $reposInspected & " participating repo(s): " & missing.join(", "),
+        remedy: remedy,
+        fixKind: hfEnsureVcsHooks))
+    else:
+      checks.add(HealthCheck(
+        name: "vcs-hooks",
+        status: hsOk,
+        detail: $okCount & " managed hook(s) wired across " &
+          $reposInspected & " participating repo(s)",
+        remedy: "", fixKind: hfNone))
+
   # 9. Push gateway. Structural/advisory: a certificate-enforcing project
   #    routes pushes through the local gateway. Absent enforcement, the
   #    gateway is not required; we report advisory so the user knows
@@ -43069,6 +43305,23 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         else:
           result.add("fix: clone of " & repo.path & " failed: " &
             res.output.strip())
+    of hfEnsureVcsHooks:
+      # Reinstalling a managed hook is additive and reversible: a foreign
+      # hook found at the canonical path is preserved as
+      # ``<hook>.repro-local`` and still runs first. Nothing is discarded,
+      # so this is a safe auto-fix.
+      result.add("fix: reinstalling managed VCS hooks across the workspace")
+      try:
+        let report = ensureWorkspaceHooks(parsed.workspaceRoot)
+        var keys: seq[string]
+        for k in report.summary.keys: keys.add(k)
+        keys.sort()
+        var parts: seq[string]
+        for k in keys: parts.add(k & "=" & $report.summary[k])
+        result.add("fix: " & $report.entries.len & " hook(s) across " &
+          $report.repos.len & " repo(s) (" & parts.join(", ") & ")")
+      except CatchableError as err:
+        result.add("fix: hooks ensure failed: " & err.msg)
     of hfWorkspaceErgonomics:
       result.add("fix: repairing workspace ergonomics files")
       let gitignoreFile = parsed.workspaceRoot / ".gitignore"
