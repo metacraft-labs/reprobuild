@@ -151,6 +151,21 @@ type
                                      ## without the tests that make the
                                      ## change safe. This field is the datum
                                      ## PMC-4 will read.
+    builtinCpuFeatures*: set[CpuFeature]
+                                     ## PMC-3: the extra extensions the
+                                     ## selected arm declared beyond its
+                                     ## floor, or ``{}`` (every catalog entry
+                                     ## today). Recorded for the same reason
+                                     ## ``builtinCpuLevel`` is, and under the
+                                     ## same restriction: NOT wired into any
+                                     ## lock identity or cache key here — that
+                                     ## is PMC-4's named deliverable.
+                                     ##
+                                     ## The arm's DECLARED set, not its
+                                     ## expansion: what the author wrote is
+                                     ## what a lock entry should record, and
+                                     ## the expansion is recoverable from it
+                                     ## via ``requiredFeatures``.
     urlUsed*: string                 ## PlatformBinary.url chosen for host
     digestAlgorithm*: string         ## "sha256" | "sha512"
     digestValue*: string             ## hex digest (lowercase)
@@ -356,10 +371,230 @@ proc detectHostMicroarchLevel*(family = detectHostCpu()): MicroarchLevel =
       "would silently change which artifacts this machine accepts.")
   parsed.level
 
+const HostCpuFeaturesEnvVar* = "REPRO_HOST_CPU_FEATURES"
+  ## PMC-3 deliverable 1, the declaration half: the CPU extensions this host
+  ## DECLARES it provides, on top of whatever ``REPRO_HOST_MICROARCH_LEVEL``
+  ## says.
+  ##
+  ## Accepts a list in the psABI spellings, separated by ``,`` / ``+`` /
+  ## whitespace (``avx512vl,avx512vnni``), or the single word ``auto`` to run
+  ## the real ``cpuid`` probe. An UNPARSEABLE value is refused loudly rather
+  ## than ignored — exactly the rule ``REPRO_HOST_MICROARCH_LEVEL`` follows,
+  ## and for the sharper version of the same reason: a dropped feature would
+  ## silently change which artifacts this machine accepts with no error
+  ## anywhere pointing back at the typo.
+  ##
+  ## **Unset means "declared nothing", NOT "probe".** That is a policy
+  ## decision, not an omission, and it is the same one PMC-2 made for the
+  ## level: the authority for "what may this machine be given" is the fleet,
+  ## not the silicon. A probe cannot be talked DOWN, and "target a floor below
+  ## the builder" is a requirement PMC-4 depends on. So a machine that can
+  ## demonstrably run more still declares nothing until an operator says
+  ## otherwise, and the conservative floor survives PMC-3 intact.
+
+when defined(amd64) and not defined(js) and not defined(nimscript):
+  # PMC-3: the ``cpuid`` / ``xgetbv`` primitives, as two tiny C statics.
+  #
+  # Emitted into the INCLUDESECTION so they are defined before any Nim-
+  # generated code that calls them. ``__get_cpuid_count`` (GCC/Clang) and
+  # ``__cpuidex`` (MSVC) both bounds-check the leaf against CPUID's own
+  # maximum, so an unsupported leaf answers zeroes rather than garbage.
+  # XGETBV is spelled as its raw opcode bytes to avoid depending on the
+  # assembler's ISA level.
+  {.emit: """/*INCLUDESECTION*/
+#if defined(_MSC_VER)
+#  include <intrin.h>
+static void repro_cpuidex(unsigned int leaf, unsigned int sub,
+                          unsigned int *out) {
+  int regs[4];
+  __cpuidex(regs, (int)leaf, (int)sub);
+  out[0] = (unsigned int)regs[0]; out[1] = (unsigned int)regs[1];
+  out[2] = (unsigned int)regs[2]; out[3] = (unsigned int)regs[3];
+}
+static unsigned long long repro_xgetbv0(void) { return _xgetbv(0); }
+#else
+#  include <cpuid.h>
+static void repro_cpuidex(unsigned int leaf, unsigned int sub,
+                          unsigned int *out) {
+  unsigned int a = 0, b = 0, c = 0, d = 0;
+  if (!__get_cpuid_count(leaf, sub, &a, &b, &c, &d)) { a = b = c = d = 0; }
+  out[0] = a; out[1] = b; out[2] = c; out[3] = d;
+}
+static unsigned long long repro_xgetbv0(void) {
+  unsigned int eax = 0, edx = 0;
+  __asm__ __volatile__(".byte 0x0f, 0x01, 0xd0"
+                       : "=a"(eax), "=d"(edx) : "c"(0));
+  return (((unsigned long long)edx) << 32) | (unsigned long long)eax;
+}
+#endif
+""".}
+
+  proc cpuidEx(leaf, sub: uint32; outRegs: ptr uint32)
+    {.importc: "repro_cpuidex", nodecl.}
+  proc xgetbv0(): uint64 {.importc: "repro_xgetbv0", nodecl.}
+
+proc probeHostCpuFeatures*(): set[CpuFeature] =
+  ## PMC-3 deliverable 1, the probe half: what this silicon ACTUALLY has,
+  ## from ``cpuid``.
+  ##
+  ## Reached only through ``REPRO_HOST_CPU_FEATURES=auto`` (see above), and
+  ## living here rather than in ``packages_schema`` because it is a host read
+  ## and the schema stays pure on that axis — the campaign's testability note
+  ## makes that a requirement, not a preference.
+  ##
+  ## Two gates, both of which exist because the CPUID bit alone is not the
+  ## question a caller is asking:
+  ##
+  ##   * ``avx`` is reported only when the OS enabled the extended register
+  ##     state for it (``OSXSAVE`` plus ``XCR0[2:1]``). AVX instructions fault
+  ##     on a kernel that did not, so a probe that answered from the raw
+  ##     feature bit would report a capability this machine does not have —
+  ##     the exact wrong direction for this campaign;
+  ##   * the AVX-512 family is gated behind ``avx`` and ``XCR0[7:5]`` for the
+  ##     same reason.
+  ##
+  ## Answers ``{}`` on anything that is not amd64: a probe with no
+  ## implementation must not report a partial one.
+  when defined(amd64) and not defined(js) and not defined(nimscript):
+    var regs: array[4, uint32]
+    template bitOf(word: uint32; bit: int): bool =
+      (word and (1'u32 shl uint32(bit))) != 0'u32
+    cpuidEx(0'u32, 0'u32, addr regs[0])
+    let maxLeaf = regs[0]
+    if maxLeaf < 1'u32:
+      return {}
+    cpuidEx(1'u32, 0'u32, addr regs[0])
+    let leaf1Ecx = regs[2]
+    let leaf1Edx = regs[3]
+    if bitOf(leaf1Edx, 15): result.incl(cfCmov)
+    if bitOf(leaf1Edx, 8): result.incl(cfCx8)
+    if bitOf(leaf1Edx, 0): result.incl(cfFpu)
+    if bitOf(leaf1Edx, 23): result.incl(cfMmx)
+    if bitOf(leaf1Edx, 24): result.incl(cfFxsr)
+    if bitOf(leaf1Edx, 25): result.incl(cfSse)
+    if bitOf(leaf1Edx, 26): result.incl(cfSse2)
+    # OSFXSR is a CR4 bit, not a CPUID one — unreadable from user mode. Every
+    # OS that runs SSE code sets it, and SSE is reported above, so deriving it
+    # from FXSR+SSE is the honest reading rather than a guess: if the OS had
+    # not enabled FXSAVE state, nothing compiled for amd64 would run at all.
+    if cfFxsr in result and cfSse in result: result.incl(cfOsfxsr)
+    if bitOf(leaf1Ecx, 0): result.incl(cfSse3)
+    if bitOf(leaf1Ecx, 1): result.incl(cfPclmulqdq)
+    if bitOf(leaf1Ecx, 9): result.incl(cfSsse3)
+    if bitOf(leaf1Ecx, 13): result.incl(cfCx16)
+    if bitOf(leaf1Ecx, 19): result.incl(cfSse4_1)
+    if bitOf(leaf1Ecx, 20): result.incl(cfSse4_2)
+    if bitOf(leaf1Ecx, 22): result.incl(cfMovbe)
+    if bitOf(leaf1Ecx, 23): result.incl(cfPopcnt)
+    if bitOf(leaf1Ecx, 25): result.incl(cfAes)
+    if bitOf(leaf1Ecx, 29): result.incl(cfF16c)
+    if bitOf(leaf1Ecx, 30): result.incl(cfRdrnd)
+    let osxsave = bitOf(leaf1Ecx, 27)
+    if osxsave: result.incl(cfOsxsave)
+    # XGETBV faults with #UD unless OSXSAVE is set, so it is read only inside
+    # this guard.
+    var xcr0: uint64 = 0'u64
+    if osxsave:
+      xcr0 = xgetbv0()
+    let ymmEnabled = osxsave and ((xcr0 and 0x6'u64) == 0x6'u64)
+    let zmmEnabled = ymmEnabled and ((xcr0 and 0xe0'u64) == 0xe0'u64)
+    if ymmEnabled and bitOf(leaf1Ecx, 28): result.incl(cfAvx)
+    if cfAvx in result and bitOf(leaf1Ecx, 12): result.incl(cfFma)
+    # Extended leaf: SYSCALL/SYSRET (the psABI's "sce"), LAHF/SAHF in long
+    # mode, and LZCNT.
+    cpuidEx(0x80000000'u32, 0'u32, addr regs[0])
+    if regs[0] >= 0x80000001'u32:
+      cpuidEx(0x80000001'u32, 0'u32, addr regs[0])
+      if bitOf(regs[3], 11): result.incl(cfSce)
+      if bitOf(regs[2], 0): result.incl(cfLahfSahf)
+      if bitOf(regs[2], 5): result.incl(cfLzcnt)
+    if maxLeaf >= 7'u32:
+      cpuidEx(7'u32, 0'u32, addr regs[0])
+      let ebx = regs[1]
+      let ecx = regs[2]
+      let edx = regs[3]
+      if bitOf(ebx, 3): result.incl(cfBmi1)
+      if bitOf(ebx, 8): result.incl(cfBmi2)
+      if bitOf(ebx, 18): result.incl(cfRdseed)
+      if bitOf(ebx, 19): result.incl(cfAdx)
+      if bitOf(ebx, 29): result.incl(cfSha)
+      if cfAvx in result and bitOf(ebx, 5): result.incl(cfAvx2)
+      if cfAvx in result and bitOf(ecx, 8): result.incl(cfGfni)
+      if cfAvx in result and bitOf(ecx, 9): result.incl(cfVaes)
+      if cfAvx in result and bitOf(ecx, 10): result.incl(cfVpclmulqdq)
+      if zmmEnabled and cfAvx in result and bitOf(ebx, 16):
+        result.incl(cfAvx512f)
+        if bitOf(ebx, 17): result.incl(cfAvx512dq)
+        if bitOf(ebx, 21): result.incl(cfAvx512Ifma)
+        if bitOf(ebx, 28): result.incl(cfAvx512cd)
+        if bitOf(ebx, 30): result.incl(cfAvx512bw)
+        if bitOf(ebx, 31): result.incl(cfAvx512vl)
+        if bitOf(ecx, 1): result.incl(cfAvx512Vbmi)
+        if bitOf(ecx, 6): result.incl(cfAvx512Vbmi2)
+        if bitOf(ecx, 11): result.incl(cfAvx512Vnni)
+        if bitOf(ecx, 12): result.incl(cfAvx512Bitalg)
+        if bitOf(ecx, 14): result.incl(cfAvx512Vpopcntdq)
+        if bitOf(edx, 8): result.incl(cfAvx512Vp2intersect)
+        if bitOf(edx, 23): result.incl(cfAvx512Fp16)
+        cpuidEx(7'u32, 1'u32, addr regs[0])
+        if bitOf(regs[0], 5): result.incl(cfAvx512Bf16)
+  else:
+    result = {}
+
+proc detectHostCpuFeatures*(family = detectHostCpu()): set[CpuFeature] =
+  ## PMC-3: what CPU extensions does this host provide, beyond its level?
+  ##
+  ## ``REPRO_HOST_CPU_FEATURES`` when set (``auto`` routes to
+  ## ``probeHostCpuFeatures``), else ``{}`` — a host that has declared
+  ## nothing.
+  ##
+  ## Same shape as ``detectHostMicroarchLevel`` and for the same reason: a
+  ## PROC WITH A DEFAULTED PARAMETER, called from the default-parameter
+  ## expressions of the resolution entry points. It is never consulted when a
+  ## caller supplies a feature set, so the env read cannot reach a test that
+  ## names a synthetic host.
+  ##
+  ## Both refusals below are the ``REPRO_HOST_MICROARCH_LEVEL`` rule applied
+  ## to a set: an unreadable TOKEN is refused, and so is a feature belonging
+  ## to another family — the latter could never be satisfied and would present
+  ## as an unexplained refusal far from the variable that caused it.
+  let raw = getEnv(HostCpuFeaturesEnvVar, "")
+  if raw.strip().len == 0:
+    return {}
+  if raw.strip().toLowerAscii() == "auto":
+    # A probe request for a family that is not the compiled one answers {}
+    # rather than handing this machine's x86 features to an aarch64
+    # resolution — the same dependence on ``family`` that
+    # ``detectHostMicroarchLevel`` has.
+    if family != detectHostCpu():
+      return {}
+    return probeHostCpuFeatures()
+  let parsed = parseCpuFeatureSet(raw)
+  if not parsed.ok:
+    raise newException(ValueError,
+      HostCpuFeaturesEnvVar & "='" & raw & "' names an unknown CPU feature '" &
+      parsed.badToken & "'. Expected psABI spellings (avx2, avx512vl, " &
+      "avx512vnni, sha, ...) separated by ',' / '+' / whitespace, or the " &
+      "single word 'auto' to probe this machine. This variable declares " &
+      "what the host may be GIVEN; an unreadable value is refused rather " &
+      "than defaulted, because dropping a feature would silently change " &
+      "which artifacts this machine accepts.")
+  for f in parsed.features:
+    if cpuFeatureFamily(f) != family:
+      raise newException(ValueError,
+        HostCpuFeaturesEnvVar & "='" & raw & "' names '" & $f &
+        "', which belongs to cpu family " & $cpuFeatureFamily(f) &
+        ", but this resolution's host family is " & $family &
+        ". A feature the host family cannot have is never satisfiable and " &
+        "would present as an unexplained refusal far from this variable.")
+  parsed.features
+
 proc detectHostTarget*(): PlatformTarget =
-  ## The full structured target for this host: family + declared level.
+  ## The full structured target for this host: family + declared level +
+  ## declared feature set.
   let family = detectHostCpu()
-  initPlatformTarget(family, detectHostMicroarchLevel(family))
+  initPlatformTarget(family, detectHostMicroarchLevel(family),
+    detectHostCpuFeatures(family))
 
 proc raisePackageUnavailableOnPlatform*(packageId: string;
                                         availability: PackageAvailability;
@@ -936,7 +1171,8 @@ proc resolveBuiltinPackage*(packageId: string;
                             version = "";
                             hostCpu = detectHostCpu();
                             hostOs = detectHostOs();
-                            hostLevel = detectHostMicroarchLevel(hostCpu)):
+                            hostLevel = detectHostMicroarchLevel(hostCpu);
+                            hostFeatures = detectHostCpuFeatures(hostCpu)):
     BuiltinResolveResult =
   ## Probe a checked-in VersionedProvisioning catalog for a satisfying
   ## (version, platform) tuple and produce a `CatalogResolution`
@@ -951,6 +1187,13 @@ proc resolveBuiltinPackage*(packageId: string;
   ## Note the default's dependence on ``hostCpu``: a caller that says
   ## "resolve as if this were aarch64" gets aarch64's baseline, not the
   ## real machine's.
+  ##
+  ## PMC-3: ``hostFeatures`` is the FOURTH such parameter and is ADDITIVE on
+  ## top of ``hostLevel`` — this host provides its level's set UNION whatever
+  ## it declares here. Its default is ``detectHostCpuFeatures(hostCpu)``,
+  ## which is the only place ``REPRO_HOST_CPU_FEATURES`` can reach selection:
+  ## a caller that supplies a set is never affected by the environment, which
+  ## is what keeps the whole campaign's test suite hermetic.
   result.found = false
   result.error = breOk
   result.resolution.packageId = packageId
@@ -984,18 +1227,24 @@ proc resolveBuiltinPackage*(packageId: string;
       schemaErrors.join("; ")
     return
   let pb = selectPlatformBinaryEx(picked,
-    initPlatformTarget(hostCpu, hostLevel), hostOs)
+    initPlatformTarget(hostCpu, hostLevel, hostFeatures), hostOs)
   if not pb.found:
     if pb.refusedForLevel:
-      # PMC-2 deliverable 4. An arm EXISTS for this (cpu, os); the host is
-      # simply below its floor. Say so, and say by how much — the generic
-      # "no platform slice" message would send the reader looking for a
-      # missing build that is right there in the catalog.
+      # PMC-2 deliverable 4, widened by PMC-3 deliverable 3. An arm EXISTS for
+      # this (cpu, os); the host simply cannot run it. Say so, and say by how
+      # much — the generic "no platform slice" message would send the reader
+      # looking for a missing build that is right there in the catalog.
+      #
+      # ``describeCapabilityShortfall`` rather than
+      # ``describeMicroarchShortfall``: an arm requiring x86-64-v3 + avx512vl
+      # refused on a v3 host has NO level shortfall, so the PMC-2 sentence
+      # would be empty here — and if it were emitted anyway it would read
+      # "needs x86-64-v3, host provides x86-64-v3", contradicting the refusal.
       result.error = breMicroarchFloorNotSatisfied
       result.errorDetail = "builtin catalog for '" & packageId &
         "' version '" & picked.version & "' has a slice for cpu=" &
         $hostCpu & " os=" & $hostOs &
-        ", but this host cannot run it: " & describeMicroarchShortfall(pb) &
+        ", but this host cannot run it: " & describeCapabilityShortfall(pb) &
         ". Selecting it anyway would resolve cleanly and then trap at " &
         "SIGILL on the first instruction the host lacks."
       return
@@ -1009,6 +1258,7 @@ proc resolveBuiltinPackage*(packageId: string;
   result.resolution.resolvedVersion = picked.version
   result.resolution.builtinVersion = picked.version
   result.resolution.builtinCpuLevel = pb.binary.cpu_level
+  result.resolution.builtinCpuFeatures = pb.binary.cpu_features
   result.resolution.urlUsed = pb.binary.url
   if pb.binary.sha256.len > 0:
     result.resolution.digestAlgorithm = "sha256"
@@ -1155,6 +1405,7 @@ proc tryResolveBuiltin(packageId: string;
                        hostCpu: PlatformCpu;
                        hostOs: PlatformOs;
                        hostLevel: MicroarchLevel;
+                       hostFeatures: set[CpuFeature];
                        step: var ChainStep):
     tuple[found: bool; resolution: CatalogResolution] =
   ## M65: the cakBuiltin branch of the chain. Looks the tool up in the
@@ -1178,7 +1429,7 @@ proc tryResolveBuiltin(packageId: string;
     step.reason = "built-in catalog for '" & packageId & "' is empty"
     return (false, CatalogResolution())
   let res = resolveBuiltinPackage(packageId, cat, version, hostCpu, hostOs,
-    hostLevel)
+    hostLevel, hostFeatures)
   if not res.found:
     step.outcome = csoSchemaError
     # PMC-2: ``res.errorDetail`` carries the microarchitecture shortfall for
@@ -1366,7 +1617,8 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
                           hostCpu = detectHostCpu();
                           hostOs = detectHostOs();
                           availability = none(PackageAvailability);
-                          hostLevel = detectHostMicroarchLevel(hostCpu)):
+                          hostLevel = detectHostMicroarchLevel(hostCpu);
+                          hostFeatures = detectHostCpuFeatures(hostCpu)):
     CatalogResolution =
   ## M65: the production adapter selection chain. Walks ``chain`` in
   ## order, returning the first adapter's resolution. When ``chain`` is
@@ -1392,6 +1644,12 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
   ## reason ``hostCpu`` / ``hostOs`` are, and the campaign's testability
   ## note makes that a requirement rather than a convenience: a v2/v3
   ## test names its host here and needs no such hardware.
+  ##
+  ## PMC-3: ``hostFeatures`` is the fourth such parameter, additive on top of
+  ## ``hostLevel``. Supplying one changes NOTHING for the standard library —
+  ## every stdlib arm requires ``{}`` and ``{} ⊆ anything`` — which is the
+  ## check that PMC-3 did not move every existing package by adding a field
+  ## nobody uses.
   ##
   ## When the builtin catalog holds an arm the host cannot run, the
   ## cakBuiltin step SKIPS (as it already did for an unsupported
@@ -1431,7 +1689,7 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
     case adapter
     of cakBuiltin:
       let outcome = tryResolveBuiltin(packageId, version, hostCpu, hostOs,
-        hostLevel, step)
+        hostLevel, hostFeatures, step)
       trace.add(step)
       if outcome.found:
         var resolution = outcome.resolution
