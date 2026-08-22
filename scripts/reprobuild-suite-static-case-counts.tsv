@@ -932,6 +932,7 @@ tests/integration/t_gate_consumes_published_evidence_for_unclonable_private_repo
 tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	nim	9
 tests/integration/t_health_fix_remediates_safe_issues_only.nim	nim	2
 tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	5
+tests/integration/t_highest_satisfied_floor_wins.nim	nim	1
 tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	nim	6
 tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim	nim	1
 tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	5
@@ -983,6 +984,7 @@ tests/integration/t_just_test_hot_cache_is_no_op_build.nim	nim	1
 tests/integration/t_just_test_via_ct_test_runner.nim	nim	1
 tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	nim	1
 tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	nim	1
+tests/integration/t_levelless_catalog_selection_is_unchanged.nim	nim	1
 tests/integration/t_linked_worktree_pre_push_repository_env.nim	nim	7
 tests/integration/t_local_daemons_control_plane_m0.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m1.nim	nim	3
@@ -1162,6 +1164,8 @@ tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1
 tests/integration/t_unrouted_private_repo_refuses_loudly.nim	nim	1
 tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim	nim	1
+tests/integration/t_v2_artifact_resolves_on_a_v3_host.nim	nim	1
+tests/integration/t_v3_artifact_refused_on_a_v2_host.nim	nim	1
 tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim	nim	1
 tests/integration/t_workspace_bootstrap_provisions_toolchain_on_windows.nim	nim	6
 tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults.nim	nim	1
@@ -1258,7 +1262,7 @@ tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	7
 tests/unit/t_m9r12_3_runquota_standard_pools.nim	nim	5
 tests/unit/t_m9r12_4_autotools_emits_fetch.nim	nim	3
 tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim	nim	15
-tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	10
+tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	11
 tests/unit/t_m9r13b_1_toolchain_pin.nim	nim	4
 tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	nim	6
 tests/unit/t_m9r13c_2_shim_lib_resolution.nim	nim	4
