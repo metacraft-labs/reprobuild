@@ -816,11 +816,16 @@ type
     treeDigest*: uint64
     hasTreeDigest*: bool
 
+# Unsynchronized process-global counters. Safe today because the scheduler
+# runs single-threaded (it spawns tool subprocesses, never `createThread`);
+# they would need atomics or per-thread accumulation if that ever changes.
 var
   outputStateCheckCalls = 0
   outputStateCheckNanos = 0'i64
-  outputStateCheckDirWalks = 0
-  outputStateCheckDirEntries = 0'i64
+  revalidateDirWalks = 0
+  revalidateDirEntries = 0'i64
+  recordDirWalks = 0
+  recordDirEntries = 0'i64
 
 proc symlinkTargetOf(path: string): string =
   ## `readlink()` or "" when `path` is not a symlink. Never follows.
@@ -833,7 +838,7 @@ proc symlinkTargetOf(path: string): string =
         return ""
   ""
 
-proc directoryMetadataDigest(root: string): uint64 =
+proc directoryMetadataDigest(root: string; entriesWalked: var int64): uint64 =
   ## Order-independent digest over the recursive metadata of `root`.
   ##
   ## Entries are folded in with a commutative accumulator (wrapping sum)
@@ -849,7 +854,6 @@ proc directoryMetadataDigest(root: string): uint64 =
   ## payload is packed as raw little-endian bytes rather than formatted
   ## text: decimal formatting of five integers per entry measured ~3x the
   ## cost of the syscall it was describing.
-  inc outputStateCheckDirWalks
   var entries = 0'u64
   var scratch = newSeq[byte](0)
   for entry in walkDirRec(extendedPath(root),
@@ -880,7 +884,7 @@ proc directoryMetadataDigest(root: string): uint64 =
     result = result + localHash(scratch).value
   # Fold the count in so that an empty tree and a missing tree differ, and so
   # that a pair of entries cannot cancel out.
-  outputStateCheckDirEntries += int64(entries)
+  entriesWalked = int64(entries)
   result = result xor (entries * 0x9E3779B97F4A7C15'u64)
 
 proc observeOutputWitness(path: string; metadata: FileMetadata): OutputWitness =
@@ -898,8 +902,14 @@ proc observeOutputWitness(path: string; metadata: FileMetadata): OutputWitness =
           discard
   if metadata.kind == ffkDirectory:
     try:
-      result.treeDigest = directoryMetadataDigest(path)
+      var walked = 0'i64
+      result.treeDigest = directoryMetadataDigest(path, walked)
       result.hasTreeDigest = true
+      # Attributed to the RECORD phase. Folding it into the revalidation
+      # counters made a COLD build report "revalidate dir walks = 1" for work
+      # that was not revalidation at all.
+      inc recordDirWalks
+      recordDirEntries += walked
     except OSError, IOError:
       result.hasTreeDigest = false
 
@@ -1127,27 +1137,38 @@ proc materialPath(root, path: string): string =
 
 const
   WitnessMagic = "RBOW"
-  WitnessVersion = 1'u16
+  WitnessVersion = 2'u16
   WitnessFileExt = ".octime"
 
 proc witnessFileName(strongHex: string): string =
   strongHex & WitnessFileExt
 
-proc encodeWitnesses(record: ActionResultRecord): seq[byte] =
+proc isEmpty(w: OutputWitness): bool =
+  w.changeTimeNs == 0'u64 and w.linkTarget.len == 0 and not w.hasTreeDigest
+
+proc encodeWitnesses(witnesses: Table[string, OutputWitness];
+                     recordWriteSequence: uint64): seq[byte] =
   for i in 0 ..< 4:
     result.add(byte(ord(WitnessMagic[i])))
   result.writeU16Le(WitnessVersion)
-  result.writeU32Le(uint32(record.outputs.len))
-  for output in record.outputs:
-    result.writeString(output.path)
-    result.writeU64Le(output.changeTimeNs)
-    result.writeString(output.linkTarget)
-    result.add(if output.hasTreeDigest: 1'u8 else: 0'u8)
-    result.writeU64Le(output.treeDigest)
+  # Back-reference to the `.rec` this sidecar describes. A reader that finds a
+  # different sequence in the record file treats the sidecar as absent. This
+  # is what makes an OLD binary rewriting `<hex>.rec` -- which cannot know
+  # about the sidecar -- safe: the stale witness is discarded rather than
+  # compared against outputs it no longer describes.
+  result.writeU64Le(recordWriteSequence)
+  result.writeU32Le(uint32(witnesses.len))
+  for path, w in witnesses:
+    result.writeString(path)
+    result.writeU64Le(w.changeTimeNs)
+    result.writeString(w.linkTarget)
+    result.add(if w.hasTreeDigest: 1'u8 else: 0'u8)
+    result.writeU64Le(w.treeDigest)
 
-proc decodeWitnesses(raw: openArray[byte]): Table[string, OutputWitness] =
-  result = initTable[string, OutputWitness]()
-  if raw.len < 10:
+proc decodeWitnesses(raw: openArray[byte]):
+    tuple[recordWriteSequence: uint64; witnesses: Table[string, OutputWitness]] =
+  result.witnesses = initTable[string, OutputWitness]()
+  if raw.len < 18:
     return
   for i in 0 ..< 4:
     if raw[i] != byte(ord(WitnessMagic[i])):
@@ -1156,6 +1177,7 @@ proc decodeWitnesses(raw: openArray[byte]): Table[string, OutputWitness] =
   let version = readU16Le(raw, pos)
   if version != WitnessVersion:
     return
+  result.recordWriteSequence = readU64Le(raw, pos)
   let count = int(readU32Le(raw, pos))
   for _ in 0 ..< count:
     let path = readString(raw, pos)
@@ -1164,10 +1186,27 @@ proc decodeWitnesses(raw: openArray[byte]): Table[string, OutputWitness] =
     w.linkTarget = readString(raw, pos)
     w.hasTreeDigest = readByte(raw, pos) == 1
     w.treeDigest = readU64Le(raw, pos)
-    result[path] = w
+    result.witnesses[path] = w
+
+proc witnessesOf(records: openArray[ActionResultRecord]):
+    tuple[witnesses: Table[string, OutputWitness]; any: bool] =
+  ## Merge the witnesses carried by `records`. All records in one `.rec` share
+  ## a strong fingerprint, so they describe the same outputs; a non-empty
+  ## witness always wins over an empty one.
+  result.witnesses = initTable[string, OutputWitness]()
+  for record in records:
+    for output in record.outputs:
+      let w = OutputWitness(changeTimeNs: output.changeTimeNs,
+        linkTarget: output.linkTarget, treeDigest: output.treeDigest,
+        hasTreeDigest: output.hasTreeDigest)
+      if not w.isEmpty:
+        result.any = true
+        result.witnesses[output.path] = w
+      elif output.path notin result.witnesses:
+        result.witnesses[output.path] = w
 
 proc attachWitnesses(record: var ActionResultRecord;
-                     witnesses: Table[string, OutputWitness]) =
+                     witnesses: Table[string, OutputWitness]) {.used.} =
   for i in 0 ..< record.outputs.len:
     let w = witnesses.getOrDefault(record.outputs[i].path)
     record.outputs[i].changeTimeNs = w.changeTimeNs
@@ -1175,8 +1214,23 @@ proc attachWitnesses(record: var ActionResultRecord;
     record.outputs[i].treeDigest = w.treeDigest
     record.outputs[i].hasTreeDigest = w.hasTreeDigest
 
+proc resetOutputStateCheckStats*() =
+  ## Zero the accumulators. The engine calls this at the start of every build:
+  ## these are process-global, and a process that runs more than one build
+  ## (the daemon, the test binaries, `repro watch`) would otherwise report
+  ## each build's cost plus every earlier build's.
+  outputStateCheckCalls = 0
+  outputStateCheckNanos = 0'i64
+  revalidateDirWalks = 0
+  revalidateDirEntries = 0'i64
+  recordDirWalks = 0
+  recordDirEntries = 0'i64
+
 proc outputStateCheckStats*(): tuple[calls: int; nanos: int64;
-                                     dirWalks: int; dirEntries: int64] =
+                                     revalidateDirWalks: int;
+                                     revalidateDirEntries: int64;
+                                     recordDirWalks: int;
+                                     recordDirEntries: int64] =
   ## Accumulated cost of EVERY `outputStateMismatch` call in this process.
   ##
   ## Counted inside the proc, not at the call sites, deliberately: the check
@@ -1186,7 +1240,9 @@ proc outputStateCheckStats*(): tuple[calls: int; nanos: int64;
   ## Instrumenting one call site and reporting the number as "the cost of the
   ## check" would under-count it by the other two.
   (calls: outputStateCheckCalls, nanos: outputStateCheckNanos,
-   dirWalks: outputStateCheckDirWalks, dirEntries: outputStateCheckDirEntries)
+   revalidateDirWalks: revalidateDirWalks,
+   revalidateDirEntries: revalidateDirEntries,
+   recordDirWalks: recordDirWalks, recordDirEntries: recordDirEntries)
 
 proc outputStateMismatchImpl(record: ActionResultRecord;
                              outputRoot: string): string =
@@ -1231,7 +1287,11 @@ proc outputStateMismatchImpl(record: ActionResultRecord;
         return "output is no longer a symlink: " & output.path
       if liveTarget != output.linkTarget:
         return "symlink output retargeted: " & output.path
-      continue
+      # NO early exit. A symlink to a DIRECTORY is classified `ffkDirectory`
+      # and therefore carries a tree digest; returning here once the target
+      # matched left that digest uncompared, so tampering INSIDE the linked
+      # tree survived as a hit. The link target and the kind-specific check
+      # are additive.
 
     # -- directory ---------------------------------------------------------
     if output.metadata.kind == ffkDirectory:
@@ -1247,7 +1307,10 @@ proc outputStateMismatchImpl(record: ActionResultRecord;
         return "directory output has no recorded tree digest: " & output.path
       var liveDigest = 0'u64
       try:
-        liveDigest = directoryMetadataDigest(path)
+        var walked = 0'i64
+        liveDigest = directoryMetadataDigest(path, walked)
+        inc revalidateDirWalks
+        revalidateDirEntries += walked
       except OSError, IOError:
         return "directory output could not be walked: " & output.path
       if liveDigest != output.treeDigest:
@@ -1731,7 +1794,14 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest):
       let witnessPath = dirPath / witnessFileName(strongHex)
       if fileExists(extendedPath(witnessPath)):
         try:
-          witnesses = decodeWitnesses(bytes(readFile(witnessPath)))
+          let sidecar = decodeWitnesses(bytes(readFile(witnessPath)))
+          # The back-reference must name the record file we just read. If an
+          # older binary rewrote the `.rec` (it cannot know about sidecars),
+          # the sequence moved and this witness describes outputs that have
+          # since been replaced -- discard it rather than fail closed against
+          # stale evidence.
+          if sidecar.recordWriteSequence == decoded.writeSequence:
+            witnesses = sidecar.witnesses
         except OSError, IOError, EnvelopeError:
           witnesses = initTable[string, OutputWitness]()
       if witnesses.len > 0:
@@ -1767,6 +1837,17 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
   ## Stamps a FRESH durable write sequence so a convergent rewrite of the same
   ## path-set becomes strictly newest (higher sequence) than every sibling.
   createDir(extendedPath(dirPath))
+  # Read the sequence of the record we are replacing BEFORE the rename, so a
+  # witness-free republish can tell "the sidecar belongs to the record I am
+  # replacing" from "the sidecar is stale".
+  var priorWriteSequence = 0'u64
+  let priorRecPath = dirPath / finalName
+  if fileExists(extendedPath(priorRecPath)):
+    try:
+      priorWriteSequence =
+        decodePerEdgeFileWithSeq(bytes(readFile(priorRecPath))).writeSequence
+    except OSError, IOError, EnvelopeError:
+      priorWriteSequence = 0'u64
   let writeSequence = cache.nextWriteSequence()
   let now = getTime()
   let tmpPath = dirPath / (finalName & ".tmp." &
@@ -1785,17 +1866,73 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
   # is invisible to them and the record format stays at v3. Best-effort: a
   # sidecar that fails to write, or is lost, simply means "no witness", and
   # the lookup degrades exactly as a pre-witness record does.
+  #
+  # DURABILITY: the `.rec` renames first and the `.octime` second, neither is
+  # fsynced, and a sidecar write that fails is swallowed below. A crash in
+  # that window leaves a record with no witness. For a regular-file output
+  # that silently reopens the corruption hole until the edge next executes;
+  # for a directory it fails closed. The store is a cache and is not crash-
+  # durable by design (see `writeRecFileAtomically`'s "fsync-less" note), so
+  # this is consistent with the rest of it -- but it is a real gap, not an
+  # oversight, and a mode that needs durable evidence needs payload-backed
+  # records rather than metadata-only ones.
+  #
+  # CRITICAL: a WITNESS-FREE record must never overwrite a witnessed sidecar.
+  # Records are republished by writers that never saw the filesystem: the
+  # cache daemon decodes a record out of its shared-memory slot -- a plain
+  # record frame, witness-free by construction -- and republishes it here,
+  # and the peer cache installs a remote record the same way. Writing
+  # all-zero witnesses on their behalf destroyed the evidence within seconds
+  # of it being recorded, silently reverting every shm-eligible edge to the
+  # size+mtime comparison this whole mechanism replaces. Such a republish
+  # does not touch the outputs, so the existing witness still describes them:
+  # carry it forward, re-stamped against the new record sequence.
   if records.len > 0:
-    let witnessTmp = tmpPath & WitnessFileExt
-    try:
-      writeFile(extendedPath(witnessTmp),
-        byteString(encodeWitnesses(records[0])))
-      moveFile(extendedPath(witnessTmp),
-        extendedPath(dirPath / witnessFileName(finalName.splitFile.name)))
-    except OSError, IOError:
-      if fileExists(extendedPath(witnessTmp)):
-        try: removeFile(extendedPath(witnessTmp))
-        except OSError: discard
+    let witnessPath = dirPath / witnessFileName(finalName.splitFile.name)
+    let merged = witnessesOf(records)
+    var payload: seq[byte] = @[]
+    var write = true
+    if merged.any:
+      payload = encodeWitnesses(merged.witnesses, writeSequence)
+    else:
+      # Carry forward only a sidecar that genuinely belonged to the record we
+      # are replacing; anything else is stale and must not be resurrected.
+      #
+      # NOTE on peer installs: `installActionBundle` writes a REMOTE record
+      # here, whose output metadata describes another machine's bytes, and
+      # this staples the LOCAL witness onto it. That is sound -- the witness
+      # still describes the local outputs, and the change time is monotone
+      # and kernel-owned, so a carried witness is never LESS restrictive than
+      # having none -- but it does mean that for a peer-installed record a
+      # hit no longer asserts "the local outputs match this record's blobs",
+      # only "the local outputs are unchanged since this machine last
+      # produced them".
+      var carried = false
+      if priorWriteSequence != 0'u64 and fileExists(extendedPath(witnessPath)):
+        try:
+          let prior = decodeWitnesses(bytes(readFile(witnessPath)))
+          if prior.recordWriteSequence == priorWriteSequence and
+              prior.witnesses.len > 0:
+            payload = encodeWitnesses(prior.witnesses, writeSequence)
+            carried = true
+        except OSError, IOError, EnvelopeError:
+          discard
+      if not carried:
+        # No witness to write and none to keep: drop any stale sidecar so a
+        # later reader cannot pair it with an unrelated record.
+        write = false
+        if fileExists(extendedPath(witnessPath)):
+          try: removeFile(extendedPath(witnessPath))
+          except OSError: discard
+    if write:
+      let witnessTmp = tmpPath & WitnessFileExt
+      try:
+        writeFile(extendedPath(witnessTmp), byteString(payload))
+        moveFile(extendedPath(witnessTmp), extendedPath(witnessPath))
+      except OSError, IOError:
+        if fileExists(extendedPath(witnessTmp)):
+          try: removeFile(extendedPath(witnessTmp))
+          except OSError: discard
 
 proc capRecFiles(cache: ActionCache; dirPath: string) =
   ## Bound the per-edge directory: keep at most `MaxRecFilesPerEdge` `.rec`
@@ -1814,6 +1951,18 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
         discard
       entries.add((seq: writeSequence, strongHex: path.splitFile.name,
         path: path))
+  # Reap sidecars whose `.rec` is gone BEFORE the cap check. An older binary's
+  # eviction removes the record without knowing the sidecar exists, and an
+  # edge directory almost never holds more than `MaxRecFilesPerEdge` files --
+  # so a reap placed after the early return below would essentially never run.
+  for kind, path in walkDir(extendedPath(dirPath)):
+    if kind == pcFile and path.endsWith(WitnessFileExt):
+      let owner = path.parentDir / (path.splitFile.name & PerEdgeRecFileExt)
+      if not fileExists(extendedPath(owner)):
+        try:
+          removeFile(extendedPath(path))
+        except OSError:
+          discard
   if entries.len <= MaxRecFilesPerEdge:
     return
   entries.sort(proc (a, b: tuple[seq: uint64; strongHex, path: string]): int =
@@ -1833,6 +1982,7 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
         removeFile(extendedPath(witness))
       except OSError:
         discard
+
 
 proc migrateLegacyFile(cache: ActionCache; weak: ContentDigest) =
   ## If a pre-AC-1b single FILE sits at `hot-records/<key>` (the same path the

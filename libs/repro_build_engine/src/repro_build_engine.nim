@@ -1101,6 +1101,19 @@ proc addCounterMetric(stats: var BuildStats; name: string; count: int) =
   for _ in 0 ..< count:
     stats.addMetric(name, 0.0)
 
+proc addCountedMetric(stats: var BuildStats; name: string; count: int;
+                      totalUs: float) =
+  ## One metric carrying BOTH a call count and the summed duration, so
+  ## `totalUs / count` is a real per-call average. `addMetric` alone can only
+  ## express one sample at a time.
+  for metric in stats.metrics.mitems:
+    if metric.name == name:
+      metric.count += count
+      metric.totalUs += totalUs
+      return
+  stats.metrics.add(BuildStatsMetric(name: name, count: count,
+    totalUs: totalUs))
+
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
   for i, ch in text:
@@ -4824,6 +4837,9 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       stderr: "no tagged materialized binary-cache entries in selected graph"))
 
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
+  # Process-global accumulators; zero them so this build reports its own cost
+  # rather than its own plus every earlier build in this process.
+  resetOutputStateCheckStats()
   var stats: BuildStats
   proc statStart(): float =
     if config.statsEnabled:
@@ -4844,11 +4860,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if not config.statsEnabled:
       return
     let osc = outputStateCheckStats()
-    stats.addCounterMetric("repro output revalidate calls", osc.calls)
-    stats.addMetric("repro output revalidate", float(osc.nanos) / 1000.0)
-    stats.addCounterMetric("repro output revalidate dir walks", osc.dirWalks)
+    # count == calls and totalUs == the summed cost, so a per-call average is
+    # meaningful. Emitting one sample carrying the cumulative total (count=1)
+    # made every average wrong by a factor of `calls`.
+    stats.addCountedMetric("repro output revalidate", osc.calls,
+      float(osc.nanos) / 1000.0)
+    stats.addCounterMetric("repro output revalidate dir walks",
+      osc.revalidateDirWalks)
     stats.addCounterMetric("repro output revalidate dir entries",
-      int(osc.dirEntries))
+      int(osc.revalidateDirEntries))
+    # Recording a directory output walks its tree too. That is EXECUTION cost,
+    # not revalidation cost, and keeping it in its own counter is what makes a
+    # cold build report zero revalidation walks.
+    stats.addCounterMetric("repro output record dir walks", osc.recordDirWalks)
+    stats.addCounterMetric("repro output record dir entries",
+      int(osc.recordDirEntries))
 
   proc finishMetadataCacheStats(cache: FileMetadataCache) =
     if not config.statsEnabled:
