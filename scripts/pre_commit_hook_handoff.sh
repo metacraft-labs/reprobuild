@@ -30,11 +30,30 @@
 # branch. Only pre-commit's own installer moves it, for as long as it takes
 # `repro hooks ensure` to run in the same shell entry.
 #
-# Recovery: a `before` that finds BOTH a set-aside copy and no chained copy is
-# resuming from a shell entry that died in between, and puts the copy back
-# before starting over. It never fails the caller — a dev shell that refuses
-# to open because a hook file could not be moved is worse than the drift, and
-# `repro health` reports the drift with its own remedy.
+# RECOVERY IS `after`'s JOB, NOT `before`'s. A shell entry that dies between
+# the two halves leaves the copy set aside and nothing chained, and the NEXT
+# entry converges from there without a resume step in `before`:
+#
+#   * if the installer never ran, the dispatcher is still at the canonical
+#     path, `before` declines to lend a second time (a copy is already out on
+#     loan), and `after` restores it from the dispatcher branch;
+#   * if the installer DID run before the crash, the canonical path now holds
+#     the installer's newer shim and nothing is chained, so `repro hooks
+#     ensure` chains that newer shim directly — one foreign file, the ordinary
+#     path — and `after` then drops the superseded copy.
+#
+# A resume step in `before` would take the second case and put the STALE copy
+# back first, manufacturing the two-foreign-files state this whole script
+# exists to prevent, and handing it to `ensure` to reconcile. `ensure` can
+# usually do that, but only when the two shims are recognisably one
+# installer's output; when they are not — a pre-commit template revision bump
+# changes the shim's `# ID:` line — it correctly refuses, and the dev shell
+# gets an error for a state nothing needed to create. So `before` does not
+# resume.
+#
+# Nothing here ever fails the caller: a dev shell that refuses to open because
+# a hook file could not be moved is worse than the drift, and `repro health`
+# reports the drift with its own remedy.
 set -uo pipefail
 
 usage() {
@@ -120,10 +139,7 @@ for hook in "${hooks[@]}"; do
 
   case "$mode" in
     before)
-      # Resume: a previous entry was interrupted between `before` and `after`.
-      if [ -f "$aside" ] && [ ! -e "$chained" ]; then
-        mv -f "$aside" "$chained" || true
-      fi
+      # NO RESUME STEP HERE, deliberately — see "Recovery" in the header.
       # Lend the shim back only when the dispatcher is actually in place and
       # the chained file is pre-commit's own output. A chained hook somebody
       # WROTE is not the installer's to regenerate and is left alone.
