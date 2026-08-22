@@ -1388,20 +1388,37 @@
               pkgs.grub2_efi
               pkgs.kmod
             ];
-            shellHook = pre-commit-check.shellHook + ''
+            shellHook = ''
+              # Lend pre-commit back its own chained shim BEFORE its installer
+              # runs, so the installer never meets a stale copy of its own
+              # output beside the dispatcher. Without this, a shell entry that
+              # re-runs the installer leaves .git/hooks/pre-push holding a
+              # freshly generated shim and pre-push.repro-local holding the
+              # previous one, and `repro hooks ensure` has two foreign files to
+              # reconcile instead of one. See scripts/pre_commit_hook_handoff.sh
+              # for what each half does and why the canonical hook path is
+              # never touched by it.
+              PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
+                ${./scripts/pre_commit_hook_handoff.sh} before --hook pre-push || true
+            ''
+            + pre-commit-check.shellHook
+            + ''
               # git-hooks.nix's shellHook, immediately above, runs
-              # pre-commit's installer on EVERY dev-shell entry: it first
-              # uninstalls the hook types pre-commit manages, then installs
-              # its own. This repo's .pre-commit-config.yaml declares only a
-              # `pre-commit` stage, so that uninstall pass DELETES
-              # .git/hooks/pre-push — the Reprobuild dispatcher that runs the
-              # publication gate — and leaves pre-push.repro-managed orphaned
-              # beside it. Nothing put it back, so pushes stopped being
-              # gated, no workspace lock was published for the commits that
-              # followed, and CI failed much later unable to resolve
-              # siblings. Re-assert the managed hooks here, in the same shell
-              # entry that removed them, so the window is closed rather than
-              # merely repaired at the next commit.
+              # pre-commit's installer whenever the generated
+              # .pre-commit-config.yaml it wants differs from the one the
+              # symlink points at — so on the first entry after any change to
+              # the hook definitions or the tools they pin. That pass first
+              # uninstalls the hook types pre-commit manages, then installs its
+              # own, and either way .git/hooks/pre-push — the Reprobuild
+              # dispatcher that runs the publication gate — stops being the
+              # dispatcher: it is DELETED when the config declares no pre-push
+              # stage, and OVERWRITTEN when it declares one. The managed body
+              # is left orphaned beside it. Nothing put it back, so pushes
+              # stopped being gated, no workspace lock was published for the
+              # commits that followed, and CI failed much later unable to
+              # resolve siblings. Re-assert the managed hooks here, in the same
+              # shell entry that removed them, so the window is closed rather
+              # than merely repaired at the next commit.
               #
               # Never fails the shell: a dev shell that refuses to open
               # because a hook could not be written is worse than the drift.
@@ -1420,6 +1437,11 @@
                 echo "warning: no 'repro' binary found; the pre-push publication gate cannot be re-asserted after pre-commit's installer. Build it with 'just build' and re-enter the shell." >&2
               fi
               unset _repro_hook_bin
+              # Close the handoff: drop the lent-back shim when `ensure`
+              # chained a freshly generated one, put it back when the installer
+              # never ran.
+              PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
+                ${./scripts/pre_commit_hook_handoff.sh} after --hook pre-push || true
             '';
           };
         };

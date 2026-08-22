@@ -935,7 +935,7 @@ tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	5
 tests/integration/t_highest_satisfied_floor_wins.nim	nim	1
 tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	nim	6
 tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim	nim	1
-tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	5
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	7
 tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	1
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18
