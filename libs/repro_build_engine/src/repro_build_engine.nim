@@ -5085,7 +5085,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           return none(BuildRunResult)
         hotProbes.add(HotMetadataProbe(
           weakFingerprint: action.weakFingerprint,
-          policy: action.actionCachePolicy))
+          policy: action.actionCachePolicy,
+          outputRoot: action.cwd))
       let lookupStart = statStart()
       let navigatorStart = statStart()
       let scan = cache.scanHotIndexMetadataInputsUnchanged(hotProbes,
@@ -5105,7 +5106,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         finishMetadataCacheStats(metadataCache)
         fastResult.stats = stats
         return some(fastResult)
-      of hmssMissingRecord, hmssInputChanged:
+      of hmssMissingRecord, hmssInputChanged, hmssOutputChanged:
+        # `hmssOutputChanged` is a declared output that no longer matches the
+        # record that claims to have produced it. Falling back to the full
+        # scheduler is the fail-closed answer: it re-consults each edge and
+        # re-executes the ones whose outputs were disturbed.
         return none(BuildRunResult)
       of hmssUnavailable, hmssCorrupt:
         discard
@@ -5124,6 +5129,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         action.actionCachePolicy)
       finishStat("repro hot record lookup", hotRecordLookupStart)
       if hotRecord.isNone:
+        return none(BuildRunResult)
+      # Outputs exist, but "exists" is not "is the artifact this record
+      # describes" (Incremental-Invalidation.md §"Minimum check set"
+      # Step 3.3). Fall back to the full scheduler when it is not.
+      let outputStateStart = statStart()
+      let outputMismatch = outputStateMismatch(hotRecord.get(), action.cwd)
+      finishStat("repro output state check", outputStateStart)
+      if outputMismatch.len > 0:
         return none(BuildRunResult)
       hotRecords.add(hotRecord.get())
     let lookupStart = statStart()
@@ -5695,6 +5708,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         runResult.trace(id, "dependency-policy", $action.dependencyPolicy.kind)
 
         var cacheMissInputChanged = false
+        # Set when the cache rejected the record because a DECLARED OUTPUT on
+        # disk no longer matches what the record says the action produced.
+        # It has to suppress the "outputs are present, call it up to date"
+        # shortcut further down: that shortcut only asks whether the paths
+        # exist, and here they exist and are wrong. Without this the reject
+        # would be recorded as `cdRejected` and then immediately overridden
+        # by `asUpToDate`, and the corrupt artifact would survive.
+        var cacheRejectedOutput = false
         var dependencyLaunched = false
         var outputsPresentBeforeLookup = false
         var outputsPresentKnown = false
@@ -5736,7 +5757,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             verifyOutputBlobs = not outputsPresentBeforeLookup,
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
               outputsPresentBeforeLookup,
-            metadataCache = addr fileMetadataCache)
+            metadataCache = addr fileMetadataCache,
+            outputRoot = action.cwd)
           finishStat("repro cache lookup", lookupStart)
           # Peer-Cache M1: on local miss, consult the LAN peer cache.
           # `peerCacheActionFetcher` is nil when ``--peer-cache=…`` was
@@ -5766,7 +5788,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   allowMetadataOnlyHit =
                     config.rebuildMissingOutputsOnCacheHit and
                     outputsPresentBeforeLookup,
-                  metadataCache = addr fileMetadataCache)
+                  metadataCache = addr fileMetadataCache,
+                  outputRoot = action.cwd)
                 finishStat("repro peer-cache lookup-retry", retryStart)
                 runResult.trace(id, "peer-cache-hit", $lookup.status)
               else:
@@ -5844,6 +5867,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdRejected
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: "corrupt-output"
+            cacheRejectedOutput = true
+            runResult.trace(id, "cache-rejected",
+              runResult.results[idToIndex.resultIndex(id)].reason)
           of aclMissInputChanged:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
@@ -5864,6 +5890,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           outputsPresent = action.allOutputsExist()
           finishStat("repro output stat", outputStatStart)
         if outputsPresent and not cacheMissInputChanged and
+            not cacheRejectedOutput and
             not dependencyLaunched and
             not config.forceRebuild and
             not action.needsExecutionForPolicy():

@@ -77,6 +77,24 @@ type
     metadata*: FileMetadata
     blob*: CasBlobRef
     permissions*: set[FilePermission]
+    changeTimeNs*: uint64
+      ## POSIX `st_ctime` of the output at record time; 0 when the platform
+      ## cannot report it (Windows) or the record predates RBAR v4.
+      ##
+      ## This is the field that makes in-place output tampering detectable
+      ## at zero extra cost. `kind`/`size`/`mtime` are all settable from
+      ## userspace -- `utimensat(2)` restores an mtime exactly, and a write
+      ## that stays inside the file leaves the size alone -- so a metadata
+      ## comparison over those three accepts a silently corrupted artifact.
+      ## `st_ctime` is maintained by the kernel on every inode change and
+      ## has no userspace setter, so any write to the file moves it and it
+      ## cannot be moved back. It costs nothing: it arrives in the same
+      ## `lstat(2)` that already produces kind/size/mtime.
+      ##
+      ## It is deliberately NOT part of `FileMetadata`: inputs keep exactly
+      ## their previous comparison semantics (and `strongIdentityPayload`
+      ## keeps producing identical fingerprints), so this cannot cause a
+      ## spurious input invalidation or invalidate an existing cache.
 
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
@@ -151,6 +169,10 @@ type
   HotMetadataProbe* = object
     weakFingerprint*: ContentDigest
     policy*: FileFingerprintPolicy
+    outputRoot*: string
+      ## The action's cwd, used to resolve the record's relative output
+      ## paths so the whole-build fast path can revalidate output state
+      ## (Incremental-Invalidation.md §"Minimum check set" Step 3.3).
 
   HotMetadataScanStatus* = enum
     hmssUnavailable
@@ -158,16 +180,24 @@ type
     hmssMissingRecord
     hmssInputChanged
     hmssCorrupt
+    hmssOutputChanged
 
   HotMetadataScan* = object
     status*: HotMetadataScanStatus
     recordCount*: int
     inputCount*: int
     checkedInputCount*: int
+    detail*: string
 
 const
   ActionRecordMagic = "RBAR"
-  ActionRecordVersion = 3'u16
+  # v4 appends a per-output `changeTimeNs` (POSIX st_ctime) after the
+  # existing permissions/blob fields. Decoding still accepts v2 and v3;
+  # those records simply carry `changeTimeNs == 0`, which the output
+  # validator reads as "no change-time evidence recorded" and skips. An
+  # existing warm cache therefore stays warm across this upgrade and
+  # gains tamper evidence as each edge is next recorded.
+  ActionRecordVersion = 4'u16
   # Per-edge record file: a small self-describing container holding the
   # edge's bounded record set. Each contained record is the existing
   # `RBAR` full-record frame, so producers/consumers (incl. the peer cache)
@@ -728,6 +758,33 @@ proc fingerprintMetadata(path: string): FileMetadata =
     result.sizeBytes = 0
     result.mtimeNs = 0
 
+proc fingerprintMetadataAndChangeTime(path: string):
+    tuple[metadata: FileMetadata; changeTimeNs: uint64] =
+  ## One `lstat(2)` producing both the ordinary `FileMetadata` tuple and the
+  ## inode change time. Used for DECLARED OUTPUTS only, where the change time
+  ## is the tamper-evident half of the comparison (see `OutputBlob`).
+  ##
+  ## On platforms without a userspace-visible change time the second element
+  ## is 0 and every consumer degrades to the kind/size/mtime comparison that
+  ## Incremental-Invalidation.md §Step 3.3 already requires.
+  when defined(posix):
+    # Fast path: ONE lstat. For a plain regular file this reproduces exactly
+    # what `fingerprintMetadata`'s own regular-file branch computes, so no
+    # second syscall is needed. Anything else (missing, dir, symlink, other)
+    # falls through to `fingerprintMetadata`, which owns the classification
+    # rules -- those are rare for declared outputs and must not be forked.
+    var st: Stat
+    if lstat(extendedPath(path).cstring, st) == 0 and S_ISREG(st.st_mode):
+      result.metadata = FileMetadata(
+        kind: ffkRegular,
+        sizeBytes: if st.st_size < 0: 0'u64 else: uint64(st.st_size),
+        mtimeNs: uint64(cast[int64](st.st_mtim.tv_sec)) * 1_000_000_000'u64 +
+          uint64(st.st_mtim.tv_nsec))
+      result.changeTimeNs = uint64(cast[int64](st.st_ctim.tv_sec)) *
+        1_000_000_000'u64 + uint64(st.st_ctim.tv_nsec)
+      return
+  result.metadata = fingerprintMetadata(path)
+
 proc initFileMetadataCache*(): FileMetadataCache =
   FileMetadataCache(entries: initTable[string, FileMetadata]())
 
@@ -950,6 +1007,48 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
+proc outputStateMismatch*(record: ActionResultRecord;
+                          outputRoot: string): string =
+  ## Incremental-Invalidation.md §"Minimum check set per target
+  ## consultation", Step 3.3: "For an in-place local build, declared outputs
+  ## must already exist **and match the recorded output metadata**."
+  ##
+  ## Returns "" when every declared output still matches, otherwise a short
+  ## human-readable reason naming the first output that does not. The engine
+  ## turns a non-empty result into `aclRejectedCorruptOutput` / `cdRejected`
+  ## and re-executes, which is the fail-closed behaviour the same document's
+  ## §"Rebuild Decision Model" requires.
+  ##
+  ## Cost is one `lstat(2)` per declared output on a cache hit. The engine
+  ## already stats every output to decide whether it exists at all, so this
+  ## is not a new class of work; it is the same class of work, comparing
+  ## more of what the syscall already returned.
+  ##
+  ## What it does NOT do is hash the output. Hashing every output on every
+  ## consultation would be correct and would also make the warm no-op path
+  ## scale with total artifact bytes instead of artifact count. The change
+  ## time is what buys tamper evidence without that: see `OutputBlob`.
+  for output in record.outputs:
+    let path = materialPath(outputRoot, output.path)
+    let live = fingerprintMetadataAndChangeTime(path)
+    if output.metadata.kind == ffkMissing:
+      # Nothing was recorded for this output; there is nothing to compare
+      # against and inventing a rule here would reject valid records.
+      continue
+    if live.metadata.kind == ffkMissing:
+      return "output missing: " & output.path
+    if live.metadata != output.metadata:
+      return "output metadata changed: " & output.path
+    if output.metadata.kind == ffkRegular and output.changeTimeNs != 0'u64 and
+        live.changeTimeNs != 0'u64 and
+        live.changeTimeNs != output.changeTimeNs:
+      # Size and mtime match but the inode changed after the action wrote
+      # it. Something rewrote, chmod'd or relinked the artifact behind the
+      # build's back; the recorded result no longer describes what is on
+      # disk. Fail closed.
+      return "output changed after it was recorded: " & output.path
+  ""
+
 proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
                      outputRoot = "") =
   if record.outputPayloadKind != opkCasBlobs:
@@ -1051,6 +1150,7 @@ proc encodeRecord(record: ActionResultRecord): seq[byte] =
       result.writeU64Le(output.blob.sizeBytes)
     of opkMetadataOnly:
       discard
+    result.writeU64Le(output.changeTimeNs)
 
 proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
   if payload.len < 6:
@@ -1060,7 +1160,7 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       raiseEnvelopeError(eeUnknownMagic, "unknown action record magic")
   var pos = 4
   let version = readU16Le(payload, pos)
-  if version notin {2'u16, ActionRecordVersion}:
+  if version notin {2'u16, 3'u16, ActionRecordVersion}:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported action record version")
   result.weakFingerprint = readDigest(payload, pos)
   let policy = readByte(payload, pos)
@@ -1098,6 +1198,8 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       let size = readU64Le(payload, pos)
       result.outputs[i].blob = blobRef(digest, size)
       result.outputs[i].permissions = readPermissions(payload, pos)
+    if version >= 4'u16:
+      result.outputs[i].changeTimeNs = readU64Le(payload, pos)
   if pos != payload.len:
     raiseEnvelopeError(eeMalformed, "trailing action record bytes")
 
@@ -1134,11 +1236,25 @@ proc legacyHotRecordPath(cache: ActionCache; weak: ContentDigest): string =
   cache.hotRoot / perEdgeDirName(weak)
 
 proc hotMetadataRecord(record: ActionResultRecord): ActionResultRecord =
+  ## The metadata-only projection used by the warm in-place reuse paths.
+  ##
+  ## It drops everything needed to RESTORE an output (the CAS blob refs, and
+  ## with them `opkCasBlobs`) and the strong fingerprint, because a
+  ## metadata-only result "MUST NOT be treated as a remote-cache hit or as a
+  ## local restore hit" (Caching-Architecture.md §"Memoization Layer").
+  ##
+  ## It deliberately KEEPS the per-output metadata. That is precisely what
+  ## Caching-Architecture.md says a metadata-only record carries -- "output
+  ## entries record existence/type, timestamp/size where relevant,
+  ## permissions" -- and what Incremental-Invalidation.md §Step 3.3 requires
+  ## the reuse decision to compare against. Discarding it here is what made
+  ## every warm consultation accept an output it had never looked at.
   result = record
   result.inputs.setLen(0)
   for input in record.inputs:
     result.inputs.add(metadataOnly(input))
-  result.outputs.setLen(0)
+  for i in 0 ..< result.outputs.len:
+    result.outputs[i].blob = CasBlobRef()
   result.outputPayloadKind = opkMetadataOnly
   result.strongFingerprint = ContentDigest()
 
@@ -1368,6 +1484,15 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest):
         decoded = decodePerEdgeFileWithSeq(bytes(readFile(path)))
       except OSError, IOError:
         continue
+      except EnvelopeError:
+        # A `.rec` this binary cannot decode -- most often a record written
+        # by a NEWER reprobuild sharing the same cache root, since the record
+        # version is bumped whenever the schema grows. Treat it as absent:
+        # the edge simply misses and re-executes. Letting the envelope error
+        # escape would abort an otherwise healthy build over a cache file,
+        # which is the opposite of the fail-closed rule in
+        # Failure-Semantics.md.
+        continue
       # Tie-break key from the file's own strong-fp nonce (its base name), so
       # even legacy/seq-0 files or a hypothetical duplicate sequence still sort
       # deterministically.
@@ -1591,6 +1716,17 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
               metadataCache) != input.metadata:
             return HotMetadataScan(status: hmssInputChanged,
               recordCount: totalRecords, checkedInputCount: checkedInputs)
+        # Same rule as `lookupActionResultImpl`: unchanged inputs are only
+        # half the hit condition. The declared outputs on disk must still be
+        # the ones this record describes (Incremental-Invalidation.md
+        # §"Minimum check set" Step 3.3). Without this the whole-build fast
+        # path would keep accepting an artifact that was overwritten after
+        # the build produced it.
+        let outputMismatch = outputStateMismatch(record, probe.outputRoot)
+        if outputMismatch.len > 0:
+          return HotMetadataScan(status: hmssOutputChanged,
+            recordCount: totalRecords, checkedInputCount: checkedInputs,
+            detail: outputMismatch)
   HotMetadataScan(status: hmssHit, recordCount: totalRecords,
     checkedInputCount: checkedInputs)
 
@@ -2031,7 +2167,12 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    let sourceMetadata = fingerprintMetadata(source, metadataCache)
+    # One lstat producing metadata AND the inode change time. Not routed
+    # through `metadataCache`: the engine invalidates that entry right after
+    # execution anyway, and the change time is only meaningful when read
+    # directly from the inode we just wrote.
+    let observed = fingerprintMetadataAndChangeTime(source)
+    let sourceMetadata = observed.metadata
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.
@@ -2054,7 +2195,7 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
       else:
         CasBlobRef()
     result.outputs.add(OutputBlob(path: path, metadata: sourceMetadata,
-      blob: blob, permissions: perms))
+      blob: blob, permissions: perms, changeTimeNs: observed.changeTimeNs))
   cache.writePerEdgeRecord(result)
 
 proc recordActionResult*(cache: var ActionCache; cas: var Store;
@@ -2075,7 +2216,12 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    let sourceMetadata = fingerprintMetadata(source, metadataCache)
+    # One lstat producing metadata AND the inode change time. Not routed
+    # through `metadataCache`: the engine invalidates that entry right after
+    # execution anyway, and the change time is only meaningful when read
+    # directly from the inode we just wrote.
+    let observed = fingerprintMetadataAndChangeTime(source)
+    let sourceMetadata = observed.metadata
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.
@@ -2094,7 +2240,7 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
       else:
         CasBlobRef()
     result.outputs.add(OutputBlob(path: path, metadata: sourceMetadata,
-      blob: blob, permissions: perms))
+      blob: blob, permissions: perms, changeTimeNs: observed.changeTimeNs))
   cache.writePerEdgeRecord(result)
 
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
@@ -2172,7 +2318,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
                                   policy: FileFingerprintPolicy;
                                   verifyOutputBlobs = true;
                                   allowMetadataOnlyHit = false;
-                                  metadataCache: ptr FileMetadataCache = nil):
+                                  metadataCache: ptr FileMetadataCache = nil;
+                                  outputRoot = ""):
                                   ActionCacheLookup =
   if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
@@ -2186,12 +2333,30 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
           changedInput = input.path
           break
       if not changed:
+        # Inputs are unchanged, so this record still describes the right
+        # computation. It is still only a hit if the DECLARED OUTPUTS on disk
+        # are the ones the record describes -- Incremental-Invalidation.md
+        # §"Minimum check set" Step 3.3. Existence alone (which is all the
+        # engine's `allOutputsExist` pre-check establishes) is not enough.
+        let outputMismatch = outputStateMismatch(hot.record, outputRoot)
+        if outputMismatch.len > 0:
+          return ActionCacheLookup(status: aclRejectedCorruptOutput,
+            record: hot.record, message: outputMismatch)
         return ActionCacheLookup(status: aclHit, record: hot.record)
-      return ActionCacheLookup(
-        status: aclMissInputChanged,
-        record: hot.record,
-        message: "input metadata changed: " & changedInput,
-        changedInputPath: changedInput)
+      if policy != ffpHybrid:
+        return ActionCacheLookup(
+          status: aclMissInputChanged,
+          record: hot.record,
+          message: "input metadata changed: " & changedInput,
+          changedInputPath: changedInput)
+      # ffpHybrid, metadata moved: this is exactly the case the hybrid
+      # policy exists for -- "compare timestamp metadata first; when the
+      # metadata changed, compute the local content hash. If the content
+      # hash is unchanged ... cut off without rebuilding dependents"
+      # (Incremental-Invalidation.md §"File Fingerprint Policies"). Reporting
+      # a miss from here made hybrid behave identically to timestamp on the
+      # warm path, so the cutoff in §"Validation Criteria" never happened.
+      # Fall through to the full candidate walk below, which implements it.
 
   let records = cache.loadRecordsForWeak(weak)
   if records.len == 0:
@@ -2233,6 +2398,16 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
       except CacheIntegrityError as err:
         return ActionCacheLookup(status: aclRejectedCorruptOutput,
           record: candidate, message: err.msg)
+    elif allowMetadataOnlyHit:
+      # In-place local reuse: the bytes stay at their declared paths, so the
+      # CAS verification above is not what protects them. Revalidate the
+      # workspace copies against the recorded output state instead.
+      # `verifyOutputBlobs` mode is the restore mode and materializes over
+      # whatever is there, so it needs no such check.
+      let outputMismatch = outputStateMismatch(candidate, outputRoot)
+      if outputMismatch.len > 0:
+        return ActionCacheLookup(status: aclRejectedCorruptOutput,
+          record: candidate, message: outputMismatch)
     if hybridCutoff:
       cache.writePerEdgeRecord(candidate)
       return ActionCacheLookup(status: aclHybridCutoff, record: candidate)
@@ -2254,18 +2429,22 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
                          verifyOutputBlobs = true;
                          allowMetadataOnlyHit = false;
-                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
+                         metadataCache: ptr FileMetadataCache = nil;
+                         outputRoot = ""): ActionCacheLookup =
   cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
-    metadataCache = metadataCache)
+    metadataCache = metadataCache,
+    outputRoot = outputRoot)
 
 proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
                          verifyOutputBlobs = true;
                          allowMetadataOnlyHit = false;
-                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
+                         metadataCache: ptr FileMetadataCache = nil;
+                         outputRoot = ""): ActionCacheLookup =
   cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
-    metadataCache = metadataCache)
+    metadataCache = metadataCache,
+    outputRoot = outputRoot)
