@@ -4834,9 +4834,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if config.statsEnabled:
       stats.addMetric(name, (epochTime() - started) * 1_000_000.0)
 
+  proc finishOutputStateCheckStats() =
+    ## Emit the TOTAL cost of output revalidation, counted inside
+    ## `outputStateMismatch` itself so it covers all three call sites (the
+    ## whole-build fast-noop scan and the two per-edge paths inside
+    ## repro_local_store) rather than the one that happens to sit in this
+    ## file. `dir walk` / `dir entries` make the O(tree-entries) cost of a
+    ## directory output visible instead of hidden inside the total.
+    if not config.statsEnabled:
+      return
+    let osc = outputStateCheckStats()
+    stats.addCounterMetric("repro output revalidate calls", osc.calls)
+    stats.addMetric("repro output revalidate", float(osc.nanos) / 1000.0)
+    stats.addCounterMetric("repro output revalidate dir walks", osc.dirWalks)
+    stats.addCounterMetric("repro output revalidate dir entries",
+      int(osc.dirEntries))
+
   proc finishMetadataCacheStats(cache: FileMetadataCache) =
     if not config.statsEnabled:
       return
+    finishOutputStateCheckStats()
     let metadataStats = cache.metadataStats()
     stats.addCounterMetric("repro file metadata current-run hit",
       metadataStats.currentRunHits)
@@ -5133,10 +5150,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # Outputs exist, but "exists" is not "is the artifact this record
       # describes" (Incremental-Invalidation.md §"Minimum check set"
       # Step 3.3). Fall back to the full scheduler when it is not.
-      let outputStateStart = statStart()
-      let outputMismatch = outputStateMismatch(hotRecord.get(), action.cwd)
-      finishStat("repro output state check", outputStateStart)
-      if outputMismatch.len > 0:
+      # Timing is accumulated inside `outputStateMismatch` and reported once
+      # as "repro output revalidate"; a timer here would have measured this
+      # call site only.
+      if outputStateMismatch(hotRecord.get(), action.cwd).len > 0:
         return none(BuildRunResult)
       hotRecords.add(hotRecord.get())
     let lookupStart = statStart()

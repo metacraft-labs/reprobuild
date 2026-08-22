@@ -52,6 +52,7 @@ proc ccPath(): string =
 # rounds through `times.Time`. The whole point of this test is a
 # BIT-EXACT mtime restore, so bind the syscall directly.
 let atFdCwd {.importc: "AT_FDCWD", header: "<fcntl.h>".}: cint
+let atSymlinkNofollow {.importc: "AT_SYMLINK_NOFOLLOW", header: "<fcntl.h>".}: cint
 proc utimensatRaw(dirfd: cint; path: cstring; times: ptr Timespec;
                   flags: cint): cint
   {.importc: "utimensat", header: "<sys/stat.h>".}
@@ -364,3 +365,217 @@ suite "action cache output integrity":
       for item in warm.results:
         check item.cacheDecision == cdHit
         check item.status in {asUpToDate, asCacheHit}
+
+suite "action cache non-regular output integrity":
+  ## Same no-mock policy and the same real `runBuild` / real `ActionCache` as
+  ## the suite above. These cover the two output kinds whose recorded
+  ## metadata carries nothing comparable:
+  ##
+  ## * a DIRECTORY output -- `fingerprintMetadata` deliberately zeroes
+  ##   `sizeBytes` and `mtimeNs` for `ffkDirectory`
+  ##   (repro_local_store.nim, "Existing-directory probes depend on the fact
+  ##   that a directory exists"), so a kind/size/mtime comparison over a
+  ##   directory reduces to "it still exists". An opaque directory output is
+  ##   a shipped shape: the JS/TS convention declares `node_modules/`.
+  ##
+  ## * a SYMLINK output -- `fingerprintMetadata` classifies a symlink to a
+  ##   file as `ffkRegular` carrying the LINK's own lstat size and mtime, so
+  ##   retargeting the link and restoring its mtime with
+  ##   `utimensat(AT_SYMLINK_NOFOLLOW)` compares equal.
+  ##
+  ## Neither needs the size-and-mtime-preserving trick the regular-file case
+  ## needs; both are easier to trigger than the defect that motivated it.
+
+  test "a rewritten file inside a directory output is not reported up to date":
+    let tempRoot = createTempDir("repro-ac-dir-output", "")
+    defer: removeDir(tempRoot)
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / "cache"
+    createDir(workRoot / "src")
+    writeFile(workRoot / "src" / "seed.txt", "seed\n")
+    let gen = workRoot / "gen.sh"
+    writeFile(gen,
+      "#!/bin/sh\n" &
+      "rm -rf out/d\n" &
+      "mkdir -p out/d/nested\n" &
+      "printf 'good-f\\n' > out/d/f\n" &
+      "printf 'good-g\\n' > out/d/g\n" &
+      "printf 'good-h\\n' > out/d/nested/h\n" &
+      "printf '%s: %s\\n' out/d src/seed.txt > out/d.dep\n")
+    setFilePermissions(gen, {fpUserRead, fpUserWrite, fpUserExec})
+
+    let build = action("dir/generate", [gen],
+      cwd = workRoot,
+      inputs = ["src/seed.txt"],
+      outputs = ["out/d"],
+      depfile = "out/d.dep",
+      cacheable = true,
+      weakFingerprint = weak("dir/generate"),
+      actionCachePolicy = ffpTimestamp,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    let g = graph([build])
+    let config = warmConfig(cacheRoot)
+
+    check runBuild(g, config).byId("dir/generate").status == asSucceeded
+    check runBuild(g, config).byId("dir/generate").cacheDecision == cdHit
+
+    # Tamper with the tree's CONTENTS. No mtime restore, no size games.
+    writeFile(workRoot / "out" / "d" / "f", "EVIL-PAYLOAD\n")
+    removeFile(workRoot / "out" / "d" / "g")
+    writeFile(workRoot / "out" / "d" / "planted", "planted\n")
+
+    let after = runBuild(g, config).byId("dir/generate")
+    check after.cacheDecision != cdHit
+    check after.status != asUpToDate
+    check after.launched
+    let fRestored = readFile(workRoot / "out" / "d" / "f") == "good-f\n"
+    let gRestored = fileExists(workRoot / "out" / "d" / "g")
+    let plantedGone = not fileExists(workRoot / "out" / "d" / "planted")
+    check fRestored
+    check gRestored
+    check plantedGone
+
+  test "a retargeted symlink output is not reported up to date":
+    let tempRoot = createTempDir("repro-ac-symlink-output", "")
+    defer: removeDir(tempRoot)
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / "cache"
+    createDir(workRoot / "src")
+    createDir(workRoot / "out")
+    writeFile(workRoot / "src" / "seed.txt", "seed\n")
+    let gen = workRoot / "gen.sh"
+    # `real` and `evil` are the same length, so the symlink's own lstat size
+    # is identical either way -- the recorded tuple cannot tell them apart.
+    writeFile(gen,
+      "#!/bin/sh\n" &
+      "printf 'GOOD\\n' > out/real.txt\n" &
+      "printf 'EVIL\\n' > out/evil.txt\n" &
+      "rm -f out/link\n" &
+      "ln -s real.txt out/link\n" &
+      "printf '%s: %s\\n' out/link src/seed.txt > out/link.dep\n")
+    setFilePermissions(gen, {fpUserRead, fpUserWrite, fpUserExec})
+
+    let build = action("symlink/generate", [gen],
+      cwd = workRoot,
+      inputs = ["src/seed.txt"],
+      outputs = ["out/link"],
+      depfile = "out/link.dep",
+      cacheable = true,
+      weakFingerprint = weak("symlink/generate"),
+      actionCachePolicy = ffpTimestamp,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    let g = graph([build])
+    let config = warmConfig(cacheRoot)
+
+    check runBuild(g, config).byId("symlink/generate").status == asSucceeded
+    check runBuild(g, config).byId("symlink/generate").cacheDecision == cdHit
+    let linkPath = workRoot / "out" / "link"
+    check expandSymlink(linkPath) == "real.txt"
+
+    # Retarget, then put the link's own lstat mtime back exactly.
+    let saved = statOf(linkPath)
+    removeFile(linkPath)
+    createSymlink("evil.txt", linkPath)
+    var ts: array[2, Timespec]
+    ts[0] = saved.st_atim
+    ts[1] = saved.st_mtim
+    doAssert utimensatRaw(atFdCwd, linkPath.cstring, addr ts[0],
+      atSymlinkNofollow) == 0
+    let live = statOf(linkPath)
+    doAssert live.st_size == saved.st_size, "link size changed"
+    doAssert live.st_mtim.tv_sec == saved.st_mtim.tv_sec and
+      live.st_mtim.tv_nsec == saved.st_mtim.tv_nsec, "link mtime not restored"
+
+    let after = runBuild(g, config).byId("symlink/generate")
+    check after.cacheDecision != cdHit
+    check after.status != asUpToDate
+    check after.launched
+    check expandSymlink(linkPath) == "real.txt"
+
+  test "a record with no output witness fails closed for a directory, open for a file":
+    ## The witness sidecar is what carries the change time, the symlink target
+    ## and the directory tree digest. A cache populated before this change has
+    ## none, and neither does a record served from the shared-memory tier.
+    ## Deleting the sidecar reproduces that state exactly.
+    ##
+    ## The two kinds must then behave DIFFERENTLY, and both behaviours are
+    ## deliberate:
+    ##
+    ## * regular file -> still a hit. The kind/size/mtime comparison is weaker
+    ##   than the change-time one but it is not vacuous, and failing closed
+    ##   here would force a full rebuild of every edge in every existing cache
+    ##   on upgrade. The consequence is that the corruption defect stays open
+    ##   for a pre-existing record until its edge next executes.
+    ##
+    ## * directory -> a miss. `fingerprintMetadata` zeroes size and mtime for
+    ##   `ffkDirectory`, so with no digest there is nothing to compare and the
+    ##   check cannot be performed at all. Incremental-Invalidation.md
+    ##   §"Rebuild Decision Model" requires failing closed when a required
+    ##   condition cannot be checked. The cost is one re-execution per such
+    ##   edge, after which the replacement record carries a digest.
+    proc dropWitnesses(cacheRoot: string): int =
+      for path in walkDirRec(cacheRoot):
+        if path.endsWith(".octime"):
+          removeFile(path)
+          inc result
+
+    block regularFileDegradesToAHit:
+      let tempRoot = createTempDir("repro-ac-nowitness-file", "")
+      defer: removeDir(tempRoot)
+      let workRoot = tempRoot / "work"
+      let cacheRoot = tempRoot / "cache"
+      createDir(workRoot / "src")
+      writeFile(workRoot / "src" / "input.txt", "payload\n")
+      let copy = builtinAction(bakCopyFile, "nowitness/file",
+        cwd = workRoot,
+        inputs = ["src/input.txt"],
+        outputs = ["out/copy.txt"],
+        cacheable = true,
+        weakFingerprint = weak("nowitness/file"),
+        actionCachePolicy = ffpTimestamp,
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      let g = graph([copy])
+      let config = warmConfig(cacheRoot)
+      check runBuild(g, config).byId("nowitness/file").status == asSucceeded
+      check dropWitnesses(cacheRoot) > 0
+      let after = runBuild(g, config).byId("nowitness/file")
+      check after.cacheDecision == cdHit
+      check not after.launched
+
+    block directoryFailsClosed:
+      let tempRoot = createTempDir("repro-ac-nowitness-dir", "")
+      defer: removeDir(tempRoot)
+      let workRoot = tempRoot / "work"
+      let cacheRoot = tempRoot / "cache"
+      createDir(workRoot / "src")
+      writeFile(workRoot / "src" / "seed.txt", "seed\n")
+      let gen = workRoot / "gen.sh"
+      writeFile(gen,
+        "#!/bin/sh\n" &
+        "rm -rf out/d\n" &
+        "mkdir -p out/d\n" &
+        "printf 'good\\n' > out/d/f\n" &
+        "printf '%s: %s\\n' out/d src/seed.txt > out/d.dep\n")
+      setFilePermissions(gen, {fpUserRead, fpUserWrite, fpUserExec})
+      let build = action("nowitness/dir", [gen],
+        cwd = workRoot,
+        inputs = ["src/seed.txt"],
+        outputs = ["out/d"],
+        depfile = "out/d.dep",
+        cacheable = true,
+        weakFingerprint = weak("nowitness/dir"),
+        actionCachePolicy = ffpTimestamp,
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      let g = graph([build])
+      let config = warmConfig(cacheRoot)
+      check runBuild(g, config).byId("nowitness/dir").status == asSucceeded
+      check runBuild(g, config).byId("nowitness/dir").cacheDecision == cdHit
+      check dropWitnesses(cacheRoot) > 0
+      let after = runBuild(g, config).byId("nowitness/dir")
+      check after.cacheDecision != cdHit
+      check after.launched
+      # And the re-execution restores a witness, so the NEXT build is a hit
+      # again -- the fail-closed cost is one rebuild per edge, not permanent.
+      let recovered = runBuild(g, config).byId("nowitness/dir")
+      check recovered.cacheDecision == cdHit
+      check not recovered.launched

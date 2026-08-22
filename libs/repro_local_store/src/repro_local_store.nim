@@ -1,4 +1,5 @@
-import std/[algorithm, options, os, osproc, sets, strutils, tables, times]
+import std/[algorithm, monotimes, options, os, osproc, sets, strutils,
+            tables, times]
 
 when defined(posix):
   import std/posix
@@ -79,7 +80,11 @@ type
     permissions*: set[FilePermission]
     changeTimeNs*: uint64
       ## POSIX `st_ctime` of the output at record time; 0 when the platform
-      ## cannot report it (Windows) or the record predates RBAR v4.
+      ## cannot report it (Windows) or when no witness sidecar was found.
+      ##
+      ## NOT serialized into the RBAR frame -- carried in the witness
+      ## sidecar (`writeWitnessSidecar`), so the record format is unchanged
+      ## and older binaries sharing a cache root are unaffected.
       ##
       ## This is the field that makes in-place output tampering detectable
       ## at zero extra cost. `kind`/`size`/`mtime` are all settable from
@@ -95,6 +100,43 @@ type
       ## their previous comparison semantics (and `strongIdentityPayload`
       ## keeps producing identical fingerprints), so this cannot cause a
       ## spurious input invalidation or invalidate an existing cache.
+      ##
+      ## WINDOWS: this stays 0. NTFS does maintain an unsettable ChangeTime,
+      ## reachable through `GetFileInformationByHandleEx(FileBasicInfo)`, but
+      ## `fingerprintMetadata`'s Windows path uses `GetFileAttributesExW`,
+      ## which does not report it. Until that is wired up, the defect this
+      ## field exists to close remains OPEN on Windows: a regular-file output
+      ## rewritten in place with its size and write time restored still
+      ## compares equal there.
+    linkTarget*: string
+      ## `readlink()` of the output at record time, empty when it was not a
+      ## symlink. `fingerprintMetadata` reports a symlink-to-file as
+      ## `ffkRegular` carrying the LINK's own lstat size and mtime, so a
+      ## retargeted link whose mtime is restored with
+      ## `utimensat(..., AT_SYMLINK_NOFOLLOW)` compares equal on every
+      ## recorded field. Comparing the target string is O(1) and exact.
+    treeDigest*: uint64
+      ## Order-independent digest over the recursive METADATA of a directory
+      ## output (relative path, kind, size, mtime, change time per entry).
+      ## Meaningful only when `hasTreeDigest`.
+      ##
+      ## A directory's own recorded metadata is deliberately empty --
+      ## `fingerprintMetadata` zeroes `sizeBytes`/`mtimeNs` for
+      ## `ffkDirectory` -- so comparing it asks only "does the directory
+      ## still exist". That leaves an opaque directory output completely
+      ## unprotected, which is a shipped shape (the JS/TS convention declares
+      ## `node_modules/`). This digest is the comparison that actually says
+      ## something.
+      ##
+      ## It costs one `lstat(2)` per entry in the tree on every warm
+      ## consultation of an edge that declares a directory output -- O(tree
+      ## entries), no content reads. That is a real and openly acknowledged
+      ## cost for such edges. The cheaper alternatives were all unsound: the
+      ## directory's own mtime/ctime move only for top-level entry changes
+      ## and say nothing about a nested file being rewritten. An edge that
+      ## cannot afford the walk should be made payload-backed (CAS directory
+      ## snapshot plus digest verification), not left unchecked.
+    hasTreeDigest*: bool
 
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
@@ -191,13 +233,19 @@ type
 
 const
   ActionRecordMagic = "RBAR"
-  # v4 appends a per-output `changeTimeNs` (POSIX st_ctime) after the
-  # existing permissions/blob fields. Decoding still accepts v2 and v3;
-  # those records simply carry `changeTimeNs == 0`, which the output
-  # validator reads as "no change-time evidence recorded" and skips. An
-  # existing warm cache therefore stays warm across this upgrade and
-  # gains tamper evidence as each edge is next recorded.
-  ActionRecordVersion = 4'u16
+  # DELIBERATELY NOT BUMPED. The output witnesses this file adds (change
+  # time, symlink target, directory metadata digest) live in a SIDECAR file
+  # next to the `.rec`, not inside the RBAR frame -- see `OutputWitness` and
+  # `writeWitnessSidecar`. Growing the frame would have required a version
+  # bump, and a bump is not backward-tolerable here: verified against a
+  # binary built from the base commit, a v4 frame makes
+  # `loadPerEdgeRecords` return ZERO records (the per-frame
+  # `except EnvelopeError: break` swallows it), so every edge this binary
+  # wrote becomes a permanent cache miss for any older `repro` sharing the
+  # per-user cache root; and `decodeActionResultRecord`, the public codec
+  # the peer cache and the dependency-evidence reader use, raises outright.
+  # An 8-byte field does not justify that.
+  ActionRecordVersion = 3'u16
   # Per-edge record file: a small self-describing container holding the
   # edge's bounded record set. Each contained record is the existing
   # `RBAR` full-record frame, so producers/consumers (incl. the peer cache)
@@ -758,32 +806,102 @@ proc fingerprintMetadata(path: string): FileMetadata =
     result.sizeBytes = 0
     result.mtimeNs = 0
 
-proc fingerprintMetadataAndChangeTime(path: string):
-    tuple[metadata: FileMetadata; changeTimeNs: uint64] =
-  ## One `lstat(2)` producing both the ordinary `FileMetadata` tuple and the
-  ## inode change time. Used for DECLARED OUTPUTS only, where the change time
-  ## is the tamper-evident half of the comparison (see `OutputBlob`).
-  ##
-  ## On platforms without a userspace-visible change time the second element
-  ## is 0 and every consumer degrades to the kind/size/mtime comparison that
-  ## Incremental-Invalidation.md §Step 3.3 already requires.
+type
+  OutputWitness* = object
+    ## The evidence about ONE declared output that the recorded
+    ## `FileMetadata` cannot carry. See `OutputBlob` for why each field
+    ## exists. Collected at record time, compared at lookup time.
+    changeTimeNs*: uint64
+    linkTarget*: string
+    treeDigest*: uint64
+    hasTreeDigest*: bool
+
+var
+  outputStateCheckCalls = 0
+  outputStateCheckNanos = 0'i64
+  outputStateCheckDirWalks = 0
+  outputStateCheckDirEntries = 0'i64
+
+proc symlinkTargetOf(path: string): string =
+  ## `readlink()` or "" when `path` is not a symlink. Never follows.
   when defined(posix):
-    # Fast path: ONE lstat. For a plain regular file this reproduces exactly
-    # what `fingerprintMetadata`'s own regular-file branch computes, so no
-    # second syscall is needed. Anything else (missing, dir, symlink, other)
-    # falls through to `fingerprintMetadata`, which owns the classification
-    # rules -- those are rare for declared outputs and must not be forked.
     var st: Stat
-    if lstat(extendedPath(path).cstring, st) == 0 and S_ISREG(st.st_mode):
-      result.metadata = FileMetadata(
-        kind: ffkRegular,
-        sizeBytes: if st.st_size < 0: 0'u64 else: uint64(st.st_size),
-        mtimeNs: uint64(cast[int64](st.st_mtim.tv_sec)) * 1_000_000_000'u64 +
-          uint64(st.st_mtim.tv_nsec))
+    if lstat(extendedPath(path).cstring, st) == 0 and S_ISLNK(st.st_mode):
+      try:
+        return expandSymlink(extendedPath(path))
+      except OSError:
+        return ""
+  ""
+
+proc directoryMetadataDigest(root: string): uint64 =
+  ## Order-independent digest over the recursive metadata of `root`.
+  ##
+  ## Entries are folded in with a commutative accumulator (wrapping sum)
+  ## rather than a sorted hash, so no O(n log n) sort of path strings is
+  ## needed for what can be a very large tree. Order independence also means
+  ## the result does not depend on `walkDirRec`'s traversal order, which is
+  ## filesystem-defined. This is LOCAL INVALIDATION evidence, in the sense of
+  ## Incremental-Invalidation.md §"Hash-function strategy": it must be fast
+  ## and reliable against honest workloads, not collision-resistant against
+  ## an adversary. It never crosses a machine boundary.
+  ##
+  ## Cost is one `lstat(2)` and one small hash per entry. The per-entry
+  ## payload is packed as raw little-endian bytes rather than formatted
+  ## text: decimal formatting of five integers per entry measured ~3x the
+  ## cost of the syscall it was describing.
+  inc outputStateCheckDirWalks
+  var entries = 0'u64
+  var scratch = newSeq[byte](0)
+  for entry in walkDirRec(extendedPath(root),
+      yieldFilter = {pcFile, pcLinkToFile, pcDir, pcLinkToDir},
+      relative = true):
+    inc entries
+    let full = root / entry
+    scratch.setLen(0)
+    for c in entry:
+      scratch.add(byte(c))
+    when defined(posix):
+      var st: Stat
+      if lstat(extendedPath(full).cstring, st) == 0:
+        scratch.writeU64Le(uint64(st.st_mode))
+        scratch.writeU64Le(if st.st_size < 0: 0'u64 else: uint64(st.st_size))
+        scratch.writeU64Le(uint64(cast[int64](st.st_mtim.tv_sec)) *
+          1_000_000_000'u64 + uint64(st.st_mtim.tv_nsec))
+        scratch.writeU64Le(uint64(cast[int64](st.st_ctim.tv_sec)) *
+          1_000_000_000'u64 + uint64(st.st_ctim.tv_nsec))
+        if S_ISLNK(st.st_mode):
+          for c in symlinkTargetOf(full):
+            scratch.add(byte(c))
+    else:
+      let m = fingerprintMetadata(full)
+      scratch.writeU64Le(uint64(ord(m.kind)))
+      scratch.writeU64Le(m.sizeBytes)
+      scratch.writeU64Le(m.mtimeNs)
+    result = result + localHash(scratch).value
+  # Fold the count in so that an empty tree and a missing tree differ, and so
+  # that a pair of entries cannot cancel out.
+  outputStateCheckDirEntries += int64(entries)
+  result = result xor (entries * 0x9E3779B97F4A7C15'u64)
+
+proc observeOutputWitness(path: string; metadata: FileMetadata): OutputWitness =
+  ## One `lstat(2)` for the scalar fields, plus a recursive walk only when
+  ## the output is a directory.
+  when defined(posix):
+    var st: Stat
+    if lstat(extendedPath(path).cstring, st) == 0:
       result.changeTimeNs = uint64(cast[int64](st.st_ctim.tv_sec)) *
         1_000_000_000'u64 + uint64(st.st_ctim.tv_nsec)
-      return
-  result.metadata = fingerprintMetadata(path)
+      if S_ISLNK(st.st_mode):
+        try:
+          result.linkTarget = expandSymlink(extendedPath(path))
+        except OSError:
+          discard
+  if metadata.kind == ffkDirectory:
+    try:
+      result.treeDigest = directoryMetadataDigest(path)
+      result.hasTreeDigest = true
+    except OSError, IOError:
+      result.hasTreeDigest = false
 
 proc initFileMetadataCache*(): FileMetadataCache =
   FileMetadataCache(entries: initTable[string, FileMetadata]())
@@ -1007,8 +1125,71 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
-proc outputStateMismatch*(record: ActionResultRecord;
-                          outputRoot: string): string =
+const
+  WitnessMagic = "RBOW"
+  WitnessVersion = 1'u16
+  WitnessFileExt = ".octime"
+
+proc witnessFileName(strongHex: string): string =
+  strongHex & WitnessFileExt
+
+proc encodeWitnesses(record: ActionResultRecord): seq[byte] =
+  for i in 0 ..< 4:
+    result.add(byte(ord(WitnessMagic[i])))
+  result.writeU16Le(WitnessVersion)
+  result.writeU32Le(uint32(record.outputs.len))
+  for output in record.outputs:
+    result.writeString(output.path)
+    result.writeU64Le(output.changeTimeNs)
+    result.writeString(output.linkTarget)
+    result.add(if output.hasTreeDigest: 1'u8 else: 0'u8)
+    result.writeU64Le(output.treeDigest)
+
+proc decodeWitnesses(raw: openArray[byte]): Table[string, OutputWitness] =
+  result = initTable[string, OutputWitness]()
+  if raw.len < 10:
+    return
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(WitnessMagic[i])):
+      return
+  var pos = 4
+  let version = readU16Le(raw, pos)
+  if version != WitnessVersion:
+    return
+  let count = int(readU32Le(raw, pos))
+  for _ in 0 ..< count:
+    let path = readString(raw, pos)
+    var w: OutputWitness
+    w.changeTimeNs = readU64Le(raw, pos)
+    w.linkTarget = readString(raw, pos)
+    w.hasTreeDigest = readByte(raw, pos) == 1
+    w.treeDigest = readU64Le(raw, pos)
+    result[path] = w
+
+proc attachWitnesses(record: var ActionResultRecord;
+                     witnesses: Table[string, OutputWitness]) =
+  for i in 0 ..< record.outputs.len:
+    let w = witnesses.getOrDefault(record.outputs[i].path)
+    record.outputs[i].changeTimeNs = w.changeTimeNs
+    record.outputs[i].linkTarget = w.linkTarget
+    record.outputs[i].treeDigest = w.treeDigest
+    record.outputs[i].hasTreeDigest = w.hasTreeDigest
+
+proc outputStateCheckStats*(): tuple[calls: int; nanos: int64;
+                                     dirWalks: int; dirEntries: int64] =
+  ## Accumulated cost of EVERY `outputStateMismatch` call in this process.
+  ##
+  ## Counted inside the proc, not at the call sites, deliberately: the check
+  ## runs from three places (the whole-build fast-noop scan, the per-edge
+  ## metadata-only lookup, and the per-edge candidate walk), two of which are
+  ## inside this module where the engine's stats plumbing does not reach.
+  ## Instrumenting one call site and reporting the number as "the cost of the
+  ## check" would under-count it by the other two.
+  (calls: outputStateCheckCalls, nanos: outputStateCheckNanos,
+   dirWalks: outputStateCheckDirWalks, dirEntries: outputStateCheckDirEntries)
+
+proc outputStateMismatchImpl(record: ActionResultRecord;
+                             outputRoot: string): string =
   ## Incremental-Invalidation.md §"Minimum check set per target
   ## consultation", Step 3.3: "For an in-place local build, declared outputs
   ## must already exist **and match the recorded output metadata**."
@@ -1029,25 +1210,74 @@ proc outputStateMismatch*(record: ActionResultRecord;
   ## scale with total artifact bytes instead of artifact count. The change
   ## time is what buys tamper evidence without that: see `OutputBlob`.
   for output in record.outputs:
-    let path = materialPath(outputRoot, output.path)
-    let live = fingerprintMetadataAndChangeTime(path)
     if output.metadata.kind == ffkMissing:
       # Nothing was recorded for this output; there is nothing to compare
       # against and inventing a rule here would reject valid records.
       continue
-    if live.metadata.kind == ffkMissing:
+    let path = materialPath(outputRoot, output.path)
+    let live = fingerprintMetadata(path)
+    if live.kind == ffkMissing:
       return "output missing: " & output.path
-    if live.metadata != output.metadata:
+    if live != output.metadata:
       return "output metadata changed: " & output.path
-    if output.metadata.kind == ffkRegular and output.changeTimeNs != 0'u64 and
-        live.changeTimeNs != 0'u64 and
-        live.changeTimeNs != output.changeTimeNs:
-      # Size and mtime match but the inode changed after the action wrote
-      # it. Something rewrote, chmod'd or relinked the artifact behind the
-      # build's back; the recorded result no longer describes what is on
-      # disk. Fail closed.
-      return "output changed after it was recorded: " & output.path
+
+    # -- symlink -----------------------------------------------------------
+    # A recorded link target means the output WAS a symlink. `live` cannot
+    # distinguish that case (a symlink to a file reports as ffkRegular), so
+    # the target string is the whole comparison.
+    if output.linkTarget.len > 0:
+      let liveTarget = symlinkTargetOf(path)
+      if liveTarget.len == 0:
+        return "output is no longer a symlink: " & output.path
+      if liveTarget != output.linkTarget:
+        return "symlink output retargeted: " & output.path
+      continue
+
+    # -- directory ---------------------------------------------------------
+    if output.metadata.kind == ffkDirectory:
+      if not output.hasTreeDigest:
+        # `fingerprintMetadata` zeroes size and mtime for a directory, so
+        # everything compared above was vacuous and the only thing actually
+        # established is that the directory still exists. With no tree
+        # digest there is no way to answer the question, so fail closed --
+        # Incremental-Invalidation.md §"Rebuild Decision Model": "If any
+        # required condition cannot be checked, Reprobuild MUST fail closed."
+        # This is what makes a pre-existing record (written before witnesses
+        # existed) re-execute ONCE; the replacement record carries a digest.
+        return "directory output has no recorded tree digest: " & output.path
+      var liveDigest = 0'u64
+      try:
+        liveDigest = directoryMetadataDigest(path)
+      except OSError, IOError:
+        return "directory output could not be walked: " & output.path
+      if liveDigest != output.treeDigest:
+        return "directory output contents changed: " & output.path
+      continue
+
+    # -- regular file ------------------------------------------------------
+    if output.metadata.kind == ffkRegular:
+      if output.changeTimeNs == 0'u64:
+        # Either the record predates witnesses, or the platform reports no
+        # change time (Windows). Degrading to the kind/size/mtime comparison
+        # above is what every record did before this change, so this is not
+        # a new hole -- but it IS the hole, and it stays open for records in
+        # an existing cache until each edge next executes.
+        continue
+      let liveCtime = observeOutputWitness(path, live).changeTimeNs
+      if liveCtime != 0'u64 and liveCtime != output.changeTimeNs:
+        # Size and mtime match but the inode changed after the action wrote
+        # it. Something rewrote, chmod'd or relinked the artifact behind the
+        # build's back; the recorded result no longer describes what is on
+        # disk. Fail closed.
+        return "output changed after it was recorded: " & output.path
   ""
+
+proc outputStateMismatch*(record: ActionResultRecord;
+                          outputRoot: string): string =
+  let started = getMonoTime()
+  result = outputStateMismatchImpl(record, outputRoot)
+  inc outputStateCheckCalls
+  outputStateCheckNanos += (getMonoTime() - started).inNanoseconds
 
 proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
                      outputRoot = "") =
@@ -1150,7 +1380,6 @@ proc encodeRecord(record: ActionResultRecord): seq[byte] =
       result.writeU64Le(output.blob.sizeBytes)
     of opkMetadataOnly:
       discard
-    result.writeU64Le(output.changeTimeNs)
 
 proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
   if payload.len < 6:
@@ -1160,7 +1389,7 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       raiseEnvelopeError(eeUnknownMagic, "unknown action record magic")
   var pos = 4
   let version = readU16Le(payload, pos)
-  if version notin {2'u16, 3'u16, ActionRecordVersion}:
+  if version notin {2'u16, ActionRecordVersion}:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported action record version")
   result.weakFingerprint = readDigest(payload, pos)
   let policy = readByte(payload, pos)
@@ -1198,8 +1427,6 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       let size = readU64Le(payload, pos)
       result.outputs[i].blob = blobRef(digest, size)
       result.outputs[i].permissions = readPermissions(payload, pos)
-    if version >= 4'u16:
-      result.outputs[i].changeTimeNs = readU64Le(payload, pos)
   if pos != payload.len:
     raiseEnvelopeError(eeMalformed, "trailing action record bytes")
 
@@ -1497,6 +1724,19 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest):
       # even legacy/seq-0 files or a hypothetical duplicate sequence still sort
       # deterministically.
       let strongHex = path.splitFile.name
+      # Attach the witness sidecar, when present, to the records it belongs
+      # to. One extra small read per `.rec`; absent/undecodable means "no
+      # witness", which is the pre-change behaviour, not a hard failure.
+      var witnesses = initTable[string, OutputWitness]()
+      let witnessPath = dirPath / witnessFileName(strongHex)
+      if fileExists(extendedPath(witnessPath)):
+        try:
+          witnesses = decodeWitnesses(bytes(readFile(witnessPath)))
+        except OSError, IOError, EnvelopeError:
+          witnesses = initTable[string, OutputWitness]()
+      if witnesses.len > 0:
+        for i in 0 ..< decoded.records.len:
+          decoded.records[i].attachWitnesses(witnesses)
       recFiles.add((seq: decoded.writeSequence, strongHex: strongHex,
         recs: decoded.records))
     recFiles.sort(proc (a, b: tuple[seq: uint64; strongHex: string;
@@ -1539,6 +1779,23 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
     if fileExists(extendedPath(tmpPath)):
       removeFile(extendedPath(tmpPath))
     raise
+  # Output witnesses go in a SIDECAR beside the `.rec`, never inside the RBAR
+  # frame. Every reader of an edge directory -- including binaries built
+  # before this change -- filters on `PerEdgeRecFileExt`, so a `.octime` file
+  # is invisible to them and the record format stays at v3. Best-effort: a
+  # sidecar that fails to write, or is lost, simply means "no witness", and
+  # the lookup degrades exactly as a pre-witness record does.
+  if records.len > 0:
+    let witnessTmp = tmpPath & WitnessFileExt
+    try:
+      writeFile(extendedPath(witnessTmp),
+        byteString(encodeWitnesses(records[0])))
+      moveFile(extendedPath(witnessTmp),
+        extendedPath(dirPath / witnessFileName(finalName.splitFile.name)))
+    except OSError, IOError:
+      if fileExists(extendedPath(witnessTmp)):
+        try: removeFile(extendedPath(witnessTmp))
+        except OSError: discard
 
 proc capRecFiles(cache: ActionCache; dirPath: string) =
   ## Bound the per-edge directory: keep at most `MaxRecFilesPerEdge` `.rec`
@@ -1568,6 +1825,14 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
       removeFile(entries[i].path)
     except OSError:
       discard
+    # Drop the evicted record's witness sidecar too, or it leaks.
+    let witness = entries[i].path.parentDir /
+      witnessFileName(entries[i].strongHex)
+    if fileExists(extendedPath(witness)):
+      try:
+        removeFile(extendedPath(witness))
+      except OSError:
+        discard
 
 proc migrateLegacyFile(cache: ActionCache; weak: ContentDigest) =
   ## If a pre-AC-1b single FILE sits at `hot-records/<key>` (the same path the
@@ -2167,12 +2432,11 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    # One lstat producing metadata AND the inode change time. Not routed
-    # through `metadataCache`: the engine invalidates that entry right after
-    # execution anyway, and the change time is only meaningful when read
-    # directly from the inode we just wrote.
-    let observed = fingerprintMetadataAndChangeTime(source)
-    let sourceMetadata = observed.metadata
+    # Read straight from the inode we just wrote, not through
+    # `metadataCache`: the engine invalidates that entry right after
+    # execution anyway, and the witness is only meaningful fresh.
+    let sourceMetadata = fingerprintMetadata(source)
+    let observed = observeOutputWitness(source, sourceMetadata)
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.
@@ -2195,7 +2459,10 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
       else:
         CasBlobRef()
     result.outputs.add(OutputBlob(path: path, metadata: sourceMetadata,
-      blob: blob, permissions: perms, changeTimeNs: observed.changeTimeNs))
+      blob: blob, permissions: perms,
+      changeTimeNs: observed.changeTimeNs, linkTarget: observed.linkTarget,
+      treeDigest: observed.treeDigest,
+      hasTreeDigest: observed.hasTreeDigest))
   cache.writePerEdgeRecord(result)
 
 proc recordActionResult*(cache: var ActionCache; cas: var Store;
@@ -2216,12 +2483,11 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
     let source = materialPath(outputRoot, path)
-    # One lstat producing metadata AND the inode change time. Not routed
-    # through `metadataCache`: the engine invalidates that entry right after
-    # execution anyway, and the change time is only meaningful when read
-    # directly from the inode we just wrote.
-    let observed = fingerprintMetadataAndChangeTime(source)
-    let sourceMetadata = observed.metadata
+    # Read straight from the inode we just wrote, not through
+    # `metadataCache`: the engine invalidates that entry right after
+    # execution anyway, and the witness is only meaningful fresh.
+    let sourceMetadata = fingerprintMetadata(source)
+    let observed = observeOutputWitness(source, sourceMetadata)
     # Windows: getFilePermissions returns a synthetic POSIX set derived from
     # the read-only attribute; we don't preserve it (see writePermissions),
     # so emit an empty set here. The cache record still round-trips cleanly.
@@ -2240,7 +2506,10 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
       else:
         CasBlobRef()
     result.outputs.add(OutputBlob(path: path, metadata: sourceMetadata,
-      blob: blob, permissions: perms, changeTimeNs: observed.changeTimeNs))
+      blob: blob, permissions: perms,
+      changeTimeNs: observed.changeTimeNs, linkTarget: observed.linkTarget,
+      treeDigest: observed.treeDigest,
+      hasTreeDigest: observed.hasTreeDigest))
   cache.writePerEdgeRecord(result)
 
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;

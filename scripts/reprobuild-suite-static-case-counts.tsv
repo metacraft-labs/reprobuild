@@ -44,7 +44,7 @@ libs/repro_binary_cache_client/tests/test_publish_in_process.nim	nim	7
 libs/repro_binary_cache_server/tests/t_a2_p1_manifest_roundtrip.nim	nim	7
 libs/repro_binary_cache_server/tests/t_a2_p2_rest_surface.nim	nim	2
 libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim	nim	1
-libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	nim	5
+libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	nim	8
 libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim	nim	5
 libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	4
 libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim	nim	1
