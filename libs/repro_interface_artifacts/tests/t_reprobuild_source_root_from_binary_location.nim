@@ -56,3 +56,31 @@ suite "reprobuild source root from binary location":
     putEnv(envName, "explicit-override")
     seedSourcePackageEnvironment([(envName, root)])
     check getEnv(envName) == "explicit-override"
+
+  test "bootstrap flags mirror external adapter and runquota roots":
+    let root = createTempDir("reprobuild-bootstrap-external-", "")
+    defer: removeDir(root)
+    let runnerRoot = root / "reprobuild-ct-test-runner"
+    let adapterRoot = runnerRoot / "libs" / "ct_incremental_adapter" / "src"
+    createDir(adapterRoot)
+    writeFile(adapterRoot / "ct_incremental_adapter.nim", "")
+    let runquotaRoot = root / "runquota"
+    let runquotaCore = runquotaRoot / "libs" / "runquota_core" / "src"
+    createDir(runquotaCore)
+    writeFile(runquotaCore / "runquota_core.nim", "")
+
+    let oldRunner = getEnv("REPRO_CT_TEST_RUNNER_SRC")
+    let hadRunner = existsEnv("REPRO_CT_TEST_RUNNER_SRC")
+    let oldRunquota = getEnv("RUNQUOTA_SRC")
+    let hadRunquota = existsEnv("RUNQUOTA_SRC")
+    putEnv("REPRO_CT_TEST_RUNNER_SRC", runnerRoot)
+    putEnv("RUNQUOTA_SRC", runquotaRoot)
+    defer:
+      if hadRunner: putEnv("REPRO_CT_TEST_RUNNER_SRC", oldRunner)
+      else: delEnv("REPRO_CT_TEST_RUNNER_SRC")
+      if hadRunquota: putEnv("RUNQUOTA_SRC", oldRunquota)
+      else: delEnv("RUNQUOTA_SRC")
+
+    let flags = bootstrapSiblingPackagePathFlags(root / "reprobuild", root)
+    check "--path:" & adapterRoot in flags
+    check "--path:" & runquotaCore in flags

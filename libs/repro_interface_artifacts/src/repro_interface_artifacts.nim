@@ -80,6 +80,10 @@ const BuiltSourcePackageRoots = [
   ("VM_HARNESS_SRC", compileTimeSourceRoot("VM_HARNESS_SRC")),
   ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
   ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
+  ("REPRO_CT_TEST_RUNNER_SRC",
+    compileTimeSourceRoot("REPRO_CT_TEST_RUNNER_SRC")),
+  ("CODETRACER_SRC", compileTimeSourceRoot("CODETRACER_SRC")),
+  ("RUNQUOTA_SRC", compileTimeSourceRoot("RUNQUOTA_SRC")),
 ]
 
 proc builtSourcePackageRoot(envName: string): string =
@@ -2677,8 +2681,31 @@ proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
       return candidate
   ""
 
-proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string;
-                                      consumerParent = ""): seq[string] =
+proc resolveCtIncrementalAdapterPath(anchorRoot: string): string =
+  for codeTracerRoot in [getEnv("CODETRACER_SRC"),
+                         anchorRoot.parentDir / "codetracer" / "src"]:
+    let candidate = markedPackageRoot(
+      codeTracerRoot, "ct_incremental_adapter.nim")
+    if candidate.len > 0:
+      return candidate
+  for runnerRoot in [getEnv("REPRO_CT_TEST_RUNNER_SRC"),
+                     anchorRoot.parentDir / "reprobuild-ct-test-runner"]:
+    let candidate = runnerRoot / "libs" / "ct_incremental_adapter" / "src"
+    if fileExists(extendedPath(candidate / "ct_incremental_adapter.nim")):
+      return candidate
+  ""
+
+proc resolveRunquotaRoot(anchorRoot, consumerParent: string): string =
+  let marker = "libs" / "runquota_core" / "src" / "runquota_core.nim"
+  for candidate in [getEnv("RUNQUOTA_SRC"),
+                    anchorRoot.parentDir / "runquota",
+                    consumerParent / "runquota"]:
+    if candidate.len > 0 and fileExists(extendedPath(candidate / marker)):
+      return candidate
+  ""
+
+proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
+                                       consumerParent = ""): seq[string] =
   ## MR14 — produce the ``--path:`` flags for the source-only sibling
   ## dependencies that ``reprobuild/config.nims`` lines 126-192 register
   ## via ``addPackagePath``. The list MUST stay in sync with config.nims
@@ -2837,9 +2864,18 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string;
                                                builtSourcePackageRoot(spec.envName))
     if resolved.len > 0:
       result.add("--path:" & resolved)
-  let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(reprobuildRoot)
-  if ctRunnerAdapter.len > 0:
-    result.add("--path:" & ctRunnerAdapter)
+  for adapterPath in [resolveCtTestRunnerAdapterPath(reprobuildRoot),
+                      resolveCtIncrementalAdapterPath(reprobuildRoot)]:
+    if adapterPath.len > 0:
+      result.add("--path:" & adapterPath)
+
+  let runquotaRoot = resolveRunquotaRoot(reprobuildRoot, consumerParent)
+  if runquotaRoot.len > 0:
+    var runquotaPaths: seq[string] = @[]
+    walkLibSrcPathsInto(runquotaRoot / "libs", runquotaPaths)
+    runquotaPaths.sort(system.cmp[string])
+    for path in runquotaPaths:
+      result.add("--path:" & path)
 
 proc declaredPackageDeps*(workDir: string): seq[string] =
   ## The package dependencies a project's ``repro.nim`` declares with a

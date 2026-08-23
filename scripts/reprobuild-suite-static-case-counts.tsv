@@ -204,7 +204,7 @@ libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	1
-libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	4
+libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	5
 libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim	nim	8
 libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim	nim	9
 libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim	nim	3
