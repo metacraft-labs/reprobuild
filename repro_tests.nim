@@ -7374,6 +7374,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_enumerated_directory_evidence_producers.nim",
+    binary: "build/test-bin/t_enumerated_directory_evidence_producers",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_every_launch_path_is_monitored.nim",
     binary: "build/test-bin/t_every_launch_path_is_monitored",
     defines: @[],
@@ -8518,14 +8526,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim",
-    binary: "build/test-bin/t_pre_push_writes_the_lock_record_it_demands",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
     source: "tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim",
     binary: "build/test-bin/t_pre_push_refuses_on_unreachable_team_backend",
     defines: @[],
@@ -8552,6 +8552,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.nim",
     binary: "build/test-bin/t_pre_push_warns_and_allows_on_unreachable_personal_backend",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim",
+    binary: "build/test-bin/t_pre_push_writes_the_lock_record_it_demands",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

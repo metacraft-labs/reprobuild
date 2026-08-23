@@ -2351,6 +2351,18 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
       evidence.monitorWrites.addUnique(seen.monitorWrites, output)
     for probe in pathSet.probes:
       evidence.monitorProbes.addUnique(seen.monitorProbes, probe)
+    for enumerated in pathSet.enumerations:
+      # Mirrors the ``mrDirectoryEnumerate`` arm of
+      # ``foldMonitorDepFileEvidence``: an enumeration is BOTH an
+      # existence dependency (so it stays in ``monitorProbes``, which
+      # every existing consumer reads) AND a membership dependency (so it
+      # is recorded separately for ``cacheEnumeratedDirectories``). A
+      # converter-reported enumeration must land in exactly the same two
+      # places as a monitor-reported one, or the two evidence sources
+      # would disagree about what the same observation means.
+      evidence.monitorProbes.addUnique(seen.monitorProbes, enumerated)
+      evidence.monitorDirectoryEnumerations.addUnique(
+        seen.monitorDirectoryEnumerations, enumerated)
   for diagnostic in pathSet.diagnostics:
     evidence.diagnostics.add(diagnostic)
 
@@ -6236,7 +6248,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 action.cacheInputPaths(evidence.evidence),
                 action.outputs, action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache)
+                metadataCache = addr fileMetadataCache,
+                # An elevated edge reaches this site instead of the
+                # monitored one, and it used to record every directory
+                # input with NO membership digest. That is not "less
+                # precise": a recorded `mtimeNs = 0` means "not
+                # membership-tracked", such a directory is never
+                # re-listed, and the hit path does not re-record — so the
+                # record was PERMANENTLY existence-only
+                # (Incremental-Invalidation.md:814-821). The evidence was
+                # already collected two lines up; only the hand-off was
+                # missing.
+                enumeratedDirectories =
+                  action.cacheEnumeratedDirectories(evidence.evidence))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, action.id), record)
@@ -6353,7 +6377,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache)
+                metadataCache = addr fileMetadataCache,
+                # Same omission as the elevated site above, reached by
+                # builtin edges and by anything whose plan is not a
+                # `bakProcess`. A builtin cannot be wrapped in the
+                # io-monitor, so its enumeration evidence arrives either
+                # from a converter path set or from a monitor depfile a
+                # direct engine caller prewired — both of which
+                # `collectEvidence` has already folded by this point.
+                enumeratedDirectories =
+                  plan.action.cacheEnumeratedDirectories(evidence.evidence))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)

@@ -14,6 +14,19 @@ type
     inputs*: seq[string]
     outputs*: seq[string]
     probes*: seq[string]
+    enumerations*: seq[string]
+      ## Directories the action LISTED. Kept apart from `probes` because a
+      ## probed directory depends on nothing but its own existence, while
+      ## an enumerated one depends on its MEMBERSHIP —
+      ## Incremental-Invalidation.md §"Validation Criteria" (:759-763):
+      ## "adding or removing a file in an enumerated directory invalidates
+      ## the action. This is a statement about ENUMERATED directories
+      ## specifically, and the distinction is load-bearing on the input
+      ## side". Collapsing the two would either make every probed
+      ## directory membership-tracked (the measured 463s/543s warm pass)
+      ## or leave every enumerated one existence-only (a silent false
+      ## hit). A consumer that only wants "did this path exist" should
+      ## read `probes` and `enumerations` together.
     diagnostics*: seq[string]
 
 const
@@ -206,6 +219,18 @@ proc readReproPathSet*(path: string): DependencyPathSet =
       result.outputs.addUnique(value)
     of "probe":
       result.probes.addUnique(value)
+    of "enumerate":
+      # A directory the action LISTED. `repro-pathset-v1` shipped with no
+      # way to say this, so every converter-backed edge was
+      # membership-blind by construction and a converter that wanted to
+      # report an enumeration could only FAIL the edge on the
+      # unknown-kind arm below. Additive: an OLDER reader meeting an
+      # `enumerate` line still raises `dreMalformed`, which the engine
+      # turns into a non-publishable action — a hard miss, the safe
+      # direction. See `Reprobuild-Repository-Layout.md:278`, which lists
+      # directory enumerations among the observations `repro_pathset`
+      # carries.
+      result.enumerations.addUnique(value)
     of "diagnostic":
       result.diagnostics.add(value)
     else:
