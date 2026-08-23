@@ -374,6 +374,71 @@ proc baselineMicroarchLevel*(family: PlatformCpu): MicroarchLevel =
   of pcX86_64: mlX86_64_v1
   of pcAny, pcAArch64, pcX86: mlNone
 
+const DefaultTargetFloorEnvVar* = "REPRO_DEFAULT_TARGET_FLOOR"
+  ## PMC-4 deliverable 3, the central half: the floor an artifact is BUILT to
+  ## target when its package does not say.
+  ##
+  ## Read this alongside ``HostMicroarchLevelEnvVar`` and note they are
+  ## opposites, because conflating them is the whole hazard. That one declares
+  ## what a host may be GIVEN (a ceiling, read on the consuming side). This one
+  ## declares what an artifact is BUILT FOR (a floor, chosen on the producing
+  ## side). Raising the ceiling lets a machine accept more; raising the floor
+  ## makes what you produce run on fewer machines.
+
+proc defaultTargetFloor*(): MicroarchLevel =
+  ## PMC-4: the fleet-wide default floor. **Conservative, and deliberately so.**
+  ##
+  ## Spack optimises for the BUILD host by default, which is exactly why Spack
+  ## binaries famously fail to run elsewhere: every artifact silently inherits
+  ## the capabilities of whichever machine happened to build it, and the
+  ## failure surfaces as a SIGILL on a different machine much later. A
+  ## cache-oriented system wants the opposite trade — a floor low enough that
+  ## one cached artifact serves the whole fleet, with higher levels taken
+  ## EXPLICITLY by the packages that can justify losing that reuse.
+  ##
+  ## So the default is ``mlNone``: no floor, runs anywhere. It is not an
+  ## absence of policy — it IS the policy, and the constant exists so that
+  ## changing it is one obvious edit rather than an archaeology exercise
+  ## across call sites.
+  ##
+  ## The per-package opt-in override is ``cpu_level`` on the arm itself
+  ## (``effectiveTargetFloor`` below), which is where a package that genuinely
+  ## needs AVX-512 says so and accepts the narrower audience.
+  ##
+  ## Same refusal discipline as the host override: an unreadable value is an
+  ## error, never a silent default. A typo here would otherwise lower the
+  ## fleet's floor without anyone noticing, and "we shipped v1 artifacts for a
+  ## month" is discovered by benchmark, not by error.
+  let raw = getEnv(DefaultTargetFloorEnvVar, "")
+  if raw.len == 0:
+    return mlNone
+  let parsed = parseMicroarchLevelToken(raw)
+  if not parsed.ok:
+    raise newException(ValueError,
+      DefaultTargetFloorEnvVar & "='" & raw & "' is not a microarchitecture " &
+      "level. Expected one of x86-64-v1 / x86-64-v2 / x86-64-v3 / " &
+      "x86-64-v4 (or the bare v1..v4, or 'none' for no floor). This " &
+      "variable declares what artifacts are BUILT FOR; an unreadable value " &
+      "is refused rather than defaulted, because defaulting it would " &
+      "silently change which machines can run what this fleet produces.")
+  parsed.level
+
+proc effectiveTargetFloor*(declared: MicroarchLevel;
+                           fleetDefault = mlNone): MicroarchLevel =
+  ## Resolve a package's floor: its own declaration if it made one, else the
+  ## fleet default.
+  ##
+  ## ``fleetDefault`` is a DEFAULTED PARAMETER rather than a call to
+  ## ``defaultTargetFloor()`` in the body, for the same reason ``hostLevel``
+  ## is: a test must be able to name a synthetic fleet policy without setting
+  ## a process-wide environment variable, and a pure function of its arguments
+  ## is the only shape that allows it.
+  ##
+  ## A package that declares ``mlNone`` explicitly is indistinguishable from
+  ## one that declared nothing, and that is correct: ``mlNone`` means "no
+  ## floor", so there is nothing for it to be overriding.
+  if declared != mlNone: declared else: fleetDefault
+
 proc detectHostMicroarchLevel*(family = detectHostCpu()): MicroarchLevel =
   ## PMC-2: what does this host provide?
   ##
