@@ -117,6 +117,20 @@ type
     adapter*: CatalogAdapterKind
     outcome*: ChainStepOutcome
     reason*: string
+    capabilityShortfall*: bool
+      ## PMC-4 — this adapter had the package and REFUSED it because the host
+      ## cannot execute what it offers (``breMicroarchFloorNotSatisfied``), as
+      ## opposed to not having it at all.
+      ##
+      ## The distinction is the whole point. "I don't have it" is a reason to
+      ## try the next adapter. "I have it and this machine cannot run it" is
+      ## not: the next adapters include ``cakPath``, which probes PATH for a
+      ## SAME-NAMED executable, and resolving to that looks like success while
+      ## delivering a binary nobody declared. That is PMC-1's
+      ## silent-fallthrough hazard in new clothing, and it is why this is a
+      ## typed field rather than a substring of ``reason`` -- a diagnostic
+      ## string is not a control-flow signal, and sniffing one would break the
+      ## first time the wording changed.
 
   CatalogResolution* = object
     ## The production catalog's verdict for one package reference.
@@ -1551,6 +1565,9 @@ proc tryResolveBuiltin(packageId: string;
     # rather than stopping at this frame.
     step.reason = "resolveBuiltinPackage: " & $res.error & " (" &
       res.errorDetail & ")"
+    # PMC-4: mark a CAPABILITY refusal so the chain can refuse to fall through
+    # to ``cakPath``. See ``ChainStep.capabilityShortfall``.
+    step.capabilityShortfall = res.error == breMicroarchFloorNotSatisfied
     return (false, CatalogResolution())
   step.outcome = csoResolved
   # The SUCCESS reason is left byte-identical to its pre-PMC-2 text. Every
@@ -1795,6 +1812,10 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
     if chain.len == 0: defaultAdapterChain()
     else: chain
   var trace: seq[ChainStep] = @[]
+  # PMC-4: has some adapter already said "I have this and this host cannot run
+  # it"? See the ``cakPath`` arm below for why that is not the same as "I do
+  # not have it", and why only ``cakPath`` is poisoned by it.
+  var capabilityRefusal = ""
   for adapter in effective:
     var step = ChainStep(adapter: adapter, outcome: csoAdapterUnavailable,
       reason: "")
@@ -1802,6 +1823,8 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
     of cakBuiltin:
       let outcome = tryResolveBuiltin(packageId, version, hostCpu, hostOs,
         hostLevel, hostFeatures, step)
+      if step.capabilityShortfall and capabilityRefusal.len == 0:
+        capabilityRefusal = step.reason
       trace.add(step)
       if outcome.found:
         var resolution = outcome.resolution
@@ -1822,6 +1845,34 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
         resolution.chainTrace = trace
         return resolution
     of cakPath:
+      # PMC-4 — the silent-wrong-thing gate, and the reason this whole flag
+      # exists.
+      #
+      # ``cakPath`` probes the host's PATH for a SAME-NAMED executable. If an
+      # earlier adapter refused because the host cannot execute what the
+      # catalog offers, probing PATH does not recover from that: it resolves
+      # a DIFFERENT, undeclared binary that merely shares a name, and reports
+      # success. The user asked for a package with an x86-64-v3 floor and got
+      # whatever ``foo.exe`` was first on PATH.
+      #
+      # This is exactly the hazard PMC-1 closed for declared availability
+      # (`Package-Model.md`: "``cakPath`` stops being reachable for a package
+      # known to be unavailable"), reappearing on the capability axis. PMC-1
+      # could gate in front of the loop because availability is known before
+      # any adapter runs; a floor shortfall is only discovered by ASKING the
+      # builtin adapter, so the gate has to live here instead.
+      #
+      # Only ``cakPath`` is poisoned. ``cakNix`` and ``cakScoop`` resolve
+      # genuinely different artifacts that may well satisfy this host, and
+      # refusing them would turn a safety fix into an outage.
+      if capabilityRefusal.len > 0:
+        step.outcome = csoAdapterUnavailable
+        step.reason = "refused: the builtin catalog has this package but " &
+          "this host cannot run it, and resolving a same-named executable " &
+          "from PATH would substitute an undeclared binary for the one that " &
+          "was refused (" & capabilityRefusal & ")"
+        trace.add(step)
+        continue
       let outcome = tryResolvePath(packageId, binaries, step)
       trace.add(step)
       if outcome.found:

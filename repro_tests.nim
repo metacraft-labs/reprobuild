@@ -9374,6 +9374,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_unsatisfiable_floor_does_not_fall_through_to_path.nim",
+    binary: "build/test-bin/t_unsatisfiable_floor_does_not_fall_through_to_path",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim",
     binary: "build/test-bin/t_unsigned_or_wrong_key_certificate_is_rejected",
     defines: @[],
