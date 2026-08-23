@@ -406,6 +406,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim",
+    binary: "build/test-bin/t_zero_output_edge_is_cacheable",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim",
     binary: "build/test-bin/test_binary_cache_publisher_hook",
     defines: @[],
