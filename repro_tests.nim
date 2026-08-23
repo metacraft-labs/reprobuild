@@ -8022,6 +8022,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_lock_from_a_v3_host_resolves_on_a_v2_host.nim",
+    binary: "build/test-bin/t_lock_from_a_v3_host_resolves_on_a_v2_host",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim",
     binary: "build/test-bin/t_lock_publish_recovers_verified_ahead_chain",
     defines: @[],

@@ -23,6 +23,14 @@ proc runIoMonitorCli(programName: string; args: seq[string]): int =
 
 import repro_provider_runtime
 import repro_project_dsl
+# PMC-4: `repro lock validate` compares a lock's recorded
+# microarchitecture target against this host through the SAME primitive
+# selection uses (`resolvedTargetSatisfiedBy`). A validator with its own
+# copy of that comparison would be a second source of truth about which
+# instructions a binary may execute -- the exact shape PMC-3 removed when
+# it made the psABI level sugar over feature sets.
+import repro_dsl_stdlib/packages_schema
+import repro_home_apply/package_catalog
 import repro_standard_provider_protocol
 import repro_runquota
 import repro_hash
@@ -50850,6 +50858,46 @@ proc runReproLockValidate(rest: openArray[string]): int =
   if lock.platform != host:
     problems.add("lock platform '" & lock.platform &
       "' is not resolvable on this host '" & host & "'")
+  # (c2) Platform-And-Microarchitecture-Constraints PMC-4 — microarchitecture
+  # resolvable on THIS host.
+  #
+  # `lock.platform` is the cpu-os coordinate and says nothing about the
+  # instruction set the locked artifacts were selected FOR. A lock refreshed
+  # on an x86-64-v3 machine can name a v3 floor and still carry
+  # `platform: amd64-linux`, so every check above passes on a v2 host while
+  # the artifacts it names cannot execute there. The failure without this is a
+  # SIGILL inside a later build with nothing pointing back at the lock, which
+  # is precisely the "works until it doesn't" shape PMC-4 exists to close.
+  #
+  # Report it rather than re-resolving. The acceptance criterion is that such
+  # a lock either resolves something satisfiable or fails LOUDLY -- silently
+  # picking a different artifact would mean the lock no longer names what gets
+  # built, which is the one outcome worse than refusing.
+  #
+  # The host target is read through the same detection PMC-2/PMC-3 use, so
+  # `REPRO_HOST_MICROARCH_LEVEL` / `REPRO_HOST_CPU_FEATURES` steer this check
+  # exactly as they steer selection. A validator that disagreed with the
+  # resolver about the same pair would be worse than no validator.
+  let hostTarget = initPlatformTarget(
+    detectHostCpu(), detectHostMicroarchLevel(detectHostCpu()),
+    detectHostCpuFeatures(detectHostCpu()))
+  for p in lock.packages:
+    if p.target.len == 0:
+      continue
+    let verdict = resolvedTargetSatisfiedBy(p.target, hostTarget)
+    if verdict.ok:
+      continue
+    if verdict.badToken.len > 0:
+      # A vocabulary problem, not a capability one -- `missing` is empty and
+      # would render as a misleading "missing cpu features: " with nothing
+      # after it. See `resolvedTargetSatisfiedBy`.
+      problems.add("lock package '" & p.name & "' records an unreadable " &
+        "target '" & p.target & "' (unknown token '" & verdict.badToken & "')")
+    else:
+      problems.add("lock package '" & p.name & "' needs target '" &
+        p.target & "', which this host does not provide (" &
+        renderResolvedTarget(hostTarget) & "); missing cpu features: " &
+        describeCpuFeatures(verdict.missing))
   # (d) consistency with the current solver inputs (tamper/stale check).
   # MO-12 — source the inputs the SAME way refresh does (compiled provider
   # preferred, sidecar fallback) so a provider-sourced lock validates against
