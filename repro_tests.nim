@@ -7662,6 +7662,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_every_launch_path_is_monitored.nim",
+    binary: "build/test-bin/t_every_launch_path_is_monitored",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
+    binary: "build/test-bin/t_monitor_fault_fails_the_action_not_the_daemon",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_integration_scheduler_dependency_gathering_policies.nim",
     binary: "build/test-bin/t_integration_scheduler_dependency_gathering_policies",
     defines: @[],
