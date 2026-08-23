@@ -141,7 +141,13 @@ suite "PMC-1 — declaring platforms: changes no existing resolution":
 
     # ---- (3) none of the slice declares availability --------------------
     block noneDeclared:
-      for name in ["innounp", "gh", "atk", "jdk", "cmake"]:
+      # PMC-5 note: ``innounp`` USED to be this block's Windows-only
+      # specimen. PMC-5 declares it (it genuinely cannot exist off Windows),
+      # so it moved to the `declaredWindowsOnlyEntry` block below. ``python3``
+      # replaces it here: its catalog is Windows-only too, but only because
+      # just the Windows slice was harvested, so it stays deliberately
+      # UNDECLARED and is the right specimen for "the gate must not fire".
+      for name in ["python3", "gh", "atk", "jdk", "cmake"]:
         let availability = packageAvailability(name)
         check not availability.declared
         # And an undeclared package is available on every host, including
@@ -149,20 +155,42 @@ suite "PMC-1 — declaring platforms: changes no existing resolution":
         check availability.isAvailableOn(pcX86_64, poLinux)
         check availability.isAvailableOn(pcAArch64, poMacos)
 
-    # ---- (4) innounp on linux: the OLD failure, unchanged ---------------
-    block windowsOnlyEntryOnLinux:
+    # ---- (4) an UNDECLARED windows-only catalog on linux: unchanged -----
+    # The property this block pins is that a package nobody declared keeps its
+    # pre-PMC-1 failure exactly. The specimen changed from ``innounp`` to
+    # ``python3`` when PMC-5 declared innounp; the property did not.
+    block undeclaredWindowsOnlyEntryOnLinux:
       var raised = false
       try:
-        discard chainResolvePackage(cat, "innounp",
+        discard chainResolvePackage(cat, "python3",
           chain = @[cakBuiltin, cakNix], hostCpu = pcX86_64, hostOs = poLinux)
       except EPackageUnavailableOnPlatform as err:
         checkpoint "undeclared package gained a platform gate: " & err.msg
         check false
       except EAdapterChainExhausted as err:
         raised = true
-        check err.packageId == "innounp"
+        check err.packageId == "python3"
         check err.msg.contains("adapter chain exhausted")
-        check err.msg.contains("platform-not-supported")
+      check raised
+
+    # ---- (4b) PMC-5: a DECLARED windows-only entry now fails with a reason
+    # The counterpart, and the reason the specimen above had to move. This is
+    # the behaviour change PMC-5 exists to make, asserted here rather than
+    # left as an unexplained edit to the block above.
+    block declaredWindowsOnlyEntry:
+      var raised = false
+      try:
+        discard chainResolvePackage(cat, "innounp",
+          chain = @[cakBuiltin, cakNix], hostCpu = pcX86_64, hostOs = poLinux)
+      except EPackageUnavailableOnPlatform as err:
+        raised = true
+        check err.packageId == "innounp"
+        # Named, not merely refused -- PMC-1's whole point.
+        check err.msg.contains("windows")
+      except EAdapterChainExhausted:
+        checkpoint "innounp is declared but still exhausted the chain; the " &
+          "PMC-5 declaration is not reaching the gate"
+        check false
       check raised
 
     # ---- (5) nix-only entry: the OLD failure, unchanged -----------------

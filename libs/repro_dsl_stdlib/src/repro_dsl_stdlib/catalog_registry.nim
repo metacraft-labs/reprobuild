@@ -348,6 +348,98 @@ proc getCatalog*(toolName: string):
   else:
     none(seq[VersionedProvisioning])
 
+# ---------------------------------------------------------------------------
+# PMC-5 — availability for packages whose ONLY definition is a harvested
+# catalog, so there is no `package` block to carry a `platforms:` line.
+#
+# ## Why the declaration lives here and not in the generated file
+#
+# `packages/wix3.nim` and friends are harvester OUTPUT. `packages/gcc.nim`
+# records what happens to hand-edits there: "Re-harvest emits ONLY the catalog
+# half; re-attach the DSL block by hand if you regenerate." A `platforms:` line
+# written into a generated file survives until the next harvest and then
+# silently disappears -- and what it takes with it is a SAFETY gate. This
+# module is hand-maintained, so a declaration here outlives regeneration.
+#
+# ## Why this is not the inference PMC-1 deleted
+#
+# PMC-1 shipped `inferredPackagePlatforms`, which derived availability by
+# walking a package's arms, then DELETED it: the inference could not see
+# harvested `VersionedProvisioning` entries, so it answered "available
+# everywhere" for exactly the class a platform lint exists to catch.
+#
+# The correction is not to re-derive from the other side. Measured across the
+# registry, 22 entries have arms for exactly one OS -- and only a handful are
+# platform-BOUND. `gcc`, `git`, `python3`, `ruby`, `php`, `erlang`, `elixir`,
+# `meson`, `autoconf`, `ocaml`, `swift` and more are single-OS in the CATALOG
+# because only the Windows slices were harvested; `gcc.nim` says so outright
+# ("the `gccCatalog` slice is consumed by the M64 `cakBuiltin` adapter on
+# Windows"). Inferring from arms would declare gcc Windows-only and make it
+# unavailable on Linux through PMC-1's own gate -- a far worse outage than the
+# hole being closed.
+#
+# So availability is DECLARED, by a human, per entry. The distinction between
+# "this package cannot exist there" and "we only harvested this platform" is
+# not recoverable from the data, and a lint that guesses it will guess wrong in
+# the direction that breaks builds.
+# ---------------------------------------------------------------------------
+const HarvestedPlatformDeclarations* = {
+  "wix3": "WiX Toolset v3 is a Windows Installer toolchain. It has no POSIX " &
+    "build, so there is nothing to catalogue for Linux or macOS.",
+  "innounp": "innounp unpacks Inno Setup installers, a Windows-only " &
+    "installer format, and ships as a Windows executable only.",
+  "lessmsi": "lessmsi reads Windows Installer (.msi) databases and is a " &
+    "Windows-only .NET tool.",
+  "7zip": "This entry is the Windows 7-Zip distribution used by the realize " &
+    "closure. p7zip exists on POSIX but is a DIFFERENT package with a " &
+    "different provisioning shape; catalogue it separately rather than " &
+    "widening this entry."
+}
+
+# PMC-5 — entries whose catalog covers ONE OS while the package itself exists
+# on others. Not a declaration of availability: a declaration that availability
+# is deliberately NOT declared, and why.
+#
+# This is what keeps the lint honest. Without it the only two options are
+# "infer and be wrong about gcc" or "assert nothing and let the stdlib drift
+# back one undeclared entry at a time" -- which is precisely how the gap PMC-1
+# found came to exist. With it, every single-OS entry is a deliberate decision
+# on somebody's part, and a NEW single-OS entry fails the lint until someone
+# decides which list it belongs in.
+const PartialCatalogCoverage* = {
+  "gcc": "gcc.nim's DSL block is the source of truth on Nix-capable hosts; " &
+    "the harvested catalog is the Windows half only.",
+  "gcc-winlibs": "the WinLibs distribution of gcc; gcc proper is cross-platform.",
+  "git": "harvested Windows slice only.",
+  "python3": "harvested Windows slice only.",
+  "ruby": "harvested Windows slice only.",
+  "php": "harvested Windows slice only.",
+  "composer": "harvested Windows slice only.",
+  "erlang": "harvested Windows slice only.",
+  "elixir": "harvested Windows slice only.",
+  "meson": "harvested Windows slice only.",
+  "ocaml": "harvested Windows slice only.",
+  "swift": "harvested Windows slice only.",
+  "dotnet-sdk": "harvested Windows slice only.",
+  "fpc": "Free Pascal runs on POSIX too; harvested Windows slice only.",
+  "autoconf": "harvested Windows slice only.",
+  "automake": "harvested Windows slice only.",
+  "libtool": "harvested Windows slice only.",
+  "libtoolize": "harvested Windows slice only."
+}
+
+proc harvestedAvailability*(packageId: string): PackageAvailability =
+  ## The PMC-5 declaration for a harvested-only package. ``declared = false``
+  ## when the package is not in the table, which is the pre-PMC-5 behaviour
+  ## and therefore what every undeclared entry keeps.
+  for pair in HarvestedPlatformDeclarations:
+    if pair[0] == packageId:
+      return PackageAvailability(
+        declared: true,
+        message: pair[1],
+        platforms: @[PackagePlatform(cpu: pcAny, os: poWindows)])
+  PackageAvailability(declared: false)
+
 proc packageAvailability*(packageId: string): PackageAvailability =
   ## PMC-1: where is ``packageId`` DECLARED to exist?
   ##
@@ -363,7 +455,12 @@ proc packageAvailability*(packageId: string): PackageAvailability =
   ## ``packageId`` already carry.
   let declaration = declaredPackagePlatforms(packageId)
   if not declaration.declared:
-    return PackageAvailability(declared: false)
+    # PMC-5: a package whose only definition is a harvested catalog has no
+    # ``package`` block to carry ``platforms:``. Fall back to the hand-
+    # maintained declaration table before giving up — see
+    # ``HarvestedPlatformDeclarations`` for why the declaration lives there
+    # and not in the generated file.
+    return harvestedAvailability(packageId)
   result.declared = true
   result.message = declaration.message
   for constraint in declaration.platforms:

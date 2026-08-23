@@ -9134,6 +9134,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_single_platform_entries_declare_platforms.nim",
+    binary: "build/test-bin/t_single_platform_entries_declare_platforms",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_solved_packages_are_first_class_locked_deps.nim",
     binary: "build/test-bin/t_solved_packages_are_first_class_locked_deps",
     defines: @[],
