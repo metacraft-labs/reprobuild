@@ -494,6 +494,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cas_store/tests/t_link_capability_probe.nim",
+    binary: "build/test-bin/t_link_capability_probe",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cas_store/tests/t_repro_cas_store_basic.nim",
     binary: "build/test-bin/t_repro_cas_store_basic",
     defines: @[],

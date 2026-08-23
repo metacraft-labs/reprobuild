@@ -39,6 +39,21 @@ import repro_local_store
 # NOT re-exported — they belong to the prefix layer.
 export StoreError, ECasMissing, ECasDigestMismatch
 
+# Local-CAS-Hardlink-Materialization M0 — the filesystem link-capability
+# model and probe. It lives in ``repro_local_store`` because the ingest
+# side (M2, ``storeCasFileBlob``) sits below this facade and needs the
+# same answer, but it is a Layer-1 concern end to end: it knows about
+# files and filesystems only, never about prefixes, receipts or roots.
+# Re-exported whole so a Layer-1 caller can implement the spec's
+# reflink → hardlink → copy preference order without importing Layer 2.
+#
+# NOTE (M0 scope): nothing in this facade calls the probe yet.
+# ``casMaterialize`` below still copies bytes; replacing it is M1, and
+# M1 is gated on M3's mutation guard rails because a materialized
+# hardlink shares an inode with the CAS blob.
+import repro_local_store/link_capability
+export link_capability
+
 # ---------------------------------------------------------------------------
 # Public types
 # ---------------------------------------------------------------------------
