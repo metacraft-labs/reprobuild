@@ -547,6 +547,24 @@ type
     monitorReads*: seq[string]
     monitorWrites*: seq[string]
     monitorProbes*: seq[string]
+    monitorDirectoryEnumerations*: seq[string]
+      ## Directories the action ENUMERATED (`opendir`/`readdir`), as opposed
+      ## to merely probed for existence. The monitor reports the two as
+      ## distinct RMDF record kinds (`mrDirectoryEnumerate` vs
+      ## `mrPathProbe`) and the engine used to collapse them into
+      ## `monitorProbes` one line after decoding them, which is where the
+      ## distinction was lost.
+      ##
+      ## It matters because the two imply different invalidation rules.
+      ## Existence is all a probe depends on, and a recorded directory
+      ## compares as "does it still exist" (`fingerprintMetadata` zeroes
+      ## size and mtime for `ffkDirectory`). An ENUMERATION depends on
+      ## MEMBERSHIP: Incremental-Invalidation.md §"Validation Criteria"
+      ## requires that "adding or removing a file in an enumerated directory
+      ## invalidates the action", and existence cannot express that.
+      ##
+      ## Entries also remain in `monitorProbes`, so every existing consumer
+      ## of that field keeps the exact set it had before.
     diagnostics*: seq[string]
 
   MonitorEvidenceStatus* = enum
@@ -1801,9 +1819,14 @@ proc allOutputsExist(action: BuildAction): bool =
 proc declaresNoOutputs(action: BuildAction): bool {.inline.} =
   action.outputs.len == 0
 
-proc cachedResultReusableInPlace(action: BuildAction): bool =
+proc cachedResultReusableInPlace(action: BuildAction;
+                                 declaredOutputsPresent: bool): bool =
   ## "If the action cache says nothing this action reads has changed, can the
   ## previous result be reused where it already is?"
+  ##
+  ## Takes `declaredOutputsPresent` rather than calling `allOutputsExist`
+  ## itself so the caller pays for exactly one output stat, and so an edge
+  ## that declares no outputs is never stat'd at all.
   ##
   ## For an edge that declares outputs, yes only when those outputs are still
   ## present — otherwise `rebuildMissingOutputsOnCacheHit` has to re-execute
@@ -1826,7 +1849,14 @@ proc cachedResultReusableInPlace(action: BuildAction): bool =
   ## NOTE the asymmetry with `allOutputsExist`, and that it is intentional:
   ## reuse here is gated on a cache RECORD whose inputs were just verified
   ## unchanged. `allOutputsExist`'s callers have no such record.
-  action.declaresNoOutputs() or action.allOutputsExist()
+  ##
+  ## This is defence in depth rather than the sole barrier: `lookupActionResult`
+  ## independently revalidates declared outputs against the record
+  ## (`outputStateMismatch`), so forcing this predicate true does not by
+  ## itself let a missing or corrupted output be reused. It is what keeps the
+  ## engine from asking for a restore it cannot perform, and what keeps an
+  ## edge with nothing to restore from being treated as one that failed to.
+  action.declaresNoOutputs() or declaredOutputsPresent
 
 proc addUnique(values: var seq[string]; value: string) =
   if value.len == 0:
@@ -2065,6 +2095,7 @@ type
     monitorReads*: HashSet[string]
     monitorWrites*: HashSet[string]
     monitorProbes*: HashSet[string]
+    monitorDirectoryEnumerations*: HashSet[string]
 
 proc monitorProfileEvidenceComplete(detail: string): bool =
   result = true
@@ -2265,8 +2296,15 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
         discard
     of mrFileWrite:
       evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
-    of mrPathProbe, mrDirectoryEnumerate:
+    of mrPathProbe:
       evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+    of mrDirectoryEnumerate:
+      # Stays in `monitorProbes` (every existing consumer keeps its set) AND
+      # is recorded separately, because membership, not existence, is what
+      # an enumeration depends on. See `monitorDirectoryEnumerations`.
+      evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+      evidence.monitorDirectoryEnumerations.addUnique(
+        seen.monitorDirectoryEnumerations, materialized)
     else:
       discard
 
@@ -2629,6 +2667,30 @@ proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
     let path = materialPath(action.cwd, probe)
+    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+      continue
+    result.addUnique(seen, path)
+
+proc cacheEnumeratedDirectories(action: BuildAction;
+                                evidence: PathSetEvidence): seq[string] =
+  ## The subset of this action's recorded inputs that it ENUMERATED, in the
+  ## same materialised form `cacheInputPaths` produces, so the record side
+  ## can match them by path.
+  ##
+  ## Filtered by the same tool/ignored-root rules as `cacheInputPaths`: a
+  ## path excluded from the inputs must not be handed over as an enumerated
+  ## one either, or the record would carry membership for something it does
+  ## not record at all.
+  let toolRoots = action.toolInputRoots()
+  let ignoredRoots = action.ignoredInputRoots()
+  var declaredMaterialized = initHashSet[string]()
+  for input in evidence.declaredInputs:
+    declaredMaterialized.incl(
+      materialPath(action.cwd, input).replace('\\', '/'))
+  var seen = initHashSet[string]()
+  for dir in evidence.monitorDirectoryEnumerations:
+    let path = materialPath(action.cwd, dir)
     if not declaredMaterialized.contains(path.replace('\\', '/')) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
@@ -5843,16 +5905,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runResult.results[idToIndex.resultIndex(id)].reason)
         elif action.cacheable:
           if config.rebuildMissingOutputsOnCacheHit:
-            if action.declaresNoOutputs():
-              # Nothing to stat: no declared output can be missing.
-              outputsPresentBeforeLookup = false
-              reusableInPlace = true
-            else:
+            if not action.declaresNoOutputs():
+              # Skipped entirely when nothing is declared: no declared output
+              # can be missing, and `outputsPresentBeforeLookup` must stay
+              # false so the no-record "outputs-present" shortcut below
+              # cannot fire for such an edge.
               let outputStatStart = statStart()
               outputsPresentBeforeLookup = action.allOutputsExist()
               outputsPresentKnown = true
-              reusableInPlace = outputsPresentBeforeLookup
               finishStat("repro output stat", outputStatStart)
+            reusableInPlace =
+              action.cachedResultReusableInPlace(outputsPresentBeforeLookup)
           let lookupStart = statStart()
           var lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy,
@@ -6689,7 +6752,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
             storeOutputBlobs = storeOutputBlobs,
-            metadataCache = addr fileMetadataCache)
+            metadataCache = addr fileMetadataCache,
+            enumeratedDirectories =
+              action.cacheEnumeratedDirectories(evidence.evidence))
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)

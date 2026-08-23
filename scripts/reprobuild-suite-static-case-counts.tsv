@@ -1039,6 +1039,7 @@ tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim	nim	1
 tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim	nim	1
 tests/integration/t_monitor_depfile_reader.nim	nim	2
 tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim	nim	3
+tests/integration/t_monitored_zero_output_edge_input_completeness.nim	nim	5
 tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim	nim	2
 tests/integration/t_nested_lock_push_capability_security.nim	nim	10
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1

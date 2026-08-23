@@ -8310,6 +8310,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_monitored_zero_output_edge_input_completeness.nim",
+    binary: "build/test-bin/t_monitored_zero_output_edge_input_completeness",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_no_runtime_compilation_in_tests.nim",
     binary: "build/test-bin/t_no_runtime_compilation_in_tests",
     defines: @[],
