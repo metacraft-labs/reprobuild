@@ -64,7 +64,7 @@ libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim	nim	1
 libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim	nim	5
 libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim	nim	8
 libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	4
-libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	7
+libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	8
 libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim	nim	9
 libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim	nim	12
 libs/repro_build_engine/tests/test_no_progress_diagnostic.nim	nim	1
