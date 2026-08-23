@@ -45,9 +45,11 @@
 ## real ``attemptHardlink`` as "fall back to copy for THIS file" and MUST
 ## NOT invalidate the cached capability. See ``isPerFileFallback``.
 ##
-## This module is scoped to M0: it is the model plus the probe. It has no
-## opinion about ``casMaterialize`` (M1), path-based ingest (M2), or the
-## mutation guard rails a hardlink needs (M3).
+## This module is scoped to the filesystem primitives the policy needs: the
+## model, the probe, and the per-file observations (``hardlinkCount``,
+## ``fileIdentity``) that "one inode" makes meaningful. It has no opinion
+## about ``casMaterialize`` (M1), where path-based ingest stages its work
+## (M2), or the mutation guard rails a hardlink needs (M3).
 
 import std/[locks, os, strutils, tables]
 
@@ -413,6 +415,97 @@ proc hardlinkCount*(path: string): int =
     if stat(cstring(path), st) != 0: -1 else: int(st.st_nlink)
   else:
     -1
+
+type
+  FileIdentity* = object
+    ## A witness that a file is still the same file holding the same
+    ## bytes. Local-CAS-Hardlink-Materialization **M2** needs this because
+    ## path-based ingest hashes a source and then links it: between those
+    ## two steps the source must not have changed, and a blob whose digest
+    ## does not match its content is a corrupt store.
+    ##
+    ## Deliberately more than a size check. The pre-M2 ingest compared
+    ## sizes alone, which cannot see an in-place rewrite of the same
+    ## length, and cannot see the source being replaced by a different
+    ## file at the same path.
+    known*: bool
+      ## ``false`` when the file could not be stat'd at all. A caller
+      ## comparing two identities MUST treat "not known" as "changed" —
+      ## see ``sameFileIdentity``.
+    sizeBytes*: uint64
+    mtimeRaw*: uint64
+      ## An OPAQUE last-write stamp: POSIX nanoseconds since the epoch,
+      ## Windows ``FILETIME`` 100-ns ticks since 1601. Deliberately not
+      ## normalised to one unit — the value is only ever compared with
+      ## another value from this same proc, and normalising Windows'
+      ## ticks to nanoseconds overflows a 64-bit integer.
+    volumeId*: uint64  ## ``st_dev`` / ``dwVolumeSerialNumber``.
+    fileId*: uint64    ## ``st_ino`` / ``nFileIndex{High,Low}``.
+    linkCount*: int
+      ## ``st_nlink`` / ``nNumberOfLinks``. Reported but deliberately NOT
+      ## part of ``sameFileIdentity``: another name appearing on the inode
+      ## does not change the bytes, and the ingest's own hardlink arm
+      ## raises this count itself.
+
+proc fileIdentity*(path: string): FileIdentity =
+  ## Stat ``path`` into a comparable witness. Never raises; an
+  ## unreachable file yields ``known = false``.
+  when defined(windows):
+    let h = createFileW(newWideCString(extendedPath(path)), 0,
+                        FILE_SHARE_READ or FILE_SHARE_WRITE or
+                          FILE_SHARE_DELETE,
+                        nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0)
+    if h == INVALID_HANDLE_VALUE:
+      return
+    var info: BY_HANDLE_FILE_INFORMATION
+    let ok = getFileInformationByHandle(h, addr info)
+    discard closeHandle(h)
+    if ok == 0:
+      return
+    result.sizeBytes = (uint64(uint32(info.nFileSizeHigh)) shl 32) or
+                       uint64(uint32(info.nFileSizeLow))
+    result.mtimeRaw =
+      (uint64(uint32(info.ftLastWriteTime.dwHighDateTime)) shl 32) or
+      uint64(uint32(info.ftLastWriteTime.dwLowDateTime))
+    result.volumeId = uint64(uint32(info.dwVolumeSerialNumber))
+    result.fileId = (uint64(uint32(info.nFileIndexHigh)) shl 32) or
+                    uint64(uint32(info.nFileIndexLow))
+    result.linkCount = int(uint32(info.nNumberOfLinks))
+    result.known = true
+  elif defined(posix):
+    var st: Stat
+    if stat(cstring(path), st) != 0:
+      return
+    result.sizeBytes = uint64(st.st_size)
+    result.mtimeRaw = uint64(st.st_mtim.tv_sec) * 1_000_000_000'u64 +
+                      uint64(st.st_mtim.tv_nsec)
+    result.volumeId = uint64(st.st_dev)
+    result.fileId = uint64(st.st_ino)
+    result.linkCount = int(st.st_nlink)
+    result.known = true
+  else:
+    discard
+
+proc sameFileIdentity*(a, b: FileIdentity): bool =
+  ## ``true`` only when both witnesses were obtained AND agree on size,
+  ## last-write time, and which file on which volume this is.
+  ##
+  ## Conservative by construction: an unknown identity on either side is
+  ## "changed", so a caller that cannot stat the source falls back to the
+  ## mechanism that does not depend on the source staying still.
+  a.known and b.known and
+    a.sizeBytes == b.sizeBytes and
+    a.mtimeRaw == b.mtimeRaw and
+    a.volumeId == b.volumeId and
+    a.fileId == b.fileId
+
+proc describe*(id: FileIdentity): string =
+  ## One-line diagnostic. Safe to log; never parsed.
+  if not id.known:
+    return "identity=unknown"
+  "size=" & $id.sizeBytes & " mtimeRaw=" & $id.mtimeRaw &
+    " volume=" & $id.volumeId & " fileId=" & $id.fileId &
+    " links=" & $id.linkCount
 
 proc filesystemName*(path: string): string =
   ## The filesystem type as the OS reports it (``NTFS``, ``ReFS``, ...),

@@ -382,6 +382,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/test_action_cache_restore_narrow_payloads.nim",
+    binary: "build/test-bin/test_action_cache_restore_narrow_payloads",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim",
     binary: "build/test-bin/test_binary_cache_publisher_hook",
     defines: @[],
@@ -488,6 +496,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim",
     binary: "build/test-bin/test_umask_wrap_both_spawn_paths",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
+    binary: "build/test-bin/t_cas_ingest_link",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

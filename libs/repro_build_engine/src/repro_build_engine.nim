@@ -960,9 +960,25 @@ proc materializeActionCacheOutputs*(cas: CasStore;
   if record.outputPayloadKind != opkCasBlobs:
     raise newException(CacheIntegrityError,
       "cache record does not contain output payloads")
-  var payloads: seq[seq[byte]] = @[]
-  for output in record.outputs:
-    payloads.add(cas.casGet(contentHashForActionBlob(output.blob)))
+  # Local-CAS-Hardlink-Materialization M2. Only a DIRECTORY output's payload
+  # is needed in memory — ``materializeDirectorySnapshotPayload`` parses a
+  # snapshot envelope rather than writing bytes to a path. Every other
+  # output goes to ``casMaterialize``, which since M1 streams (and, where
+  # the filesystem allows, links) each entry without ever holding it.
+  #
+  # Pre-reading all of them made the facade's O(1)-memory property stop at
+  # this boundary: a restore of many large outputs still peaked at the sum
+  # of them one layer up. The slots are indexed BY RECORD POSITION, which
+  # is why this is a pre-sized ``newSeq`` with holes rather than a filtered
+  # append — ``payloads[i]`` below is read with ``i`` from the record.
+  #
+  # Nothing is weakened by not reading them: ``casMaterialize`` runs its
+  # own existence pre-pass over every entry before touching a destination,
+  # and hash-verifies each staged result before committing any rename.
+  var payloads = newSeq[seq[byte]](record.outputs.len)
+  for i, output in record.outputs:
+    if output.metadata.kind == ffkDirectory:
+      payloads[i] = cas.casGet(contentHashForActionBlob(output.blob))
   var entries: seq[CasMaterialization] = @[]
   for output in record.outputs:
     if output.metadata.kind == ffkDirectory:

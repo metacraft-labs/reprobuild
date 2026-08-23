@@ -41,6 +41,15 @@ import ./sqlite3_binding
 # all `sqlite3_*` named or prefixed (`SqliteOk`, `Database`, ...) so
 # there is no name conflict with the rest of `repro_local_store`.
 
+import ./link_capability
+export link_capability
+# Local-CAS-Hardlink-Materialization M0's filesystem model and probe.
+# ``storeCasFileBlobDetailed`` below (M2) is the ingest-side production
+# caller: it adopts a source file by clone/link instead of streaming a
+# second full copy of it into the store. Re-exported so a Layer-2 caller
+# that reads a ``CasIngestOutcome.mechanism`` has the enum in scope; the
+# Layer-1 facade re-exports the same module directly.
+
 # ---------------------------------------------------------------------------
 # Public types and errors
 # ---------------------------------------------------------------------------
@@ -665,13 +674,222 @@ proc storeCasBlob*(s: var Store; payload: openArray[byte]): PrefixIdBytes =
     if not fileExists(extendedPath(finalPath)):
       raise
 
-proc storeCasFileBlob*(s: var Store; path: string;
-                       sizeBytes: uint64): PrefixIdBytes =
-  ## Inserts the file at `path` into the content-addressed blob store without
-  ## loading the whole payload into memory. Returns the same raw BLAKE3-256 key
-  ## as `storeCasBlob`.
-  let stagePath = s.casStageDir() & ".blob"
-  createDir(extendedPath(parentDir(stagePath)))
+# ---------------------------------------------------------------------------
+# Path-based ingest — Local-CAS-Hardlink-Materialization M2
+# ---------------------------------------------------------------------------
+#
+# Spec: ``reprobuild-specs/Local-Content-Addressed-Store.md``
+#       §"Hardlink, Reflink, and Copy Policy" (normative).
+#
+# The headline cost this milestone removes: a stored blob used to cost a
+# second full copy of itself on disk, plus a full read AND a full write of
+# its bytes, because ``storeCasFileBlob`` streamed the payload into a stage
+# file while hashing it. Adopting the source by clone/link instead replaces
+# that with one read and one metadata operation, and the store stops
+# doubling the size of every output it holds.
+#
+# THE ORDERING PROBLEM, AND HOW EACH ARM ANSWERS IT
+#
+# The destination name is the digest, and the digest is not known until the
+# bytes have been read — so ingest cannot link into its final name in one
+# pass. Hashing first and linking second opens a window: if the source
+# changes in between, the store ends up holding a blob whose digest does
+# not match its content, which is corruption of the worst kind, because
+# every later reader trusts the name.
+#
+#   * ``lmReflink`` — CLONE FIRST, then hash the CLONE. A reflink is a
+#     copy-on-write snapshot, so from the instant it exists its bytes are
+#     independent of the source. Hashing the clone therefore digests
+#     exactly the bytes that get committed and the window does not exist
+#     at all. This is a structural answer, not a check.
+#   * ``lmHardlink`` — cannot do that: the "clone" IS the source's inode,
+#     so there is nothing to snapshot. It hashes the source, compares a
+#     ``FileIdentity`` witness (size, mtime, volume, file id) before and
+#     after, and falls back to copy if anything moved. That narrows the
+#     window but cannot close it, which is one more reason the arm is off
+#     by default — see ``CasIngestAllowSharedInodeDefault``.
+#   * ``lmCopy`` — the pre-M2 streaming path, unchanged, including its
+#     ``"file changed while hashing"`` size check. Always present, always
+#     correct; it reads the source exactly once and writes what it read.
+#
+# WHAT IS NOT CHANGED. The digest, the sharded on-disk layout, and the
+# read path are untouched. A blob ingested through a link is byte-identical
+# to one ingested through the copy arm and indistinguishable from one
+# written before M2 existed; an existing store stays readable.
+
+const
+  CasIngestAllowSharedInodeDefault* = false
+    ## The ingest hardlink arm is IMPLEMENTED but OFF BY DEFAULT, decided
+    ## here rather than as a literal in a signature so that flipping it is
+    ## a reviewable one-line change with a test watching it — the same
+    ## convention M1 established with
+    ## ``CasMaterializeAllowSharedInodeDefault``.
+    ##
+    ## An ingested hardlink is arguably WORSE than a materialized one. On
+    ## the way out, the shared inode is between the CAS blob and a file
+    ## the build is about to consume. On the way in, it is between the CAS
+    ## blob and a file the build tree still owns and will overwrite on the
+    ## next rebuild — and a build step that rewrites its output in place
+    ## would then silently rewrite the stored blob, leaving the store
+    ## holding content that does not hash to the name it is filed under.
+    ## Answering that hazard is Local-CAS-Hardlink-Materialization M3's
+    ## job.
+    ##
+    ## Reflink is on, because it is copy-on-write: a later write to either
+    ## name copies the touched extents instead of editing shared ones, so
+    ## the blob is as isolated as a copy would have made it while costing
+    ## a link. That is why the default path on a reflink-capable store
+    ## volume still gets the whole win.
+
+  CasIngestChunkSize = 1024 * 1024
+    ## Bounded working buffer, so ingest is O(chunk) in memory regardless
+    ## of payload size — the property the pre-M2 code already had and this
+    ## one must not lose.
+
+type
+  CasIngestOutcome* = object
+    ## Per-call record of HOW a blob entered the store. Returned by
+    ## ``storeCasFileBlobDetailed`` so callers (and tests) can assert on
+    ## the mechanism actually used instead of inferring it from timing.
+    digest*: PrefixIdBytes
+    mechanism*: LinkMechanism
+    perFileFallback*: bool
+      ## ``true`` when a link mechanism was available for this filesystem
+      ## pair but refused THIS file — NTFS's 1024-name cap, ReFS's
+      ## per-extent reference cap. Per the spec's §"Per-file limits are
+      ## not pair capabilities" this falls back to copy for the one file,
+      ## never downgrades the cached pair verdict, and never surfaces as
+      ## an error.
+    alreadyPresent*: bool
+      ## The digest was already in the store, so nothing was committed.
+    sourceChanged*: bool
+      ## A link arm declined because the source moved under it between
+      ## the hash and the link. The blob is still stored — by the copy
+      ## arm, which re-reads — but never under a stale digest.
+    diagnostic*: string
+      ## Human-readable reason the chosen mechanism was not the first in
+      ## the preference order. Safe to log; never parsed.
+
+var casIngestRaceWindowHook*: proc (sourcePath: string) {.closure.}
+  ## TEST SEAM. ``nil`` in production, and nothing in the store ever sets
+  ## it.
+  ##
+  ## It fires exactly once per ingest, at THE INSTANT A CONCURRENT WRITER
+  ## TO THE SOURCE WOULD DO MAXIMUM DAMAGE to the arm in play — which is a
+  ## different instant per arm, because the arms are exposed differently:
+  ##
+  ##   * reflink — the moment the clone exists, BEFORE anything has been
+  ##     hashed. That is the window a naive implementation would leave
+  ##     open by cloning and then hashing the SOURCE: the clone would hold
+  ##     the old bytes while the digest described the new ones. Hashing
+  ##     the clone is what shuts it, and firing here is what proves that
+  ##     rather than asserting it.
+  ##   * hardlink — the moment the source's digest has been computed,
+  ##     BEFORE the link is attempted. That is the classic hash-then-link
+  ##     window, and the ``FileIdentity`` witness is what has to catch it.
+  ##   * copy — after the streaming read has finished, where by
+  ##     construction nothing can go wrong, so the arm is exercised
+  ##     through the same seam without a special case.
+  ##
+  ## It exists because the race is otherwise only reachable by timing, and
+  ## a test that races a real writer is a test that passes for the wrong
+  ## reason on a slow machine. A hook makes "the source changed at the
+  ## worst possible moment" a deterministic input.
+
+proc casIngestQuietRemove(path: string) =
+  try:
+    if fileExists(extendedPath(path)):
+      removeFile(extendedPath(path))
+  except CatchableError, Defect:
+    discard
+
+proc streamHashPath(path: string): tuple[digest: PrefixIdBytes;
+                                         total: uint64] =
+  ## BLAKE3-256 over ``path``, read in bounded chunks. The whole file is
+  ## never resident. Also returns the byte count actually read, which is
+  ## what the ``sizeBytes`` contract is checked against.
+  var f = open(extendedPath(path), fmRead)
+  var hasher = blake3.initHasher()
+  try:
+    var buffer = newSeq[byte](CasIngestChunkSize)
+    while true:
+      let n = f.readBuffer(addr buffer[0], buffer.len)
+      if n <= 0:
+        break
+      result.total += uint64(n)
+      hasher.update(addr buffer[0], n)
+    result.digest = hasher.finalize()
+  finally:
+    try: hasher.close() except CatchableError: discard
+    try: f.close() except CatchableError: discard
+
+proc allocateCasStagePath(s: var Store): string =
+  ## A stage name under the store's own ``tmp/``.
+  ##
+  ## Deliberately ``tmp/`` and not the blob tree: ``tmp/`` is the area
+  ## ``sweepStaging`` / ``repro store recover`` already reap, so a crashed
+  ## ingest leaves debris exactly where the store already knows to look
+  ## for it. ``tmp/`` and ``cas/`` are the same filesystem by construction
+  ## — both are subdirectories of the store root, and the pre-M2 commit
+  ## step already depended on that rename — which is why the capability
+  ## probe asks about the (source directory → ``tmp/``) pair: that is the
+  ## pair the link is actually made across.
+  result = s.casStageDir() & ".blob"
+  createDir(extendedPath(parentDir(result)))
+  casIngestQuietRemove(result)
+
+proc commitCasStage(s: var Store; stagePath: string; digest: PrefixIdBytes;
+                    outcome: var CasIngestOutcome) =
+  ## Publish a staged blob under its digest, or discard the stage if some
+  ## other writer got there first. Byte-for-byte the pre-M2 commit.
+  let finalPath = s.casPath(digest)
+  if fileExists(extendedPath(finalPath)):
+    casIngestQuietRemove(stagePath)
+    outcome.alreadyPresent = true
+    return
+  createDir(extendedPath(parentDir(finalPath)))
+  try:
+    moveFile(extendedPath(stagePath), extendedPath(finalPath))
+  except OSError:
+    if fileExists(extendedPath(finalPath)):
+      casIngestQuietRemove(stagePath)
+      outcome.alreadyPresent = true
+    else:
+      casIngestQuietRemove(stagePath)
+      raise
+
+proc describeIngestCopyOnly(cap: LinkCapability;
+                            allowSharedInode: bool): string =
+  ## Why a pair got no link arm at all. Same reasoning as M1's
+  ## ``describeCopyOnlyPair``: a cross-volume reflink on Windows fails
+  ## ``ERROR_INVALID_PARAMETER`` and is classified ``loUnsupported``, which
+  ## reads as "this filesystem has no clone primitive" when the truth is
+  ## "not across this device boundary" — so lean on the hardlink attempt's
+  ## ``loCrossDevice`` on the same pair, which says it plainly.
+  if not cap.probed:
+    return "copy: the filesystem pair could not be probed (" &
+      cap.describe() & ")"
+  var reason =
+    if cap.hardlinkAttempt.outcome == loCrossDevice:
+      "copy: the ingest source is on a different filesystem from the " &
+      "store (hardlink reported cross-device; the reflink refusal on the " &
+      "same pair is the same boundary, whatever error code it used)"
+    else:
+      "copy: neither reflink nor hardlink is available for this pair"
+  if cap.hardlink and not allowSharedInode:
+    reason = "copy: the pair supports hardlinks but the shared-inode arm " &
+      "is disabled (an ingested hardlink would make the build tree's " &
+      "output and the CAS blob one inode; M3 owns that hazard)"
+  reason & " [" & cap.describe() & "]"
+
+proc ingestByStreamingCopy(s: var Store; path: string; sizeBytes: uint64;
+                           outcome: var CasIngestOutcome;
+                           hookFired: var bool) =
+  ## The pre-M2 path, unchanged in what it does and what it raises: read
+  ## the source once, write it into a stage file while hashing, then
+  ## commit. It is the arm that cannot be unavailable, which is what lets
+  ## the spec promise correctness never depends on which mechanism ran.
+  let stagePath = s.allocateCasStagePath()
   var input = open(extendedPath(path), fmRead)
   var output = open(extendedPath(stagePath), fmWrite)
   var inputOpen = true
@@ -680,8 +898,7 @@ proc storeCasFileBlob*(s: var Store; path: string;
   var total = 0'u64
   var hasher = blake3.initHasher()
   try:
-    const ChunkSize = 1024 * 1024
-    var buffer = newSeq[byte](ChunkSize)
+    var buffer = newSeq[byte](CasIngestChunkSize)
     while true:
       let n = input.readBuffer(addr buffer[0], buffer.len)
       if n <= 0:
@@ -691,36 +908,168 @@ proc storeCasFileBlob*(s: var Store; path: string;
       if output.writeBuffer(addr buffer[0], n) != n:
         raise newException(IOError, "short write while staging CAS blob: " &
           path)
-    if total != sizeBytes:
-      raise newException(IOError, "file changed while hashing: " & path)
-    result = hasher.finalize()
+    let digest = hasher.finalize()
     output.close()
     outputOpen = false
     input.close()
     inputOpen = false
-    let finalPath = s.casPath(result)
-    if fileExists(extendedPath(finalPath)):
-      removeFile(extendedPath(stagePath))
-      staged = true
-      return
-    createDir(extendedPath(parentDir(finalPath)))
-    try:
-      moveFile(extendedPath(stagePath), extendedPath(finalPath))
-      staged = true
-    except OSError:
-      if fileExists(extendedPath(finalPath)):
-        removeFile(extendedPath(stagePath))
-        staged = true
-      else:
-        raise
+    if not hookFired:
+      hookFired = true
+      if casIngestRaceWindowHook != nil:
+        casIngestRaceWindowHook(path)
+    if total != sizeBytes:
+      raise newException(IOError, "file changed while hashing: " & path)
+    outcome.digest = digest
+    outcome.mechanism = lmCopy
+    s.commitCasStage(stagePath, digest, outcome)
+    staged = true
   finally:
     try: hasher.close() except CatchableError: discard
     if inputOpen:
       try: input.close() except CatchableError: discard
     if outputOpen:
       try: output.close() except CatchableError: discard
-    if not staged and fileExists(extendedPath(stagePath)):
-      try: removeFile(extendedPath(stagePath)) except OSError: discard
+    if not staged:
+      casIngestQuietRemove(stagePath)
+
+proc storeCasFileBlobDetailed*(s: var Store; path: string; sizeBytes: uint64;
+                               allowSharedInode =
+                                 CasIngestAllowSharedInodeDefault):
+    CasIngestOutcome =
+  ## Insert the file at ``path`` into the content-addressed blob store by
+  ## the best mechanism the (source filesystem → store filesystem) pair
+  ## supports, in the order the spec mandates: reflink → hardlink → copy.
+  ## Returns the same raw BLAKE3-256 key ``storeCasBlob`` would, plus a
+  ## record of how it got there.
+  ##
+  ## **Availability is probed, never predicted.** The mechanism list comes
+  ## from ``preferredMechanisms`` over a real ``linkCapabilities`` probe of
+  ## the pair, cached process-wide, so a source on a different volume from
+  ## the store degrades to copy because the operation itself said
+  ## ``EXDEV`` / ``ERROR_NOT_SAME_DEVICE``, not because anyone read a
+  ## mount table.
+  ##
+  ## **Every arm falls back rather than fails.** A per-file limit
+  ## (``isPerFileFallback``) drops THIS file to copy, records
+  ## ``perFileFallback``, and leaves the cached pair verdict alone.
+  ##
+  ## **The bytes stored always hash to the name they are stored under.**
+  ## See the ordering discussion above the
+  ## ``CasIngestAllowSharedInodeDefault`` constant: the reflink arm makes
+  ## the race structurally impossible by hashing the clone, and the
+  ## hardlink arm compares a ``FileIdentity`` witness and hands off to copy
+  ## if the source moved.
+  result.mechanism = lmCopy
+  let srcDir = parentDir(path)
+  # Taken BEFORE the hash read, so the witness spans the whole window a
+  # link arm would be exposed to.
+  let sourceBefore = fileIdentity(path)
+  let cap =
+    if srcDir.len > 0: linkCapabilities(srcDir, s.tmpRoot)
+    else: LinkCapability()
+  let mechanisms = cap.preferredMechanisms(allowSharedInode = allowSharedInode)
+  if mechanisms == @[lmCopy]:
+    # No link arm was offered at all, so no attempt-level message will
+    # exist. Record WHY, because "it copied" without a reason is the log
+    # line that makes a misconfigured store look like a working one.
+    result.diagnostic = describeIngestCopyOnly(cap, allowSharedInode)
+
+  var hookFired = false
+  template fireIngestHook() =
+    if not hookFired:
+      hookFired = true
+      if casIngestRaceWindowHook != nil:
+        casIngestRaceWindowHook(path)
+
+  for mech in mechanisms:
+    case mech
+    of lmReflink:
+      let stagePath = s.allocateCasStagePath()
+      let attempt = attemptReflink(path, stagePath)
+      if attempt.outcome != loOk:
+        if attempt.isPerFileFallback():
+          result.perFileFallback = true
+        result.diagnostic = "reflink: " & attempt.message &
+          " [" & cap.describe() & "]"
+        casIngestQuietRemove(stagePath)
+        continue
+      # The clone now exists and is a copy-on-write SNAPSHOT of the
+      # source: its bytes are frozen and no later writer to the source can
+      # reach them. This is the instant the seam fires, because it is the
+      # window a clone-then-hash-the-SOURCE implementation would leave
+      # open — and hashing the STAGE below is what shuts it.
+      fireIngestHook()
+      var settled = false
+      try:
+        let hashed = streamHashPath(stagePath)
+        if hashed.total != sizeBytes:
+          raise newException(IOError, "file changed while hashing: " & path)
+        result.digest = hashed.digest
+        result.mechanism = lmReflink
+        s.commitCasStage(stagePath, hashed.digest, result)
+        settled = true
+      finally:
+        if not settled:
+          casIngestQuietRemove(stagePath)
+      return
+    of lmHardlink:
+      # Hash-then-link, because there is no snapshot to hash: the stage
+      # IS the source's inode. The witness below narrows the window; it
+      # cannot close it, and after the link the two names are the same
+      # file forever, so a later in-place rewrite of the build tree's
+      # output rewrites the stored blob. Both are why this arm is off by
+      # default.
+      let hashed = streamHashPath(path)
+      fireIngestHook()
+      let afterHash = fileIdentity(path)
+      if not sameFileIdentity(sourceBefore, afterHash):
+        result.sourceChanged = true
+        result.diagnostic = "hardlink: the source changed between hash and " &
+          "link (" & sourceBefore.describe() & " -> " & afterHash.describe() &
+          "); falling back to copy rather than storing a stale digest"
+        continue
+      if hashed.total != sizeBytes:
+        raise newException(IOError, "file changed while hashing: " & path)
+      let stagePath = s.allocateCasStagePath()
+      let attempt = attemptHardlink(path, stagePath)
+      if attempt.outcome != loOk:
+        if attempt.isPerFileFallback():
+          result.perFileFallback = true
+        result.diagnostic = result.diagnostic & " hardlink: " &
+          attempt.message & " [" & cap.describe() & "]"
+        casIngestQuietRemove(stagePath)
+        continue
+      let afterLink = fileIdentity(path)
+      if not sameFileIdentity(sourceBefore, afterLink):
+        casIngestQuietRemove(stagePath)
+        result.sourceChanged = true
+        result.diagnostic = "hardlink: the source changed while it was " &
+          "being linked (" & sourceBefore.describe() & " -> " &
+          afterLink.describe() & "); falling back to copy"
+        continue
+      var settled = false
+      try:
+        result.digest = hashed.digest
+        result.mechanism = lmHardlink
+        s.commitCasStage(stagePath, hashed.digest, result)
+        settled = true
+      finally:
+        if not settled:
+          casIngestQuietRemove(stagePath)
+      return
+    of lmCopy:
+      s.ingestByStreamingCopy(path, sizeBytes, result, hookFired)
+      return
+
+proc storeCasFileBlob*(s: var Store; path: string;
+                       sizeBytes: uint64): PrefixIdBytes =
+  ## Inserts the file at `path` into the content-addressed blob store without
+  ## loading the whole payload into memory. Returns the same raw BLAKE3-256 key
+  ## as `storeCasBlob`.
+  ##
+  ## ``storeCasFileBlobDetailed`` with the mechanism record discarded —
+  ## the shape every pre-M2 caller already uses, unchanged.
+  s.storeCasFileBlobDetailed(path, sizeBytes).digest
 
 proc readCasBlob*(s: Store; digest: PrefixIdBytes): seq[byte] =
   ## Reads a CAS blob and verifies its BLAKE3-256 digest BEFORE the

@@ -42,18 +42,29 @@ import repro_local_store
 # NOT re-exported — they belong to the prefix layer.
 export StoreError, ECasMissing, ECasDigestMismatch
 
+# Local-CAS-Hardlink-Materialization M2 — the ingest side's named default
+# and its per-call mechanism record. The implementation lives one layer
+# down (``repro_local_store/store.nim``) because it is the module that owns
+# the on-disk staging and commit protocol; the constant is re-exported here
+# so a Layer-1 caller can read the policy without importing Layer 2, and so
+# a test can watch the value the way M1's watches
+# ``CasMaterializeAllowSharedInodeDefault``.
+export CasIngestAllowSharedInodeDefault, CasIngestOutcome,
+  casIngestRaceWindowHook
+
 # Local-CAS-Hardlink-Materialization M0 — the filesystem link-capability
 # model and probe. It lives in ``repro_local_store`` because the ingest
-# side (M2, ``storeCasFileBlob``) sits below this facade and needs the
-# same answer, but it is a Layer-1 concern end to end: it knows about
+# side (M2, ``storeCasFileBlobDetailed``) sits below this facade and needs
+# the same answer, but it is a Layer-1 concern end to end: it knows about
 # files and filesystems only, never about prefixes, receipts or roots.
 # Re-exported whole so a Layer-1 caller can implement the spec's
 # reflink → hardlink → copy preference order without importing Layer 2.
 #
-# M1: ``casMaterialize`` below consumes ``preferredMechanisms`` and is
-# the facade's production caller of the probe. The hardlink arm is
-# implemented but DISABLED by default — see
-# ``CasMaterializeAllowSharedInodeDefault``.
+# Both directions are now production callers of the probe, and both have
+# their hardlink arm implemented but DISABLED by default:
+# ``casMaterialize`` below (M1, ``CasMaterializeAllowSharedInodeDefault``)
+# on the way out, and ``casPutPath`` below (M2,
+# ``CasIngestAllowSharedInodeDefault``) on the way in.
 import repro_local_store/link_capability
 export link_capability
 
@@ -137,6 +148,60 @@ proc casPut*(cas: var CasStore; payload: openArray[byte]): ContentHash =
   ## disk atomic-rename layer sees the target already exists.
   let raw = storeCasBlob(cas.inner, payload)
   ContentHash(raw)
+
+type
+  CasPutPathOutcome* = object
+    ## Per-call record of how ``casPutPath`` got a file into the store.
+    ## Mirrors ``CasMaterializeOutcome`` on the restore side so both
+    ## directions are asserted the same way: on the mechanism actually
+    ## used, never on timing.
+    hash*: ContentHash
+    mechanism*: LinkMechanism
+    perFileFallback*: bool
+    alreadyPresent*: bool
+    sourceChanged*: bool
+    diagnostic*: string
+
+proc casPutPathDetailed*(cas: var CasStore; path: string;
+                         allowSharedInode =
+                           CasIngestAllowSharedInodeDefault):
+    CasPutPathOutcome =
+  ## Insert the file at ``path`` into the CAS *by adopting it* — reflink
+  ## where the filesystem pair supports it, hardlink where it is enabled,
+  ## and the streaming copy otherwise. Returns the same
+  ## ``ContentHash`` ``casPut`` would return for the same bytes, and a
+  ## blob byte-identical to the one ``casPut`` would have written.
+  ##
+  ## This is the entry point Local-CAS-Hardlink-Materialization M2 adds
+  ## because ``casPut`` takes ``openArray[byte]``: a caller holding a
+  ## PATH could not express "adopt this file" without first reading the
+  ## whole payload into memory, which is both the memory cost and — since
+  ## the store then wrote its own second copy — the disk cost the
+  ## milestone exists to remove.
+  ##
+  ## The source is stat'd here for its size, which is also the first half
+  ## of the identity witness the hardlink arm compares. A source that
+  ## cannot be stat'd is an error before anything is staged.
+  let identity = fileIdentity(path)
+  if not identity.known:
+    raise newException(StoreError,
+      "cannot stat CAS ingest source: " & path)
+  let outcome = cas.inner.storeCasFileBlobDetailed(
+    path, identity.sizeBytes, allowSharedInode = allowSharedInode)
+  CasPutPathOutcome(
+    hash: ContentHash(outcome.digest),
+    mechanism: outcome.mechanism,
+    perFileFallback: outcome.perFileFallback,
+    alreadyPresent: outcome.alreadyPresent,
+    sourceChanged: outcome.sourceChanged,
+    diagnostic: outcome.diagnostic)
+
+proc casPutPath*(cas: var CasStore; path: string): ContentHash =
+  ## ``casPutPathDetailed`` with the mechanism record discarded. This is
+  ## the shape a caller that merely holds a path wants; the detailed
+  ## overload exists for callers that want to log or assert on the
+  ## mechanism that was actually used.
+  cas.casPutPathDetailed(path).hash
 
 proc casGet*(cas: CasStore; hash: ContentHash): seq[byte] =
   ## Retrieve the blob whose digest is ``hash``. The bytes are
