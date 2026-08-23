@@ -28451,6 +28451,27 @@ proc workspaceLockCommand*(workspaceRoot: string): string =
   if workspaceRoot.len == 0: "repro workspace lock"
   else: "repro workspace lock --workspace-root=" & workspaceRoot
 
+proc firstNamedReproCommand*(message: string): string =
+  ## The first backtick-quoted ``repro …`` invocation a diagnostic names, or
+  ## ``""`` when it names none.
+  ##
+  ## A refusal that travels (the lock writer raises; the pre-push gate catches
+  ## and renders a ``CheckFailure``) must not lose the one copy-pasteable step
+  ## the inner message worked out — §6 Decision 2, "The named command must RUN
+  ## where the message is printed". The outer layer knows the failure class,
+  ## not the repo names the inner layer resolved, so it lifts rather than
+  ## re-derives.
+  var i = 0
+  while true:
+    let a = message.find('`', i)
+    if a < 0: return ""
+    let b = message.find('`', a + 1)
+    if b < 0: return ""
+    let span = message[(a + 1) ..< b].strip()
+    if span.startsWith("repro "):
+      return span
+    i = b + 1
+
 proc committedLockCommand*(workspaceRoot: string): string =
   ## The copy-pasteable ``repro lock refresh`` invocation that re-pins the
   ## COMMITTED ``repro.lock``. It takes the workspace as a positional.
@@ -32483,6 +32504,23 @@ type
       ## ``triggerRepo`` is empty; resolved against the project's declared
       ## repos by ``pickTriggerRepo``.
     triggerSha: string
+    triggerOutsideEveryPartition: bool
+      ## The operation was triggered by a repo that belongs to NO lock
+      ## partition — today that is exactly the MEMBERSHIP repo (the checkout
+      ## carrying ``projects/``/``repos/``), which no project declares and
+      ## which therefore has no manifest ``name`` to key a record by
+      ## ([Workspace-Manifests.md] §"Path components are encoded names": the
+      ## ``<repo>`` component is a declared repo's *name*).
+      ##
+      ## Unified-Locking-And-Hooks.md §6 Decision 1, consequence 2 settles
+      ## what to do: "the partition is anchored only at a trigger that BELONGS
+      ## to it … when the trigger is outside the partition, the manifest gets
+      ## no trigger-keyed document for that operation." So no trigger-keyed
+      ## record is written, and — crucially — the anchor does NOT fall through
+      ## to ``pickTriggerRepo``'s project-named default, which would file the
+      ## membership repo's workspace state under an unrelated repo's name and
+      ## commit. See the block comment at the partition write for what that
+      ## cost in the field.
     toolProvisioning: ToolProvisioningMode
     # RA-21 — when non-empty, the dirty-tree refusal only considers repos
     # whose NAME is in this set (the pushed repo's develop-set dependency
@@ -32492,6 +32530,23 @@ type
     # the legacy whole-workspace refusal (explicit ``repro workspace lock``
     # and post-commit keep that behavior).
     dirtyScopeNames: HashSet[string]
+    dirtyScopeIsExplicit: bool
+      ## ``dirtyScopeNames`` was DECIDED by the caller, so an empty set means
+      ## "no repo is in scope" rather than "no scope was supplied".
+      ##
+      ## A bare ``HashSet`` cannot tell those apart, and the pre-push gate has
+      ## a scope that is legitimately empty: a membership-repo push whose
+      ## commit range touches no manifest fragment
+      ## ([Workspace-And-Develop-Mode.md] §"Gate scope when the pushed repo is
+      ## the membership repo" — "A commit touching no manifest fragment has an
+      ## empty scope and checks only the membership repo's own cleanliness and
+      ## publication"). The gate's own cleanliness stage honours that; the lock
+      ## writer read the same empty set as the legacy whole-workspace refusal
+      ## and blocked the push on an unrelated sibling's dirty tree — the exact
+      ## outcome that section names as the friction its rule removes.
+      ##
+      ## Left ``false`` by ``repro workspace lock`` and the post-commit hook,
+      ## which supply no scope and keep the whole-workspace refusal.
     report: ReportSpec
       ## Opt-in ``--write-report[=PATH]`` artifact. Left default-empty by the
       ## in-process (hook / pre-push) constructions of this object, which
@@ -32834,7 +32889,12 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # instead of a revision it cannot honestly supply. Silence was the one
   # option ruled out — a lock that is short by a repo, with no way for a
   # consumer to tell, is worse than either refusing or saying so.
-  let scopeDirty = args.dirtyScopeNames.len > 0
+  # An EXPLICIT scope is authoritative including when it is empty. Reading a
+  # decided-and-empty scope as "no scope supplied" restored the whole-workspace
+  # dirty refusal for exactly the push the scope rule exists to unblock — a
+  # membership commit touching no manifest fragment, refused because some
+  # unrelated sibling had edits in its tree.
+  let scopeDirty = args.dirtyScopeIsExplicit or args.dirtyScopeNames.len > 0
   for repo in resolved.repos:
     let repoPath =
       if args.triggerRepoPath.len > 0 and repo.name == triggerRepo.name:
@@ -32895,7 +32955,12 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   let triggerSha =
     if args.triggerSha.len > 0: args.triggerSha
     else: headShas.getOrDefault(triggerRepo.path)
-  if triggerSha.len == 0:
+  # ...unless this operation writes no trigger-keyed record at all (the
+  # membership repo — see the partition write below). There is then no anchor
+  # to demand, and demanding one would refuse a membership push merely because
+  # the project's primary repo — a repo the push has nothing to do with — is
+  # not materialized here.
+  if triggerSha.len == 0 and not args.triggerOutsideEveryPartition:
     raise newException(ValueError,
       "could not determine trigger SHA for repo '" &
         triggerRepo.name & "' at path '" & triggerRepo.path &
@@ -33039,12 +33104,36 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # another tier. When the trigger is outside the partition the manifest simply
   # gets no trigger-keyed document for this operation, and its repos keep their
   # per-repo participation records until one of them is itself the trigger.
+  #
+  # The MEMBERSHIP repo is the extreme of that rule: it belongs to no
+  # partition at all, because no project declares it. It has no manifest
+  # ``name``, so there is no ``<repo>`` component to encode
+  # ([Workspace-Manifests.md] §"Path components are encoded names, not joined
+  # paths" — the component is a declared repo's *name*), and
+  # Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+  # membership repo" says plainly that it "is not a project repo".
+  #
+  # ``pickTriggerRepo``'s fallback (3) nevertheless answered with the
+  # PROJECT-NAMED repo, because a membership push supplies neither a trigger
+  # name nor a trigger path. The record then claimed, at some unrelated repo's
+  # old commit, a workspace state that commit never saw — and because
+  # publication is additions-only and records are immutable, the coordinate was
+  # burned: every later membership push produced the same key with different
+  # sibling coordinates and refused,
+  #
+  #   immutable lock record already exists at
+  #   'locks/<project>/<primary>/<primarySha>.toml' with different repository
+  #   coordinates (changed paths: …)
+  #
+  # with no way to advance until the primary repo's HEAD happened to move.
+  # ``repro workspace lock`` refused identically, so the workspace was wedged.
   var triggerInManifestPartition = false
   for repo in manifestRepos:
     if repo.path == triggerRepo.path:
       triggerInManifestPartition = true
       break
   let writeManifestPartition = manifestLayerRoot.len > 0 and
+    not args.triggerOutsideEveryPartition and
     (not composed.hasExplicitRoutes or triggerInManifestPartition)
   # False only when the trigger coordinate is already occupied by a PUBLISHED
   # participation record, which this operation must neither overwrite nor claim
@@ -33105,26 +33194,58 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
         let existingShas = shasFromBody(existingBody)
         var sameCoordinates = existingShas.len == lock.repos.len
         var mismatchedPaths: seq[string]
+        # The NAMES behind those paths, because the remedy below has to be a
+        # command and ``--trigger-repo`` takes a name, not a path (the two are
+        # allowed to differ — ``nim`` lives at ``codetracer-nim``).
+        var mismatchedNames: seq[string]
+        proc noteMismatch(entry: WorkspaceLockEntry) =
+          mismatchedPaths.add(entry.path)
+          if entry.name.len > 0 and entry.name != triggerRepo.name and
+              entry.name notin mismatchedNames:
+            mismatchedNames.add(entry.name)
         if sameCoordinates:
           for entry in lock.repos:
             if entry.path notin existingShas or
                 existingShas[entry.path] != entry.revision:
               sameCoordinates = false
-              mismatchedPaths.add(entry.path)
+              noteMismatch(entry)
         else:
           for entry in lock.repos:
             if entry.path notin existingShas or
                 existingShas[entry.path] != entry.revision:
-              mismatchedPaths.add(entry.path)
+              noteMismatch(entry)
         if not sameCoordinates:
+          # Unified-Locking-And-Hooks.md §6 Decision 2, "Remedy text shape":
+          # "**The named command must RUN where the message is printed.**"
+          # This refusal used to end with "keep the existing record and create
+          # a lock anchored by the commit that changed" — a correct
+          # description of the repair and not a command anybody can type. The
+          # gate wrapped it in "investigate the lock writer error and re-run
+          # `repro check`", which is the invocation that had just refused, so
+          # the whole message pair named no way forward at all.
+          #
+          # The repair IS expressible: the record at this key is history and
+          # stays as published; a NEW record is anchored at a repo whose commit
+          # actually moved, and ``--trigger-repo=`` is how the operator says
+          # which. Its coordinate is free precisely BECAUSE that repo moved, so
+          # the command has somewhere to write. ``--workspace-root=`` is spelled
+          # out for the same reason ``workspaceLockCommand`` spells it out: the
+          # gate speaks from inside the pushed repo.
+          let remedy =
+            if mismatchedNames.len > 0:
+              workspaceLockCommand(args.workspaceRoot) &
+                " --trigger-repo=" & mismatchedNames[0]
+            else:
+              workspaceLockCommand(args.workspaceRoot)
           raise newException(ValueError,
             "immutable lock record already exists at '" & lockPath &
             "' with different repository coordinates" &
             (if mismatchedPaths.len > 0:
               " (changed paths: " & mismatchedPaths.join(", ") & ")"
             else: "") &
-            "; keep the existing record and create a lock anchored by the " &
-            "commit that changed")
+            "; that record is published history and is kept as-is — anchor " &
+            "the new workspace state at a commit that did change: `" &
+            remedy & "`")
     else:
       writeLockFile(lock, lockPath)
   if partitionRecordPresent:
@@ -33138,8 +33259,15 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
         revision: entry.revision,
         branch: entry.branch))
   report.indexFilePath = ""
-  report.triggerRepo = triggerRepo.name
-  report.triggerSha = triggerSha
+  # Report the anchor only when one was USED. Naming ``pickTriggerRepo``'s
+  # unused fallback here would print "trigger=<primary>@<primarySha>" for an
+  # operation that deliberately anchored nothing.
+  report.triggerRepo =
+    if args.triggerOutsideEveryPartition: ""
+    else: triggerRepo.name
+  report.triggerSha =
+    if args.triggerOutsideEveryPartition: ""
+    else: triggerSha
   report.createdAt = createdAt
   report.workspaceBranch = workspaceBranch
 
@@ -39617,11 +39745,25 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   var lockArgs = WorkspaceLockArgs(
     workspaceRoot: parsed.workspaceRoot,
     toolProvisioning: parsed.toolProvisioning,
-    dirtyScopeNames: scopeClosure)
+    dirtyScopeNames: scopeClosure,
+    # The gate DECIDED this scope (``prePushScope``), so it stands even when it
+    # is empty — which it legitimately is for a membership commit that touches
+    # no manifest fragment. Only the genuine "no scope information" verdict
+    # (``wholeWorkspace``) keeps the whole-workspace refusal.
+    dirtyScopeIsExplicit: not scopeIsWholeWorkspace)
   lockArgs.triggerRepo = currentRepoName
   lockArgs.triggerRepoPath =
     if currentRepoName.len > 0: parsed.currentRepo
     else: ""
+  # The membership repo is not a declared repo, so it supplies neither a
+  # trigger NAME nor a trigger PATH — and with both empty the lock driver used
+  # to fall through to the project-named anchor and file this push's workspace
+  # state under an unrelated repo's commit. It belongs to no partition
+  # (Unified-Locking-And-Hooks.md §6 Decision 1, consequence 2), so say so
+  # instead of letting the absence of a trigger be read as "no trigger in
+  # particular".
+  lockArgs.triggerOutsideEveryPartition =
+    currentRepoName.len == 0 and currentIsMembershipRepo
   let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
   # MO-2 — manifest-optional gate. When the workspace has NO resolved manifest
   # checkout on disk (a committed-lock-only / manifest-less workspace), there
@@ -39905,18 +40047,60 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # neither exists there is nothing to compare — the lock must be created.
   var lockMissing = latest.lockKey.sha.len == 0 and routedBackendRepos.len == 0
   var lockStale = false
-  if outgoing.outgoingCurrent and currentRepoName.len > 0 and
-      outgoing.headOid.len > 0:
-    # A global latest lock may already describe identical workspace HEADs, but
-    # ``repro push`` completion requires an immutable record anchored by each
-    # closure member's own outgoing commit. Do not let another repo's current
-    # record suppress creation of this exact trigger record.
-    let expectedCurrent = lockFileRepoRelativePath(
-      resolved.projectName, currentRepoName, outgoing.headOid)
-    let present = gitRunPlain(identity,
-      ["-C", manifestLayerRoot, "ls-tree", "HEAD", "--", expectedCurrent])
-    if present.code != 0 or present.output.strip().len == 0:
-      lockMissing = true
+  # A global latest lock may already describe identical workspace HEADs, but
+  # publication requires an immutable record anchored by the pushed repo's own
+  # commit. Do not let another repo's current record suppress creation of this
+  # exact trigger record.
+  #
+  # The obligation is read from ``result.expectedManifestRecords`` — the very
+  # list the publisher below verifies — rather than recomputed from
+  # ``outgoing``. The two used to be derived from different facts and disagreed
+  # about WHEN the record is owed: the verifier appends an expected record
+  # whenever ``--current-repo`` resolves to a declared repo with an observable
+  # HEAD, while this writer only created one when the push was additionally
+  # accepted as ``outgoing-current`` (a strict single fast-forward HEAD update
+  # to the manifest-agreed remote, which needs ``--pushed-refs`` and fails for
+  # a same-oid or force update). Every gate run outside that narrow shape
+  # therefore reported "lock already current", wrote nothing, and then refused
+  # the push with
+  #
+  #   expected lock record is not reachable at <manifests HEAD>:
+  #   locks/<project>/<repo>/<sha>.toml
+  #
+  # — the writer creating no commit and the verifier then looking for one. It
+  # was invisible for any repo that had been an explicit ``repro push`` trigger
+  # at its current HEAD before (its record already existed, so the missing
+  # write went unnoticed), and fatal for its otherwise identical sibling that
+  # had not. Both halves now read the same list, so the gate can only demand a
+  # record it is also willing to write.
+  #
+  # Guarded on a manifest layer EXISTING. With no declared route
+  # ``manifestLayerRoot`` is empty (§10, "No implicit team route"), there is no
+  # git-checkout store to hold a trigger-keyed record and none is verified
+  # either; probing ``git -C "" ls-tree`` would merely fail and be misread as
+  # "the record is missing".
+  if manifestLayerRoot.len > 0:
+    for expectedRecord in result.expectedManifestRecords:
+      # A record already ON DISK satisfies the obligation even when it is not
+      # committed yet: the publisher stages untracked canonical records under
+      # ``locks/`` (``ls-files --others``), so a draft this or an earlier
+      # operation wrote is exactly what the next publish carries.
+      #
+      # Testing only ``ls-tree HEAD`` would make every gate run REWRITE that
+      # draft for as long as publication has not happened — a store with no
+      # upstream, or any run that refuses at a later stage. The bytes are the
+      # same except ``created_at``, and that is enough to move the lock's
+      # identity: a certificate issued against the draft stops covering it,
+      # and "the gate did not rewrite an already-current lock" stops holding.
+      if fileExists(extendedPath(manifestLayerRoot /
+          expectedRecord.relPath.replace('/', DirSep))):
+        continue
+      let present = gitRunPlain(identity,
+        ["-C", manifestLayerRoot, "ls-tree", "HEAD", "--",
+         expectedRecord.relPath])
+      if present.code != 0 or present.output.strip().len == 0:
+        lockMissing = true
+        break
   if not lockMissing:
     if lockedShas.len == 0 and committedLockPaths.len == 0:
       lockMissing = true
@@ -39973,13 +40157,24 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     try:
       lockOutcome = executeWorkspaceLock(lockArgs, deferParticipation = true)
     except CatchableError as err:
+      # §6 Decision 2 "Remedy text shape": the named command must RUN where the
+      # message is printed. "re-run 'repro check'" named the invocation that
+      # had just refused — the one instruction guaranteed not to help — and it
+      # DISCARDED the command the writer had already worked out and put in its
+      # own message. Carry that command up verbatim when there is one; only
+      # fall back to the generic sentence when the writer named nothing.
+      let carried = firstNamedReproCommand(err.msg)
       result.lockUpdate.kind = cluFailed
       result.lockUpdate.diagnostic = err.msg
       result.failures.add(CheckFailure(
         repo: "",
         property: "lock-failure",
         remediation:
-          "investigate the lock writer error and re-run 'repro check'",
+          if carried.len > 0:
+            "run `" & carried & "` to create the lock this push needs, " &
+              "then re-push"
+          else:
+            "investigate the lock writer error, then re-run the push",
         evidence: err.msg))
       result.exitCode = 2
       return

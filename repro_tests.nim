@@ -8230,6 +8230,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_membership_repo_push_anchors_no_foreign_lock_record.nim",
+    binary: "build/test-bin/t_membership_repo_push_anchors_no_foreign_lock_record",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim",
     binary: "build/test-bin/t_migrate_leaves_a_pinned_checkout_on_its_pin",
     defines: @[],
@@ -8504,6 +8512,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim",
     binary: "build/test-bin/t_pre_push_public_only_writes_no_manifest_lock",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim",
+    binary: "build/test-bin/t_pre_push_writes_the_lock_record_it_demands",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

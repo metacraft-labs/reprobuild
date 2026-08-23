@@ -18,6 +18,33 @@
 ##   so naming the wrong one is not a typo: it sends the operator to a command
 ##   that cannot succeed no matter how many times it is retried.
 ##
+## Case C — the immutable-record refusal named no command at all, and the
+##   gate wrapped it in the one command guaranteed not to help.
+##   A published lock record is keyed by (trigger repo, trigger sha) and is
+##   immutable; publication is additions-only. When the trigger repo's HEAD has
+##   not moved but a sibling's has, the writer recomputes the same key, sees
+##   different sibling coordinates, and refuses with
+##
+##     immutable lock record already exists at 'locks/<p>/<t>/<sha>.toml' with
+##     different repository coordinates (changed paths: …); keep the existing
+##     record and create a lock anchored by the commit that changed
+##
+##   "create a lock anchored by the commit that changed" is a correct
+##   description of the repair and not something an operator can type. The
+##   pre-push gate then discarded even that and rendered its own remediation:
+##   "investigate the lock writer error and re-run 'repro check'" — naming the
+##   invocation that had just refused. Between them the two messages named no
+##   way forward, and the coordinate cannot be rewritten, so the workspace
+##   stayed refused.
+##
+##   The repair is expressible: keep the published record, and anchor the new
+##   state at a repo whose commit actually moved — ``repro workspace lock
+##   --workspace-root=<root> --trigger-repo=<name>``. Its coordinate is free
+##   precisely because that repo moved. This case asserts it the same way case
+##   A does: parse the command out of the gate's own remediation, run it
+##   verbatim from the pushed repo, require exit 0, and require the refusal to
+##   be gone.
+##
 ## Case B — the repair verb could not run in its documented form.
 ##   ``repro workspace migrate-locks --dry-run`` — the exact invocation the
 ##   publisher's refusal prints, and the exact invocation ``repro workspace
@@ -337,3 +364,133 @@ suite "a refusal names a command that runs where the operator is standing":
       check dryRun.output.contains(strayRel)
       # A dry run is read-only: the record is still where it was.
       check fileExists(store / strayRel.replace('/', DirSep))
+
+      # ================================================================
+      # Case C — the immutable-record refusal
+      # ================================================================
+      # A workspace with TWO declared repos and a default (unrouted)
+      # ``.repro/manifests`` git-checkout store, so the refusal is the
+      # trigger-keyed partition one.
+      let ws3 = scratch / "immutable-workspace"
+      createDir(ws3 / "projects")
+      createDir(ws3 / "repos")
+
+      proc seedRepo3(name, seed: string) =
+        let origin = scratch / ("c-origin-" & name & ".git")
+        discard requireGit(q(gitBin) & " init -q --bare -b main " & q(origin))
+        discard requireGit(q(gitBin) & " clone -q " & q("file://" & origin) &
+          " " & q(ws3 / name))
+        gitConfig(gitBin, ws3 / name)
+        writeFile(ws3 / name / "seed.txt", seed)
+        discard requireGit(q(gitBin) & " -C " & q(ws3 / name) & " add -A")
+        discard requireGit(q(gitBin) & " -C " & q(ws3 / name) &
+          " commit -qm " & q("seed " & name))
+        discard requireGit(q(gitBin) & " -C " & q(ws3 / name) &
+          " push -q origin main")
+        writeFile(ws3 / "repos" / (name & ".toml"),
+          repoFragment(name, name & "-origin") &
+          # ``lead`` develops against ``follower``, so the RA-21 pre-push
+          # scope of a ``lead`` push is {lead, follower}. Without the edge the
+          # sibling's move is out of scope, the gate calls the lock current,
+          # and the refusal under test never fires — a fixture that would have
+          # passed for the wrong reason.
+          (if name == "lead": "depends = [\"follower\"]\n" else: ""))
+
+      writeFile(ws3 / "projects" / "pair.toml",
+        "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+        "[project]\nname = \"pair\"\ndefault_revision = \"main\"\n" &
+        "trunk = \"main\"\n\n" &
+        "[[remote]]\nname = \"lead-origin\"\nfetch = \"file://" &
+          scratch / "c-origin-lead.git" & "\"\n\n" &
+        "[[remote]]\nname = \"follower-origin\"\nfetch = \"file://" &
+          scratch / "c-origin-follower.git" & "\"\n\n" &
+        "includes = [\n  \"repos/lead.toml\",\n  \"repos/follower.toml\",\n]\n")
+      # Different seeds ⇒ different SHAs, so "which repo is this record
+      # anchored at" is observable at all.
+      seedRepo3("lead", "lead seed\n")
+      seedRepo3("follower", "follower seed\n")
+
+      let store3 = ws3 / ".repro" / "manifests"
+      createDir(parentDir(store3))
+      let store3Origin = scratch / "c-origin-manifests.git"
+      discard requireGit(q(gitBin) & " init -q --bare -b main " & q(store3Origin))
+      discard requireGit(q(gitBin) & " clone -q " &
+        q("file://" & store3Origin) & " " & q(store3))
+      gitConfig(gitBin, store3)
+      writeFile(store3 / "README.md", "lock store\n")
+      discard requireGit(q(gitBin) & " -C " & q(store3) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(store3) & " commit -qm seed")
+      discard requireGit(q(gitBin) & " -C " & q(store3) & " push -q origin main")
+
+      writeWorkspaceBranch(ws3, project = "pair", branch = "main")
+
+      proc head3(repo: string): string =
+        requireGit(q(gitBin) & " -C " & q(ws3 / repo) &
+          " rev-parse HEAD").strip()
+
+      let leadSha = head3("lead")
+      check leadSha != head3("follower")
+
+      # Publish the immutable record at ``lead``'s commit.
+      let seed3 = run(reproAbs & " workspace lock --workspace-root=" & q(ws3) &
+        " --trigger-repo=lead")
+      checkpoint("case C seed lock: exit " & $seed3.code & "\n" & seed3.output)
+      check seed3.code == 0
+      let burned = store3 / "locks" / "pair" / "lead" / (leadSha & ".toml")
+      check fileExists(burned)
+      let burnedBody = readFile(burned)
+
+      # The sibling moves. ``lead`` does NOT, so its coordinate is unchanged
+      # and already occupied by published history.
+      writeFile(ws3 / "follower" / "work.txt", "follower work\n")
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") &
+        " commit -qm \"follower work\"")
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") &
+        " push -q origin main")
+      check head3("lead") == leadSha
+
+      let refs3 = scratch / "case-c-refs.txt"
+      writeFile(refs3, "refs/heads/main " & leadSha &
+        " refs/heads/main " & leadSha & "\n")
+
+      proc gate3(): tuple[code: int; output: string] =
+        run(reproAbs & " check --mode=pre-push --write-report" &
+          " --workspace-root=" & q(ws3) &
+          " --current-repo=" & q(ws3 / "lead") &
+          " --pushed-refs=" & q(refs3) & " --json", cwd = ws3 / "lead")
+
+      let refusal3 = gate3()
+      checkpoint("case C gate: exit " & $refusal3.code & "\n" & refusal3.output)
+      require refusal3.code == 2
+      var lockFailure: JsonNode = nil
+      for f in parseFile(ws3 / ".repro" / "build" / "reports" /
+          "check-report.json")["failures"]:
+        if f["property"].getStr() == "lock-failure":
+          lockFailure = f
+          break
+      require lockFailure != nil
+      let evidence3 = lockFailure["evidence"].getStr()
+      let remediation3 = lockFailure["remediation"].getStr()
+      checkpoint("case C evidence: " & evidence3)
+      checkpoint("case C remediation: " & remediation3)
+      # This is the failure we are talking about, not some other lock failure.
+      check evidence3.contains("immutable lock record already exists")
+      # The historical wrong answer, in its own words.
+      check not remediation3.contains("re-run 'repro check'")
+
+      # ---- the remedy is a command, and the command runs -----------------
+      let commands3 = namedReproCommands(remediation3)
+      checkpoint("case C commands named: " & commands3.join(" | "))
+      check commands3.len >= 1
+      for cmd in commands3:
+        let res = run(reproAbs & cmd["repro".len .. ^1], cwd = ws3 / "lead")
+        checkpoint("ran `" & cmd & "` -> exit " & $res.code & "\n" & res.output)
+        check res.code == 0
+
+      # ---- and running it CLEARS the refusal it was offered for ----------
+      let after3 = gate3()
+      checkpoint("case C gate after remedy: " & after3.output)
+      check after3.code == 0
+      # Published history was kept, exactly as the refusal promised.
+      check readFile(burned) == burnedBody
