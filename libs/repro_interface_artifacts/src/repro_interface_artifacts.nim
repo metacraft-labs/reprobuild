@@ -55,6 +55,38 @@ const BuiltNimCompilerPath = sanitizeStaticExec(staticExec("command -v nim"))
 const BuiltCCompilerPath =
   sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
 
+proc compileTimeSourceRoot(name: string): string {.compileTime.} =
+  ## Preserve source-only dependency roots from the environment that built
+  ## ``repro``. A Nix-built CLI can then compile out-of-tree providers after
+  ## leaving its dev shell; embedding the store paths also keeps those inputs
+  ## in the installed closure. Runtime overrides and live sibling checkouts
+  ## still take precedence at resolution time.
+  getEnv(name)
+
+const BuiltSourcePackageRoots = [
+  ("REPRO_TEST_ADAPTERS_SRC", compileTimeSourceRoot("REPRO_TEST_ADAPTERS_SRC")),
+  ("FASTSTREAMS_SRC", compileTimeSourceRoot("FASTSTREAMS_SRC")),
+  ("NIM_STEW_SRC", compileTimeSourceRoot("NIM_STEW_SRC")),
+  ("NIM_SERIALIZATION_SRC", compileTimeSourceRoot("NIM_SERIALIZATION_SRC")),
+  ("NIM_JSON_SERIALIZATION_SRC", compileTimeSourceRoot("NIM_JSON_SERIALIZATION_SRC")),
+  ("NIM_TOML_SERIALIZATION_SRC", compileTimeSourceRoot("NIM_TOML_SERIALIZATION_SRC")),
+  ("SSZ_SERIALIZATION_SRC", compileTimeSourceRoot("SSZ_SERIALIZATION_SRC")),
+  ("NIMCRYPTO_SRC", compileTimeSourceRoot("NIMCRYPTO_SRC")),
+  ("BEARSSL_SRC", compileTimeSourceRoot("BEARSSL_SRC")),
+  ("RESULTS_SRC", compileTimeSourceRoot("RESULTS_SRC")),
+  ("STINT_SRC", compileTimeSourceRoot("STINT_SRC")),
+  ("IO_MON_SRC", compileTimeSourceRoot("IO_MON_SRC")),
+  ("STACKABLE_HOOKS_SRC", compileTimeSourceRoot("STACKABLE_HOOKS_SRC")),
+  ("VM_HARNESS_SRC", compileTimeSourceRoot("VM_HARNESS_SRC")),
+  ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
+  ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
+]
+
+proc builtSourcePackageRoot(envName: string): string =
+  for entry in BuiltSourcePackageRoots:
+    if entry[0] == envName:
+      return entry[1]
+
 type
   InterfaceEnvelopeKind* = enum
     iekProjectInterface
@@ -2581,9 +2613,19 @@ proc reprobuildExternalLibsRoot(workDir: string): string =
   if result.len == 0:
     result = siblingReprobuildLibsRoot(workDir)
 
+proc markedPackageRoot(candidate, marker: string): string =
+  if candidate.len == 0:
+    return ""
+  if fileExists(extendedPath(candidate / marker)):
+    return candidate
+  let srcCandidate = candidate / "src"
+  if fileExists(extendedPath(srcCandidate / marker)):
+    return srcCandidate
+
 proc resolveBootstrapPackagePath*(envName: string;
                                   candidates: openArray[string];
-                                  marker: string): string =
+                                  marker: string;
+                                  builtCandidate = ""): string =
   ## MR14 — mirror ``config.nims``'s ``addPackagePath`` resolution shape
   ## so the recipe-compile (extract_runner) ``nim c`` invocation sees the
   ## same sibling source-only dependencies that reprobuild itself sees
@@ -2598,14 +2640,16 @@ proc resolveBootstrapPackagePath*(envName: string;
   ## Resolution order (mirrors ``config.nims:112-121``):
   ## 1. ``$<envName>`` environment variable (if set and contains marker)
   ## 2. each candidate path in declaration order (if it contains marker)
-  ## 3. "" (caller skips the ``--path:`` flag entirely)
-  let envPath = getEnv(envName)
-  if envPath.len > 0 and fileExists(extendedPath(envPath / marker)):
+  ## 3. the source root captured when ``repro`` was built
+  ## 4. "" (caller skips the ``--path:`` flag entirely)
+  let envPath = markedPackageRoot(getEnv(envName), marker)
+  if envPath.len > 0:
     return envPath
   for candidate in candidates:
-    if fileExists(extendedPath(candidate / marker)):
-      return candidate
-  ""
+    let resolved = markedPackageRoot(candidate, marker)
+    if resolved.len > 0:
+      return resolved
+  markedPackageRoot(builtCandidate, marker)
 
 proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
   let envRoot = getEnv("REPRO_CT_TEST_RUNNER_SRC")
@@ -2726,6 +2770,9 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string;
       ".." / "codetracer" / "libs" / "nimcrypto",
       ".." / "nimcrypto",
     ]), "nimcrypto" / "hash.nim"),
+    ("IO_MON_SRC", anchored([
+      ".." / "io-mon" / "src",
+    ]), "io_mon.nim"),
     ("BEARSSL_SRC", anchored([
       ".." / "nim-bearssl",
       "libs" / "nim-bearssl",
@@ -2773,7 +2820,8 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string;
   ]
   for spec in specs:
     let resolved = resolveBootstrapPackagePath(spec.envName, spec.candidates,
-                                               spec.marker)
+                                               spec.marker,
+                                               builtSourcePackageRoot(spec.envName))
     if resolved.len > 0:
       result.add("--path:" & resolved)
   let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(reprobuildRoot)
