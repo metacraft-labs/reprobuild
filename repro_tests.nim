@@ -470,6 +470,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/test_s5_own_output_is_not_a_cache_input.nim",
+    binary: "build/test-bin/test_s5_own_output_is_not_a_cache_input",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
     binary: "build/test-bin/test_tool_identity_env_plumbing",
     defines: @[],

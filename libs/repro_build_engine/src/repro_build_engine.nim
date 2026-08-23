@@ -1491,6 +1491,40 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
+proc selfConsumedDeclaredPaths*(action: BuildAction): seq[string] =
+  ## S5 — the materialized paths this action declares as BOTH an input and
+  ## an output, in declaration order.
+  ##
+  ## Such an action genuinely consumes its own output: an incremental tool
+  ## reading the state a previous run left behind. It is therefore NOT
+  ## hermetic — its result depends on what was on disk before it ran — and
+  ## the one thing it must never do is silently take a cache hit on that
+  ## stale state. It does not — and NOT because anything here exempts it.
+  ## These paths are NOT exempt from ``selfWrittenOutputKeys``; they are in
+  ## that set like any other declared output. The carve-out is STRUCTURAL:
+  ## both input folds add ``evidence.declaredInputs`` first and unfiltered,
+  ## so such a path is already in the key before the self-write filter is
+  ## consulted, and all the filter can still drop is the same file arriving
+  ## a second time through an observed channel under another spelling. The
+  ## fingerprint keeps tracking it and the action misses on every run in
+  ## which its own output changed. A permanent miss is the correct answer
+  ## for a non-hermetic action; a hit would be a false one.
+  ##
+  ## This proc is therefore purely diagnostic — nothing in
+  ## ``cacheInputPaths`` branches on its result. ``collectEvidence`` turns a
+  ## non-empty result into a diagnostic so the permanent miss that follows
+  ## does not read as a caching bug.
+  for output in action.outputs:
+    let materialized = materialPath(action.cwd, output)
+    let key = materialized.replace('\\', '/')
+    var declared = false
+    for input in action.inputs:
+      if materialPath(action.cwd, input).replace('\\', '/') == key:
+        declared = true
+        break
+    if declared and materialized notin result:
+      result.add(materialized)
+
 proc parseCreateActionRecord(payload, path: string; lineNo: int;
                              governingLockIdentity: LockIdentity): BuildAction =
   ## Decode an M25 ``create-action`` JSON payload into a BuildAction. The
@@ -1899,6 +1933,23 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
   result.publishable = true
   result.evidence.declaredInputs = action.inputs
   result.evidence.declaredOutputs = action.outputs
+  # S5 — an action that declares the same path as BOTH an input and an
+  # output consumes its own output: an incremental tool reading the state
+  # a previous run left behind. That action is not hermetic, and the one
+  # thing it must never do is silently take a cache hit on stale state.
+  # It does not: ``cacheInputPaths`` adds the DECLARED inputs first and
+  # unfiltered, so the path is in the key before the self-write filter is
+  # consulted (see ``selfWrittenOutputKeys``). The fingerprint keeps
+  # tracking it and the action misses on every run in which its own output
+  # changed. Say that out loud rather than letting a permanent miss look
+  # like a caching bug.
+  for materialized in action.selfConsumedDeclaredPaths():
+    result.evidence.diagnostics.add(
+      "action declares '" & materialized & "' as both an input and an " &
+      "output, so it consumes its own output and is not hermetic; the " &
+      "path is retained in the action-cache input set (a stale hit " &
+      "would be worse than a permanent miss). Spec: " &
+      "Filesystem-Policy-And-Observed-Inputs.md §\"Source Rewrites\".")
   # Deferred-D4: track membership in side-car ``HashSet``s so adding the
   # k-th unique evidence entry costs O(1) instead of O(k). Monitor
   # records on a single action can exceed several thousand entries; the
@@ -2111,19 +2162,73 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
   if strict and not result.publishable:
     discard
 
-proc evidenceInputPaths(evidence: PathSetEvidence): seq[string] =
+proc selfWrittenOutputKeys(action: BuildAction): HashSet[string] =
+  ## S5 — the action's OWN declared output paths, keyed in the normalized
+  ## (forward-slash, materialized) form the input folds compare on. The
+  ## observed-evidence channels are filtered against this set before they
+  ## reach the action-cache key.
+  ##
+  ## Why an own declared output is never an input: a linker, an archiver
+  ## and a compiler all OPEN the file they are writing (and stat/probe it
+  ## first), and the monitor faithfully records that access as a read.
+  ## Those bytes are bytes the action produced *in this same run* — the
+  ## content that was there before cannot affect a hermetic result, so
+  ## the prior content is not an input. Recording it as one makes the
+  ## action depend on itself: the fingerprint can never match once the
+  ## output exists or changes, which costs a hit on every relink and
+  ## makes CAS restore of a deleted output structurally impossible.
+  ## Spec: ``reprobuild-specs/Filesystem-Policy-And-Observed-Inputs.md``
+  ## §"Writable Output Scopes" — a declared output is a writable scope,
+  ## not a dependency-relevant read scope.
+  ##
+  ## The exclusion is deliberately as narrow as it can be: EXACT declared
+  ## output paths of THIS action, matched by string equality after
+  ## materialization. No directory containment, no prefix rule, no
+  ## "looks like an output" heuristic — an over-broad filter here would
+  ## drop a genuine input that merely lives next to an output, and
+  ## dropping a genuine input is a false cache hit, the cardinal sin.
+  ##
+  ## There is one case where an own declared output IS a real input: an
+  ## incremental tool that reads the state a previous run left behind,
+  ## declaring the same path as input and output. That action is not
+  ## hermetic and must NOT silently get a hit. It doesn't, and NOT because
+  ## of anything in this set — the carve-out is structural. Both folds
+  ## below add ``evidence.declaredInputs`` FIRST and UNFILTERED, so a path
+  ## the author declared as an input is in the key before this set is ever
+  ## consulted. Declaration outranks every filter; that is the same
+  ## principle ``cacheInputPaths``' ``declaredMaterialized`` retention
+  ## encodes for the tool-root filter. ``selfConsumedDeclaredPaths`` +
+  ## ``collectEvidence`` name such an action in a diagnostic so the
+  ## permanent miss that follows does not read as a caching bug.
+  result = initHashSet[string]()
+  for output in action.outputs:
+    result.incl(materialPath(action.cwd, output).replace('\\', '/'))
+
+proc evidenceInputPaths(action: BuildAction;
+                        evidence: PathSetEvidence): seq[string] =
   # Deferred-D4: side-car ``HashSet`` keeps the per-action wrap-up linear
   # in N rather than quadratic. The output ``seq`` preserves insertion
   # order — callers downstream of action-cache key construction (see
   # ``cacheInputPaths``) depend on it for stable fingerprints.
+  #
+  # S5: the observed channels are filtered against the action's own
+  # declared outputs; see ``selfWrittenOutputKeys``. Declared inputs are
+  # never filtered.
+  let selfWritten = action.selfWrittenOutputKeys()
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
     result.addUnique(seen, input)
   for input in evidence.depfileInputs:
+    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+      continue
     result.addUnique(seen, input)
   for input in evidence.monitorReads:
+    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+      continue
     result.addUnique(seen, input)
   for probe in evidence.monitorProbes:
+    if selfWritten.contains(materialPath(action.cwd, probe).replace('\\', '/')):
+      continue
     result.addUnique(seen, probe)
 
 proc nixStoreRoot(path: string): string =
@@ -2202,9 +2307,31 @@ proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
     if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
       return true
 
-proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string] =
+proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[string] =
+  ## The action-cache key's input path set: the paths whose content or
+  ## metadata a later run compares against to decide ``cdHit`` /
+  ## ``cdMiss``. Exported for the regression tests that pin the two
+  ## properties below directly (same precedent as ``EvidenceSeenSets`` /
+  ## ``foldMonitorDepFileEvidence``); the engine's three publish sites
+  ## are the only production callers.
+  ##
+  ## Two filters apply, and they are NOT the same rule:
+  ##
+  ## * the tool-root / ignored-prefix filter drops observed reads under
+  ##   the toolchain's own store roots. ``declaredMaterialized`` exempts
+  ##   anything the action DECLARED as an input from that filter — the
+  ##   declaration is the author's statement that this path is a real
+  ##   dependency, and a heuristic must not overrule it (a declared
+  ##   input that happens to live inside a ``/nix/store`` tool root, for
+  ##   instance, would otherwise be silently dropped from the key).
+  ## * S5's self-write filter drops the action's OWN declared outputs
+  ##   from the OBSERVED channels only — see ``selfWrittenOutputKeys``
+  ##   for why those are provably not inputs, and for the
+  ##   declared-input carve-out that keeps the two filters from
+  ##   colliding. Declared inputs are never dropped by either filter.
   let toolRoots = action.toolInputRoots()
   let ignoredRoots = action.ignoredInputRoots()
+  let selfWritten = action.selfWrittenOutputKeys()
   var declaredMaterialized = initHashSet[string]()
   # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
   # output ``seq`` retains insertion order because the action-cache key
@@ -2216,19 +2343,28 @@ proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string
     result.addUnique(seen, path)
   for input in evidence.depfileInputs:
     let path = materialPath(action.cwd, input)
-    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+    let key = path.replace('\\', '/')
+    if selfWritten.contains(key):
+      continue
+    if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
     let path = materialPath(action.cwd, input)
-    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+    let key = path.replace('\\', '/')
+    if selfWritten.contains(key):
+      continue
+    if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
     let path = materialPath(action.cwd, probe)
-    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+    let key = path.replace('\\', '/')
+    if selfWritten.contains(key):
+      continue
+    if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
