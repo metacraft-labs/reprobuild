@@ -42,10 +42,54 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Byte collation, everywhere. The committed baseline is in C order, but the
+# scan below sorts in the AMBIENT locale, so on an en_US.UTF-8 machine
+# `--write-baseline` reshuffles ~20 unrelated lines (`.` and `/` swap rank)
+# on top of whatever it actually changed. `comm` then also has to see both
+# streams in the same order to compare them at all.
+export LC_ALL=C
+
 # Banned APIs: ambient resolution or execution of a binary this project did not
 # provision. `getEnv` is deliberately NOT here — it is pervasive, mostly benign
 # (reading configuration), and banning it would drown the signal.
-BANNED='findExe|execCmdEx|execProcess|execShellCmd|startProcess'
+#
+# `startDirect` is on the list even though it is reprobuild's OWN typed launch
+# primitive rather than a stdlib ambient call. It hands an argv straight to the
+# process backend with no lease and, crucially, with whatever monitor wrapper
+# the caller did or did not prepend — so a file that acquires a `startDirect`
+# call is a file that acquired a way to run a build action. Every such call
+# belongs in the build engine, next to the launch-path enumeration that
+# documents it; a new one anywhere else must be argued for in review. The
+# engine module is already on the baseline, so that entry relaxes nothing and
+# adds no baseline entries.
+#
+# `launchProcess` is `startDirect`'s own callee, from the shared
+# `runquota_process` backend, and it is importable directly. A file that
+# imports it spawns exactly the way `startDirect` spawns while naming nothing
+# `startDirect` names. It adds ONE baseline entry — `repro_runquota.nim`,
+# which is where `startDirect` and the RunQuota launch wrappers are defined.
+# That entry is correct rather than a concession: that file genuinely is a
+# launch site, and until now this ratchet could not see it at all.
+#
+# `execCmd` and `execProcesses` are the reason this comment exists. They are
+# `std/osproc` exports, they start children, and NEITHER was matched by any
+# other alternative below: `execCmd(` is not `execCmdEx(` and
+# `execProcesses(` is not `execProcess(`, because every alternative is
+# anchored on the `(`. A new file that called either one was not a new
+# offender here — measured, with a working side channel that ran a build
+# action's raw argv through `execCmd` while this script exited 0. Adding them
+# costs ZERO baseline entries: all nine production files that already call
+# `execCmd` call something else on the list too, and `execProcesses` has no
+# production call site at all. Pure tightening.
+#
+# NOT added, deliberately: `commandSpec`, the argv/env builder those launch
+# primitives take. It builds no process on its own, and the name is generic
+# enough that a repo-wide grep for it would flag unrelated code as a launch
+# site. It is pinned instead where the name can be resolved to a module —
+# tests/integration/t_every_launch_path_is_monitored.nim, which scans the
+# build-engine library with comments and string literals removed.
+BANNED='findExe|execCmdEx|execCmd|execProcesses|execProcess|execShellCmd'
+BANNED="${BANNED}|startProcess|startDirect|launchProcess"
 
 # Baseline: files that already contain a banned call. Regenerate with
 #   scripts/check_ambient_execution.sh --write-baseline

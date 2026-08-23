@@ -1,8 +1,19 @@
 import std/[algorithm, json, options, os, osproc, net, nativesockets, sets, streams, strtabs,
     strutils, tables, times]
 
+# The OS is reached through a named symbol list on both platforms, never
+# wholesale. ``std/posix`` exports ``fork`` / ``execvp`` / ``posix_spawn``
+# and ``std/winlean`` exports ``createProcessW`` / ``shellExecuteW``, so a
+# blanket import puts a way to start an UNMONITORED child in scope
+# throughout this module. Every launch path here has to go through
+# ``monitoredAction`` and ``preparedRunQuotaCommand``; keeping the import
+# narrow is what makes that a property of the code rather than a
+# convention. ``tests/integration/t_every_launch_path_is_monitored.nim``
+# enforces both lists.
 when defined(windows):
-  import std/winlean
+  from std/winlean import Handle, DWORD, WINBOOL, SYNCHRONIZE,
+    MAXIMUM_WAIT_OBJECTS, WOHandleArray, openProcess, closeHandle,
+    waitForMultipleObjects
 elif defined(posix):
   from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid
 

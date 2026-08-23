@@ -46,6 +46,7 @@ libs/repro_profile_compile/src/repro_profile_compile/compile.nim
 libs/repro_project_dsl/src/repro_project_dsl/types.nim
 libs/repro_provider_runtime/src/repro_provider_runtime/runtime.nim
 libs/repro_provider_runtime/src/repro_provider_runtime/session.nim
+libs/repro_runquota/src/repro_runquota.nim
 libs/repro_standard_provider/src/repro_standard_provider/conventions/ada_direct.nim
 libs/repro_standard_provider/src/repro_standard_provider/conventions/c_cpp_autotools.nim
 libs/repro_standard_provider/src/repro_standard_provider/conventions/crystal.nim

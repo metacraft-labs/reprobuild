@@ -925,7 +925,7 @@ tests/integration/t_e2e_engine_shim_removed.nim	nim	2
 tests/integration/t_e2e_selectable_toolchain_fixture.nim	nim	5
 tests/integration/t_e2e_variant_feature_flag_drops_tls.nim	nim	5
 tests/integration/t_entrypoints.nim	nim	1
-tests/integration/t_every_launch_path_is_monitored.nim	nim	4
+tests/integration/t_every_launch_path_is_monitored.nim	nim	7
 tests/integration/t_evidence_publish_verb_and_lock_flag_on_test_sharding.nim	nim	1
 tests/integration/t_extension_type_lifted_and_consumed.nim	nim	1
 tests/integration/t_external_cli_store_contract_writes_and_reads.nim	nim	1
