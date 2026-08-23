@@ -6878,6 +6878,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim",
+    binary: "build/test-bin/t_cache_key_separates_v2_and_v3_artifacts",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_cache_refuses_to_serve_an_unsatisfiable_floor.nim",
+    binary: "build/test-bin/t_cache_refuses_to_serve_an_unsatisfiable_floor",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_cas_restore_outputs_cleans_temp_on_failure.nim",
     binary: "build/test-bin/t_cas_restore_outputs_cleans_temp_on_failure",
     defines: @[],

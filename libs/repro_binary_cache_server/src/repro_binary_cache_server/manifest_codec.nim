@@ -207,6 +207,16 @@ proc decodeCacheEntryKey(payload: openArray[byte]): CacheEntryKey =
   result.platform.os = readString(payload, pos)
   result.platform.abi = readString(payload, pos)
   result.platform.libcVariant = readString(payload, pos)
+  # PMC-4: the OPTIONAL microarchitecture field. Present iff the producer
+  # declared a floor; absent (and therefore costing nothing) for every entry
+  # published before the milestone. ``MicroarchFieldMarker`` is not a length
+  # any string can have, so this peek is a decision and not a guess — see the
+  # constant's own documentation in ``key.nim``.
+  if payload.len - pos >= 4:
+    var peek = pos
+    if readU32LE(payload, peek) == MicroarchFieldMarker:
+      pos = peek
+      result.platform.microarch = readString(payload, pos)
   result.toolchain.name = readString(payload, pos)
   result.toolchain.version = readString(payload, pos)
   result.toolchain.hostLdSoAbi = readString(payload, pos)

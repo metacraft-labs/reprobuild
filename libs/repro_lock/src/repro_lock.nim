@@ -122,10 +122,27 @@ type
     ## The field records a fact and decides no policy. It is not read by
     ## ``canonicalSolvedGraph`` (so it does not enter ``lockIdentity``), it
     ## does not filter ``packages``, and it does not affect materiality.
+    ##
+    ## ``target`` is Platform-And-Microarchitecture-Constraints PMC-4: the
+    ## microarchitecture the instance RESOLVED FOR, in
+    ## ``packages_schema.renderResolvedTarget``'s spelling. Unlike
+    ## ``selection`` it IS projected into ``lockIdentity``, and the
+    ## difference is not arbitrary — ``selection`` is a fact about which
+    ## instances the solve required, while ``target`` is a fact about WHICH
+    ## ARTIFACT the instance is. Two locks that name the same package at the
+    ## same version resolved for two different microarchitectures are two
+    ## different answers, and §6.2's rule ("anything that legitimately
+    ## distinguishes two lock files must be something the key already
+    ## captures") admits it for exactly that reason.
+    ##
+    ## Written only when non-empty and read with a default, so a lock
+    ## committed before PMC-4 round-trips byte-identically and keeps the
+    ## identity it had.
     name*: string
     version*: string
     source*: string
     selection*: SelectionStatus
+    target*: string
 
   SolvedGraphLock* = object
     ## In-memory shape of the committed lock. Round-trips through
@@ -311,7 +328,9 @@ proc canonicalSolvedGraph*(lock: SolvedGraphLock): CanonicalSolvedGraph =
   for p in lock.packages:
     result.packages.add(SolvedPackageInstance(
       name: p.name, version: p.version, sourceIdentity: p.source,
-      variants: @[]))
+      variants: @[],
+      # PMC-4: projected, unlike `selection` above. See `LockedPackage`.
+      resolvedTarget: p.target))
 
 proc canonicalSolvedGraph*(sol: UnifiedSolution;
                            platform: string): CanonicalSolvedGraph =
@@ -342,7 +361,19 @@ proc canonicalSolvedGraph*(sol: UnifiedSolution;
   for name in pnames:
     result.packages.add(SolvedPackageInstance(
       name: name, version: sol.packages[name], sourceIdentity: name,
-      variants: @[]))
+      variants: @[],
+      # PMC-4: **[MEASURED]** left empty here, deliberately. A
+      # `UnifiedSolution` is the SOLVER's answer and the solver carries no
+      # microarchitecture coordinate — the target is decided later, when
+      # `resolveBuiltinPackage` picks a `PlatformBinary` arm. Writing the
+      # reading host's own target into this field would be a fact this value
+      # does not contain, and it would make the identity of a live solution
+      # depend on where it was computed rather than on what it says. The
+      # honest value is "no floor", which is also what every instance in the
+      # tree actually resolves to today. A caller that HAS resolved arms —
+      # `repro lock refresh` — populates `LockedPackage.target`, which the
+      # lock-side overload above does project.
+      resolvedTarget: ""))
 
 proc lockIdentityOf*(lock: SolvedGraphLock): LockIdentity =
   ## §6.2's key for a loaded lock. The lock-file NAME is not a parameter and
@@ -515,7 +546,15 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
             if fields.getOrDefault("selection", "") == $ssUnselected:
               ssUnselected
             else:
-              ssSelected))
+              ssSelected,
+          # PMC-4 — an ABSENT `target` key reads as "" ("no floor"), which is
+          # what every lock written before this milestone meant and the only
+          # reading that keeps such a lock's identity where it was. It is NOT
+          # read as the reading host's target: a lock records the answer the
+          # SOLVE reached, and substituting the reader's own capability here
+          # is precisely the silent re-resolution
+          # `t_lock_from_a_v3_host_resolves_on_a_v2_host` exists to forbid.
+          target: fields.getOrDefault("target", "")))
     else: discard
   if not sawSchema or result.schema != SolvedGraphLockSchemaV2:
     # A ``…v1`` tag is named specifically: it is not a typo but a lock
@@ -780,7 +819,14 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
     result.add("{ name = \"" & tomlEscape(p.name) & "\", version = \"" &
                tomlEscape(p.version) & "\", source = \"" &
                tomlEscape(p.source) & "\", selection = \"" &
-               $p.selection & "\" }")
+               $p.selection & "\"")
+    # PMC-4: emitted ONLY when the instance resolved against a declared
+    # floor. Every lock in the tree today has none, so every one of them
+    # re-serializes byte-identically — the same discipline PMC-2 applied to
+    # `cpu_level` and PMC-3 to `cpu_features`, for the same reason.
+    if p.target.len > 0:
+      result.add(", target = \"" & tomlEscape(p.target) & "\"")
+    result.add(" }")
   result.add("]\n")
   # deps — the MO-8 unified set (coordinates + integrity per dependency).
   var sorted = ld.deps

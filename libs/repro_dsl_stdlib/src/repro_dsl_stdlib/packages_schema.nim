@@ -1277,6 +1277,195 @@ proc parseCpuFeatureSet*(tokens: string):
       return (false, {}, raw.strip())
     result.features.incl(one.feature)
 
+# ---------------------------------------------------------------------------
+# PMC-4 — the RESOLVED TARGET as one string
+#
+# Two consumers outside this library need to record "which microarchitecture
+# did this resolve for": the lock identity (``repro_lock/identity.nim``, a
+# leaf module that may import only ``std`` + ``repro_multihash``) and the
+# binary-cache key (``repro_binary_cache_server/types.nim``, which must not
+# grow a dependency on the DSL stdlib). Neither can hold a ``MicroarchLevel``
+# or a ``set[CpuFeature]``.
+#
+# So the interchange is a STRING, and this is the one place it is rendered and
+# the one place it is read back. That is deliberate: the alternative — each
+# consumer spelling the comparison itself over its own string — is precisely
+# the "second source of truth about which instructions a binary may execute"
+# that PMC-3 collapsed ``satisfiesFloor`` into ``satisfiesFeatures`` to avoid.
+# ``resolvedTargetSatisfiedBy`` below routes through ``satisfiesFeatures``
+# like every other capability question in this module, so a cache gate and an
+# arm selection cannot disagree about the same host.
+# ---------------------------------------------------------------------------
+
+const ResolvedTargetFeatureSep* = '+'
+  ## Separates the level from the extra features in a rendered target:
+  ## ``x86-64-v3+avx512vl,avx512vnni``. Chosen because no ``MicroarchLevel``
+  ## spelling and no ``CpuFeature`` spelling contains it, so the split is
+  ## unambiguous without escaping.
+
+proc renderCpuFeatureTokens*(features: set[CpuFeature]): string =
+  ## ``avx512vl,avx512vnni`` — the compact, space-free spelling for a rendered
+  ## target. ``describeCpuFeatures`` stays the DIAGNOSTIC spelling (``, ``
+  ## separated) because a sentence and a key component want different things:
+  ## the sentence wants to read well, the key component wants no whitespace to
+  ## be lost or added in transit.
+  ##
+  ## Enum order, for the same reason ``describeCpuFeatures`` uses it: this
+  ## string reaches a cache key and a lock identity, where a set literal
+  ## written in a different order must not produce a different key.
+  var parts: seq[string] = @[]
+  for f in features:
+    parts.add($f)
+  parts.join(",")
+
+proc renderResolvedTarget*(level: MicroarchLevel;
+                           features: set[CpuFeature] = {}): string =
+  ## The canonical rendering of a resolved target.
+  ##
+  ##   * ``mlNone`` + ``{}``  -> ``""``
+  ##   * ``mlX86_64_v3``      -> ``"x86-64-v3"``
+  ##   * v3 + ``{cfAvx512vl}``-> ``"x86-64-v3+avx512vl"``
+  ##   * ``mlNone`` + a set   -> ``"none+avx512vl"``
+  ##
+  ## **The default renders as the EMPTY STRING, and that is the milestone's
+  ## compatibility guarantee, not a formatting choice.** Every artifact in the
+  ## tree today declares no floor and no features (zero of the 259 checked-in
+  ## ``packages/<tool>.nim`` carry ``cpu_level`` or ``cpu_features``). Both
+  ## consumers omit an empty target entirely — the cache key emits no bytes
+  ## for it, the lock identity contributes no tree entry — so every key and
+  ## every identity that exists today is byte-identical after PMC-4. A
+  ## rendering that produced ``"none"`` for the default would have moved all
+  ## of them at once, which is a fleet-wide cache-miss event rather than a
+  ## safety fix.
+  if level == mlNone and features == {}:
+    return ""
+  if features == {}:
+    return describeMicroarchLevel(level)
+  describeMicroarchLevel(level) & ResolvedTargetFeatureSep &
+    renderCpuFeatureTokens(features)
+
+proc resolvedTargetOf*(pb: PlatformBinary): string =
+  ## The rendered target of the arm that was SELECTED — the single place a
+  ## chosen ``PlatformBinary`` becomes the string a lock entry and a cache key
+  ## record. Reads the arm's DECLARED level and features rather than their
+  ## expansion, because what the author wrote is what should be legible in a
+  ## lock; ``parseResolvedTarget`` + ``featuresForLevel`` recover the
+  ## expansion whenever the comparison needs it.
+  renderResolvedTarget(pb.cpu_level, pb.cpu_features)
+
+proc renderResolvedTarget*(target: PlatformTarget): string =
+  ## The host-side rendering. Same string space as the artifact side, read in
+  ## the opposite direction: on an artifact the value is a FLOOR, on a host it
+  ## is a CEILING. One vocabulary, because the comparison between them is a
+  ## single subset test and two vocabularies would need a translation that
+  ## could drift.
+  renderResolvedTarget(target.level, target.features)
+
+proc parseResolvedTarget*(rendered: string):
+    tuple[ok: bool; level: MicroarchLevel; features: set[CpuFeature];
+          badToken: string] =
+  ## Inverse of ``renderResolvedTarget``. ``""`` parses to
+  ## ``(mlNone, {})`` — "declared nothing", a legitimate statement and the
+  ## state of every artifact in the tree today.
+  ##
+  ## Fails on the first unreadable token and NAMES it, exactly as
+  ## ``parseCpuFeatureSet`` and ``REPRO_HOST_MICROARCH_LEVEL`` do. The
+  ## consequence of a lenient parse here is the sharpest in the campaign: a
+  ## target that silently degraded to ``mlNone`` would read as "no floor",
+  ## which is satisfied everywhere, so an unreadable requirement would become
+  ## a binary that runs on hosts that cannot execute it. Every caller must
+  ## treat ``ok == false`` as a REFUSAL and none may fall back to the default.
+  let trimmed = rendered.strip()
+  if trimmed.len == 0:
+    return (true, mlNone, {}, "")
+  let sep = trimmed.find(ResolvedTargetFeatureSep)
+  let levelToken = (if sep < 0: trimmed else: trimmed[0 ..< sep]).strip()
+  let featureTokens = (if sep < 0: "" else: trimmed[sep + 1 .. ^1])
+  let lvl = parseMicroarchLevelToken(levelToken)
+  if not lvl.ok:
+    return (false, mlNone, {}, levelToken)
+  let feats = parseCpuFeatureSet(featureTokens)
+  if not feats.ok:
+    return (false, mlNone, {}, feats.badToken)
+  (true, lvl.level, feats.features, "")
+
+proc requiredFeaturesOfTarget*(rendered: string): set[CpuFeature] =
+  ## The EXPANDED requirement a rendered target denotes: its level's feature
+  ## set union its explicit extras. Raises ``ValueError`` on an unreadable
+  ## target rather than answering ``{}`` — see ``parseResolvedTarget``.
+  let p = parseResolvedTarget(rendered)
+  if not p.ok:
+    raise newException(ValueError,
+      "'" & rendered & "' is not a resolved target: unreadable token '" &
+      p.badToken & "'")
+  featuresForLevel(p.level) + p.features
+
+proc resolvedTargetSatisfiedBy*(rendered: string; host: PlatformTarget):
+    tuple[ok: bool; missing: set[CpuFeature]; badToken: string] =
+  ## Can a host PROVIDING ``host`` run an artifact whose floor is
+  ## ``rendered``?
+  ##
+  ## One subset test, through ``satisfiesFeatures``, so this answers exactly
+  ## what ``selectPlatformBinaryEx`` answers for the same pair. That identity
+  ## is the point: a binary-cache gate that disagreed with arm selection would
+  ## either refuse artifacts the resolver had just chosen or serve ones it had
+  ## just refused, and only one of those two failures is loud.
+  ##
+  ## An UNREADABLE target answers ``ok = false`` with the offending token and
+  ## an empty ``missing`` set — refused, not defaulted. ``missing == {}`` with
+  ## ``ok == false`` is therefore the caller's signal that the shortfall is a
+  ## vocabulary problem rather than a capability one, and the two want
+  ## different diagnostics.
+  let p = parseResolvedTarget(rendered)
+  if not p.ok:
+    return (false, {}, p.badToken)
+  let required = featuresForLevel(p.level) + p.features
+  let provided = providedFeatures(host)
+  (satisfiesFeatures(provided, required), missingFeatures(provided, required),
+   "")
+
+proc describeResolvedTargetShortfall*(rendered: string;
+                                      host: PlatformTarget): string =
+  ## Why ``host`` cannot run an artifact built for ``rendered``; ``""`` when
+  ## it can.
+  ##
+  ## Same two-part shape as ``describeCapabilityShortfall``, and for the same
+  ## reasons: the level sentence is the actionable one and uses the vocabulary
+  ## this org's CI runner labels already carry, the feature list is what
+  ## carries a requirement no level names. The level half is SUPPRESSED when
+  ## the level is satisfied and only features are missing — otherwise an
+  ## artifact needing ``x86-64-v3 + avx512vnni`` refused on a v4 host would
+  ## report "needs x86-64-v3, host provides x86-64-v4", which contradicts the
+  ## refusal it is explaining.
+  ##
+  ## The word "microarchitecture" appears in every branch on purpose: this
+  ## string is read next to "CPU mismatch", "OS mismatch" and "ABI mismatch"
+  ## in the same gate, and a reader who cannot tell which axis refused them
+  ## goes looking for a build that does not exist for their OS.
+  let verdict = resolvedTargetSatisfiedBy(rendered, host)
+  if verdict.ok:
+    return ""
+  if verdict.badToken.len > 0:
+    return "unreadable microarchitecture target '" & rendered &
+      "': '" & verdict.badToken & "' names no microarchitecture level or " &
+      "CPU feature this build understands"
+  let p = parseResolvedTarget(rendered)
+  let provides =
+    if host.level == mlNone: "no declared microarchitecture level"
+    else: describeMicroarchLevel(host.level)
+  let level =
+    if satisfiesFloor(host.level, p.level): ""
+    else: "needs " & describeMicroarchLevel(p.level) &
+      ", host provides " & provides
+  let features =
+    if verdict.missing == {}: ""
+    else: "missing cpu features: " & describeCpuFeatures(verdict.missing)
+  let body =
+    if level.len == 0: features
+    elif features.len == 0: level
+    else: level & " (" & features & ")"
+  "microarchitecture shortfall: " & body
+
 proc parsePlatformOsToken*(token: string):
     tuple[ok: bool; os: PlatformOs] =
   ## Map a ``platforms:`` OS token onto ``PlatformOs``. Empty or ``any``

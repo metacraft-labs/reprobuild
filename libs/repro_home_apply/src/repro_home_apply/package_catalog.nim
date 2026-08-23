@@ -166,6 +166,33 @@ type
                                      ## what a lock entry should record, and
                                      ## the expansion is recoverable from it
                                      ## via ``requiredFeatures``.
+    resolvedTarget*: string
+                                     ## PMC-4: ``builtinCpuLevel`` and
+                                     ## ``builtinCpuFeatures`` rendered as
+                                     ## ONE string by
+                                     ## ``renderResolvedTarget`` — the exact
+                                     ## value that goes into a lock entry
+                                     ## (``LockedPackage.target``) and into a
+                                     ## binary-cache key
+                                     ## (``PlatformTriple.microarch``).
+                                     ##
+                                     ## A derived field rather than a fourth
+                                     ## source of truth: it is a pure
+                                     ## function of the two above, computed
+                                     ## HERE so that the lock writer and the
+                                     ## cache-key deriver cannot each invent
+                                     ## their own spelling of the same
+                                     ## resolution. Two spellings would
+                                     ## separate entries that are in fact
+                                     ## interchangeable, which is a silent
+                                     ## cache miss — quieter than the SIGILL
+                                     ## this milestone prevents, and just as
+                                     ## hard to attribute.
+                                     ##
+                                     ## ``""`` for every catalog entry today,
+                                     ## which is what makes the whole change
+                                     ## byte-neutral for existing keys and
+                                     ## identities.
     urlUsed*: string                 ## PlatformBinary.url chosen for host
     digestAlgorithm*: string         ## "sha256" | "sha512"
     digestValue*: string             ## hex digest (lowercase)
@@ -1159,6 +1186,26 @@ type
       ## shortfall ("needs x86-64-v3, host provides x86-64-v2").
     breSchemaInvalid = "schema-invalid"
       ## The selected slice failed `validateVersionedProvisioning`.
+    breLockedTargetNotSatisfied = "locked-target-not-satisfied"
+      ## PMC-4: the caller supplied a `lockedTarget` — the microarchitecture
+      ## a LOCK FILE says this package resolved for — and this host cannot
+      ## run it.
+      ##
+      ## Distinct from `breMicroarchFloorNotSatisfied`, and the distinction
+      ## is the whole of `t_lock_from_a_v3_host_resolves_on_a_v2_host`. That
+      ## error means "the catalog offers nothing this host can run"; this one
+      ## means "the catalog might well offer something, but the lock already
+      ## named a different answer and re-resolving would silently substitute
+      ## it". A lock that quietly re-resolves is worse than one that fails:
+      ## the build succeeds, the artifact is not the pinned one, and nothing
+      ## anywhere says so. The remediations differ too — get a host that
+      ## satisfies the lock, or refresh the lock on this host and commit the
+      ## new pin — so collapsing the two would send the reader to the wrong
+      ## one.
+      ##
+      ## Appended at the END of the enum on purpose: nothing serializes
+      ## `BuiltinResolveError` by ordinal today, and keeping the existing
+      ## members' ordinals fixed means nothing can start to.
 
   BuiltinResolveResult* = object
     found*: bool
