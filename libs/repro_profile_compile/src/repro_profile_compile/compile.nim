@@ -209,7 +209,24 @@ proc rbpiBytesFromJson*(jsonText: string): seq[byte] =
   ## Parse the JSON ProfileIntent emitted by the compiled profile and
   ## re-encode it through the Phase B RBPI envelope. The JSON ->
   ## ProfileIntent -> RBPI round-trip is lossless.
+  ##
+  ## A profile binary that ran to exit 0 and printed NOTHING gets its own
+  ## diagnostic rather than the JSON parser's. `parseJson("")` reports
+  ## `input(1, 0) Error: { expected`, which names a position in a document
+  ## that does not exist and sends the reader looking for a syntax error in
+  ## their profile. The real cause is upstream and structural — the module
+  ## never reached the `ProfileIntent` emitter (an empty or comment-only
+  ## profile, a `main` that returns early, output swallowed by a redirect) —
+  ## so say that instead. NOT silently encoded as an empty intent: an
+  ## emitter that never ran is a broken profile, and inventing a
+  ## zero-resource intent for it would apply "converge to nothing" to a host
+  ## and report success.
   let trimmed = jsonText.strip()
+  if trimmed.len == 0:
+    raise newException(ValueError,
+      "the compiled profile exited 0 but printed no ProfileIntent JSON on " &
+      "stdout. The profile module never reached the intent emitter — an " &
+      "empty or comment-only profile does exactly this.")
   let p = parseProfileIntentJson(trimmed)
   encodeRbpi(p)
 
