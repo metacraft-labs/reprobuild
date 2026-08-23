@@ -1853,6 +1853,17 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
+proc isVolatileMonitorPath(path: string): bool =
+  ## Runtime pseudo-filesystems describe the monitored process or host at one
+  ## instant. They cannot be reopened reliably when the action is fingerprinted
+  ## and must never become cache inputs. Keep this aligned with
+  ## repro_local_store.isVolatileDevicePath.
+  let normalized = path.replace('\\', '/')
+  normalized == "/dev" or normalized.startsWith("/dev/") or
+    normalized == "/proc" or normalized.startsWith("/proc/") or
+    normalized == "/sys" or normalized.startsWith("/sys/") or
+    normalized == "/run" or normalized.startsWith("/run/")
+
 proc parseCreateActionRecord(payload, path: string; lineNo: int;
                              governingLockIdentity: LockIdentity): BuildAction =
   ## Decode an M25 ``create-action`` JSON payload into a BuildAction. The
@@ -2213,6 +2224,9 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
       result = worseMonitorStatus(result, mesUnknownScopeLoss)
 
     let materialized = materialPath(cwd, record.path)
+    if materialized.isVolatileMonitorPath():
+      framePos = payloadPos + length
+      continue
     case record.kind
     of mrFileRead:
       evidence.monitorReads.addUnique(seen.monitorReads, materialized)

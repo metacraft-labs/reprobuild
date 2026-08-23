@@ -172,3 +172,30 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     var seen: EvidenceSeenSets
     let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
     check status == mesComplete
+
+  test "volatile runtime paths never become observed cache inputs":
+    resetTmp()
+    let rmdfPath = TmpDir / "volatile-runtime-paths.rdep"
+    let stablePath = TmpDir / "stable-input.txt"
+    let records = @[
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: stablePath),
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: "/proc/self/fd/4"),
+      MonitorRecord(kind: mrFileOpen, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: "/sys/devices/system/cpu/online"),
+      MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
+        osPid: 1, threadId: 1, path: "/dev/null"),
+      MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
+        osPid: 1, threadId: 1, path: "/run/user/1000/socket"),
+    ]
+    writeFile(rmdfPath, cast[string](encodeCanonical(records)))
+
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
+
+    check status == mesComplete
+    check evidence.monitorReads == @[stablePath]
+    check evidence.monitorWrites.len == 0
+    check evidence.monitorProbes.len == 0
