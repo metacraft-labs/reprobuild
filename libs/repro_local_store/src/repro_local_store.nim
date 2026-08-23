@@ -887,6 +887,216 @@ proc directoryMetadataDigest(root: string; entriesWalked: var int64): uint64 =
   entriesWalked = int64(entries)
   result = result xor (entries * 0x9E3779B97F4A7C15'u64)
 
+const
+  DirectoryMembershipUnlistable* = 0xFFFFFFFFFFFFFFFF'u64
+    ## Recorded in place of a membership digest when the directory exists
+    ## but could not be enumerated. Distinct from 0 ("not tracked") and from
+    ## every real listing, so "was empty, now unreadable" and "was
+    ## unreadable, now listable" both compare unequal and re-execute.
+  DirectoryMembershipDigestCollisionEscape = 0xD1B54A32D192ED03'u64
+    ## Substituted when a real listing happens to hash to one of the two
+    ## reserved values.
+
+proc directoryMembershipDigest*(root: string; entriesWalked: var int64): uint64 =
+  ## Order-independent digest over the IMMEDIATE children of `root` -- their
+  ## names and kinds, one `readdir` sweep, no per-entry `lstat`.
+  ##
+  ## Deliberately SHALLOW, and deliberately not `directoryMetadataDigest`.
+  ## The question a recorded directory ENUMERATION has to answer is the one
+  ## in Incremental-Invalidation.md §"Validation Criteria" -- "adding or
+  ## removing a file in an enumerated directory invalidates the action" --
+  ## and that is a statement about the entries the action's `readdir`
+  ## returned. It is not a statement about the contents of those entries: a
+  ## file the action went on to READ is recorded as its own input with its
+  ## own fingerprint, and a subdirectory the action went on to enumerate is
+  ## recorded as its own enumeration. Recursing here would re-derive that
+  ## information at a cost proportional to the whole subtree.
+  ##
+  ## The cost difference is not academic. Measured on this repository, the
+  ## directories a real test edge enumerates that still exist at record time
+  ## are ~50, and are almost entirely `/nix/store/<pkg>/lib/` -- small and
+  ## immutable. But an edge's recorded PROBES include `/home/<user>/<work>`
+  ## and the repo root, and a recursive digest of those would walk the whole
+  ## multi-repo workspace on every warm consultation. Shallow keeps the
+  ## sweep proportional to what was actually read.
+  ##
+  ## Same accumulator rationale as `directoryMetadataDigest`: a commutative
+  ## sum, so no sort of path strings, and no dependence on `walkDir`'s
+  ## filesystem-defined order. LOCAL INVALIDATION evidence only -- fast and
+  ## reliable against honest workloads, never collision-resistant against an
+  ## adversary, never crossing a machine boundary.
+  ## `checkDir = true` is load-bearing. At Nim's default of `false` an
+  ## `opendir` failure yields ZERO entries and raises NOTHING, so an
+  ## unlistable directory produced a digest bit-identical to an empty one
+  ## (measured: both 15111065706836454659, entries=0). That fails OPEN in
+  ## two ways -- a directory recorded while empty and later unlistable but
+  ## non-empty is a false hit, and a record written under a transient
+  ## EMFILE claims the directory is empty forever. The OUTPUT side already
+  ## fails closed for the analogous case (see the `hasTreeDigest` branch in
+  ## `outputStateMismatchImpl`); this now does too, by raising here and
+  ## letting `fingerprintDirectoryMembership` substitute
+  ## `DirectoryMembershipUnlistable`.
+  var entries = 0'u64
+  var scratch = newSeq[byte](0)
+  for kind, path in walkDir(extendedPath(root), relative = true,
+      checkDir = true):
+    inc entries
+    scratch.setLen(0)
+    for c in path:
+      scratch.add(byte(c))
+    scratch.writeU64Le(uint64(ord(kind)))
+    result = result + localHash(scratch).value
+  entriesWalked = int64(entries)
+  # Fold the count in so an empty directory and a missing one differ, and so
+  # a pair of entries cannot cancel out.
+  result = result xor (entries * 0x9E3779B97F4A7C15'u64)
+  # Two values are reserved and must never be produced by a real listing: 0
+  # means "not membership-tracked" (`membershipTrackedDirectory`), and
+  # `DirectoryMembershipUnlistable` means "could not be listed".
+  if result == 0'u64 or result == DirectoryMembershipUnlistable:
+    result = DirectoryMembershipDigestCollisionEscape
+
+proc membershipTrackedDirectory*(metadata: FileMetadata): bool {.inline.} =
+  ## Is this recorded input a directory whose MEMBERSHIP was fingerprinted?
+  ##
+  ## Self-describing, and that is the point: `fingerprintMetadata` forces
+  ## `mtimeNs` to 0 for every `ffkDirectory`, so a non-zero `mtimeNs` on a
+  ## directory cannot arise any other way and needs no new record field. The
+  ## record format is unchanged -- Incremental-Invalidation.md §"Storage
+  ## Format" is explicit that adding evidence must not change the schema,
+  ## because a cache root is shared between whatever `repro` binaries a user
+  ## has installed.
+  ##
+  ## CROSS-BINARY BEHAVIOUR IS NOT SYMMETRIC, and the asymmetric direction
+  ## is a false hit. Do not restate this as "a miss in both directions"; it
+  ## was written that way once and it was wrong.
+  ##
+  ## * OLD reader, NEW record: the reader recomputes 0 for a directory this
+  ##   writer recorded with a digest, sees a mismatch, and re-executes. A
+  ##   miss. Self-correcting.
+  ## * NEW reader, OLD record (or any record written before this change):
+  ##   the recorded `mtimeNs` is 0, so `membershipTrackedDirectory` is
+  ##   FALSE, so the directory is never re-listed and the comparison is
+  ##   existence-only -- exactly the pre-fix behaviour. And because the hit
+  ##   path does not re-record, the record is never upgraded. A directory
+  ##   enumerated by an edge whose record predates this change is therefore
+  ##   a PERMANENT false hit for that record. Measured.
+  ##
+  ## The remedy is to discard records written before this change: delete the
+  ## action-cache root, or let retention evict them. Every record written
+  ## from here on carries membership from its first execution.
+  ##
+  ## WHY NOT FORCE THE UPGRADE, given that `outputStateMismatchImpl` sets
+  ## exactly that precedent for directory OUTPUTS ("directory output has no
+  ## recorded tree digest" -> fail closed -> re-execute once)? Two reasons,
+  ## both checked rather than assumed:
+  ##
+  ## 1. On the output side the record names its declared outputs, so "a
+  ##    directory output with no witness" is unambiguous. On the INPUT side
+  ##    a directory with no membership digest is indistinguishable from a
+  ##    directory that was correctly only PROBED -- and probe-only
+  ##    directories are the common case, measured at 4 of 5 directory inputs
+  ##    on a small edge and 285-of-338-tracked-plus-hundreds-probed on a
+  ##    real one. Failing closed on them would make every monitored edge a
+  ##    permanent miss, which is the whole regression this work exists to
+  ##    remove.
+  ## 2. The other way to discriminate is the record version, and that door
+  ##    is already closed with reasons: see the comment on
+  ##    `ActionRecordVersion` above. A v4 frame makes `loadPerEdgeRecords`
+  ##    return ZERO records for any older `repro` sharing the per-user cache
+  ##    root, and makes the public `decodeActionResultRecord` raise. That
+  ##    was judged not worth an 8-byte field; it is not worth this either.
+  ##
+  ## Closing it properly needs a discriminator that identifies the WRITER
+  ## rather than the per-input evidence, in a shape older readers ignore --
+  ## the sidecar route Incremental-Invalidation.md §"Storage Format"
+  ## prescribes for exactly this. That is follow-up work, not a comment.
+  metadata.kind == ffkDirectory and metadata.mtimeNs != 0'u64
+
+proc isImmutablePackageStoreRoot*(path: string): bool =
+  ## Is this the ROOT of a content-addressed package store?
+  ##
+  ## THIS IS A DELIBERATE HOLE, NOT A PROOF THAT THERE IS NO HOLE. Read the
+  ## whole comment before touching it; an earlier version of it claimed the
+  ## exemption was correctness-neutral and that claim is false.
+  ##
+  ## COST -- the reason the exemption exists, and it is decisive.
+  ## `/nix/store` here holds 376,169 immediate children. One sweep costs
+  ## 1.14-1.16 s, which by itself exceeds the entire 0.82 s fast-noop scan
+  ## over all 338 membership-tracked directories of a real edge. Worse, its
+  ## membership changes whenever anything on the machine builds or
+  ## garbage-collects, so it churns essentially every run. Measured with the
+  ## root tracked: two consecutive warm passes of an edge that had listed it
+  ## took 463 s and 543 s where the steady state is ~5 s. Tracking it does
+  ## not slow the warm path down, it abolishes it.
+  ##
+  ## WHAT IT COSTS IN CORRECTNESS, stated plainly because it is real. An
+  ## edge whose behaviour depends on the store's MEMBERSHIP -- `ls
+  ## /nix/store | wc -l`, or any scan for a package by name -- is silently
+  ## reused when that membership changes. Demonstrated: an edge counting
+  ## store entries records `/nix/store` with `tracked = false` and is reused
+  ## across a change in the count. Code in this repository has that shape:
+  ## `repro_interface_artifacts.nim` walks the store for `nixPrefix` /
+  ## `nixLibDir` (~:3616-3690), and `autotools_package.nim:388` /
+  ## `cmake_package.nim:36` do the same. Those recipes are OUT OF SCOPE of
+  ## the enumerated-directory guarantee until there is a cheaper mechanism
+  ## -- a store generation marker (one stat of a counter the package manager
+  ## bumps) rather than a 376k-entry readdir. Do not describe this as safe.
+  ##
+  ## The individual package directories INSIDE the store stay tracked: 53 of
+  ## the 338 on the measured edge. They are small, and being store paths
+  ## they are immutable, so they cost one cheap readdir each and never
+  ## churn.
+  ## NOT configurable from the environment, and that was a real hole rather
+  ## than a hypothetical one. This runs in the ENGINE process at fingerprint
+  ## time, so honouring `NIX_STORE_DIR` let any ambient value nominate a
+  ## directory as exempt: measured, `NIX_STORE_DIR` pointed at a directory
+  ## the edge enumerated stopped a newly added file from re-running it, and
+  ## CLEARING the variable did not recover, because the record had been
+  ## written with `mtimeNs = 0` and a 0 is never re-listed. A transient env
+  ## var permanently poisoned the record. If the store location ever needs
+  ## to vary it must arrive through something the engine controls -- a
+  ## config field on `BuildEngineConfig`, threaded to this call -- never
+  ## through `getEnv` here.
+  ##
+  ## The match is normalized-string equality on a trailing-slash-stripped
+  ## path. `//nix/store`, `/nix/./store`, `/NIX/STORE` and symlink aliases
+  ## are therefore NOT exempt. That is a performance cliff, not a
+  ## correctness one -- an unexempted store root is membership-tracked,
+  ## which is the conservative direction -- but it is worth knowing that the
+  ## monitor demonstrably emits both `/nix/store` and `/nix/store/` as
+  ## separate inputs, so both spellings are handled by the strip.
+  let normalized = path.replace('\\', '/').strip(leading = false,
+    trailing = true, chars = {'/'})
+  if normalized.len == 0:
+    return false
+  normalized == "/nix/store"
+
+proc fingerprintDirectoryMembership*(path: string): FileMetadata =
+  ## `fingerprintMetadata` plus the membership digest, for a path the action
+  ## ENUMERATED. Returns the plain existence fingerprint when the path is no
+  ## longer a directory -- an action that created, listed and then deleted a
+  ## scratch directory records it as `ffkMissing` and keeps comparing as
+  ## "still missing", which is what stops per-run temporary directories from
+  ## making every such edge a permanent miss.
+  result = fingerprintMetadata(path)
+  if result.kind != ffkDirectory:
+    return
+  if path.isImmutablePackageStoreRoot():
+    return
+  try:
+    var walked = 0'i64
+    result.mtimeNs = directoryMembershipDigest(path, walked)
+  except OSError, IOError:
+    # The directory exists but could not be listed. Leaving `mtimeNs` at 0
+    # would mean "not membership-tracked", i.e. existence-only, i.e. a false
+    # hit the moment it becomes listable again with different contents.
+    # Record the fact instead, so a later successful listing compares
+    # unequal and re-executes -- Incremental-Invalidation.md §"Rebuild
+    # Decision Model": "If any required condition cannot be checked,
+    # Reprobuild MUST fail closed."
+    result.mtimeNs = DirectoryMembershipUnlistable
+
 proc observeOutputWitness(path: string; metadata: FileMetadata): OutputWitness =
   ## One `lstat(2)` for the scalar fields, plus a recursive walk only when
   ## the output is a directory.
@@ -952,6 +1162,21 @@ proc fingerprintMetadata(path: string;
 
 proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
                                  cache: ptr FileMetadataCache): FileMetadata =
+  # A membership-tracked directory has to be re-listed, not just stat'd, and
+  # it must not be served from (or stored into) the plain metadata cache:
+  # that cache is keyed on path alone and is shared with call sites that
+  # want the existence-only answer for the same directory.
+  if recorded.membershipTrackedDirectory():
+    if not cache.isNil:
+      inc cache[].stats.warmEntries
+      inc cache[].stats.warmRevalidated
+    result = fingerprintDirectoryMembership(path)
+    if not cache.isNil:
+      if result == recorded:
+        inc cache[].stats.warmUnchanged
+      else:
+        inc cache[].stats.warmChanged
+    return
   if cache.isNil:
     return fingerprintMetadata(path)
   if cache[].entries.hasKey(path):
@@ -995,6 +1220,13 @@ proc observeFile*(path: string; policy: FileFingerprintPolicy): FileFingerprint 
 proc observeFile*(path: string; policy: FileFingerprintPolicy;
                   cache: ptr FileMetadataCache): FileFingerprint =
   observeFileWithMetadata(path, policy, fingerprintMetadata(path, cache))
+
+proc observeEnumeratedDirectory*(path: string;
+                                 policy: FileFingerprintPolicy): FileFingerprint =
+  ## Record a directory the action ENUMERATED, carrying its membership.
+  ## Bypasses the metadata cache deliberately: that cache holds the
+  ## existence-only answer for the same path.
+  observeFileWithMetadata(path, policy, fingerprintDirectoryMembership(path))
 
 proc isVolatileDevicePath(path: string): bool =
   let normalized = path.replace('\\', '/')
@@ -2569,12 +2801,20 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
                          inputPaths, outputPaths: openArray[string];
                          outputRoot = "";
                          storeOutputBlobs = true;
-                         metadataCache: ptr FileMetadataCache = nil):
+                         metadataCache: ptr FileMetadataCache = nil;
+                         enumeratedDirectories: openArray[string] = []):
                          ActionResultRecord =
   result.weakFingerprint = weak
   result.policy = policy
+  var enumerated = initHashSet[string]()
+  for path in enumeratedDirectories:
+    enumerated.incl(path.replace('\\', '/'))
   for path in inputPaths:
-    let input = observeFile(path, policy, metadataCache)
+    let input =
+      if enumerated.contains(path.replace('\\', '/')):
+        observeEnumeratedDirectory(path, policy)
+      else:
+        observeFile(path, policy, metadataCache)
     if input.isRecordableInput():
       result.inputs.add(input)
   result.strongFingerprint = computeStrongFingerprint(weak, result.inputs)
@@ -2620,12 +2860,20 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
                          inputPaths, outputPaths: openArray[string];
                          outputRoot = "";
                          storeOutputBlobs = true;
-                         metadataCache: ptr FileMetadataCache = nil):
+                         metadataCache: ptr FileMetadataCache = nil;
+                         enumeratedDirectories: openArray[string] = []):
                          ActionResultRecord =
   result.weakFingerprint = weak
   result.policy = policy
+  var enumerated = initHashSet[string]()
+  for path in enumeratedDirectories:
+    enumerated.incl(path.replace('\\', '/'))
   for path in inputPaths:
-    let input = observeFile(path, policy, metadataCache)
+    let input =
+      if enumerated.contains(path.replace('\\', '/')):
+        observeEnumeratedDirectory(path, policy)
+      else:
+        observeFile(path, policy, metadataCache)
     if input.isRecordableInput():
       result.inputs.add(input)
   result.strongFingerprint = computeStrongFingerprint(weak, result.inputs)
@@ -2672,6 +2920,18 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
   for i, recorded in record.inputs:
     let currentMetadata = fingerprintRecordedMetadata(recorded.path,
       recorded.metadata, metadataCache)
+    if recorded.metadata.membershipTrackedDirectory() and
+        currentMetadata != recorded.metadata:
+      # An enumerated directory whose membership moved. This returns BEFORE
+      # the policy switch on purpose: `fileBytesForHash` is empty for a
+      # directory, so both the `ffpChecksum` comparison and the `ffpHybrid`
+      # cutoff would find the content hashes equal and call it unchanged --
+      # turning the one signal that exists for a directory back into
+      # nothing. Incremental-Invalidation.md §"Validation Criteria" requires
+      # this to invalidate.
+      changed = true
+      changedInputPath = recorded.path
+      return
     case recorded.policy
     of ffpTimestamp:
       if currentMetadata != recorded.metadata:

@@ -57,6 +57,7 @@ libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph
 libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim	nim	6
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim	nim	6
+libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
 libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	9
 libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	1
 libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim	nim	2
@@ -982,7 +983,7 @@ tests/integration/t_integrity_mismatch_surfaces_per_tier.nim	nim	1
 tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim	nim	1
 tests/integration/t_is_published_accepts_any_remote_name.nim	nim	1
 tests/integration/t_just_test_end_to_end_via_parallel_runner.nim	nim	1
-tests/integration/t_just_test_hot_cache_is_no_op_build.nim	nim	1
+tests/integration/t_just_test_hot_cache_is_no_op_build.nim	nim	2
 tests/integration/t_just_test_via_ct_test_runner.nim	nim	1
 tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	nim	1
 tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	nim	1
@@ -1038,6 +1039,7 @@ tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim	nim	1
 tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim	nim	1
 tests/integration/t_monitor_depfile_reader.nim	nim	2
 tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim	nim	3
+tests/integration/t_monitored_zero_output_edge_input_completeness.nim	nim	5
 tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim	nim	2
 tests/integration/t_nested_lock_push_capability_security.nim	nim	10
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
