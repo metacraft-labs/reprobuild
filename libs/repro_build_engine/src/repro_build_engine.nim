@@ -2311,6 +2311,37 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
     case record.kind
     of mrFileRead:
       evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+    of mrLibraryLoad:
+      # A library the dynamic loader MAPPED into the action. This is a
+      # content dependency and nothing else: change the file, change what
+      # the action computes.
+      #
+      # It needs its own arm because it cannot arrive as an `mrFileRead`.
+      # `ld.so` resolves `DT_NEEDED` entries with its own internal open,
+      # before the preloaded shim's hooks exist, so a dependent DSO
+      # passes through no interposed `open` at all — io-mon emits it from
+      # the loaded-object enumeration instead, and the `else: discard`
+      # below swallowed every one. Measured on `env true`, a process that
+      # touches no file of its own: 18 `mrLibraryLoad` records naming 16
+      # DSOs, `mesComplete`, and `monitorReads: 0`.
+      #
+      # io-mon sets `observationKind = moFileRead` on these deliberately
+      # so every consumer keying on the observation kind treats them as
+      # content reads (io-mon `types.nim:36`); folding them into
+      # `monitorReads` is that contract's consumer half.
+      #
+      # UNCONDITIONALLY, with no allowlist for immutable package stores.
+      # Sandbox-And-Monitoring.md §"Open Design Questions" left "how much
+      # library-load information is required for correctness" open; the
+      # answer taken here is "all of it", because an allowlist is exactly
+      # what kept this invisible — on NixOS every loaded DSO is a store
+      # path, so exempting store paths would leave the fix asserting
+      # nothing while a host with a mutable `/usr/lib` still served stale
+      # results. Cost: one `lstat` per loaded DSO on the warm path.
+      # `cacheInputPaths` still drops the ones under the action's own
+      # tool roots, and `isVolatileMonitorPath` above still drops
+      # `/run`-resident driver libraries.
+      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
     of mrFileOpen:
       case record.observationKind
       of moFileRead, moFileOpen:

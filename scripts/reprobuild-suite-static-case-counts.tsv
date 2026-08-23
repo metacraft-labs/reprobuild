@@ -992,6 +992,7 @@ tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	
 tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	nim	1
 tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim	nim	1
 tests/integration/t_levelless_catalog_selection_is_unchanged.nim	nim	1
+tests/integration/t_library_load_evidence_is_recorded.nim	nim	1
 tests/integration/t_linked_worktree_pre_push_repository_env.nim	nim	7
 tests/integration/t_local_daemons_control_plane_m0.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m1.nim	nim	3

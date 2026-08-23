@@ -7886,6 +7886,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_library_load_evidence_is_recorded.nim",
+    binary: "build/test-bin/t_library_load_evidence_is_recorded",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_linked_worktree_pre_push_repository_env.nim",
     binary: "build/test-bin/t_linked_worktree_pre_push_repository_env",
     defines: @[],
