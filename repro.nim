@@ -702,7 +702,20 @@ package reprobuild:
     # entirely; B3 + B4 land both paths in parallel.
     var reprobuildTestBuildActions: seq[BuildActionDef] = @[]
     var reprobuildTestExecuteActions: seq[BuildActionDef] = @[]
-    const reproBinaryPath = "build/bin/repro"
+    # The path must be spelled EXACTLY as the producing edge declares its
+    # output, because that is how the dependency is inferred:
+    # ``inferDeclaredActionDeps`` indexes actions by declared output path and
+    # matches an action's declared INPUTS against that index by normalized
+    # string equality. Since ``nim.c`` began appending ``.exe`` on Windows,
+    # ``reprobuild.apps.repro`` declares ``build/bin/repro.exe`` — so a
+    # ``build/bin/repro`` input matched nothing and the e2e execute edges
+    # silently lost both halves of the contract the ``requiredBinaries`` slot
+    # exists for: ordering after the CLI build, and re-running when the CLI
+    # changes. No error is produced when the lookup misses; the edge simply
+    # has one fewer dep.
+    const reproBinaryPath =
+      when defined(windows): "build/bin/repro.exe"
+      else: "build/bin/repro"
 
     proc reproTestExecuteId(binary: string): string =
       ## Compute the per-test EXECUTE-edge action id from the build
@@ -1076,7 +1089,13 @@ package reprobuild:
       binary = "build/bin/repro",
       defines = @["release", "reproVendoredHash", "ssl"],
       paths = ioMonNimPaths & sourceOnlyNimPaths,
-      passL = reproRuntimePassL,
+      # ``-d:ssl`` makes ``nim.c`` append ``-lssl -lcrypto``; without the
+      # matching ``-L`` this link dies on ``ld.exe: cannot find -lssl``.
+      # ``windowsOpensslPassL`` is what supplies it, and it has to reach
+      # EVERY ssl edge -- it originally reached only the two ``test-helpers``
+      # ones, so ``.#apps`` (the collection that builds ``repro`` itself)
+      # could not link on Windows at all.
+      passL = reproRuntimePassL & opensslPassL,
       nimcache = "build/nimcache/repro",
       # The public launcher sits on the prompt-time dev-env no-op path.
       # Build it with the vendored portable hash backend so each no-op spawn
@@ -1205,6 +1224,7 @@ package reprobuild:
       binary = "build/bin/repro-binary-cache",
       defines = @["release", "ssl"],
       paths = sourceOnlyNimPaths,
+      passL = opensslPassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
       actionId = "reprobuild.apps.repro-binary-cache"))
@@ -1226,6 +1246,7 @@ package reprobuild:
       binary = "build/bin/repro-harvest-apt",
       defines = @["release", "ssl"],
       paths = @["apps/repro-harvest-apt/src"] & sourceOnlyNimPaths,
+      passL = opensslPassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-harvest-apt",
       actionId = "reprobuild.apps.repro-harvest-apt"))
