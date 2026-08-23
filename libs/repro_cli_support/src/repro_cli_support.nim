@@ -33286,8 +33286,25 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # refusal — and every other repo's write squats on its own future key).
   # `partitionRoot` is empty when no partition was written, so the per-repo
   # fan-out is unchanged there.
+  #
+  # ...and the same exclusion holds when this operation deliberately wrote NO
+  # trigger-keyed document because the trigger belongs to no partition (the
+  # membership repo). "No document was added" is not "these repos are not
+  # covered": the manifest backend still owns them, and each already has — or
+  # will publish — its own trigger-keyed partition at its own commit. Letting
+  # the fan-out run there is precisely the squatting the paragraph above
+  # describes, and it is not hypothetical: a membership push in a routed
+  # workspace refused with one
+  #
+  #   lock-backend-unreachable — team repo '<r>' could not be published …
+  #   (immutable lock record already exists with different content at
+  #   locks/<project>/<r>/<its own head>.toml)
+  #
+  # per repo, naming the very partitions those repos had published themselves.
   let participationPartitionRoot =
-    if partitionRecordPresent: manifestLayerRoot else: ""
+    if partitionRecordPresent or args.triggerOutsideEveryPartition:
+      manifestLayerRoot
+    else: ""
   if deferParticipation:
     result.deferredParticipation = prepareRoutedParticipation(
       args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity,

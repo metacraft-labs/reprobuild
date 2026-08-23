@@ -190,6 +190,19 @@ suite "a membership-repo push anchors no foreign lock record":
         "schema = \"reprobuild.workspace.local.v1\"\n\n" &
         "[workspace]\nproject = \"mix\"\nbranch = \"main\"\n")
 
+      # An EXPLICIT team route to that store. Without one the workspace is
+      # single-tier, ``recordRoutedParticipation`` returns nothing, and the
+      # per-repo participation fan-out — the path a suppressed partition write
+      # re-enables — is never exercised at all. The field failure this test
+      # exists for happened in a routed workspace, so the fixture is routed.
+      writeFile(ws / ".repro-workspace.toml",
+        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+        "[manifest]\n" &
+        "url = \"https://example.invalid/manifests.git\"\n\n" &
+        "[locking]\n" &
+        "route = [{ visibility = \"team\", backend = \"git-checkout\", " &
+        "path = \".repro/manifests\", repos = [\"core\", \"side\"] }]\n")
+
       # The MEMBERSHIP repo is the workspace root itself: it carries
       # ``projects/`` and ``repos/``, which is exactly what
       # ``manifestsRoot`` recognises.

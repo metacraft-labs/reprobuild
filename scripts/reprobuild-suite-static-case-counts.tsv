@@ -866,6 +866,8 @@ tests/integration/t_buildtype_drives_compile_flags.nim	nim	7
 tests/integration/t_buildtype_drives_output_dir.nim	nim	4
 tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim	nim	39
 tests/integration/t_cache_daemon_grows_via_cas_resize_and_survives_crash.nim	nim	2
+tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim	nim	1
+tests/integration/t_cache_refuses_to_serve_an_unsatisfiable_floor.nim	nim	1
 tests/integration/t_cas_restore_outputs_cleans_temp_on_failure.nim	nim	3
 tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim	nim	1
 tests/integration/t_certificate_policy_required_advisory_off_modes.nim	nim	1
@@ -1003,6 +1005,7 @@ tests/integration/t_local_daemons_control_plane_m7.nim	nim	2
 tests/integration/t_local_daemons_control_plane_m8.nim	nim	3
 tests/integration/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify.nim	nim	1
 tests/integration/t_lock_coherence_reports_the_diff_advisory_only.nim	nim	1
+tests/integration/t_lock_entry_pins_the_resolved_target.nim	nim	5
 tests/integration/t_lock_failure_remedies_name_a_runnable_command.nim	nim	1
 tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim	nim	1
 tests/integration/t_lock_foreign_coords.nim	nim	2
