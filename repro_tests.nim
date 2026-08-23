@@ -7750,6 +7750,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim",
+    binary: "build/test-bin/t_monitor_shim_edges_carry_static_libgcc",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim",
     binary: "build/test-bin/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted",
     defines: @[],

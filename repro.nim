@@ -1662,6 +1662,27 @@ package reprobuild:
         binary = monitorArtifactPath(MonitorShim64Name),
         appLib = true,
         threadsOn = true,
+        # ``-static-libgcc`` is load-bearing, and it is the one flag from
+        # io-mon's ``scripts/build_shim.sh`` that this edge originally did not
+        # mirror -- even though the three cross-bitness edges below all pass
+        # it. Linked dynamically the shim imports ``libgcc_s_seh-1.dll``, which
+        # lives in whichever mingw bin dir built it. That directory is on a
+        # developer's interactive PATH, so the omission is invisible there; it
+        # is NOT on the PATH the engine composes for a monitored action, and
+        # the injected child then dies with
+        # ``repro internal io monitor: error: LoadLibraryW in child returned
+        # NULL`` -- taking every monitored action on Windows with it. Observed
+        # exactly that way while validating S3: the graph-built shim failed to
+        # load where io-mon's script-built one loaded fine, and ``objdump -p``
+        # named the difference. Confirmed since by removing this flag and
+        # rebuilding this very edge: the artefact comes back importing
+        # ``libgcc_s_seh-1.dll``. Whether it does depends on the compiler --
+        # a gcc that links libgcc statically by default hides the omission
+        # entirely -- which is why the flag is pinned here rather than left to
+        # whatever is first on PATH, and why
+        # ``tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim``
+        # asserts it over both this recipe and the lowered graph.
+        passL = @["-static-libgcc"],
         paths = @[ioMonSrc, stackableHooksSrc],
         nimcache = monitorShimNimcache,
         dependencyPolicy = monitorShimPolicy,
