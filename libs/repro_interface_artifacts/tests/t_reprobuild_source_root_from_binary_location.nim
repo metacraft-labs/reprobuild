@@ -38,3 +38,21 @@ suite "reprobuild source root from binary location":
 
     check resolveBootstrapPackagePath(
       envName, newSeq[string](), "io_mon.nim", root) == root / "src"
+
+  test "embedded roots are exported for nested compiler processes":
+    let root = createTempDir("reprobuild-seeded-package-root-", "")
+    defer: removeDir(root)
+    let envName = "REPROBUILD_TEST_SEEDED_SOURCE_ROOT"
+    let hadEnv = existsEnv(envName)
+    let oldEnv = getEnv(envName)
+    delEnv(envName)
+    defer:
+      if hadEnv: putEnv(envName, oldEnv)
+      else: delEnv(envName)
+
+    seedSourcePackageEnvironment([(envName, root)])
+    check getEnv(envName) == root
+
+    putEnv(envName, "explicit-override")
+    seedSourcePackageEnvironment([(envName, root)])
+    check getEnv(envName) == "explicit-override"

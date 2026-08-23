@@ -54309,6 +54309,10 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     return 2
 
 proc runThinAppDispatch(programName: string): int =
+  # Source-only inputs captured by a packaged or locally built CLI must cross
+  # every nested interface/resource compiler boundary. Explicit caller
+  # overrides remain authoritative; this only fills missing environment keys.
+  ensureBuiltSourcePackageEnvironment()
   # M9.R.13a — seed the provider-nimcache session token before any
   # subcommand routing, so every nested subprocess spawned downstream
   # (the build engine's per-recipe `__repro-compile-provider` helpers,

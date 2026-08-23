@@ -87,6 +87,19 @@ proc builtSourcePackageRoot(envName: string): string =
     if entry[0] == envName:
       return entry[1]
 
+proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
+  ## Child compilers rebuild the interface-artifact module and therefore
+  ## cannot see its parent's compile-time constants. Export valid embedded
+  ## roots through the process environment so every nested extractor and
+  ## resource-accessor compile inherits the same source closure.
+  for (envName, root) in roots:
+    if not existsEnv(envName) and root.len > 0 and
+        dirExists(extendedPath(root)):
+      putEnv(envName, root)
+
+proc ensureBuiltSourcePackageEnvironment*() =
+  seedSourcePackageEnvironment(BuiltSourcePackageRoots)
+
 type
   InterfaceEnvelopeKind* = enum
     iekProjectInterface
