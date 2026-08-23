@@ -33,10 +33,17 @@
 ## widened diagnostic is exercised by simulating the connect failure
 ## via the build-engine entry-point's documented exception shape.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, unittest]
 
 import repro_cli_support
-from repro_test_support import executableFromEnvOrPath
+when defined(posix):
+  from repro_test_support import executableFromEnvOrPath
+
+const AutoDaemonLifetimeRunnerFlag = "--auto-daemon-lifetime-runner"
+
+if paramCount() >= 1 and paramStr(1) == AutoDaemonLifetimeRunnerFlag:
+  sleep(30_000)
+  quit(0)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -202,3 +209,20 @@ suite "DSL-port M9.R.11 — runquota daemon discovery + recovery":
       putEnv("REPROBUILD_AUTO_RUNQUOTA", value)
       check getEnv("REPROBUILD_AUTO_RUNQUOTA").normalize == value.normalize
     resetEnv()
+
+  when defined(windows):
+    test "releasing a shared Windows auto-daemon leaves it running":
+      var daemon = startProcess(getAppFilename(),
+        args = [AutoDaemonLifetimeRunnerFlag],
+        options = {poParentStreams})
+      let pid = daemon.processID
+      try:
+        releaseAutoRunQuotaProcess(daemon)
+        check daemon == nil
+        sleep(100)
+        let listing = execProcess("tasklist", args = [
+          "/FI", "PID eq " & $pid, "/FO", "CSV", "/NH"],
+          options = {poUsePath, poStdErrToStdOut})
+        check listing.contains(",\"" & $pid & "\",")
+      finally:
+        discard execCmdEx("taskkill /PID " & $pid & " /T /F")

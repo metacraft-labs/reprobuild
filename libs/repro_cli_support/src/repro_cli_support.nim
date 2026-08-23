@@ -7066,32 +7066,36 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     skipCacheHitEvidence: skipCacheHitEvidence,
     cancelCallback: cancelCheck)
   edgeConfig.statsEnabled = statsEnabled
-  let edgeResult = runBuild(graph([extractAction]), edgeConfig)
-  stats.mergeStats(edgeResult.stats)
-  if edgeResult.hasFailedActions():
-    # The child's captured stdout/stderr carries the recipe's own compiler
-    # diagnostics (file, line, message). Surfacing them verbatim is the whole
-    # reason the extraction can be a monitored child at all: a failed edge
-    # must still read like a failed recipe compile.
-    var detail = ""
-    for item in edgeResult.results:
-      if item.status in {asFailed, asBlocked}:
-        var parts = @["interface extraction edge " & $item.status &
-          " for " & modulePath]
-        if item.stderr.len > 0:
-          parts.add(item.stderr)
-        if item.stdout.len > 0:
-          parts.add(item.stdout)
-        detail = parts.join("\n")
-        break
-    if detail.len == 0:
-      detail = "interface extraction edge failed for " & modulePath
-    raise newException(OSError, detail)
-  if not fileExists(extendedPath(artifactPath)):
-    raise newException(IOError,
-      "interface extraction edge did not write artifact: " & artifactPath)
-  result = readInterfaceArtifact(artifactPath)
-  interfaceEdgeSessionResults[sessionKey] = result
+  var artifactLock = acquireInterfaceArtifactLock(artifactPath)
+  try:
+    let edgeResult = runBuild(graph([extractAction]), edgeConfig)
+    stats.mergeStats(edgeResult.stats)
+    if edgeResult.hasFailedActions():
+      # The child's captured stdout/stderr carries the recipe's own compiler
+      # diagnostics (file, line, message). Surfacing them verbatim is the whole
+      # reason the extraction can be a monitored child at all: a failed edge
+      # must still read like a failed recipe compile.
+      var detail = ""
+      for item in edgeResult.results:
+        if item.status in {asFailed, asBlocked}:
+          var parts = @["interface extraction edge " & $item.status &
+            " for " & modulePath]
+          if item.stderr.len > 0:
+            parts.add(item.stderr)
+          if item.stdout.len > 0:
+            parts.add(item.stdout)
+          detail = parts.join("\n")
+          break
+      if detail.len == 0:
+        detail = "interface extraction edge failed for " & modulePath
+      raise newException(OSError, detail)
+    if not fileExists(extendedPath(artifactPath)):
+      raise newException(IOError,
+        "interface extraction edge did not write artifact: " & artifactPath)
+    result = readInterfaceArtifact(artifactPath)
+    interfaceEdgeSessionResults[sessionKey] = result
+  finally:
+    releaseInterfaceArtifactLock(artifactLock)
 
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
@@ -14334,6 +14338,23 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   raise newException(OSError,
     "runquotad did not become reachable at " & endpointHint)
 
+proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
+  ## Release this invocation's handle to an automatically started RunQuota
+  ## daemon. Windows uses a shared per-user named pipe, so another concurrent
+  ## invocation may already have adopted the daemon; terminating it here would
+  ## break that client's live session. POSIX auto-daemons use invocation-local
+  ## socket paths and remain owned by their spawning process.
+  if process == nil:
+    return
+  try:
+    when not defined(windows):
+      process.terminate()
+      discard process.waitForExit()
+    process.close()
+  except CatchableError:
+    discard
+  process = nil
+
 proc autoRunQuotaNeedsPoolPreflight(bypassRunQuota: bool): bool =
   ## Pool discovery compiles/inspects the project provider. Do it only when
   ## this process may actually spawn runquotad and can pass the discovered
@@ -17196,13 +17217,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
           "exitCode": result
         })
     finally:
-      if autoRunQuota != nil:
-        try:
-          autoRunQuota.terminate()
-          discard autoRunQuota.waitForExit()
-          autoRunQuota.close()
-        except CatchableError:
-          discard
+      releaseAutoRunQuotaProcess(autoRunQuota)
 
   proc buildRunId(): string =
     let nowTime = getTime()
@@ -19804,13 +19819,7 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
       echo renderBuildGraphDot(info, focus)
     return 0
   finally:
-    if autoRunQuota != nil:
-      try:
-        autoRunQuota.terminate()
-        discard autoRunQuota.waitForExit()
-        autoRunQuota.close()
-      except CatchableError:
-        discard
+    releaseAutoRunQuotaProcess(autoRunQuota)
 
 proc latestReportAction(info: BuildGraphInspection; actionId: string): Option[JsonNode] =
   let reportPath = info.outDir / "build-report.json"
@@ -20239,13 +20248,7 @@ proc runWhyCommand(args: openArray[string]; publicCliPath: string): int =
       discard
     return 0
   finally:
-    if autoRunQuota != nil:
-      try:
-        autoRunQuota.terminate()
-        discard autoRunQuota.waitForExit()
-        autoRunQuota.close()
-      except CatchableError:
-        discard
+    releaseAutoRunQuotaProcess(autoRunQuota)
 
 proc renderLoweredGraphRecordText(record: LoweredGraphCacheRecord): string =
   var lines: seq[string] = @[]

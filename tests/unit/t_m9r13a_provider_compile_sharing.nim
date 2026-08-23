@@ -100,6 +100,7 @@ import repro_tool_profiles
 const
   ProviderLockRunnerFlag = "--provider-lock-runner"
   ProviderLockPayloadFlag = "--provider-lock-payload"
+  InterfaceLockRunnerFlag = "--interface-lock-runner"
 
 if paramCount() >= 1 and paramStr(1) == ProviderLockPayloadFlag:
   writeFile(paramStr(2), "entered\n")
@@ -119,6 +120,16 @@ if paramCount() >= 1 and paramStr(1) == ProviderLockRunnerFlag:
   if execution.exitCode != 0:
     stderr.write(execution.output)
   quit(execution.exitCode)
+
+if paramCount() >= 1 and paramStr(1) == InterfaceLockRunnerFlag:
+  writeFile(paramStr(3), "started\n")
+  var lock = acquireInterfaceArtifactLock(paramStr(2))
+  try:
+    writeFile(paramStr(4), "entered\n")
+    sleep(parseInt(paramStr(5)))
+  finally:
+    releaseInterfaceArtifactLock(lock)
+  quit(0)
 
 # ---------------------------------------------------------------------------
 # Test fixture helpers
@@ -318,6 +329,38 @@ suite "M9.R.13a provider-compile cache sharing":
 
     let second = startProcess(runner, args = @[
       ProviderLockRunnerFlag, nimcache, secondStarted, secondEntered, "0"],
+      options = {poParentStreams})
+    check waitForFile(secondStarted, 5000)
+    sleep(150)
+    check not fileExists(secondEntered)
+
+    check first.waitForExit() == 0
+    first.close()
+    check second.waitForExit() == 0
+    second.close()
+    check fileExists(secondEntered)
+
+  test "concurrent interface edges serialize a shared artifact":
+    let scratch = getTempDir() /
+      ("repro-interface-lock-" & $getCurrentProcessId())
+    createDir(scratch)
+    defer:
+      try: removeDir(scratch)
+      except CatchableError: discard
+    let artifact = scratch / "project-interface.rbsz"
+    let firstStarted = scratch / "first-started"
+    let firstEntered = scratch / "first-entered"
+    let secondStarted = scratch / "second-started"
+    let secondEntered = scratch / "second-entered"
+    let runner = getAppFilename()
+
+    let first = startProcess(runner, args = @[
+      InterfaceLockRunnerFlag, artifact, firstStarted, firstEntered, "2000"],
+      options = {poParentStreams})
+    check waitForFile(firstEntered, 5000)
+
+    let second = startProcess(runner, args = @[
+      InterfaceLockRunnerFlag, artifact, secondStarted, secondEntered, "0"],
       options = {poParentStreams})
     check waitForFile(secondStarted, 5000)
     sleep(150)

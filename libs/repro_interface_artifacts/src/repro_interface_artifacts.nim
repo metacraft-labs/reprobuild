@@ -4270,7 +4270,7 @@ proc providerNimcacheMode(): string =
   let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
   if mode.len == 0: "shared" else: mode.toLowerAscii()
 
-type ProviderNimcacheLock = object
+type ReproFileLock* = object
   held: bool
   when defined(windows):
     handle: ProviderLockHandle
@@ -4284,12 +4284,7 @@ proc providerNimcachePath(command: openArray[string]): string =
   raise newException(ValueError,
     "provider compiler command has no --nimcache path")
 
-proc acquireProviderNimcacheLock(command: openArray[string]):
-    ProviderNimcacheLock =
-  ## Nim's incremental cache is reusable across provider recipes but is not
-  ## safe for concurrent writers. Serialize commands that carry the same
-  ## ``--nimcache`` path while leaving independent sessions fully parallel.
-  let lockPath = providerNimcachePath(command) & ".compile.lock"
+proc acquireProviderFileLock(lockPath: string): ReproFileLock =
   createDir(extendedPath(parentDir(lockPath)))
   when defined(windows):
     let wide = newWideCString(lockPath)
@@ -4303,7 +4298,7 @@ proc acquireProviderNimcacheLock(command: openArray[string]):
         ProviderLockFileAttributeNormal,
         nil)
       if cast[int](handle) != cast[int](ProviderLockInvalidHandle):
-        return ProviderNimcacheLock(held: true, handle: handle)
+        return ReproFileLock(held: true, handle: handle)
       let error = providerLockGetLastError()
       if error != ProviderLockSharingViolation:
         raise newException(IOError,
@@ -4321,9 +4316,16 @@ proc acquireProviderNimcacheLock(command: openArray[string]):
       discard posix.close(fd)
       raise newException(IOError,
         "flock(" & lockPath & ") failed, errno=" & $lockError)
-    return ProviderNimcacheLock(held: true, fd: fd)
+    return ReproFileLock(held: true, fd: fd)
 
-proc releaseProviderNimcacheLock(lock: var ProviderNimcacheLock) =
+proc acquireProviderNimcacheLock(command: openArray[string]):
+    ReproFileLock =
+  ## Nim's incremental cache is reusable across provider recipes but is not
+  ## safe for concurrent writers. Serialize commands that carry the same
+  ## ``--nimcache`` path while leaving independent sessions fully parallel.
+  acquireProviderFileLock(providerNimcachePath(command) & ".compile.lock")
+
+proc releaseProviderNimcacheLock(lock: var ReproFileLock) =
   if not lock.held:
     return
   when defined(windows):
@@ -4335,6 +4337,17 @@ proc releaseProviderNimcacheLock(lock: var ProviderNimcacheLock) =
       discard posix.close(lock.fd)
       lock.fd = -1
   lock.held = false
+
+proc acquireInterfaceArtifactLock*(artifactPath: string):
+    ReproFileLock =
+  ## Serialize independent Reprobuild sessions that evaluate the same
+  ## interface-extraction edge. The edge's monitor depfile and cache staging
+  ## paths are project-local shared outputs, so RunQuota resource admission
+  ## alone does not make concurrent writers safe.
+  acquireProviderFileLock(artifactPath & ".extract.lock")
+
+proc releaseInterfaceArtifactLock*(lock: var ReproFileLock) =
+  releaseProviderNimcacheLock(lock)
 
 proc runProviderCompilerCommand*(command: openArray[string]; cwd = ""):
     ProviderCompileExecutionResult =
