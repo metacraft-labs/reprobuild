@@ -3916,18 +3916,23 @@ proc seedBootstrapCycleBreakTools*() =
   for tool in BootstrapCycleBreakTools:
     fromSourceCycleBrokenTools.incl(tool)
 
-proc fromSourceRecipeRoot*(): string =
+proc fromSourceRecipeRoot*(workspaceRoot = ""): string =
   ## Resolve the from-source recipe anchor. Honours
   ## ``REPRO_FROM_SOURCE_ROOT`` first. The legacy in-tree catalog remains
   ## the first automatic candidate, followed by the federated sibling
-  ## ``reprobuild-packages/packages/source`` checkout.
+  ## ``reprobuild-packages/packages/source`` checkout. ``workspaceRoot`` lets
+  ## metadata-only callers such as ``repro lock refresh <path>`` resolve the
+  ## catalog relative to the project being locked instead of the caller's cwd.
   let override = getEnv(FromSourceRootEnvVar)
   if override.len > 0:
     return override
-  let inTree = getCurrentDir() / "recipes" / "packages" / "source"
+  let root =
+    if workspaceRoot.len > 0: absolutePath(workspaceRoot)
+    else: getCurrentDir()
+  let inTree = root / "recipes" / "packages" / "source"
   if dirExists(inTree):
     return inTree
-  let federated = parentDir(getCurrentDir()) / "reprobuild-packages" /
+  let federated = parentDir(root) / "reprobuild-packages" /
     "packages" / "source"
   if dirExists(federated):
     return federated

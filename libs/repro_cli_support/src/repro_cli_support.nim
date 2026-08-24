@@ -23,6 +23,7 @@ proc runIoMonitorCli(programName: string; args: seq[string]): int =
 
 import repro_provider_runtime
 import repro_project_dsl
+import repro_dsl_stdlib/configurables/variants as solver_variants
 # PMC-4: `repro lock validate` compares a lock's recorded
 # microarchitecture target against this host through the SAME primitive
 # selection uses (`resolvedTargetSatisfiedBy`). A validator with its own
@@ -16420,7 +16421,9 @@ proc repositoryNameFromUrl(url: string): string =
   value
 
 proc lockedDepsForWorkspace(workspaceRoot: string;
-                            usesSelectors: seq[string] = @[]): seq[LockedDep] =
+                            usesSelectors: seq[string] = @[];
+                            sourceRecipeRoots: seq[string] = @[]):
+                            seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
   ## url/ref/revision) and a genuinely-computed INTEGRITY multihash. The root
@@ -16482,6 +16485,39 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     siblingDeps.add(dep)
     seenPaths.add(dep.path)
     seenNames.add(dep.name)
+  # A federated source catalog is itself a reproducibility input. Recipe paths
+  # live below that repository, so normalize each one to its enclosing Git
+  # worktree and lock the repository once rather than recording hundreds of
+  # package subdirectories as unrelated dependencies.
+  for recipeRoot in sourceRecipeRoots:
+    let repoRoot = gitTopLevel(recipeRoot)
+    if repoRoot.len == 0:
+      continue
+    let depAbs = absolutePath(repoRoot)
+    if cmpPaths(depAbs, root) == 0:
+      continue
+    let rel = relativePath(depAbs, root).replace('\\', '/')
+    if rel in seenPaths:
+      continue
+    let facts = committedLockRepoFacts(depAbs)
+    let bareName = extractFilename(depAbs.strip(
+      leading = false, trailing = true, chars = {'/', '\\'}))
+    let originName = repositoryNameFromUrl(facts.originUrl)
+    let depName =
+      if originName.len > 0: originName
+      elif bareName.len > 0: bareName
+      else: "source-catalog"
+    if depName in seenNames:
+      continue
+    siblingDeps.add(LockedDep(
+      name: depName, path: rel,
+      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+        gitRef: facts.branch, revision: facts.headSha),
+      integrity: computeDepIntegrity(depAbs, facts.headSha),
+      version: "", visibility: "public", participation: "",
+      depends: @[], tags: @[]))
+    seenPaths.add(rel)
+    seenNames.add(depName)
   var rootDepends: seq[string] = @[]
   for d in siblingDeps: rootDepends.add(d.name)
   result.add(LockedDep(
@@ -50458,12 +50494,19 @@ const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
   ## — the env var the compiled provider's ``finalizeVariants()`` honours to
   ## emit the solved inputs.
 
+type CompiledProviderSolverInputs = object
+  variants: seq[variant_encoder.VariantDecl]
+  packages: seq[PackageDecl]
+  text: string
+  toolUses: seq[InterfaceToolUse]
+  usesSelectors: seq[string]
+  defaultToolProvisioning: string
+  sourceRecipeRoots: seq[string]
+
 proc solverInputsFromCompiledProvider(projectDir: string;
-                                      requireSolverBinding = true):
-    Option[tuple[
-    variants: seq[variant_encoder.VariantDecl];
-    packages: seq[PackageDecl]; text: string;
-    usesSelectors: seq[string]]] =
+                                      requireSolverBinding = true;
+                                      strict = false):
+    Option[CompiledProviderSolverInputs] =
   ## MO-12 — obtain solver inputs from the compiled project provider. Compiles
   ## the project's ``repro.nim`` / ``reprobuild.nim`` recipe to a provider
   ## binary and runs it with ``REPRO_EMIT_SOLVER_INPUTS`` set so module-init's
@@ -50475,8 +50518,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
   ## failure, an empty solve} returns ``none`` so the caller falls back to the
   ## ``repro.solver`` sidecar. All scratch lives under the system temp dir, so
   ## refresh still writes NO build artifacts into the project tree.
-  result = none(tuple[variants: seq[variant_encoder.VariantDecl];
-    packages: seq[PackageDecl]; text: string; usesSelectors: seq[string]])
+  result = none(CompiledProviderSolverInputs)
   let match =
     try: resolveProjectFile(projectDir)
     except CatchableError: return result
@@ -50518,6 +50560,17 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     # would be keyed on paths that never exist again and could never hit.
     # This is a best-effort probe for the lock refresh, not a build; its
     # results are thrown away and it writes nothing into the project tree.
+    # A refresh always re-solves. Clear inherited build pins before interface
+    # extraction as well as provider execution: module initialization can run
+    # during either process, and an old pin must not prevent us from observing
+    # the declaration that supersedes it.
+    let inheritedPins = getEnv(LockPinsEnvVar)
+    let inheritedLockPath = getEnv(LockPathEnvVar)
+    delEnv(LockPinsEnvVar)
+    delEnv(LockPathEnvVar)
+    defer:
+      if inheritedPins.len > 0: putEnv(LockPinsEnvVar, inheritedPins)
+      if inheritedLockPath.len > 0: putEnv(LockPathEnvVar, inheritedLockPath)
     let artifact = extractInterfaceFromModule(modulePath, interfacePath,
       stubPath, compileWorkDir, scratchDir, requireStub = false,
       consumerRoot = projectRootForModule(modulePath))
@@ -50548,10 +50601,6 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     # inherited them from an enclosing build would emit the OLD lock's answer
     # as the new solve's inputs and every refresh would be a fixed point. The
     # pins are removed for the probe's lifetime and put back afterwards.
-    let inheritedPins = getEnv(LockPinsEnvVar)
-    let inheritedLockPath = getEnv(LockPathEnvVar)
-    delEnv(LockPinsEnvVar)
-    delEnv(LockPathEnvVar)
     try:
       # A bare manifest request is enough: ``finalizeVariants()`` runs at the
       # provider's MODULE INITIALISATION (the variant decls + finalize call are
@@ -50565,23 +50614,181 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           reason: girExplicitUserRequest))
     finally:
       delEnv(SolverInputsEmitEnvVar)
-      if inheritedPins.len > 0: putEnv(LockPinsEnvVar, inheritedPins)
-      if inheritedLockPath.len > 0: putEnv(LockPathEnvVar, inheritedLockPath)
     if not fileExists(extendedPath(emitPath)):
       return result
     let text = readFile(extendedPath(emitPath))
     let parsed = parseExplainFixture(text)
     if parsed.packages.len == 0 and parsed.variants.len == 0:
       return result
-    return some((variants: parsed.variants, packages: parsed.packages,
-                 text: text, usesSelectors: usesSelectors))
+    return some(CompiledProviderSolverInputs(
+      variants: parsed.variants,
+      packages: parsed.packages,
+      text: text,
+      toolUses: artifact.projectInterface.toolUses,
+      usesSelectors: usesSelectors,
+      defaultToolProvisioning:
+        artifact.projectInterface.defaultToolProvisioning))
   except CatchableError:
+    if strict:
+      raise
     return result
+
+proc dependencyDeclEqual(a, b: DependencyDecl): bool =
+  a.name == b.name and a.range == b.range and a.conditional == b.conditional
+
+proc mergeProviderSolverInputs(aggregate: var CompiledProviderSolverInputs;
+                               incoming: CompiledProviderSolverInputs) =
+  ## Fold independently compiled package providers into one solver universe.
+  ## A global lock must satisfy every selected producer, not only the root
+  ## recipe that happened to start the build.
+  for incomingVariant in incoming.variants:
+    var found = false
+    for existing in aggregate.variants:
+      if existing.name != incomingVariant.name:
+        continue
+      if existing != incomingVariant:
+        raise newException(ValueError,
+          "conflicting variant declarations for '" & incomingVariant.name &
+          "' while composing from-source solver inputs")
+      found = true
+      break
+    if not found:
+      aggregate.variants.add(incomingVariant)
+
+  for incomingPackage in incoming.packages:
+    var match = -1
+    for i, existing in aggregate.packages:
+      if existing.name == incomingPackage.name:
+        match = i
+        break
+    if match < 0:
+      aggregate.packages.add(incomingPackage)
+      continue
+
+    var existing = aggregate.packages[match]
+    if existing.source.len > 0 and incomingPackage.source.len > 0 and
+        existing.source != incomingPackage.source:
+      raise newException(ValueError,
+        "conflicting source declarations for package '" &
+        incomingPackage.name & "'")
+    if existing.source.len == 0:
+      existing.source = incomingPackage.source
+    if existing.instanceOf.len > 0 and incomingPackage.instanceOf.len > 0 and
+        existing.instanceOf != incomingPackage.instanceOf:
+      raise newException(ValueError,
+        "conflicting instance declarations for package '" &
+        incomingPackage.name & "'")
+    if existing.instanceOf.len == 0:
+      existing.instanceOf = incomingPackage.instanceOf
+    if existing.pinned and incomingPackage.pinned and
+        existing.versions != incomingPackage.versions:
+      raise newException(ValueError,
+        "conflicting pinned versions for package '" & incomingPackage.name &
+        "'")
+    if incomingPackage.pinned:
+      existing.pinned = true
+      existing.versions = incomingPackage.versions
+    elif not existing.pinned:
+      for version in incomingPackage.versions:
+        if version notin existing.versions:
+          existing.versions.add(version)
+    for dependency in incomingPackage.depends:
+      var found = false
+      for current in existing.depends:
+        if dependencyDeclEqual(current, dependency):
+          found = true
+          break
+      if not found:
+        existing.depends.add(dependency)
+    for packageVariant in incomingPackage.variants:
+      var found = false
+      for current in existing.variants:
+        if current.name != packageVariant.name:
+          continue
+        if current != packageVariant:
+          raise newException(ValueError,
+            "conflicting package variant declarations for '" &
+            packageVariant.name & "'")
+        found = true
+        break
+      if not found:
+        existing.variants.add(packageVariant)
+    existing.versions.sort()
+    existing.depends.sort(proc(a, b: DependencyDecl): int =
+      result = cmp(a.name, b.name)
+      if result == 0: result = cmp(a.range, b.range)
+      if result == 0: result = cmp($a.conditional, $b.conditional))
+    existing.variants.sort(proc(a, b: variant_encoder.VariantDecl): int =
+      cmp(a.name, b.name))
+    aggregate.packages[match] = existing
+
+  for useDef in incoming.toolUses:
+    var found = false
+    for current in aggregate.toolUses:
+      if current.packageSelector == useDef.packageSelector and
+          current.executableName == useDef.executableName and
+          current.rawConstraint == useDef.rawConstraint:
+        found = true
+        break
+    if not found:
+      aggregate.toolUses.add(useDef)
+  for selector in incoming.usesSelectors:
+    if selector notin aggregate.usesSelectors:
+      aggregate.usesSelectors.add(selector)
+  aggregate.variants.sort(proc(a, b: variant_encoder.VariantDecl): int =
+    cmp(a.name, b.name))
+  aggregate.packages.sort(proc(a, b: PackageDecl): int = cmp(a.name, b.name))
+
+proc foldFromSourceProviderSolverInputs(projectDir: string;
+                                        aggregate: var
+                                          CompiledProviderSolverInputs) =
+  ## Discover the same corpus recipes that from-source execution would select,
+  ## compile their metadata only, and merge their transitive constraints into
+  ## the root solve. No package build action is executed.
+  let recipeRoot = fromSourceRecipeRoot(projectDir)
+  if not dirExists(extendedPath(recipeRoot)):
+    return
+  seedBootstrapCycleBreakTools()
+  var pending = aggregate.toolUses
+  var seenRecipeDirs: seq[string] = @[]
+  var cursor = 0
+  while cursor < pending.len:
+    let useDef = pending[cursor]
+    inc cursor
+    if useDef.executableName.len == 0:
+      continue
+    let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
+    var recipeDir = ""
+    case outcome.kind
+    of rrResolved:
+      recipeDir = outcome.profile.selectedStorePath
+    of rrNeedsBuild:
+      if useDef.executableName in fromSourceCycleBrokenTools:
+        continue
+      recipeDir = outcome.recipeDir
+    of rrSiblingMissing:
+      continue
+    if recipeDir.len == 0:
+      continue
+    recipeDir = absolutePath(recipeDir)
+    if recipeDir in seenRecipeDirs:
+      continue
+    seenRecipeDirs.add(recipeDir)
+    let provider = solverInputsFromCompiledProvider(recipeDir, strict = true)
+    if provider.isNone:
+      continue
+    let producerInputs = provider.get()
+    for transitiveUse in producerInputs.toolUses:
+      pending.add(transitiveUse)
+    aggregate.mergeProviderSolverInputs(producerInputs)
+  aggregate.sourceRecipeRoots = seenRecipeDirs
+  aggregate.text = solver_variants.renderSolverInputsFixture(
+    aggregate.variants, aggregate.packages)
 
 proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string; source: string;
-    usesSelectors: seq[string]] =
+    usesSelectors: seq[string]; sourceRecipeRoots: seq[string]] =
   ## MO-12 — resolve the solver inputs for ``lock refresh`` / ``validate``,
   ## PREFERRING the compiled project provider (the real recipe's solve) and
   ## falling back to the ``repro.solver`` sidecar. An explicit ``--inputs``
@@ -50594,15 +50801,19 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
   if inputsOverride.len == 0:
     let fromProvider = solverInputsFromCompiledProvider(projectDir)
     if fromProvider.isSome:
-      let p = fromProvider.get()
-      return (true, p.variants, p.packages, p.text, "provider", p.usesSelectors)
+      var p = fromProvider.get()
+      if p.defaultToolProvisioning == "from-source":
+        foldFromSourceProviderSolverInputs(projectDir, p)
+      return (true, p.variants, p.packages, p.text, "provider",
+        p.usesSelectors, p.sourceRecipeRoots)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
-    return (true, loaded.variants, loaded.packages, loaded.text, "sidecar", @[])
-  return (false, @[], @[], "", "", @[])
+    return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
+      @[], @[])
+  return (false, @[], @[], "", "", @[], @[])
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
@@ -50643,7 +50854,8 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     endpoints: gen.registries,
     workDir: getTempDir() /
       ("repro-lock-generation-" & $getCurrentProcessId() & "-" & verb),
-    extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors),
+    extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
+      resolved.sourceRecipeRoots),
     entryPoint: entryPoint)
   return 0
 
@@ -50906,7 +51118,7 @@ proc runReproLockValidate(rest: openArray[string]): int =
     var resolved: tuple[found: bool;
       variants: seq[variant_encoder.VariantDecl];
       packages: seq[PackageDecl]; text: string; source: string;
-      usesSelectors: seq[string]]
+      usesSelectors: seq[string]; sourceRecipeRoots: seq[string]]
     try:
       resolved = resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:
