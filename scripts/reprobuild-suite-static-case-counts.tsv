@@ -46,6 +46,7 @@ libs/repro_binary_cache_server/tests/t_a2_p2_rest_surface.nim	nim	2
 libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim	nim	1
 libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	nim	12
 libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim	nim	5
+libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	nim	9
 libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	4
 libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim	nim	1
 libs/repro_build_engine/tests/t_engine_implicit_target_name_hook_overrides_canonical.nim	nim	1
@@ -933,6 +934,7 @@ tests/integration/t_e2e_selectable_toolchain_fixture.nim	nim	5
 tests/integration/t_e2e_variant_feature_flag_drops_tls.nim	nim	5
 tests/integration/t_entrypoints.nim	nim	1
 tests/integration/t_enumerated_directory_evidence_producers.nim	nim	5
+tests/integration/t_env_inheritance_census_is_reported.nim	nim	2
 tests/integration/t_every_launch_path_is_monitored.nim	nim	7
 tests/integration/t_evidence_publish_verb_and_lock_flag_on_test_sharding.nim	nim	1
 tests/integration/t_extension_type_lifted_and_consumed.nim	nim	1

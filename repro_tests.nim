@@ -318,6 +318,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim",
+    binary: "build/test-bin/t_declared_env_is_in_the_cache_key",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
     binary: "build/test-bin/t_engine_action_create_dyndep",
     defines: @[],
@@ -9056,6 +9064,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
     binary: "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_env_inheritance_census_is_reported.nim",
+    binary: "build/test-bin/t_env_inheritance_census_is_reported",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
