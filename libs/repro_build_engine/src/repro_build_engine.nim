@@ -5468,6 +5468,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return none(BuildRunResult)
     if config.progressCallback != nil:
       return none(BuildRunResult)
+    # A forced rebuild is a request to re-execute, and `config.forceRebuild`
+    # is read in exactly one place: the scheduler's per-action cache
+    # decision. A whole-graph short-circuit that returns before the
+    # scheduler runs therefore silently DISCARDS the request — every edge
+    # comes back `asCacheHit` / `cdHit` / `launched = false` and nothing
+    # re-runs. `repro build --force-rebuild` never exposed this only
+    # because rendering progress installs a callback, which the bail-out
+    # above already catches; an engine-API caller that renders nothing got
+    # the flag dropped on the floor.
+    if config.forceRebuild:
+      return none(BuildRunResult)
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
     var metadataCache = initFileMetadataCache()

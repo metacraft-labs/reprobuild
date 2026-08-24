@@ -390,6 +390,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim",
+    binary: "build/test-bin/t_force_rebuild_is_honored_by_engine_api",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim",
     binary: "build/test-bin/t_nlf_stat4_baseline_fingerprints",
     defines: @[],
