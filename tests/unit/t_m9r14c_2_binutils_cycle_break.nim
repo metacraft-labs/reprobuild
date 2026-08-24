@@ -86,6 +86,7 @@ suite "DSL-port M9.R.14c.2 — bootstrap cycle-break taxonomy widening":
     check "ld" in fromSourceCycleBrokenTools
     check "gcc" in fromSourceCycleBrokenTools
     check "make" in fromSourceCycleBrokenTools
+    check "meson" notin fromSourceCycleBrokenTools
 
     # Idempotent: a second call doesn't grow the set further (it's a
     # ``HashSet.incl`` over a fixed list).
@@ -176,6 +177,7 @@ suite "DSL-port M9.R.14c.2 — bootstrap cycle-break taxonomy widening":
     check "wayland" notin BootstrapCycleBreakTools
     check "glib2" notin BootstrapCycleBreakTools
     check "fontconfig" notin BootstrapCycleBreakTools
+    check "meson" notin BootstrapCycleBreakTools
 
     let scratch = createTempDir("repro-m9r14c-2-autoconf-", "")
     defer: removeDir(scratch)
