@@ -846,6 +846,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim",
+    binary: "build/test-bin/t_deploy_agent_cli_compiles_manifest_profile",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim",
     binary: "build/test-bin/t_repro_deploy_agent_converges_from_signed_manifest",
     defines: @[],
