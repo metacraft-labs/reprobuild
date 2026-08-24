@@ -33,6 +33,8 @@ import repro_project_dsl
 # m4, ...) + gmp/mpfr/mpc (also under system_tools).
 import repro_dsl_stdlib/packages/system_tools
 import repro_dsl_stdlib/packages/autoconf
+import repro_dsl_stdlib/packages/automake
+import repro_dsl_stdlib/packages/libtool
 
 proc packageProvisioning(name: string):
     tuple[nix: int; scoop: int; tarball: int] =
@@ -69,6 +71,29 @@ suite "DSL-port M9.R.11 — stub provisioning widening":
       check bootstrap.sha256 ==
         "ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a"
     check found
+
+  test "remaining autotools packages have source-cycle bootstrap channels":
+    let expected = [
+      (name: "automake", hash:
+        "8920c1fc411e13b90bf704ef9db6f29d540e76d232cb3b2c9f4dc4cc599bd990"),
+      (name: "libtool", hash:
+        "f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675"),
+      (name: "libtoolize", hash:
+        "f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675"),
+    ]
+    for entry in expected:
+      var found = false
+      for pkg in registeredPackages():
+        if pkg.packageName != entry.name:
+          continue
+        found = true
+        check pkg.nixProvisioning.len >= 1
+        check pkg.tarballProvisioning.len == 1
+        let bootstrap = pkg.tarballProvisioning[0]
+        check bootstrap.archiveType == "tar.xz"
+        check bootstrap.executablePath == "configure"
+        check bootstrap.sha256 == entry.hash
+      check found
 
   test "texinfo (the canary) has nix + tarball provisioning":
     let p = packageProvisioning("texinfo")

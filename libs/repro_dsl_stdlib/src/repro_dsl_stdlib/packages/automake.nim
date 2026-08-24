@@ -20,6 +20,18 @@ package automake:
     nixPackage "nixpkgs#automake", executablePath = "bin/automake",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # The release archive contains a pre-generated configure script. It is
+    # therefore sufficient as the non-Nix profile used only to break the
+    # automake source recipe's bootstrap cycle.
+    tarball url = "https://ftp.gnu.org/gnu/automake/automake-1.17.tar.xz",
+      sha256 = "8920c1fc411e13b90bf704ef9db6f29d540e76d232cb3b2c9f4dc4cc599bd990",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "configure",
+      packageId = "automake@1.17",
+      cpu = "any",
+      os = "any",
+      lockIdentity = "tarball:automake@1.17:sha256:8920c1fc411e13b90bf704ef9db6f29d540e76d232cb3b2c9f4dc4cc599bd990"
 
 # ---------------------------------------------------------------------------
 # Harvested MSYS2 catalog (cakBuiltin adapter consumer on Windows).
