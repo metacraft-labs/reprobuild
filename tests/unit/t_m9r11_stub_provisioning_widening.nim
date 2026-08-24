@@ -32,6 +32,7 @@ import repro_project_dsl
 # fields. The two aggregator imports cover system_tools (texinfo, perl,
 # m4, ...) + gmp/mpfr/mpc (also under system_tools).
 import repro_dsl_stdlib/packages/system_tools
+import repro_dsl_stdlib/packages/autoconf
 
 proc packageProvisioning(name: string):
     tuple[nix: int; scoop: int; tarball: int] =
@@ -53,6 +54,21 @@ const
   ]
 
 suite "DSL-port M9.R.11 — stub provisioning widening":
+
+  test "autoconf has a portable source-cycle bootstrap channel":
+    var found = false
+    for pkg in registeredPackages():
+      if pkg.packageName != "autoconf":
+        continue
+      found = true
+      check pkg.nixProvisioning.len >= 1
+      check pkg.tarballProvisioning.len == 1
+      let bootstrap = pkg.tarballProvisioning[0]
+      check bootstrap.archiveType == "tar.xz"
+      check bootstrap.executablePath == "configure"
+      check bootstrap.sha256 ==
+        "ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a"
+    check found
 
   test "texinfo (the canary) has nix + tarball provisioning":
     let p = packageProvisioning("texinfo")
