@@ -4035,15 +4035,18 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
   script.add("touch \"" & escapedStamp & "\"")
   script
 
-proc dslPortSubstituteShellPlaceholders(command, fetchPath, extractedPath,
-                                       outPath: string): string =
+proc dslPortSubstituteShellPlaceholders*(command, fetchPath, extractedPath,
+                                        outPath: string): string =
   ## Replace ``$fetch`` / ``$extracted`` / ``$out`` in ``command``.
   ## Mirrors ``from_source_custom.substitutePlaceholders`` byte-for-byte
   ## so a recipe routed through the per-project provider gets the same
   ## substituted argv as one routed through the standard provider.
-  result = command.replace("$extracted", extractedPath)
-  result = result.replace("$fetch", fetchPath)
-  result = result.replace("$out", outPath)
+  let shellFetchPath = fetchPath.replace("\\", "/")
+  let shellExtractedPath = extractedPath.replace("\\", "/")
+  let shellOutPath = outPath.replace("\\", "/")
+  result = command.replace("$extracted", shellExtractedPath)
+  result = result.replace("$fetch", shellFetchPath)
+  result = result.replace("$out", shellOutPath)
 
 proc dslPortSanitizeIdPart(value: string): string =
   for ch in value:
