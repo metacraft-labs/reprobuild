@@ -8694,6 +8694,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_provider_compile_reporting_distinguishes_compile_from_reuse.nim",
+    binary: "build/test-bin/t_provider_compile_reporting_distinguishes_compile_from_reuse",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_provider_file_driven_fanout_cleanup.nim",
     binary: "build/test-bin/t_provider_file_driven_fanout_cleanup",
     defines: @[],

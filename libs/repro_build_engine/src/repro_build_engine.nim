@@ -5458,6 +5458,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         "status=" & $res.statusCode & " bytes=" & $res.bytesUploaded)
     finishStat("repro binary-cache publish", publishStart)
 
+  proc fastNoopReuseReason(action: BuildAction): string =
+    ## The whole-graph fast scan and the regular scheduler decide the SAME
+    ## state — "the record revalidated and the declared outputs (if any)
+    ## are already on disk" — so they must report it the same way. The
+    ## scheduler calls that state `asUpToDate` / `cdHit` with reason
+    ## `outputs-present` or `no-declared-outputs` (see the `aclHit` /
+    ## `reusableInPlace` branch below). The fast scan used to call it
+    ## `asCacheHit` / `cdHit` with an EMPTY reason, which is the
+    ## scheduler's vocabulary for something else entirely: a record whose
+    ## outputs were MISSING and had to be materialized out of the CAS
+    ## (reason `restored`). Two different events wearing one label is
+    ## exactly what makes a status field unreadable.
+    if action.declaresNoOutputs(): "no-declared-outputs"
+    else: "outputs-present"
+
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
     # Backfill needs each full action-cache record so it can publish the
     # validated, materialized output. The regular scheduler already performs
@@ -5514,8 +5529,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         for action in buildGraph.actions:
           fastResult.results.add(ActionResult(
             id: action.id,
-            status: asCacheHit,
+            status: asUpToDate,
             cacheDecision: cdHit,
+            reason: fastNoopReuseReason(action),
             dependencyPolicyKind: action.dependencyPolicy.kind))
         finishStat("repro cache hit result materialize", resultMaterializeStart)
         finishMetadataCacheStats(metadataCache)
@@ -5571,8 +5587,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         else: hotRecords[i]
       fastResult.results.add(ActionResult(
         id: action.id,
-        status: asCacheHit,
+        status: asUpToDate,
         cacheDecision: cdHit,
+        reason: fastNoopReuseReason(action),
         dependencyPolicyKind: action.dependencyPolicy.kind,
         evidence: cacheHitEvidence(action, record)))
     finishStat("repro cache hit result materialize", resultMaterializeStart)
