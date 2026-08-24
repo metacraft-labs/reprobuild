@@ -298,6 +298,12 @@ suite "M9.R.13a provider-compile cache sharing":
     ## Provider compile is already one build-engine action; the Nim command
     ## itself must not spawn a parallel host-C compile wave inside that edge.
     let scratch = getTempDir() / "repro-provider-compile-serial"
+    let prior = getEnv(ProviderParallelBuildEnv)
+    let priorWasSet = existsEnv(ProviderParallelBuildEnv)
+    delEnv(ProviderParallelBuildEnv)
+    defer:
+      if priorWasSet: putEnv(ProviderParallelBuildEnv, prior)
+      else: delEnv(ProviderParallelBuildEnv)
     let command = providerCompileCommand(
       modulePath = scratch / "repro.nim",
       outputBinaryPath = scratch / "out" / "provider",
@@ -307,6 +313,30 @@ suite "M9.R.13a provider-compile cache sharing":
     if not hasParallelLimit:
       checkpoint("command: " & command.join(" "))
     check hasParallelLimit
+
+  test "provider compile parallelism has a bounded opt-in override":
+    let scratch = getTempDir() / "repro-provider-compile-parallel"
+    let prior = getEnv(ProviderParallelBuildEnv)
+    let priorWasSet = existsEnv(ProviderParallelBuildEnv)
+    defer:
+      if priorWasSet: putEnv(ProviderParallelBuildEnv, prior)
+      else: delEnv(ProviderParallelBuildEnv)
+
+    putEnv(ProviderParallelBuildEnv, "8")
+    let command = providerCompileCommand(
+      modulePath = scratch / "repro.nim",
+      outputBinaryPath = scratch / "out" / "provider",
+      workDir = scratch,
+      scratchDir = scratch / "scratch")
+    check command.anyIt(it == "--parallelBuild:8")
+
+    putEnv(ProviderParallelBuildEnv, "0")
+    expect ValueError:
+      discard providerCompileCommand(
+        modulePath = scratch / "repro.nim",
+        outputBinaryPath = scratch / "out" / "provider",
+        workDir = scratch,
+        scratchDir = scratch / "scratch")
 
   test "concurrent provider commands serialize a shared nimcache":
     let scratch = getTempDir() /

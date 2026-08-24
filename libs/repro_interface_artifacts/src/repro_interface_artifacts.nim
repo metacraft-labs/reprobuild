@@ -4192,7 +4192,10 @@ proc providerNimcacheKey(outputBinaryPath: string): string =
   ## Retained for opt-in isolation via `REPRO_PROVIDER_NIMCACHE_MODE=per-binary`.
   fnvHex64([absolutePath(outputBinaryPath)])
 
-const ProviderNimcacheSessionEnv* = "REPRO_PROVIDER_NIMCACHE_SESSION"
+const
+  ProviderNimcacheSessionEnv* = "REPRO_PROVIDER_NIMCACHE_SESSION"
+  ProviderParallelBuildEnv* = "REPRO_PROVIDER_PARALLEL_BUILD"
+  ProviderParallelBuildMax* = 64
   ## Environment variable carrying the per-`repro`-invocation nimcache
   ## session token. The root `repro` process seeds this env var to its
   ## own pid (see `ensureProviderNimcacheSession`) and every child
@@ -4283,6 +4286,21 @@ proc sharedProviderNimcacheKey*(workDir: string;
 proc providerNimcacheMode(): string =
   let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
   if mode.len == 0: "shared" else: mode.toLowerAscii()
+
+proc providerParallelBuildCount(): int =
+  let raw = getEnv(ProviderParallelBuildEnv).strip()
+  if raw.len == 0:
+    return 1
+  try:
+    result = parseInt(raw)
+  except ValueError:
+    raise newException(ValueError,
+      ProviderParallelBuildEnv & " must be an integer between 1 and " &
+      $ProviderParallelBuildMax & "; got: " & raw)
+  if result < 1 or result > ProviderParallelBuildMax:
+    raise newException(ValueError,
+      ProviderParallelBuildEnv & " must be between 1 and " &
+      $ProviderParallelBuildMax & "; got: " & raw)
 
 type ReproFileLock* = object
   held: bool
@@ -5156,10 +5174,10 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   result = @[
     nimCompilerPath(), "c",
     # Provider compiles are often nested inside latency-sensitive graph
-    # construction paths. Keep Nim's C backend serial so one provider edge
-    # cannot fan out into a burst of host C compiler jobs; this also avoids
-    # observed GCC 15 vregs ICEs during concurrent generated-C compilation.
-    "--parallelBuild:1",
+    # construction paths. The default stays serial to avoid observed GCC 15
+    # vregs ICEs and unbounded nested compiler bursts. Hosts with a validated
+    # toolchain can opt into bounded concurrency through the environment.
+    "--parallelBuild:" & $providerParallelBuildCount(),
     "--define:reproProviderMode",
     "--path:" & parentDir(modulePath),
     "--nimcache:" & nimcache,
