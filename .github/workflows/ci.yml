@@ -5,22 +5,23 @@ on:
     branches: [main, dev]
   pull_request:
 
-# Superseding is right for a pull request and wrong for a branch.
+# This workflow supersedes its own older runs, on branches as well as pull
+# requests, and that is deliberate rather than merely inherited.
 #
-# A PR is judged at its tip: pushing a fixup makes the previous run's verdict
-# irrelevant, so cancelling it costs nothing and keeps the queue short.
+# It would be nice for every commit on `dev` to get its own verdict from these
+# jobs. It is not affordable: they run on a small, permanently saturated
+# self-hosted pool, and `dev` takes pushes faster than the pool drains. Letting
+# branch runs accumulate does not buy more verdicts -- it buys a backlog that
+# delays the pull-request checks people are actually waiting on, while the
+# branch verdicts arrive hours late against a commit several pushes old.
 #
-# A branch is not. Every commit that lands on `main` or `dev` is permanent and
-# has to be judged on its own -- if it broke something, the branch is broken
-# from that commit onward whether or not a later push exists. Grouping branch
-# pushes together made a rapid series of pushes cancel each other, so the
-# checks below (the suite case-count baseline first among them) never ran to a
-# verdict on the very commits that introduced the drift they exist to catch.
-# Branch pushes therefore get a group of their own, keyed by commit, and are
-# never cancelled.
+# The gate that must not be skipped therefore does not live here. The suite
+# case-count baseline runs in `suite-case-counts.yml`, on a hosted runner, in
+# seconds, with no cancellation -- so it reaches a verdict on every commit
+# without competing for this pool. See that workflow for the reasoning.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 # CI replays the project's deterministic dev environment via the
 # shared `metacraft-github-actions` composite actions. Per the
@@ -112,8 +113,9 @@ jobs:
       # scan that answers in seconds -- so it is asked first, and the
       # failure annotation names this step rather than a lint log.
       #
-      # The pre-push hook (flake.nix `pre-commit-check`) is the first line
-      # of defence; this is the one that cannot be bypassed.
+      # This copy is a convenience, not the gate: it shares this job's fate,
+      # and this workflow supersedes its own branch runs. The gate that
+      # always reaches a verdict is `suite-case-counts.yml`.
       - name: Suite case-count baseline
         run: dev-exec bash scripts/check_suite_case_counts.sh
       - name: just lint
