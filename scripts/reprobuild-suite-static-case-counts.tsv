@@ -1282,7 +1282,7 @@ tests/unit/t_m9r10a_cycle_break.nim	nim	7
 tests/unit/t_m9r10a_exec_name_audit.nim	nim	5
 tests/unit/t_m9r10b_synthesis_wiring.nim	nim	8
 tests/unit/t_m9r11_runquota_daemon_recovery.nim	nim	11
-tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	7
+tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	9
 tests/unit/t_m9r12_3_runquota_standard_pools.nim	nim	5
 tests/unit/t_m9r12_4_autotools_emits_fetch.nim	nim	3
 tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim	nim	15
