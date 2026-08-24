@@ -223,6 +223,22 @@ type
     argv*: seq[string]
     cwd*: string
     env*: seq[string]
+    envPassthrough*: seq[string]
+      ## Names of environment variables whose VALUE is the host's, not
+      ## Reprobuild's. BuildXL's `passThroughEnvironmentVariables`, with
+      ## BuildXL's semantics: the NAME is part of what the action is (it
+      ## records "this action reads the host's `PATH`") and enters the
+      ## weak fingerprint; the VALUE never does — including when `env`
+      ## above carries a declared value for the same name, which is
+      ## BuildXL's passthrough-with-value case (the process is launched
+      ## with that value, the fingerprint does not see it).
+      ##
+      ## This exists because keying on the environment BY VALUE is not
+      ## the fix for an unkeyed environment, it is a different defect.
+      ## An action's `PATH` is resolved tool directories prepended to
+      ## the host's; under `nix develop` that is not what it is in CI.
+      ## A key that read it would invalidate every edge of every graph
+      ## on any host difference.
     pool*: string
     poolUnits*: uint32
     cpuMilli*: uint32
@@ -1211,6 +1227,134 @@ proc keyedOnGoverningLock*(fingerprint: ContentDigest;
   framed.add($lock.len & "\x1f" & lock & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc actionEnvironmentKeyText*(env: openArray[string];
+                               envPassthrough: openArray[string]): string =
+  ## The canonical rendering of an action's ENVIRONMENT DECLARATION, in
+  ## BuildXL's two classes.
+  ##
+  ## `Public/Src/Pips/Dll/Graph/PipFingerprinter.cs:360-375` is the whole
+  ## of BuildXL's environment fingerprinting, and it is a two-branch
+  ## order-independent collection over `Process.EnvironmentVariables`:
+  ##
+  ## ```csharp
+  ## if (env.IsPassThrough)
+  ##     fCollection.Add(env.Name.ToString(...), "Pass-through");
+  ## else
+  ##     AddPipData(fCollection, env.Name.ToString(...), env.Value);
+  ## ```
+  ##
+  ## so — declared contributes name AND value, passthrough contributes
+  ## name and a fixed marker. `Documentation/Wiki/Advanced-Features/
+  ## Build-Parameters-(Environment-variables).md:30-39` states the
+  ## consequence: for a passthrough variable "value is not tracked;
+  ## addition or removal is considered for caching", and that holds
+  ## "when the value of passthrough variables is explicitly set in
+  ## DScript to something other than what is in bxl.exe's environment.
+  ## The effect is the same in that the value will not be tracked."
+  ## `BaselineTests.cs:1696-1741` (`PerVariablePassThroughIsHonored`) is
+  ## the executable proof: same declared value, cache HIT iff passthrough.
+  ##
+  ## ## Where this rendering DIVERGES from BuildXL, deliberately
+  ##
+  ## BuildXL puts the literal string `"Pass-through"` in the value slot,
+  ## with no separate type tag. A DECLARED variable whose value happens
+  ## to render to exactly `Pass-through` therefore produces a
+  ## byte-identical contribution to a PASSTHROUGH variable of the same
+  ## name — two different actions, one key. That is a latent
+  ## serve-a-stale-artifact hole, and there is no reason to inherit it.
+  ## Here the class is its own framed field, so no value can impersonate
+  ## a class.
+  ##
+  ## BuildXL also gets order-independence by XOR-ing per-element hashes
+  ## and appends the element count to keep the function injective. A
+  ## sorted, length-framed rendering gets both properties directly and
+  ## stays readable, which matters because this text is what an operator
+  ## diffs when two hosts disagree about a key.
+  ##
+  ## ## Canonicalisation
+  ##
+  ## Duplicate declarations resolve LAST-WRITE-WINS, because that is what
+  ## the spawn-time overlay does (`prependPathDirsToArgvEnv` documents
+  ## the same rule: "Last-write-wins matches the StringTableRef merge").
+  ## A key that disagreed with the spawn would be keying on an
+  ## environment the action never experiences.
+  ##
+  ## Entries with no `=` or an empty name carry no environment and are
+  ## dropped; they cannot become part of a key by accident.
+  ##
+  ## ## This procedure reads NOTHING ambient, and that is load-bearing
+  ##
+  ## It is a pure function of its arguments. PR #96's `NIX_STORE_DIR`
+  ## defect was a transient ambient value entering a cache record
+  ## permanently because a key computation called `getEnv`. No `getEnv`
+  ## may appear here or in `keyedOnActionEnvironment` below; a test
+  ## asserts on the source text of both to keep it that way.
+  const US = "\x1f"
+  const RS = "\x1e"
+  var declared = initOrderedTable[string, string]()
+  for entry in env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    declared[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+  var passthrough = initHashSet[string]()
+  for name in envPassthrough:
+    if name.len > 0:
+      passthrough.incl(name)
+  var names: seq[string] = @[]
+  for name in declared.keys:
+    names.add(name)
+  for name in passthrough:
+    if not declared.hasKey(name):
+      names.add(name)
+  names.sort()
+  var records: seq[string] = @[]
+  for name in names:
+    if passthrough.contains(name):
+      # The declared value, if any, is deliberately NOT rendered.
+      records.add($name.len & US & name & US & "passthrough" & US & "0" & US)
+    else:
+      let value = declared[name]
+      records.add($name.len & US & name & US & "declared" & US &
+        $value.len & US & value)
+  result = records.join(RS)
+
+proc keyedOnActionEnvironment*(fingerprint: ContentDigest;
+                               env: openArray[string];
+                               envPassthrough: openArray[string]):
+    ContentDigest =
+  ## Mix an action's environment DECLARATION into its weak fingerprint.
+  ##
+  ## Applied in `action()` for the same reason `keyedOnGoverningLock` is
+  ## — "by a structural check, not by care". Every `weakFingerprint =`
+  ## argument in the tree is a caller who computed a fingerprint over
+  ## what its edge DOES, and none of them knows that the engine will
+  ## hand the process an environment. A call site that had to remember
+  ## to mix the environment in is a call site that will eventually
+  ## forget, and forgetting is silent: it serves one environment's
+  ## result to another and reports success.
+  ##
+  ## ## The empty declaration is the IDENTITY, and that is required
+  ##
+  ## An edge that declares no environment and no passthrough must
+  ## fingerprint to exactly what it fingerprinted before this existed.
+  ## Otherwise landing this invalidates every action-cache record ever
+  ## written — a correctness fix that ships as a total cache wipe. The
+  ## early return is the property; a test pins it.
+  if env.len == 0 and envPassthrough.len == 0:
+    return fingerprint
+  let text = actionEnvironmentKeyText(env, envPassthrough)
+  if text.len == 0:
+    return fingerprint
+  # Length-framed two-field mix, same shape and rationale as
+  # `keyedOnGoverningLock`: no two distinct (fingerprint, environment)
+  # pairs may collide by concatenation ambiguity.
+  var framed = "action-environment\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  framed.add($text.len & "\x1f" & text & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc weakFingerprintFor*(id: string;
                          governingLockIdentity: LockIdentity): ContentDigest =
   ## The fingerprint `action()` / `builtinAction()` would compute for an edge
@@ -1250,6 +1394,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              dynamicDepsFile = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
              env: openArray[string] = [];
+             envPassthrough: openArray[string] = [];
              requiresElevation = false;
              governingLockIdentity: LockIdentity): BuildAction =
   ## Named-Lock-Files §7.2: `governingLockIdentity` has NO DEFAULT, and that
@@ -1273,13 +1418,20 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     argv: @argv,
     cwd: cwd,
     env: @env,
+    envPassthrough: @envPassthrough,
     pool: pool,
     poolUnits: poolUnits,
     cpuMilli: cpuMilli,
     memoryBytes: memoryBytes,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
-    weakFingerprint: keyedOnGoverningLock(weakFingerprint,
+    # The environment mix is INSIDE the lock mix, so the two compose in
+    # one fixed order for every edge in the tree. An edge that declares
+    # no environment is unaffected — `keyedOnActionEnvironment` is the
+    # identity on the empty declaration — so this does not move any
+    # fingerprint that existed before it.
+    weakFingerprint: keyedOnGoverningLock(
+      keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
       governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     depfile: depfile,
@@ -4149,6 +4301,45 @@ proc launchChildEnv(action: BuildAction;
   # those are for local A/B diagnosis, not something the engine seeds.)
   for entry in action.env:
     result.add(entry)
+  # BuildXL `PipEnvironment.GetEffectiveEnvironmentVariables`
+  # (`Public/Src/Engine/ProcessPipExecutor/PipEnvironment.cs:116-152`)
+  # resolves every passthrough variable that carries NO declared value
+  # by NAME out of the build engine's own process environment, and
+  # silently drops the ones the host does not have. That is what this
+  # does, and it is the half of the passthrough contract that lives at
+  # LAUNCH time rather than at key time:
+  #
+  #   * the NAME was recorded in the weak fingerprint by
+  #     `keyedOnActionEnvironment` when the graph was built;
+  #   * the VALUE is read HERE, from the host, per launch.
+  #
+  # A variable the action already declares is left alone — the declared
+  # value wins, exactly as in BuildXL's layering, where declared values
+  # are overridden onto the base set before the by-name passthrough
+  # resolution runs and only value-less passthroughs reach it.
+  #
+  # Today this is very nearly a no-op: the RunQuota launcher layers
+  # these entries OVER the inherited environment, so an undeclared
+  # passthrough already reaches the child by plain inheritance. It is
+  # written explicitly anyway because inheritance is the channel
+  # Reprobuild does not control and does not record, and when that
+  # channel is closed this is the mechanism that keeps a declared
+  # passthrough working.
+  if action.envPassthrough.len > 0:
+    var declaredNames = initHashSet[string]()
+    for entry in action.env:
+      let eq = entry.find('=')
+      if eq > 0:
+        declaredNames.incl(entry[0 ..< eq])
+    var emitted = initHashSet[string]()
+    for name in action.envPassthrough:
+      if name.len == 0 or declaredNames.contains(name) or
+          emitted.contains(name):
+        continue
+      emitted.incl(name)
+      if not existsEnv(name):
+        continue
+      result.add(name & "=" & getEnv(name))
 
 proc bypassActionLogDir(cacheRoot: string): string =
   ## **M1 milestone** (Windows-bypass-stdio-capture). Per-action log

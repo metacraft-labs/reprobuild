@@ -318,6 +318,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim",
+    binary: "build/test-bin/t_declared_env_is_in_the_cache_key",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
     binary: "build/test-bin/t_engine_action_create_dyndep",
     defines: @[],
