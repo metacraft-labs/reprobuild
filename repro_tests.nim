@@ -9174,6 +9174,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_shm_oversized_submit_is_reported.nim",
+    binary: "build/test-bin/t_shm_oversized_submit_is_reported",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_single_platform_entries_declare_platforms.nim",
     binary: "build/test-bin/t_single_platform_entries_declare_platforms",
     defines: @[],

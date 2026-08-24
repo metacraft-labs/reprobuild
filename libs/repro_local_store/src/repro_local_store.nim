@@ -160,6 +160,17 @@ type
     enabled*: bool
     idx*: ShmIndex
     readerSlot*: int
+    oversizedSubmits*: int
+      ## How many records this process declined to submit because their
+      ## ENCODED form exceeded the inline slot cap. Not a curiosity: a
+      ## build whose records are all over the cap bypasses the shm tier
+      ## 100% of the time and, from outside, looks IDENTICAL to a healthy
+      ## one — the ring stays empty, no daemon is ever asked to publish,
+      ## and every lookup quietly falls through to Tier-1 disk.
+    oversizedReported*: bool
+      ## The first drop prints; the rest only count. One line per process
+      ## per cache root says the tier is being bypassed without turning a
+      ## large build's stderr into a wall of identical warnings.
 
   ActionCache* = object
     root*: string
@@ -2261,6 +2272,48 @@ proc ensureCacheDaemon*(root: string; idx: ShmIndex;
     afterLeaseReserved: CacheDaemonLaunchHook = nil;
     afterAuthorizationBeforeSpawn: CacheDaemonLaunchHook = nil): bool
 
+proc noteOversizedShmSubmit(cache: ActionCache; encodedBytes: int) =
+  ## SIGNAL a record the shared-memory tier will not carry.
+  ##
+  ## Before this existed the drop was completely silent, and the drop is
+  ## not rare: the encoded record is dominated by ABSOLUTE PATH strings,
+  ## so whether the shm tier engages at all is a function of how long the
+  ## checkout / temp path happens to be. Measured on a one-edge graph:
+  ## a 19-character root encodes to 173 B and is carried; a 104-character
+  ## root encodes to 258 B and is not. That is roughly one byte per
+  ## character of root, with the cliff around 102 characters.
+  ##
+  ## The consequence of silence is not a wrong build — Tier-1 disk stays
+  ## authoritative and the decision is unchanged — but an unfalsifiable
+  ## one: a developer in a deep checkout gets no live cross-build sharing
+  ## and no way to discover it, and two engineers on the same branch can
+  ## get different cache behaviour with nothing to point at. That has
+  ## already happened here.
+  ##
+  ## Printed once per process per cache root; the rest are counted in
+  ## `ShmTier.oversizedSubmits`.
+  if cache.shm == nil: return
+  inc cache.shm.oversizedSubmits
+  if cache.shm.oversizedReported: return
+  cache.shm.oversizedReported = true
+  when shmIndexSupported:
+    stderr.writeLine("repro: warning: shared-memory cache tier: record not " &
+      "submitted, encoded " & $encodedBytes & " B exceeds the " &
+      $SlotInlineCap & " B inline slot cap. This edge is served from the " &
+      "on-disk cache tier only; live cross-build sharing is off for it. " &
+      "Encoded size is dominated by absolute paths, so a deeper checkout " &
+      "drops more records -- cache root " & cache.root & " is " &
+      $cache.root.len & " characters. Further drops in this process are " &
+      "counted, not printed.")
+    stderr.flushFile()
+
+proc shmOversizedSubmits*(cache: ActionCache): int =
+  ## How many records this process declined to hand to the shared-memory
+  ## tier because they did not fit an inline slot. Zero on a cache with no
+  ## shm tier attached — which is not the same statement, and callers that
+  ## care should check `cache.shm` too.
+  if cache.shm == nil: 0 else: cache.shm.oversizedSubmits
+
 proc submitToShm(cache: ActionCache; record: ActionResultRecord) =
   ## AC-2c engine WRITE path (§4.4): submit `record`'s METADATA-ONLY encoding to
   ## the MPSC ring so the single-writer daemon publishes it to the shared table
@@ -2275,9 +2328,14 @@ proc submitToShm(cache: ActionCache; record: ActionResultRecord) =
   ## daemon's Tier-1 persist round-trips byte-identically (never downgrading the
   ## durable record) and (b) a shm-served read reconstructs the SAME record the
   ## disk read would — the decision is unchanged. Records whose full encoding
-  ## exceeds the inline slot cap are simply not shm-cached (Tier-1-only).
+  ## exceeds the inline slot cap are not shm-cached (Tier-1-only) — and that
+  ## rejection is REPORTED, see `noteOversizedShmSubmit`.
   if cache.shm == nil or not cache.shm.enabled: return
   let enc = encodeActionResultRecord(record)
+  when shmIndexSupported:
+    if enc.len > SlotInlineCap:
+      cache.noteOversizedShmSubmit(enc.len)
+      return
   let submitted = cache.shm.idx.submitRecord(record.weakFingerprint.bytes, enc)
   # The daemon self-reaps or may hard-crash while this handle remains live.
   # Every successful append increments a shared work generation. Exactly one

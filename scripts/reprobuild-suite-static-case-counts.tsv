@@ -1153,6 +1153,7 @@ tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim	nim	1
 tests/integration/t_shm_index_boot_id_unavailable_fails_closed.nim	nim	1
 tests/integration/t_shm_index_mpsc_ring_multiproducer_single_consumer.nim	nim	3
 tests/integration/t_shm_index_seqlock_reads_consistent_across_resize.nim	nim	1
+tests/integration/t_shm_oversized_submit_is_reported.nim	nim	1
 tests/integration/t_single_platform_entries_declare_platforms.nim	nim	7
 tests/integration/t_solved_packages_are_first_class_locked_deps.nim	nim	1
 tests/integration/t_spec_example_fixtures_compile.nim	nim	2
