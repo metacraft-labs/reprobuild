@@ -43,15 +43,29 @@ import repro_cli_support/infra_install_root
 # ---------------------------------------------------------------------------
 
 proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
-    tuple[text: string; cached: bool; compileError: string;
+    tuple[compiled: bool; text: string; cached: bool; compileError: string;
           buildActions: seq[ProfileBuildAction]] =
   ## Run the Phase C build-engine edge against `profilePath`, decode
   ## the RBPI artifact, and render the adapted `SystemProfile` back
   ## into the canonical declarative text the M69 lib's APIs consume.
   ##
+  ## `result.compiled` is the ONLY success signal, and it is set at
+  ## exactly one place: after the decode + render completed without
+  ## raising. Callers must branch on it.
+  ##
+  ## It is deliberately NOT inferable from `result.text`. A profile
+  ## that compiles CLEANLY and declares no live-state resources — one
+  ## whose `resources:` block holds only action edges
+  ## (`inlineExecCall(...)`, `expandArchive.build(...)`) — renders to
+  ## the EMPTY canonical text, because `renderSystemProfileToText`
+  ## emits one block per resource and there are none. That is a
+  ## legitimate desired state ("this host declares no live state; its
+  ## work is the build-action half"), not a failure, and the apply
+  ## path parses "" as zero resources and converges.
+  ##
   ## On success: `result.text` is the canonical text and the caller
   ## passes it down to `runInfraApply(text, opts)`. On compile
-  ## failure: `result.text` is empty and `result.compileError`
+  ## failure: `result.compiled` is false and `result.compileError`
   ## carries the diagnostic; apply-path callers propagate as a hard
   ## error via `formatProfileCompileError`.
   ##
@@ -76,6 +90,7 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
     let sp = profileIntentToSystemProfile(intent)
     result.text = renderSystemProfileToText(sp)
     result.buildActions = intent.buildActions
+    result.compiled = true
   except ProfileCompileError as err:
     result.compileError = err.msg
   except CatchableError as err:
@@ -104,15 +119,31 @@ proc resolveSystemProfileText*(profilePath: string;
   ## can populate ``ApplyOptions.buildActions``. Callers that do not
   ## drive an apply (e.g. ``repro infra plan``) leave the pointer nil
   ## and the seq is discarded.
+  ##
+  ## SUCCESS IS `outcome.compiled`, NOT `outcome.text.len > 0`. Keying
+  ## on the rendered text failed a profile that compiled cleanly but
+  ## rendered no live-state resources — a `resources:` block holding
+  ## only action edges renders to "" — and reported it as
+  ## "profile compilation failed" with an EMPTY diagnostic, because
+  ## there was no error to quote. Two things were wrong at once: a
+  ## valid profile was refused, and the refusal named no cause. Both
+  ## come from inferring failure from absent output instead of from an
+  ## actual error.
   discard originalText  # retained for caller compatibility; see docstring
   let outcome = compileAndAdaptSystemProfile(profilePath, stateDir)
-  if outcome.text.len > 0:
+  if outcome.compiled:
     outText = outcome.text
     if outBuildActions != nil:
       outBuildActions[] = outcome.buildActions
     return true
+  # A compile failure with nothing to say is still a compile failure,
+  # but the operator must not be handed a diagnostic-shaped blank. Say
+  # so explicitly rather than printing an empty `diagnostic:` block.
+  let diagnostic =
+    if outcome.compileError.strip().len > 0: outcome.compileError
+    else: "the profile compile failed without reporting a diagnostic"
   stderr.writeLine(cli_home.formatProfileCompileError(
-    commandName, profilePath, outcome.compileError,
+    commandName, profilePath, diagnostic,
     planCommand = planCommand))
   false
 

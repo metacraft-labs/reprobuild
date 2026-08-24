@@ -558,6 +558,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim",
+    binary: "build/test-bin/t_infra_apply_profile_without_live_state",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim",
     binary: "build/test-bin/t_lock_binding_governs_per_name",
     defines: @[],
@@ -8526,14 +8534,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim",
-    binary: "build/test-bin/t_pre_push_writes_the_lock_record_it_demands",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
     source: "tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim",
     binary: "build/test-bin/t_pre_push_refuses_on_unreachable_team_backend",
     defines: @[],
@@ -8560,6 +8560,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.nim",
     binary: "build/test-bin/t_pre_push_warns_and_allows_on_unreachable_personal_backend",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim",
+    binary: "build/test-bin/t_pre_push_writes_the_lock_record_it_demands",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
