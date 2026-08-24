@@ -294,3 +294,111 @@ suite "M5 — deploy agent converges from a signed manifest":
       check readFile(cwd2 / OutRel) == Expected
       # THE M4-hardening ASSERTION: the output was served from the cache.
       check "substituted-from-cache 1" in a2.message
+
+  test "a blank profileText never reaches the profile resolver":
+    # Production injects a resolver that stages `profileText` as a `.nim` and
+    # drives a real Nim compile. A manifest that carries only build actions
+    # has a BLANK `profileText` — the shape both cases above use, and the
+    # shape the renderer emits whenever its optional `--profile` is unset.
+    #
+    # Sending that to the compiler stages an empty module, which compiles,
+    # links, runs and prints nothing; the profile compiler then fails the
+    # tick with "failed to encode RBPI envelope from compiled profile
+    # output: input(1, 0) Error: { expected" — an empty-input JSON parse
+    # error wearing the costume of a toolchain fault. It cost the
+    # nixos-modules HTTPS deploy-agent gate five weeks of red.
+    #
+    # So this asserts the negative directly: with a resolver injected that
+    # FAILS if it is ever called, a blank-profile manifest still converges.
+    # A resolver that merely tolerated empty input would not catch a
+    # regression here; refusing to run at all is what is being specified.
+    when not (defined(linux) or defined(macosx)):
+      skip()
+    else:
+      let tmpRoot = createTempDir("m5-blank-profile-", "")
+      defer:
+        try: removeDir(tmpRoot) except CatchableError: discard
+
+      let signer = peerAuth.generateKeypair()
+      let anchors = anchorsFromKeypairs(@[signer.publicKey])
+
+      let agentStateDir = tmpRoot / "agent-state"
+      let applyStateDir = tmpRoot / "apply-state"
+      let cacheRoot = tmpRoot / "apply-cache"
+      let applyCwd = tmpRoot / "target"
+      for d in [agentStateDir, applyStateDir, cacheRoot, applyCwd]:
+        createDir(d)
+
+      var resolverCalls = 0
+      let tripwire: ProfileResolver = proc(profileText: string;
+                                           outText: var string;
+                                           outBuildActions: var seq[ProfileBuildAction]):
+                                        bool {.gcsafe.} =
+        {.cast(gcsafe).}:
+          resolverCalls.inc
+          false
+
+      let manifestPath = tmpRoot / "manifests" / "latest.rdm"
+      let cfg = AgentConfig(
+        target: Target,
+        sources: @[manifestPath],
+        anchors: anchors,
+        stateDir: agentStateDir,
+        fetchTimeoutMs: 5000)
+      let deps = AgentDeps(
+        apply: mkRunInfraApplyHook(applyStateDir, cacheRoot,
+          hostIdentity = "m5-blank-profile-host", reproExe = "/usr/bin/false",
+          profileResolver = tripwire))
+
+      # Whitespace, not "" — a renderer that terminates an absent profile
+      # with a newline must be read the same way as one that emits nothing.
+      let outRel = "bin/blank-profile.txt"
+      let payload = "converged-without-a-profile"
+      var m = DeployManifest(
+        target: Target,
+        sequence: 1'u64,
+        deploymentId: "blank-profile-1",
+        profileText: "\n  \n",
+        buildActions: @[shellWriteAction(
+          "m5-blank-profile", applyCwd, outRel, payload)])
+      signManifest(signer, m)
+      writeManifestFile(manifestPath, m)
+
+      let r = runAgentTick(cfg, deps)
+      check resolverCalls == 0
+      check r.kind == aoApplied
+      check r.sequence == 1'u64
+      # Converged for real: the build action's effect is on disk.
+      check fileExists(applyCwd / outRel)
+      check readFile(applyCwd / outRel) == payload
+      check readLastAppliedSequence(cfg) == 1'u64
+
+      # And the resolver is still reached — and still fatal — when there IS
+      # a profile to compile, so the short-circuit above cannot be mistaken
+      # for "resolvers are optional now".
+      let agentStateDir2 = tmpRoot / "agent-state-2"
+      let applyStateDir2 = tmpRoot / "apply-state-2"
+      let cacheRoot2 = tmpRoot / "apply-cache-2"
+      for d in [agentStateDir2, applyStateDir2, cacheRoot2]: createDir(d)
+      let manifestPath2 = tmpRoot / "manifests" / "with-profile.rdm"
+      var m2 = DeployManifest(
+        target: Target,
+        sequence: 1'u64,
+        deploymentId: "with-profile-1",
+        profileText: "import repro_profile\n",
+        buildActions: @[])
+      signManifest(signer, m2)
+      writeManifestFile(manifestPath2, m2)
+      let cfg2b = AgentConfig(
+        target: Target,
+        sources: @[manifestPath2],
+        anchors: anchors,
+        stateDir: agentStateDir2,
+        fetchTimeoutMs: 5000)
+      let deps2b = AgentDeps(
+        apply: mkRunInfraApplyHook(applyStateDir2, cacheRoot2,
+          hostIdentity = "m5-blank-profile-host", reproExe = "/usr/bin/false",
+          profileResolver = tripwire))
+      let r2 = runAgentTick(cfg2b, deps2b)
+      check resolverCalls == 1
+      check r2.kind == aoApplyFailed

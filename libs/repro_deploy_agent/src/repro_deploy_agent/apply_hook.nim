@@ -11,7 +11,7 @@
 ## import only ``agent`` + a lightweight recording hook, while the
 ## production path imports THIS.
 
-import std/os
+import std/[os, strutils]
 
 import repro_elevation
 import repro_infra
@@ -81,9 +81,31 @@ proc mkRunInfraApplyHook*(stateDir: string;
 
         # Compile the manifest's profile the way the CLI does, when a resolver
         # was injected. `resolvedActions` is only consulted below.
+        #
+        # A BLANK `profileText` is NOT a profile, and must not reach the
+        # compiler. It is the ordinary shape of a manifest that carries only
+        # build actions (or nothing at all) — every hermetic gate in this
+        # library uses it, and so does the renderer whose `--profile` is
+        # optional. Handing it to the resolver stages an empty `.nim`, which
+        # compiles and links perfectly happily, runs, and prints nothing;
+        # the profile compiler then meets an empty string where it expects a
+        # JSON object and fails the whole tick with
+        #
+        #   failed to encode RBPI envelope from compiled profile output:
+        #   input(1, 0) Error: { expected
+        #
+        # — a message that names neither the manifest nor the emptiness, and
+        # so reads like a compiler or toolchain fault. Observed as a hard
+        # convergence failure in the nixos-modules HTTPS deploy-agent gate
+        # from 2026-08-18 (when this hook began resolving unconditionally)
+        # onward; before that the empty text flowed through as canonical
+        # resource text and correctly described zero resources.
+        #
+        # Zero resources is exactly what it still means, so say so directly
+        # instead of asking a compiler to rediscover it.
         var applyText = m.profileText
         var resolvedActions: seq[ProfileBuildAction] = @[]
-        if capturedResolver != nil:
+        if capturedResolver != nil and m.profileText.strip().len > 0:
           if not capturedResolver(m.profileText, applyText, resolvedActions):
             return (ok: false,
               message: "profile did not compile; see the diagnostic above")
