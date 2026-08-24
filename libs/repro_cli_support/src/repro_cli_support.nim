@@ -1200,20 +1200,131 @@ proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata;
   payload.addCmakeFingerprintField(meta.providerStateFile)
   weakFingerprintFromText(payload)
 
+const ActionPathPassthrough = ["PATH"]
+  ## The environment variables an action's `PATH` composition takes from
+  ## the HOST. Declared beside `actionPathEntry` below, and used by every
+  ## lowering site that calls it, so the two can never drift apart: a
+  ## site that composes a host value without saying so is exactly the
+  ## defect this pair exists to prevent.
+  ##
+  ## ## THE CLASSIFICATION RULE
+  ##
+  ## An action's declared environment mixes two very different kinds of
+  ## value, and which class a variable belongs in is decided by WHERE
+  ## THE LOWERING GOT IT, not by what it looks like:
+  ##
+  ## * **Obtained by reading the ambient environment** (`getEnv`) or by
+  ##   probing the host filesystem — PASSTHROUGH. The value is a fact
+  ##   about this machine, it does not determine what the action
+  ##   computes, and pinning it would key every edge to one host.
+  ##   `PATH` and `REPROBUILD_SOURCE_ROOT` are the two.
+  ##
+  ## * **Obtained from the solved graph** — DECLARED, by value. These
+  ##   look host-absolute and are not: `DEP_NIM_ROOT`, `BEARSSL_SRC`,
+  ##   `OUT_MIRROR` and the rest of the `DEP_*_ROOT` / `*_SRC` family
+  ##   are `/nix/store` paths, but they are *package identities*. A
+  ##   different `DEP_NIM_ROOT` is a different compiler, and an action
+  ##   built against it really is a different action. Excluding them
+  ##   would be a stale-serve hole, not a portability win.
+  ##
+  ## Two consequences worth being explicit about, because they are the
+  ## first things a reader will suspect are oversights:
+  ##
+  ## 1. Those fifteen `/nix/store` values are in every key BY VALUE.
+  ##    That is deliberate under the rule above, and it is also NOT a
+  ##    change: they arrive through the DSL's `extraEnv`, which
+  ##    `encodeBuildActionPayload` has serialised since v14 and which
+  ##    every lowering site already folds into its fingerprint text via
+  ##    `node.payload`. Keying the environment admitted no new value to
+  ##    any key — every value now in a key was already in one.
+  ##
+  ## 2. It DOES make those keys non-portable across machines, which is
+  ##    the same complaint `repro_build_engine.nim`'s shim-library seed
+  ##    answers differently: it keeps the machine-specific
+  ##    `REPRO_MONITOR_SHIM_LIB` out of `action.env` entirely, injecting
+  ##    it at launch. That is consistent with the rule, not in conflict
+  ##    with it — the shim path is a host probe, not a solved-graph
+  ##    identity, so it is in the first class. Making the solved-graph
+  ##    values portable is content-addressing work, not a reason to
+  ##    reclassify them.
+  ##
+  ## ## Applied unconditionally, and what that costs
+  ##
+  ## Every lowering site that composes a `PATH` passes this whole list;
+  ## there is no per-variable opt-in and no way for a recipe to ask for
+  ## `PATH` to be keyed by value. The price is real and one-directional:
+  ## a recipe that overrides `PATH` explicitly through `extraEnv` gets
+  ## that override applied to the process (it is appended after the
+  ## prefix and wins) but NOT reflected in the key, so two recipes
+  ## differing only in an explicit `extraEnv` `PATH` share a cache
+  ## entry. This is most reachable on inline-exec edges, which carry no
+  ## `profile.profileFingerprint` to distinguish them by other means.
+  ## BuildXL has the same behaviour for the same reason — a passthrough
+  ## variable's value is untracked even when the build sets it — but
+  ## BuildXL lets a spec choose per variable and this does not.
+
+proc actionPathEntry(actionPathPrefix: string): string =
+  ## The action's `PATH`: the resolved tool directories this edge
+  ## declares, then whatever the host has.
+  ##
+  ## ## The `getEnv` here is deliberate, and it is not in a cache key
+  ##
+  ## Every caller pairs this with `envPassthrough =
+  ## ActionPathPassthrough`, which puts `PATH` in BuildXL's passthrough
+  ## class: `keyedOnActionEnvironment` records the NAME and refuses the
+  ## VALUE. So the host's `PATH` cannot reach a cache record, which is
+  ## the property that matters — PR #96's `NIX_STORE_DIR` defect was an
+  ## ambient value entering a record permanently because a key
+  ## computation read the environment.
+  ##
+  ## Keying on this value instead would be a much larger defect than the
+  ## one it appears to fix. The prefix is absolute store paths and the
+  ## tail is the host's `PATH`; neither is the same under `nix develop`
+  ## as in CI. Every edge of every graph would invalidate on any host
+  ## difference. BuildXL reaches the same conclusion twice over: `PATH`
+  ## is one of its untracked base variables
+  ## (`PipEnvironment.cs:88-110`), and a passthrough variable's value is
+  ## not fingerprinted even when the build declares it explicitly
+  ## (`Build-Parameters-(Environment-variables).md:39`).
+  ##
+  ## What this does NOT recover is the PREFIX's contribution: the
+  ## resolved tool directories are also excluded, because they are
+  ## host-absolute for the same reason. For typed-tool edges the tool
+  ## identity is already keyed through `profile.profileFingerprint`.
+  ## For inline-exec edges it is not yet, and making it so needs the
+  ## portable-key work, not a raw path in a key.
+  "PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")
+
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
   # CMake may invoke ``repro build --prepare-only`` while regenerating.
   # Keep that provider-priming call in the current process tree instead of
   # handing a transient CMake binary dir to a second daemon session.
   var env: seq[string] = @["REPRO_DAEMON=off"]
+  # The FOURTH lowering site, and the one that makes the rule worth
+  # stating as a rule: this edge composes its environment by hand, ~400
+  # lines away from the three that go through `lowerGraphAction`, and a
+  # sweep of "the lowering sites" missed it. Both values below are
+  # obtained by reading the ambient environment, so both are
+  # PASSTHROUGH — see `ActionPathPassthrough` for the classification
+  # rule and why keying them by value would be the very defect the
+  # passthrough class exists to prevent.
+  var envPassthrough: seq[string] = @[]
   if meta.providerRoot.len > 0:
     let wrapperPath = meta.values.metadataValue("wrapper_path",
       meta.providerRoot / "bin")
     if wrapperPath.len > 0:
-      env.add("PATH=" & wrapperPath & $PathSep & getEnv("PATH"))
+      env.add(actionPathEntry(wrapperPath))
+      envPassthrough.add("PATH")
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
+    # A machine-specific absolute path read straight from the host, and
+    # the exact shape `repro_build_engine.nim`'s shim-library seed
+    # refuses to put in `action.env` because it "would make the action
+    # ID non-reproducible across machines". Passthrough records that
+    # this edge reads it without pinning one machine's answer.
     env.add("REPROBUILD_SOURCE_ROOT=" & sourceRoot)
+    envPassthrough.add("REPROBUILD_SOURCE_ROOT")
   let depfilePath = cmakeRegenerationDepfile(meta)
   let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
   action("__repro_cmake_regenerate", @[
@@ -1235,7 +1346,8 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     weakFingerprint = cmakeRegenerationFingerprint(meta, publicCliPath),
     depfile = depfilePath,
     dependencyPolicy = requiredMakeDepfilePolicy(depfilePath),
-    env = env)
+    env = env,
+    envPassthrough = envPassthrough)
 
 proc prependProcessPath(path: string) =
   if path.len == 0:
@@ -1588,45 +1700,6 @@ proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
       if dir notin dirs:
         dirs.add(dir)
   dirs.join($PathSep)
-
-const ActionPathPassthrough = ["PATH"]
-  ## The environment variables an action's `PATH` composition takes from
-  ## the HOST. Declared beside `actionPathEntry` below, and used by every
-  ## lowering site that calls it, so the two can never drift apart: a
-  ## site that composes a host value without saying so is exactly the
-  ## defect this pair exists to prevent.
-
-proc actionPathEntry(actionPathPrefix: string): string =
-  ## The action's `PATH`: the resolved tool directories this edge
-  ## declares, then whatever the host has.
-  ##
-  ## ## The `getEnv` here is deliberate, and it is not in a cache key
-  ##
-  ## Every caller pairs this with `envPassthrough =
-  ## ActionPathPassthrough`, which puts `PATH` in BuildXL's passthrough
-  ## class: `keyedOnActionEnvironment` records the NAME and refuses the
-  ## VALUE. So the host's `PATH` cannot reach a cache record, which is
-  ## the property that matters — PR #96's `NIX_STORE_DIR` defect was an
-  ## ambient value entering a record permanently because a key
-  ## computation read the environment.
-  ##
-  ## Keying on this value instead would be a much larger defect than the
-  ## one it appears to fix. The prefix is absolute store paths and the
-  ## tail is the host's `PATH`; neither is the same under `nix develop`
-  ## as in CI. Every edge of every graph would invalidate on any host
-  ## difference. BuildXL reaches the same conclusion twice over: `PATH`
-  ## is one of its untracked base variables
-  ## (`PipEnvironment.cs:88-110`), and a passthrough variable's value is
-  ## not fingerprinted even when the build declares it explicitly
-  ## (`Build-Parameters-(Environment-variables).md:39`).
-  ##
-  ## What this does NOT recover is the PREFIX's contribution: the
-  ## resolved tool directories are also excluded, because they are
-  ## host-absolute for the same reason. For typed-tool edges the tool
-  ## identity is already keyed through `profile.profileFingerprint`.
-  ## For inline-exec edges it is not yet, and making it so needs the
-  ## portable-key work, not a raw path in a key.
-  "PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")
 
 proc argvForCall*(call: PublicCliCall;
                   profile: PathOnlyToolProfile): seq[string] =
@@ -3329,7 +3402,16 @@ proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
 
 const
   LoweredGraphCacheMagic = "RBLG"
-  LoweredGraphCacheVersion = 5'u16
+  # v6 — the lowered-graph cache learned `BuildAction.envPassthrough`.
+  # A v5 record cannot carry it, and a v5 record READ as v6 would come
+  # back with an empty passthrough set: every action's declared-vs-host
+  # classification silently lost on the warm path, which is exactly the
+  # defect the bump exists to make impossible. The weak fingerprint is
+  # stored explicitly so keys do not move, but `launchChildEnv`'s
+  # passthrough resolution and the stage-2 census both read this field,
+  # and a census that answers differently cold and warm is not a
+  # measurement.
+  LoweredGraphCacheVersion = 6'u16
   LoweredGraphAlgorithmVersion = "reprobuild.loweredGraph.v1"
 
 type
@@ -4049,6 +4131,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.argv)
   outp.writeString(action.cwd)
   outp.writeStringSeq(action.env)
+  outp.writeStringSeq(action.envPassthrough)
   outp.writeString(action.pool)
   outp.writeU32Le(action.poolUnits)
   outp.writeU32Le(action.cpuMilli)
@@ -4098,6 +4181,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.argv = readStringSeq(bytes, pos)
   result.cwd = readString(bytes, pos)
   result.env = readStringSeq(bytes, pos)
+  result.envPassthrough = readStringSeq(bytes, pos)
   result.pool = readString(bytes, pos)
   result.poolUnits = readU32Le(bytes, pos)
   result.cpuMilli = readU32Le(bytes, pos)
@@ -17653,6 +17737,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "argv": jsonStringSeq(action.argv),
     "cwd": action.cwd,
     "env": jsonStringSeq(action.env),
+    "envPassthrough": jsonStringSeq(action.envPassthrough),
     "pool": action.pool,
     "poolUnits": action.poolUnits,
     "cpuMilli": action.cpuMilli,

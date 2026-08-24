@@ -53,9 +53,11 @@
 ## 1. declared value changes            => the edge RE-RUNS.
 ## 2. passthrough value changes         => the edge does NOT re-run.
 ## 3. passthrough NAME set changes      => the edge RE-RUNS.
-## 4. empty env + empty passthrough     => the fingerprint is UNCHANGED.
+## 4. empty env + empty passthrough     => the fingerprint is UNCHANGED,
+##                                        and the classes that reach.
 ## 5. the key is order- and duplicate-canonical.
 ## 6. the host environment cannot reach the key.
+## 10. every site composing a host PATH declares it passthrough.
 ##
 ## (1) alone would pass against an engine that keys on the whole
 ## environment by value — the regression described above. (2) is what
@@ -63,13 +65,34 @@
 ## the environment entirely, which is the defect. (3) is what stops (2)
 ## from being vacuous: the passthrough DECLARATION is still keyed, so
 ## "this action reads the host's FOO" is a different action from one that
-## does not. (4) is what keeps every cache record written before this
-## change valid — an edge that declares no environment must fingerprint
-## byte-identically to how it did, or landing this is a silent global
-## cache wipe. (5) and (6) are the structural halves: a non-canonical
+## does not. (5) and (6) are the structural halves: a non-canonical
 ## rendering produces two keys for one environment (a silent miss and a
 ## duplicated build), and a `getEnv` reachable from the key computation
 ## is how an ambient value silently and permanently enters a record.
+## (10) is the sweep that a person does once: it caught nothing when it
+## was a habit and a fourth site was missed, so it is a test now.
+##
+## ## WHAT (4) DOES NOT SAY — READ THIS BEFORE QUOTING IT
+##
+## (4) says `keyedOnActionEnvironment` is the identity on the empty
+## declaration. It does NOT say landing this invalidates no existing
+## record, and an earlier version of this file was read that way.
+##
+## Measured, dev binary against branch binary, same graph, same project
+## root, isolated cache roots: 1391 / 1391 weak fingerprints MOVED, 0
+## unmoved, with the constructed env byte-identical on both sides. Every
+## lowered process action already carried a `PATH=` entry, so none of
+## them has an empty declaration and the identity arm reaches none of
+## them.
+##
+## **Landing this is a one-time total action-cache wipe for process
+## actions.** The practical cost is smaller than it sounds — those keys
+## are already 100% host-dependent through `pathSearchList` in
+## `profileFingerprintFor`, so they do not survive a host change either
+## way — but it is a wipe, and (4) is not evidence against it. What (4)
+## does buy is stated and tested in its reachable half: built-in
+## (non-forking) actions cannot declare an environment at all, so their
+## records survive.
 
 import std/[algorithm, os, sequtils, strutils, tempfiles, unittest]
 
@@ -287,13 +310,36 @@ suite "an action's declared environment is part of its cache key":
 
 suite "the environment key rendering is canonical and host-independent":
 
-  test "4. an edge that declares no environment fingerprints unchanged":
-    # The compatibility property, and the reason it is stated as a test
-    # rather than assumed: if an empty environment perturbed the key,
-    # landing this change would silently invalidate every action-cache
-    # record in existence — a correctness fix that ships as a total cache
-    # wipe. `keyedOnActionEnvironment` must be the identity on the empty
-    # declaration.
+  test "4. the empty declaration is the identity — and who that reaches":
+    # READ THE SECOND HALF OF THIS TEST BEFORE QUOTING THE FIRST.
+    #
+    # The identity property below is real and the mutation kills it. It
+    # is ALSO, on its own, one of this campaign's recurring defects: a
+    # test that is correct and vacuous. "Landing this invalidates no
+    # existing record" does NOT follow from it, and asserting that was
+    # wrong.
+    #
+    # Measured, dev binary against branch binary, same graph, same
+    # project root, isolated cache roots:
+    #
+    #   weakFingerprint moved dev -> branch: 1391 / 1391
+    #   unmoved:                                 0
+    #   env identical dev vs branch:         1391 / 1391
+    #
+    # Every lowered process action already carried a `PATH=` entry
+    # before this change, so NO lowered process action has an empty
+    # declaration — the census reports 0 (0%) declaring nothing — and
+    # the identity arm is unreachable for all of them. Landing this is a
+    # ONE-TIME TOTAL ACTION-CACHE WIPE for process actions. (The
+    # practical cost is smaller than that sounds: those keys are already
+    # 100% host-dependent through `pathSearchList` in
+    # `profileFingerprintFor`, so they do not survive a host change
+    # either way.)
+    #
+    # So the identity property is not load-bearing for compatibility. It
+    # is load-bearing for a narrower and still worthwhile claim, which
+    # the reachable half below pins: the classes that CANNOT declare an
+    # environment keep their keys.
     let base = weakFingerprintFromText("some-edge")
     check keyedOnActionEnvironment(base, [], []) == base
     # And the constructor must agree: an action built with no env has the
@@ -303,6 +349,26 @@ suite "the environment key rendering is canonical and host-independent":
     let a = action("id", ["/bin/true"], weakFingerprint = base,
       governingLockIdentity = identity)
     check a.weakFingerprint == keyedOnGoverningLock(base, identity)
+
+    # THE REACHABLE HALF. `builtinAction` takes no `env` argument at
+    # all, so a built-in edge cannot declare an environment however hard
+    # a caller tries — the compatibility property is not merely
+    # satisfiable for this class, it is structural. Every `ensureDir`,
+    # `copyFile`, `writeText`, `stamp`, `preserveTree`, `ensureLine` and
+    # `ensureSnippet` record ever written stays valid.
+    #
+    # This is what makes the identity arm non-vacuous, and it is stated
+    # as an enumeration over the kinds rather than one sample so that a
+    # new built-in kind that somehow acquired an environment would be
+    # caught here.
+    for kind in [bakEnsureDir, bakCopyFile, bakWriteText, bakStamp,
+                 bakPreserveTree, bakEnsureLine, bakEnsureSnippet]:
+      let b = builtinAction(kind, "builtin/" & $kind,
+        weakFingerprint = base, governingLockIdentity = identity)
+      checkpoint("built-in kind: " & $kind)
+      check b.env.len == 0
+      check b.envPassthrough.len == 0
+      check b.weakFingerprint == keyedOnGoverningLock(base, identity)
 
   test "5. the rendering is order- and duplicate-canonical":
     let base = weakFingerprintFromText("some-edge")
@@ -400,6 +466,60 @@ suite "the environment key rendering is canonical and host-independent":
                    "putEnv", "delEnv"]:
       checkpoint("banned call: " & banned)
       check not body.contains(banned)
+
+  test "10. every site that composes a host PATH declares it passthrough":
+    # THE SWEEP MADE STRUCTURAL. A review found a FOURTH lowering site
+    # (`cmakeRegenerationBuildAction`) that built
+    # `"PATH=" & wrapperPath & PathSep & getEnv("PATH")` by hand and
+    # passed no `envPassthrough`, so the verbatim host PATH entered that
+    # cacheable edge's key BY VALUE — precisely the defect the
+    # passthrough class exists to prevent, created by the change that
+    # introduced the class. It sits ~1000 lines from the other three and
+    # this repository's graph contains no CMake-driven project, so no
+    # measurement could have caught it; only reading every site could,
+    # and reading every site is what a person does once and then stops
+    # doing.
+    #
+    # So the pairing is checked instead of remembered. Two rules:
+    #
+    #   (a) nothing may build a `PATH=` entry for an action's env by
+    #       hand — it must go through `actionPathEntry`, which is where
+    #       the ambient read and its justification live; and
+    #   (b) every `actionPathEntry` call site must declare the
+    #       passthrough within a few lines of the call.
+    #
+    # A fifth site added tomorrow fails this test rather than silently
+    # keying a host value.
+    let source = currentSourcePath().parentDir.parentDir.parentDir /
+      "repro_cli_support" / "src" / "repro_cli_support.nim"
+    check fileExists(source)
+    let lines = readFile(source).splitLines()
+
+    var handRolled: seq[string] = @[]
+    var callSites: seq[int] = @[]
+    for i, line in lines:
+      if line.contains(".add(\"PATH=") or line.contains("= \"PATH=\" &"):
+        handRolled.add($(i + 1) & ": " & line.strip())
+      if line.contains("actionPathEntry(") and
+          not line.contains("proc actionPathEntry"):
+        callSites.add(i)
+    checkpoint("hand-rolled PATH entries: " & $handRolled)
+    check handRolled.len == 0
+
+    # The call sites must exist at all — a scan that found nothing would
+    # pass rule (b) vacuously.
+    checkpoint("actionPathEntry call sites: " & $callSites.len)
+    check callSites.len >= 4
+
+    for site in callSites:
+      var declared = false
+      for probe in max(site - 6, 0) .. min(site + 6, lines.high):
+        if lines[probe].contains("ActionPathPassthrough") or
+            lines[probe].contains("envPassthrough.add(\"PATH\")"):
+          declared = true
+      checkpoint("call site line " & $(site + 1) & ": " &
+        lines[site].strip() & " -> declared=" & $declared)
+      check declared
 
   test "9. the rendering distinguishes the two classes explicitly":
     # A cache key that cannot be explained cannot be debugged. The

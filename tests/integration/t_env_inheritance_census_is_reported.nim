@@ -83,13 +83,21 @@ suite "the undeclared-environment population is measured":
       # nothing". Measured: without this edge in the fixture, a mutation
       # that drops the passthrough clause from the undeclared test goes
       # completely undetected.
+      # The three counters must come out DISTINCT. With every class at
+      # the same count a mutation that swaps two counters passes, and
+      # this fixture originally had 2/2/2 — the swap mutation survived
+      # it. Sized here for 4 declaring, 3 passthrough, 2 undeclared, so
+      # no permutation of the three reads as the identity.
       let g = graph([
         edge("bare"),                                   # declares nothing
         edge("alsobare"),                               # declares nothing
         edge("declares", env = ["FOO=1"]),              # declares a value
+        edge("declares2", env = ["BAR=2"]),             # declares a value
         edge("passonly", passthrough = ["REPRO_TEST_HOST_VAR"]),  # names only
         edge("both", env = ["PATH=/tool/bin"],
              passthrough = ["PATH"]),                   # value + name
+        edge("both2", env = ["QUX=3"],
+             passthrough = ["REPRO_TEST_OTHER_VAR"]),   # value + name
         builtinAction(bakEnsureDir, "mkdir",
           cwd = workRoot,
           outputs = ["out"],
@@ -105,16 +113,22 @@ suite "the undeclared-environment population is measured":
         " passthrough=" & $census.passthroughActions &
         " undeclared=" & $census.undeclaredActions)
 
-      # The built-in is excluded: 6 actions in the graph, 5 in the
+      # The built-in is excluded: 8 actions in the graph, 7 in the
       # denominator.
-      check census.totalActions == 5
-      # `declares` and `both` carry a NAME=VALUE Reprobuild chose.
-      check census.declaringActions == 2
-      # `passonly` and `both` name a variable whose value is the host's.
-      check census.passthroughActions == 2
+      check census.totalActions == 7
+      # `declares`, `declares2`, `both`, `both2` carry a NAME=VALUE
+      # Reprobuild chose.
+      check census.declaringActions == 4
+      # `passonly`, `both`, `both2` name a host-valued variable.
+      check census.passthroughActions == 3
       # Only `bare` and `alsobare` say nothing at all — `passonly` says
       # something even though it declares no value.
       check census.undeclaredActions == 2
+      # Distinct by construction, so no counter can stand in for
+      # another.
+      check census.declaringActions != census.passthroughActions
+      check census.passthroughActions != census.undeclaredActions
+      check census.declaringActions != census.undeclaredActions
       # Every action is in the denominator, and no action is counted as
       # saying nothing while also being counted as saying something.
       check census.undeclaredActions <= census.totalActions

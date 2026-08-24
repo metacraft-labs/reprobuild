@@ -1322,6 +1322,16 @@ proc actionEnvironmentKeyText*(env: openArray[string];
   ## Entries with no `=` or an empty name carry no environment and are
   ## dropped; they cannot become part of a key by accident.
   ##
+  ## Names are compared CASE-SENSITIVELY here, while Windows environment
+  ## variables are case-insensitive and the spawn path's `PATH` collapse
+  ## uses `cmpIgnoreCase`. On Windows, `Path=x` and `PATH=x` therefore
+  ## render as two records where the process sees one variable. That is
+  ## an OVER-invalidation (two keys for one environment: a redundant
+  ## rebuild) and never a false hit, so it is safe in the direction that
+  ## matters. Folding case here would have to match the spawn path's
+  ## collapse exactly or it would introduce the opposite error, which is
+  ## the unsafe one.
+  ##
   ## ## This procedure reads NOTHING ambient, and that is load-bearing
   ##
   ## It is a pure function of its arguments. PR #96's `NIX_STORE_DIR`
