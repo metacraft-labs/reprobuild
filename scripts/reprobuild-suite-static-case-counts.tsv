@@ -57,7 +57,7 @@ libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph
 libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim	nim	6
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim	nim	6
-libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	3
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	6
 libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
 libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	9
 libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	1

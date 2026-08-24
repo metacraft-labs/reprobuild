@@ -2088,6 +2088,86 @@ proc converterSpecsForPolicy(action: BuildAction):
     return action.dependencyPolicy.postBuildConverters
   @[]
 
+type
+  MonitorShimPlatform* = enum
+    ## Which io-mon shim a build is running against. Present so the
+    ## library-load-floor question below can be answered for EVERY
+    ## platform on ANY host — see `monitorShimHasLibraryLoadFloor`.
+    mspLinux, mspMacos, mspWindows, mspUnsupported
+
+func monitorShimHasLibraryLoadFloor*(platform: MonitorShimPlatform): bool =
+  ## Does this platform's monitor shim emit `mrLibraryLoad` records?
+  ##
+  ## A FUNCTION OVER A PLATFORM rather than a bare `defined()` constant,
+  ## and that is the whole point. As a constant the Windows answer is
+  ## unreachable from a Linux test run — `defined(linux) or
+  ## defined(macosx)` and a plain `true` are indistinguishable there, so
+  ## a mutation that silently claimed a floor everywhere passed every
+  ## test. Measured: that exact mutation survived. As data, every
+  ## platform's answer is gradeable wherever the suite runs.
+  ##
+  ## The values come from counting `mrLibraryLoad` emission sites in the
+  ## io-mon sibling: `shim/linux_preload.nim` 2,
+  ## `shim/macos_interpose.nim` 2, `shim/windows_interpose.nim` 0.
+  case platform
+  of mspLinux, mspMacos: true
+  of mspWindows, mspUnsupported: false
+
+when defined(linux):
+  const HostMonitorShimPlatform* = mspLinux
+elif defined(macosx):
+  const HostMonitorShimPlatform* = mspMacos
+elif defined(windows):
+  const HostMonitorShimPlatform* = mspWindows
+else:
+  const HostMonitorShimPlatform* = mspUnsupported
+
+const MonitorHasLibraryLoadFloor* =
+  monitorShimHasLibraryLoadFloor(HostMonitorShimPlatform)
+  ## The host's answer to `monitorShimHasLibraryLoadFloor`.
+  ##
+  ## WHAT DEPENDS ON IT. On a platform WITH a floor, every process the
+  ## shim can inject reports at least the dynamic loader plus its own
+  ## dependent libraries, so "the monitor recorded no observation at all"
+  ## is not reachable for an injectable process — the zero-evidence guard
+  ## in `collectEvidence` is a backstop against a backend asserting a
+  ## completeness it has not earned. WITHOUT a floor, an ordinary
+  ## monitored action that performs no interposed read, probe or write
+  ## reaches the guard and stops publishing. That is still the correct,
+  ## fail-closed direction — it re-runs rather than serving a stale
+  ## result — but it is a live operational condition rather than an
+  ## unreachable one, so it has to announce itself. See
+  ## `zeroEvidenceDiagnostic`.
+
+proc zeroEvidenceDiagnostic*(actionId: string;
+                             hasLibraryLoadFloor: bool): string =
+  ## The diagnostic for an action whose monitor reported success while
+  ## recording nothing. Split out and exported so BOTH branches are
+  ## gradeable on any host: the no-floor branch is the one that matters
+  ## operationally and it is not reachable on the platform this is
+  ## usually built on, so a `when`-guarded string literal would ship
+  ## untested.
+  result = "action '" & actionId & "': monitor reported success but " &
+    "recorded no observation of any kind (no reads, writes, probes or " &
+    "enumerations). The recorded input set would be the declared inputs " &
+    "alone, which cannot be distinguished from 'the monitor observed " &
+    "nothing'. Action-cache publish skipped — an action with no " &
+    "monitorable evidence is NON-CACHEABLE per Monitor-Hook-Shim.md " &
+    "§\"Failure Semantics\" and Reprobuild-Development.milestones.org " &
+    "M17, never complete-on-declared-inputs."
+  if hasLibraryLoadFloor:
+    result.add(" This platform HAS a library-load floor, so an injectable " &
+      "process cannot normally reach this state; suspect the monitor " &
+      "backend rather than the action.")
+  else:
+    result.add(" This platform has NO library-load floor (its shim emits " &
+      "no library-load records), so an action that performs no interposed " &
+      "read, probe or write reaches this state legitimately and will " &
+      "re-run on EVERY build, permanently, until it gains observable " &
+      "evidence or is marked `cacheable = false`. If that is not what you " &
+      "want, the fix is a library-load floor in the platform's shim, not " &
+      "a weaker guard here.")
+
 proc monitorEvidenceRequired(action: BuildAction): bool =
   ## Monitor evidence is required for monitored policies once an RMDF
   ## (monitor depfile) has actually been wired up for the action. The only
@@ -2322,13 +2402,49 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
       # passes through no interposed `open` at all — io-mon emits it from
       # the loaded-object enumeration instead, and the `else: discard`
       # below swallowed every one. Measured on `env true`, a process that
-      # touches no file of its own: 18 `mrLibraryLoad` records naming 16
-      # DSOs, `mesComplete`, and `monitorReads: 0`.
+      # touches no file of its own: 18 `mrLibraryLoad` records covering
+      # 14 distinct PATHS and 9 distinct SONAMEs, `mesComplete`, and
+      # `monitorReads: 0`. The three counts differ for two separate
+      # reasons and both are worth knowing: four sonames are emitted
+      # twice under the identical path (duplicate records, deduped by
+      # `addUnique`), and five appear under two DIFFERENT store paths
+      # because `env` exec'd a second image linked against a different
+      # glibc. So the fold contributes 14 inputs here, not 18 and not 9.
       #
       # io-mon sets `observationKind = moFileRead` on these deliberately
       # so every consumer keying on the observation kind treats them as
       # content reads (io-mon `types.nim:36`); folding them into
       # `monitorReads` is that contract's consumer half.
+      #
+      # WHAT ABOUT THE SHIM'S OWN LOAD CLOSURE? io-mon excludes the shim
+      # library itself (`shim/linux_preload.nim`, so that "upgrading
+      # io-mon would not invalidate every cached action") but not the
+      # libraries the shim's own `DT_NEEDED` pulls in, so it is fair to
+      # ask whether this fold now puts the monitor's libc into every
+      # action's key. Measured, and the answer is no in the case that
+      # matters, for a reason worth writing down: the loader maps ONE
+      # object per soname, so when the action has its own libc the shim
+      # binds to THAT one and adds nothing. On the real
+      # `reprobuild.test_execute.t_smoke_ct_test_interface` edge the six
+      # recorded libraries are all under the TEST BINARY's glibc
+      # (`…-glibc-2.42-51` reached via its own RPATH), none under the
+      # shim's separate glibc store path. The shim's closure shows up
+      # alone only when the action has no closure of its own — measured
+      # on a `-nostdlib` binary, where those six ARE the shim's.
+      #
+      # So DO NOT "fix" this by dropping the shim's closure by path. In
+      # the common case there is nothing there to drop, and on any host
+      # where repro and the toolchain resolve to the SAME glibc store
+      # path such a filter would drop the action's genuine libc — which
+      # is this defect, for the single most consequential library there
+      # is. The sound fix is attribution, not filtering: record whether a
+      # loaded object is reachable from the MAIN IMAGE's `DT_NEEDED`
+      # closure and let the consumer drop only the unreachable ones. That
+      # belongs in io-mon, which is the only side that can see the
+      # dependency graph. Until it exists, an action whose recorded libc
+      # is the shim's rather than its own pays a spurious cross-host
+      # cache MISS — an efficiency cost in the fail-closed direction, not
+      # a stale hit.
       #
       # UNCONDITIONALLY, with no allowlist for immutable package stores.
       # Sandbox-And-Monitoring.md §"Open Design Questions" left "how much
@@ -2514,19 +2630,16 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
     # mrEventLoss record. See M9.R.60.D + M9.R.68 + M9.R.70 characterizations
     # and recipes/reproos-image/run-evidence/m9r72/m9r72_phaseB_gap_enumeration.txt
     # Gap I.
-    if action.monitorDepfile.len == 0:
-      result.evidence.diagnostics.add(
-        "dependency policy requires monitor evidence but no RMDF path is selected")
-      # Genuine Level 3: no monitoring output at all. Preserve the M9.R.60.2
-      # non-cacheable carve-out (workspace sync fetch on hosts without a
-      # monitor CLI wired).
-      result.monitorStatus = worseMonitorStatus(result.monitorStatus,
-        mesMonitorUnavailable)
-      if action.cacheable:
-        result.publishable = false
-      if strict and not result.publishable:
-        discard
-      return
+    # There is no `monitorDepfile.len == 0` arm here, and there must not
+    # be one: `monitorEvidenceRequired` — the condition guarding this
+    # whole block — already requires `monitorDepfile.len > 0`, so such a
+    # branch is unreachable. It existed and was dead. The Level 3
+    # "monitoring unavailable" case it claimed to cover is decided
+    # EARLIER and differently: `monitoredAction` returns a
+    # "requires an io-monitor driver" diagnostic for a cacheable action
+    # with no monitor CLI, and the scheduler turns a non-empty
+    # `plan.diagnostic` into `asFailed`. That is the FAIL arm, not the
+    # non-cacheable arm; do not describe it as the latter.
     try:
       let status = foldMonitorDepFileEvidence(action.monitorDepfile,
         action.cwd, result.evidence, seen)
@@ -2569,15 +2682,30 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
         # its nearest neighbour — a declared-only gathering mode — is
         # explicitly prohibited and has been re-introduced by agents more
         # than once (see the note in
-        # `repro_core/dependency_gathering.nim`). (c) It is not needed:
-        # measured on this host, every process the shim can inject
-        # reports at least the loader plus the shim's own dependent DSOs
-        # (6 for a `-nostdlib` dynamic binary, 16 for `env true`), and a
-        # process the shim CANNOT inject — a static binary — already
-        # trips `mrEventLoss` and lands on the Level 2 arm below. An edge
-        # that genuinely needs to run without evidence already has a
-        # sanctioned answer with no new soundness surface:
-        # `cacheable = false`.
+        # `repro_core/dependency_gathering.nim`). (c) On a platform with
+        # a library-load floor it is not needed: measured on this host,
+        # every process the shim can inject reports at least the loader
+        # plus its dependent libraries (6 records for a `-nostdlib`
+        # dynamic binary; 18 records naming 14 distinct paths / 9
+        # distinct sonames for `env true`), and a process the shim CANNOT
+        # inject — a static binary — already trips `mrEventLoss` and
+        # lands on the Level 2 arm below. An edge that genuinely needs to
+        # run without evidence already has a sanctioned answer with no
+        # new soundness surface: `cacheable = false`.
+        #
+        # READ (c) NARROWLY — it is platform-conditional and the
+        # condition is real. `MonitorHasLibraryLoadFloor` is false on
+        # Windows, whose shim emits no library-load records at all, so
+        # there an ordinary monitored action that performs no interposed
+        # read, probe or write DOES reach this branch and stops
+        # publishing for good. The guard is deliberately NOT scoped away
+        # from such platforms: scoping it off would hand exactly the
+        # platform with no floor the original soundness hole AND no
+        # signal that it has it. Instead the diagnostic says which regime
+        # it is in — see `zeroEvidenceDiagnostic` — so the outcome is a
+        # report rather than a silent permanent non-publish. The
+        # behaviour is the fail-closed direction on every platform; only
+        # its reachability differs.
         #
         # The test is deliberately narrow — no observation of ANY kind
         # from ANY source, including a recognized report's
@@ -2590,14 +2718,7 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
             result.evidence.monitorDirectoryEnumerations.len == 0 and
             result.evidence.depfileInputs.len == 0:
           result.evidence.diagnostics.add(
-            "monitor reported success but recorded no observation of any " &
-            "kind (no reads, writes, probes or enumerations); the recorded " &
-            "input set would be the declared inputs alone, which cannot be " &
-            "distinguished from 'the monitor observed nothing'. " &
-            "Action-cache publish skipped — an action with no monitorable " &
-            "evidence is NON-CACHEABLE per Monitor-Hook-Shim.md:501 and " &
-            "Reprobuild-Development.milestones.org M17, never " &
-            "complete-on-declared-inputs.")
+            zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
           result.disableCacheHits = true
       of mesKnownScopeLoss:
         # M9.R.73.2 — spec Level 1 narrow path-set invalidation per

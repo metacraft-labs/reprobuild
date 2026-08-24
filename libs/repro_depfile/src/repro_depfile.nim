@@ -226,10 +226,16 @@ proc readReproPathSet*(path: string): DependencyPathSet =
       # report an enumeration could only FAIL the edge on the
       # unknown-kind arm below. Additive: an OLDER reader meeting an
       # `enumerate` line still raises `dreMalformed`, which the engine
-      # turns into a non-publishable action — a hard miss, the safe
-      # direction. See `Reprobuild-Repository-Layout.md:278`, which lists
-      # directory enumerations among the observations `repro_pathset`
-      # carries.
+      # turns into a non-publishable action — and `publishable = false`
+      # sets `asFailed` and blocks the closure at every one of its four
+      # sites in `repro_build_engine`, so that is a hard FAILURE with a
+      # diagnostic, NOT a cache miss. Loud and safe, rather than quiet
+      # and safe; do not soften this to "a miss". It is also why the
+      # format keeps the `repro-pathset-v1` header instead of bumping to
+      # v2: a version bump would make every EXISTING file fail the header
+      # check, whereas an added kind only affects files that use it.
+      # See `Reprobuild-Repository-Layout.md:278`, which lists directory
+      # enumerations among the observations `repro_pathset` carries.
       result.enumerations.addUnique(value)
     of "diagnostic":
       result.diagnostics.add(value)

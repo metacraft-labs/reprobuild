@@ -15,8 +15,9 @@
 ## this host with the real monitor:
 ##
 ##   * `env true` (touches no file of its own): 33 records, 18 of them
-##     `mrLibraryLoad`, `mesComplete`, and — once library loads are
-##     folded as reads — 16 recorded inputs. Not zero.
+##     `mrLibraryLoad` covering 14 distinct paths, `mesComplete`, and —
+##     once library loads are folded as reads — 14 recorded inputs.
+##     Not zero.
 ##   * a `-nostdlib` dynamically-linked binary: 6 `mrLibraryLoad`
 ##     records (the loader plus the shim's own dependent DSOs).
 ##     Not zero.
@@ -28,8 +29,23 @@
 ## So on Linux today there is no process that reaches the guard: every
 ## injectable process observes something, and every non-injectable one
 ## fails closed earlier. A test that waited for a real process to
-## produce the state would assert nothing, forever. The state is still
-## worth guarding — it is what a backend that reports success while
+## produce the state would assert nothing, forever.
+##
+## THAT IS A PROPERTY OF THE PLATFORM, NOT OF THE GUARD, and it does not
+## hold everywhere: Windows' shim emits no library-load records at all
+## (measured by emission-site count in the io-mon sibling —
+## `shim/linux_preload.nim` 2, `shim/macos_interpose.nim` 2,
+## `shim/windows_interpose.nim` 0), so there an ordinary monitored action
+## that performs no interposed read, probe or write reaches the guard for
+## real and stops publishing permanently. The behaviour is still the
+## fail-closed one; what changes is that it becomes reachable, so it has
+## to say so. `MonitorHasLibraryLoadFloor` makes that condition explicit
+## instead of an accident of which shim is compiled in, and the
+## diagnostic suite below grades BOTH regimes on whatever host runs it —
+## the no-floor message is the one that matters operationally and is
+## exactly the one a `when`-guarded literal would ship untested.
+##
+## The state is still worth guarding — it is what a backend that reports success while
 ## capturing nothing produces, which is the documented shape of io-mon's
 ## P0 "mcComplete with zero real inputs"
 ## (MacOS-Monitoring-Adversarial-Hardening.milestones.org:1360) — and a
@@ -205,6 +221,9 @@ suite "an edge that observed nothing is not cacheable":
     let diagnosed = r0.evidence.diagnostics.join(" ")
     checkpoint("diagnostics: " & diagnosed)
     check diagnosed.contains("no observation of any kind")
+    # It must also name the ACTION, because a build with hundreds of
+    # edges gives an operator nothing to act on otherwise.
+    check diagnosed.contains(act.id)
 
     # Nothing was published, so there is nothing to be reused.
     check not f.hasRecord(act)
@@ -277,3 +296,64 @@ suite "an edge that observed nothing is not cacheable":
 
     check runBuild(g, config).byId(act.id).status == asSucceeded
     check f.runCount() == 2
+
+suite "the zero-evidence diagnostic names the platform's floor regime":
+  ## Both regimes are graded here, on whatever host runs the suite. The
+  ## no-floor branch is the operationally important one and is NOT
+  ## reachable on Linux or macOS, so if it were a `when`-guarded literal
+  ## it would ship untested — which is how the "every process reports the
+  ## loader closure" argument came to be applied to a platform where it
+  ## is false.
+
+  test "every platform's floor answer is pinned, on any host":
+    # io-mon emits `mrLibraryLoad` from `shim/linux_preload.nim` and
+    # `shim/macos_interpose.nim`; `shim/windows_interpose.nim` has no
+    # emission site.
+    #
+    # Asserted as DATA, per platform, rather than as `when defined(...)`
+    # against the host constant. The `when` form does not work and this
+    # is not a stylistic preference: on Linux `defined(linux) or
+    # defined(macosx)` and a bare `true` are the same value, so a
+    # mutation claiming a floor on EVERY platform — the exact mistake
+    # under review — passed a host-conditional assertion. Verified: that
+    # mutation survived the `when` form and is caught by this one.
+    check monitorShimHasLibraryLoadFloor(mspLinux)
+    check monitorShimHasLibraryLoadFloor(mspMacos)
+    check not monitorShimHasLibraryLoadFloor(mspWindows)
+    # An unknown platform must default to "no floor": claiming a floor we
+    # have not verified is the direction that produces a silent permanent
+    # non-publish with no diagnostic.
+    check not monitorShimHasLibraryLoadFloor(mspUnsupported)
+    # ... and the host constant is that function, not a separate literal
+    # that could drift from it.
+    check MonitorHasLibraryLoadFloor ==
+      monitorShimHasLibraryLoadFloor(HostMonitorShimPlatform)
+
+  test "with a library-load floor: the message points at the backend":
+    let msg = zeroEvidenceDiagnostic("pkg.some_edge", true)
+    checkpoint(msg)
+    check msg.contains("pkg.some_edge")
+    check msg.contains("no observation of any kind")
+    check msg.contains("HAS a library-load floor")
+    check msg.contains("suspect the monitor backend")
+    # It must NOT tell an operator on a floored platform that the edge
+    # will re-run forever; there the state means the backend is lying.
+    check not msg.contains("re-run on EVERY build")
+
+  test "without a library-load floor: the message says it is permanent":
+    # This is the Windows regime. A silent permanent non-publish is the
+    # failure mode under review; the whole point is that it announces
+    # itself, names the edge, says the consequence, and says where the
+    # real fix belongs.
+    let msg = zeroEvidenceDiagnostic("pkg.some_edge", false)
+    checkpoint(msg)
+    check msg.contains("pkg.some_edge")
+    check msg.contains("NO library-load floor")
+    check msg.contains("re-run on EVERY build")
+    check msg.contains("permanently")
+    check msg.contains("cacheable = false")
+    # The remedy must point at the shim, not at weakening this guard —
+    # scoping the guard off a platform with no floor would hand that
+    # platform the original soundness hole with no signal.
+    check msg.contains("not a weaker guard here")
+    check not msg.contains("suspect the monitor backend")

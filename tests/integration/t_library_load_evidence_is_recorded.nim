@@ -31,9 +31,13 @@
 ##     fold status: mesComplete
 ##     monitorReads: 0   monitorWrites: 0   monitorProbes: 0
 ##
-## Eighteen library-load records naming sixteen real DSOs (libc, libdl,
-## libm, libpthread, librt, libacl, libattr, libgmp, ld-linux), and not
-## one of them reached the cache key.
+## Eighteen library-load records covering fourteen distinct paths and
+## nine distinct sonames (libc, libdl, libm, libpthread, librt, libacl,
+## libattr, libgmp, ld-linux), and not one of them reached the cache key.
+## Record count exceeds path count because four sonames are emitted twice
+## under the identical path; path count exceeds soname count because
+## `env` exec'd a second image linked against a different glibc, so five
+## sonames appear under two store paths each.
 ##
 ## Governing spec text:
 ##
