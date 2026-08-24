@@ -25,3 +25,19 @@ proc appendCurlDownload*(script: var string; destination, url: string) =
     escapedDestination & "\"; ")
   script.add("else rc=$?; rm -f \"" & escapedPartial &
     "\"; exit $rc; fi; fi; ")
+
+proc appendTarExtraction*(script: var string; archive, destination: string;
+                          stripComponents: int) =
+  ## Extract a verified source archive into an existing staging directory.
+  ## Windows tar implementations may materialize symlinks as target files;
+  ## retrying after the other members exist resolves forward references.
+  let escapedArchive = shellDoubleQuote(archive)
+  let escapedDestination = shellDoubleQuote(destination)
+  let forceLocal = when defined(windows): "--force-local " else: ""
+  let command = "tar " & forceLocal & "-xf \"" & escapedArchive &
+    "\" -C \"" & escapedDestination & "\" --strip-components=" &
+    $stripComponents
+  when defined(windows):
+    script.add("if ! " & command & "; then " & command & "; fi; ")
+  else:
+    script.add(command & "; ")

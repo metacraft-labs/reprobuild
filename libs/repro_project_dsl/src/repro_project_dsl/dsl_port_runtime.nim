@@ -4004,13 +4004,14 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
                                    stamp: string): string =
   ## Compose the fetch-script body. Mirrors the autotools / cmake /
   ## meson constructors' fetch-script shape: curl → hash-verify → tar
-  ## --force-local extract → touch stamp. ``file://`` URLs work natively
+  ## extract → touch stamp. ``file://`` URLs work natively
   ## via curl.
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
+  let staged = extracted & ".repro-extract-" & spec.hashHex
+  let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
@@ -4028,8 +4029,7 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
     script.add("cp \"" & escapedTarball & "\" \"" &
       escapedStaged & "/source\"; ")
   else:
-    script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+    script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
   script.add("touch \"" & escapedStamp & "\"")

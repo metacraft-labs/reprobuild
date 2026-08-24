@@ -111,7 +111,8 @@ proc emitFetchAction*(projectRoot, packageName: string;
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted =
     extracted.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
+  let staged = extracted & ".repro-extract-" & spec.hashHex
+  let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
   let escapedRev = spec.gitRevision.replace("\"", "\\\"")
   var argv: seq[string]
   if shExe.len > 0:
@@ -137,9 +138,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
           "\" | b2sum -a blake3 -c - || ")
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
           "\" | blake3sum -c -; ")
-      script.add("tar -xf \"" & escapedTarball & "\" -C \"" &
-        escapedStaged & "\" --strip-components=" & $spec.extractStrip &
-        "; ")
+      script.appendTarExtraction(tarball, staged, spec.extractStrip)
     of dfkGitArchive:
       # Shallow clone + archive. The git rev is verified by extracting
       # archive contents and then hashing the resulting tarball — the
@@ -161,9 +160,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
           "\" | b2sum -a blake3 -c - || ")
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
           "\" | blake3sum -c -; ")
-      script.add("tar -xf \"" & escapedTarball & "\" -C \"" &
-        escapedStaged & "\" --strip-components=" & $spec.extractStrip &
-        "; ")
+      script.appendTarExtraction(tarball, staged, spec.extractStrip)
     of dfkDataFile:
       script.appendCurlDownload(tarball, spec.url)
       case spec.hashAlg
