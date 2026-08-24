@@ -695,12 +695,118 @@ proc detectHostCpuFeatures*(family = detectHostCpu()): set[CpuFeature] =
         "would present as an unexplained refusal far from this variable.")
   parsed.features
 
-proc detectHostTarget*(): PlatformTarget =
-  ## The full structured target for this host: family + declared level +
-  ## declared feature set.
+# ---------------------------------------------------------------------------
+# PMC-4/PMC-6 — the BUILD machine and the HOST target are two different things
+#
+# Everything above answers questions about "the host", and until now that word
+# carried two meanings that happen to coincide today. They stop coinciding the
+# moment a cross build exists, and the failure is silent: artifacts built with
+# instructions the target machine cannot execute, discovered as a SIGILL far
+# from here.
+#
+# The vocabulary is Nix's, because the build engine already uses it
+# (`repro_build_engine/platform.nim`: `buildPlatformTriple()` vs
+# `resolvedTargetTriple()`, `dkNative` vs `dkBuild`/`dkRuntime`, with `"native"`
+# as the BUILD == HOST sentinel). Adding a second, parallel vocabulary here is
+# the mistake PMC-3 avoided when it made the psABI level sugar over feature
+# sets rather than a rival source of truth.
+#
+#   BUILD machine  the machine running `repro` right now. A MEASURED FACT --
+#                  cpuid says what it says. Tools that RUN during the build
+#                  (`nativeBuildDeps:`, `dkNative`) must satisfy this one:
+#                  a compiler that traps on this machine is useless no matter
+#                  what it is producing.
+#
+#   HOST target    what the produced artifacts must RUN on. A DECISION, not a
+#                  measurement. `buildDeps:` / `runtimeDeps:` (`dkBuild`,
+#                  `dkRuntime`) and every published artifact must satisfy this
+#                  one. It is what belongs in the lock identity and the cache
+#                  key, because it is the thing that makes two artifacts
+#                  genuinely different.
+#
+# Why the existing REPRO_HOST_* variables are already the right seam: they say
+# what the RUN target provides, which is exactly the host axis. Setting them
+# BELOW the build machine is a cross build in miniature -- "produce something
+# that runs on less than this machine" -- and it is the shape a real cross
+# build takes. That is why they had to refuse an unparseable value rather than
+# defaulting: a silently-defaulted override is a cross build quietly resolving
+# as native, which is precisely the failure this section exists to prevent.
+#
+# The asymmetry to keep hold of: the host target may be LOWER than the build
+# machine (build conservative artifacts on a capable machine -- the normal,
+# desirable case). It being HIGHER is not automatically wrong either
+# (cross-compiling for a more capable machine), but it means native tools and
+# produced artifacts no longer share a floor, so they must be resolved
+# separately. Either way the two must never be silently substituted for one
+# another, which is what a single "host" concept guarantees will eventually
+# happen.
+# ---------------------------------------------------------------------------
+
+type
+  TargetRole* = enum
+    ## Which of the two targets a resolution is asking about.
+    trBuildMachine = "build"
+      ## The machine running the build. Satisfied by `nativeBuildDeps:`.
+    trHostTarget = "host"
+      ## What the produced artifacts must run on. Satisfied by `buildDeps:` /
+      ## `runtimeDeps:`, and what the lock identity and cache key carry.
+
+proc buildMachineTarget*(): PlatformTarget =
+  ## What the machine running `repro` actually provides. A MEASUREMENT:
+  ## `cpuid` / `xgetbv`, never an override.
+  ##
+  ## Deliberately not overridable. The REPRO_HOST_* variables describe the
+  ## target you are building FOR; letting them also rewrite what this machine
+  ## IS would make a cross build unable to resolve its own compiler -- you
+  ## would be telling reprobuild that the machine executing gcc lacks
+  ## instructions gcc's binary actually uses. When cross compilation lands,
+  ## the build machine stays measured and only the host target moves.
+  let family = detectHostCpu()
+  initPlatformTarget(family, baselineMicroarchLevel(family),
+    probeHostCpuFeatures())
+
+proc hostTarget*(): PlatformTarget =
+  ## What the produced artifacts must run on.
+  ##
+  ## Defaults to the build machine -- that is the `"native"` sentinel the build
+  ## engine already uses, and it is why one "host" concept has worked so far.
+  ## REPRO_HOST_MICROARCH_LEVEL / REPRO_HOST_CPU_FEATURES move it, and moving
+  ## it is what makes a build cross rather than native.
   let family = detectHostCpu()
   initPlatformTarget(family, detectHostMicroarchLevel(family),
     detectHostCpuFeatures(family))
+
+proc isCrossTargeted*(buildT, hostT: PlatformTarget): bool =
+  ## True when the two targets have diverged, i.e. this is no longer a
+  ## `"native"` build in the build engine's sense.
+  ##
+  ## Exposed because the interesting diagnostics and cache decisions hang off
+  ## this being observable, rather than each caller re-deriving it from a
+  ## comparison it might get subtly wrong.
+  buildT.level != hostT.level or buildT.features != hostT.features or
+    buildT.family != hostT.family
+
+proc targetForRole*(role: TargetRole; buildT, hostT: PlatformTarget):
+    PlatformTarget =
+  ## Route a dependency to the target that must satisfy it.
+  ##
+  ## Pure and fully parameterised on purpose: a test names both targets and
+  ## asks the routing question directly, with no machine involved. That is the
+  ## same seam `hostCpu`/`hostOs`/`hostLevel`/`hostFeatures` keep on the
+  ## resolution entry points, and it is what makes cross-compilation behaviour
+  ## testable on hardware that can only ever be one of the two.
+  case role
+  of trBuildMachine: buildT
+  of trHostTarget: hostT
+
+proc detectHostTarget*(): PlatformTarget =
+  ## The HOST target -- what produced artifacts must run on.
+  ##
+  ## Retained as the established name (the binary-cache compat check and the
+  ## PMC-2/PMC-3 tests call it). `hostTarget()` is the same value under a name
+  ## that says which of the two axes it is; prefer that in new code, and reach
+  ## for `buildMachineTarget()` when you mean the machine doing the work.
+  hostTarget()
 
 proc raisePackageUnavailableOnPlatform*(packageId: string;
                                         availability: PackageAvailability;

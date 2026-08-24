@@ -6846,6 +6846,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_build_machine_and_host_target_are_distinct.nim",
+    binary: "build/test-bin/t_build_machine_and_host_target_are_distinct",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_build_progress_modes.nim",
     binary: "build/test-bin/t_build_progress_modes",
     defines: @[],
