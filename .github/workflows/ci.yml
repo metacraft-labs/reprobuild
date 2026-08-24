@@ -5,9 +5,22 @@ on:
     branches: [main, dev]
   pull_request:
 
+# Superseding is right for a pull request and wrong for a branch.
+#
+# A PR is judged at its tip: pushing a fixup makes the previous run's verdict
+# irrelevant, so cancelling it costs nothing and keeps the queue short.
+#
+# A branch is not. Every commit that lands on `main` or `dev` is permanent and
+# has to be judged on its own -- if it broke something, the branch is broken
+# from that commit onward whether or not a later push exists. Grouping branch
+# pushes together made a rapid series of pushes cancel each other, so the
+# checks below (the suite case-count baseline first among them) never ran to a
+# verdict on the very commits that introduced the drift they exist to catch.
+# Branch pushes therefore get a group of their own, keyed by commit, and are
+# never cancelled.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # CI replays the project's deterministic dev environment via the
 # shared `metacraft-github-actions` composite actions. Per the
