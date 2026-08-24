@@ -1589,6 +1589,45 @@ proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
         dirs.add(dir)
   dirs.join($PathSep)
 
+const ActionPathPassthrough = ["PATH"]
+  ## The environment variables an action's `PATH` composition takes from
+  ## the HOST. Declared beside `actionPathEntry` below, and used by every
+  ## lowering site that calls it, so the two can never drift apart: a
+  ## site that composes a host value without saying so is exactly the
+  ## defect this pair exists to prevent.
+
+proc actionPathEntry(actionPathPrefix: string): string =
+  ## The action's `PATH`: the resolved tool directories this edge
+  ## declares, then whatever the host has.
+  ##
+  ## ## The `getEnv` here is deliberate, and it is not in a cache key
+  ##
+  ## Every caller pairs this with `envPassthrough =
+  ## ActionPathPassthrough`, which puts `PATH` in BuildXL's passthrough
+  ## class: `keyedOnActionEnvironment` records the NAME and refuses the
+  ## VALUE. So the host's `PATH` cannot reach a cache record, which is
+  ## the property that matters — PR #96's `NIX_STORE_DIR` defect was an
+  ## ambient value entering a record permanently because a key
+  ## computation read the environment.
+  ##
+  ## Keying on this value instead would be a much larger defect than the
+  ## one it appears to fix. The prefix is absolute store paths and the
+  ## tail is the host's `PATH`; neither is the same under `nix develop`
+  ## as in CI. Every edge of every graph would invalidate on any host
+  ## difference. BuildXL reaches the same conclusion twice over: `PATH`
+  ## is one of its untracked base variables
+  ## (`PipEnvironment.cs:88-110`), and a passthrough variable's value is
+  ## not fingerprinted even when the build declares it explicitly
+  ## (`Build-Parameters-(Environment-variables).md:39`).
+  ##
+  ## What this does NOT recover is the PREFIX's contribution: the
+  ## resolved tool directories are also excluded, because they are
+  ## host-absolute for the same reason. For typed-tool edges the tool
+  ## identity is already keyed through `profile.profileFingerprint`.
+  ## For inline-exec edges it is not yet, and making it so needs the
+  ## portable-key work, not a raw path in a key.
+  "PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")
+
 proc argvForCall*(call: PublicCliCall;
                   profile: PathOnlyToolProfile): seq[string] =
   result = @[profile.resolvedExecutablePath]
@@ -2094,8 +2133,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # The fix mirrors the typed-tool path below: prepend the called tool and
     # this action's explicit tool refs to PATH, then append per-edge overrides.
     var inlineEnv: seq[string] = @[]
+    var inlineEnvPassthrough: seq[string] = @[]
     if actionPathPrefix.len > 0:
-      inlineEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
+      inlineEnv.add(actionPathEntry(actionPathPrefix))
+      inlineEnvPassthrough = @ActionPathPassthrough
     for entry in payload.env:
       inlineEnv.add(entry[0] & "=" & entry[1])
     return repro_build_engine.action(
@@ -2120,6 +2161,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         payload.dependencyPolicy),
       commandStatsId = commandStatsId,
       env = inlineEnv,
+      envPassthrough = inlineEnvPassthrough,
       requiresElevation = payload.requiresElevation)
 
   if payload.call.packageName == "reprobuild.builtin" and
@@ -2349,8 +2391,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       node.payload
     ].join("\n")
     var mergedEnv: seq[string] = @[]
+    var mergedEnvPassthrough: seq[string] = @[]
     if actionPathPrefix.len > 0:
-      mergedEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
+      mergedEnv.add(actionPathEntry(actionPathPrefix))
+      mergedEnvPassthrough = @ActionPathPassthrough
     # MR10: per-edge env-var injections from the typed-tool wrapper's
     # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
     # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
@@ -2378,7 +2422,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
       commandStatsId = commandStatsId,
-      env = mergedEnv)
+      env = mergedEnv,
+      envPassthrough = mergedEnvPassthrough)
 
   # M9.R.12.2 — fall back to ``packageName`` alone when the recipe's
   # ``nativeBuildDeps:`` declares the tool by its package selector
@@ -2424,8 +2469,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     digestHex(profile.profileFingerprint)
   ].join("\n")
   var mergedEnv: seq[string] = @[]
+  var mergedEnvPassthrough: seq[string] = @[]
   if actionPathPrefix.len > 0:
-    mergedEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
+    mergedEnv.add(actionPathEntry(actionPathPrefix))
+    mergedEnvPassthrough = @ActionPathPassthrough
   # MR10: per-edge env-var injections from the typed-tool wrapper's
   # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
   # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
@@ -2454,7 +2501,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
     commandStatsId = commandStatsId,
-    env = mergedEnv)
+    env = mergedEnv,
+    envPassthrough = mergedEnvPassthrough)
 
 proc levenshtein(a, b: string): int =
   ## Named-Targets M2 ``unknown_target`` diagnostic helper. A small
