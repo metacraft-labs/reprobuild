@@ -26,6 +26,41 @@
 ## are an observation mechanism for the conformance suite, not an
 ## answer: an advertised capability whose operation then refuses is
 ## precisely the contradiction F2 exists to catch.
+##
+## The unknown-filesystem degradation rule — **F4**
+## ================================================
+##
+## The tables will never be complete, so what happens on a filesystem
+## with no row is not an edge case; it is a normative rule, and it is
+## stated here because this is the module that decides a path has no
+## row. A caller that gets ``TableEntryStatus`` other than ``teKnown``
+## MUST:
+##
+## 1. **Assume nothing.** No capability may be ruled out and none may be
+##    assumed available. In particular the absence of a row is NOT a
+##    ``tnNo`` — ``factsForPath`` returns the zeroth row when it answers
+##    ``known = false``, and reading it is a bug.
+## 2. **Probe everything it would otherwise have skipped.** The whole
+##    point of F3's skipping is that the constants already determine the
+##    outcome; with no constants there is nothing determined, so every
+##    attempt is issued and the answer is whatever the attempt did.
+## 3. **Take the probe's answer and nothing beyond it.** A probe
+##    establishes reachability between two paths; it establishes nothing
+##    about link caps, timestamp granularity or case folding, so a
+##    caller MUST NOT infer any other fact from a successful probe.
+## 4. **Report it.** Silence here is how a wrong policy decision hides.
+##    ``describeTableStatus`` produces the notice;
+##    ``repro_local_store/link_capability`` attaches it to every
+##    capability answer it derives from an unrowed filesystem.
+##
+## The rule is IDENTICAL for ``teDeferred`` — a name the table knows it
+## does not describe. Only the notice differs, and the difference is
+## real: for ``teUnknown`` the only honest advice is "add a row", while
+## for ``teDeferred`` somebody has already looked and the notice carries
+## the reason and the change that would replace it. See
+## ``filesystems.UnenteredFilesystems``; ``ext3`` is the type case, a
+## filesystem that current kernels serve with the ext4 driver while
+## ``/proc/self/mountinfo`` still reports the name ``ext3``.
 
 import std/strutils
 
@@ -38,6 +73,19 @@ elif defined(posix):
   import std/posix
 
 type
+  TableEntryStatus* = enum
+    ## Which of the four situations a path is in. ``known`` (below) is
+    ## the two-valued view of this and stays for the callers that only
+    ## need "may I read ``facts``?"; this enum is what a REPORT needs,
+    ## because "nobody has looked" and "somebody looked and declined to
+    ## write a row" are different things to tell a reader.
+    teUnqueried  ## the OS query itself failed. Not a statement about
+                 ## any filesystem.
+    teKnown      ## a row describes this filesystem.
+    teDeferred   ## the table knows the name and knows why it has no
+                 ## row. Policy degrades exactly as for ``teUnknown``.
+    teUnknown    ## the table has never heard of this name.
+
   FilesystemObservation* = object
     ## What the OS says about the filesystem holding a path.
     queried*: bool
@@ -53,6 +101,13 @@ type
     known*: bool
       ## ``true`` when ``reportedName`` matched a table entry. ``false``
       ## is the F4 case and MUST be reported, never silently defaulted.
+    status*: TableEntryStatus
+      ## The four-valued form of ``known``. ``known == (status ==
+      ## teKnown)`` always; the tests assert it, so the two can never
+      ## drift into disagreeing about the same observation.
+    deferral*: UnenteredFilesystem
+      ## Meaningful only when ``status == teDeferred``: the recorded
+      ## reason this filesystem has no row, and what adding one takes.
     id*: FilesystemId
       ## Meaningful only when ``known``.
     volumeKey*: string
@@ -123,6 +178,33 @@ elif defined(macosx):
 proc ternaryFromFlag(flags: uint32; bit: uint32): Ternary =
   if (flags and bit) != 0: tnYes else: tnNo
 
+func tableEntryStatusFor*(reportedName: string):
+    tuple[status: TableEntryStatus; known: bool; id: FilesystemId;
+          deferral: UnenteredFilesystem] =
+  ## Classify an OS-reported filesystem name against both tables.
+  ##
+  ## **Deliberately a pure function of the name rather than a few lines
+  ## inside ``observeFilesystem``.** The unrowed arms are unreachable on
+  ## a host whose filesystems all have rows — which is every host this
+  ## repository currently runs on — so folded into the OS query they
+  ## would be branches no test here could drive, and F4's whole subject
+  ## is what happens on those branches. As a function of a string they
+  ## are drivable everywhere, and mutation testing confirmed the
+  ## difference: with the classification inline, silently answering
+  ## ``teKnown`` for an unrowed name SURVIVED.
+  ##
+  ## ``known`` is returned beside ``status`` rather than derived by the
+  ## caller so the two cannot drift: ``known == (status == teKnown)`` is
+  ## established here, once.
+  let match = filesystemIdForName(reportedName)
+  if match.found:
+    return (teKnown, true, match.id, UnenteredFilesystem())
+  let deferred = unenteredFilesystem(reportedName)
+  if deferred.found:
+    (teDeferred, false, fsNtfs, deferred.entry)
+  else:
+    (teUnknown, false, fsNtfs, UnenteredFilesystem())
+
 when defined(linux):
   proc unescapeMountField(field: string): string =
     ## ``/proc/self/mountinfo`` escapes space, tab, newline and backslash
@@ -192,7 +274,8 @@ proc observeFilesystem*(path: string): FilesystemObservation =
   ## Never raises. A failed query yields ``queried = false``, which a
   ## caller MUST treat as "no information" — not as "no capability".
   result = FilesystemObservation(
-    queried: false, path: path, known: false, id: fsNtfs,
+    queried: false, path: path, known: false, status: teUnqueried,
+    id: fsNtfs,
     advertisedHardLinks: tnUnknown, advertisedSparseFiles: tnUnknown,
     advertisedBlockRefcounting: tnUnknown,
     advertisedCasePreservedNames: tnUnknown,
@@ -257,10 +340,16 @@ proc observeFilesystem*(path: string): FilesystemObservation =
     if pathMax > 0:
       result.reportedMaxPathLength = int(pathMax)
 
-  let match = filesystemIdForName(result.reportedName)
-  result.known = match.found
-  if match.found:
-    result.id = match.id
+  # The classification — including F4's distinction between "nobody has
+  # looked" and "somebody looked and recorded why there is no row" —
+  # belongs to ``tableEntryStatusFor``, which is a function of the name
+  # alone and is therefore testable on a host that has none of the
+  # filesystems in question.
+  let classified = tableEntryStatusFor(result.reportedName)
+  result.status = classified.status
+  result.known = classified.known
+  result.id = classified.id
+  result.deferral = classified.deferral
 
 proc describe*(obs: FilesystemObservation): string =
   ## One-line diagnostic. Safe to log; never parsed.
@@ -269,10 +358,10 @@ proc describe*(obs: FilesystemObservation): string =
   var parts = @["path=" & obs.path,
                 "reported=" & obs.reportedName,
                 "volume=" & obs.volumeKey]
-  if obs.known:
-    parts.add("table=" & $obs.id)
-  else:
-    parts.add("table=NO ENTRY")
+  case obs.status
+  of teKnown: parts.add("table=" & $obs.id)
+  of teDeferred: parts.add("table=NO ENTRY (deliberate)")
+  else: parts.add("table=NO ENTRY")
   if obs.reportedMaxComponentLength >= 0:
     parts.add("nameMax=" & $obs.reportedMaxComponentLength)
   if obs.reportedMaxLinks >= 0:
@@ -285,6 +374,46 @@ proc describe*(obs: FilesystemObservation): string =
   if obs.advertisedSparseFiles != tnUnknown:
     parts.add("advertises sparse=" & $obs.advertisedSparseFiles)
   parts.join(" ")
+
+const TableEntrySourceFile* =
+  "libs/repro_fs_facts/src/repro_fs_facts/filesystems.nim"
+  ## Named once so every notice points a reader at the same place, and
+  ## so moving the table cannot leave a stale path in a message.
+
+proc describeTableStatus*(obs: FilesystemObservation): string =
+  ## The F4 notice for an observation, or ``""`` when the filesystem has
+  ## a row and there is nothing to report.
+  ##
+  ## This is the "visible, not silent" half of the degradation rule. It
+  ## is deliberately a string rather than a log call: this library has
+  ## no logging dependency, and the caller that owns the decision is the
+  ## one that knows where a diagnostic belongs. What the library
+  ## guarantees is that the notice EXISTS and says which filesystem,
+  ## what policy did about it, and what would remove the notice.
+  case obs.status
+  of teKnown:
+    ""
+  of teUnqueried:
+    "filesystem UNQUERIED for " & obs.path &
+      ": the OS could not say what filesystem holds this path, so no " &
+      "declared fact applies to it. Policy degrades to probing and " &
+      "assumes nothing (F4)."
+  of teDeferred:
+    "filesystem `" & obs.reportedName & "` (" & obs.path &
+      ") has NO ENTRY in the fact table, DELIBERATELY. Policy degrades " &
+      "to probing and assumes nothing beyond what the probe " &
+      "establishes (F4). Reason: " & obs.deferral.reason &
+      " To replace this deferral with a row: " & obs.deferral.toAdd &
+      " (" & TableEntrySourceFile & ")"
+  of teUnknown:
+    "filesystem `" & obs.reportedName & "` (" & obs.path &
+      ") has NO ENTRY in the fact table. Policy degrades to probing " &
+      "and assumes nothing beyond what the probe establishes (F4). " &
+      "Add a row for `" & obs.reportedName & "` to " &
+      TableEntrySourceFile & " — or, if the honest row cannot be " &
+      "written, record WHY in that file's `UnenteredFilesystems`. A " &
+      "guess is not an option: a wrong fact is worse than no fact, " &
+      "because policy acts on it."
 
 proc factsForPath*(path: string):
     tuple[known: bool; facts: FilesystemFacts;

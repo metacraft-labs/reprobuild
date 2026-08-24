@@ -775,14 +775,29 @@ suite "M3 — why read-only blobs do not rescue the shared-inode arm":
 
   test "applyPermissions through a shared inode would chmod the CAS blob, which is why the arm excludes it":
     ## M1 introduced the exclusion in passing; M3 confirms it is still
-    ## right and supplies its evidence. The exclusion is POSIX-only because
-    ## ``casMaterializeDetailed`` does not apply permissions on Windows at
-    ## all — so the guard and the thing it guards are enabled together, and
-    ## the structural check below pins that they stay that way.
+    ## right and supplies its evidence. The exclusion applies exactly
+    ## where mode bits mean something, because
+    ## ``casMaterializeDetailed`` does not apply permissions where they
+    ## do not — so the guard and the thing it guards are enabled
+    ## together, and the structural check below pins that they stay that
+    ## way.
+    ##
+    ## Platform-And-Filesystem-Facts F3 changed the SPELLING of that
+    ## guard from ``when not defined(windows)`` to
+    ## ``when HostHonoursPosixModeBits`` — a compile-time reading of the
+    ## OS fact table's ``honoursPosixModeBits``, which is what the
+    ## platform check always meant. The pin follows the spelling and
+    ## keeps its strength: what it asserts is still that the guard and
+    ## the guarded block are the same condition, and it now also asserts
+    ## that the condition is the declared fact rather than a platform
+    ## name standing in for one.
     let body = materializeBody()
     check "if entry.applyPermissions:" in body
     check "entryAllowsSharedInode = false" in body
-    check "when not defined(windows):" in body
+    check "when HostHonoursPosixModeBits:" in body
+    # ...and that the old spelling is gone, so the two cannot coexist
+    # with only one of them updated.
+    check "when not defined(windows):" notin body
 
     let vols = hardlinkOnlyVolume()
     if vols.len == 0:

@@ -441,11 +441,40 @@ suite "F2 filesystem-facts conformance — discovery":
     # REPORTED, not ignored — that is how the table grows, and an
     # unknown filesystem silently falling back is how a wrong policy
     # decision hides.
+    #
+    # **F4 refined what "does not know" means, and it is a narrowing of
+    # the failure, not a weakening of it.** There are two ways to have
+    # no row. One is that nobody has looked, and the only honest advice
+    # is "add a row" — that still FAILS, unchanged. The other is that
+    # somebody looked, established that the honest row cannot be
+    # written, and recorded why in ``UnenteredFilesystems``; ext3 is the
+    # real case, a filesystem current kernels serve with the ext4 driver
+    # while ``/proc/self/mountinfo`` still reports the name ``ext3``,
+    # and whose timestamp granularity is nonetheless NOT ext4's. Failing
+    # on that one asks a developer to fix something no change can fix
+    # short of inventing the facts this library exists to remove, and a
+    # gate nobody can satisfy is a gate everybody learns to ignore.
+    #
+    # What replaces the failure is strictly more than nothing: the
+    # deferral must carry a reason AND the change that would replace it,
+    # both asserted here, and it is ECHOED on a green run rather than
+    # checkpointed, for the same reason the coverage report is — a fact
+    # this suite did not verify must be visible when it passes.
     var unknown: seq[string] = @[]
+    var deferred: seq[string] = @[]
     for v in volumes:
       if not v.obs.queried:
         continue
-      if not v.obs.known:
+      case v.obs.status
+      of teKnown, teUnqueried:
+        discard
+      of teDeferred:
+        deferred.add(v.obs.reportedName & " at " & v.obs.volumeKey)
+        # A deferral with an empty reason is an excuse, not a decision.
+        check v.obs.deferral.reason.len > 0
+        check v.obs.deferral.toAdd.len > 0
+        echo "NOT VERIFIED HERE: " & describeTableStatus(v.obs)
+      of teUnknown:
         unknown.add(v.obs.reportedName & " at " & v.obs.volumeKey)
     if unknown.len > 0:
       checkpoint("this host offers filesystem(s) with NO entry in " &
@@ -453,8 +482,12 @@ suite "F2 filesystem-facts conformance — discovery":
                  unknown.join(", ") &
                  ". Add a FilesystemId member and a FilesystemTable row " &
                  "(with citations) rather than letting policy fall back " &
-                 "silently.")
+                 "silently — or, if the honest row cannot be written, " &
+                 "record WHY in that file's UnenteredFilesystems.")
     check unknown.len == 0
+    if deferred.len > 0:
+      checkpoint("deliberately unrowed filesystem(s) on this host: " &
+                 deferred.join(", "))
 
   test "an unrecognised filesystem name resolves to no entry rather than a default":
     # The lookup's own contract, asserted directly: a name the table does

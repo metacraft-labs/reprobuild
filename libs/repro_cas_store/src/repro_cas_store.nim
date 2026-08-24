@@ -35,6 +35,12 @@ import std/[hashes, os, sets, strutils]
 import blake3
 from repro_core/paths import extendedPath
 
+# Platform-And-Filesystem-Facts F3. Only ``HostHonoursPosixModeBits`` is
+# used here, and it is a compile-time reading of the OS table's
+# ``honoursPosixModeBits`` — the fact whose own doc comment names this
+# module's ``applyPermissions`` handling as the reason it exists.
+from repro_fs_facts import HostHonoursPosixModeBits
+
 import repro_local_store
 
 # Re-export the error taxonomy the facade may raise. Layer-2 error
@@ -586,14 +592,26 @@ proc casMaterializeDetailed*(cas: CasStore;
     # on: a chmod through a linked name moves the blob's own mode (see
     # ``tests/t_cas_link_mutation_safety.nim``).
     #
-    # The guard is POSIX-only because the permission-applying block
-    # below is POSIX-only: on Windows nothing here ever applies
-    # ``entry.permissions``, so there is nothing to leak into the blob.
-    # The two ``when not defined(windows)`` blocks are therefore a pair —
-    # if the second ever gains a Windows arm, this one MUST lose its
-    # guard in the same change.
+    # The guard is conditioned on the OS honouring POSIX mode bits at
+    # all, because the permission-applying blocks below are: on Windows
+    # nothing here ever applies ``entry.permissions``, so there is
+    # nothing to leak into the blob. All three
+    # ``when HostHonoursPosixModeBits`` blocks are therefore one group —
+    # if the permission-applying pair ever gains a Windows arm, this one
+    # MUST lose its guard in the same change.
+    #
+    # Platform-And-Filesystem-Facts F3: this used to be a negated
+    # ``defined(windows)``, which is a statement about which PLATFORM
+    # this is standing in for a statement about what the platform
+    # DOES. ``honoursPosixModeBits`` is the declared fact, and
+    # the OS table's own doc comment names this exact call site as the
+    # reason it exists. Substituting it changes no behaviour on any of
+    # the three OSes the table describes — that is the point, since a
+    # migration that changed behaviour would be a different milestone —
+    # but it makes the dependency legible and makes a fourth OS a table
+    # row rather than a hunt for negated ``defined(windows)``.
     var entryAllowsSharedInode = allowSharedInode
-    when not defined(windows):
+    when HostHonoursPosixModeBits:
       if entry.applyPermissions:
         entryAllowsSharedInode = false
 
@@ -657,7 +675,7 @@ proc casMaterializeDetailed*(cas: CasStore;
             "CAS digest mismatch materializing " & $entry.hash &
             " to " & dest & " via " & $outcome.mechanism)
 
-      when not defined(windows):
+      when HostHonoursPosixModeBits:
         if entry.applyPermissions:
           setFilePermissions(extendedPath(tmp), entry.permissions)
     except CatchableError:
@@ -672,7 +690,7 @@ proc casMaterializeDetailed*(cas: CasStore;
       removeFile(extendedPath(s.dest))
     moveFile(extendedPath(s.tmp), extendedPath(s.dest))
 
-  when not defined(windows):
+  when HostHonoursPosixModeBits:
     # Re-applied after the rename, as the pre-M1 code did: some
     # filesystems drop bits across a rename, and the destination's mode
     # is what the caller asked about.

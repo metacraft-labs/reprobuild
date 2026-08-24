@@ -350,3 +350,22 @@ const HostOsId*: OsId =
 func hostOsFacts*(): OsFacts =
   ## The declared facts for the OS this binary runs on.
   OsTable[HostOsId]
+
+const HostHonoursPosixModeBits* =
+  OsTable[HostOsId].honoursPosixModeBits.value == tnYes
+  ## Whether this platform applies POSIX mode bits at all.
+  ##
+  ## Not a new fact — a compile-time READING of ``honoursPosixModeBits``,
+  ## provided because it is the one OS fact a ``when`` needs to branch on
+  ## and a `when` cannot be given a reason in its own line. Every
+  ## ``when not defined(windows)`` that really meant "does chmod mean
+  ## anything here?" should say this instead, which is what
+  ## Platform-And-Filesystem-Facts F3 asks of a consumer: the branch
+  ## names the property it depends on, so that a fourth OS is a table row
+  ## rather than a search for every negated ``defined(windows)`` in the
+  ## repository.
+  ##
+  ## It is deliberately a ``const`` rather than a runtime read: nothing
+  ## about it can change while the process runs, and the branches it
+  ## replaces were compile-time too, so no code that was elided before
+  ## starts being compiled now.

@@ -22,6 +22,14 @@
 ## driven for real the first time the suite meets that filesystem.
 ## Values you cannot source MUST be `tnUnknown` / `unknownQuantity()`
 ## with `pvUnestablished` — never a plausible guess.
+##
+## **Deciding NOT to add an entry** is also a recorded decision, and F4
+## gives it a table of its own: `UnenteredFilesystems` at the bottom of
+## this file names a filesystem the table deliberately does not describe,
+## says why, and says what adding a row would take. Use it when the
+## honest row cannot be written — never as a place to park a filesystem
+## nobody has looked at, and never as a way to alias one filesystem onto
+## a neighbouring row.
 
 import ./fact
 
@@ -1389,6 +1397,112 @@ func filesystemIdForName*(name: string): tuple[found: bool;
       if candidate == needle:
         return (true, id)
   (false, fsNtfs)
+
+# ---------------------------------------------------------------------------
+# Deliberate non-entries — Platform-And-Filesystem-Facts **F4**.
+#
+# There are two ways for a host filesystem to have no row, and policy
+# behaves IDENTICALLY for both (see ``detect.nim``'s degradation rule:
+# probe, assume nothing, report). What differs is what the report can
+# say, and that difference is worth a table of its own:
+#
+#   * the table has never heard of the name. The report can only say
+#     "add a row"; nobody has looked at the filesystem.
+#   * the table knows the name, has looked, and has decided NOT to
+#     write a row — because the facts it would have to state are not
+#     established, or are genuinely a `varies` that a copied row would
+#     misreport. The report can say WHY, and what would take to change
+#     it.
+#
+# The second is not a gap in the table. It is a fact ABOUT the table,
+# and recording it here is what stops the next reader "fixing" it by
+# aliasing the name onto a neighbouring row — which is precisely the
+# defect review round 2 removed from the ext4 row.
+#
+# INVARIANT, asserted by the tests: a name listed here MUST NOT appear
+# in any row's ``names``. A deferral that shadows a real row would make
+# ``filesystemIdForName`` and this list disagree about the same string.
+# ---------------------------------------------------------------------------
+
+type
+  UnenteredFilesystem* = object
+    ## A filesystem name the table knows it does not describe.
+    name*: string
+      ## The OS-reported name, lowercased, exactly as
+      ## ``normalizedFsName`` would produce it.
+    reason*: string
+      ## Why there is no row. Sourced the same way a fact's citation
+      ## is: a reader must be able to check it without a machine.
+    toAdd*: string
+      ## The small, documented change that would replace this deferral
+      ## with a row — F4 requires that adding an entry be small, and
+      ## this is where "small" is written down rather than assumed.
+
+const UnenteredFilesystems*: array[2, UnenteredFilesystem] = [
+  UnenteredFilesystem(
+    name: "ext3",
+    reason:
+      "There is no ext3 driver on Linux 4.3 or later: CONFIG_EXT3_FS " &
+      "was removed and fs/ext4 serves ext2- and ext3-formatted volumes " &
+      "(fs/ext4/super.c registers the `ext2` and `ext3` filesystem types " &
+      "under CONFIG_EXT4_USE_FOR_EXT23). /proc/self/mountinfo reports " &
+      "the type the volume was mounted AS, so such a mount still says " &
+      "`ext3` while the ext4 code is what answers every call. Aliasing " &
+      "the name onto the ext4 row would nonetheless be wrong, and in " &
+      "the exact way review round 2 already removed once: ext4's row " &
+      "declares timestampGranularityNs = exactly(1), which " &
+      "fs/ext4/super.c grants only when `sbi->s_inode_size` leaves room " &
+      "for `i_atime_extra` (inodes of at least 256 bytes). An ext3 " &
+      "volume made with the traditional 128-byte inode gets " &
+      "`s_time_gran = NSEC_PER_SEC` instead — nine orders of magnitude " &
+      "coarser — and the inode size is a mkfs-time choice, so no single " &
+      "number is right. An ext3 row's honest value is `varies`, which " &
+      "is not the ext4 row's value and cannot be borrowed from it.",
+    toAdd:
+      "add `fsExt3` to `FilesystemId`, one `FilesystemFacts` literal to " &
+      "`FilesystemTable` with `names: @[\"ext3\"]`, and delete this " &
+      "deferral. That is 17 facts, each needing its own citation and " &
+      "falsification recipe; the conformance suite picks the row up with " &
+      "no further change. The one fact that MUST NOT be copied from the " &
+      "ext4 row is timestampGranularityNs — see the reason above."),
+  UnenteredFilesystem(
+    name: "ext2",
+    reason:
+      "The same driver story as ext3, plus a divergence that is not " &
+      "even a `varies`: WHICH cap applies depends on which driver " &
+      "mounted the volume. include/linux/ext2_fs.h has `#define " &
+      "EXT2_LINK_MAX 32000` and fs/ext2/super.c's ext2_fill_super " &
+      "assigns it to `s_max_links`, while fs/ext4 serving the same " &
+      "volume under CONFIG_EXT4_USE_FOR_EXT23 assigns EXT4_LINK_MAX " &
+      "(65000) — so ext4's `exactly(65000)` is wrong here by a factor " &
+      "of two whenever the ext2 driver is the one in play. The ext2 " &
+      "driver also sets no `s_time_gran` at all and inherits the VFS " &
+      "default of one SECOND. Review round 2 removed `ext2` and `ext3` " &
+      "from the ext4 row's `names` for exactly these two reasons; " &
+      "re-adding either would restore the defect.",
+    toAdd:
+      "add `fsExt2` to `FilesystemId` and one `FilesystemFacts` literal " &
+      "with `names: @[\"ext2\"]`, and delete this deferral. " &
+      "maxNamesPerFile and timestampGranularityNs are the two facts " &
+      "that cannot be copied from the ext4 row; both are driver- " &
+      "dependent here, so `varies` with a citation naming both drivers " &
+      "is likely the honest value rather than a number."),
+]
+
+func unenteredFilesystem*(name: string):
+    tuple[found: bool; entry: UnenteredFilesystem] =
+  ## Look a name up in the deliberate-non-entry table.
+  ##
+  ## ``found = true`` never means a fact is available — it means the
+  ## report can say why one is not. Policy MUST treat this exactly as it
+  ## treats a name nobody has heard of; see ``detect.nim``.
+  let needle = normalizedFsName(name)
+  if needle.len == 0:
+    return (false, UnenteredFilesystem())
+  for entry in UnenteredFilesystems:
+    if entry.name == needle:
+      return (true, entry)
+  (false, UnenteredFilesystem())
 
 func `$`*(op: CloneOperation): string =
   case op

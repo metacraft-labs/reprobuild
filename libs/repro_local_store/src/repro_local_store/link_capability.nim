@@ -20,9 +20,9 @@
 ## and safer than a hardlink. See ``preferredMechanisms``.
 ##
 ## **Availability is not a filesystem-name lookup.** This module never
-## decides from a mount-type string. It ATTEMPTS the operation once per
-## filesystem pair and caches what actually happened, because prediction
-## is wrong in ways that matter:
+## decides a PAIR's reachability from a mount-type string. It ATTEMPTS
+## the operation once per filesystem pair and caches what actually
+## happened, because prediction is wrong in ways that matter:
 ##
 ## * Same-device is necessary but not sufficient. On Btrfs ``link()``
 ##   across subvolumes fails ``EXDEV`` on a single device, because
@@ -36,6 +36,53 @@
 ##   and generally offer no reflink; server-side copy offload is a copy.
 ## * Overlayfs interposes copy-up semantics that change what a write
 ##   through a link does; a bind mount does not.
+##
+## Two questions, and only one of them is the probe's
+## ==================================================
+##
+## Platform-And-Filesystem-Facts **F3**. The paragraph above is about
+## the question *does this operation work between THESE two paths?* — a
+## question no table can answer, and the reason this module exists. It
+## is not the only question in the room:
+##
+## ==========================================  ==================================
+## question                                    answered by
+## ==========================================  ==================================
+## What can this filesystem do?                ``repro_fs_facts`` — the CONSTANTS
+## Does it work between THESE two paths?       this module — the PROBE
+## ==========================================  ==================================
+##
+## Since F3 this module reads the constants for one purpose and one
+## only: **to skip an attempt whose failure they already determine.**
+## There is no reason to issue ``FSCTL_DUPLICATE_EXTENTS_TO_FILE``
+## against NTFS to discover something that has been true since NTFS
+## shipped, and a reasoned answer beats a rediscovered one because it
+## can say WHY. Everything else is unchanged: pair reachability is still
+## established by attempting the operation, because the constants cannot
+## know which Btrfs subvolume a path is in.
+##
+## The skip is deliberately one-directional. A definite ``tnNo`` removes
+## an attempt; a ``tnYes`` does NOT add a capability, and neither does an
+## advertised volume flag. A capability this module reports is always
+## one an attempt produced — except where the tables say the attempt
+## cannot produce one, in which case no capability is reported either.
+## There is no path through this module by which a constant can turn a
+## mechanism ON.
+##
+## **A disagreement is a bug, and it is surfaced.** When the table says a
+## filesystem implements an operation and the operation answers "not
+## implemented" — or, under ``setFactAudit``, when the table says it
+## cannot and the operation succeeds — the capability record carries a
+## ``FactDisagreement`` naming both values. Something is wrong with the
+## table or with the detection, and the one thing that must not happen is
+## for one side to be silently preferred. See ``disagreementKind``, which
+## is the only place the two are compared.
+##
+## **A filesystem with no table row** degrades to probe-everything and is
+## reported rather than assumed about; the rule is stated in
+## ``repro_fs_facts/detect.nim`` §"The unknown-filesystem degradation
+## rule" (**F4**) and implemented here by ``verdictFor`` answering
+## ``fvNoTableEntry``, which no arm treats as a reason to skip.
 ##
 ## **What the probe deliberately does NOT answer.** NTFS caps a file at
 ## 1023 hardlinks. That limit is a property of an individual blob, not of
@@ -53,9 +100,16 @@
 ## ``preferredMechanisms``' ``allowSharedInode`` lever, which M3 settled:
 ## see its doc comment.
 
-import std/[locks, os, strutils, tables]
+import std/[atomics, locks, os, strutils, tables]
 
 from repro_core/paths import extendedPath
+
+# Platform-And-Filesystem-Facts F3. A leaf library whose only
+# dependencies are ``std/[os, strutils]`` and the platform bindings, so
+# importing it here adds no transitive weight and creates no cycle:
+# ``repro_fs_facts`` is line 22 of ``libs/libraries.txt`` and
+# ``repro_local_store`` is line 23, deliberately in that order.
+import repro_fs_facts
 
 when defined(windows):
   import std/winlean
@@ -97,6 +151,15 @@ type
     loPermissionDenied   ## EPERM / EACCES / ERROR_ACCESS_DENIED.
     loOther              ## Anything else, including a link that was
                          ## created but did not verify.
+    loNotAttempted       ## **No syscall was issued.** The declared
+                         ## facts already determine that this mechanism
+                         ## cannot work on this filesystem, so the
+                         ## attempt was skipped (F3). Distinct from
+                         ## ``loUnsupported`` on purpose: that one is an
+                         ## observation, this one is a deduction, and a
+                         ## reader of a log is entitled to know which
+                         ## they are looking at. ``message`` names the
+                         ## row that ruled it out.
 
   LinkAttempt* = object
     ## The result of one real attempt, kept as a diagnostic so a caller
@@ -105,25 +168,121 @@ type
     errorCode*: int    ## ``errno`` / ``GetLastError``; 0 when unused.
     message*: string   ## Human-readable, safe to log. Never parsed.
 
+  FactVerdict* = enum
+    ## What the DECLARED facts say about a mechanism for a pair —
+    ## Platform-And-Filesystem-Facts F3. Never a capability answer on
+    ## its own: only ``fvImpossible`` changes what this module does, and
+    ## all it does is remove an attempt.
+    fvNoTableEntry
+      ## At least one endpoint's filesystem has no row (or could not be
+      ## identified at all). Nothing is determined, so nothing is
+      ## skipped and nothing is assumed — the F4 degradation rule.
+    fvIndefinite
+      ## Both endpoints have rows, and at least one declares ``varies``
+      ## / ``unknown`` / ``n/a`` for this mechanism. That is a fact, and
+      ## the fact is "no single value is correct here" — which is a
+      ## statement that policy must probe. NFS, SMB and overlayfs are
+      ## the type cases, and their rows say so in as many words.
+    fvPossible
+      ## Every endpoint declares the mechanism available. This does NOT
+      ## make it available for this PAIR — Btrfs refuses ``link()``
+      ## across subvolumes on one device — so the attempt is still
+      ## issued. What it buys is the right to call a ``loUnsupported``
+      ## answer a disagreement rather than an ordinary refusal.
+    fvImpossible
+      ## Some endpoint declares the mechanism absent, definitely
+      ## (``tnNo``). This is the only verdict that removes a syscall.
+
+  FactDisagreementKind* = enum
+    ## The table and the probe contradicting each other. Both values are
+    ## always named in the message: which of the two is wrong is exactly
+    ## what a reader has to decide, and a message that names one has
+    ## already decided it for them.
+    fdNone
+    fdDeclaredPossibleButUnsupported
+      ## The table says this filesystem implements the operation; the
+      ## operation answered "not implemented". Either the row is wrong
+      ## or ``detect.nim`` matched the wrong row.
+    fdDeclaredImpossibleButWorked
+      ## The table says this filesystem cannot; it did. Only reachable
+      ## under ``setFactAudit`` — without it the attempt is skipped, so
+      ## there is nothing to disagree with. That asymmetry is why the
+      ## audit mode exists.
+
+  FactDisagreement* = object
+    ## One surfaced contradiction, in the same "name both values" shape
+    ## the F2 conformance suite uses.
+    kind*: FactDisagreementKind
+    mechanism*: LinkMechanism
+    filesystem*: string   ## the OS-reported name of the endpoint.
+    declared*: string     ## what the table says.
+    observed*: string     ## what the attempt did.
+    citation*: string     ## the row's own citation, so a reader can
+                          ## check the claim without a machine.
+    message*: string      ## the whole thing, safe to log.
+
+  DeclaredEndpoint* = object
+    ## What the fact tables say about one end of a pair. A projection,
+    ## not the row: this module reads exactly the two facts it acts on,
+    ## so a later reader can see the whole of the coupling in one place.
+    status*: TableEntryStatus
+    reportedName*: string   ## the filesystem name the OS reported.
+    volumeKey*: string      ## the filesystem instance, for telling one
+                            ## endpoint from another.
+    id*: FilesystemId       ## meaningful only when ``status ==
+                            ## teKnown``.
+    hardlinks*: Ternary
+    reflink*: Ternary
+    hardlinkCitation*: string
+    reflinkCitation*: string
+    notice*: string
+      ## The F4 notice when this endpoint has no row; ``""`` otherwise.
+
+  DeclaredPair* = object
+    source*, dest*: DeclaredEndpoint
+    sameFilesystem*: bool
+      ## Both endpoints are one filesystem INSTANCE. A pair that spans
+      ## two filesystems is not a statement about either, which is why
+      ## no disagreement is ever raised for one: a cross-volume reflink
+      ## on Windows answers ERROR_INVALID_PARAMETER, which classifies
+      ## ``loUnsupported``, and calling that a table defect would make
+      ## every cross-volume materialization report a bug in NTFS's row.
+
   LinkCapability* = object
     ## What a (source directory, destination directory) pair supports.
     probed*: bool
-      ## ``true`` when both mechanisms were actually attempted. ``false``
-      ## means the probe could not run at all (unwritable source, missing
-      ## destination) — such a result is NOT cached, so a later call with
-      ## a usable directory re-probes.
+      ## ``true`` when both mechanisms were resolved — attempted, or
+      ## skipped because the declared facts already determined them.
+      ## ``false`` means nothing could be resolved at all (unwritable
+      ## source, missing destination) — such a result is NOT cached, so
+      ## a later call with a usable directory re-probes.
     hardlink*: bool
     reflink*: bool
     hardlinkAttempt*: LinkAttempt
     reflinkAttempt*: LinkAttempt
     key*: string
       ## The filesystem-pair cache key this answer is filed under.
+    declared*: DeclaredPair
+      ## What the fact tables said about the two endpoints (F3).
+    hardlinkVerdict*: FactVerdict
+    reflinkVerdict*: FactVerdict
+    disagreements*: seq[FactDisagreement]
+      ## Empty on a healthy host. Non-empty is a BUG in the table or in
+      ## the detection, and ``describe`` puts it in the log line rather
+      ## than leaving it for a caller to remember to look for.
+    notices*: seq[string]
+      ## F4 notices for endpoints with no table row.
 
   LinkCapabilityCache* = object
     ## Per-filesystem-pair memo. Explicitly passed so tests can observe
     ## the probe count; ``linkCapabilities`` wraps a process-wide one.
     entries: Table[string, LinkCapability]
     probes: int
+    audit: bool
+      ## When set, an attempt the declared facts rule out is issued
+      ## ANYWAY, purely to check the table against reality. Off by
+      ## default because the whole point of F3 is not to issue it; see
+      ## ``setFactAudit``.
 
 # ---------------------------------------------------------------------------
 # Platform bindings
@@ -241,6 +400,40 @@ proc isPerFileFallback*(attempt: LinkAttempt): bool =
   attempt.outcome == loLinkLimitExceeded
 
 # ---------------------------------------------------------------------------
+# Issued-attempt counters
+#
+# F3's concrete win is FEWER SYSCALLS, and a claim about syscalls needs a
+# mechanism behind it or it is the class of claim this campaign removes.
+# These counters are that mechanism: every path that actually issues
+# ``CreateHardLinkW`` / ``link(2)`` / the clone primitive increments one,
+# so a test can assert that a known-failing attempt was never made
+# without measuring TIME, which measures the machine rather than the
+# code.
+#
+# Atomics rather than a lock because these sit on the per-file
+# materialization path, and because a counter is exactly the shape
+# ``fetchAdd`` exists for.
+# ---------------------------------------------------------------------------
+
+var
+  hardlinkAttemptsIssued: Atomic[int]
+  reflinkAttemptsIssued: Atomic[int]
+
+proc linkAttemptsIssued*(mechanism: LinkMechanism): int =
+  ## How many real attempts of ``mechanism`` this process has issued.
+  ## ``lmCopy`` is always 0: a copy is not an attempt whose availability
+  ## is in question.
+  case mechanism
+  of lmHardlink: hardlinkAttemptsIssued.load()
+  of lmReflink: reflinkAttemptsIssued.load()
+  of lmCopy: 0
+
+proc resetLinkAttemptCounters*() =
+  ## Zero the counters. For tests; production code has no reason to.
+  hardlinkAttemptsIssued.store(0)
+  reflinkAttemptsIssued.store(0)
+
+# ---------------------------------------------------------------------------
 # Mechanism attempts
 # ---------------------------------------------------------------------------
 
@@ -251,6 +444,7 @@ proc attemptHardlink*(src, dst: string): LinkAttempt =
   ## Reminder from the model above: on success ``src`` and ``dst`` are
   ## the SAME inode, so mode bits, timestamps and in-place writes are
   ## shared between them.
+  hardlinkAttemptsIssued.atomicInc()
   when defined(windows):
     let ok = createHardLinkW(newWideCString(extendedPath(dst)),
                              newWideCString(extendedPath(src)), nil)
@@ -299,6 +493,7 @@ proc attemptReflink*(src, dst: string): LinkAttempt =
   ##
   ## Any partially created ``dst`` is removed before returning a failure,
   ## so a failed attempt leaves no debris for the caller to clean up.
+  reflinkAttemptsIssued.atomicInc()
   when defined(windows):
     let srcW = newWideCString(extendedPath(src))
     let srcH = createFileW(srcW, GENERIC_READ,
@@ -566,6 +761,31 @@ proc deviceKeyOf(dir: string): string =
   else:
     ""
 
+const PathKeysFoldCase =
+  hostOsFacts().pathLookupIsCaseSensitive.value == tnNo
+  ## Whether two paths differing only in case name the same directory,
+  ## read from the OS fact table rather than from ``defined(windows)``.
+  ##
+  ## Platform-And-Filesystem-Facts F3. This was an unconditional
+  ## ``toLowerAscii`` on both paths, and it was WRONG on every
+  ## case-sensitive host: ``/srv/A`` and ``/srv/a`` are two directories
+  ## on Linux, they can give different answers, and folding them
+  ## together filed one answer under both. The Windows arm of
+  ## ``deviceKeyOf`` above folds case correctly and always did; this
+  ## fallback did not, which is exactly the drift a declared fact
+  ## removes.
+  ##
+  ## ``tnVaries`` — macOS, where case sensitivity is the mounted
+  ## volume's property and the OS has no single answer — resolves to
+  ## "do not fold", which is the conservative direction here: not
+  ## folding can only ever produce a second cache entry and a second
+  ## probe, while folding wrongly produces a wrong answer for a
+  ## directory that was never measured. Same trade ``deviceKeyOf``
+  ## already documents for an unidentifiable device.
+
+func pairKeyPathComponent(dir: string): string =
+  if PathKeysFoldCase: dir.toLowerAscii else: dir
+
 proc filesystemPairKey*(srcDir, dstDir: string): string =
   ## Cache key for the (source, destination) filesystem pair. Exposed so
   ## callers can log which pair an answer came from, and so tests can
@@ -573,9 +793,224 @@ proc filesystemPairKey*(srcDir, dstDir: string): string =
   let a = deviceKeyOf(srcDir)
   let b = deviceKeyOf(dstDir)
   if a.len == 0 or b.len == 0:
-    "path:" & srcDir.toLowerAscii & "->path:" & dstDir.toLowerAscii
+    "path:" & pairKeyPathComponent(srcDir) & "->path:" &
+      pairKeyPathComponent(dstDir)
   else:
     a & "->" & b
+
+# ---------------------------------------------------------------------------
+# The declared facts — Platform-And-Filesystem-Facts F3
+#
+# Everything in this section is a READ of ``repro_fs_facts``. Nothing in
+# it issues a syscall, and nothing in it can turn a mechanism on: the
+# single effect the tables are allowed to have on this module is
+# ``fvImpossible`` removing an attempt that would have failed.
+# ---------------------------------------------------------------------------
+
+proc `$`*(m: LinkMechanism): string =
+  case m
+  of lmReflink: "reflink"
+  of lmHardlink: "hardlink"
+  of lmCopy: "copy"
+
+func `$`*(v: FactVerdict): string =
+  case v
+  of fvNoTableEntry: "no table entry"
+  of fvIndefinite: "indefinite"
+  of fvPossible: "possible"
+  of fvImpossible: "impossible"
+
+proc declaredEndpoint*(dir: string): DeclaredEndpoint =
+  ## What the fact tables say about the filesystem holding ``dir``.
+  ##
+  ## Reads exactly the two facts this module acts on. When the
+  ## filesystem has no row the values stay ``tnUnknown`` and the row is
+  ## NOT read — ``factsForPath`` answers the zeroth table row alongside
+  ## ``known = false``, and treating that as data is the mistake its own
+  ## doc comment warns about.
+  let (known, facts, obs) = factsForPath(dir)
+  result = DeclaredEndpoint(
+    status: obs.status, reportedName: obs.reportedName,
+    volumeKey: obs.volumeKey, id: obs.id,
+    hardlinks: tnUnknown, reflink: tnUnknown,
+    notice: describeTableStatus(obs))
+  if known:
+    result.hardlinks = facts.hardlinks.value
+    result.reflink = facts.reflink.value
+    result.hardlinkCitation = facts.hardlinks.citation
+    result.reflinkCitation = facts.reflink.citation
+
+proc declaredPairFor*(srcDir, dstDir: string): DeclaredPair =
+  ## The declared facts for both ends of a pair.
+  result.source = declaredEndpoint(srcDir)
+  result.dest = declaredEndpoint(dstDir)
+  # One filesystem INSTANCE, not merely one filesystem TYPE: two ReFS
+  # volumes are two instances and a link between them is a statement
+  # about neither one's row.
+  result.sameFilesystem =
+    result.source.status != teUnqueried and
+    result.dest.status != teUnqueried and
+    result.source.volumeKey.len > 0 and
+    result.source.volumeKey == result.dest.volumeKey
+
+func declaredValue*(ep: DeclaredEndpoint;
+                    mechanism: LinkMechanism): Ternary =
+  ## The declared support for ``mechanism`` at one endpoint.
+  case mechanism
+  of lmHardlink: ep.hardlinks
+  of lmReflink: ep.reflink
+  of lmCopy: tnYes  ## copy is the arm that cannot be unavailable.
+
+func declaredCitation*(ep: DeclaredEndpoint;
+                       mechanism: LinkMechanism): string =
+  case mechanism
+  of lmHardlink: ep.hardlinkCitation
+  of lmReflink: ep.reflinkCitation
+  of lmCopy: ""
+
+func verdictFor*(mechanism: LinkMechanism;
+                 pair: DeclaredPair): FactVerdict =
+  ## What the constants determine about ``mechanism`` for this pair.
+  ##
+  ## Pure, and deliberately so: the whole of F3's use of the tables is
+  ## this function plus ``disagreementKind``, so both can be driven over
+  ## their entire input space by a test without a host that has the
+  ## filesystem in question.
+  ##
+  ## The asymmetry is the design. ``tnNo`` at EITHER endpoint makes the
+  ## operation impossible — a clone into NTFS cannot work however
+  ## capable the source is — while ``tnYes`` at both endpoints is not
+  ## enough to make it possible, because pair reachability is the
+  ## probe's question. Anything that is not a definite ``tnNo`` or
+  ## ``tnYes`` (``varies`` on NFS/SMB/overlayfs, ``unknown``, ``n/a``)
+  ## is ``fvIndefinite``, which means probe.
+  ##
+  ## **An endpoint with no row outranks everything, including a definite
+  ## ``tnNo`` at the other end** — the F4 rule, and the precedence is
+  ## deliberate rather than incidental. A verdict is a statement about a
+  ## PAIR; a table that describes only half of a pair has not described
+  ## the pair, and "NTFS cannot clone, so this cannot clone" would skip
+  ## an attempt on a pair no observation has ever covered while a notice
+  ## saying "assumes nothing" was attached to the answer. It also has to
+  ## outrank ``tnNo`` rather than merely appear beside it, or the verdict
+  ## would depend on which endpoint the loop reached first — the first
+  ## draft of this function did exactly that and its own test caught it.
+  ## The cost is one syscall, on precisely the host where the extra
+  ## evidence is worth most.
+  if mechanism == lmCopy:
+    return fvPossible
+  var indefinite = false
+  var impossible = false
+  for ep in [pair.source, pair.dest]:
+    if ep.status != teKnown:
+      return fvNoTableEntry
+    case declaredValue(ep, mechanism)
+    of tnNo: impossible = true
+    of tnYes: discard
+    else: indefinite = true
+  if impossible: fvImpossible
+  elif indefinite: fvIndefinite
+  else: fvPossible
+
+func disagreementKind*(verdict: FactVerdict; issued: bool;
+                       outcome: LinkOutcome;
+                       sameFilesystem: bool): FactDisagreementKind =
+  ## The ONLY place the table and the probe are compared.
+  ##
+  ## Everything that is not a disagreement has to be excluded here, and
+  ## the exclusions carry more weight than the inclusions:
+  ##
+  ## * **A pair spanning two filesystems is not a statement about
+  ##   either.** A cross-volume reflink on Windows answers
+  ##   ERROR_INVALID_PARAMETER, which ``classifyWinError`` maps to
+  ##   ``loUnsupported``; without this guard every cross-volume
+  ##   materialization would report a defect in NTFS's row.
+  ## * **Only ``loUnsupported`` contradicts a declared capability.**
+  ##   ``loCrossDevice`` is pair reachability, ``loLinkLimitExceeded``
+  ##   is a per-file property (``isPerFileFallback``),
+  ##   ``loPermissionDenied`` is the caller's, and ``loOther`` is
+  ##   undiagnosed. None of them says the filesystem lacks the
+  ##   operation.
+  ## * **An indefinite or absent declaration cannot be contradicted.**
+  ##   ``varies`` is consistent with every observation; that is what
+  ##   makes it an honest value rather than an evasion.
+  if not issued or not sameFilesystem:
+    return fdNone
+  case verdict
+  of fvPossible:
+    if outcome == loUnsupported: fdDeclaredPossibleButUnsupported
+    else: fdNone
+  of fvImpossible:
+    if outcome == loOk: fdDeclaredImpossibleButWorked
+    else: fdNone
+  of fvIndefinite, fvNoTableEntry:
+    fdNone
+
+func describeEndpoint*(ep: DeclaredEndpoint): string =
+  ## Short form for a log line. The long form — why a filesystem has no
+  ## row, and what adding one takes — is ``ep.notice``.
+  case ep.status
+  of teKnown: $ep.id
+  of teDeferred: "UNROWED-BY-DECISION(" & ep.reportedName & ")"
+  of teUnknown: "UNROWED(" & ep.reportedName & ")"
+  of teUnqueried: "UNQUERIED"
+
+proc rulingEndpoint(mechanism: LinkMechanism;
+                    pair: DeclaredPair): DeclaredEndpoint =
+  ## The endpoint whose ``tnNo`` made a mechanism impossible. Source
+  ## first, matching ``verdictFor``'s own order, so the message names
+  ## the same row the verdict came from.
+  if declaredValue(pair.source, mechanism) == tnNo: pair.source
+  else: pair.dest
+
+proc skippedAttempt(mechanism: LinkMechanism;
+                    pair: DeclaredPair): LinkAttempt =
+  ## The record left behind by an attempt that was never issued.
+  ##
+  ## It names the row rather than only the verdict, because "not
+  ## attempted" without a reason is indistinguishable from a broken
+  ## probe, and the reader who most needs this line is the one who
+  ## suspects the table is wrong.
+  let ep = rulingEndpoint(mechanism, pair)
+  LinkAttempt(
+    outcome: loNotAttempted, errorCode: 0,
+    message: $mechanism & " was NOT attempted: the filesystem fact " &
+      "table declares " & $ep.id & " " & $mechanism & "=" &
+      $declaredValue(ep, mechanism) & ", so the attempt's failure is " &
+      "already determined and issuing it would only rediscover it " &
+      "(Platform-And-Filesystem-Facts F3)")
+
+proc buildDisagreement*(kind: FactDisagreementKind;
+                        mechanism: LinkMechanism; pair: DeclaredPair;
+                        attempt: LinkAttempt): FactDisagreement =
+  ## Turn a detected disagreement into a message that names BOTH values,
+  ## in the same shape the F2 conformance suite uses for a
+  ## contradiction. Which of the two is wrong is the reader's call, and
+  ## a message that decided it for them would be the paper-over this
+  ## milestone forbids.
+  let ep =
+    if kind == fdDeclaredImpossibleButWorked: rulingEndpoint(mechanism, pair)
+    else: pair.source
+  result = FactDisagreement(
+    kind: kind, mechanism: mechanism, filesystem: ep.reportedName,
+    declared: $mechanism & "=" & $declaredValue(ep, mechanism),
+    observed: $attempt.outcome, citation: declaredCitation(ep, mechanism))
+  result.message =
+    case kind
+    of fdNone: ""
+    of fdDeclaredPossibleButUnsupported:
+      "TABLE/PROBE DISAGREEMENT on " & ep.reportedName & " (" & $ep.id &
+        "): the fact table declares " & result.declared &
+        " but the operation answered " & $attempt.outcome & " on a pair " &
+        "within one filesystem (" & attempt.message & "). Either the row " &
+        "is wrong or repro_fs_facts/detect.nim matched the wrong row; " &
+        "the row's citation is: " & result.citation
+    of fdDeclaredImpossibleButWorked:
+      "TABLE/PROBE DISAGREEMENT on " & ep.reportedName & " (" & $ep.id &
+        "): the fact table declares " & result.declared &
+        " but the operation SUCCEEDED. The table is wrong, or this " &
+        "filesystem is not the one the table thinks it is; the row's " &
+        "citation is: " & result.citation
 
 # ---------------------------------------------------------------------------
 # The probe
@@ -605,12 +1040,35 @@ const ProbePayloadSize = 8192
   ## on, so a reflink attempt exercises a real extent duplication rather
   ## than a degenerate zero/short-file path.
 
-proc probeUncached(srcDir, dstDir: string): LinkCapability =
-  ## One real probe. Both mechanisms are attempted and the resulting
-  ## link is VERIFIED (content, and for hardlinks the shared link count)
-  ## before it is called available — an API that returns success while
-  ## producing a wrong file must not be recorded as a capability.
+proc noteDeclared(cap: var LinkCapability; pair: DeclaredPair) =
+  ## Attach the declared facts and, where an endpoint has no table row,
+  ## the F4 notice. Deduped because ``srcDir`` and ``dstDir`` are the
+  ## same directory on most pairs and one notice is a report while two
+  ## identical ones are noise.
+  cap.declared = pair
+  cap.hardlinkVerdict = verdictFor(lmHardlink, pair)
+  cap.reflinkVerdict = verdictFor(lmReflink, pair)
+  for ep in [pair.source, pair.dest]:
+    if ep.notice.len > 0 and ep.notice notin cap.notices:
+      cap.notices.add(ep.notice)
+
+proc probeUncached(srcDir, dstDir: string;
+                   audit: bool): LinkCapability =
+  ## One real probe. Each mechanism is either ATTEMPTED and the
+  ## resulting link VERIFIED (content, and for hardlinks the shared link
+  ## count) before it is called available — an API that returns success
+  ## while producing a wrong file must not be recorded as a capability —
+  ## or SKIPPED because the declared facts already determine that it
+  ## cannot work here.
+  ##
+  ## ``audit`` issues the skipped attempts anyway, purely to check the
+  ## table against reality. Off in production, because not issuing them
+  ## is the whole of F3's win; on in the tests, and available to a
+  ## caller who has reason to distrust a row on a host the F2
+  ## conformance suite has never seen.
   result = LinkCapability(probed: false)
+  let declared = declaredPairFor(srcDir, dstDir)
+  result.noteDeclared(declared)
   if not dirExists(extendedPath(srcDir)) or not dirExists(extendedPath(dstDir)):
     let why = LinkAttempt(outcome: loOther,
                           message: "probe skipped: source or destination " &
@@ -635,7 +1093,16 @@ proc probeUncached(srcDir, dstDir: string): LinkCapability =
 
   defer: quietRemove(probeSrc)
 
+  # The decision the tables are allowed to make, and the only one:
+  # whether the attempt below runs at all.
+  let issueHardlink = result.hardlinkVerdict != fvImpossible or audit
+  let issueReflink = result.reflinkVerdict != fvImpossible or audit
+
   block hardlinkArm:
+    if not issueHardlink:
+      result.hardlinkAttempt = skippedAttempt(lmHardlink, declared)
+      result.hardlink = false
+      break hardlinkArm
     let dst = dstDir / probeFileName("hl")
     quietRemove(dst)
     var attempt = attemptHardlink(probeSrc, dst)
@@ -650,9 +1117,18 @@ proc probeUncached(srcDir, dstDir: string): LinkCapability =
                                        "inode link count did not rise")
     quietRemove(dst)
     result.hardlinkAttempt = attempt
+    # Reality wins over the table for THIS pair, always — including when
+    # an audited attempt succeeds against a row that said it could not.
+    # The disagreement is recorded rather than resolved in the table's
+    # favour, because a capability the machine demonstrated is not
+    # something a constant may veto.
     result.hardlink = attempt.outcome == loOk
 
   block reflinkArm:
+    if not issueReflink:
+      result.reflinkAttempt = skippedAttempt(lmReflink, declared)
+      result.reflink = false
+      break reflinkArm
     let dst = dstDir / probeFileName("rl")
     quietRemove(dst)
     var attempt = attemptReflink(probeSrc, dst)
@@ -664,7 +1140,38 @@ proc probeUncached(srcDir, dstDir: string): LinkCapability =
     result.reflinkAttempt = attempt
     result.reflink = attempt.outcome == loOk
 
+  for (mechanism, verdict, issued, attempt) in [
+      (lmHardlink, result.hardlinkVerdict, issueHardlink,
+       result.hardlinkAttempt),
+      (lmReflink, result.reflinkVerdict, issueReflink,
+       result.reflinkAttempt)]:
+    let kind = disagreementKind(verdict, issued, attempt.outcome,
+                                declared.sameFilesystem)
+    if kind != fdNone:
+      result.disagreements.add(
+        buildDisagreement(kind, mechanism, declared, attempt))
+
   result.probed = true
+
+proc setFactAudit*(cache: var LinkCapabilityCache; enabled: bool) =
+  ## Turn the declared-fact audit on or off for this cache, dropping
+  ## every cached answer (the answers were derived under the other
+  ## setting, so keeping them would mix two policies in one memo).
+  ##
+  ## The audit exists because F3's skipping makes one direction of
+  ## disagreement unobservable in production: an attempt that is never
+  ## issued cannot succeed against a row that said it could not. The F2
+  ## conformance suite covers that direction for every filesystem the
+  ## host offers; this covers it for a host the suite has never run on,
+  ## at the cost of the syscalls F3 exists to avoid. That is why it is
+  ## off by default rather than merely discouraged.
+  if cache.audit != enabled:
+    cache.audit = enabled
+    cache.entries.clear()
+    cache.probes = 0
+
+proc factAudit*(cache: LinkCapabilityCache): bool =
+  cache.audit
 
 proc probeLinkCapabilities*(cache: var LinkCapabilityCache;
                             srcDir, dstDir: string): LinkCapability =
@@ -678,7 +1185,7 @@ proc probeLinkCapabilities*(cache: var LinkCapabilityCache;
   let key = filesystemPairKey(srcDir, dstDir)
   if cache.entries.hasKey(key):
     return cache.entries[key]
-  result = probeUncached(srcDir, dstDir)
+  result = probeUncached(srcDir, dstDir, cache.audit)
   result.key = key
   if result.probed:
     cache.probes.inc
@@ -708,6 +1215,15 @@ var
 
 globalCacheLock.initLock()
 
+var globalNotices {.guard: globalCacheLock.}: seq[string]
+  ## Every distinct F4 notice and disagreement this process has produced.
+  ##
+  ## The record in ``LinkCapability`` is the primary channel and
+  ## ``describe`` puts it in the caller's own log line, but a caller that
+  ## never logs would make the situation silent — which is the one thing
+  ## F4 forbids. This is the second channel: a process can ask, once, at
+  ## the end, what its filesystem assumptions rested on.
+
 proc linkCapabilities*(srcDir, dstDir: string): LinkCapability =
   ## ``probeLinkCapabilities`` against the process-wide cache. This is
   ## the entry point production callers use; the explicit-cache overload
@@ -715,6 +1231,27 @@ proc linkCapabilities*(srcDir, dstDir: string): LinkCapability =
   withLock globalCacheLock:
     {.gcsafe.}:
       result = probeLinkCapabilities(globalCache, srcDir, dstDir)
+      for notice in result.notices:
+        if notice notin globalNotices:
+          globalNotices.add(notice)
+      for d in result.disagreements:
+        if d.message notin globalNotices:
+          globalNotices.add(d.message)
+
+proc linkFactNotices*(): seq[string] =
+  ## Every filesystem the process met that the fact table does not
+  ## describe, and every table/probe disagreement it surfaced — in the
+  ## order they were first seen. Empty is the healthy answer.
+  withLock globalCacheLock:
+    {.gcsafe.}:
+      result = globalNotices
+
+proc setGlobalFactAudit*(enabled: bool) =
+  ## ``setFactAudit`` for the process-wide cache. See its doc for why
+  ## this is off by default.
+  withLock globalCacheLock:
+    {.gcsafe.}:
+      globalCache.setFactAudit(enabled)
 
 proc globalProbeCount*(): int =
   withLock globalCacheLock:
@@ -727,6 +1264,7 @@ proc resetGlobalLinkCapabilityCache*() =
   withLock globalCacheLock:
     {.gcsafe.}:
       globalCache.clear()
+      globalNotices.setLen(0)
 
 # ---------------------------------------------------------------------------
 # The decision the model dictates
@@ -758,6 +1296,14 @@ proc preferredMechanisms*(cap: LinkCapability;
   ## ``lmCopy`` is always last and always present: copy is the arm that
   ## cannot be unavailable, which is what lets the spec promise that
   ## correctness never depends on which mechanism was used.
+  ##
+  ## **Where the two flags come from since F3.** ``cap.reflink`` and
+  ## ``cap.hardlink`` are still what an attempt produced, except where
+  ## the declared facts made the attempt pointless, in which case they
+  ## are ``false`` and the attempt record says ``loNotAttempted`` and
+  ## names the row. This function deliberately does NOT consult the fact
+  ## tables itself: one seam is easier to reason about than two, and a
+  ## second consultation here could only ever disagree with the first.
   result = @[]
   if cap.reflink:
     result.add lmReflink
@@ -765,18 +1311,25 @@ proc preferredMechanisms*(cap: LinkCapability;
     result.add lmHardlink
   result.add lmCopy
 
-proc `$`*(m: LinkMechanism): string =
-  case m
-  of lmReflink: "reflink"
-  of lmHardlink: "hardlink"
-  of lmCopy: "copy"
-
 proc describe*(cap: LinkCapability): string =
   ## One-line diagnostic suitable for a log or a receipt hint.
+  ##
+  ## Since F3 it also carries what the fact tables said, because a
+  ## mechanism that was never attempted needs to explain itself: a log
+  ## reading ``reflink=false(loNotAttempted)`` with no reason attached is
+  ## indistinguishable from a broken probe.
   var parts: seq[string] = @[]
   parts.add("pair=" & cap.key)
   parts.add("probed=" & $cap.probed)
-  parts.add("reflink=" & $cap.reflink & "(" & $cap.reflinkAttempt.outcome & ")")
+  parts.add("fs=" & describeEndpoint(cap.declared.source) & "->" &
+            describeEndpoint(cap.declared.dest))
+  parts.add("reflink=" & $cap.reflink & "(" & $cap.reflinkAttempt.outcome &
+            "; table says " & $cap.reflinkVerdict & ")")
   parts.add("hardlink=" & $cap.hardlink & "(" &
-            $cap.hardlinkAttempt.outcome & ")")
+            $cap.hardlinkAttempt.outcome & "; table says " &
+            $cap.hardlinkVerdict & ")")
+  for notice in cap.notices:
+    parts.add("[NO TABLE ENTRY] " & notice)
+  for d in cap.disagreements:
+    parts.add("[" & d.message & "]")
   parts.join(" ")

@@ -3,7 +3,8 @@
 Declared facts about operating systems and filesystems.
 
 Spec: `reprobuild-specs/Platform-And-Filesystem-Facts.milestones.org`
-(**F1** the tables, **F2** the conformance suite).
+(**F1** the tables, **F2** the conformance suite, **F3** policy reading
+them, **F4** filesystems with no row).
 
 Two tables, because the axes are independent — a property belongs either
 to the OS (is symlink creation privileged? how long may a command line
@@ -39,6 +40,38 @@ Neither replaces the other. Constants cannot know which subvolume a path
 is in; a probe knows nothing about a filesystem this host does not have.
 `detect.nim` maps a path to a table row by asking the OS for the
 filesystem's *name* — a lookup, never a capability verdict.
+
+Since **F3** the probe *consults* this library, for exactly one purpose:
+to skip an attempt whose failure these constants already determine, so
+no `FSCTL_DUPLICATE_EXTENTS_TO_FILE` is issued against NTFS to
+rediscover something true since NTFS shipped. The effect is
+one-directional — a definite `tnNo` removes an attempt; a `tnYes` never
+adds a capability — and a disagreement between the two is reported
+rather than resolved in either's favour.
+
+## A filesystem with no row (F4)
+
+Policy degrades to the conservative answer: probe everything, assume
+nothing beyond what the probe establishes, and *report it*. The rule is
+stated normatively at the top of `detect.nim`;
+`describeTableStatus(obs)` is the notice.
+
+`TableEntryStatus` distinguishes four situations, because "nobody has
+looked" and "somebody looked and recorded why there is no row" are
+different things to tell a reader:
+
+| status | meaning |
+|--------|---------|
+| `teKnown` | a row describes this filesystem |
+| `teDeferred` | the name is in `UnenteredFilesystems`, with a reason and what adding a row takes |
+| `teUnknown` | the table has never heard of this name |
+| `teUnqueried` | the OS query failed; not a statement about any filesystem |
+
+`ext3` is the type case for `teDeferred`: current kernels serve it with
+the ext4 driver while `/proc/self/mountinfo` still reports `ext3`, but
+ext4's row declares a 1 ns timestamp granularity that a 128-byte-inode
+ext3 does not have — so the name gets a recorded decision, not a
+borrowed row.
 
 ## Layout
 

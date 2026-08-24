@@ -146,9 +146,20 @@ suite "M0 link-capability probe — availability":
         # FSCTL_DUPLICATE_EXTENTS_TO_FILE (block cloning).
         if vol.fsName == "NTFS":
           check not cap.reflink
-          check cap.reflinkAttempt.outcome == loUnsupported
+          # Platform-And-Filesystem-Facts F3 made this assertion more
+          # specific rather than less: the answer used to be
+          # ``loUnsupported``, DISCOVERED by issuing the FSCTL against a
+          # filesystem that has never implemented it. It is now
+          # ``loNotAttempted``, REASONED from NTFS's declared
+          # ``reflink = no``, and the verdict is what pins that it came
+          # from the table and not from a probe that quietly stopped
+          # running. ``t_link_capability_facts.nim`` asserts the
+          # syscall counter does not move.
+          check cap.reflinkVerdict == fvImpossible
+          check cap.reflinkAttempt.outcome == loNotAttempted
         elif vol.fsName == "ReFS":
           check cap.reflink
+          check cap.reflinkVerdict == fvPossible
           check cap.reflinkAttempt.outcome == loOk
       # Whatever the filesystem, the recorded flag and the recorded
       # outcome must agree — a "true" that was never observed is the
