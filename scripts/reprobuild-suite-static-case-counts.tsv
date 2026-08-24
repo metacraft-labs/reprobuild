@@ -207,7 +207,7 @@ libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	1
-libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	5
+libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	6
 libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim	nim	8
 libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim	nim	9
 libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim	nim	3
@@ -440,7 +440,7 @@ libs/repro_standard_provider/tests/test_examples_layout.nim	nim	1
 libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	nim	10
 libs/repro_standard_provider/tests/test_from_source_autotools_convention.nim	nim	5
 libs/repro_standard_provider/tests/test_from_source_cmake_convention.nim	nim	5
-libs/repro_standard_provider/tests/test_from_source_custom_convention.nim	nim	14
+libs/repro_standard_provider/tests/test_from_source_custom_convention.nim	nim	15
 libs/repro_standard_provider/tests/test_from_source_make_convention.nim	nim	6
 libs/repro_standard_provider/tests/test_from_source_meson_convention.nim	nim	7
 libs/repro_standard_provider/tests/test_go_convention.nim	nim	14
@@ -863,6 +863,7 @@ tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	nim	5
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	14
+tests/integration/t_build_machine_and_host_target_are_distinct.nim	nim	9
 tests/integration/t_build_progress_modes.nim	nim	1
 tests/integration/t_buildtype_drives_compile_flags.nim	nim	7
 tests/integration/t_buildtype_drives_output_dir.nim	nim	4
@@ -1018,7 +1019,7 @@ tests/integration/t_lock_from_a_v3_host_resolves_on_a_v2_host.nim	nim	6
 tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	nim	9
 tests/integration/t_lock_refresh_and_validate_without_building.nim	nim	5
 tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim	nim	1
-tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	nim	1
+tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	nim	2
 tests/integration/t_lock_store_backend_roundtrip_each_backend.nim	nim	1
 tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim	nim	1
 tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim	nim	1
@@ -1154,7 +1155,7 @@ tests/integration/t_shm_index_boot_id_unavailable_fails_closed.nim	nim	1
 tests/integration/t_shm_index_mpsc_ring_multiproducer_single_consumer.nim	nim	3
 tests/integration/t_shm_index_seqlock_reads_consistent_across_resize.nim	nim	1
 tests/integration/t_shm_oversized_submit_is_reported.nim	nim	1
-tests/integration/t_single_platform_entries_declare_platforms.nim	nim	7
+tests/integration/t_single_platform_entries_declare_platforms.nim	nim	8
 tests/integration/t_solved_packages_are_first_class_locked_deps.nim	nim	1
 tests/integration/t_spec_example_fixtures_compile.nim	nim	2
 tests/integration/t_spec_example_fixtures_present.nim	nim	16
@@ -1285,7 +1286,7 @@ tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	7
 tests/unit/t_m9r12_3_runquota_standard_pools.nim	nim	5
 tests/unit/t_m9r12_4_autotools_emits_fetch.nim	nim	3
 tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim	nim	15
-tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	12
+tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	13
 tests/unit/t_m9r13b_1_toolchain_pin.nim	nim	4
 tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	nim	6
 tests/unit/t_m9r13c_2_shim_lib_resolution.nim	nim	4
@@ -1312,7 +1313,7 @@ tests/unit/t_m9r15i_1_cmake_qt6_component_dirs.nim	nim	13
 tests/unit/t_m9r15o_1_qt6_transitive_cmake_deps.nim	nim	7
 tests/unit/t_m9r15p_0_qt6_transitive_auto_inject.nim	nim	10
 tests/unit/t_m9r15p_1_6_share_only_lib_cmake.nim	nim	5
-tests/unit/t_m9r15q_2_from_source_custom_registry_population.nim	nim	5
+tests/unit/t_m9r15q_2_from_source_custom_registry_population.nim	nim	6
 tests/unit/t_m9r15q_3_kf6_umbrella_config.nim	nim	9
 tests/unit/t_m9r15q_4_x11_stubs.nim	nim	4
 tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim	nim	7
@@ -1333,7 +1334,7 @@ tests/unit/t_m9r22b_1_disk_tools.nim	nim	8
 tests/unit/t_m9r22b_3_apply_cli.nim	nim	5
 tests/unit/t_m9r22b_4_mount_cli.nim	nim	3
 tests/unit/t_m9r23_1_installer_state_install_sequence.nim	nim	6
-tests/unit/t_m9r2_typed_cli_surfaces.nim	nim	17
+tests/unit/t_m9r2_typed_cli_surfaces.nim	nim	18
 tests/unit/t_m9r2b_typed_value_layer.nim	nim	15
 tests/unit/t_m9r2c_artifact_slot_typed.nim	nim	8
 tests/unit/t_m9r30_transitive_rpath_propagation.nim	nim	11
@@ -1356,7 +1357,7 @@ tests/unit/t_m9r81_dep_root_env_vars.nim	nim	5
 tests/unit/t_m9r82_action_cache_cas_migration.nim	nim	8
 tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	2
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
-tests/unit/t_m9r8_dispatcher_gate.nim	nim	4
+tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	14
 tests/unit/t_measurement_axes.nim	nim	14
 tests/unit/t_nix_propagated_store_paths.nim	nim	2
