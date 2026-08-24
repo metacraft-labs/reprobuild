@@ -69,10 +69,20 @@ suite "build machine vs host target":
     check targetForRole(trBuildMachine, v3Machine, v1Target) !=
           targetForRole(trHostTarget, v3Machine, v1Target)
 
-  test "features participate, not only the level":
-    # PMC-3 made the level sugar over a feature set; a split that compared only
-    # levels would treat these as native and silently share artifacts.
-    check isCrossTargeted(v3Plus, v3Machine)
+  test "features participate, but only once the HOST states them":
+    # PMC-3 made the level sugar over a feature set, so a split comparing only
+    # levels would treat a feature difference as native and silently share
+    # artifacts. But "the host said nothing" is not a difference: PMC-3 also
+    # made features DECLARED rather than probed, so an unstated host answers
+    # `{}` while `buildMachineTarget` measures real silicon. Comparing those
+    # raw values reported CROSS on an ordinary machine with no configuration,
+    # which is what this pair of cases now pins apart.
+    #
+    # host STATES a different feature set -> cross.
+    check isCrossTargeted(v3Machine, v3Plus)
+    # host states NOTHING -> native, however capable the build machine is.
+    check not isCrossTargeted(v3Plus, v3Machine)
+    # Routing is unaffected either way: the host target is still returned.
     check targetForRole(trHostTarget, v3Plus, v3Machine) == v3Machine
 
   test "a higher host target is cross too, not an error":
@@ -88,8 +98,13 @@ suite "build machine vs host target":
     defer: delEnv("REPRO_HOST_MICROARCH_LEVEL")
     check buildMachineTarget() == before          # unmoved
     check hostTarget().level == mlX86_64_v1       # moved
-    # ...and that combination is precisely a cross build.
-    check isCrossTargeted(buildMachineTarget(), hostTarget())
+    # ...and when that moves the host BELOW the build machine, it is a cross
+    # build. Guarded because `baselineMicroarchLevel(x86_64)` is itself v1
+    # (PMC-2), so on a host that has not declared a higher level there is
+    # nothing to move and nothing to observe -- asserting unconditionally
+    # would pin an accident of this machine's baseline.
+    if before.level != mlX86_64_v1:
+      check isCrossTargeted(buildMachineTarget(), hostTarget())
 
   test "detectHostTarget still means the HOST target":
     # The established name, kept so existing callers (the binary-cache compat

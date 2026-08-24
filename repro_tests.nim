@@ -7070,6 +7070,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_cross_targeting_axes_do_not_silently_disagree.nim",
+    binary: "build/test-bin/t_cross_targeting_axes_do_not_silently_disagree",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim",
     binary: "build/test-bin/t_cross_tier_move_between_layers_errors_loudly",
     defines: @[],

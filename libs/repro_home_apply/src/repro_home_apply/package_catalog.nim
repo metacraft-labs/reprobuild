@@ -783,8 +783,22 @@ proc isCrossTargeted*(buildT, hostT: PlatformTarget): bool =
   ## Exposed because the interesting diagnostics and cache decisions hang off
   ## this being observable, rather than each caller re-deriving it from a
   ## comparison it might get subtly wrong.
-  buildT.level != hostT.level or buildT.features != hostT.features or
-    buildT.family != hostT.family
+  # An UNSTATED host feature set is not a disagreement.
+  #
+  # PMC-3 made features DECLARED rather than probed: `detectHostCpuFeatures`
+  # answers `{}` unless `REPRO_HOST_CPU_FEATURES` says otherwise, while
+  # `buildMachineTarget` genuinely measures the silicon. Comparing those two
+  # raw values reported CROSS on an ordinary native machine with no
+  # configuration at all -- the host had said nothing and the build machine
+  # had said everything.
+  #
+  # So a divergence requires the host to have STATED something different.
+  # Family and level always count (both always have a value); features count
+  # only once the host has named some, which is exactly when a caller has
+  # taken a position on what the target provides.
+  buildT.family != hostT.family or
+    buildT.level != hostT.level or
+    (hostT.features != {} and hostT.features != buildT.features)
 
 proc targetForRole*(role: TargetRole; buildT, hostT: PlatformTarget):
     PlatformTarget =
