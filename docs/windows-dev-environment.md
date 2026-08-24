@@ -125,20 +125,21 @@ Two related traps while you are here:
   to. If a build produces no output and no `gcc`/`nim` children, check for a
   leftover `repro` process with 0 CPU seconds before re-running.
 
-## Known-unfixed: gcc crashes under the automatic dependency monitor
+## Fixed: access violations under the automatic dependency monitor
 
-Some actions fail with a gcc exit code of `-1073741819` — `0xC0000005`,
-STATUS_ACCESS_VIOLATION — accompanied by
+Older Windows monitor shims could make an action fail with an exit code of
+`-1073741819` — `0xC0000005`, STATUS_ACCESS_VIOLATION — accompanied by
 
 ```
 repro internal io monitor: error: The process cannot access the file because
 it is being used by another process.
 ```
 
-The affected actions all carry `dependencyPolicyKind: dgAutomaticMonitor`. It
-is **nondeterministic**: successive runs of the same target failed 3, then 4,
-then 1 different actions, converging as retries succeed. gcc is crashing, not
-diagnosing a bad input, so nothing in the source is at fault.
+The affected actions all carry `dependencyPolicyKind: dgAutomaticMonitor`. The
+failure was **nondeterministic** because a Win64 callee may leave the upper half
+of the return register undefined for a 32-bit `BOOL` result. Narrowing the full
+register in an injected hook could raise a `RangeDefect` inside the monitored
+process. `io-mon` now applies Windows' 32-bit return-value semantics explicitly.
 
 **Do not "fix" this by disabling the monitor.** A declared-only /
 monitor-disabled dependency mode is a deliberate, documented soundness hole —
@@ -151,8 +152,10 @@ rebuild. It has been introduced by agents without approval more than once
 that genuinely cannot be monitored must FAIL or be NON-CACHEABLE
 (`Monitor-Hook-Shim.md:501`) — never marked complete-on-declared-inputs.
 
-Re-running is the current workaround. The real fix belongs in the Windows
-monitor.
+If this signature returns, first sync `io-mon`, stop any running Reprobuild
+daemon, and run `just build` so `build/lib/librepro_monitor_shim.dll` is rebuilt
+before the daemon starts again. Re-running with a stale DLL can appear to fix
+the problem by chance and is not a valid workaround.
 
 ## Scale: the full suite is long, not broken
 
