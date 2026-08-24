@@ -428,6 +428,77 @@ const PartialCatalogCoverage* = {
   "libtoolize": "harvested Windows slice only."
 }
 
+const PlatformDeclarationSourceFile* =
+  "libs/repro_dsl_stdlib/src/repro_dsl_stdlib/catalog_registry.nim"
+  ## Named in diagnostics so a developer does not have to find it.
+
+proc platformDeclarationGuidance*(packageId: string; onlyOs: string): string =
+  ## The remediation text for "this entry's catalog covers exactly one OS and
+  ## nobody has said whether that is a fact about the package or a fact about
+  ## what we harvested".
+  ##
+  ## This lives beside the tables rather than inside the test that currently
+  ## raises it, for two reasons. It stays correct when the tables move, and any
+  ## other surface that needs to ask the same question -- a future harvester
+  ## check, a `repro` subcommand, a CI lint -- gets the identical wording
+  ## instead of a second, drifting copy.
+  ##
+  ## The bar it has to clear: a developer who has never read this campaign
+  ## should be able to act on it without opening the source. That means naming
+  ## the file, giving both snippets ready to paste, stating the TEST that
+  ## decides between them, and -- because the two mistakes are not symmetric --
+  ## saying what each wrong choice costs.
+  let os = if onlyOs.len > 0: onlyOs else: "one OS"
+  result = """
+  Package '""" & packageId & """' has catalog arms for """ & os & """ only, and
+  nothing records WHY. Reprobuild cannot infer it: "this package cannot exist
+  elsewhere" and "we only harvested this platform" look identical in the data,
+  and guessing wrong in one direction breaks builds fleet-wide.
+
+  Pick ONE of the two, in """ & PlatformDeclarationSourceFile & """:
+
+  (a) The package genuinely cannot exist on other platforms.
+      Add to HarvestedPlatformDeclarations:
+
+          """" & packageId & """": "<one sentence saying why it is """ & os &
+    """-only, e.g. it wraps a """ & os & """-only OS facility>",
+
+      Effect: an unguarded `uses: """" & packageId & """"` on another platform
+      now FAILS NAMING THE REASON instead of exhausting the adapter chain, and
+      the PATH adapter stops being reachable for it -- so it can no longer
+      silently resolve to a same-named binary that happens to be installed.
+
+  (b) The package exists elsewhere; we have only harvested this platform.
+      Add to PartialCatalogCoverage:
+
+          """" & packageId & """": "harvested """ & os & """ slice only.",
+
+      Effect: nothing changes at resolution time. This records the decision so
+      the entry stops being flagged, and so the next reader knows the narrow
+      catalog is a coverage gap rather than a property of the package.
+
+  HOW TO DECIDE, when it is not obvious: ask whether a build of this package
+  for another platform could exist AT ALL -- not whether we have one.
+    * `wix3`, `innounp`, `lessmsi` wrap Windows Installer formats. Nothing to
+      build elsewhere. -> (a)
+    * `gcc`, `git`, `python3` obviously run everywhere; the catalog is narrow
+      because only the Windows slices were harvested. -> (b)
+    * A vendor tool shipped as a single win64 .exe with no source: (a), unless
+      the vendor also ships other platforms and we simply have not added them.
+
+  IF YOU ARE UNSURE, CHOOSE (b). The two errors are NOT symmetric:
+    * Wrongly choosing (b) leaves today's behaviour exactly as it is. The entry
+      keeps resolving as it always has; you lose a good error message.
+    * Wrongly choosing (a) makes the package UNAVAILABLE on every platform you
+      did not list, through the same gate that protects the Windows-only ones.
+      Declaring `gcc` windows-only would stop gcc resolving on Linux.
+
+  Do not "fix" this by deleting the check or by inferring from the arms. An
+  earlier inference helper was deleted for exactly this reason: it walked a
+  package's DSL arms, could not see harvested catalog entries, and therefore
+  answered "available everywhere" for precisely the class this exists to catch.
+"""
+
 proc harvestedAvailability*(packageId: string): PackageAvailability =
   ## The PMC-5 declaration for a harvested-only package. ``declared = false``
   ## when the package is not in the table, which is the pre-PMC-5 behaviour

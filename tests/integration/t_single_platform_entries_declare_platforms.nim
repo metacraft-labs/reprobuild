@@ -73,18 +73,41 @@ suite "PMC-5 — single-OS entries are declared or explicitly excused":
     check singleOsTools().len > 0
 
   test "every single-OS entry is declared OR recorded as partially covered":
-    var unaccounted: seq[string] = @[]
+    # The failure path is the product here. Somebody hits this having just
+    # added a package and knowing nothing about this campaign, so the message
+    # has to be actionable on its own: which file, both snippets ready to
+    # paste, the test that decides between them, and what each wrong choice
+    # costs. `platformDeclarationGuidance` lives next to the tables so it stays
+    # correct when they move, and so any other surface asking the same question
+    # gets identical wording rather than a drifting second copy.
+    var unaccounted: seq[tuple[name: string; os: string]] = @[]
     for entry in singleOsTools():
-      let declared = packageAvailability(entry.name).declared
-      if declared or isPartiallyCovered(entry.name):
+      if packageAvailability(entry.name).declared or
+          isPartiallyCovered(entry.name):
         continue
-      unaccounted.add(entry.name & " (" & $entry.os & ")")
+      unaccounted.add((name: entry.name, os: $entry.os))
+    for entry in unaccounted:
+      checkpoint platformDeclarationGuidance(entry.name, entry.os)
     if unaccounted.len > 0:
-      checkpoint "single-OS entries in neither list: " & unaccounted.join(", ")
-      checkpoint "Decide which: add a HarvestedPlatformDeclarations entry if " &
-        "the package genuinely cannot exist elsewhere, or a " &
-        "PartialCatalogCoverage entry if only one platform was harvested."
+      var names: seq[string] = @[]
+      for e in unaccounted: names.add(e.name & " (" & e.os & ")")
+      checkpoint "undecided single-OS entries: " & names.join(", ")
     check unaccounted.len == 0
+
+  test "the guidance names the file, both lists, and the safe default":
+    # Pin the remediation itself. A diagnostic nobody asserts on is a
+    # diagnostic that rots -- and this one is the entire value of the lint,
+    # since the lint's job is to stop a human and tell them what to do.
+    let g = platformDeclarationGuidance("demo-tool", "windows")
+    check "demo-tool" in g
+    check PlatformDeclarationSourceFile in g
+    check "HarvestedPlatformDeclarations" in g
+    check "PartialCatalogCoverage" in g
+    # The asymmetry is the part a reader most needs and is most likely to skip.
+    check "IF YOU ARE UNSURE, CHOOSE (b)" in g
+    check "HOW TO DECIDE" in g
+    # It must say what the WRONG choice costs, not just what to type.
+    check "UNAVAILABLE" in g
 
   test "no entry is in BOTH lists":
     # The two lists mean opposite things. An entry in both would be a package
