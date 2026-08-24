@@ -725,15 +725,30 @@ const
     ## convention M1 established with
     ## ``CasMaterializeAllowSharedInodeDefault``.
     ##
-    ## An ingested hardlink is arguably WORSE than a materialized one. On
-    ## the way out, the shared inode is between the CAS blob and a file
-    ## the build is about to consume. On the way in, it is between the CAS
-    ## blob and a file the build tree still owns and will overwrite on the
-    ## next rebuild — and a build step that rewrites its output in place
-    ## would then silently rewrite the stored blob, leaving the store
-    ## holding content that does not hash to the name it is filed under.
-    ## Answering that hazard is Local-CAS-Hardlink-Materialization M3's
-    ## job.
+    ## **Local-CAS-Hardlink-Materialization M3 settled this and the answer
+    ## is that it stays ``false``.** See
+    ## ``Local-Content-Addressed-Store.md`` §"The shared-inode arm: a
+    ## weaker guarantee, and the conditions for using it" (normative) and
+    ## ``libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim``.
+    ##
+    ## An ingested hardlink is WORSE than a materialized one, and it is
+    ## the reason M3's answer could not be "yes, with guard rails". On the
+    ## way out, the shared inode is between the CAS blob and a file the
+    ## build is about to consume; a caller could in principle promise not
+    ## to write it. On the way IN, it is between the CAS blob and a file
+    ## the build tree already owns and will overwrite on the next
+    ## rebuild — so the hazard fires with nobody doing anything unusual,
+    ## and it fires AFTER this proc has returned, which puts it beyond the
+    ## reach of any check this proc could make. The identity witnesses
+    ## below close the window up to the commit; nothing closes the window
+    ## that opens at the commit and stays open for the blob's lifetime.
+    ##
+    ## It also retires the one free signal the store has in the other
+    ## direction. ``st_nlink`` above one is supposed to tell a GC that a
+    ## blob has outstanding materializations; with this arm on, EVERY
+    ## ingested blob permanently carries a second name owned by a tree the
+    ## store does not control, so the signal would carry no information at
+    ## all.
     ##
     ## Reflink is on, because it is copy-on-write: a later write to either
     ## name copies the touched extents instead of editing shared ones, so
@@ -878,8 +893,9 @@ proc describeIngestCopyOnly(cap: LinkCapability;
       "copy: neither reflink nor hardlink is available for this pair"
   if cap.hardlink and not allowSharedInode:
     reason = "copy: the pair supports hardlinks but the shared-inode arm " &
-      "is disabled (an ingested hardlink would make the build tree's " &
-      "output and the CAS blob one inode; M3 owns that hazard)"
+      "is disabled by policy (an ingested hardlink would make the build " &
+      "tree's output and the CAS blob one inode, so the next rebuild " &
+      "would rewrite the store; see M3)"
   reason & " [" & cap.describe() & "]"
 
 proc ingestByStreamingCopy(s: var Store; path: string; sizeBytes: uint64;

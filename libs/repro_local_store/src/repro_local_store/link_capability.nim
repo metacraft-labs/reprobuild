@@ -48,8 +48,10 @@
 ## This module is scoped to the filesystem primitives the policy needs: the
 ## model, the probe, and the per-file observations (``hardlinkCount``,
 ## ``fileIdentity``) that "one inode" makes meaningful. It has no opinion
-## about ``casMaterialize`` (M1), where path-based ingest stages its work
-## (M2), or the mutation guard rails a hardlink needs (M3).
+## about ``casMaterialize`` (M1) or where path-based ingest stages its
+## work (M2). The one policy statement it does carry is
+## ``preferredMechanisms``' ``allowSharedInode`` lever, which M3 settled:
+## see its doc comment.
 
 import std/[locks, os, strutils, tables]
 
@@ -740,10 +742,18 @@ proc preferredMechanisms*(cap: LinkCapability;
   ## every observer while costing like a link; a hardlink does not, and
   ## that is why it sorts second even though it is the cheapest.
   ##
-  ## ``allowSharedInode = false`` drops the hardlink arm entirely. That
-  ## is the lever for a destination that may be written in place — the
-  ## hazard M3 addresses — and it is expressed here so a caller states
-  ## its mutation expectation rather than re-deriving the policy.
+  ## ``allowSharedInode = false`` drops the hardlink arm entirely, and it
+  ## is expressed here so a caller states its mutation expectation once
+  ## rather than re-deriving the policy at each call site.
+  ##
+  ## Both of the store's own callers pass ``false`` by default and
+  ## Local-CAS-Hardlink-Materialization **M3** settled that they keep
+  ## doing so: a destination that is written IN PLACE — which is what
+  ## ``O_WRONLY|O_CREAT|O_TRUNC`` does, and what every compiler's ``-o``
+  ## therefore does — edits the CAS blob through the shared inode, and no
+  ## guard rail available to the store removes that. See
+  ## ``Local-Content-Addressed-Store.md`` §"The shared-inode arm: a weaker
+  ## guarantee, and the conditions for using it".
   ##
   ## ``lmCopy`` is always last and always present: copy is the arm that
   ## cannot be unavailable, which is what lets the spec promise that

@@ -21,10 +21,12 @@
 ##      front. M1 keeps the guarantee by staging everything and
 ##      committing only at the end, so it has to be measured directly.
 ##
-## The hardlink arm is DISABLED by default (M3 owns the mutation
-## hazard), so the tests assert both halves of that: the default really
-## does not hand out a shared inode, and the arm really does work when a
-## caller opts in.
+## The hardlink arm is DISABLED by default -- M3 settled that it stays
+## that way, because a write through a shared inode edits the CAS blob --
+## so the tests assert both halves of it: the default really does not hand
+## out a shared inode, and the arm really does work when a caller opts in.
+## The mutation-safety evidence itself lives in
+## ``t_cas_link_mutation_safety.nim``.
 
 import std/[algorithm, os, sequtils, strutils, unittest]
 
@@ -307,14 +309,18 @@ suite "M1 casMaterialize — mechanism selection":
       check readBytes(dest) == payload
       check hardlinkCount(cas.casPath(h)) == 1
       check hardlinkCount(dest) == 1
-      # The mutation hazard M3 owns is therefore absent by default:
-      # writing the restored output does not edit the cached blob.
+      # The mutation hazard is therefore absent by default: writing the
+      # restored output does not edit the cached blob. M3 generalised this
+      # to every arm the defaults can select.
       writeFile(extendedPath(dest), "an action rewrote its output")
       check readBytes(cas.casPath(h)) == payload
       check cas.casVerify(h)
 
   test "the default is expressed as a named constant, not a literal":
-    # M3 flips this. A test watches it so the flip is deliberate.
+    # M1 made this a named constant so M3's answer would be one reviewable
+    # line. M3's answer is that it stays false, so the watch now guards a
+    # settled decision rather than an open question; the evidence is in
+    # ``t_cas_link_mutation_safety.nim``.
     check CasMaterializeAllowSharedInodeDefault == false
 
   test "allowSharedInode = true reaches the hardlink arm and shares an inode":

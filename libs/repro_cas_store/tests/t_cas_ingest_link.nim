@@ -151,6 +151,34 @@ proc writeSource(path: string; payload: openArray[byte]) =
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), textOfBytes(payload))
 
+proc writeSourceStreamed(path: string; sizeBytes: int; seed: int) =
+  ## The same bytes ``writeSource(path, payloadOf(sizeBytes, seed))`` would
+  ## write, built in bounded chunks so the FIXTURE's own peak is a chunk
+  ## rather than the payload.
+  ##
+  ## This exists for the memory guard below and it is load-bearing there.
+  ## ``getMaxMem`` reports a high-water mark that never falls, so every byte
+  ## the fixture allocates before the measurement starts becomes headroom
+  ## the measurement silently grants to the thing under test. Building the
+  ## file the obvious way allocates the payload seq AND a whole string copy
+  ## of it — about 2x the payload — so an ingest that read the entire file
+  ## into memory would still report ``grew == 0`` and pass. The guard would
+  ## then be measuring nothing at all.
+  createDir(extendedPath(parentDir(path)))
+  const ChunkSize = 256 * 1024
+  var f = open(extendedPath(path), fmWrite)
+  try:
+    var buffer = newString(ChunkSize)
+    var written = 0
+    while written < sizeBytes:
+      let n = min(ChunkSize, sizeBytes - written)
+      for i in 0 ..< n:
+        buffer[i] = char(((written + i) * 131 + seed * 17) and 0xFF)
+      doAssert f.writeBuffer(addr buffer[0], n) == n
+      written += n
+  finally:
+    try: f.close() except CatchableError: discard
+
 proc digestOf(payload: openArray[byte]): ContentHash =
   toContentHash(blake3.digest(payload))
 
@@ -221,9 +249,12 @@ suite "M2 casPutPath — bounded work":
     const PayloadSize = 32 * 1024 * 1024
     const Budget = PayloadSize div 4
     let src = dir / "src" / "big.bin"
-    # Built and released before the measurement so the fixture's own
-    # allocation cannot be mistaken for the ingest's.
-    writeSource(src, payloadOf(PayloadSize, 2))
+    # Written in bounded chunks, NOT as one 32 MiB payload: the fixture's
+    # own allocation would otherwise raise ``getMaxMem``'s high-water mark
+    # by roughly 2x the payload before the measurement even begins, leaving
+    # the budget below with more slack than it reads. See
+    # ``writeSourceStreamed``.
+    writeSourceStreamed(src, PayloadSize, 2)
 
     GC_fullCollect()
     let before = getMaxMem()
@@ -231,7 +262,8 @@ suite "M2 casPutPath — bounded work":
     let grew = getMaxMem() - before
     checkpoint("ingested " & $PayloadSize & " bytes via " &
                $outcome.mechanism & "; heap high-water grew by " & $grew &
-               " bytes (budget " & $Budget & ")")
+               " bytes (budget " & $Budget & ", fixture peak bounded at " &
+               "256 KiB)")
     check grew < Budget
     # ...and the bytes are still right, so the bound was not bought by not
     # doing the work.
@@ -368,7 +400,7 @@ suite "M2 casPutPath — mechanism selection":
       check outcome.hash == digestOf(payload)
       check readBytes(cas.casPath(outcome.hash)) == payload
       # A clone is its own inode. That is the whole reason this arm needs
-      # no M3 guard rail: nothing is shared that a write could reach.
+      # no guard rail at all: nothing is shared that a write could reach.
       check hardlinkCount(src) == 1
       check hardlinkCount(cas.casPath(outcome.hash)) == 1
 
@@ -447,15 +479,18 @@ suite "M2 casPutPath — mechanism selection":
       check "hardlink=true" in outcome.diagnostic
       check hardlinkCount(src) == 1
       check hardlinkCount(cas.casPath(outcome.hash)) == 1
-      # The mutation hazard M3 owns is therefore absent by default: the
-      # build tree rewriting its own output does not touch the store.
+      # The mutation hazard is therefore absent by default: the build tree
+      # rewriting its own output does not touch the store. M3 generalised
+      # this to every arm the defaults can select.
       writeFile(extendedPath(src), repeat('z', 16 * 1024))
       check cas.casVerify(outcome.hash)
       check cas.casGet(outcome.hash) == payload
 
   test "the ingest default is expressed as a named constant, not a literal":
-    # M3 flips this. A test watches it so the flip is deliberate, exactly
-    # as M1's watches CasMaterializeAllowSharedInodeDefault.
+    # M2 made this a named constant so M3's answer would be one reviewable
+    # line, exactly as M1's did. M3's answer is that BOTH stay false, so
+    # the watch now guards a settled decision; the evidence is in
+    # ``t_cas_link_mutation_safety.nim``.
     check CasIngestAllowSharedInodeDefault == false
     check CasMaterializeAllowSharedInodeDefault == false
 

@@ -510,6 +510,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim",
+    binary: "build/test-bin/t_cas_link_mutation_safety",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cas_store/tests/t_cas_materialize_link.nim",
     binary: "build/test-bin/t_cas_materialize_link",
     defines: @[],

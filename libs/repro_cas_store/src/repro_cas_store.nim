@@ -323,28 +323,48 @@ type
 const
   CasMaterializeAllowSharedInodeDefault* = false
     ## The hardlink arm is IMPLEMENTED but OFF BY DEFAULT, and this
-    ## constant is where that is decided — deliberately a named
-    ## constant rather than a literal in a signature, so flipping it is
-    ## a reviewable one-line change with a test that watches it.
+    ## constant is where that is decided.
+    ##
+    ## **Local-CAS-Hardlink-Materialization M3 settled this and the
+    ## answer is that it stays ``false``.** M1 made it a named constant
+    ## so the flip would be one reviewable line; M3 measured the arm and
+    ## declined to make it. See
+    ## ``Local-Content-Addressed-Store.md`` §"The shared-inode arm: a
+    ## weaker guarantee, and the conditions for using it" for the
+    ## normative statement, and
+    ## ``tests/t_cas_link_mutation_safety.nim`` for the measurements.
     ##
     ## Why off: a materialized hardlink shares an inode with the CAS
     ## blob, so an action that opens its restored output and writes in
-    ## place edits the cache's copy of somebody else's result. That
-    ## hazard is Local-CAS-Hardlink-Materialization **M3**'s to answer
-    ## (read-only blobs, link-count checks at ingest, or
-    ## copy-on-materialize for declared-mutable outputs); until it is
-    ## answered, this facade MUST NOT hand a caller a shared inode it
-    ## did not ask for.
+    ## place edits the cache's copy of somebody else's result. That is
+    ## not an exotic write shape — ``O_WRONLY|O_CREAT|O_TRUNC``, which
+    ## is what every compiler's ``-o`` does, writes THROUGH the existing
+    ## name into the existing inode. Replacing the name by rename is
+    ## safe and truncating it is not, and the store cannot observe which
+    ## one an arbitrary tool will pick.
+    ##
+    ## Why the candidate guard rails do not change that: read-only mode
+    ## bits are per-inode, so the guard lands on the build tree's own
+    ## output, is clearable without privilege through the very name it
+    ## guards against, and makes the output's writability depend on
+    ## which mechanism ran — which is the one thing the spec says
+    ## correctness must never do. A link-count check detects sharing but
+    ## cannot prevent a write through it. Copy-on-materialize for
+    ## declared-mutable outputs would make cache integrity depend on
+    ## every edge declaring correctly, with silent cross-build
+    ## corruption as the cost of a wrong declaration.
     ##
     ## Why the reflink arm is nevertheless on: a reflink is
     ## copy-on-write. A write through it copies the touched extents
     ## instead of editing the shared ones, so it is indistinguishable
     ## from a copy to every observer while costing like a link. It has
-    ## no mutation hazard and therefore needs no M3 guard rail.
+    ## no mutation hazard and therefore needs no guard rail at all.
     ##
-    ## Callers that know their destination is never written in place
-    ## may pass ``allowSharedInode = true`` explicitly. M3 flips the
-    ## default.
+    ## The opt-in still exists, and a caller that takes it accepts the
+    ## weaker guarantee the spec section above spells out: the
+    ## destination MUST NOT be written in place by anything, ever, for
+    ## as long as the blob is in the store. "We think our tools use
+    ## rename" does not satisfy that condition.
 
   CasStreamChunkSize = 1024 * 1024
     ## Bounded working buffer for the copy and verify passes. It is the
@@ -436,7 +456,8 @@ proc describeCopyOnlyPair(cap: LinkCapability;
       "copy: neither reflink nor hardlink is available for this pair"
   if cap.hardlink and not allowSharedInode:
     reason = "copy: the pair supports hardlinks but the shared-inode " &
-      "arm is disabled (M3 owns the mutation hazard)"
+      "arm is disabled by policy (a write through the restored output " &
+      "would edit the CAS blob; see M3)"
   reason & " [" & cap.describe() & "]"
 
 proc casProbeSourceDir(cas: CasStore): string =
@@ -557,10 +578,20 @@ proc casMaterializeDetailed*(cas: CasStore;
     # ``applyPermissions`` says this destination carries its own mode
     # bits. Mode bits are per-INODE, so honouring that request through
     # a hardlink would chmod the CAS blob itself — the first of the
-    # three "consequences that follow from one inode" the spec lists.
-    # Windows never applies permissions here (see the guarded block
-    # below), so the exclusion is POSIX-only; making it unconditional
-    # would disable the arm on the very platform M3 will enable it on.
+    # three "consequences that follow from one inode" the spec lists,
+    # and normative since M3 as
+    # ``Local-Content-Addressed-Store.md`` §"The shared-inode arm"'s
+    # ``applyPermissions`` clause rather than a convention living only
+    # here. M3 re-confirmed the exclusion and MEASURED the fact it rests
+    # on: a chmod through a linked name moves the blob's own mode (see
+    # ``tests/t_cas_link_mutation_safety.nim``).
+    #
+    # The guard is POSIX-only because the permission-applying block
+    # below is POSIX-only: on Windows nothing here ever applies
+    # ``entry.permissions``, so there is nothing to leak into the blob.
+    # The two ``when not defined(windows)`` blocks are therefore a pair —
+    # if the second ever gains a Windows arm, this one MUST lose its
+    # guard in the same change.
     var entryAllowsSharedInode = allowSharedInode
     when not defined(windows):
       if entry.applyPermissions:
