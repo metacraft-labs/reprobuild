@@ -390,6 +390,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim",
+    binary: "build/test-bin/t_force_rebuild_is_honored_by_engine_api",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim",
     binary: "build/test-bin/t_nlf_stat4_baseline_fingerprints",
     defines: @[],
@@ -8694,6 +8702,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_provider_compile_reporting_distinguishes_compile_from_reuse.nim",
+    binary: "build/test-bin/t_provider_compile_reporting_distinguishes_compile_from_reuse",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_provider_file_driven_fanout_cleanup.nim",
     binary: "build/test-bin/t_provider_file_driven_fanout_cleanup",
     defines: @[],
@@ -9160,6 +9176,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_shm_index_seqlock_reads_consistent_across_resize.nim",
     binary: "build/test-bin/t_shm_index_seqlock_reads_consistent_across_resize",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_shm_oversized_submit_is_reported.nim",
+    binary: "build/test-bin/t_shm_oversized_submit_is_reported",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

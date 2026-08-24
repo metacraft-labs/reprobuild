@@ -4611,6 +4611,43 @@ proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
     return
   removeFile(extendedPath(artifactPath))
 
+const ProviderCompileActionId = "__repro_provider_compile"
+
+var providerCompileConsultations: int
+var providerCompileLaunchedInThisProcess: bool
+  ## Per-PROCESS ledger of every engine consultation of the ONE
+  ## ``__repro_provider_compile`` edge, and whether any of them actually
+  ## launched a compile.
+  ##
+  ## Why this has to exist for the log line to mean anything: one
+  ## ``repro build`` reaches the provider-compile edge up to three times —
+  ## the daemon-spawn pool discovery (``getRecipeBuildPools`` →
+  ## ``refreshRecipeProviderSnapshot``), the scoped-tool snapshot refresh,
+  ## and the build itself — for the same reason ``extractInterfaceEdge``
+  ## is reached several times (see ``interfaceEdgeSessionResults``). Only
+  ## the LAST one is logged. The earlier passes are the ones that do the
+  ## work, so the logged pass is a no-op WHENEVER a compile happened, and
+  ## reads byte-identically to an invocation in which nothing happened at
+  ## all. Measured pre-fix: a run that spent 63 s in a real ``nim c`` of
+  ## the provider and a run that did nothing printed the same line.
+  ##
+  ## Scope, stated plainly: this counts consultations in THIS process. All
+  ## the passes above run in one process (the CLI with ``--daemon=off``,
+  ## the daemon session process otherwise), so the count is complete for
+  ## the invocation it describes; it is not a claim about work some other
+  ## process may have done.
+
+proc noteProviderCompileConsultation(buildResult: BuildRunResult) =
+  for item in buildResult.results:
+    if item.id == ProviderCompileActionId:
+      inc providerCompileConsultations
+      if item.launched:
+        providerCompileLaunchedInThisProcess = true
+
+proc providerCompileInvocationSummary(): string =
+  " consultations=" & $providerCompileConsultations &
+    " compiled=" & $providerCompileLaunchedInThisProcess
+
 proc providerCompileFailure(buildResult: BuildRunResult): string =
   for item in buildResult.results:
     if item.status in {asFailed, asBlocked}:
@@ -8455,11 +8492,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
       warnRunQuotaBypassIfUsed(providerCompileResult)
+      noteProviderCompileConsultation(providerCompileResult)
       for item in providerCompileResult.results:
+        # `status`/`launched`/`cache` describe THIS consultation only.
+        # `consultations`/`compiled` describe the whole invocation, which
+        # is what a reader of this line is actually asking about — see
+        # `providerCompileLaunchedInThisProcess`.
         logAction("providerCompileAction: " & item.id & " status=" &
           $item.status & " launched=" & $item.launched & " cache=" &
           $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
-          (if item.reason.len > 0: " reason=" & item.reason else: ""))
+          (if item.reason.len > 0: " reason=" & item.reason else: "") &
+          providerCompileInvocationSummary())
       if providerCompileResult.hasFailedActions():
         raise newException(OSError, providerCompileFailure(providerCompileResult))
       if not fileExists(extendedPath(providerArtifactPath)):
@@ -17865,6 +17908,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       skipCacheHitEvidence: true)
     let providerCompileResult = runBuild(graph([providerCompileAction]),
       providerCompileConfig)
+    # This pass logs nothing of its own, and it is the pass that most
+    # often does the actual compiling. Record it so the ONE line that IS
+    # logged (in `executeBuildTarget`) can report the invocation rather
+    # than just its own last consultation.
+    noteProviderCompileConsultation(providerCompileResult)
     if providerCompileResult.hasFailedActions():
       raise newException(OSError, providerCompileFailure(providerCompileResult))
     # Re-derived from the engine's own decision now that the hand-written
@@ -18065,6 +18113,11 @@ proc refreshRecipeProviderSnapshot(target: string;
       skipCacheHitEvidence: true)
     let providerCompileResult = runBuild(graph([providerCompileAction]),
       providerCompileConfig)
+    # This pass logs nothing of its own, and it is the pass that most
+    # often does the actual compiling. Record it so the ONE line that IS
+    # logged (in `executeBuildTarget`) can report the invocation rather
+    # than just its own last consultation.
+    noteProviderCompileConsultation(providerCompileResult)
     if providerCompileResult.hasFailedActions():
       raise newException(OSError, providerCompileFailure(providerCompileResult))
     if not fileExists(extendedPath(providerArtifactPath)):
