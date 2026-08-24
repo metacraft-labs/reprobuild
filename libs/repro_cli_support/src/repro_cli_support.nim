@@ -5558,6 +5558,16 @@ proc siblingStandardProviderPath(publicCliPath: string): string =
   else:
     ""
 
+proc standardProviderArtifactIdForBinary*(binaryPath: string): string =
+  ## Graph snapshots contain convention-lowered commands, so their identity
+  ## must change whenever the standard-provider implementation changes.
+  ## Content addressing preserves sharing across installations at different
+  ## filesystem paths.
+  if not fileExists(extendedPath(binaryPath)):
+    raise newException(IOError,
+      "standard provider binary does not exist: " & binaryPath)
+  StandardProviderArtifactId & "." & fileContentDigest(binaryPath)
+
 type
   BuildProgressMode = enum
     bpmQuiet
@@ -8297,12 +8307,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       artifact.projectInterface.standardBuildEligible:
     let standardProviderBinary = siblingStandardProviderPath(publicCliPath)
     if standardProviderBinary.len > 0:
+      let standardProviderArtifactId =
+        standardProviderArtifactIdForBinary(standardProviderBinary)
       invocationFastPath = "tier2b-standard-direct"
       logSummary("standardDirect: dispatching " & standardProviderBinary)
       logSummary("project: " & artifact.projectInterface.projectName)
       logSummary("interface: " & interfacePath)
       logSummary("providerBinary: " & standardProviderBinary)
-      logSummary("providerArtifact: " & StandardProviderArtifactId)
+      logSummary("providerArtifact: " & standardProviderArtifactId)
       logSummary("runQuotaSocket: " & runQuotaSocketDiagnostic())
       let synthIdentity = PathOnlyBuildIdentity(
         projectName: artifact.projectInterface.projectName,
@@ -8312,7 +8324,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       let refresh = refreshProviderGraph(RefreshConfig(
         storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
         providerBinaryPath: standardProviderBinary,
-        providerArtifactId: StandardProviderArtifactId,
+        providerArtifactId: standardProviderArtifactId,
         rootEntryPointId: StandardProviderRootEntryPointId,
         rootArguments: result.projectRoot,
         namespace: StandardProviderNamespace,

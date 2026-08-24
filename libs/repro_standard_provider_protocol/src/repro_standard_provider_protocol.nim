@@ -22,20 +22,12 @@
 ## framework.
 
 const
-  ## Stable identity of the standard-provider binary. The engine bakes
-  ## this string into ``ProviderArtifactId`` whenever it routes a no-
-  ## ``build:`` package through the Tier 2b path; every project on the
-  ## same ``repro`` release that hits this provider shares an action-
-  ## cache scope for the provider artifact itself. Bumping the suffix
-  ## invalidates that share — keep it in lockstep with the binary's
-  ## emitted graph schema.
+  ## Stable namespace for standard-provider artifacts. The engine appends
+  ## the provider binary's content digest before dispatch, so byte-identical
+  ## installations share graph snapshots while any implementation change
+  ## invalidates previously emitted graphs.
   StandardProviderArtifactId* =
-    "repro-standard-provider.v0-scaffold"
-    ## v0-scaffold: M0 placeholder; one fake entry point, empty graph
-    ##              fragments. Engine routing is not wired up yet, so
-    ##              this value never reaches production cache keys.
-    ## v1 (future): M1's convention-dispatch framework lands and the
-    ##              binary emits real per-language fragments.
+    "repro-standard-provider.v1"
   StandardProviderRootEntryPointId* =
     "standardProvider.root"
   StandardProviderRootBodyHash* =
