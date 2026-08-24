@@ -95,6 +95,28 @@ import ../packages/pkg_config as pkg_config_module
 
 const FetchScratchSubdir = ".repro/fetch"
 
+const AutotoolsWindowsInstallArgConversionExclusions* =
+  "prefix=;exec_prefix=;bindir=;sbindir=;libdir=;includedir=;" &
+  "datarootdir=;datadir=;mandir=;infodir=;DESTDIR="
+
+proc addWindowsInstallArgConversionExclusions(
+    env: var seq[(string, string)]) =
+  ## Recursive Automake installs pass POSIX install directories back to a
+  ## native make executable. MSYS must leave those VAR=/path arguments intact.
+  when defined(windows):
+    for i, entry in env:
+      if entry[0] == "MSYS2_ARG_CONV_EXCL":
+        var merged = entry[1]
+        for exclusion in AutotoolsWindowsInstallArgConversionExclusions.split(';'):
+          if exclusion.len > 0 and exclusion notin merged.split(';'):
+            if merged.len > 0 and not merged.endsWith(";"):
+              merged.add(';')
+            merged.add(exclusion)
+        env[i] = (entry[0], merged)
+        return
+    env.add(("MSYS2_ARG_CONV_EXCL",
+      AutotoolsWindowsInstallArgConversionExclusions))
+
 proc sanitizedPackageName(packageName: string): string =
   ## Lower the package name to the limited character set the build
   ## engine's action-id slot accepts (alphanumerics + ``-``/``_``/``.``).
@@ -683,6 +705,7 @@ proc autotools_package*(srcDir: string;
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
   for envVar in extraEnv:
     installEnv.add(envVar)
+  addWindowsInstallArgConversionExclusions(installEnv)
   let installDestdir = (block:
     if providerProjectRoot.len > 0:
       providerProjectRoot / buildDir / destdir
