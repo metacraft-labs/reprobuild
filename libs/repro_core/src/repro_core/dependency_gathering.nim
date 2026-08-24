@@ -7,8 +7,44 @@ type
     dgPostBuildConverter
     dgRecognizedFormatValidatedByMonitor
     dgPostBuildConverterValidatedByMonitor
+
+    dgTrustedDeclaredInputs
+      ## HAZARDOUS. The action's inputs are whatever the recipe author wrote
+      ## inline, and the engine performs NO monitoring and NO result
+      ## processing for the edge. Nothing verifies the list.
+      ##
+      ## USE ONLY when the action CANNOT be monitored at all — today that
+      ## means an action performing ``LD_PRELOAD`` interposition itself,
+      ## because the monitor's interposer and the action's re-enter each
+      ## other on the same libc entry points and livelock. "Monitoring is
+      ## inconvenient", "the action is slow", or "the evidence looks noisy"
+      ## are NOT reasons; those keep ``dgAutomaticMonitor``.
+      ##
+      ## THE HAZARD: a declared list that is wrong, or that goes stale when a
+      ## dependency moves, will NOT invalidate the cache. The action keeps
+      ## serving a cached result built from inputs that have since changed,
+      ## silently and indefinitely, until a human notices and edits the list.
+      ## Automatic monitoring exists precisely so that cannot happen.
+      ##
+      ## Note the engine must ALSO withhold the shim-library env seed for
+      ## this kind (see ``launchChildEnv``): suppressing the monitor wrap
+      ## alone is not enough, because io-mon's preload runtime propagates
+      ## whatever ``REPRO_MONITOR_SHIM_LIB`` names into child processes.
+      ##
+      ## Authorized by the repository owner on 2026-08-21 for the narrow
+      ## self-interposing-test case, with the explicit instruction that its
+      ## use stay discouraged. See the history note below for why the
+      ## unrestricted forms of this idea were removed and must not return.
+
     # NOTE: there is intentionally NO "declared-only" / "no runtime
-    # dependencies" gathering kind. A mode that tracked only the
+    # dependencies" gathering kind of the UNRESTRICTED kind described below.
+    # ``dgTrustedDeclaredInputs`` above is a deliberately narrow,
+    # owner-authorized exception requiring the author to write the inputs and
+    # a justification inline at the call site; it is NOT a default, NOT a
+    # fallback, and NOT reachable from an environment variable. The blanket
+    # forms remain banned:
+    #
+    # A mode that tracked only the
     # statically declared inputs and marked the action complete/cacheable
     # — silently letting depended-on files change without a rebuild — was
     # re-introduced more than once by agents without approval (first as

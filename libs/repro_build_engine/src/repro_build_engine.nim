@@ -4355,7 +4355,24 @@ proc launchChildEnv(action: BuildAction;
   # An explicit ``action.env`` override wins because the action env is
   # appended after the seed and the process launcher's overlay is
   # last-write-wins.
-  let shimLib = findShimLibrary()
+  #
+  # NOT SEEDED for ``dgTrustedDeclaredInputs``. Suppressing the monitor WRAP is
+  # not sufficient on its own to keep an action shim-free: io-mon's preload
+  # runtime propagates itself to child processes by prepending the library
+  # named in ``REPRO_MONITOR_SHIM_LIB`` to their ``LD_PRELOAD``. An action that
+  # builds its own interposer from that same runtime therefore re-injects OUR
+  # shim into its children even though the engine never wrapped it — which is
+  # exactly how a self-interposing test ends up with two interposers again and
+  # livelocks.
+  #
+  # Measured: with the wrap suppressed but the seed still present, the
+  # stackable-hooks fixture came up with
+  # ``LD_PRELOAD=<monitor shim>:<test shim>`` and spun at 92% CPU. The two
+  # must be gated together — a policy that says "do not monitor this action"
+  # has to also mean "do not hand this action the means to monitor itself".
+  let shimLib =
+    if action.dependencyPolicy.kind == dgTrustedDeclaredInputs: ""
+    else: findShimLibrary()
   if shimLib.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)
   # macOS monitoring needs NO env seed: the io-mon shim always runs BOTH
