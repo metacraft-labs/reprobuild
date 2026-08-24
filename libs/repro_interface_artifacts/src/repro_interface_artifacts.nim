@@ -61,7 +61,16 @@ proc compileTimeSourceRoot(name: string): string {.compileTime.} =
   ## leaving its dev shell; embedding the store paths also keeps those inputs
   ## in the installed closure. Runtime overrides and live sibling checkouts
   ## still take precedence at resolution time.
-  getEnv(name)
+  let root = getEnv(name)
+  if root.len == 0 or root.isAbsolute:
+    root
+  else:
+    # Nim VM cannot call the Windows current-directory API used by
+    # `absolutePath`. This module's source location is already known during
+    # compilation, so resolve build-environment paths against the reprobuild
+    # checkout without consulting ambient process state.
+    let reprobuildRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+    os.normalizedPath(reprobuildRoot / root)
 
 const BuiltSourcePackageRoots = [
   ("REPRO_TEST_ADAPTERS_SRC", compileTimeSourceRoot("REPRO_TEST_ADAPTERS_SRC")),
@@ -97,7 +106,12 @@ proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
   ## roots through the process environment so every nested extractor and
   ## resource-accessor compile inherits the same source closure.
   for (envName, root) in roots:
-    if not existsEnv(envName) and root.len > 0 and
+    # A build-time relative path is anchored at the directory where the CLI
+    # happened to be compiled. Re-exporting it from a consumer or temp runner
+    # silently changes its meaning. New binaries normalize such roots while
+    # compiling; rejecting them here also keeps older binaries from poisoning
+    # cold out-of-tree interface extraction.
+    if not existsEnv(envName) and root.isAbsolute and
         dirExists(extendedPath(root)):
       putEnv(envName, root)
 

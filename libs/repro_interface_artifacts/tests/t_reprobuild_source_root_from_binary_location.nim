@@ -57,6 +57,20 @@ suite "reprobuild source root from binary location":
     seedSourcePackageEnvironment([(envName, root)])
     check getEnv(envName) == "explicit-override"
 
+  test "relative embedded roots are not exported from a consumer cwd":
+    let envName = "REPROBUILD_TEST_RELATIVE_SOURCE_ROOT"
+    let hadEnv = existsEnv(envName)
+    let oldEnv = getEnv(envName)
+    delEnv(envName)
+    defer:
+      if hadEnv: putEnv(envName, oldEnv)
+      else: delEnv(envName)
+
+    # `.` exists but denotes a different tree after the CLI moves from its
+    # build checkout into a consumer project or extraction scratch directory.
+    seedSourcePackageEnvironment([(envName, ".")])
+    check not existsEnv(envName)
+
   test "bootstrap flags mirror external adapter and runquota roots":
     let root = createTempDir("reprobuild-bootstrap-external-", "")
     defer: removeDir(root)
