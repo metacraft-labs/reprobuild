@@ -1589,9 +1589,47 @@ proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
         dirs.add(dir)
   dirs.join($PathSep)
 
+proc scriptInterpreterArgv(executablePath: string): seq[string] =
+  ## Windows does not interpret shebangs before CreateProcessW. Lower a typed
+  ## script tool to its declared interpreter while keeping native executables
+  ## and every non-Windows invocation unchanged.
+  when defined(windows):
+    if not fileExists(extendedPath(executablePath)):
+      return
+    var executableFile: File
+    if not open(executableFile, extendedPath(executablePath), fmRead):
+      return
+    defer:
+      executableFile.close()
+    var marker: array[2, char]
+    if executableFile.readBuffer(addr marker[0], marker.len) != marker.len or
+        marker != ['#', '!']:
+      return
+    var firstLine = ""
+    if not executableFile.readLine(firstLine):
+      return
+    let fields = firstLine.strip().splitWhitespace()
+    if fields.len == 0:
+      return
+    let normalizedInterpreter = fields[0].replace('\\', '/')
+    if normalizedInterpreter.endsWith("/env"):
+      var firstCommandArg = 1
+      if firstCommandArg < fields.len and fields[firstCommandArg] == "-S":
+        inc firstCommandArg
+      for i in firstCommandArg ..< fields.len:
+        result.add(fields[i])
+    else:
+      if normalizedInterpreter.startsWith("/"):
+        result.add(lastPathPart(normalizedInterpreter))
+      else:
+        result.add(fields[0])
+      for i in 1 ..< fields.len:
+        result.add(fields[i])
+
 proc argvForCall*(call: PublicCliCall;
                   profile: PathOnlyToolProfile): seq[string] =
-  result = @[profile.resolvedExecutablePath]
+  result = scriptInterpreterArgv(profile.resolvedExecutablePath)
+  result.add(profile.resolvedExecutablePath)
 
   proc encodedValues(arg: PublicCliArg): seq[string] =
     if arg.nimType.normalize == "seq[string]":
@@ -2414,6 +2452,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       payload.commandStatsId
     else:
       payload.id
+  let invocationArgv = argvForCall(payload.call, profile)
+  let executableArgIndex = invocationArgv.find(profile.resolvedExecutablePath)
+  let invocationPrefix =
+    if executableArgIndex > 0:
+      invocationArgv[0 ..< executableArgIndex].join("\x1f")
+    else:
+      ""
   let fingerprintText = [
     "reprobuild.localProjectAction.v1",
     payload.id,
@@ -2421,7 +2466,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     executableName,
     payload.call.subcommand,
     node.payload,
-    digestHex(profile.profileFingerprint)
+    digestHex(profile.profileFingerprint),
+    invocationPrefix
   ].join("\n")
   var mergedEnv: seq[string] = @[]
   if actionPathPrefix.len > 0:
@@ -2433,7 +2479,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     mergedEnv.add(entry[0] & "=" & entry[1])
   result = repro_build_engine.action(
     payload.id,
-    argvForCall(payload.call, profile),
+    invocationArgv,
     # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares no
     # lock files is governed by `default`, the one workspace lock.
     governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
