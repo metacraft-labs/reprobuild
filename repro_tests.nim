@@ -1214,6 +1214,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_fs_facts/tests/t_fs_facts_conformance.nim",
+    binary: "build/test-bin/t_fs_facts_conformance",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_home_apply/tests/t_adapter_chain.nim",
     binary: "build/test-bin/t_adapter_chain",
     defines: @[],

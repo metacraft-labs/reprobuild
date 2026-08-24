@@ -158,6 +158,7 @@ libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim	nim	21
 libs/repro_elevation/tests/t_sandbox_m1_fhssandbox_driver.nim	nim	37
 libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	394
 libs/repro_elevation/tests/t_windows_service_recovery_digest.nim	nim	7
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	nim	36
 libs/repro_home_apply/tests/t_adapter_chain.nim	nim	8
 libs/repro_home_apply/tests/t_builtin_adapter.nim	nim	10
 libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	nim	2

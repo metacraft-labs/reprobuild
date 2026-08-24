@@ -19,6 +19,7 @@ repro_dev_env_artifacts
 repro_dev_env_activation
 repro_dev_env_engine
 repro_tool_profiles
+repro_fs_facts
 repro_local_store
 repro_shm_index
 repro_runquota
