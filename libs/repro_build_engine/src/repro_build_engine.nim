@@ -2533,7 +2533,72 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
       result.monitorStatus = worseMonitorStatus(result.monitorStatus, status)
       case status
       of mesComplete:
-        discard
+        # An action that observed NOTHING is not cacheable, even though
+        # the monitor reported success.
+        #
+        # This is the engine predicate that
+        # `repro_core/dependency_gathering.nim` has documented since M17
+        # ("actions with no monitorable evidence ... are made
+        # NON-CACHEABLE, never marked complete-on-declared-inputs") and
+        # that nothing enforced. It was documentation plus two
+        # hand-applied `cacheable = false` call sites; an action that
+        # reached this point with an empty observation set published a
+        # record keyed on its declared inputs alone and was reused
+        # against every change to everything else it touched.
+        #
+        # WHY IT MATTERS NOW. A zero-output edge used to be an
+        # unconditional cache miss, so such an action re-ran regardless
+        # of what its record said. Once test-execute edges became
+        # cacheable on their recorded inputs alone, the record became the
+        # only thing standing between the edge and a stale skip.
+        #
+        # WHY `disableCacheHits` AND NOT `publishable = false`.
+        # Monitor-Hook-Shim.md:501 offers two arms — "fail the monitored
+        # action OR make it non-cacheable, depending on policy". Failing
+        # a successful, exit-0 action to punish its monitor is the wrong
+        # one: it breaks builds for a soundness property that the
+        # cheaper arm secures completely. Skipping the publish means the
+        # action succeeds now and re-executes next time, which IS
+        # non-cacheable.
+        #
+        # WHY NO "THIS ACTION DECLARES IT READS NOTHING" ESCAPE HATCH.
+        # Three reasons, in order of weight. (a) The declaration is
+        # unfalsifiable exactly where it is load-bearing: it only takes
+        # effect when the evidence is empty, i.e. when the monitor cannot
+        # corroborate it. (b) No such concept exists in the specs, and
+        # its nearest neighbour — a declared-only gathering mode — is
+        # explicitly prohibited and has been re-introduced by agents more
+        # than once (see the note in
+        # `repro_core/dependency_gathering.nim`). (c) It is not needed:
+        # measured on this host, every process the shim can inject
+        # reports at least the loader plus the shim's own dependent DSOs
+        # (6 for a `-nostdlib` dynamic binary, 16 for `env true`), and a
+        # process the shim CANNOT inject — a static binary — already
+        # trips `mrEventLoss` and lands on the Level 2 arm below. An edge
+        # that genuinely needs to run without evidence already has a
+        # sanctioned answer with no new soundness surface:
+        # `cacheable = false`.
+        #
+        # The test is deliberately narrow — no observation of ANY kind
+        # from ANY source, including a recognized report's
+        # `depfileInputs`. An action with one recorded probe has said
+        # something about the world and keeps its record.
+        if action.cacheable and
+            result.evidence.monitorReads.len == 0 and
+            result.evidence.monitorWrites.len == 0 and
+            result.evidence.monitorProbes.len == 0 and
+            result.evidence.monitorDirectoryEnumerations.len == 0 and
+            result.evidence.depfileInputs.len == 0:
+          result.evidence.diagnostics.add(
+            "monitor reported success but recorded no observation of any " &
+            "kind (no reads, writes, probes or enumerations); the recorded " &
+            "input set would be the declared inputs alone, which cannot be " &
+            "distinguished from 'the monitor observed nothing'. " &
+            "Action-cache publish skipped — an action with no monitorable " &
+            "evidence is NON-CACHEABLE per Monitor-Hook-Shim.md:501 and " &
+            "Reprobuild-Development.milestones.org M17, never " &
+            "complete-on-declared-inputs.")
+          result.disableCacheHits = true
       of mesKnownScopeLoss:
         # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
         # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
