@@ -338,6 +338,18 @@ suite "M9.R.13a provider-compile cache sharing":
         workDir = scratch,
         scratchDir = scratch / "scratch")
 
+  test "interface and provider compiles share the parallelism bound":
+    let prior = getEnv(ProviderParallelBuildEnv)
+    let priorWasSet = existsEnv(ProviderParallelBuildEnv)
+    defer:
+      if priorWasSet: putEnv(ProviderParallelBuildEnv, prior)
+      else: delEnv(ProviderParallelBuildEnv)
+
+    putEnv(ProviderParallelBuildEnv, "4")
+    let command = boundedNimCompileCommand()
+    check command.len == 3
+    check command[1 .. 2] == @["c", "--parallelBuild:4"]
+
   test "concurrent provider commands serialize a shared nimcache":
     let scratch = getTempDir() /
       ("repro-provider-lock-" & $getCurrentProcessId())

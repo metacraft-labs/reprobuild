@@ -4302,6 +4302,16 @@ proc providerParallelBuildCount(): int =
       ProviderParallelBuildEnv & " must be between 1 and " &
       $ProviderParallelBuildMax & "; got: " & raw)
 
+proc boundedNimCompileCommand*(): seq[string] =
+  ## Provider and interface-runner compiles are nested build-engine work. Keep
+  ## their host-C waves under the same validated bound so either path cannot
+  ## independently exhaust a constrained builder.
+  @[
+    nimCompilerPath(),
+    "c",
+    "--parallelBuild:" & $providerParallelBuildCount()
+  ]
+
 type ReproFileLock* = object
   held: bool
   when defined(windows):
@@ -4592,7 +4602,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
       else:
         buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
           sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
-  var command = @[nimCompilerPath(), "c"]
+  var command = boundedNimCompileCommand()
   command.add(interfaceDefines)
   command.add(@[
     "--path:" & moduleDir,
@@ -5171,19 +5181,18 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
       nimcacheRoot / providerNimcacheKey(outputBinaryPath)
     else:
       nimcacheRoot / sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
-  result = @[
-    nimCompilerPath(), "c",
+  result = boundedNimCompileCommand()
+  result.add(@[
     # Provider compiles are often nested inside latency-sensitive graph
     # construction paths. The default stays serial to avoid observed GCC 15
     # vregs ICEs and unbounded nested compiler bursts. Hosts with a validated
     # toolchain can opt into bounded concurrency through the environment.
-    "--parallelBuild:" & $providerParallelBuildCount(),
     "--define:reproProviderMode",
     "--path:" & parentDir(modulePath),
     "--nimcache:" & nimcache,
     "--out:" & outputBinaryPath,
     modulePath
-  ]
+  ])
   result.insert(hostFlags, 2)
   result.insert(externalHashFlags(workDir), 2)
   result.insert(reproPackagePathFlags(workDir), 2)
