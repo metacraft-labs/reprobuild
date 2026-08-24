@@ -291,7 +291,46 @@ proc compileDependencyPolicy(cacheDir: string;
   if policy.kind != bdpDefault:
     return policy
   if cacheable:
-    return defaultDependencyPolicy()
+    # S7 — name the nimcache as machine-local derived state.
+    #
+    # ``nim c`` writes its whole incremental cache (the generated ``.c``,
+    # the ``.o``, the per-entry ``.json`` manifest) into ``cacheDir``, and
+    # the monitor records every one of those as a write. Without this
+    # declaration the engine's restore gate (see
+    # ``undeclaredSurvivingWrites``) sees a compile that produced files its
+    # declared outputs do not account for, concludes that restoring just
+    # the binary would serve an incomplete tree, and withholds the output
+    # payloads — which makes ``repro build --restore-cached-outputs`` inert
+    # for the one edge kind it matters most for.
+    #
+    # ONE measurement, quoted the same way everywhere it appears (this
+    # comment, ``undeclaredSurvivingWrites``, the DSL test's docstring and
+    # the milestone), because the count is program-dependent and three
+    # different numbers in four places is how a reader concludes none of
+    # them was measured. Program: a one-file ``src/hello.nim`` whose whole
+    # body is ``echo "hello from s7"``, built through the real CLI with
+    # ``--tool-provisioning=path --daemon=off --no-runquota`` and a per-run
+    # ``--action-cache-root``. The monitor records 41 writes for that
+    # compile. WITHOUT this declaration: *15 unaccounted paths, every one of
+    # them nimcache* (the ``.c``, the ``.o``, and ``hello.json``), and
+    # ``CAS_BLOBS = 0``. WITH it: 0 unaccounted, one blob, and the binary
+    # deleted from ``build/bin`` is restored by the next build and runs.
+    #
+    # The declaration is true, not a convenience. The nimcache is nim's
+    # private cache: every byte in it was produced by a previous run of
+    # THIS action from inputs that are themselves in the key, a rebuild
+    # regenerates it, and nothing else in the graph reads it. Each edge
+    # gets its own directory (``defaultNimcacheDir``, and every ``cpu``-
+    # varying edge is given one explicitly), so one edge's declaration
+    # cannot exempt another's product.
+    #
+    # It does not change any action-cache KEY today: ``ignoredInputRoots``
+    # compares its entries raw, and this one is relative, so the input
+    # filter never matches it. If that is ever aligned with the write
+    # side's materialization, nim edges' keys change once — which is a
+    # cache invalidation, not a correctness change, and is the same
+    # principle S5 established for an action's own declared output.
+    return defaultDependencyPolicy(@[cacheDir])
   makeDepfilePolicy(cacheDir / "nim-compile.d")
 
 # ---------------------------------------------------------------------------

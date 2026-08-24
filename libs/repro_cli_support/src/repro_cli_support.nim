@@ -221,7 +221,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -263,7 +263,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " switch <branch> [-b|--new-branch] [--yes] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
-      " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...]\n       " &
+      " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n       " &
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
           programName &
@@ -7027,6 +7027,26 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   result = readInterfaceArtifact(artifactPath)
   interfaceEdgeSessionResults[sessionKey] = result
 
+proc restoreCachedOutputsEnvDefault(): bool =
+  ## S7 — the ``REPRO_RESTORE_CACHED_OUTPUTS`` default behind
+  ## ``--restore-cached-outputs``, in one place because every command that
+  ## drives a build has to reach the same answer.
+  ##
+  ## The env spelling is a convenience, NOT a necessity, and the difference
+  ## matters because the milestone originally recorded the opposite. A
+  ## daemon-hosted build is not out of the flag's reach: the daemon
+  ## re-parses the client's ``request.rawArgs`` through ``runBuildCommand``,
+  ## so ``repro build --restore-cached-outputs`` reaches a daemon-hosted run
+  ## exactly like any other build flag. It is the ENV spelling that a daemon
+  ## does not carry across — ``getEnv`` inside the daemon reads the
+  ## environment the daemon was STARTED with, not the client's — so setting
+  ## the variable in a shell only takes effect for ``--daemon=off`` runs or
+  ## for a daemon started after it was set. The variable exists so the mode
+  ## can be turned on for a whole session or a whole CI job without editing
+  ## every invocation; the flag always wins over it.
+  getEnv("REPRO_RESTORE_CACHED_OUTPUTS").normalize in
+    ["1", "true", "yes", "on"]
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
@@ -7047,6 +7067,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         substituteMaterialized = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false;
+                        restoreCachedOutputs = false;
                         benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
@@ -7344,6 +7365,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       peerCacheActionFetcher: peerCacheFetcher,
       peerCacheActionPublisher: peerCachePublisher,
       peerCacheActionInstaller: peerCacheInstaller)
+    # S7 — ``--restore-cached-outputs``. See the matching call on the main
+    # inline build path below; this is the only other BUILD engine config,
+    # and leaving it out would make the flag depend on which of the two
+    # paths the invocation happened to take.
+    if restoreCachedOutputs:
+      engineConfig.enableCachedOutputRestore()
     # M9.L.4-refactor Step C: wire the binary-cache publisher closure
     # into the production engine config. The closure is inert when
     # ``REPRO_CACHE_DISABLE=1`` (silent) or when the key/cert env vars
@@ -7870,6 +7897,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           substituteMaterialized = true,
           skipCmakeRegeneration = skipCmakeRegeneration,
           bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          restoreCachedOutputs = restoreCachedOutputs,
           eventSink = eventSink,
           cancelCheck = cancelCheck)
         if substituteOutcome.exitCode == 0:
@@ -7900,6 +7928,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           substituteMaterialized = substituteMaterialized,
           skipCmakeRegeneration = skipCmakeRegeneration,
           bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          restoreCachedOutputs = restoreCachedOutputs,
           eventSink = eventSink,
           cancelCheck = cancelCheck)
         if siblingOutcome.exitCode != 0:
@@ -8132,6 +8161,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             substituteMaterialized = substituteMaterialized,
             skipCmakeRegeneration = skipCmakeRegeneration,
             bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+            restoreCachedOutputs = restoreCachedOutputs,
             eventSink = eventSink,
             cancelCheck = cancelCheck)
           if producerOutcome.exitCode != 0:
@@ -8634,6 +8664,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       suppressTrace: mcTrace notin measureSet,
       skipCacheHitEvidence: mcCacheEvidence notin measureSet,
       cancelCallback: cancelCheck)
+    # S7 — ``--restore-cached-outputs`` is what makes the CAS-restore
+    # configuration reachable from ``repro build`` at all. Until it existed,
+    # this construction's two literals above (``rebuild… = true``,
+    # ``defer… = true``) meant every record this path published was
+    # ``opkMetadataOnly`` and a deleted output was always rebuilt, never
+    # restored — measured as 181 of 181 records on the reference host.
+    #
+    # It is opt-in rather than the default for two independent reasons,
+    # both recorded in ``Windows-Cacheable-Builds-Session-Residuals`` S7:
+    # storing every artefact's payload is a second full copy of the build
+    # tree on any filesystem without reflink, and turning restore on
+    # re-reads every existing ``cacheable = true`` as the strictly stronger
+    # claim "my declared outputs are my whole product". The engine's gate
+    # (``requireCompleteOutputEvidence``, set by the same call) enforces
+    # that claim per action instead of trusting it.
+    if restoreCachedOutputs:
+      engineConfig.enableCachedOutputRestore()
     # M9.L.4-refactor Step C: wire the binary-cache publisher closure
     # into the production engine config for the main inline build
     # path (the runLoweredGraphBuild helper above gets the same
@@ -15952,6 +15999,13 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var publishCacheHits = false
   var publishMaterialized = false
   var skipCmakeRegeneration = false
+  # S7 — ``--restore-cached-outputs`` / ``--no-restore-cached-outputs``,
+  # over the ``REPRO_RESTORE_CACHED_OUTPUTS`` default. See
+  # ``restoreCachedOutputsEnvDefault`` for what the env spelling is and is
+  # not: the flag reaches a daemon-hosted build fine (the daemon re-parses
+  # ``request.rawArgs`` through this very proc), the env variable is the one
+  # that does not cross into a daemon started before it was set.
+  var restoreCachedOutputs = restoreCachedOutputsEnvDefault()
   var forwardedActionArgs: seq[string] = @[]
   var afterArgumentSeparator = false
   # MO-1 — committed solved-graph lock. ``--lock <file>`` selects an
@@ -16096,6 +16150,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       publishMaterialized = true
     elif arg == "--skip-cmake-regeneration":
       skipCmakeRegeneration = true
+    elif arg == "--restore-cached-outputs":
+      restoreCachedOutputs = true
+    elif arg == "--no-restore-cached-outputs":
+      restoreCachedOutputs = false
     elif arg == "--no-runquota":
       bypassRunQuota = true
     elif arg == "--runquota":
@@ -16377,6 +16435,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         publishMaterialized = publishMaterialized,
         skipCmakeRegeneration = skipCmakeRegeneration,
         bypassRunQuotaExplicit = bypassRunQuota,
+        restoreCachedOutputs = restoreCachedOutputs,
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck,
@@ -20045,6 +20104,14 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   # dir the test writes its trace to). Absence of ``--ct-incremental`` leaves
   # the legacy watch behaviour byte-for-byte unchanged.
   var ctFlags = WatchCtIncrementalFlags()
+  # S7 — ``repro watch`` drives ``executeBuildTarget`` directly rather than
+  # through ``runBuildCommand``, so it gets neither the flag nor the
+  # environment default unless it asks for them here. It did not, and that
+  # was a build entry point silently unable to restore for the same reason
+  # all seven engine configs were: nobody looked at it. Wired rather than
+  # recorded as a gap, because a watch loop is precisely where restoring a
+  # deleted output instead of rebuilding it pays off.
+  var restoreCachedOutputs = restoreCachedOutputsEnvDefault()
 
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
@@ -20111,6 +20178,10 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         reportPersistence.path = arg["--write-report=".len .. ^1]
     elif arg == "--no-write-report":
       reportPersistence.suppressed = true
+    elif arg == "--restore-cached-outputs":
+      restoreCachedOutputs = true
+    elif arg == "--no-restore-cached-outputs":
+      restoreCachedOutputs = false
     elif arg.startsWith("--attach="):
       attachSessionId = arg.split("=", maxsplit = 1)[1]
     elif arg == "--attach":
@@ -20514,6 +20585,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         showSet = showSet,
         measureSet = measureSet,
         reportPersistence = reportPersistence,
+        restoreCachedOutputs = restoreCachedOutputs,
         eventSink = buildEventSink,
         cancelCheck = cancelCheck,
         extraNameSelectors = extraNameSelectors)

@@ -359,6 +359,31 @@ type
     # the local CAS. This is only appropriate for modes that rebuild missing
     # outputs instead of restoring them from cache.
     deferLocalOutputBlobs*: bool
+    requireCompleteOutputEvidence*: bool
+      ## S7 — the safety gate that makes the restore branch usable without
+      ## also making it dangerous.
+      ##
+      ## Restoring an action's DECLARED outputs is equivalent to re-running
+      ## it only when those outputs are the whole of its product. When they
+      ## are not, a restore yields a tree that is silently missing whatever
+      ## the action produced but did not declare — and it reports a cache
+      ## HIT while doing so. ``repro_cli_support.nim`` records the precedent
+      ## (see the ``develop --all`` note at its ``rebuildMissingOutputs``
+      ## call site): an action whose real product was a clone TREE
+      ## materialized only its receipt, and the chained step then failed
+      ## against a directory nobody had created.
+      ##
+      ## With this set, an action whose observed writes are not accounted
+      ## for by its declared outputs is published WITHOUT output payloads.
+      ## A payload-less record cannot serve a restore — the lookup returns
+      ## ``aclMissNoOutputPayload`` — so the action re-executes and produces
+      ## its whole product again. The gate therefore fails CLOSED: the cost
+      ## of a false negative is a rebuild, never an incomplete tree.
+      ##
+      ## "Accounted for" is deliberately narrow; see
+      ## ``undeclaredSurvivingWrites``. Default ``false`` preserves every
+      ## pre-S7 caller byte for byte. ``enableCachedOutputRestore`` is the
+      ## one place that turns it on, together with the two knobs it guards.
     # When true, the engine spawns each `bakProcess` action directly via
     # `osproc.startProcess` instead of going through the RunQuota helper, and
     # synthesizes a result JSON in the same on-disk schema the helper would
@@ -1015,6 +1040,29 @@ proc defaultBuildEngineConfig*(cacheRoot: string;
     progressCallback: nil,
     statsEnabled: false,
     suppressTrace: false)
+
+proc enableCachedOutputRestore*(config: var BuildEngineConfig) =
+  ## S7 — select the CAS-restore configuration, as ONE call rather than as
+  ## three fields a caller has to remember to set together.
+  ##
+  ## Restoring a deleted output from the local CAS needs all three, and
+  ## setting two of them is worse than setting none: blobs stored with
+  ## ``rebuildMissingOutputsOnCacheHit = true`` are disk spent on a branch
+  ## that can never be taken (the state ``repro build`` was in before S7 —
+  ## every published record ``opkMetadataOnly``), and the restore branch
+  ## reached without ``requireCompleteOutputEvidence`` is the hazard the
+  ## gate exists to stop. Grouping them means a caller cannot pick the
+  ## unsafe two.
+  ##
+  ## * ``deferLocalOutputBlobs = false`` — store the output payloads in the
+  ##   local CAS, so there is something to restore FROM;
+  ## * ``rebuildMissingOutputsOnCacheHit = false`` — on a hit whose outputs
+  ##   are missing, restore them instead of re-running the action;
+  ## * ``requireCompleteOutputEvidence = true`` — but only for actions whose
+  ##   observed writes their declared outputs actually account for.
+  config.deferLocalOutputBlobs = false
+  config.rebuildMissingOutputsOnCacheHit = false
+  config.requireCompleteOutputEvidence = true
 
 proc addMetric*(stats: var BuildStats; name: string; elapsedUs: float) =
   for metric in stats.metrics.mitems:
@@ -2382,6 +2430,190 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+      continue
+    result.addUnique(seen, path)
+
+proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
+  ## S7 — the subset of the action's ``ignoredInputPrefixes`` that the
+  ## restore gate may read as "machine-local derived state, not product",
+  ## materialized against the action's ``cwd``.
+  ##
+  ## *This proc exists because the two readings of ``ignoredInputPrefixes``
+  ## are not the same claim, and conflating them silently loses build
+  ## products.* The field's established meaning is about the cache KEY:
+  ## "do not treat what I read under here as a discovered input". The
+  ## reason recipes reach for it is usually self-invalidation — see
+  ## ``cmake_package.nim``'s install edge, whose comment says so in as many
+  ## words: *"Treating either mutable tree as a discovered input makes the
+  ## install edge depend on its own previous writes and miss on every warm
+  ## build."* That is a statement about inputs. It says nothing whatsoever
+  ## about whether the bytes under the prefix are part of what the action
+  ## PRODUCES, and the restore gate needs the second claim, not the first.
+  ##
+  ## Where the two come apart is not hypothetical, and it is not a corner:
+  ## it is the shape of every from-source package edge in the stdlib. The
+  ## ``cmake --install`` edge declares ``outputs = @[installStamp]``, a
+  ## single stamp file; its real product is the staged install tree under
+  ## ``effectiveDestRoot``; and it lists that very same
+  ## ``effectiveDestRoot`` as an ignored input prefix. Read naively, the
+  ## exclusion below would exempt the entire product, the gate would see
+  ## nothing unaccounted for, the record would be published WITH payloads,
+  ## and a later build would report ``cdHit`` / ``restored`` having put back
+  ## only the stamp. Reproduced through a real ``runBuild`` during review:
+  ## green build, reported cache hit, install tree gone.
+  ## ``meson_package.nim``'s setup / compile / install edges have the
+  ## identical shape.
+  ##
+  ## The rule, therefore: *a derived-state prefix is honoured only where it
+  ## is DISJOINT from everything the action has declared as its own
+  ## product.* An author who says both "my product goes here" and "ignore
+  ## what I write here" has made the KEY claim, not the PRODUCT claim, and
+  ## the gate must not upgrade one into the other on their behalf. Two
+  ## declarations count as product:
+  ##
+  ## * ``action.declaredOutputs`` — the M9.R.75 write ROOTS. Overlap is
+  ##   tested with ``writeRootsOverlap``, the same predicate M9.R.75's own
+  ##   R7 pairwise pass uses, and in BOTH directions, because two directory
+  ##   subtrees intersect exactly when one contains the other. Both
+  ##   directions are load-bearing: ``cmake-install`` names the write root
+  ##   itself as a prefix (equal), and also names the build directory ABOVE
+  ##   it (prefix contains root), and the second would exempt the staged
+  ##   tree just as thoroughly as the first.
+  ## * ``action.outputs`` — the declared product FILES, for actions that
+  ##   carry no write-root declaration at all. A prefix containing a
+  ##   declared output is not describing scratch space; the file itself
+  ##   stays exempt through ``selfWrittenOutputKeys`` either way, so all
+  ##   this costs is that its undeclared NEIGHBOURS are seen again.
+  ##
+  ## Note the asymmetry with ``ignoredInputRoots``' use in
+  ## ``cacheInputPaths``: this side materializes the prefix against
+  ## ``action.cwd`` while the input side compares raw, so a RELATIVE prefix
+  ## is honoured here and inert there. That difference is deliberate and it
+  ## is this side that is right — a recipe spells its scratch directory the
+  ## way it spells its outputs, and a declaration the author wrote must not
+  ## be honoured or ignored depending on whether they happened to write it
+  ## absolute. Aligning the input side would drop paths that are in cache
+  ## KEYS today, so it is a separable change and is not made here.
+  ##
+  ## Nothing here weakens the nimcache declaration this milestone added to
+  ## ``nim.nim``: a ``nim c`` edge carries no ``declaredOutputs``, and its
+  ## nimcache (``build/nimcache/<name>``) contains none of its declared
+  ## outputs (``build/bin/<name>.exe``), so the prefix is disjoint from the
+  ## product and stays honoured. That is the same fact stated as a rule
+  ## rather than as a coincidence — and it is what makes the ``nimcache =``
+  ## passthrough safe: a recipe that pointed a nimcache at its own output
+  ## directory would lose the exemption and fail closed instead of silently
+  ## exempting its binary's neighbours.
+  proc coverageKey(path: string): string =
+    ## Case-FOLDED on Windows, unlike every other comparison in this family.
+    ## The direction is what decides it: the other comparisons ask "is this
+    ## observed write one of my outputs?", where a case-folded match could
+    ## exempt a path that is not the output and hand back a hit, so they
+    ## stay case-sensitive. This one asks "does this prefix cover my
+    ## product?", where a MISSED match re-enables the exemption and loses
+    ## the product. Folding is the fail-closed direction here and the
+    ## strict spelling is the fail-closed direction there.
+    let normalized = normalizeWriteRoot(path)
+    when defined(windows): normalized.toLowerAscii()
+    else: normalized
+
+  var productRoots: seq[string] = @[]
+  for root in action.declaredOutputs:
+    let normalized = coverageKey(materialPath(action.cwd, root))
+    if normalized.len > 0:
+      productRoots.add(normalized)
+  var productFiles: seq[string] = @[]
+  for output in action.outputs:
+    let normalized = coverageKey(materialPath(action.cwd, output))
+    if normalized.len > 0:
+      productFiles.add(normalized)
+  for raw in action.ignoredInputRoots():
+    let materialized = materialPath(action.cwd, raw)
+    let prefix = coverageKey(materialized)
+    if prefix.len == 0:
+      continue
+    var covers = false
+    for root in productRoots:
+      if writeRootsOverlap(prefix, root):
+        covers = true
+        break
+    if not covers:
+      for file in productFiles:
+        if pathAtOrUnderRoot(file, prefix):
+          covers = true
+          break
+    if covers:
+      continue
+    result.add(materialized)
+
+proc undeclaredSurvivingWrites*(action: BuildAction;
+                                evidence: PathSetEvidence): seq[string] =
+  ## S7 — the paths this action was OBSERVED to write that its declared
+  ## outputs do not account for and that are still on disk when the action
+  ## finishes. A non-empty result means "restoring this action's declared
+  ## outputs is NOT equivalent to re-running it", and the engine responds by
+  ## publishing the record without payloads so the restore branch cannot be
+  ## taken for it. See ``BuildEngineConfig.requireCompleteOutputEvidence``.
+  ##
+  ## Three exclusions, and each of them is a claim about the path being
+  ## irrelevant to a restore rather than a convenience:
+  ##
+  ## * the action's own DECLARED outputs — those are exactly what a restore
+  ##   puts back, so writing them is the action doing its job.
+  ##   ``selfWrittenOutputKeys`` supplies the same normalized, exact-match
+  ##   set S5's input filter uses, for the same reason: no directory rule,
+  ##   no prefix rule.
+  ## * anything at or under one of the action's HONOURED derived prefixes —
+  ##   see ``honouredDerivedPrefixes``, which is where the whole of that
+  ##   exclusion's safety argument lives. It is NOT simply
+  ##   ``ignoredInputPrefixes``: a prefix that overlaps the action's own
+  ##   declared product is dropped, because such a prefix is a statement
+  ##   about the cache KEY and not about the PRODUCT.
+  ## * writes that no longer exist, or that are DIRECTORIES.
+  ##
+  ## The last one is not an optimization, it is required for the gate to
+  ## mean anything. The monitor records a directory creation as a write, so
+  ## a real ``nim c`` edge reports ``build/``, ``build/bin/`` and every
+  ## intermediate above them — including the parent of its own declared
+  ## output. Measured through the real CLI on the reference program (a
+  ## one-file ``hello.nim`` whose body is one ``echo``; see ``nim.nim``'s
+  ## ``compileDependencyPolicy`` for the full invocation, which is the one
+  ## measurement this milestone quotes anywhere it needs a number): *41
+  ## observed writes*, of which the gate reports 15 once directories,
+  ## transients and the declared binary are set aside — and those 15 are
+  ## the nimcache, which is what the ``nim.nim`` declaration is for. A
+  ## restore that materializes a declared output creates its parent
+  ## directories on the way (``casMaterialize`` does), and a directory with
+  ## no files in it is not a product, so nothing is lost by skipping them —
+  ## an undeclared product inside a directory is caught by the FILES it
+  ## contains, which is how the motivating clone-tree case is caught.
+  ## Transient files are the same argument in a different shape: a tool that
+  ## writes a temp file and unlinks it has produced nothing to restore.
+  ##
+  ## Note what is NOT excluded. ``action.declaredOutputs`` — the M9.R.75
+  ## write ROOTS — does not exempt anything, and must not: the motivating
+  ## failure is an action that wrote its real product INSIDE its own write
+  ## root without declaring the product itself. Exempting write roots would
+  ## make the gate blind to precisely the case it exists for. It is read
+  ## here only in the OPPOSITE direction, to DISQUALIFY a derived prefix
+  ## that covers one.
+  ##
+  ## Comparison is by exact string equality after separator normalization,
+  ## and is therefore case-SENSITIVE even on Windows. That direction is the
+  ## safe one: a declared output observed under a different case spelling is
+  ## reported here, which costs the action its blobs and a rebuild. The
+  ## reverse — case-folding, and so matching a path that is not the declared
+  ## output — would hand back a hit.
+  let selfWritten = action.selfWrittenOutputKeys()
+  let derivedRoots = action.honouredDerivedPrefixes()
+  var seen = initHashSet[string]()
+  for write in evidence.monitorWrites:
+    let path = materialPath(action.cwd, write)
+    if selfWritten.contains(path.replace('\\', '/')):
+      continue
+    if path.isUnderAnyRoot(derivedRoots):
+      continue
+    if dirExists(path) or not fileExists(path):
       continue
     result.addUnique(seen, path)
 
@@ -4976,6 +5208,42 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for output in evidence.monitorWrites:
       invalidateCachedPath(materialPath(action.cwd, output))
 
+  proc storeOutputBlobsFor(action: BuildAction;
+                           evidence: PathSetEvidence): bool =
+    ## Whether this action's output PAYLOADS go into the local CAS, as
+    ## opposed to a metadata-only record.
+    ##
+    ## The three publish sites (elevated, builtin, process) asked this
+    ## question with three copies of the same expression; S7 needed to add a
+    ## second clause to all three, and three copies of a SAFETY condition is
+    ## how one of them ends up without it. One closure now, so the gate
+    ## cannot be present at two sites and absent at the third.
+    let wanted = (not config.deferLocalOutputBlobs) or
+      config.peerCacheActionPublisher != nil or
+      (config.binaryCachePublisher != nil and
+        (action.publishToBinaryCache or config.binaryCacheIntermediateScope))
+    if not wanted:
+      return false
+    if not config.requireCompleteOutputEvidence:
+      return true
+    # S7's gate. A payload-less record cannot serve a restore, so withholding
+    # the blobs is exactly "this action must re-run rather than be restored".
+    let unaccounted = action.undeclaredSurvivingWrites(evidence)
+    if unaccounted.len == 0:
+      return true
+    runResult.trace(action.id, "cache-output-blobs-withheld",
+      "undeclared surviving writes: " & unaccounted.join(", "))
+    let idx = idToIndex.resultIndex(action.id)
+    runResult.results[idx].evidence.diagnostics.add(
+      "output payloads withheld (S7): action wrote " & $unaccounted.len &
+      " path(s) its declared outputs do not account for — " &
+      unaccounted.join(", ") & ". Restoring only the declared outputs " &
+      "would serve an incomplete tree, so the record is published without " &
+      "payloads and the action re-runs instead. Declare the path as an " &
+      "output, or as an ignored (machine-local derived) prefix, if it " &
+      "should not gate the restore.")
+    false
+
   poolCapacity[""] = maxParallel
   for p in buildGraph.pools:
     poolCapacity[p.name] = p.capacity
@@ -5756,11 +6024,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # M9.R.72.3 block for the spec citation.
             if action.cacheable and not evidence.disableCacheHits:
               let recordStart = statStart()
-              let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-              config.peerCacheActionPublisher != nil or
-              (config.binaryCachePublisher != nil and
-                (action.publishToBinaryCache or
-                 config.binaryCacheIntermediateScope))
+              let storeOutputBlobs =
+                storeOutputBlobsFor(action, evidence.evidence)
               let record = cache.recordActionResult(cas.inner,
                 action.weakFingerprint,
                 action.actionCachePolicy,
@@ -5874,11 +6139,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               # opted into publishing — the publish hook guards on
               # ``outputPayloadKind == opkCasBlobs`` and would
               # silently skip otherwise.
-              let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-                config.peerCacheActionPublisher != nil or
-                (config.binaryCachePublisher != nil and
-                  (plan.action.publishToBinaryCache or
-                   config.binaryCacheIntermediateScope))
+              let storeOutputBlobs =
+                storeOutputBlobsFor(plan.action, evidence.evidence)
               let record = cache.recordActionResult(cas.inner,
                 plan.action.weakFingerprint,
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
@@ -6299,11 +6561,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # either the peer-cache publisher OR the binary-cache
           # publisher (with this action opted in) needs to read the
           # blob payloads back out of the local CAS.
-          let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-            config.peerCacheActionPublisher != nil or
-            (config.binaryCachePublisher != nil and
-              (action.publishToBinaryCache or
-               config.binaryCacheIntermediateScope))
+          let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
           let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
