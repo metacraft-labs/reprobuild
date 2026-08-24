@@ -9062,6 +9062,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_env_inheritance_census_is_reported.nim",
+    binary: "build/test-bin/t_env_inheritance_census_is_reported",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim",
     binary: "build/test-bin/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes",
     defines: @[],

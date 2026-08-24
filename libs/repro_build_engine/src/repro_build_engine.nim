@@ -676,10 +676,50 @@ type
   BuildStats* = object
     metrics*: seq[BuildStatsMetric]
 
+  EnvironmentInheritanceCensus* = object
+    ## STAGE 2 — the denominator for the environment Reprobuild does not
+    ## control.
+    ##
+    ## Reprobuild passes an action's `env` as an OVERLAY: the launcher
+    ## layers those entries over the environment the build process
+    ## itself inherited, so an action that declares nothing runs with the
+    ## developer's or the CI runner's entire environment, and nothing
+    ## records that it did. That is not a cache-key defect — closing it
+    ## is a behaviour change that will break real edges — so this counts
+    ## the population first and changes nothing about it.
+    ##
+    ## This is deliberately a CENSUS and not a warning. PR #99's shm drop
+    ## was invisible for the same reason: nobody had put a number on it.
+    ## A number is what makes the next decision arguable.
+    totalActions*: int
+    declaringActions*: int
+      ## Actions carrying at least one `NAME=VALUE` Reprobuild chose.
+    passthroughActions*: int
+      ## Actions naming at least one variable whose value is the host's.
+      ## The name IS recorded (it is in the weak fingerprint); the value
+      ## is not, by design.
+    undeclaredActions*: int
+      ## Actions that declare NOTHING at all.
+      ##
+      ## Read this as "declares nothing", NOT as "inherits nothing".
+      ## EVERY process action inherits the build process environment,
+      ## because `env` is an overlay on it rather than a replacement —
+      ## so the population exposed to the host environment is
+      ## `totalActions`, and this narrower count is only the subset that
+      ## does not even overlay one variable on top.
+      ##
+      ## The distinction is the whole reason this is a census: on this
+      ## repository's own graph `undeclaredActions` is 0 while
+      ## `totalActions` is 1391, and a report that called the first
+      ## number "inheriting" would have said the channel was closed
+      ## when it is open for every edge.
+
   BuildRunResult* = object
     results*: seq[ActionResult]
     trace*: seq[SchedulerTraceEvent]
     stats*: BuildStats
+    environmentInheritance*: EnvironmentInheritanceCensus
+      ## STAGE 2 census of this graph — see `EnvironmentInheritanceCensus`.
     traceEnabled: bool
     runQuotaBypassed*: bool
       ## RA-13: true when at least one action in this build launched without a
@@ -5459,6 +5499,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
   runResult.traceEnabled = not config.suppressTrace
+  # STAGE 2 census — count, do not change. Taken over the graph as it
+  # will actually be scheduled, after dependency inference, so the number
+  # describes the build that runs rather than the graph as authored.
+  for censusAction in buildGraph.actions:
+    if censusAction.kind != bakProcess:
+      # Built-in actions do not fork, so they have no environment to
+      # inherit and do not belong in this denominator.
+      continue
+    inc runResult.environmentInheritance.totalActions
+    if censusAction.env.len > 0:
+      inc runResult.environmentInheritance.declaringActions
+    if censusAction.envPassthrough.len > 0:
+      inc runResult.environmentInheritance.passthroughActions
+    if censusAction.env.len == 0 and censusAction.envPassthrough.len == 0:
+      inc runResult.environmentInheritance.undeclaredActions
   let validateStart = statStart()
   validateGraph(buildGraph)
   finishStat("repro graph validate", validateStart)

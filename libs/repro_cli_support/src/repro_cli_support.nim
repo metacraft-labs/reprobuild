@@ -4429,6 +4429,30 @@ proc runQuotaAuthorityHeaderLine*(bypassed: bool): string =
   else:
     "runQuota: active (lease authority)"
 
+proc environmentInheritanceHeaderLine*(
+    census: EnvironmentInheritanceCensus): string =
+  ## STAGE 2: the build-header line reporting how much of this graph runs
+  ## on an environment Reprobuild neither declares nor records.
+  ##
+  ## Reprobuild passes `env` as an OVERLAY on the environment the build
+  ## process inherited, so an action declaring nothing runs with the whole
+  ## host environment. That is a real channel and it is currently silent.
+  ## This states its size and changes nothing about it — closing the
+  ## channel breaks edges, and the breakage should be a measured list
+  ## rather than a surprise.
+  ##
+  ## It is a FACT line, not a warning: nothing here is wrong yet, and
+  ## dressing a measurement up as a warning trains people to skip it.
+  if census.totalActions == 0:
+    return "env: no process actions in this graph"
+  let percent = (census.undeclaredActions * 100) div census.totalActions
+  "env: " & $census.declaringActions & "/" & $census.totalActions &
+    " process actions declare a variable, " & $census.passthroughActions &
+    " name a passthrough variable, " & $census.undeclaredActions &
+    " (" & $percent & "%) declare nothing; all " & $census.totalActions &
+    " also inherit the build environment (declared entries overlay it, " &
+    "they do not replace it)"
+
 proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
                       providerInvocationCount: int;
@@ -7419,6 +7443,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     loggedRunQuotaAuthority = true
     logSummary(runQuotaAuthorityHeaderLine(runResult.runQuotaBypassed))
+    # STAGE 2: report the undeclared-environment population beside the
+    # resource-authority line, for the same reason — a state the build
+    # is in that nobody can see is a state nobody can decide about.
+    logSummary(environmentInheritanceHeaderLine(
+      runResult.environmentInheritance))
 
   proc warnRunQuotaBypassIfUsed(runResult: BuildRunResult) =
     if warnedRunQuotaBypass or not fallbackToRunQuotaBypass:
@@ -19892,6 +19921,47 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
         raise err
     if view == "actions":
       discard
+    elif view == "env":
+      # STAGE 2's instrument, and the one that answers "does a host
+      # difference invalidate this graph?" without guessing.
+      #
+      # One line per process action: the weak fingerprint the action
+      # cache is keyed by, followed by the environment declaration that
+      # produced it. Two runs under two different hosts diff to exactly
+      # the set of edges that would rebuild. The alternative — asserting
+      # from the source that nothing host-varying reaches the key — is
+      # how a regression here would be missed, because the reasoning and
+      # the code drift apart silently.
+      #
+      # It lives in the CLI rather than a transcript because a
+      # measurement that exists only in a transcript is a measurement
+      # nobody can repeat.
+      var census: EnvironmentInheritanceCensus
+      var lines: seq[string] = @[]
+      for action in info.actions:
+        if action.kind != bakProcess:
+          continue
+        inc census.totalActions
+        if action.env.len > 0: inc census.declaringActions
+        if action.envPassthrough.len > 0: inc census.passthroughActions
+        if action.env.len == 0 and action.envPassthrough.len == 0:
+          inc census.undeclaredActions
+        var declaredNames: seq[string] = @[]
+        for entry in action.env:
+          let eq = entry.find('=')
+          if eq > 0:
+            declaredNames.add(entry[0 ..< eq])
+        declaredNames.sort()
+        var passthroughNames = @(action.envPassthrough)
+        passthroughNames.sort()
+        lines.add(toHex(action.weakFingerprint.bytes) & " " & action.id &
+          " declared=[" & declaredNames.join(",") & "]" &
+          " passthrough=[" & passthroughNames.join(",") & "]")
+      lines.sort()
+      echo environmentInheritanceHeaderLine(census)
+      for line in lines:
+        echo line
+      return 0
     elif view == "neighborhood":
       if focus.len == 0:
         focus = info.selectedActionId
