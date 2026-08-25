@@ -336,6 +336,39 @@ type
     oidLength*: int
     updates*: seq[PrePushRefUpdate]
 
+  OutgoingUpdateShape* = enum
+    ## How the outgoing branch update relates to the tip it replaces.
+    ##
+    ## This is deliberately SEPARATE from ``outgoingCurrent``. The two
+    ## questions the classifier used to fuse are:
+    ##
+    ##   1. does this push PUBLISH this HEAD? — the meaning of
+    ##      ``outgoingCurrent``, and the answer for a force-push is *yes*;
+    ##   2. does this push ORPHAN something the workspace depends on? — a
+    ##      real and separate concern, decided by the caller against the
+    ##      workspace's lock records, with its own remedy.
+    ##
+    ## Fusing them made an ordinary rebase-and-force-push of a feature branch
+    ## report the repository as "unpublished" and instruct the operator to run
+    ## the very push being refused, whose only remedy was ``--no-verify`` —
+    ## i.e. disabling the whole gate on a legitimate case.
+    ouShapeUnknown = "unknown"
+      ## The update was never classified (a protocol or eligibility refusal
+      ## short-circuited first).
+    ouCreate = "create"
+      ## Remote-old is the zero OID: the push creates the branch and can
+      ## discard nothing.
+    ouFastForward = "fast-forward"
+      ## Remote-old is an ancestor of the new HEAD: nothing becomes
+      ## unreachable.
+    ouRewrite = "rewrite"
+      ## Remote-old is a locally present commit that is NOT an ancestor of the
+      ## new HEAD. This push makes commits unreachable on the remote branch,
+      ## and which ones can be enumerated locally.
+    ouRewriteOpaque = "rewrite-opaque"
+      ## Remote-old is not a locally present commit, so the push is not a
+      ## fast-forward and what it discards cannot be enumerated here.
+
   OutgoingCurrentDecision* = object
     protocolOk*: bool
     outgoingCurrent*: bool
@@ -346,6 +379,7 @@ type
     remoteRef*: string
     remoteOldOid*: string
     objectFormat*: string
+    updateShape*: OutgoingUpdateShape
 
   HookCapability* = object
     schema*: string
@@ -755,21 +789,54 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
   if not update.remoteRef.startsWith("refs/heads/"):
     result.diagnostic = "outgoing-current only applies to a remote branch"
     return
-  if not isZeroOid(update.remoteOid):
+  # Classify the update's SHAPE. A push that names one ref, whose local object
+  # is the independently observed HEAD, and whose destination is the
+  # manifest-agreed remote branch, publishes that HEAD — fast-forward or not.
+  # Rewriting the branch is a claim about what the push DISCARDS, which is a
+  # separate question with a separate remedy and is decided by the caller
+  # against the workspace's lock records (``repro check`` stage 2b).
+  if isZeroOid(update.remoteOid):
+    result.updateShape = ouCreate
+  else:
     let oldType = gitValue(gitBin, repoRoot,
       ["cat-file", "-t", update.remoteOid])
     if oldType != "commit":
-      result.diagnostic = "remote old object is not a locally present commit"
-      return
-    if runGit(gitBin, repoRoot,
+      result.updateShape = ouRewriteOpaque
+    elif runGit(gitBin, repoRoot,
         ["merge-base", "--is-ancestor", update.remoteOid,
-         result.headOid]).code != 0:
-      result.diagnostic = "outgoing update is not a fast-forward"
-      return
+         result.headOid]).code == 0:
+      result.updateShape = ouFastForward
+    else:
+      result.updateShape = ouRewrite
   result.branchRef = update.localRef
   result.remoteRef = update.remoteRef
   result.remoteOldOid = update.remoteOid
   result.outgoingCurrent = true
+
+proc commitsMadeUnreachable*(gitBin, repoRoot, remoteOldOid,
+    headOid: string): seq[string] =
+  ## The commits a branch update from ``remoteOldOid`` to ``headOid`` would
+  ## make unreachable on that branch: ``remoteOldOid`` itself plus everything
+  ## reachable from it but not from the new HEAD, newest first.
+  ##
+  ## Empty for a create or a fast-forward (``rev-list old ^new`` is empty and
+  ## ``old`` is itself reachable from ``new``), and empty when the old object
+  ## is not present locally — an absent old object is reported by
+  ## ``updateShape == ouRewriteOpaque`` rather than by a silently empty set,
+  ## because "nothing is discarded" and "what is discarded cannot be seen" are
+  ## different answers and only the first is safe to act on.
+  if remoteOldOid.len == 0 or isZeroOid(remoteOldOid) or headOid.len == 0:
+    return
+  if gitValue(gitBin, repoRoot, ["cat-file", "-t", remoteOldOid]) != "commit":
+    return
+  let res = runGit(gitBin, repoRoot,
+    ["rev-list", remoteOldOid, "^" & headOid])
+  if res.code != 0:
+    return
+  for line in res.output.splitLines():
+    let oid = line.strip().toLowerAscii()
+    if oid.len > 0:
+      result.add(oid)
 
 proc commonGitDir*(gitBin, repoRoot: string): string =
   let raw = gitValue(gitBin, repoRoot, ["rev-parse", "--git-common-dir"])

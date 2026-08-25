@@ -8598,6 +8598,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_pre_push_rewrite_orphan_gate.nim",
+    binary: "build/test-bin/t_pre_push_rewrite_orphan_gate",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim",
     binary: "build/test-bin/t_pre_push_refuses_on_unreachable_team_backend",
     defines: @[],

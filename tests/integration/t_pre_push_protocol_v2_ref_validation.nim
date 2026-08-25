@@ -7,10 +7,17 @@
 ##
 ## * one unpublished, clean current HEAD can be pushed to its manifest-agreed
 ##   remote, while the same HEAD is refused on a wrong remote;
-## * batch, tag-only, deletion-batch, and non-fast-forward pushes cannot borrow
-##   the provisional outgoing-current classification;
+## * batch, tag-only, and deletion-batch pushes cannot borrow the provisional
+##   outgoing-current classification;
+## * a NON-FAST-FORWARD update does receive it — such a push publishes HEAD —
+##   but is then refused by the separate history-rewrite stage, which names
+##   the branch or the lock record it would break instead of claiming the
+##   repository is unpublished (see t_pre_push_rewrite_orphan_gate for the
+##   feature-branch converse that this suite's mainline fixture cannot show);
 ## * direct-URL and stale-branch pushes cannot impersonate the agreed outgoing
-##   HEAD, while missing and non-commit remote-old objects fail closed;
+##   HEAD, while missing and non-commit remote-old objects are classified
+##   ``rewrite-opaque`` and refused for being unverifiable, not for being
+##   unpublished;
 ## * once HEAD is genuinely published, valid tag/deletion/certificate-note
 ##   updates plus force and batch pushes retain the pre-existing allow policy;
 ## * only a proven readable byte-empty (zero-update) refs stream is a no-op;
@@ -374,8 +381,11 @@ template exerciseManifestRemoteAlias(gitBin: string) =
       "refs/tags/alias-batch"], required = false), "unpublished")
     discard fx.git(["push", "metacraft-labs", "main"])
 
-    # A force/non-fast-forward update through the correct alias remains
-    # ineligible and leaves the real destination unchanged.
+    # A force/non-fast-forward update through the correct alias is still
+    # refused and still leaves the real destination unchanged — but for the
+    # reason it is actually refused for. ``main`` is what this fixture's
+    # manifest declares as the repo's mainline, so the mainline clause is what
+    # fires; the alias binding is irrelevant to it, which is the point.
     let published = fx.head()
     discard fx.git(["checkout", "--orphan", "alias-rewritten"])
     discard fx.git(["rm", "-rf", "."])
@@ -385,15 +395,13 @@ template exerciseManifestRemoteAlias(gitBin: string) =
     discard fx.git(["branch", "-M", "main"])
     let aliasForce = fx.git(["push", "--force", "metacraft-labs", "main"],
       required = false)
-    assertRefused(aliasForce, "unpublished")
-    # RA-32 — the refusal must name the reason it actually declined. The
-    # property is still `unpublished`, and the push is still refused; what
-    # changes is that the operator is no longer told to run the very push
-    # being refused. Before RA-32 the only remedy printed was
-    # "run 'git push' in . first", while `evaluateOutgoing` had computed
-    # "outgoing update is not a fast-forward" and discarded it.
-    check "not a fast-forward" in aliasForce.output
-    check "will not help" in aliasForce.output
+    assertRefused(aliasForce, "mainline-history-rewrite")
+    check "'main'" in aliasForce.output
+    # The self-refuting pair is gone: the push is what publishes this HEAD,
+    # so the gate must not call the repository unpublished, and must not
+    # instruct the operator to run the push it is refusing.
+    check "unpublished" notin aliasForce.output
+    check "will not help" notin aliasForce.output
     check require(q(gitBin) & " --git-dir=" & q(fx.origin) &
       " rev-parse refs/heads/main").strip() == published
 
@@ -539,11 +547,16 @@ template exerciseFormat(gitBin, objectFormat: string) =
     let missingDecision = evaluateOutgoingCurrent(gitBin, fx.repo,
       missingRefs, "origin", fx.origin, "origin", fx.origin)
     check missingDecision.protocolOk
-    check not missingDecision.outgoingCurrent
-    check "remote old object" in missingDecision.diagnostic
+    # An absent old object does not stop this update from PUBLISHING this
+    # HEAD, so it keeps the provisional classification; what it prevents is
+    # enumerating what the update discards, which is a separate verdict.
+    check missingDecision.outgoingCurrent
+    check missingDecision.updateShape == ouRewriteOpaque
+    check missingDecision.diagnostic.len == 0
     let missingResult = run(q(dispatcher) & " origin " & q(fx.origin) &
       " < " & q(missingRefs), fx.repo)
-    assertRefused(missingResult, "unpublished")
+    assertRefused(missingResult, "history-rewrite-unverifiable")
+    check "unpublished" notin missingResult.output
     # `git hash-object --stdin` needs bytes on stdin; create a real blob from a
     # temporary file instead.
     let blobFile = fx.scratch / "remote-old-blob"
@@ -562,11 +575,13 @@ template exerciseFormat(gitBin, objectFormat: string) =
     let blobDecision = evaluateOutgoingCurrent(gitBin, fx.repo, blobRefs,
       "origin", fx.origin, "origin", fx.origin)
     check blobDecision.protocolOk
-    check not blobDecision.outgoingCurrent
-    check "remote old object" in blobDecision.diagnostic
+    check blobDecision.outgoingCurrent
+    check blobDecision.updateShape == ouRewriteOpaque
+    check blobDecision.diagnostic.len == 0
     let blobResult = run(q(dispatcher) & " origin " & q(fx.origin) &
       " < " & q(blobRefs), fx.repo)
-    assertRefused(blobResult, "unpublished")
+    assertRefused(blobResult, "history-rewrite-unverifiable")
+    check "unpublished" notin blobResult.output
 
     # Tag-only and multi-ref pushes likewise cannot borrow the exception.
     discard fx.git(["tag", "candidate"])
@@ -593,10 +608,12 @@ template exerciseFormat(gitBin, objectFormat: string) =
     discard fx.git(["branch", "-M", "main"])
     let originForce = fx.git(["push", "--force", "origin", "main"],
       required = false)
-    assertRefused(originForce, "unpublished")
-    # RA-32, same property through the plain `origin` remote.
-    check "not a fast-forward" in originForce.output
-    check "will not help" in originForce.output
+    # Same verdict through the plain `origin` remote: the branch being
+    # rewritten is the declared mainline, so that is what the refusal says.
+    assertRefused(originForce, "mainline-history-rewrite")
+    check "'main'" in originForce.output
+    check "unpublished" notin originForce.output
+    check "will not help" notin originForce.output
     discard fx.git(["fetch", "origin", "main"])
     discard fx.git(["reset", "--hard", published])
 
