@@ -7446,6 +7446,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_ext_repro_action_rows.nim",
+    binary: "build/test-bin/t_ext_repro_action_rows",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_extension_type_lifted_and_consumed.nim",
     binary: "build/test-bin/t_extension_type_lifted_and_consumed",
     defines: @[],
@@ -10048,6 +10056,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim",
     binary: "build/test-bin/t_workspace_vcs_switch_preserves_dirty_state",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_action_compatibility_key.nim",
+    binary: "build/test-bin/t_action_compatibility_key",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

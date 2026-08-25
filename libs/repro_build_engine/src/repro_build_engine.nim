@@ -34,6 +34,12 @@ import io_mon/codec as ioMonCodec
 import io_mon/writer as ioMonWriter
 import repro_platform
 import repro_runquota
+# M17: the ``ext_repro_action`` schema, the compatibility key, and the
+# row shape. A leaf module by construction — it imports only the hash
+# library — so the engine can build a row without the row's definition
+# reaching back into the engine.
+import repro_build_engine/action_extension
+export action_extension
 
 # M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
 # but is identity-agnostic — the convention populates the identity tuple
@@ -661,6 +667,21 @@ type
     runQuotaBackend*: string
     runQuotaSocket*: string
     evidence*: PathSetEvidence
+    strongFingerprintHex*: string
+      ## M17 (``ext_repro_action``): the ACTION-CACHE KEY the lookup
+      ## compared against, hex-encoded, or "" when the lookup found no
+      ## record at all and there was therefore no key to report. Recorded
+      ## here rather than recomputed later because a cache lookup is the
+      ## only moment at which it exists — and it is the quantity the
+      ## compatibility key must be COARSER than, so a row carrying one
+      ## without the other cannot show that the two diverge.
+    cacheMissReason*: string
+      ## Why the lookup did not hit, in the cache layer's own words
+      ## ("no cache record for weak fingerprint", "input changed: <path>",
+      ## …). Empty when there is nothing to say; stored as SQL NULL so
+      ## "no reason recorded" stays distinguishable from an empty reason.
+    outputBytes*: int64
+      ## Total size of the action's declared outputs after it settled.
 
   SchedulerTraceEvent* = object
     seq*: uint64
@@ -5432,6 +5453,112 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       reason: "materialized-binary-cache-no-entries",
       stderr: "no tagged materialized binary-cache entries in selected graph"))
 
+# ---------------------------------------------------------------------------
+# ``ext_repro_action`` (M17)
+# ---------------------------------------------------------------------------
+
+proc actionKindName(kind: BuildActionKind): string =
+  ($kind).replace("bak", "").toLowerAscii()
+
+proc measuredOutputBytes(action: BuildAction): int64 =
+  ## Total size of the action's declared outputs, MEASURED after the
+  ## action settled. Missing outputs contribute nothing rather than
+  ## failing the row: an observation must never fail the work.
+  for output in action.outputs:
+    let path =
+      if output.isAbsolute or action.cwd.len == 0: output
+      else: action.cwd / output
+    try:
+      if fileExists(extendedPath(path)):
+        result += int64(getFileSize(extendedPath(path)))
+    except CatchableError:
+      discard
+
+proc emitActionExtensionRows(session: ReproRunQuotaSession;
+                             runResult: BuildRunResult;
+                             actionsById: Table[string, BuildAction]) =
+  ## One ``ext_repro_action`` row per execution RunQuota admitted.
+  ##
+  ## ROWS EXIST FOR EXECUTIONS, NOT FOR ACTIONS, and the difference is
+  ## not a shortcut. RunQuota's spine records executions; a cache HIT is
+  ## precisely the case where nothing executed, so there is no spine row
+  ## for an extension row to be joined to. What the rows therefore carry
+  ## is the cache decision that LED TO a launch -- miss, refused,
+  ## not-cacheable, hybrid cutoff -- together with the reason, which is
+  ## the "why did this rebuild" question the store exists to answer.
+  ## A reader counting hits from this table alone would undercount them,
+  ## and ``docs/stats.md`` says so where a reader will find it.
+  ##
+  ## BEST EFFORT, ALWAYS. Nothing here may fail a build (OS-4), and
+  ## nothing here may block it (OS-1): the declaration is one round trip
+  ## made once per build after every action has settled, and each row is
+  ## a single buffered write with no reply.
+  if session.isNil or not session.active:
+    return
+  var declared = false
+  for item in runResult.results:
+    if not item.launched or item.leaseId == 0:
+      continue
+    if item.id notin actionsById:
+      continue
+    let action = actionsById[item.id]
+    if not declared:
+      # Declared lazily: a build that admitted nothing should not create
+      # a table for rows it will never write.
+      let refusal = session.declareRunQuotaExtension(
+        ReproActionExtensionId, ReproActionExtensionOwner,
+        ReproActionSchemaVersion, reproActionMigrations())
+      if refusal.len > 0:
+        return
+      declared = true
+    let toolIdentity = action.toolIdentityRefs.join(",")
+    let toolKind =
+      if action.toolIdentityRefs.len > 0: action.toolIdentityRefs[0]
+      else: ""
+    let cacheOutcome =
+      case item.cacheDecision
+      of cdNotCacheable: racNotCacheable
+      of cdMiss: racMiss
+      of cdHit: racHit
+      of cdHybridCutoff: racHybridCutoff
+      of cdRejected: racRefused
+    let compatibility = compatibilityKey(
+      actionKindName(action.kind), action.commandStatsId, toolKind,
+      toolIdentity, action.argv, action.outputs)
+    session.recordRunQuotaExtensionRow(
+      item.leaseId, ReproActionExtensionId, ReproActionSchemaVersion,
+      reproActionColumns(),
+      @[
+        extText(item.id),
+        extText(actionKindName(action.kind)),
+        extText(compatibility),
+        extText($cacheOutcome),
+        (if item.cacheMissReason.len > 0: extText(item.cacheMissReason)
+         else: extNull()),
+        extText(toHex(action.weakFingerprint.bytes)),
+        (if item.strongFingerprintHex.len > 0:
+           extText(item.strongFingerprintHex)
+         else: extNull()),
+        (if action.pool.len > 0: extText(action.pool) else: extNull()),
+        extInt(int64(action.poolUnits)),
+        extInt(measuredOutputBytes(action)),
+        # SUBSTITUTION IS A PROPERTY OF THE ACTION KIND, not a flag some
+        # other code path has to remember to set. The one launched form
+        # of substitution is the binary-cache substitute edge; a
+        # peer-cache install settles as a HIT and therefore has no
+        # execution row at all, so a boolean on the result would have
+        # been false on every row that exists.
+        extInt(if action.kind == bakBinaryCacheSubstitute: 1'i64 else: 0'i64),
+        (if toolKind.len > 0: extText(toolKind) else: extNull()),
+        (if toolIdentity.len > 0: extText(toolIdentity) else: extNull()),
+        extInt(int64(item.evidence.declaredInputs.len)),
+        extInt(int64(item.evidence.declaredOutputs.len)),
+        extInt(int64(item.evidence.depfileInputs.len)),
+        extInt(int64(item.evidence.monitorReads.len)),
+        extInt(int64(item.evidence.monitorWrites.len)),
+        extInt(int64(item.evidence.monitorProbes.len))
+      ])
+
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # Process-global accumulators; zero them so this build reports its own cost
   # rather than its own plus every earlier build in this process.
@@ -6177,6 +6304,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             err.msg)
           return j
 
+  proc recordCacheLookupFacts(id: string; lookup: ActionCacheLookup) =
+    ## M17: pin the ACTION-CACHE KEY and the miss reason at the only
+    ## moment they exist.
+    ##
+    ## ``reason`` alone will not do: ``completeSuccess`` overwrites it
+    ## with the settle detail, so for exactly the actions that go on to
+    ## LAUNCH -- the ones that get an ``ext_repro_action`` row -- the
+    ## reason the cache missed is gone by the time the row is built.
+    ## The strong fingerprint is worse still: it is not stored on the
+    ## action at all, only on the record the lookup compared against.
+    let idx = idToIndex.resultIndex(id)
+    runResult.results[idx].cacheMissReason = lookup.message
+    runResult.results[idx].strongFingerprintHex =
+      if lookup.record.strongFingerprint.bytes == default(array[32, byte]):
+        ""
+      else:
+        toHex(lookup.record.strongFingerprint.bytes)
+
   proc completeSuccess(id: string; status: ActionStatus; cacheDecision: CacheDecision;
                        launched: bool; detail = "") =
     let idx = idToIndex.resultIndex(id)
@@ -6570,15 +6715,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             cacheRejectedOutput = true
             runResult.trace(id, "cache-rejected",
               runResult.results[idToIndex.resultIndex(id)].reason)
+            recordCacheLookupFacts(id, lookup)
           of aclMissInputChanged:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: "input-changed"
+            recordCacheLookupFacts(id, lookup)
             cacheMissInputChanged = true
           else:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: $lookup.status
+            recordCacheLookupFacts(id, lookup)
         elif not action.cacheable:
           runResult.results[idToIndex.resultIndex(id)].reason = "not-cacheable"
 
@@ -6819,7 +6967,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishStat("repro builtin execute", builtinStart)
           let idx = idToIndex.resultIndex(id)
           let previousCacheDecision = runResult.results[idx].cacheDecision
+          # M17: the cache-lookup facts were recorded BEFORE the action
+          # ran and would be wiped by this assignment. They are carried
+          # for the same reason the cache decision is -- the settled
+          # result describes the execution, not the lookup that led to
+          # it, and the lookup is the only place either fact exists.
+          let previousMissReason = runResult.results[idx].cacheMissReason
+          let previousStrongFingerprint =
+            runResult.results[idx].strongFingerprintHex
           runResult.results[idx] = finished
+          runResult.results[idx].cacheMissReason = previousMissReason
+          runResult.results[idx].strongFingerprintHex =
+            previousStrongFingerprint
           runResult.results[idx].dependencyPolicyKind =
             plan.action.dependencyPolicy.kind
           runResult.results[idx].cacheDecision =
@@ -7249,7 +7408,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
       let idx = idToIndex.resultIndex(finished.id)
       let previousCacheDecision = runResult.results[idx].cacheDecision
+      # M17: see the built-in merge above. Recorded at lookup time,
+      # carried across the settle.
+      let previousMissReason = runResult.results[idx].cacheMissReason
+      let previousStrongFingerprint =
+        runResult.results[idx].strongFingerprintHex
       runResult.results[idx] = finished
+      runResult.results[idx].cacheMissReason = previousMissReason
+      runResult.results[idx].strongFingerprintHex = previousStrongFingerprint
       runResult.results[idx].dependencyPolicyKind =
         runningItem.action.dependencyPolicy.kind
       runResult.results[idx].monitorDepfilePath = runningItem.action.monitorDepfile
@@ -7359,6 +7525,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         terminateRunningAction(item)
         item.process.close()
     if inlineRunQuotaSessionOpen:
+      emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       inlineRunQuotaSession.close()
   finishStat("repro scheduler total", totalStart)
   finishMetadataCacheStats(fileMetadataCache)

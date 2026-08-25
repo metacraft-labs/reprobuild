@@ -919,6 +919,55 @@ proc openRunQuotaSession*(name = "reprobuild action";
     result.client.close()
     raise newException(ReproRunQuotaError, err.msg)
 
+# ---------------------------------------------------------------------------
+# Domain extensions (M17)
+# ---------------------------------------------------------------------------
+#
+# Reprobuild attaches its own per-execution facts as an extension on
+# RunQuota's execution spine (OS-5). It does NOT open RunQuota's database:
+# `runquotad` is the only sanctioned reader and the only writer, so both
+# the declaration and every row travel over the socket the session is
+# already holding.
+
+proc extNull*(): ExtensionCellWire = wireNull()
+proc extText*(value: string): ExtensionCellWire = wireText(value)
+proc extInt*(value: int64): ExtensionCellWire = wireInt(value)
+proc extReal*(value: float64): ExtensionCellWire = wireReal(value)
+
+proc declareRunQuotaExtension*(session: ReproRunQuotaSession;
+                               extensionId, owner: string;
+                               schemaVersion: int64;
+                               migrations: openArray[string]): string =
+  ## Registers the extension, returning "" on acceptance and the daemon's
+  ## refusal otherwise.
+  ##
+  ## A REFUSAL IS RETURNED, NOT RAISED. Capture must degrade rather than
+  ## fail (OS-4): a daemon that will not store this schema is a reason to
+  ## write no rows, never a reason to fail a build.
+  if session.isNil or not session.active:
+    return "runquota session is not active"
+  try:
+    session.session.declareExtension(extensionId, owner, schemaVersion,
+      migrations)
+  except CatchableError as err:
+    err.msg
+
+proc recordRunQuotaExtensionRow*(session: ReproRunQuotaSession;
+                                 leaseId: uint64; extensionId: string;
+                                 schemaVersion: int64;
+                                 columns: openArray[string];
+                                 values: openArray[ExtensionCellWire]) =
+  ## One row, one buffered write, no reply. Silent on every failure for
+  ## the same reason ``lease.observe`` is: losing an observation is always
+  ## preferable to perturbing the work being observed.
+  if session.isNil or not session.active:
+    return
+  try:
+    session.session.recordExtensionRow(leaseId, extensionId, schemaVersion,
+      columns, values)
+  except CatchableError:
+    discard
+
 proc close*(session: ReproRunQuotaSession) =
   if session.isNil:
     return
