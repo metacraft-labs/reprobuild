@@ -1192,6 +1192,7 @@ tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
 tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim	nim	1
 tests/integration/t_team_repo_record_only_no_checkout.nim	nim	1
 tests/integration/t_test_edge_migration_covers_all_test_files.nim	nim	1
+tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.nim	nim	4
 tests/integration/t_ti1_interface_artifact_edge.nim	nim	4
 tests/integration/t_ti2_separate_module_producer.nim	nim	2
 tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	nim	1
