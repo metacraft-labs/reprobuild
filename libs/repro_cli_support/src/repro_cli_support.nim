@@ -34,6 +34,10 @@ import repro_dsl_stdlib/packages_schema
 import repro_home_apply/package_catalog
 import repro_standard_provider_protocol
 import repro_runquota
+# M18: ``repro stats`` reads RunQuota's observation store through
+# ``runquotad``'s query interface. This module is the ONLY read path;
+# nothing here opens the store's database file.
+import repro_runquota/stats_query
 import repro_hash
 # M4: unified Workspace-VCS evidence record + derived JSON view.
 # ``writeBuildReport`` embeds the JSON view under the new
@@ -18758,7 +18762,12 @@ type
 
   StatsActionRollup = object
     actionId: string
-    target: string
+    statsKey: string
+      ## The action's RunQuota stats key, carried from the spine row the
+      ## extension row was joined to. It is what ties an action to the
+      ## work RunQuota admitted, and it replaces the M7 store's
+      ## project-local ``target`` field, which the shared store has no
+      ## dimension for.
     resultSamples: int
     cacheSamples: int
     cacheHits: int
@@ -18767,24 +18776,6 @@ type
     inputSamples: int
     maxInputCount: int
     maxOutputCount: int
-
-  StatsTargetRollup = object
-    target: string
-    runIds: HashSet[string]
-    observations: int
-    actionSamples: int
-    launched: int
-    cacheSamples: int
-    cacheHits: int
-    cacheMisses: int
-    buildTotalUs: float
-    buildTotalSamples: int
-
-  StatsWindow = object
-    observationCount: int
-    runIds: HashSet[string]
-    firstMs: int64
-    lastMs: int64
 
 proc nowUnixMsCli(): int64 =
   let current = getTime()
@@ -18815,111 +18806,62 @@ proc safeSnapshotLabel(label: string): string =
 proc statsSnapshotPath(projectRoot, label: string): string =
   defaultStatsSnapshotDir(projectRoot) / (safeSnapshotLabel(label) & ".json")
 
-proc statsWindow(nodes: openArray[JsonNode]): StatsWindow =
-  result.firstMs = int64.high
-  for node in nodes:
-    inc result.observationCount
-    let runId = node{"runId"}.getStr()
-    if runId.len > 0:
-      result.runIds.incl(runId)
-    let occurred = node{"occurredAtUnixMs"}.getBiggestInt(0)
-    if occurred > 0:
-      result.firstMs = min(result.firstMs, occurred)
-      result.lastMs = max(result.lastMs, occurred)
-  if result.firstMs == int64.high:
-    result.firstMs = 0
+proc statsWindowJson(view: SharedStoreView): JsonNode =
+  ## THE QUALIFICATION EVERY REPORTED STATISTIC CARRIES (M18).
+  ##
+  ## Time window, sample count, and the host/hardware profiles the figures
+  ## describe, plus the STATE that says whether they may be believed at
+  ## all. ``observationCount`` is retained as the count of
+  ## ``ext_repro_action`` rows in the window so the shape of this object is
+  ## still the one ``repro stats`` documents; everything beside it is new
+  ## and is what OS-2 and OS-6 require to be visible.
+  result = windowJson(view)
+  result["observationCount"] = %view.actionRows.len
 
-proc statsWindowJson(window: StatsWindow): JsonNode =
-  %*{
-    "observationCount": window.observationCount,
-    "runCount": window.runIds.len,
-    "firstObservationUnixMs": window.firstMs,
-    "lastObservationUnixMs": window.lastMs
-  }
+proc unavailableReason(view: SharedStoreView): string =
+  ## The reason a view carries when the shared store has no figures to
+  ## render. NEVER "no data": each state has its own sentence, because the
+  ## reader's next action differs for each and a view that collapses them
+  ## has told the reader nothing.
+  view.reason
 
-proc cacheDecisionKind(value: string): string =
-  let v = value.normalize()
-  if v.contains("hit"):
-    "hit"
-  elif v.contains("miss"):
-    "miss"
-  elif v.contains("reject"):
-    "rejected"
-  elif v.contains("notcache"):
-    "not-cacheable"
-  else:
-    "other"
-
-proc actionRollups(nodes: openArray[JsonNode]): Table[string, StatsActionRollup] =
-  for node in nodes:
-    let fields = node{"fields"}
-    let actionId = fields{"actionId"}.getStr()
+proc actionRollups(view: SharedStoreView): Table[string, StatsActionRollup] =
+  ## Rolled up from ``ext_repro_action`` rows read back over RQSP.
+  ##
+  ## ONE ROW PER EXECUTION, WHICH IS NOT ONE ROW PER ACTION. RunQuota's
+  ## spine records executions, and a cache HIT is precisely the case where
+  ## nothing executed — so the hit counted here is only the hit an
+  ## execution reported, and ``docs/stats.md`` says so where a reader will
+  ## find it.
+  proc count(row: SharedActionRow; name: string): int =
+    try:
+      parseInt(row.value(name))
+    except ValueError:
+      0
+  for row in view.actionRows:
+    let actionId = row.value("action_id")
     if actionId.len == 0:
       continue
     var item = result.getOrDefault(actionId)
     item.actionId = actionId
-    if item.target.len == 0:
-      item.target = node{"target"}.getStr()
-    case node{"kind"}.getStr()
-    of "action-result":
-      inc item.resultSamples
-      if fields{"launched"}.getBool(false):
-        inc item.launched
-    of "cache-decision":
-      inc item.cacheSamples
-      case cacheDecisionKind(fields{"cacheDecision"}.getStr())
-      of "hit":
-        inc item.cacheHits
-      of "miss":
-        inc item.cacheMisses
-      else:
-        discard
-    of "dependency-evidence":
-      inc item.inputSamples
-      let inputCount =
-        fields{"declaredInputs"}.getInt(0) +
-        fields{"depfileInputs"}.getInt(0) +
-        fields{"monitorReads"}.getInt(0) +
-        fields{"monitorProbes"}.getInt(0)
-      item.maxInputCount = max(item.maxInputCount, inputCount)
-      item.maxOutputCount = max(item.maxOutputCount,
-        fields{"declaredOutputs"}.getInt(0) +
-        fields{"monitorWrites"}.getInt(0))
+    item.statsKey = row.statsKey
+    inc item.resultSamples
+    inc item.launched
+    inc item.cacheSamples
+    case row.value("cache_outcome")
+    of "hit":
+      inc item.cacheHits
+    of "miss":
+      inc item.cacheMisses
     else:
       discard
+    inc item.inputSamples
+    item.maxInputCount = max(item.maxInputCount,
+      row.count("declared_inputs") + row.count("depfile_inputs") +
+        row.count("monitor_reads") + row.count("monitor_probes"))
+    item.maxOutputCount = max(item.maxOutputCount,
+      row.count("declared_outputs") + row.count("monitor_writes"))
     result[actionId] = item
-
-proc targetRollups(nodes: openArray[JsonNode]): Table[string, StatsTargetRollup] =
-  for node in nodes:
-    let target = node{"target"}.getStr("default")
-    var item = result.getOrDefault(target)
-    item.target = target
-    inc item.observations
-    let runId = node{"runId"}.getStr()
-    if runId.len > 0:
-      item.runIds.incl(runId)
-    let fields = node{"fields"}
-    case node{"kind"}.getStr()
-    of "action-result":
-      inc item.actionSamples
-      if fields{"launched"}.getBool(false):
-        inc item.launched
-    of "cache-decision":
-      inc item.cacheSamples
-      case cacheDecisionKind(fields{"cacheDecision"}.getStr())
-      of "hit":
-        inc item.cacheHits
-      of "miss":
-        inc item.cacheMisses
-      else:
-        discard
-    of "metric":
-      if fields{"name"}.getStr() == "repro build total":
-        item.buildTotalUs += fields{"totalUs"}.getFloat(0.0)
-        inc item.buildTotalSamples
-    else:
-      discard
-    result[target] = item
 
 proc graphActionMap(info: BuildGraphInspection): Table[string, BuildAction] =
   for action in info.actions:
@@ -18938,7 +18880,7 @@ proc graphMetadataJson(info: BuildGraphInspection): JsonNode =
   }
 
 proc unavailableStatsJson(command, scope, metric, projectRoot, storePath,
-                          reason: string; window: StatsWindow): JsonNode =
+                          reason: string; view: SharedStoreView): JsonNode =
   %*{
     "schemaId": "reprobuild.stats.rank.v1",
     "command": command,
@@ -18946,11 +18888,25 @@ proc unavailableStatsJson(command, scope, metric, projectRoot, storePath,
     "metric": metric,
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "sampleCount": 0,
     "availability": {"available": false, "reason": reason},
     "rows": newJArray()
   }
+
+proc storeUnavailableStatsJson(command, scope, metric, projectRoot,
+                               storePath: string;
+                               view: SharedStoreView): JsonNode =
+  ## What a view renders when the shared store cannot answer.
+  ##
+  ## THE POINT OF THIS PROC IS THAT IT IS NOT A ZERO. An unreachable
+  ## daemon, a daemon with capture off, a failed query and an empty store
+  ## are four different states, and each arrives here carrying its own
+  ## sentence. Rendering any of them as an empty ranking with
+  ## ``available: true`` would present an absent sample as a complete one,
+  ## which is exactly what OS-2 forbids.
+  unavailableStatsJson(command, scope, metric, projectRoot, storePath,
+    unavailableReason(view), view)
 
 proc outputSizeForAction(projectRoot: string; action: BuildAction): BiggestInt =
   for output in action.outputs:
@@ -18959,23 +18915,28 @@ proc outputSizeForAction(projectRoot: string; action: BuildAction): BiggestInt =
       result += getFileSize(extendedPath(path))
 
 proc actionRankJson(projectRoot, storePath, metric: string; top: int;
-                    nodes: openArray[JsonNode];
+                    view: SharedStoreView;
                     graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
-  let rollups = actionRollups(nodes)
+  let rollups = actionRollups(view)
   let graphById =
     if graphInfo.isSome: graphActionMap(graphInfo.get())
     else: initTable[string, BuildAction]()
   let unavailable = {
-    "build-time": "M7 records run-level timing but not per-action durations",
+    "build-time": "per-action durations are not projected into this view yet",
     "critical-path": "critical-path contribution needs per-action dynamic timings",
     "duration-variance": "duration variance needs multiple per-action duration samples",
-    "peak-memory": "peak memory is not captured by the M7 stats store",
-    "queue-time": "queue time is not captured by the M7 stats store"
+    "peak-memory": "peak memory is not captured by this view",
+    "queue-time": "queue time is not captured by this view"
   }.toTable
   if unavailable.hasKey(metric):
     return unavailableStatsJson("stats rank", "actions", metric, projectRoot,
-      storePath, unavailable[metric], window)
+      storePath, unavailable[metric], view)
+  # THE STORE STATE IS CHECKED BEFORE ANY FIGURE IS COMPUTED, and after the
+  # metric-support check so that "this metric is not projected" keeps its
+  # own reason rather than being masked by a missing daemon.
+  if not figuresArePresentable(view.state):
+    return storeUnavailableStatsJson("stats rank", "actions", metric,
+      projectRoot, storePath, view)
 
   var rows = newJArray()
   type Row = tuple[id: string; value: float; samples: int; evidence: JsonNode]
@@ -19008,7 +18969,7 @@ proc actionRankJson(projectRoot, storePath, metric: string; top: int;
   of "output-size":
     if graphInfo.isNone:
       return unavailableStatsJson("stats rank", "actions", metric, projectRoot,
-        storePath, "output-size needs a materialized build graph", window)
+        storePath, "output-size needs a materialized build graph", view)
     for id, action in graphById:
       raw.add((id, float(outputSizeForAction(projectRoot, action)), 1, %*{
         "outputs": jsonStringSeq(action.outputs)
@@ -19041,7 +19002,7 @@ proc actionRankJson(projectRoot, storePath, metric: string; top: int;
     "metric": metric,
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "sampleCount": rows.len,
     "availability": {"available": rows.len > 0, "reason": ""},
     "rows": rows
@@ -19055,20 +19016,25 @@ proc inputDependents(info: BuildGraphInspection; path: string): HashSet[string]
 proc downstreamClosure(info: BuildGraphInspection; roots: HashSet[string]): HashSet[string]
 
 proc inputRankJson(projectRoot, storePath, metric: string; top: int;
-                   nodes: openArray[JsonNode];
+                   view: SharedStoreView;
                    graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
+  ## STRUCTURAL, NOT HISTORICAL, and deliberately still so. Blast radius
+  ## and fanout are properties of the build graph, so this view does not
+  ## consult the shared store for its figures and does not become
+  ## unavailable when no daemon is running. It still carries the store
+  ## window, because the two historical metrics below are the ones that
+  ## would need it.
   if metric in ["change-frequency", "critical-path-impact"]:
     return unavailableStatsJson("stats rank", "inputs", metric, projectRoot,
       storePath,
       if metric == "change-frequency":
-        "M7 records dependency evidence counts but not changed input paths"
+        "changed input paths are not recorded on the shared store's spine"
       else:
         "critical-path impact needs per-action dynamic timings and input paths",
-      window)
+      view)
   if graphInfo.isNone:
     return unavailableStatsJson("stats rank", "inputs", metric, projectRoot,
-      storePath, "input ranking needs a materialized build graph", window)
+      storePath, "input ranking needs a materialized build graph", view)
   if metric notin ["blast-radius", "fanout"]:
     raise newException(ValueError, "unsupported inputs metric: " & metric)
 
@@ -19110,7 +19076,7 @@ proc inputRankJson(projectRoot, storePath, metric: string; top: int;
     "metric": metric,
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "sampleCount": rows.len,
     "availability": {
       "available": rows.len > 0,
@@ -19121,83 +19087,53 @@ proc inputRankJson(projectRoot, storePath, metric: string; top: int;
   }
 
 proc targetRankJson(projectRoot, storePath, metric: string; top: int;
-                    nodes: openArray[JsonNode]): JsonNode =
-  let window = statsWindow(nodes)
-  if metric == "critical-path":
-    return unavailableStatsJson("stats rank", "targets", metric, projectRoot,
-      storePath, "critical path needs per-action dynamic timings", window)
-  let rollups = targetRollups(nodes)
-  type Row = tuple[target: string; value: float; samples: int; evidence: JsonNode]
-  var raw: seq[Row] = @[]
-  case metric
-  of "build-time":
-    for target, item in rollups:
-      if item.buildTotalSamples > 0:
-        raw.add((target, item.buildTotalUs / float(item.buildTotalSamples),
-          item.buildTotalSamples, %*{
-            "buildTotalUs": item.buildTotalUs,
-            "buildTotalSamples": item.buildTotalSamples
-          }))
-    raw.sort(proc(a, b: Row): int = cmp(b.value, a.value))
-  of "cache-hit-ratio":
-    for target, item in rollups:
-      if item.cacheSamples > 0:
-        raw.add((target, float(item.cacheHits) / float(item.cacheSamples),
-          item.cacheSamples, %*{
-            "cacheHits": item.cacheHits,
-            "cacheMisses": item.cacheMisses,
-            "cacheSamples": item.cacheSamples
-          }))
-    raw.sort(proc(a, b: Row): int = cmp(a.value, b.value))
-  of "rebuild-count":
-    for target, item in rollups:
-      raw.add((target, float(item.launched), item.actionSamples, %*{
-        "launchedActions": item.launched,
-        "actionSamples": item.actionSamples
-      }))
-    raw.sort(proc(a, b: Row): int = cmp(b.value, a.value))
-  else:
+                    view: SharedStoreView): JsonNode =
+  ## TARGETS HAVE NO DIMENSION ON THE SHARED STORE, AND THAT IS STATED
+  ## RATHER THAN APPROXIMATED.
+  ##
+  ## RunQuota's execution spine records host, profile, stats key, owner
+  ## and outcome; the reprobuild TARGET a build was invoked for is not one
+  ## of them, and ``ext_repro_action`` version 1 does not carry it either.
+  ## The M7 project-local store had it because it was written by the
+  ## command that knew it.
+  ##
+  ## There are two ways to keep this view answering: attribute every row
+  ## to the target of whichever invocation happens to be asking, or pool
+  ## every row under one synthetic target. Both produce a number, and
+  ## neither produces the number the caller asked for -- a ranking over
+  ## one bucket is not a ranking, and attributing history to the current
+  ## invocation is a figure about the question rather than about the work.
+  ## OS-2 rules both out, so the view says what it cannot answer and names
+  ## the dimension that would make it answerable.
+  discard top
+  if metric notin ["build-time", "cache-hit-ratio", "rebuild-count",
+      "critical-path"]:
     raise newException(ValueError, "unsupported targets metric: " & metric)
-  let limit = if top <= 0: raw.len else: min(top, raw.len)
-  var rows = newJArray()
-  for index in 0 ..< limit:
-    let row = raw[index]
-    rows.add(%*{
-      "rank": index + 1,
-      "target": row.target,
-      "value": row.value,
-      "sampleCount": row.samples,
-      "evidence": row.evidence
-    })
-  %*{
-    "schemaId": "reprobuild.stats.rank.v1",
-    "command": "stats rank",
-    "scope": "targets",
-    "metric": metric,
-    "projectRoot": projectRoot,
-    "storePath": storePath,
-    "window": statsWindowJson(window),
-    "sampleCount": rows.len,
-    "availability": {
-      "available": rows.len > 0,
-      "reason": if rows.len == 0: "no target observations for metric" else: ""
-    },
-    "rows": rows
-  }
+  let reason =
+    if metric == "critical-path":
+      "critical path needs per-action dynamic timings"
+    else:
+      "the shared observation store carries no reprobuild target dimension; " &
+        "rank by --scope=tools (RunQuota stats key) or --scope=actions instead"
+  unavailableStatsJson("stats rank", "targets", metric, projectRoot,
+    storePath, reason, view)
 
 proc toolRankJson(projectRoot, storePath, metric: string; top: int;
-                  nodes: openArray[JsonNode];
+                  view: SharedStoreView;
                   graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
   if metric in ["build-time", "queue-time", "duration-variance", "peak-memory"]:
     return unavailableStatsJson("stats rank", "tools", metric, projectRoot,
-      storePath, "M7 does not capture per-action resource/timing by tool", window)
+      storePath, "per-tool resource/timing is not projected into this view",
+      view)
   if metric != "cache-hit-ratio":
     raise newException(ValueError, "unsupported tools metric: " & metric)
   if graphInfo.isNone:
     return unavailableStatsJson("stats rank", "tools", metric, projectRoot,
-      storePath, "tool ranking needs a materialized build graph", window)
-  let actions = actionRollups(nodes)
+      storePath, "tool ranking needs a materialized build graph", view)
+  if not figuresArePresentable(view.state):
+    return storeUnavailableStatsJson("stats rank", "tools", metric,
+      projectRoot, storePath, view)
+  let actions = actionRollups(view)
   let graphById = graphActionMap(graphInfo.get())
   type Tool = object
     id: string
@@ -19207,9 +19143,16 @@ proc toolRankJson(projectRoot, storePath, metric: string; top: int;
     actions: HashSet[string]
   var tools = initTable[string, Tool]()
   for actionId, rollup in actions:
-    if not graphById.hasKey(actionId) or rollup.cacheSamples == 0:
+    if rollup.cacheSamples == 0:
       continue
-    var toolId = graphById[actionId].commandStatsId
+    # THE TOOL ID COMES OFF THE SPINE, not out of the graph. RunQuota's
+    # ``stats_key`` IS reprobuild's command stats id, carried on the row
+    # the daemon joined, so the identity a figure is grouped by is the
+    # identity the measurement was recorded under rather than one
+    # re-derived from a graph the measurement never saw.
+    var toolId = rollup.statsKey
+    if toolId.len == 0 and graphById.hasKey(actionId):
+      toolId = graphById[actionId].commandStatsId
     if toolId.len == 0:
       toolId = "unknown-command-shape"
     var item = tools.getOrDefault(toolId)
@@ -19251,7 +19194,7 @@ proc toolRankJson(projectRoot, storePath, metric: string; top: int;
     "metric": metric,
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "sampleCount": rows.len,
     "availability": {
       "available": rows.len > 0,
@@ -19267,8 +19210,11 @@ proc renderStatsRankText(node: JsonNode): string =
   let metric = node{"metric"}.getStr()
   let window = node{"window"}
   lines.add("Stats rank: scope=" & scope & " by=" & metric &
-    " runs=" & $window{"runCount"}.getInt(0) &
-    " observations=" & $window{"observationCount"}.getInt(0))
+    " state=" & window{"state"}.getStr("unknown") &
+    " samples=" & $window{"sampleCount"}.getInt(0) &
+    " observations=" & $window{"observationCount"}.getInt(0) &
+    " window=" & $window{"firstObservationUnixMs"}.getBiggestInt(0) & ".." &
+    $window{"lastObservationUnixMs"}.getBiggestInt(0) & "ms")
   if not node{"availability"}{"available"}.getBool(false):
     lines.add("unavailable: " & node{"availability"}{"reason"}.getStr())
     return lines.join("\n") & "\n"
@@ -19291,24 +19237,40 @@ proc renderStatsRankText(node: JsonNode): string =
   lines.join("\n") & "\n"
 
 proc showActionStatsJson(projectRoot, storePath, actionId: string;
-                         nodes: openArray[JsonNode];
+                         view: SharedStoreView;
                          graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
-  let rollups = actionRollups(nodes)
+  if not figuresArePresentable(view.state):
+    # NOT "unknown action". A missing daemon and an action the store has
+    # never seen are different answers, and reporting the first as the
+    # second would send a reader looking for a typo in the action id.
+    raise newException(ValueError,
+      "the shared observation store has no figures to show: " &
+        unavailableReason(view))
+  let rollups = actionRollups(view)
   if not rollups.hasKey(actionId):
     raise newException(ValueError, "unknown action in stats store: " & actionId)
   let item = rollups[actionId]
   var recent = newJArray()
-  for node in nodes:
-    if node{"fields"}{"actionId"}.getStr() == actionId:
-      recent.add(node)
+  for row in view.actionRows:
+    if row.value("action_id") != actionId:
+      continue
+    var values = newJObject()
+    for i, name in row.columns:
+      if i < row.values.len:
+        values[name] = %row.values[i]
+    recent.add(%*{
+      "executionId": row.executionId,
+      "statsKey": row.statsKey,
+      "profile": profileJson(row.profile),
+      "values": values
+    })
   result = %*{
     "schemaId": "reprobuild.stats.show.v1",
     "command": "stats show",
     "scope": "actions",
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "id": actionId,
     "actionId": actionId,
     "rollup": {
@@ -19358,7 +19320,8 @@ proc renderStatsShowText(node: JsonNode): string =
     lines.add("directDependents: " &
       $node{"rollup"}{"directDependents"}.getInt(0) &
       " blastRadius: " & $node{"rollup"}{"blastRadius"}.getInt(0))
-    lines.add("observed change frequency: unavailable (M7 does not record changed input paths)")
+    lines.add("observed change frequency: unavailable (changed input " &
+      "paths are not recorded on the shared store's spine)")
     lines.add("next: " & node{"graphCommand"}.getStr())
   lines.join("\n") & "\n"
 
@@ -19370,9 +19333,8 @@ proc actionIdsJson(values: HashSet[string]): JsonNode =
   jsonStringSeq(ids)
 
 proc showInputStatsJson(projectRoot, storePath, path: string;
-                        nodes: openArray[JsonNode];
+                        view: SharedStoreView;
                         graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
   if graphInfo.isNone:
     return %*{
       "schemaId": "reprobuild.stats.show.v1",
@@ -19380,7 +19342,7 @@ proc showInputStatsJson(projectRoot, storePath, path: string;
       "scope": "inputs",
       "projectRoot": projectRoot,
       "storePath": storePath,
-      "window": statsWindowJson(window),
+      "window": statsWindowJson(view),
       "path": path,
       "availability": {
         "available": false,
@@ -19395,7 +19357,7 @@ proc showInputStatsJson(projectRoot, storePath, path: string;
     "scope": "inputs",
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "path": path,
     "availability": {"available": true, "reason": ""},
     "rollup": {
@@ -19411,22 +19373,28 @@ proc showInputStatsJson(projectRoot, storePath, path: string;
   }
 
 proc snapshotJson(projectRoot, storePath, label: string;
-                  nodes: openArray[JsonNode];
+                  view: SharedStoreView;
                   graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
   let actions = actionRankJson(projectRoot, storePath, "cache-miss-count", 0,
-    nodes, graphInfo)
-  let targets = targetRankJson(projectRoot, storePath, "build-time", 0, nodes)
+    view, graphInfo)
+  let tools = toolRankJson(projectRoot, storePath, "cache-hit-ratio", 0,
+    view, graphInfo)
   result = %*{
     "schemaId": "reprobuild.stats.snapshot.v1",
     "label": label,
     "createdAtUnixMs": nowUnixMsCli(),
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "rollups": {
       "actionsByCacheMissCount": actions{"rows"},
-      "targetsByBuildTime": targets{"rows"}
+      # THE TARGET ROLLUP IS GONE BECAUSE THE DIMENSION IS. A snapshot
+      # that kept the key and filled it with an empty array would record
+      # "no targets were slow" where the truth is "targets are not a
+      # dimension of the store this snapshot is taken from". The tool
+      # rollup replaces it: RunQuota's stats key is the identity the
+      # measurements were actually recorded under.
+      "toolsByCacheHitRatio": tools{"rows"}
     },
     "unavailableMetrics": jsonStringSeq([
       "per-action build-time",
@@ -19444,7 +19412,8 @@ proc snapshotJson(projectRoot, storePath, label: string;
 proc renderSnapshotText(node: JsonNode; path: string): string =
   "stats snapshot: " & node{"label"}.getStr() &
     " observations=" & $node{"window"}{"observationCount"}.getInt(0) &
-    " runs=" & $node{"window"}{"runCount"}.getInt(0) &
+    " samples=" & $node{"window"}{"sampleCount"}.getInt(0) &
+    " state=" & node{"window"}{"state"}.getStr("unknown") &
     "\npath: " & path & "\n"
 
 proc rollupDeltaRows(baseRows, candRows: JsonNode; keyField: string): JsonNode =
@@ -19513,22 +19482,22 @@ proc compareSnapshotsJson(projectRoot, baseline, candidate: string): JsonNode =
     "deltas": {
       "observationCount": cand{"window"}{"observationCount"}.getInt(0) -
         base{"window"}{"observationCount"}.getInt(0),
-      "runCount": cand{"window"}{"runCount"}.getInt(0) -
-        base{"window"}{"runCount"}.getInt(0),
+      "sampleCount": cand{"window"}{"sampleCount"}.getInt(0) -
+        base{"window"}{"sampleCount"}.getInt(0),
       "actionCacheMissRows": cand{"rollups"}{"actionsByCacheMissCount"}.len -
         base{"rollups"}{"actionsByCacheMissCount"}.len,
-      "targetBuildTimeRows": cand{"rollups"}{"targetsByBuildTime"}.len -
-        base{"rollups"}{"targetsByBuildTime"}.len
+      "toolCacheHitRatioRows": cand{"rollups"}{"toolsByCacheHitRatio"}.len -
+        base{"rollups"}{"toolsByCacheHitRatio"}.len
     },
     "rollupDeltas": {
       "actionsByCacheMissCount": rollupDeltaRows(
         base{"rollups"}{"actionsByCacheMissCount"},
         cand{"rollups"}{"actionsByCacheMissCount"},
         "actionId"),
-      "targetsByBuildTime": rollupDeltaRows(
-        base{"rollups"}{"targetsByBuildTime"},
-        cand{"rollups"}{"targetsByBuildTime"},
-        "target")
+      "toolsByCacheHitRatio": rollupDeltaRows(
+        base{"rollups"}{"toolsByCacheHitRatio"},
+        cand{"rollups"}{"toolsByCacheHitRatio"},
+        "toolId")
     },
     "notes": jsonStringSeq([
       "Compare uses current M7 rollups; per-action timing/resource deltas are unavailable until those metrics are captured."
@@ -19540,7 +19509,7 @@ proc renderCompareText(node: JsonNode): string =
   "stats compare: " & node{"baseline"}{"label"}.getStr() & " -> " &
     node{"candidate"}{"label"}.getStr() & "\n" &
     "delta observations: " & $deltas{"observationCount"}.getInt(0) & "\n" &
-    "delta runs: " & $deltas{"runCount"}.getInt(0) & "\n" &
+    "delta samples: " & $deltas{"sampleCount"}.getInt(0) & "\n" &
     "note: " & node{"notes"}[0].getStr() & "\n"
 
 proc maybePrepareStatsGraph(projectRoot, target, publicCliPath, workRoot: string;
@@ -19625,13 +19594,16 @@ proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
     inc i
 
   projectRoot = absolutePath(projectRoot)
-  let storePath = defaultStatsStorePath(projectRoot)
-  let nodes = readStatsObservations(projectRoot)
+  let storePath = derivedStatsStorePath(projectRoot)
+  # ONE QUERY PER INVOCATION, AND EVERY VIEW BELOW RENDERS FROM IT.
+  # ``runquotad`` is the only sanctioned reader of the observation store,
+  # so this is the whole of what ``repro stats`` can know about raw rows.
+  let sharedStore = readSharedStore()
   case view
   of "status":
-    stdout.write(statsStatusText(projectRoot))
+    stdout.write(statsStatusText(projectRoot, sharedStore))
   of "overview":
-    stdout.write(statsOverviewText(projectRoot))
+    stdout.write(statsOverviewText(projectRoot, sharedStore))
   of "rank":
     if scope.len == 0:
       raise newException(ValueError, "stats rank requires --scope")
@@ -19647,13 +19619,16 @@ proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
     let outputNode =
       case scope
       of "actions":
-        actionRankJson(projectRoot, storePath, metric, top, nodes, graphInfo)
+        actionRankJson(projectRoot, storePath, metric, top, sharedStore,
+          graphInfo)
       of "inputs":
-        inputRankJson(projectRoot, storePath, metric, top, nodes, graphInfo)
+        inputRankJson(projectRoot, storePath, metric, top, sharedStore,
+          graphInfo)
       of "targets":
-        targetRankJson(projectRoot, storePath, metric, top, nodes)
+        targetRankJson(projectRoot, storePath, metric, top, sharedStore)
       of "tools":
-        toolRankJson(projectRoot, storePath, metric, top, nodes, graphInfo)
+        toolRankJson(projectRoot, storePath, metric, top, sharedStore,
+          graphInfo)
       else:
         raise newException(ValueError, "unsupported stats scope: " & scope)
     if format == sofJson:
@@ -19674,11 +19649,13 @@ proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
       of "actions":
         if actionId.len == 0:
           raise newException(ValueError, "stats show --scope=actions requires --id")
-        showActionStatsJson(projectRoot, storePath, actionId, nodes, graphInfo)
+        showActionStatsJson(projectRoot, storePath, actionId, sharedStore,
+          graphInfo)
       of "inputs":
         if inputPath.len == 0:
           raise newException(ValueError, "stats show --scope=inputs requires --path")
-        showInputStatsJson(projectRoot, storePath, inputPath, nodes, graphInfo)
+        showInputStatsJson(projectRoot, storePath, inputPath, sharedStore,
+          graphInfo)
       else:
         raise newException(ValueError, "unsupported stats show scope: " & scope)
     if format == sofJson:
@@ -19690,8 +19667,8 @@ proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
       raise newException(ValueError, "stats snapshot requires --label")
     let graphInfo = maybePrepareStatsGraph(projectRoot, target, publicCliPath,
       workRoot, mode)
-    let outputNode = snapshotJson(projectRoot, storePath, safeSnapshotLabel(label),
-      nodes, graphInfo)
+    let outputNode = snapshotJson(projectRoot, storePath,
+      safeSnapshotLabel(label), sharedStore, graphInfo)
     let path = statsSnapshotPath(projectRoot, label)
     createDir(parentDir(path))
     writeFile(path, pretty(outputNode))
@@ -19831,21 +19808,21 @@ proc graphBlastRadiusJson(info: BuildGraphInspection; path: string): JsonNode =
   result["affectedOutputs"] = targetOutputs
   result["note"] = %"Structural graph blast radius; historical observed impact belongs to repro stats rank --scope=inputs --by=blast-radius."
 
-proc latestStatsRunId(projectRoot: string): string =
-  for node in readStatsObservations(projectRoot):
-    let runId = node{"runId"}.getStr()
-    if runId.len > 0:
-      result = runId
-
 proc graphCriticalPathJson(info: BuildGraphInspection; run: string): JsonNode =
-  let selectedRun =
-    if run == "last": latestStatsRunId(info.projectRoot) else: run
+  ## THE SELECTED RUN IS NO LONGER GUESSED FROM A LOCAL FILE. The M7
+  ## project-local JSONL store carried a ``runId`` per observation and this
+  ## view picked the last one out of it; that store is retired, and
+  ## RunQuota's query interface does not expose the ``runs`` table, so
+  ## ``--run=last`` has nothing to resolve against. Reporting an empty
+  ## string as though it were a resolved run id would be a fabricated
+  ## answer, so the view resolves only what the caller named.
   result = analysisBaseJson(info, "critical-path")
   result["run"] = %run
-  result["selectedRunId"] = %selectedRun
+  result["selectedRunId"] = %(if run == "last": "" else: run)
   result["availability"] = %*{
     "available": false,
-    "reason": "M7 stats do not capture per-action dynamic durations required for critical path reconstruction"
+    "reason": "per-action dynamic durations required for critical path " &
+      "reconstruction are not projected from the shared observation store"
   }
   result["criticalPath"] = newJArray()
   result["sampleCount"] = %0

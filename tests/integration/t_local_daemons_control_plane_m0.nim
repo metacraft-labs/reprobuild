@@ -64,7 +64,14 @@ suite "Local daemons/control-plane M0 current-state gates":
       let stats = requireSuccess(shellCommand([
         publicReproBin(), "stats", "status", "--project-root=" & tempRoot
       ]), repoRoot())
-      check stats.contains("stats capture: disabled by default")
+      # M18 RETARGET. The surface still reports whether capture is on --
+      # that is what this inventory gate is about -- but there are two
+      # stores now with different owners, so it names which. Raw
+      # per-execution rows are RunQuota's (Build-Analytics-And-
+      # Optimization.md §"Two Stores"); the project-local DERIVED store
+      # is the one ``--stats-groups`` turns on, and it is off here.
+      check stats.contains("raw capture: RunQuota-owned")
+      check stats.contains("active derived capture: none")
       check stats.contains("flushed: 0")
 
       let storeDaemon = requireReproFailure([

@@ -939,6 +939,16 @@ proc flushStatsAfterTerminal(config: UserDaemonConfig; sessionId: string) =
   if flush.flushed > 0:
     logLine(config.logPath, "stats flushed session=" & sessionId &
       " observations=" & $flush.flushed & " store=" & flush.storePath)
+  elif flush.discarded > 0:
+    # M18: THE DISCARD IS LOGGED, NOT SWALLOWED. The derived store's
+    # backend is not linked, so rollup inputs have nowhere to go -- and an
+    # operator looking at an empty derived store must be able to tell
+    # "nothing was captured" from "what was captured had nowhere to go".
+    # The in-process counter cannot answer that from another process; this
+    # line can.
+    logLine(config.logPath, "stats discarded session=" & sessionId &
+      " observations=" & $flush.discarded & " store=" & flush.storePath &
+      " reason=derived-backend-not-linked")
   elif flush.lastError.len > 0:
     logLine(config.logPath, "stats flush failed session=" & sessionId &
       " error=" & flush.lastError)

@@ -60,3 +60,71 @@ Two things a reader must know before counting anything:
 
 Built-in actions (`fs.copyFile` and friends) run inside the engine's own
 process, take no lease, and so produce no rows at all.
+
+## `repro stats` reads that store, and nothing else
+
+`repro stats` renders from RunQuota's observation store, over `runquotad`'s
+query interface. It never opens the store's database file: `runquotad` is the
+only sanctioned reader.
+
+Every reported statistic carries the qualification the store's invariants
+require — the time window it covers, how many spine rows it was computed
+over, and the host/hardware profile it describes:
+
+```sh
+repro stats status
+repro stats overview
+repro stats rank --scope=actions --by=cache-miss-count --json
+```
+
+**The window says whose rows it covers.** One host-wide `runquotad` holds every
+user's executions, so a query has to name a scope. `repro stats` asks for
+`scope: owner` — the calling uid, taken by the daemon from peer credentials and
+never from anything the CLI declares. Widening to the whole host is a real
+question with a real answer, but it has to be asked for; a human surface that
+widened silently would show you a colleague's builds on a shared machine with
+nothing to say so. The scope the rows were actually selected under is rendered
+on every surface, `--json` and text alike.
+
+**An empty window is never rendered as zeros.** Four different states produce
+"no figures", and `repro stats` names which one it is rather than printing a
+ranking of nothing:
+
+| state | what it means | what to do |
+| --- | --- | --- |
+| `unavailable` | no `runquotad` answered | start the daemon |
+| `query-failed` | a daemon answered and the query did not | report it |
+| `capture-disabled` | the daemon is recording nothing | enable capture |
+| `empty` | the daemon knows nothing for this scope yet | build something |
+
+**A store with counted drops renders as `incomplete`, never as a thin
+`complete`.** `runquotad` counts every observation it lost — a full writer
+queue, a write failure, a refused self-report, a refused extension row — and
+`repro stats` reads those counters back through the `observations` inspection
+subject and labels the sample accordingly. Statistics over a silently
+truncated window read as authoritative, which is worse than having none.
+
+Two views do not have a shared-store answer, and say so instead of inventing
+one:
+
+- `--scope=targets`: RunQuota's spine has no Reprobuild *target* dimension and
+  `ext_repro_action` v1 does not carry one. Rank by `--scope=tools` (RunQuota's
+  stats key) or `--scope=actions` instead.
+- `repro graph --view=critical-path --run=last`: the query interface does not
+  expose the `runs` table, so there is no last run id to resolve.
+
+## The project-local store holds derived rollups only
+
+`.repro/stats/observations.jsonl` and `.repro/stats/summary.json` are retired,
+along with the schema ids `reprobuild.daemon.stats-observation.v1` and
+`reprobuild.daemon.stats-summary.v1`. Nothing read them but `repro stats`,
+which now reads the shared store, so they are **superseded rather than
+migrated**: an existing file is left where it is and never imported. Importing
+it would inject rows carrying no host identity and no hardware profile into a
+store whose OS-6 invariant refuses aggregates that lack them.
+
+`--write-stats` survives with a narrower job: it names the project-local
+*derived* store, `.repro/stats/derived/`, which holds rollups computed **from**
+RunQuota's rows and no raw samples of its own. Its SQLite backend is not linked
+yet, so queued rollup inputs are discarded — and the discard is **counted** and
+reported by `repro stats status`, rather than presented as an empty store.
