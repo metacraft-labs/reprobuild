@@ -92,6 +92,8 @@ libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cac
 libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim	nim	1
 libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim	nim	6
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	5
+libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	nim	4
+libs/repro_cli_support/tests/t_w2_dev_env_producer_pin_binding.nim	nim	9
 libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim	nim	3
 libs/repro_cli_support/tests/test_engine_publisher_wiring.nim	nim	5
 libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim	nim	3
@@ -639,6 +641,7 @@ tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim	nim	1
 tests/e2e/codetracer-subset/t_e2e_codetracer_dev_environment_slice.nim	nim	1
 tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim	nim	13
 tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim	nim	4
+tests/e2e/dev-env/t_e2e_dev_env_binds_materialized_producer.nim	nim	2
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_per_shell.nim	nim	7
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_round_trip.nim	nim	5
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_tampered.nim	nim	4

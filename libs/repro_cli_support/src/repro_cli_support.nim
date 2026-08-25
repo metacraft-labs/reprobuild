@@ -5175,6 +5175,13 @@ type
 proc resolveProducerBinding*(selector: string;
                              workspaceRoot: string): ProducerBinding
 
+proc devEnvProducerEdgesPossible*(projectRoot: string): bool
+  ## W2 — the cheapest honest answer to "could ANY selector in this workspace
+  ## be a declared cross-repo producer edge?". Forward-declared here because
+  ## its body needs ``committedLockPath``, which lives next to the lock
+  ## helpers, while its caller (``devEnvProducerActivation``) is far above
+  ## them. See the body for why three ``fileExists`` calls decide it.
+
 var lastResolvedProducerBinding*: ProducerBinding =
   ProducerBinding(selector: "", kind: pbkNotProducer)
   ## SC-1 observability sink. The ``mkToolIdentityResolver`` closure records
@@ -8968,6 +8975,17 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
       DevEnvShellOp(kind: deskSetEnv, name: "REPRO_PROJECT_ROOT",
         value: canonicalProjectRoot)
     ])
+  # W2-no-producer-ops-and-no-report: this artifact is SYNTHESIZED right above
+  # from ``binDirsForDevelop`` — it is ``repro develop``'s own PATH projection,
+  # not a dev-env introspection artifact, and it carries no ``toolProfiles``.
+  # ``devEnvProducerPins`` classifies ``toolProfiles``; with none there is
+  # nothing for it to classify and a report call here would be a guaranteed
+  # no-op, which is why this site cannot even REPORT rather than merely
+  # declining to bind. ``repro develop`` does print its resolved ``binDirs``
+  # and every ``tool: <name> <path>`` pair, so its answer is visible if not
+  # attributed. (It does not run the producer pre-pass either; that is
+  # recorded in W2's DONE section as a separate, still-open gap, not something
+  # this call site can fix.)
   runActivatedCommand(artifact, "", command, canonicalProjectRoot)
 
 proc valueAfterFlag(args: openArray[string]; flag: string): string =
@@ -9248,6 +9266,19 @@ proc runDevEnvShellRenderHelper(args: openArray[string]): int =
     var navigatorStats: DevEnvNavigatorStats
     let ops = shellOpsFromNavigatorFile(artifactPath, navigatorStats)
     createDir(extendedPath(parentDir(outputPath)))
+    # W2-no-producer-ops-and-no-report: this is not an activation surface. It
+    # is the BUILD ACTION behind the dev-env edge — it renders the shell
+    # fragment to a file that ``__repro-direnv-activate`` later streams — and
+    # its output is content-addressed by the edge's cache key. Two consequences
+    # rule out both halves. Binding would fold a producer's build OUTPUT into a
+    # cached artifact, which is the staleness failure W2's whole design avoids.
+    # Reporting would emit the notice once, on the run that MISSED the cache,
+    # and then never again for as long as the fragment stayed warm — a warning
+    # that appears at most once per cache generation is worse than none,
+    # because its absence stops meaning anything. The surface that consumes
+    # this fragment reports at activation time instead, where the answer is
+    # re-derived every time; see ``runReproDirenvActivationHelper``. This
+    # helper also has no project root in hand, only an artifact path.
     writeFile(extendedPath(outputPath), renderDevEnvShellOps(ops, depPosix))
     if navigatorStatsPath.len > 0:
       createDir(extendedPath(parentDir(navigatorStatsPath)))
@@ -9915,6 +9946,342 @@ proc writeDevEnvStats(path: string; edge: DevEnvEdgeResult;
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), $devEnvStatsJson(edge, commandName) & "\n")
 
+# ---------------------------------------------------------------------------
+# W2 — a dev-env BINDS a cross-repo producer; it never BUILDS one.
+#
+# The decision this implements, and the four reasons it is not "the dev-env
+# engine should call the build's producer pre-pass" (Windows-Cacheable-Builds
+# -Session-Residuals W2):
+#
+# * COST. The build's pre-pass (``repro_cli_support.nim`` ~7987-8237, inline in
+#   ``executeBuildTarget``) runs a full recursive ``executeBuildTarget`` on the
+#   producer's DEFAULT target. For the motivating pin that is a 1263-action
+#   graph. Nothing about it persists across processes — ``producerMaterialized
+#   BinDirs`` is a process-global that is never written to disk — so EVERY
+#   ``repro shell`` / ``repro exec`` / prompt-time hook would re-enter the
+#   producer's whole engine pass. The M77 no-op budget is < 15 ms p50 here.
+#
+# * STALENESS. A producer's build OUTPUT is not one of the dev-env artifact's
+#   declared source inputs, and it cannot become one: ``computeDevEnvEdge
+#   CacheKey`` exists precisely so the shell hook can answer without walking a
+#   graph, and folding a build product into it defeats that. So the binding is
+#   deliberately NOT baked into the cached RBDE artifact. It is re-derived at
+#   every activation from cheap on-disk state, which is what makes it correct
+#   about staleness rather than merely lucky.
+#
+# * CIRCULARITY. For the motivating case the producer IS the running engine.
+#   The dev-env's own provider-compile and introspection edges are argv'd
+#   against ``config.publicCliPath``, i.e. the image already running, so
+#   building the pin could not change what computed the artifact — and on
+#   Windows the ``reprobuild.apps.repro`` edge relinks the running executable
+#   and cannot complete in place (S5's record audit). Binding a materialized
+#   bin dir has none of that: it is a path prepend.
+#
+# * LAYERING. The pre-pass is not a callable unit, and it lives in
+#   ``repro_cli_support``, which DEPENDS ON ``repro_dev_env_engine``. Calling
+#   it from the dev-env engine inverts the dependency. Resolving the binding
+#   here — where ``resolveProducerBinding`` already lives — does not.
+#
+# What is left is the half that WAS a defect: before W2 a dev-env dropped every
+# ``uses:`` declaration on the floor and silently answered a declared producer
+# name from the ambient PATH. That is now impossible: a pin is either bound to
+# the materialized output or announced as not in effect, naming the ambient
+# binary that will answer instead and the command that fixes it.
+#
+# Cost of the pass itself: ``resolveProducerBinding`` reads at most two small
+# files (``repro.lock``, ``.repro/develop-overrides.toml``) plus one ``dirExists``
+# / directory-head probe per declared producer. It never fetches (a lock-pinned
+# producer with no checkout is REPORTED, not cloned — a network operation has no
+# business on an interactive activation path) and never compiles.
+
+type
+  DevEnvProducerPinState* = enum
+    ## What a dev-env activation was able to do with one declared ``uses:``
+    ## cross-repo producer selector.
+    deppBound
+      ## A previous ``repro build`` materialized the producer's output; its
+      ## ``build/bin`` is prepended to the activated ``PATH``.
+    deppNotBuilt
+      ## The producer edge is declared and its source is present, but nothing
+      ## has been built. The name falls through to the ambient PATH, loudly.
+    deppNoSource
+      ## The producer edge is declared but no source checkout is available
+      ## here. Not fetched — see the header note.
+    deppUnresolvable
+      ## Resolving the binding failed (e.g. a develop override naming a
+      ## checkout that is not on disk). Reported, never fatal to the shell.
+
+  DevEnvProducerPin* = object
+    selector*: string
+    executableName*: string
+    state*: DevEnvProducerPinState
+    sourceRoot*: string
+    binDir*: string
+    boundExecutable*: string
+      ## The materialized producer executable that decided ``deppBound``.
+    ambientPath*: string
+      ## The executable that WILL answer ``executableName`` when the pin is not
+      ## bound. Empty when nothing on the ambient PATH answers it.
+    detail*: string
+
+const DevEnvProducerPinsEnvVar* = "REPRO_DEV_ENV_PRODUCER_PINS"
+  ## Newline-free, ``;``-separated ``<selector>=<binDir>`` list of the producer
+  ## pins this activation BOUND. Exported into the activated environment so the
+  ## binding is observable from inside the shell rather than only inferable
+  ## from ``PATH`` ordering.
+
+proc devEnvProducerSourceRootNoFetch(binding: ProducerBinding;
+                                     selector, projectRoot: string): string =
+  ## ``producerSourceRoot``'s read-only twin. Same answers for a develop
+  ## override and for a lock pin whose checkout is already present (either as a
+  ## workspace sibling or as an already-fetched revision tree), and an empty
+  ## string instead of a ``git fetch`` when it is not.
+  case binding.kind
+  of pbkDevelopOverride:
+    result = binding.localPathAbsolute
+  of pbkLockPinned:
+    let sibling = findSiblingProjectFile(selector, projectRoot)
+    if sibling.len > 0:
+      return parentDir(sibling)
+    let revision = binding.lockedDep.coordinates.revision
+    if binding.lockedDep.name.len > 0 and revision.len > 0:
+      let fetched = lockPinnedProducerCacheRoot(projectRoot) /
+        binding.lockedDep.name / revision
+      if dirExists(extendedPath(fetched)):
+        return fetched
+  of pbkOnDiskSibling, pbkNotProducer:
+    discard
+
+proc executableInDir(dir, name: string): string =
+  ## The path a PATH search of ``dir`` would find for ``name``, or "". This is
+  ## deliberately the SAME question the prepend exists to answer, so "bound"
+  ## can never mean "a directory that happens to contain something".
+  if name.len == 0 or not dirExists(extendedPath(dir)):
+    return ""
+  let direct = dir / name
+  if fileExists(extendedPath(direct)):
+    return direct
+  when defined(windows):
+    if splitFile(name).ext.len == 0:
+      for ext in [ExeExt, "bat", "cmd", "com"]:
+        if ext.len == 0:
+          continue
+        let candidate = dir / addFileExt(name, ext)
+        if fileExists(extendedPath(candidate)):
+          return candidate
+  ""
+
+proc producerInterfaceExecutableNames(projectRoot, selector: string):
+    seq[string] =
+  ## The producer's OWN declared binary names, read from the interface artifact
+  ## a previous ``repro build`` already extracted next to the producer's
+  ## materialized output — never by compiling anything here.
+  ##
+  ## This matters because a selector need not equal the binary it produces:
+  ## the workspace pin ``uses: "reprobuild"`` produces ``repro``. The build
+  ## seam learns that mapping from the producer's interface; so does this pass,
+  ## from the copy the build left behind at
+  ## ``<root>/.repro/build/<target>/cross-repo-producers/<key>/producer-interface.rbsz``.
+  ## Returns an empty seq when no such artifact exists, and the caller then
+  ## falls back to the declared selector name — which is the safe direction: a
+  ## name that does not resolve is REPORTED, never silently bound.
+  let buildRoot = absolutePath(projectRoot) / ".repro" / "build"
+  if not dirExists(extendedPath(buildRoot)):
+    return
+  let key = selectorFilesystemKey(selector)
+  for entryKind, entryPath in walkDir(extendedPath(buildRoot)):
+    if entryKind != pcDir:
+      continue
+    # Only the tail is reused: ``walkDir`` over an ``extendedPath`` yields
+    # ``\\?\``-prefixed entries, and that namespace is strict-canonical, so
+    # re-joining onto one with ``/`` separators produces a path Windows
+    # rejects. Rebuild from the ordinary root instead.
+    let ifacePath = buildRoot / splitPath(entryPath).tail /
+      "cross-repo-producers" / key / "producer-interface.rbsz"
+    if not fileExists(extendedPath(ifacePath)):
+      continue
+    try:
+      let producerArtifact = readInterfaceArtifact(ifacePath)
+      for exe in producerArtifact.projectInterface.publicExecutables:
+        let binName =
+          if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
+        if binName.len > 0 and binName notin result:
+          result.add(binName)
+    except CatchableError:
+      continue
+
+proc devEnvProducerPins*(artifact: DevEnvArtifact;
+                         projectRoot: string): seq[DevEnvProducerPin] =
+  ## Classify every cross-repo producer selector the recipe declared in
+  ## ``uses:``. Selectors that are NOT declared producer edges are omitted
+  ## entirely: for those, resolution from the ambient PATH is the declared
+  ## contract of ``defaultToolProvisioning "path"``, not a silent fallthrough.
+  ## Builds nothing, fetches nothing, compiles nothing.
+  if projectRoot.len == 0:
+    return
+  let workspaceRoot = absolutePath(projectRoot)
+  var seen: seq[string] = @[]
+  for profile in artifact.toolProfiles:
+    let selector = profile.packageIdentity
+    if selector.len == 0 or selector in seen:
+      continue
+    seen.add(selector)
+    var pin = DevEnvProducerPin(
+      selector: selector,
+      executableName:
+        if profile.logicalName.len > 0: profile.logicalName else: selector)
+    var binding: ProducerBinding
+    try:
+      binding = resolveProducerBinding(selector, workspaceRoot)
+    except CatchableError as err:
+      pin.state = deppUnresolvable
+      pin.detail = err.msg
+      pin.ambientPath = findExe(pin.executableName)
+      result.add(pin)
+      continue
+    if not binding.declaresProducerEdge():
+      continue
+    pin.sourceRoot = devEnvProducerSourceRootNoFetch(binding, selector,
+      workspaceRoot)
+    if pin.sourceRoot.len == 0 or
+        not dirExists(extendedPath(pin.sourceRoot)):
+      pin.state = deppNoSource
+      pin.ambientPath = findExe(pin.executableName)
+      result.add(pin)
+      continue
+    # The canonical producer output layout every producing edge writes to, and
+    # the same one ``recordProducerMaterialization`` seeds its bin dirs from.
+    let binDir = absolutePath(pin.sourceRoot) / "build" / "bin"
+    pin.binDir = binDir
+    var candidateNames =
+      producerInterfaceExecutableNames(workspaceRoot, selector)
+    if candidateNames.len == 0:
+      candidateNames = @[pin.executableName]
+    for candidate in candidateNames:
+      let realized = executableInDir(binDir, candidate)
+      if realized.len > 0:
+        pin.boundExecutable = realized
+        break
+    if pin.boundExecutable.len > 0:
+      pin.state = deppBound
+    else:
+      pin.state = deppNotBuilt
+      pin.ambientPath = findExe(pin.executableName)
+    result.add(pin)
+
+proc devEnvProducerShellOps*(pins: openArray[DevEnvProducerPin]):
+    seq[DevEnvShellOp] =
+  ## The activation ops for the BOUND pins. Emitted in reverse declaration
+  ## order because ``deskPrependPath`` applies sequentially: reversing here
+  ## makes the FIRST declared pin end up first on the resulting ``PATH``.
+  var bound: seq[DevEnvProducerPin] = @[]
+  for pin in pins:
+    if pin.state == deppBound and pin.binDir.len > 0:
+      bound.add(pin)
+  if bound.len == 0:
+    return
+  for i in countdown(bound.high, 0):
+    result.add(DevEnvShellOp(kind: deskPrependPath, name: "PATH",
+      value: bound[i].binDir))
+  var summary: seq[string] = @[]
+  for pin in bound:
+    summary.add(pin.selector & "=" & pin.binDir)
+  result.add(DevEnvShellOp(kind: deskSetEnv, name: DevEnvProducerPinsEnvVar,
+    value: summary.join($PathSep)))
+
+proc devEnvProducerNotices*(pins: openArray[DevEnvProducerPin];
+                            appliesToPath = true): seq[string] =
+  ## One human-readable line per pin that is NOT in effect. A bound pin is
+  ## silent — it did what the declaration asked for.
+  ##
+  ## ``appliesToPath`` is false on the surfaces that deliberately do not bind
+  ## (see ``repro dev-env export``): the notice then says so, rather than
+  ## implying the pin merely needs building.
+  for pin in pins:
+    if pin.state == deppBound:
+      if not appliesToPath:
+        result.add("cross-repo producer \"" & pin.selector &
+          "\" is materialized at " & pin.binDir &
+          " but this surface does not put it on PATH; `repro shell`, " &
+          "`repro exec` and `repro run` do.")
+      continue
+    var line = "cross-repo producer \"" & pin.selector &
+      "\" is declared in uses: but is not pinned in this environment"
+    case pin.state
+    of deppBound:
+      discard
+    of deppNotBuilt:
+      line.add(" — nothing is built at " & pin.binDir &
+        ". Run `repro build` in " & pin.sourceRoot & " (or for a target " &
+        "that consumes it) once; the dev-env binds the materialized output " &
+        "thereafter.")
+    of deppNoSource:
+      line.add(" — no source checkout is available for it here. A dev-env " &
+        "activation deliberately does not fetch one; run `repro build` for a " &
+        "target that consumes it.")
+    of deppUnresolvable:
+      line.add(" — its binding could not be resolved: " & pin.detail)
+    if pin.ambientPath.len > 0:
+      line.add(" `" & pin.executableName & "` will resolve to " &
+        pin.ambientPath & " from the ambient PATH instead.")
+    else:
+      line.add(" `" & pin.executableName &
+        "` is not on the ambient PATH either.")
+    result.add(line)
+
+proc emitDevEnvProducerNotices(pins: openArray[DevEnvProducerPin];
+                               appliesToPath = true) =
+  var emitted = false
+  for notice in devEnvProducerNotices(pins, appliesToPath):
+    stderr.writeLine("repro dev-env: warning: " & notice)
+    emitted = true
+  if emitted:
+    # W2 — FLUSH. On Windows a redirected ``stderr`` is fully buffered by
+    # the C runtime, so a notice written by a LONG-LIVED process sits in that
+    # buffer until the process exits or the buffer fills. For ``repro dev`` /
+    # ``repro up`` that is not a test artefact but the defect itself: a session
+    # that runs for hours would hold its "this pin is not in effect" warning
+    # for hours, and a session that is killed rather than stopped would lose it
+    # entirely — which is being silent about a declared pin by a slower route.
+    # Found exactly that way: the ``--foreground`` case asserted the pin (read
+    # from a file the watch task wrote, so unaffected) and the notice (read
+    # from the supervisor's own pipe) and only the notice went missing, on the
+    # run where the supervisor was terminated instead of exiting cleanly.
+    try:
+      stderr.flushFile()
+    except IOError:
+      discard
+
+proc devEnvProducerActivation(artifact: DevEnvArtifact; projectRoot: string;
+                              appliesToPath = true): seq[DevEnvShellOp] =
+  ## Resolve + report in one call, for the activation surfaces. Reporting is
+  ## never fatal: a broken pin must leave the developer with a WORKING shell
+  ## that says what it could not provide, not with no shell at all.
+  if not devEnvProducerEdgesPossible(projectRoot):
+    return
+  let pins = devEnvProducerPins(artifact, projectRoot)
+  emitDevEnvProducerNotices(pins, appliesToPath)
+  if appliesToPath:
+    result = devEnvProducerShellOps(pins)
+
+proc devEnvProducerOpsResolver*(projectRoot: string):
+    DevSessionProducerOpsResolver =
+  ## W2 — the ONE producer-binding resolver a dev session is driven with, for
+  ## both the ``--foreground`` and the detached arm of ``repro dev`` / ``repro
+  ## up``.
+  ##
+  ## It exists as a named factory rather than as a lambda written out at each
+  ## call site because the two arms are two DIFFERENT construction paths for
+  ## the same session — ``supervisorConfig`` builds the config the foreground
+  ## arm runs directly and the detached arm serialises to CLI args, and
+  ## ``runDevSessionSupervisorHelper`` rebuilds it from those args in the
+  ## child. Before this, only the child set the callback, so ``--foreground``
+  ## activated services and watch tasks with no producer pins and said nothing
+  ## about it. Two spellings of one policy is how that happened; there is now
+  ## one spelling, and ``runDevSessionSupervisor`` cannot be called without it.
+  result = proc (artifact: DevEnvArtifact): seq[DevEnvShellOp] =
+    devEnvProducerActivation(artifact, projectRoot)
+
 proc emitDevEnvDiagnostics(artifact: DevEnvArtifact): bool =
   ## Returns true when an error diagnostic was emitted.
   for diagnostic in artifact.diagnostics:
@@ -9932,14 +10299,16 @@ proc emitDevEnvDiagnostics(artifact: DevEnvArtifact): bool =
 
 proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
                     task: DevEnvTaskSummary; forwardedArgs: seq[string];
-                    defaultWorkingDirectory: string): int =
+                    defaultWorkingDirectory: string;
+                    extraOps: openArray[DevEnvShellOp] = []): int =
   when defined(windows):
     let shellLine =
       if forwardedArgs.len > 0:
         task.command & " " & forwardedArgs.mapIt(quoteShell(it)).join(" ")
       else:
         task.command
-    let activation = activatedEnvironment(artifact, artifactPath, defaultWorkingDirectory)
+    let activation = activatedEnvironment(artifact, artifactPath,
+      defaultWorkingDirectory, extraOps)
     let cmdExe = getEnv("COMSPEC", "cmd.exe")
     var process = startProcess(cmdExe,
       args = @["/c", shellLine],
@@ -9949,7 +10318,8 @@ proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
     result = process.waitForExit()
     process.close()
   else:
-    let activation = activatedEnvironment(artifact, artifactPath, defaultWorkingDirectory)
+    let activation = activatedEnvironment(artifact, artifactPath,
+      defaultWorkingDirectory, extraOps)
     let shellPath = getEnv("SHELL", "/bin/sh")
     let shellLine = task.command & " \"$@\""
     var childArgs = @["-c", shellLine, "--"]
@@ -10472,8 +10842,10 @@ proc runReproRunCommand(args: openArray[string];
       if activeTask.name == parsed.target:
         task = activeTask
         break
+    let producerOps = devEnvProducerActivation(artifact,
+      parsed.selection.projectRoot)
     return runTaskCommand(artifact, edge.artifactPath, task,
-      parsed.forwardedArgs, parsed.selection.projectRoot)
+      parsed.forwardedArgs, parsed.selection.projectRoot, producerOps)
 
   if parsed.qualifier == rtqTask:
     # ``task:<name>`` explicitly requested the task tier, but no task
@@ -10602,8 +10974,10 @@ proc runReproExecCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
     return 1
-  runActivatedCommand(artifact, edge.artifactPath, parsed.command,
+  let producerOps = devEnvProducerActivation(artifact,
     parsed.selection.projectRoot)
+  runActivatedCommand(artifact, edge.artifactPath, parsed.command,
+    parsed.selection.projectRoot, producerOps)
 
 proc defaultInteractiveShell(): string =
   when defined(windows):
@@ -10625,9 +10999,11 @@ proc runReproShellCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
     return 1
+  let producerOps = devEnvProducerActivation(artifact,
+    parsed.selection.projectRoot)
   if parsed.printEnv:
     stdout.write(renderDevEnvArtifact(artifact, edge.artifactPath,
-      parsed.printFormat))
+      parsed.printFormat, producerOps))
     return 0
   let shellPath =
     if parsed.shellPath.len > 0:
@@ -10635,7 +11011,7 @@ proc runReproShellCommand(args: openArray[string];
     else:
       defaultInteractiveShell()
   spawnActivatedShell(artifact, edge.artifactPath, shellPath,
-    parsed.selection.projectRoot)
+    parsed.selection.projectRoot, producerOps)
 
 # M74 — ``repro dev-env export <shell>``.
 #
@@ -10892,6 +11268,19 @@ proc runDevEnvExportCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if not parsed.allowStale and emitDevEnvDiagnostics(artifact):
     return 1
+
+  # W2 — this surface REPORTS producer pins but does not apply them, and the
+  # asymmetry with ``repro shell`` / ``exec`` / ``run`` is deliberate rather
+  # than an omission. The export plan is sealed: ``dev-env deactivate``
+  # re-derives the activation script from the on-disk artifact and compares
+  # ``activationScriptHash`` to detect tampering. A producer's materialization
+  # state can change between activation and deactivation for a wholly ordinary
+  # reason — somebody ran ``repro build`` — so folding it into the plan would
+  # make a normal build fire the tamper seal (exit 3, env left as-is) on the
+  # next ``cd`` out of the directory. Reporting it costs nothing and keeps the
+  # surface honest about what it is not doing.
+  discard devEnvProducerActivation(artifact, selection.projectRoot,
+    appliesToPath = false)
 
   var plan = devEnvArtifactToExportPlan(edge.artifactPath)
   # M77 — emit the cache-key as the ``__REPRO_APPLIED`` marker. The
@@ -11218,7 +11607,11 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
   let edge = computePublicDevEnv(parsed.selection, publicCliPath)
   let config = supervisorConfig(parsed, edge, publicCliPath, mode)
   if parsed.foreground:
-    return runDevSessionSupervisor(config)
+    # W2 — the SAME resolver the detached arm re-creates in
+    # ``runDevSessionSupervisorHelper``. ``runDevSessionSupervisor`` takes it as
+    # a required parameter precisely so these two arms cannot drift again.
+    return runDevSessionSupervisor(config,
+      devEnvProducerOpsResolver(parsed.selection.projectRoot))
   config.startBackgroundSupervisor()
   let status = waitForDevSessionReady(config)
   echo "repro " & commandName & ": session " &
@@ -11280,10 +11673,11 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
     else:
       raise newException(ValueError, "unsupported dev session mode: " & modeText)
   let debounceText = valueAfterFlag(args, "--debounce-ms")
+  let sessionProjectRoot = valueAfterFlag(args, "--project-root")
   let config = DevSessionSupervisorConfig(
     mode: mode,
     foreground: args.find("--foreground") >= 0,
-    projectRoot: valueAfterFlag(args, "--project-root"),
+    projectRoot: sessionProjectRoot,
     modulePath: valueAfterFlag(args, "--module"),
     outDir: valueAfterFlag(args, "--out-dir"),
     workDir: valueAfterFlag(args, "--work-dir"),
@@ -11296,7 +11690,14 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
     developOverridesPath: valueAfterFlag(args, "--develop-overrides"),
     httpBind: valueAfterFlag(args, "--http"),
     debounceMs: if debounceText.len > 0: parseInt(debounceText) else: 250)
-  runDevSessionSupervisor(config)
+  # W2 — a ``repro dev`` / ``repro up`` session starts services and runs
+  # watch-cycle tasks in the activated environment, so it is an activation
+  # surface like ``repro exec`` and gets the same treatment: bind the producer
+  # pins a build materialized, report the ones it cannot. The supervisor
+  # re-reads the artifact every cycle and calls the resolver each time, which
+  # is what lets a long-lived session pick up a producer rebuilt underneath it.
+  runDevSessionSupervisor(config,
+    devEnvProducerOpsResolver(sessionProjectRoot))
 
 proc runDevSessionHttpHelper(args: openArray[string]): int =
   let portText = valueAfterFlag(args, "--port")
@@ -11626,7 +12027,46 @@ proc renderNativeShellTransition(previousArtifactPath: string;
       of depJson:
         discard
   if nextArtifact.isSome:
-    result.add(renderDevEnvArtifact(nextArtifact.get(), nextArtifactPath,
+    let nextArtifactValue = nextArtifact.get()
+    # W2 — REPORT the workspace's declared ``uses:`` producer pins. This is
+    # ``repro hooks ensure --shell bash|zsh|fish|powershell`` (and, through
+    # ``renderDevEnvShellOps``, ``--shell-direnv``): the prompt-time surface,
+    # and the one a developer who installed the hook spends all day inside.
+    # It was fully silent before, which meant the workspace's most-used shell
+    # was the one place a declared pin could go unmentioned. The notices go to
+    # stderr; every hook template captures only stdout for its ``eval`` /
+    # ``source`` / ``Invoke-Expression``, so reporting cannot corrupt the
+    # script. The artifact's own ``projectRoot`` is the workspace root here —
+    # the introspection edge validates it against the selection that produced
+    # it, so it is the same root ``repro shell`` would pass.
+    discard devEnvProducerActivation(nextArtifactValue,
+      nextArtifactValue.projectRoot, appliesToPath = false)
+    # W2-no-producer-ops: it reports (above) but deliberately does not BIND,
+    # and the reason is NOT the M75 tamper seal. That seal covers
+    # ``devEnvArtifactToExportPlan``, which ``dev-env deactivate`` re-derives
+    # and re-hashes; it is reached from ``repro shell hook <shell>`` and never
+    # from this function. The earlier note here claimed otherwise and was
+    # simply wrong.
+    #
+    # The real reason is the UNLOAD half of this same function. A native-shell
+    # transition undoes the PREVIOUS environment by re-deriving its removals
+    # from the previous artifact's bytes (``nativePathRemovals`` and
+    # ``nativeUnsetNames``, both of which read ``artifact.shellOps``). A
+    # producer bin dir is deliberately not in those bytes — that is exactly
+    # what makes the binding staleness-proof on the surfaces that do bind —
+    # so a ``deskPrependPath`` emitted here would be matched by no later
+    # removal. It would survive every ``cd`` out and gain a fresh copy on every
+    # ``cd`` in, and after a ``repro build`` the accumulated copies would no
+    # longer even agree with each other. ``repro shell`` / ``exec`` / ``run``
+    # bind instead, and they can afford to: the environment they build dies
+    # with the command that asked for it.
+    #
+    # Making this bind is therefore not a wiring tweak. It requires the
+    # transition to record what it APPLIED (the M75 rollback manifest's job)
+    # and the unload to consume that record rather than re-derive from the
+    # artifact — the same change W2's closing section names as W1's second
+    # rough edge. Deliberately not attempted here.
+    result.add(renderDevEnvArtifact(nextArtifactValue, nextArtifactPath,
       format))
 
 proc findDevEnvProjectRoot(startPath: string): string =
@@ -12884,6 +13324,36 @@ proc runReproDirenvActivationHelper(args: openArray[string];
   let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true)
   writeDevEnvStats(selection.statsPath, edge, "hooks shell-direnv")
   stdout.write(readFile(extendedPath(edge.shellFragmentPath)))
+  # W2 — REPORT the workspace's declared ``uses:`` producer pins, exactly as
+  # the native-shell transition does. This is what ``repro hooks ensure
+  # --shell-direnv`` installs into ``.envrc``; direnv shows an ``.envrc``'s
+  # stderr, and the managed block ``eval``s only stdout, so the notice reaches
+  # the developer without touching the script.
+  #
+  # The gate is not an optimisation detail here: this surface had no reason to
+  # read the RBDE artifact at all (it streams the pre-rendered shell fragment
+  # the dev-env edge produced), and it runs on every direnv reload. A workspace
+  # that declares no cross-repo producer — nearly every workspace — pays three
+  # ``fileExists`` calls and no artifact read.
+  if devEnvProducerEdgesPossible(selection.projectRoot):
+    discard devEnvProducerActivation(
+      readDevEnvArtifact(edge.artifactPath), selection.projectRoot,
+      appliesToPath = false)
+  # W2-no-producer-ops: reports (above), does not BIND. direnv would in fact
+  # unload a prepend correctly — it snapshots and restores the environment
+  # itself rather than relying on the artifact-derived unload the native-shell
+  # hook uses — so the accumulation argument recorded at
+  # ``renderNativeShellTransition`` does not apply. The reason here is
+  # staleness. direnv re-evaluates ``.envrc`` only when ``.envrc`` or a watched
+  # path changes; ``repro build`` materializing a producer is neither. A bound
+  # direnv environment would therefore assert a pin for as long as the
+  # developer stayed in the directory, with nothing able to re-derive it —
+  # which is precisely the "a shell can hand you a stale driver indefinitely"
+  # failure the per-activation re-derivation exists to make impossible. A
+  # NOTICE that is stale is a visible, checkable claim; a BINDING that is stale
+  # silently runs the wrong binary. Until the block can ``watch_file`` the
+  # producer's materialization, this surface reports and ``repro shell``
+  # binds.
   stdout.write(renderDevEnvShellOps([
     DevEnvShellOp(kind: deskSetEnv, name: "REPRO_DEV_ENV_ARTIFACT",
       value: edge.artifactPath),
@@ -14659,6 +15129,36 @@ proc committedLockPath*(projectDir: string): string =
 
 proc solverInputsPath*(projectDir: string): string =
   projectDir / SolverInputsFileName
+
+proc devEnvProducerEdgesPossible*(projectRoot: string): bool =
+  ## W2 — see the forward declaration. ``declaresProducerEdge`` accepts exactly
+  ## two ``ProducerBinding`` kinds, ``pbkDevelopOverride`` and
+  ## ``pbkLockPinned``, and ``resolveProducerBinding`` can only produce either
+  ## one when one of these three files exists. So for a workspace that declares
+  ## no cross-repo producers at all — which is nearly every workspace — three
+  ## ``fileExists`` calls decide the whole pass, and it costs no lock parse, no
+  ## overrides parse, and no ``findExe`` walk of the ambient ``PATH``.
+  ##
+  ## That is what buys the M77 prompt-time budget for the surfaces added in
+  ## this milestone's fix pass. ``__repro-native-shell-activate`` runs on every
+  ## ``cd`` / ``chpwd`` / prompt and ``__repro-direnv-activate`` on every direnv
+  ## reload; on the direnv side this gate also skips reading the RBDE artifact
+  ## from disk, which that surface otherwise had no reason to do at all.
+  ##
+  ## Fail-OPEN on any error. The gate is an optimisation, and the only failure
+  ## direction it must never take is the one that makes a declared pin go
+  ## unreported — so if it cannot cheaply decide, the full pass runs.
+  if projectRoot.len == 0:
+    return false
+  try:
+    let root = absolutePath(projectRoot)
+    if fileExists(extendedPath(committedLockPath(root))):
+      return true
+    if fileExists(extendedPath(developOverridesPath(root))):
+      return true
+    return fileExists(extendedPath(developOverridesMetadataPath(root)))
+  except CatchableError:
+    return true
 
 # ---------------------------------------------------------------------------
 # Cross-Repo-Source-Consumption SC-1 — the "resolve package binding" hook.

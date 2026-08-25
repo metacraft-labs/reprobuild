@@ -13,6 +13,31 @@ type
     dsmUp
     dsmDev
 
+  DevSessionProducerOpsResolver* =
+      proc (artifact: DevEnvArtifact): seq[DevEnvShellOp]
+    ## W2 — resolves the cross-repo ``uses:`` producer pins for an artifact
+    ## and returns the activation ops that BIND the ones a previous ``repro
+    ## build`` materialized, reporting on stderr any it could not put into
+    ## effect.
+    ##
+    ## A callback rather than a precomputed seq for two reasons. The
+    ## supervisor re-reads the artifact on every watch cycle, and the binding
+    ## is deliberately re-derived per activation rather than cached — a
+    ## session that runs for hours must pick up a producer rebuilt underneath
+    ## it. And it keeps the layering: the resolver lives in
+    ## ``repro_cli_support``, which IMPORTS this module.
+    ##
+    ## It is a REQUIRED PARAMETER of ``runDevSessionSupervisor`` and
+    ## deliberately not a field of ``DevSessionSupervisorConfig``. That
+    ## distinction is the whole fix: Nim object construction zero-fills a
+    ## field nobody mentioned, so a config-shaped callback is silently ``nil``
+    ## for any construction site that forgets it — which is exactly how the
+    ## ``--foreground`` arm of ``repro dev`` / ``repro up`` ended up activating
+    ## an environment with no producer pins in it while the detached arm bound
+    ## them correctly. A parameter with no default cannot be forgotten; it can
+    ## only be refused in writing, at a call site the audit
+    ## (``t_w2_activation_surfaces_declare_producer_ops.nim``) reads.
+
   DevSessionSupervisorConfig* = object
     mode*: DevSessionMode
     foreground*: bool
@@ -70,6 +95,11 @@ type
     stopOrder: seq[string]
     watchCycles: int
     lastWatchPath: string
+    producerOpsFor: DevSessionProducerOpsResolver
+      ## W2 — the resolver ``runDevSessionSupervisor`` was handed. It lives on
+      ## the private session state rather than on the public config precisely
+      ## so that no external construction can leave it unset; see
+      ## ``DevSessionProducerOpsResolver``.
 
 const
   SessionSchemaId = "reprobuild.dev-session.v1"
@@ -453,14 +483,31 @@ proc waitForReadiness(spec: ServiceSpec) =
   raise newException(IOError,
     "service readiness timed out for " & spec.name)
 
-proc startService(state: var SessionState; artifact: DevEnvArtifact;
+proc producerOps(state: SessionState;
+                 artifact: DevEnvArtifact): seq[DevEnvShellOp] =
+  ## W2 — see ``DevSessionProducerOpsResolver``. Every activation the
+  ## supervisor performs goes through here, so there is ONE place the session's
+  ## producer binding is derived and no per-activation site that could differ.
+  ##
+  ## ``nil`` can only arrive here from a caller that wrote ``nil`` at the
+  ## ``runDevSessionSupervisor`` call site — which the W2 activation-surface
+  ## audit rejects. It is tolerated rather than asserted because a supervisor
+  ## that aborts a developer's session over a missing binding would be a worse
+  ## failure than the one it is guarding.
+  if state.producerOpsFor == nil:
+    return @[]
+  state.producerOpsFor(artifact)
+
+proc startService(state: var SessionState;
+                  artifact: DevEnvArtifact;
                   artifactPath: string; spec: ServiceSpec) =
   var runtime = ServiceRuntime(spec: spec, status: "starting")
   state.services.add(runtime)
   state.writeState()
   state.emitEvent("service.starting", service = spec.name)
   let activation = activatedEnvironment(artifact, artifactPath,
-    defaultWorkingDirectory = spec.cwd)
+    defaultWorkingDirectory = spec.cwd,
+    extraOps = state.producerOps(artifact))
   var childArgs: seq[string] = @[]
   for i in 1 ..< spec.command.len:
     childArgs.add(spec.command[i])
@@ -534,14 +581,16 @@ proc eventInputPaths(artifact: DevEnvArtifact; state: SessionState): seq[string]
       seen.add(normalized)
   result = seen
 
-proc runTaskCommand(state: var SessionState; artifact: DevEnvArtifact;
+proc runTaskCommand(state: var SessionState;
+                    artifact: DevEnvArtifact;
                     artifactPath: string; task: DevEnvTaskSummary;
                     cycle: int) =
   if task.command.len == 0:
     return
   state.emitEvent("watch.task.started", detail = task.name, cycle = cycle)
   let activation = activatedEnvironment(artifact, artifactPath,
-    defaultWorkingDirectory = artifact.projectRoot)
+    defaultWorkingDirectory = artifact.projectRoot,
+    extraOps = state.producerOps(artifact))
   let command =
     when defined(windows):
       @["cmd", "/c", task.command]
@@ -633,11 +682,24 @@ proc startHttpServer(config: DevSessionSupervisorConfig) =
     workingDir = config.projectRoot,
     options = {poUsePath, poParentStreams})
 
-proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig): int =
+proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
+                              producerOpsFor: DevSessionProducerOpsResolver):
+    int =
+  ## W2 — ``producerOpsFor`` has no default ON PURPOSE. A dev session starts
+  ## services and runs watch-cycle tasks in the activated environment, so it is
+  ## an activation surface exactly like ``repro exec``; a caller that reaches
+  ## this proc has to state, in writing, what it wants done about the
+  ## workspace's declared ``uses:`` producer pins. Both call sites are in
+  ## ``repro_cli_support`` (the ``--foreground`` arm of ``repro dev`` / ``repro
+  ## up``, and the detached supervisor's re-entry helper) and both pass
+  ## ``devEnvProducerOpsResolver``; the audit in
+  ## ``t_w2_activation_surfaces_declare_producer_ops.nim`` fails if a third one
+  ## appears that does not.
   var artifactPath = config.artifactPath
   var artifact = readDevEnvArtifact(artifactPath)
   var state = SessionState(
     schemaId: SessionSchemaId,
+    producerOpsFor: producerOpsFor,
     sessionId: "dev-session-" & $getCurrentProcessId() & "-" &
       $epochTime().int64,
     mode: config.mode,

@@ -686,6 +686,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim",
+    binary: "build/test-bin/t_w2_activation_surfaces_declare_producer_ops",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_cli_support/tests/t_w2_dev_env_producer_pin_binding.nim",
+    binary: "build/test-bin/t_w2_dev_env_producer_pin_binding",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim",
     binary: "build/test-bin/t_watch_ct_incremental_flags",
     defines: @[],
@@ -5056,6 +5072,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim",
     binary: "build/test-bin/t_e2e_configurable_system_in_dsl",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/e2e/dev-env/t_e2e_dev_env_binds_materialized_producer.nim",
+    binary: "build/test-bin/t_e2e_dev_env_binds_materialized_producer",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

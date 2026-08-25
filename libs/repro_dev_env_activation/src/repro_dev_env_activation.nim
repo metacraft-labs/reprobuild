@@ -81,7 +81,8 @@ proc metadataOps(artifact: DevEnvArtifact; artifactPath = ""): seq[DevEnvShellOp
     name: "REPRO_DEV_ENV_SERVICES",
     value: artifact.services.mapIt(it.name).join(",")))
 
-proc activationOps(artifact: DevEnvArtifact; artifactPath = ""):
+proc activationOps(artifact: DevEnvArtifact; artifactPath = "";
+                   extraOps: openArray[DevEnvShellOp] = []):
     seq[DevEnvShellOp] =
   # TODO(io-mon live interpose): when a dev-env artifact carries io-mon's
   # monitor/shim build outputs, the Incremental-Test-Runner M8 live read-file
@@ -96,6 +97,19 @@ proc activationOps(artifact: DevEnvArtifact; artifactPath = ""):
   # Linux LD_PRELOAD validation, Windows CreateRemoteThread path) are tracked in
   # io-mon's capture CLI and codetracer/src/ct_test/incremental/io_mon_capture.nim.
   result = artifact.shellOps
+  # W2 — ``extraOps`` carries environment the ARTIFACT cannot: the bin dirs of
+  # cross-repo ``uses:`` producers whose output a previous ``repro build``
+  # already materialized. They are deliberately NOT part of the cached RBDE
+  # artifact (a producer's build OUTPUT is not one of the artifact's declared
+  # source inputs, so it cannot key the artifact's cache without defeating the
+  # M77 prompt-time fast path the key exists to serve). The caller re-derives
+  # them at every activation instead — see ``devEnvProducerPins`` in
+  # ``repro_cli_support``. They are appended AFTER the recipe's own shellOps so
+  # a ``deskPrependPath`` here lands in front of anything the recipe prepended:
+  # a declared pin outranks both the recipe's ad-hoc PATH edits and the
+  # ambient PATH, which is the whole point of pinning it.
+  for op in extraOps:
+    result.add(op)
   result.add(metadataOps(artifact, artifactPath))
 
 proc renderPosix*(ops: openArray[DevEnvShellOp]): string =
@@ -193,12 +207,14 @@ proc renderDevEnvShellOps*(ops: openArray[DevEnvShellOp];
       "json rendering requires the full dev-env artifact")
 
 proc renderDevEnvArtifact*(artifact: DevEnvArtifact; artifactPath = "";
-                           format: DevEnvPrintFormat): string =
+                           format: DevEnvPrintFormat;
+                           extraOps: openArray[DevEnvShellOp] = []): string =
   case format
   of depJson:
     toJsonInspection(artifact) & "\n"
   else:
-    renderDevEnvShellOps(activationOps(artifact, artifactPath), format)
+    renderDevEnvShellOps(activationOps(artifact, artifactPath, extraOps),
+      format)
 
 proc baseEnvironment(): StringTableRef =
   result = newStringTable(modeCaseSensitive)
@@ -228,7 +244,8 @@ proc applyOp(env: StringTableRef; op: DevEnvShellOp;
       env["PWD"] = op.value
 
 proc activatedEnvironment*(artifact: DevEnvArtifact; artifactPath = "";
-                           defaultWorkingDirectory = ""):
+                           defaultWorkingDirectory = "";
+                           extraOps: openArray[DevEnvShellOp] = []):
     tuple[env: StringTableRef; workingDirectory: string] =
   result.env = baseEnvironment()
   result.workingDirectory =
@@ -236,7 +253,7 @@ proc activatedEnvironment*(artifact: DevEnvArtifact; artifactPath = "";
       defaultWorkingDirectory
     else:
       artifact.projectRoot
-  for op in activationOps(artifact, artifactPath):
+  for op in activationOps(artifact, artifactPath, extraOps):
     result.env.applyOp(op, result.workingDirectory)
 
 proc containsPathSeparator(value: string): bool =
@@ -273,11 +290,12 @@ proc resolveFromActivatedPath(command: string; env: StringTableRef;
 
 proc runActivatedCommand*(artifact: DevEnvArtifact; artifactPath: string;
                           command: openArray[string];
-                          defaultWorkingDirectory = ""): int =
+                          defaultWorkingDirectory = "";
+                          extraOps: openArray[DevEnvShellOp] = []): int =
   if command.len == 0:
     raise newException(ValueError, "dev-env command is empty")
   let activation = activatedEnvironment(artifact, artifactPath,
-    defaultWorkingDirectory)
+    defaultWorkingDirectory, extraOps)
   var childArgs: seq[string] = @[]
   for i in 1 ..< command.len:
     childArgs.add(command[i])
@@ -293,11 +311,12 @@ proc runActivatedCommand*(artifact: DevEnvArtifact; artifactPath: string;
 
 proc spawnActivatedShell*(artifact: DevEnvArtifact; artifactPath,
                           shellPath: string;
-                          defaultWorkingDirectory = ""): int =
+                          defaultWorkingDirectory = "";
+                          extraOps: openArray[DevEnvShellOp] = []): int =
   if shellPath.len == 0:
     raise newException(ValueError, "dev-env shell path is empty")
   let activation = activatedEnvironment(artifact, artifactPath,
-    defaultWorkingDirectory)
+    defaultWorkingDirectory, extraOps)
   var process = startProcess(shellPath,
     env = activation.env,
     workingDir = activation.workingDirectory,
