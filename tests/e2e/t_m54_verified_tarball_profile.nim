@@ -42,7 +42,8 @@ proc reproBinary(): string =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = "/tmp/repro-m54-rq-" & $getCurrentProcessId() & ".sock"
+  let socketPath = runquotaSocketEndpoint(
+    "repro-m54-rq-" & $getCurrentProcessId())
   if fileExists(socketPath):
     removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [

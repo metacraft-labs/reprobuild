@@ -13567,10 +13567,14 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   # unset on Windows so child actions (which inherit the daemon's
   # env) likewise hit the default endpoint.
   #
-  # POSIX: keep the per-PID ``.sock`` path in ``$TMPDIR`` — Unix
-  # domain sockets need a concrete filesystem path, the PID guards
-  # against collisions between concurrent daemons, and the
-  # filesystem reclaims the inode when the daemon exits.
+  # POSIX: a per-PID Unix socket, but inside a DIRECTORY OF ITS OWN
+  # rather than loose in ``$TMPDIR``. The socket's parent directory is
+  # the rendezvous point that ``runquotad`` verifies before binding and
+  # every client verifies before connecting, and a shared ``/tmp`` is
+  # root-owned ``1777``, which fails both halves — the daemon exits
+  # before it listens and the build dies with the refusal in its log.
+  # ``runquotaEndpointPath`` owns that rule; see its docs for why the
+  # answer is a private directory and not a laxer check.
   # M9.R.12.3 — declare the standard named pools the convention layer
   # registers (``compile`` + ``fetch``). Without these flags the daemon
   # initialises ``namedPoolCaps`` empty, so every action that requests
@@ -13604,8 +13608,8 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
     putEnv("RUNQUOTA_SOCKET", "")
     let socket = ""
   else:
-    let socket = getTempDir() / ("reprobuild-runquota-" &
-      $getCurrentProcessId() & ".sock")
+    let socket = runquotaEndpointPath(
+      "reprobuild-runquota-" & $getCurrentProcessId())
     if fileExists(socket):
       removeFile(socket)
     var args = @[

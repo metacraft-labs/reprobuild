@@ -61,7 +61,8 @@ proc startLinkPoolDaemon(repoRoot: string; linkCap: int):
     tuple[process: owned(Process), socket: string] =
   ## Real ``runquotad`` whose ``link`` pool admits ``linkCap`` units.
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = "/tmp/repro-ra13-rq-" & $getCurrentProcessId() & ".sock"
+  let socketPath = runquotaSocketEndpoint(
+    "repro-ra13-rq-" & $getCurrentProcessId())
   if fileExists(socketPath):
     removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [

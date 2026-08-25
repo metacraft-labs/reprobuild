@@ -137,7 +137,8 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string; cli: string] =
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let cliBin = requireRunQuotaCliBin(repoRoot)
-  let socketPath = "/tmp/repro-m22-rq-" & $getCurrentProcessId() & ".sock"
+  let socketPath = runquotaSocketEndpoint(
+    "repro-m22-rq-" & $getCurrentProcessId())
   if pathExists(socketPath):
     removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [

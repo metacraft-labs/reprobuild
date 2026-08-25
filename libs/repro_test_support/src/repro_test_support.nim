@@ -31,7 +31,7 @@
 
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
-from repro_core/paths import extendedPath
+from repro_core/paths import extendedPath, runquotaEndpointPath
 
 when defined(windows):
   import std/winlean
@@ -491,16 +491,16 @@ proc daemonSocketEndpoint*(name: string): string =
 
 proc runquotaSocketEndpoint*(name: string): string =
   ## Per-test ``runquotad --socket`` argument that always lands on the
-  ## right transport: a Unix-socket path under ``/tmp`` on POSIX, a
-  ## Named-Pipe name in the kernel namespace on Windows. ``runquotad``
-  ## auto-maps a ``.sock``-shaped argument to a deterministic
-  ## ``\\.\pipe\runquota-<token>`` on Windows, but tests still need
-  ## to thread the SAME string into ``RUNQUOTA_SOCKET`` so the client
-  ## connects to the same instance.
-  when defined(windows):
-    r"\\.\pipe\runquotad-" & name.replace('\\', '_').replace('/', '_')
-  else:
-    "/tmp" / (name & ".sock")
+  ## right transport: a Unix socket inside a private per-test directory
+  ## on POSIX, a Named-Pipe name in the kernel namespace on Windows.
+  ## Tests thread the SAME string into ``RUNQUOTA_SOCKET`` so the client
+  ## connects to the instance the test started.
+  ##
+  ## The rule about WHERE that socket may live is
+  ## ``repro_core/paths.runquotaEndpointPath`` and is shared with the
+  ## product's own daemon spawn, because a test that binds somewhere the
+  ## shipped code would not is a test of something nobody runs.
+  runquotaEndpointPath(name)
 
 proc runquotaEndpointReachable*(endpoint: string): bool =
   ## Polled readiness check used by ``ensureRunQuotaDaemon`` helpers
