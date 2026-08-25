@@ -100,6 +100,7 @@ import repro_tool_profiles
 const
   ProviderLockRunnerFlag = "--provider-lock-runner"
   ProviderLockPayloadFlag = "--provider-lock-payload"
+  InterfaceCompilerLockRunnerFlag = "--interface-compiler-lock-runner"
   InterfaceLockRunnerFlag = "--interface-lock-runner"
 
 if paramCount() >= 1 and paramStr(1) == ProviderLockPayloadFlag:
@@ -111,6 +112,20 @@ if paramCount() >= 1 and paramStr(1) == ProviderLockRunnerFlag:
   let nimcache = paramStr(2)
   writeFile(paramStr(3), "started\n")
   let execution = runProviderCompilerCommand(@[
+    getAppFilename(),
+    ProviderLockPayloadFlag,
+    paramStr(4),
+    paramStr(5),
+    "--nimcache:" & nimcache,
+  ])
+  if execution.exitCode != 0:
+    stderr.write(execution.output)
+  quit(execution.exitCode)
+
+if paramCount() >= 1 and paramStr(1) == InterfaceCompilerLockRunnerFlag:
+  let nimcache = paramStr(2)
+  writeFile(paramStr(3), "started\n")
+  let execution = runInterfaceCompilerCommand(@[
     getAppFilename(),
     ProviderLockPayloadFlag,
     paramStr(4),
@@ -372,6 +387,44 @@ suite "M9.R.13a provider-compile cache sharing":
     let second = startProcess(runner, args = @[
       ProviderLockRunnerFlag, nimcache, secondStarted, secondEntered, "0"],
       options = {poParentStreams})
+    check waitForFile(secondStarted, 5000)
+    sleep(150)
+    check not fileExists(secondEntered)
+
+    check first.waitForExit() == 0
+    first.close()
+    check second.waitForExit() == 0
+    second.close()
+    check fileExists(secondEntered)
+
+  test "concurrent interface compilers serialize a shared nimcache":
+    let scratch = getTempDir() /
+      ("repro-interface-compiler-lock-" & $getCurrentProcessId())
+    createDir(scratch)
+    defer:
+      try: removeDir(scratch)
+      except CatchableError: discard
+    let nimcache = scratch / "nimcache"
+    let firstStarted = scratch / "first-started"
+    let firstEntered = scratch / "first-entered"
+    let secondStarted = scratch / "second-started"
+    let secondEntered = scratch / "second-entered"
+    let runner = getAppFilename()
+
+    let first = startProcess(runner, args = @[
+      InterfaceCompilerLockRunnerFlag,
+      nimcache,
+      firstStarted,
+      firstEntered,
+      "2000"], options = {poParentStreams})
+    check waitForFile(firstEntered, 5000)
+
+    let second = startProcess(runner, args = @[
+      InterfaceCompilerLockRunnerFlag,
+      nimcache,
+      secondStarted,
+      secondEntered,
+      "0"], options = {poParentStreams})
     check waitForFile(secondStarted, 5000)
     sleep(150)
     check not fileExists(secondEntered)

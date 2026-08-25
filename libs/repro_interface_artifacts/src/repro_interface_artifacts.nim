@@ -4391,16 +4391,28 @@ proc acquireInterfaceArtifactLock*(artifactPath: string):
 proc releaseInterfaceArtifactLock*(lock: var ReproFileLock) =
   releaseProviderNimcacheLock(lock)
 
-proc runProviderCompilerCommand*(command: openArray[string]; cwd = ""):
+proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = ""):
     ProviderCompileExecutionResult =
-  ## Execute a provider compiler command under the lock for its shared Nim
-  ## cache. The lock is kernel-owned, so process termination releases it even
-  ## though the small lock file remains available for later sessions.
+  ## Execute a compiler command under the lock for its shared Nim cache. The
+  ## lock is kernel-owned, so process termination releases it even though the
+  ## small lock file remains available for later sessions.
   var lock = acquireProviderNimcacheLock(command)
   try:
     result = runCommand(command, cwd = cwd)
   finally:
     releaseProviderNimcacheLock(lock)
+
+proc runProviderCompilerCommand*(command: openArray[string]; cwd = ""):
+    ProviderCompileExecutionResult =
+  runSharedNimcacheCompilerCommand(command, cwd)
+
+proc runInterfaceCompilerCommand*(command: openArray[string]; cwd = ""):
+    ProviderCompileExecutionResult =
+  ## Interface runners reuse one cache for the same toolchain and library set.
+  ## Distinct extraction edges may run in separate Reprobuild processes, so
+  ## their compiler writes require the same cross-process serialization as
+  ## provider compiles.
+  runSharedNimcacheCompilerCommand(command, cwd)
 
 proc providerDynamicEnabled(): bool =
   ## Returns true when ``REPRO_PROVIDER_DYNAMIC`` selects the Tier 1
@@ -4638,7 +4650,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # not a valid compiler working directory: Nim writes relative linker response
   # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
   # The runner scratch directory already owns every generated extractor file.
-  let compileExecution = runCommand(command, cwd = tempRoot)
+  let compileExecution = runInterfaceCompilerCommand(command, cwd = tempRoot)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
     # `runCommand` already raises on non-zero exit, so reaching this branch
