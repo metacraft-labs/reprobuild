@@ -90,6 +90,45 @@ The split is not organisational. A generic layer only one runner can populate
 would become that runner's schema by default, and every other framework under
 Reprobuild would then either record nothing or distort itself to fit.
 
+**And it is not a claim: a second runner populates the same table.**
+`repro_tap_test_runner` (`tools/tap-test-runner`) runs TAP 13 producers —
+shell scripts, `node:test`, perl's `prove`, pytest-tap, anything that prints
+the protocol — through the adapter in
+[`reprobuild-test-adapters`](https://github.com/metacraft-labs/reprobuild-test-adapters).
+It declares `test_execution` from the *same* constants CodeTracer's reporter
+declares it from (`ct_test_interface`, imported by both, spelled by neither),
+writes the same `ext_test_execution` rows, and declares no other extension at
+all. TAP has no suite and no per-case output split, so those columns are NULL
+in its rows rather than `''` and `0` — the absences the generic schema was
+made nullable for, exercised by a runner that genuinely has them.
+
+```sh
+repro_tap_test_runner --bin-dir=build/tap-test-bin --summary-json=tap-run.json
+```
+
+## `stats flaky` and `stats duration` read the generic layer, and only it
+
+```sh
+repro_test_runner stats flaky --json
+repro_test_runner stats duration --json
+```
+
+Both answer from `ext_test_execution` over `runquotad`'s query interface, and
+from no other table. They therefore cannot tell which runner produced a row —
+two runners with the same pass/fail pattern produce byte-identical entries
+apart from the test's own name, which is what invariant OS-8 is worth. The
+framework layer stays distinguishable where it should be: a query for
+`ext_codetracer_test` returns rows for exactly the CodeTracer executions.
+
+- `flaky` lists tests that have BOTH passed and failed in the window. A test
+  that only ever failed is broken, not flaky, and is not listed.
+- `duration` reports mean, median, p90 and p99 over the case durations the
+  runners reported. Executions whose runner reported no duration are excluded
+  from the sample rather than counted as zero, and `samples` says how many
+  were left.
+- With no daemon the window reads `unavailable` rather than empty, and the
+  exit code stays 0: a missing daemon is not an error.
+
 **`termination` is what separates an OOM kill from an assertion failure.** Both
 are non-zero exits and an exit status cannot tell them apart, which matters
 most under a parallel runner: an OOM correlates with how much else was running,
