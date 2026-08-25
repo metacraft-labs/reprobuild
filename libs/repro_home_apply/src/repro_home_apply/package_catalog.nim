@@ -765,16 +765,61 @@ proc buildMachineTarget*(): PlatformTarget =
   initPlatformTarget(family, baselineMicroarchLevel(family),
     probeHostCpuFeatures())
 
-proc hostTarget*(): PlatformTarget =
-  ## What the produced artifacts must run on.
+type
+  HostTargetResolver* = proc(): PlatformTarget {.gcsafe, closure.}
+    ## PMC-6 — the seam that makes the microarchitecture host target and the
+    ## engine's `targetTriple` ONE input instead of two.
+    ##
+    ## ## Why a closure and not a direct read
+    ##
+    ## `targetTriple` is a SOLVER VARIANT. Resolving it needs the solver, and
+    ## this module must not import it -- the same layering rule that made the
+    ## build engine take a `TargetTripleResolver` closure rather than reaching
+    ## for `repro_dsl_stdlib` itself (`repro_build_engine/platform.nim`).
+    ##
+    ## So the CLI, which is the only layer that can see both, wires a closure
+    ## here exactly as it already wires one there. This module stays a leaf,
+    ## and the two axes acquire a single decision point instead of two
+    ## independent ones that agree only by coincidence of defaults.
+    ##
+    ## `nil` means "nobody wired one", which is the library and test case: the
+    ## environment-based default below applies, and behaviour is what it was
+    ## before PMC-6.
+
+var hostTargetResolverHook: HostTargetResolver = nil
+  ## Deliberately private. A caller SETS it through `setHostTargetResolver`
+  ## and can never read it back, so no code path can start branching on
+  ## "was a resolver wired?" -- which would reintroduce the two-answers
+  ## problem in a new shape.
+
+proc setHostTargetResolver*(resolver: HostTargetResolver) =
+  ## Wire the single host-target authority. Called once by the CLI driver.
   ##
-  ## Defaults to the build machine -- that is the `"native"` sentinel the build
-  ## engine already uses, and it is why one "host" concept has worked so far.
-  ## REPRO_HOST_MICROARCH_LEVEL / REPRO_HOST_CPU_FEATURES move it, and moving
-  ## it is what makes a build cross rather than native.
+  ## Passing `nil` restores the environment-based default; that is what tests
+  ## do to get back to a known state, and it is why this is idempotent rather
+  ## than a one-shot install.
+  hostTargetResolverHook = resolver
+
+proc environmentHostTarget*(): PlatformTarget =
+  ## The host target as described by `REPRO_HOST_MICROARCH_LEVEL` /
+  ## `REPRO_HOST_CPU_FEATURES` alone, ignoring any wired resolver.
+  ##
+  ## Exposed so the CLI's resolver can COMPOSE it -- read the variant, fall
+  ## back to the environment -- rather than reimplementing the parsing and
+  ## refusal rules and letting the two copies drift.
   let family = detectHostCpu()
   initPlatformTarget(family, detectHostMicroarchLevel(family),
     detectHostCpuFeatures(family))
+
+proc hostTarget*(): PlatformTarget =
+  ## What the produced artifacts must run on.
+  ##
+  ## The wired resolver when there is one; otherwise the environment, which
+  ## itself defaults to the build machine -- the `"native"` sentinel the build
+  ## engine already uses, and why one "host" concept worked for so long.
+  if hostTargetResolverHook != nil:
+    return hostTargetResolverHook()
+  environmentHostTarget()
 
 proc isCrossTargeted*(buildT, hostT: PlatformTarget): bool =
   ## True when the two targets have diverged, i.e. this is no longer a
@@ -799,6 +844,32 @@ proc isCrossTargeted*(buildT, hostT: PlatformTarget): bool =
   buildT.family != hostT.family or
     buildT.level != hostT.level or
     (hostT.features != {} and hostT.features != buildT.features)
+
+proc targetRoleForDepKind*(kind: string): TargetRole =
+  ## PMC-6 — route a dependency to the target that must satisfy it, keyed on
+  ## the engine's own `DepKind` spelling.
+  ##
+  ## Takes the kind as a STRING rather than importing `repro_build_engine`.
+  ## That import would be a layering inversion (the engine deliberately does
+  ## not depend on this side either), and the vocabulary here is three fixed
+  ## tokens that the engine already serialises.
+  ##
+  ##   * `nativeBuildDeps:` / `dkNative` -- tools that RUN during the build.
+  ##     They execute on the BUILD machine, so a compiler that traps here is
+  ##     useless no matter what it is producing.
+  ##   * `buildDeps:` / `dkBuild` and `runtimeDeps:` / `dkRuntime` -- libraries
+  ##     the produced binaries link or load. They must satisfy the HOST target,
+  ##     because that is where those binaries will run.
+  ##
+  ## The default is the HOST target, and that direction is deliberate: an
+  ## unrecognised kind that resolved against the build machine could let an
+  ## artifact silently inherit capabilities the target lacks, which is a SIGILL
+  ## on someone else's machine. Resolving against the host target instead can
+  ## only ever be too conservative -- it may refuse something that would have
+  ## worked, loudly, here.
+  case kind
+  of "dkNative", "native", "nativeBuildDeps": trBuildMachine
+  else: trHostTarget
 
 proc targetForRole*(role: TargetRole; buildT, hostT: PlatformTarget):
     PlatformTarget =
