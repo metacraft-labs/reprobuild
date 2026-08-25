@@ -26,7 +26,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -34,6 +34,12 @@ import repro_project_dsl
 # fetch spec + cmake flags + two executable artifacts + one library
 # artifact under ``sddmSource`` at module init time.
 import ./repro
+
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
 
 const ExpectedUrl =
   # M9.R.15f.6 drive-by — the recipe long since switched to the
@@ -44,10 +50,13 @@ const ExpectedHash =
   "f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf"
 
 const ExpectedCmakeFlags = @[
-  "-DBUILD_TESTING=OFF",
-  "-DBUILD_MAN_PAGES=OFF",
-  "-DENABLE_JOURNALD=OFF",
-  "-DCMAKE_BUILD_TYPE=Release",
+  "CMAKE_POLICY_VERSION_MINIMUM=3.5",
+  "BUILD_WITH_QT6=ON",
+  "BUILD_TESTING=OFF",
+  "BUILD_MAN_PAGES=OFF",
+  "INSTALL_PAM_CONFIGURATION=ON",
+  "ENABLE_JOURNALD=OFF",
+  "CMAKE_BUILD_TYPE=Release",
 ]
 
 suite "sddmSource — from-source recipe smoke test":
@@ -76,11 +85,31 @@ suite "sddmSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "cmakeFlags registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``cmake_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("sddmSource")
+    check declared.found
+    # ``opts`` grows conditionally with staged-install destinations when a
+    # provider project root is available, so this pins the unconditional
+    # prefix of the sequence.
+    check declared.values == ExpectedCmakeFlags
+    check buildBlockConstructors("sddmSource") == @["cmake_package"]
   test "cmakeFlags does not leak into the meson channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the meson channel would
+    # surface as a ``meson_package(...)`` call here.
+    check "meson_package" notin buildBlockConstructors("sddmSource")
   test "cmakeFlags does not leak into the configure channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the configure channel would
+    # surface as a ``autotools_package(...)`` call here.
+    check "autotools_package" notin buildBlockConstructors("sddmSource")
   test "artifacts register two executables with correct kinds":
     # M3 artifact registry: ``sddm`` + ``sddm-greeter-qt6`` are
     # tagged ``dakExecutable``.

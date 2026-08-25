@@ -35,6 +35,12 @@ import repro_project_dsl
 # ``gnutlsSource`` at module init time.
 import ./repro
 
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
+
 const ExpectedUrl =
   "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.8.tar.xz"
 
@@ -48,6 +54,9 @@ const ExpectedConfigureFlags = @[
   "--disable-tools",
   "--disable-cxx",
   "--disable-tests",
+  "--with-included-libtasn1",
+  "--with-included-unistring",
+  "--without-idn",
 ]
 
 suite "gnutlsSource — from-source recipe smoke test":
@@ -76,15 +85,54 @@ suite "gnutlsSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "configureFlags registers the exact production flag sequence (largest in corpus)":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``autotools_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("gnutlsSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedConfigureFlags
+    check buildBlockConstructors("gnutlsSource") == @["autotools_package"]
   test "configureFlags preserves mixed --disable-* / --without-* polarity":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # gnutls mixes ``--disable-*`` (turn a feature off), ``--with-*``
+    # (use this dependency) and ``--without-*`` (do not) in a single
+    # sequence. A rewrite that normalised every flag onto one
+    # polarity would change what gets built while leaving the flag
+    # COUNT untouched, so the count is not the property -- the mix is.
+    let declared = declaredBuildOptions("gnutlsSource")
+    var disables, withs, withouts = 0
+    for flag in declared.values:
+      if flag.startsWith("--disable-"): inc disables
+      elif flag.startsWith("--without-"): inc withouts
+      elif flag.startsWith("--with-"): inc withs
+    check disables > 0
+    check withs > 0
+    check withouts > 0
   test "configureFlags does not leak into the meson channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the meson channel would
+    # surface as a ``meson_package(...)`` call here.
+    check "meson_package" notin buildBlockConstructors("gnutlsSource")
   test "configureFlags does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the cmake channel would
+    # surface as a ``cmake_package(...)`` call here.
+    check "cmake_package" notin buildBlockConstructors("gnutlsSource")
   test "configureFlags does not leak into the make channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # The retired registry kept a separate ``make`` flag channel.
+    # Its post-M9.R.6.1 equivalent is the ``makeVars`` /
+    # ``installMakeVars`` arguments of the Layer-1 constructors:
+    # flags reaching the make step would be passed there. This
+    # recipe passes neither, so nothing leaks into that channel.
+    check not buildBlockPassesArgument("gnutlsSource", "makeVars")
+    check not buildBlockPassesArgument("gnutlsSource", "installMakeVars")
   test "artifacts register a single library":
     # M3 artifact registry: ``libGnutls`` is the only artifact and
     # must be tagged ``dakLibrary``. gnutls's autotools build emits

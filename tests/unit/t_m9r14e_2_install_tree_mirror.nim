@@ -16,10 +16,26 @@
 ##      per-artifact stage-copy fire side effects.
 ##   3. Idempotent: a recipe that calls ``pkg.executable("foo")``
 ##      AND ``pkg.library("libfoo")`` emits the mirror exactly once.
-##   4. Distinct packages each get their own mirror (per-package
-##      gate, not per-process).
-##   5. ``emitInstallTreeMirror`` is exposed via the package_result
+##   4. ``emitInstallTreeMirror`` is exposed via the package_result
 ##      surface for downstream test inspection.
+##
+## ## What this file does NOT pin, and where that coverage now lives
+##
+## The per-package mirror gate ("distinct packages each get their own
+## mirror, not one per process") is not observable from THIS file. The
+## gate lives in ``package_result.nim``'s private ``stageCopyEmitted`` /
+## ``installMirrorEmitted`` thread-locals, and both
+## ``emitAutotoolsStageCopy`` and ``emitInstallTreeMirror`` early-return
+## before touching them when ``activeProviderProjectRoot()`` is empty --
+## which it always is here, because this binary is built WITHOUT
+## ``reproProviderMode`` and the accessor is then a compile-time ``""``.
+##
+## A case named for that gate used to sit here asserting ``check true``,
+## which reported [OK] whether the gate existed or not. It has been moved
+## rather than deleted: ``tests/unit/t_m9r83_install_mirror_action_shapes
+## .nim`` builds in provider mode and drives the gate through the real
+## ``buildPackageFragment`` entry point, so the property is asserted there
+## against emitted action ids.
 
 import std/[strutils, unittest]
 
@@ -123,21 +139,3 @@ suite "DSL-port M9.R.14e.2 — install-tree mirror emission":
       check pkg.installEdge.id.len > 0
     finally:
       clearCurrentOwningPackageOverride()
-
-  test "distinct packages each get their own mirror gate":
-    resetDslPortFetchState()
-    setCurrentOwningPackageOverride("pkgAlpha")
-    try:
-      let pkg = meson_package(srcDir = "./src")
-      discard pkg.executable("alpha")
-    finally:
-      clearCurrentOwningPackageOverride()
-    setCurrentOwningPackageOverride("pkgBeta")
-    try:
-      let pkg = meson_package(srcDir = "./src")
-      discard pkg.executable("beta")
-    finally:
-      clearCurrentOwningPackageOverride()
-    # If the gate is keyed per-package, both calls execute their slicing
-    # without raising; the test passes by virtue of not raising.
-    check true

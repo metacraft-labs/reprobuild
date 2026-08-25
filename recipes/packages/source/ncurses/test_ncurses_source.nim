@@ -24,7 +24,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -32,6 +32,12 @@ import repro_project_dsl
 # fetch spec + configure flags + two library + two executable
 # artifacts under ``ncursesSource`` at module init time.
 import ./repro
+
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
 
 const ExpectedUrl =
   "https://ftp.gnu.org/gnu/ncurses/ncurses-6.5.tar.gz"
@@ -74,13 +80,39 @@ suite "ncursesSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "configureFlags registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``autotools_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("ncursesSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedConfigureFlags
+    check buildBlockConstructors("ncursesSource") == @["autotools_package"]
   test "configureFlags does not leak into the meson channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the meson channel would
+    # surface as a ``meson_package(...)`` call here.
+    check "meson_package" notin buildBlockConstructors("ncursesSource")
   test "configureFlags does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the cmake channel would
+    # surface as a ``cmake_package(...)`` call here.
+    check "cmake_package" notin buildBlockConstructors("ncursesSource")
   test "configureFlags does not leak into the make channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # The retired registry kept a separate ``make`` flag channel.
+    # Its post-M9.R.6.1 equivalent is the ``makeVars`` /
+    # ``installMakeVars`` arguments of the Layer-1 constructors:
+    # flags reaching the make step would be passed there. This
+    # recipe passes neither, so nothing leaks into that channel.
+    check not buildBlockPassesArgument("ncursesSource", "makeVars")
+    check not buildBlockPassesArgument("ncursesSource", "installMakeVars")
   test "artifacts register two libraries + two executables with correct kinds":
     # M3 artifact registry: ``libNcursesw`` + ``libTinfow`` are tagged
     # ``dakLibrary`` while ``tic`` + ``infocmp`` are tagged

@@ -190,10 +190,20 @@ suite "M4b: C-ABI provider-library memory-ownership (distinct allocators)":
 
     var scoped = loadResourceProviderLibrary(soPath)
     let inst = desiredInstance("raii", 1)
-    discard digestViaLibrary(scoped, inst)
+    let beforeDrop = digestViaLibrary(scoped, inst)
     scoped = nil            # last ref dropped -> =destroy -> exported close + unloadLib
     GC_fullCollect()
-    check true              # reaching here without a crash proves clean teardown
+    # "Reaching here without a crash proves clean teardown" was the rationale
+    # for ``check true``. It proves less than that: an ``=destroy`` that never
+    # ran, or one that skipped the exported close, also does not crash -- and
+    # ``check true`` reports [OK] for every one of those. Re-loading the SAME
+    # object after the drop distinguishes them. A half-unloaded library fails
+    # to load or answers differently; a clean close + unload leaves the object
+    # loadable and answering exactly as before.
+    var reloaded = loadResourceProviderLibrary(soPath)
+    check digestViaLibrary(reloaded, inst) == beforeDrop
+    reloaded = nil
+    GC_fullCollect()
 
   test "error paths leave out-params defined-empty; no exception/panic crosses the ABI":
     let tempRoot = getTempDir() / ("m4b-err-" & $getCurrentProcessId())

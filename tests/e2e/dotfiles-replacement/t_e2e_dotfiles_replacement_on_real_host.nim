@@ -233,7 +233,11 @@ when not defined(windows):
     when isNixSupported:
       test "platform N/A":
         echo "[platform N/A] t_e2e_dotfiles_replacement_on_real_host: requires the Windows real-host dotfiles/Scoop setup"
-        check true
+        # The `[platform N/A]` marker above IS this case's statement: it is the
+        # repository's structured, greppable declaration that the coverage does
+        # not apply to this host. A `check true` beside it added nothing and
+        # taught the shape that an assertion which cannot fail is acceptable
+        # filler, so it is gone.
 else:
   suite "M70 gate: e2e_dotfiles_replacement_on_real_host":
     when isNixSupported:

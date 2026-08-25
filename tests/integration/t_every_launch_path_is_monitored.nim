@@ -1929,4 +1929,7 @@ suite "every_launch_path_is_monitored":
     test "teardown":
       daemon.stop()
       removeDir(tempRoot)
-      check true
+      # ``check true`` could not fail, so a teardown that silently left the
+      # daemon running or the scratch tree on disk still reported [OK].
+      # Assert the post-state the teardown exists to produce.
+      check not dirExists(tempRoot)
