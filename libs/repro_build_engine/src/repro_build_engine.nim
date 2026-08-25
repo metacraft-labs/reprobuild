@@ -2429,6 +2429,137 @@ proc monitorProfileEvidenceComplete(detail: string): bool =
     if pair.len == 2 and pair[0] == "evidenceComplete":
       return pair[1] == "true"
 
+proc benignRawSyscallLoss*(detail: string): bool =
+  ## Recognise the io-mon "raw syscall unsupported" event-loss class and say
+  ## whether the syscall in question provably cannot affect the observed-input
+  ## set.
+  ##
+  ## io-mon's Linux preload shim intercepts the libc ``syscall(2)`` wrapper and
+  ## decodes inline ``SYSCALL`` traps out of its ring buffer. Numbers it can
+  ## model are handled by ``classifyRawFileSyscall``; everything else falls
+  ## through to ``recordRawSyscallClassification``, which emits
+  ##
+  ##     "libc raw syscall unsupported nr=<N>"       (libc wrapper route)
+  ##     "inline raw syscall unsupported nr=<N>"     (inline-trap route)
+  ##
+  ## (io-mon ``src/io_mon/shim/linux_preload.nim``, ``rawSyscallSourceName`` +
+  ## ``recordRawSyscallClassification``.) The detail string carries the syscall
+  ## NUMBER and nothing else — no arguments, no fds, no paths.
+  ##
+  ## Such a record means "the shim saw a syscall it does not model", which is
+  ## only a correctness problem when the syscall in question could open, read,
+  ## write, probe, rename or otherwise name a file. For a small set of numbers
+  ## that is decidable from the number alone, so the record carries no lost
+  ## filesystem information and the depfile is still Level 0 (complete).
+  ##
+  ## **This is an allowlist, not an inversion of the default.** Any number not
+  ## enumerated below keeps falling through to
+  ## ``classifyEventLossDetail``'s fail-closed ``mesUnknownScopeLoss``.
+  ##
+  ## SYSCALL NUMBERS ARE ARCHITECTURE-SPECIFIC AND THE DETAIL STRING CARRIES NO
+  ## ARCHITECTURE TAG. This is load-bearing, not pedantry: on the asm-generic
+  ## table used by aarch64/riscv64/loongarch64, nr=39 is ``umount2`` — a
+  ## filesystem-namespace mutation — where on x86_64 it is ``getpid``. The
+  ## table below is therefore selected by the architecture this engine is
+  ## COMPILED for, which is the architecture of the shim that produced the
+  ## RMDF (RMDFs live in the local ``build-engine-cache/monitor-depfiles`` and
+  ## are never fetched cross-arch from the shared action cache). Architectures
+  ## without a verified table get an empty allowlist and keep failing closed.
+  ##
+  ## Per-entry justification — each number verified against the kernel uapi
+  ## headers (``asm/unistd_64.h`` for x86_64, ``asm-generic/unistd.h`` for
+  ## arm64), NOT from memory:
+  ##
+  ##   * ``getpid`` (x86_64 nr=39, arm64 nr=172) — takes no arguments, touches
+  ##     no descriptor and names no path; it copies the caller's pid out of the
+  ##     kernel and returns. It cannot introduce a filesystem dependency and it
+  ##     cannot hide one, because it mutates no shim state at all.
+  ##
+  ##   * ``close_range`` (x86_64 and arm64 nr=436) — closes a range of
+  ##     descriptors. Closing a descriptor cannot open, read, write or probe a
+  ##     path, so no new dependency can be introduced and no content can be
+  ##     consumed through it.
+  ##
+  ##     RESIDUAL, stated rather than waved through: the shim DOES keep fd→path
+  ##     state (``updateFdPath`` / ``removeFdPath`` / ``pathForFd`` in
+  ##     ``linux_preload.nim``), and a bulk close it does not observe leaves
+  ##     stale entries for the closed fds. The consequences of that staleness
+  ##     are bounded:
+  ##       - an fd number reused by a monitored ``open``/``openat`` is repaired,
+  ##         because ``recordOpen`` → ``updateFdPath`` overwrites the entry;
+  ##       - an fd number reused by an UNmonitored raw open already emits its
+  ##         own unsupported-nr event-loss and so still fails closed here;
+  ##       - an fd number reused by a non-path descriptor (socket/pipe/eventfd/
+  ##         dup) makes a later read on it attribute to the STALE path, which
+  ##         adds a spurious input — the over-approximating, cache-conservative
+  ##         direction.
+  ##     The one under-approximating corner is an fd that is simultaneously
+  ##     marked inherited-at-shim-init AND carries a stale in-tree path AND is
+  ##     reused by an opaque descriptor, which would suppress the
+  ##     ``recordExternalContent`` Level 2 signal in ``classifyEmptyFdRead``.
+  ##
+  ##     That corner is NOT closed by leaving nr=436 fail-closed, which is why
+  ##     the allowlist entry is still the right call: the shim has no
+  ##     ``close_range`` handling of ANY kind — no libc-symbol hook and no raw
+  ##     classifier arm (verified against the pinned io-mon revision this build
+  ##     links). A program calling glibc's ``close_range()`` SYMBOL produces the
+  ##     identical fd→path staleness and NO event-loss record at all, so the
+  ##     session stays cacheable today. The nr=436 record therefore covers only
+  ##     the minority ``syscall(2)`` route; as a soundness gate it is not
+  ##     exhaustive, and all it actually buys is permanent cache loss for the
+  ##     callers that happen to use the wrapper. The durable fix is an io-mon
+  ##     ``of LinuxSysCloseRange:`` arm that calls ``removeFdPath`` over the
+  ##     range plus a ``close_range`` symbol hook; io-mon is a pinned flake
+  ##     input here and cannot be changed from this repo. This is recorded as a
+  ##     known residual in
+  ##     ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``.
+  ##
+  ## Deliberately NOT allowlisted, having been considered individually:
+  ##   * ``io_uring_setup``/``io_uring_enter`` (x86_64 nr=425/426) — SQEs can
+  ##     carry real opens and reads, so the number alone does not decide it.
+  ##     io-mon makes its own documented tradeoff for these at the shim layer;
+  ##     the engine does not re-endorse it.
+  ##   * ``gettid`` (x86_64 nr=186) — provably benign by the same argument as
+  ##     ``getpid``, but the pinned io-mon already classifies it at the shim so
+  ##     it never reaches this classifier. Left out for lack of evidence that
+  ##     any RMDF carries it.
+  when defined(linux) and defined(amd64):
+    const BenignRawSyscallNumbers: seq[int64] = @[
+      39'i64,    # getpid      — asm/unistd_64.h
+      436'i64,   # close_range — asm/unistd_64.h
+    ]
+  elif defined(linux) and defined(arm64):
+    const BenignRawSyscallNumbers: seq[int64] = @[
+      172'i64,   # getpid      — asm-generic/unistd.h
+      436'i64,   # close_range — asm-generic/unistd.h
+    ]
+  else:
+    const BenignRawSyscallNumbers: seq[int64] = @[]
+  const RawSyscallUnsupportedPrefixes = [
+    "libc raw syscall unsupported nr=",
+    "inline raw syscall unsupported nr=",
+  ]
+  for prefix in RawSyscallUnsupportedPrefixes:
+    if not detail.startsWith(prefix):
+      continue
+    let digits = detail[prefix.len .. ^1]
+    # Require a bare unsigned decimal, which is the only shape io-mon's
+    # ``$number`` produces. ``parseInt`` alone is not enough: it accepts a
+    # leading '+' or '-', so "nr=+436" would otherwise reach the allowlist.
+    # A detail shape this classifier has not reasoned about fails closed.
+    for ch in digits:
+      if ch notin {'0' .. '9'}:
+        return false
+    var number: int64
+    try:
+      # Rejects the empty remainder ("nr=") and any value too large for
+      # ``int``; both fail closed.
+      number = int64(parseInt(digits))
+    except ValueError:
+      return false
+    return number in BenignRawSyscallNumbers
+  false
+
 proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
   ##
@@ -2457,6 +2588,15 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ##   * "duplicate identity token in fragment record" — writer.nim:2034 /
   ##     :2068. A shim identity token appeared twice, so record-ordering
   ##     integrity is compromised. Level 2.
+  ##
+  ##   * "libc raw syscall unsupported nr=<N>" / "inline raw syscall
+  ##     unsupported nr=<N>" — linux_preload.nim
+  ##     ``recordRawSyscallClassification``. The shim saw a raw syscall it
+  ##     does not model. For the small, individually-justified set of
+  ##     numbers in ``benignRawSyscallLoss`` the number alone proves the
+  ##     call cannot name a path or move content, so the record represents
+  ##     no lost filesystem information: Level 0. Every other number stays
+  ##     Level 2 via the fail-closed default below.
   ##
   ## Every other unknown detail defaults to mesUnknownScopeLoss to fail
   ## closed conservatively — the spec's R3 general rule for ambiguous
@@ -2506,6 +2646,17 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
     return mesUnknownScopeLoss
   if detail.startsWith(BreakawayReportPrefix):
     return mesUnknownScopeLoss
+  # Benign raw-syscall class (Level 0). What makes this arm unable to downgrade
+  # a recognised loss class is that the two prefixes it matches are disjoint
+  # from every prefix above — not its position, which is defensive only.
+  # (Mutation-checked: moving this arm to the front of the chain changes no
+  # observable behaviour.) The property that actually keeps a mixed RMDF
+  # fail-closed lives one level up, in ``foldMonitorDepFileEvidence``'s
+  # ``worseMonitorStatus`` fold, and is pinned by
+  # ``test_m9r72_phaseD_end_to_end.nim``'s "benign raw syscall does not rescue
+  # an RMDF that also lost a subtree".
+  if benignRawSyscallLoss(detail):
+    return mesComplete
   # Unknown detail — fail closed conservatively.
   mesUnknownScopeLoss
 
