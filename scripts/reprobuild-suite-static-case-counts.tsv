@@ -1182,6 +1182,7 @@ tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim	n
 tests/integration/t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty.nim	nim	1
 tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim	nim	1
 tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim	nim	1
+tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
 tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim	nim	1
 tests/integration/t_team_repo_record_only_no_checkout.nim	nim	1
 tests/integration/t_test_edge_migration_covers_all_test_files.nim	nim	1
@@ -1276,6 +1277,7 @@ tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	1
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
 tests/unit/t_fribidi_dev_stub.nim	nim	1
+tests/unit/t_from_source_realization_platform.nim	nim	2
 tests/unit/t_hcr_agent_coordinator.nim	nim	1
 tests/unit/t_hcr_agent_endpoint.nim	nim	3
 tests/unit/t_hcr_agent_ipc.nim	nim	4

@@ -10158,6 +10158,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_from_source_realization_platform.nim",
+    binary: "build/test-bin/t_from_source_realization_platform",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_hcr_agent_coordinator.nim",
     binary: "build/test-bin/t_hcr_agent_coordinator",
     defines: @[],
