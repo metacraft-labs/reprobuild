@@ -7,12 +7,16 @@
 # script is the equivalent on Windows, providing the toolchain
 # `bash scripts/build_apps.sh` and `just test` need:
 #
-#   * Nim 2.2.x + a working C compiler (gcc/clang/cl)         -- via
+#   * Nim 2.2.x + the pinned WinLibs gcc                       -- via
 #     windows/bootstrap-toolchain.ps1 (Ensure-Nim + Ensure-Gcc), which
 #     lives in THIS repo: no sibling checkout of any other repo is needed
-#     to bootstrap. `just`, `gh`, `python3`, `gpg` and `git-repo` are NOT
-#     provisioned -- none is required to build repro, and the gpg step in
-#     particular used to trigger a UAC elevation prompt.
+#     to bootstrap. Both are version+sha256 pins in
+#     windows/toolchain-versions.env, downloaded and verified rather than
+#     discovered on the host -- gcc is a toolchain dependency like any
+#     other, and `nim c` shells out to it for every module. `just`, `gh`,
+#     `python3`, `gpg` and `git-repo` are NOT provisioned -- none is
+#     required to build repro, and the gpg step in particular used to
+#     trigger a UAC elevation prompt.
 #   * bash                                                    -- resolved from
 #     git's own installation and put AHEAD of the WSL launcher that Windows
 #     puts on PATH by default. Both build entry points below are bash scripts,
@@ -53,7 +57,11 @@
 # Knobs (unchanged from the framework these scripts came from):
 #   $env:WINDOWS_DIY_SYNC = "0"            skip all toolchain downloads
 #   $env:WINDOWS_DIY_SKIP_NIM = "1"        skip the nim step
-#   $env:WINDOWS_DIY_SKIP_GCC = "1"        skip the gcc step
+#   $env:WINDOWS_DIY_SKIP_GCC = "1"        skip the gcc step. `nim c` then
+#       uses whatever gcc the host has on PATH, and fails with
+#       `Requested command not found: 'gcc.exe ...'` if there is none. Same
+#       caveat as the clingo/bearssl skips below: it is for hosts that
+#       provision a C toolchain independently, not a way to opt out of one.
 #   $env:WINDOWS_DIY_INSTALL_ROOT = <dir>  where toolchains land
 #   (the JUST / GH / PYTHON / REPO / GPG skips are gone with the steps
 #   themselves -- see the nim/gcc note above)
@@ -339,15 +347,14 @@ function Get-ToolPathWithVersion {
     # Report the version the binary ITSELF claims, not the one implied by the
     # directory it happens to sit in.
     #
-    # `GCC_VERSION` in windows/toolchain-versions.env is a FALLBACK pin, not a
-    # hard one: `Test-CompilerOnPath` deliberately skips provisioning whenever
-    # any sane gcc is already on PATH (MSYS2, a system mingw), so the installed
-    # tree keeps whatever directory name it was given when it was first
-    # provisioned. On this box that produced
-    # `D:\metacraft-dev-deps\gcc\15.2.0\bin\gcc.exe` -- a junction into a
-    # WinLibs package that reports 16.1.0. Every log line and every status
-    # summary then repeated 15.2.0, which is the sort of thing discovered
-    # months later while bisecting a miscompile.
+    # Provisioning now verifies the two against each other, so they should
+    # agree -- but this line is what would show it if they ever stopped. The
+    # failure it was added for: `GCC_VERSION` used to name a directory that a
+    # `winget install` (which takes no version argument) had filled with
+    # whatever release was current, producing
+    # `D:\metacraft-dev-deps\gcc\15.2.0\bin\gcc.exe` over a compiler reporting
+    # 16.1.0. Every log line and every status summary repeated 15.2.0, which is
+    # the sort of thing discovered months later while bisecting a miscompile.
     param([string]$Name)
     $source = Get-CommandSource $Name
     if ($source -eq "(not on PATH)") { return $source }
