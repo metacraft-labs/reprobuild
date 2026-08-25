@@ -32,7 +32,8 @@ suite "lowered graph cache action round trip":
       outputs: @["mirror.stamp"],
       argv: @["sh", "-c", "true"],
       cwd: "/recipe/zlib",
-      env: @["A=B"],
+      env: @["A=B", "PATH=/tool/bin"],
+      envPassthrough: @["PATH"],
       pool: "compile",
       poolUnits: 2,
       cpuMilli: 1500,
@@ -74,6 +75,22 @@ suite "lowered graph cache action round trip":
     check roundTrip.readOnlyRoots == action.readOnlyRoots
     check roundTrip.requiresElevation
 
+    # The declared/passthrough CLASSIFICATION must survive the cache, and
+    # this is not a formality. Before it was serialised, a warm build
+    # decoded every action with an empty passthrough set: the stage-2
+    # census reported 1391 actions naming a passthrough variable cold and
+    # 0 warm, and `launchChildEnv`'s passthrough resolution was dead on
+    # any warm build. The weak fingerprint is stored explicitly so keys
+    # did not move, which is exactly why nothing noticed.
+    check roundTrip.env == action.env
+    check roundTrip.envPassthrough == action.envPassthrough
+    check roundTrip.envPassthrough == @["PATH"]
+    # And the classification must survive as a DISTINCTION, not just as
+    # two non-empty seqs: `PATH` is declared AND passthrough here, `A` is
+    # declared only.
+    check "A=B" in roundTrip.env
+    check "A" notin roundTrip.envPassthrough
+
   test "rejects the previous cache version instead of decoding without lock identity":
     let action = BuildAction(
       governingLockIdentity: emptySolvedGraphIdentity("codec-version-test"),
@@ -81,9 +98,13 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 5'u8
+    check encoded[versionOffset] == 6'u8
     check encoded[versionOffset + 1] == 0'u8
-    encoded[versionOffset] = 4'u8
+    # v5 is the version that could not carry `envPassthrough`. Decoding a
+    # v5 record as v6 would silently return an empty passthrough set for
+    # every action rather than failing, so the rejection below is what
+    # makes the field's absence impossible instead of invisible.
+    encoded[versionOffset] = 5'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)

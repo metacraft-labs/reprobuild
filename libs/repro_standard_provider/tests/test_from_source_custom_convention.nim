@@ -232,6 +232,18 @@ suite "from-source-custom convention M9.N Batch C.1 — meson recipe":
     check not resolved.contains("$extracted")
     check not resolved.contains("$out")
 
+  test "substitutePlaceholders emits shell-safe Windows paths":
+    let resolved = from_source_custom_convention.substitutePlaceholders(
+      "cp -r $extracted/mesonbuild $out/share/meson && echo $fetch",
+      r"D:\repo\meson\fetch\meson.tar.gz",
+      r"D:\repo\meson\src",
+      r"D:\repo\meson\.repro\out")
+    check resolved ==
+      "cp -r D:/repo/meson/src/mesonbuild " &
+      "D:/repo/meson/.repro/out/share/meson && " &
+      "echo D:/repo/meson/fetch/meson.tar.gz"
+    check not resolved.contains("\\")
+
   test "emitFragment: produces fetch + N shell + stage-copy + mirror":
     let conv = from_source_custom_convention.fromSourceCustomConvention()
     let request = dummyRequest(MesonRecipe)

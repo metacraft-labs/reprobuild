@@ -14,6 +14,7 @@ import runquota_protocol
 
 type
   ReproRunQuotaError* = object of CatchableError
+  ReproRunQuotaDeadlockError* = object of ReproRunQuotaError
 
   ReproRunQuotaSession* = ref object
     client: RunQuotaClient
@@ -129,6 +130,7 @@ const
   # the first wait after a fresh candidate's initial denial.
   denialBackoffStartMs = 100
   denialBackoffMaxMs = 5000
+  denialDeadlockTimeoutMsDefault = 30_000
 
 proc nextDenialBackoff(backoffMs: int): int =
   if backoffMs <= 0: denialBackoffStartMs
@@ -189,6 +191,9 @@ proc envIntMs(name: string; fallback: int): int =
     if parsed > 0: parsed else: fallback
   except ValueError:
     fallback
+
+proc denialDeadlockTimeoutMs*(): int =
+  envIntMs("REPRO_RUNQUOTA_DENIAL_TIMEOUT", denialDeadlockTimeoutMsDefault)
 
 proc grantHeartbeatMs*(): int =
   envIntMs("REPRO_RUNQUOTA_GRANT_HEARTBEAT", grantHeartbeatMsDefault)
@@ -341,6 +346,33 @@ proc reportDenialRetry(label, statsId, diagnostic: string;
   except IOError, OSError:
     discard
 
+proc waitAfterDenial(label, statsId, diagnostic: string;
+                     attempt: int; firstDeniedMs: var int;
+                     backoffMs: var int) =
+  ## A daemon denial is distinct from normal queue pressure. Current
+  ## runquotad versions deny requests that cannot fit their static machine or
+  ## named-pool capacity and queue requests that merely do not fit *now*.
+  ## Keep the policy's retry window for compatibility with authorities that
+  ## can produce transient denials, but surface the required static-capacity
+  ## deadlock instead of retrying forever.
+  let nowMs = int(epochTime() * 1000.0)
+  if firstDeniedMs < 0:
+    firstDeniedMs = nowMs
+  backoffMs = nextDenialBackoff(backoffMs)
+  reportDenialRetry(label, statsId, diagnostic, attempt, backoffMs)
+  let waitedMs = nowMs - firstDeniedMs
+  let timeoutMs = denialDeadlockTimeoutMs()
+  if waitedMs >= timeoutMs:
+    let id = if statsId.len > 0: statsId else: label
+    raise newException(ReproRunQuotaDeadlockError,
+      "runquota static-capacity deadlock for '" & id & "' after " &
+      $attempt & " denied offers over " & $waitedMs & "ms: " & diagnostic &
+      ". The request cannot be admitted by the current daemon configuration. " &
+      "Adjust the action resource request or restart runquotad with matching " &
+      "CPU, memory, IO, and named-pool capacities. Raise " &
+      "REPRO_RUNQUOTA_DENIAL_TIMEOUT if the authority can deny transiently.")
+  sleep(backoffMs)
+
 proc reportGrantedAfterRetry(label, statsId: string; attempts: int) =
   if attempts <= 1:
     return
@@ -360,6 +392,7 @@ proc waitForQueuedGrant(session: var RunQuotaSession;
   # hard failure (raises) — denial is distinct from "daemon crashed".
   var attempts = 0
   var backoffMs = 0
+  var firstDeniedMs = -1
   while true:
     inc attempts
     let firstDecisions = session.offerCandidates(
@@ -379,10 +412,8 @@ proc waitForQueuedGrant(session: var RunQuotaSession;
         denied = true
         denialMessage = decision.diagnostic.diagnosticText()
     if denied:
-      backoffMs = nextDenialBackoff(backoffMs)
-      reportDenialRetry(request.label, request.commandStatsId,
-        denialMessage, attempts, backoffMs)
-      sleep(backoffMs)
+      waitAfterDenial(request.label, request.commandStatsId,
+        denialMessage, attempts, firstDeniedMs, backoffMs)
       continue
     if not sawQueued:
       raise newException(ReproRunQuotaError,
@@ -463,10 +494,8 @@ proc waitForQueuedGrant(session: var RunQuotaSession;
     if awaited.granted:
       reportGrantedAfterRetry(request.label, request.commandStatsId, attempts)
       return awaited.lease
-    backoffMs = nextDenialBackoff(backoffMs)
-    reportDenialRetry(request.label, request.commandStatsId,
-      awaited.denialMessage, attempts, backoffMs)
-    sleep(backoffMs)
+    waitAfterDenial(request.label, request.commandStatsId,
+      awaited.denialMessage, attempts, firstDeniedMs, backoffMs)
     continue
 
 proc finishOutcome(completion: ProcessCompletion): LeaseFinishOutcome =
@@ -780,6 +809,8 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         result.leaseReleased = true
       if session.active:
         session.closeSession()
+  except ReproRunQuotaDeadlockError:
+    raise
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
   finally:
@@ -888,6 +919,55 @@ proc openRunQuotaSession*(name = "reprobuild action";
     result.client.close()
     raise newException(ReproRunQuotaError, err.msg)
 
+# ---------------------------------------------------------------------------
+# Domain extensions (M17)
+# ---------------------------------------------------------------------------
+#
+# Reprobuild attaches its own per-execution facts as an extension on
+# RunQuota's execution spine (OS-5). It does NOT open RunQuota's database:
+# `runquotad` is the only sanctioned reader and the only writer, so both
+# the declaration and every row travel over the socket the session is
+# already holding.
+
+proc extNull*(): ExtensionCellWire = wireNull()
+proc extText*(value: string): ExtensionCellWire = wireText(value)
+proc extInt*(value: int64): ExtensionCellWire = wireInt(value)
+proc extReal*(value: float64): ExtensionCellWire = wireReal(value)
+
+proc declareRunQuotaExtension*(session: ReproRunQuotaSession;
+                               extensionId, owner: string;
+                               schemaVersion: int64;
+                               migrations: openArray[string]): string =
+  ## Registers the extension, returning "" on acceptance and the daemon's
+  ## refusal otherwise.
+  ##
+  ## A REFUSAL IS RETURNED, NOT RAISED. Capture must degrade rather than
+  ## fail (OS-4): a daemon that will not store this schema is a reason to
+  ## write no rows, never a reason to fail a build.
+  if session.isNil or not session.active:
+    return "runquota session is not active"
+  try:
+    session.session.declareExtension(extensionId, owner, schemaVersion,
+      migrations)
+  except CatchableError as err:
+    err.msg
+
+proc recordRunQuotaExtensionRow*(session: ReproRunQuotaSession;
+                                 leaseId: uint64; extensionId: string;
+                                 schemaVersion: int64;
+                                 columns: openArray[string];
+                                 values: openArray[ExtensionCellWire]) =
+  ## One row, one buffered write, no reply. Silent on every failure for
+  ## the same reason ``lease.observe`` is: losing an observation is always
+  ## preferable to perturbing the work being observed.
+  if session.isNil or not session.active:
+    return
+  try:
+    session.session.recordExtensionRow(leaseId, extensionId, schemaVersion,
+      columns, values)
+  except CatchableError:
+    discard
+
 proc close*(session: ReproRunQuotaSession) =
   if session.isNil:
     return
@@ -938,22 +1018,23 @@ proc startWithRunQuota*(session: ReproRunQuotaSession;
   try:
     let lease = session.session.waitForQueuedGrant(request.toRunQuotaRequest())
     return session.startGrantedWithRunQuota(lease, command)
+  except ReproRunQuotaDeadlockError:
+    raise
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
 
-proc offerWithRunQuota*(session: ReproRunQuotaSession;
-                        request: ReproResourceRequest;
-                        command: ReproCommandSpec): ReproRunQuotaOffer =
-  ## Per docs/runquota-policy.md a denied lease MUST delay-and-retry; it
-  ## must never surface as a build-stopping error.  We loop in place,
-  ## re-offering the candidate with backoff until the daemon either
-  ## grants it (returns ``rqokStarted``) or queues it (returns
-  ## ``rqokQueued``).  Protocol-level failures still raise.
+proc offerWithRunQuotaRetry(session: ReproRunQuotaSession;
+                            request: ReproResourceRequest;
+                            command: ReproCommandSpec;
+                            attempts: var int;
+                            backoffMs: var int;
+                            firstDeniedMs: var int): ReproRunQuotaOffer =
+  ## A denied lease is retried with backoff until the daemon grants or queues
+  ## it, bounded by the static-capacity deadlock deadline. Protocol failures
+  ## and requests that remain impossible beyond that deadline raise.
   if not session.active:
     raise newException(ReproRunQuotaError, "runquota session is not active")
   let rqRequest = request.toRunQuotaRequest()
-  var attempts = 0
-  var backoffMs = 0
   while true:
     inc attempts
     let candidateId = session.nextCandidateId
@@ -991,14 +1072,22 @@ proc offerWithRunQuota*(session: ReproRunQuotaSession;
       denied = true
       denialMessage = decision.diagnostic.diagnosticText()
     if denied:
-      backoffMs = nextDenialBackoff(backoffMs)
-      reportDenialRetry(rqRequest.label, rqRequest.commandStatsId,
-        denialMessage, attempts, backoffMs)
-      sleep(backoffMs)
+      waitAfterDenial(rqRequest.label, rqRequest.commandStatsId,
+        denialMessage, attempts, firstDeniedMs, backoffMs)
       continue
     if not sawDecision:
       raise newException(ReproRunQuotaError,
         "runquota did not return a decision for the offered lease")
+
+proc offerWithRunQuota*(session: ReproRunQuotaSession;
+                        request: ReproResourceRequest;
+                        command: ReproCommandSpec): ReproRunQuotaOffer =
+  ## Offer one process, retrying denials up to the static-capacity deadline.
+  var attempts = 0
+  var backoffMs = 0
+  var firstDeniedMs = -1
+  session.offerWithRunQuotaRetry(request, command, attempts, backoffMs,
+    firstDeniedMs)
 
 proc maxOfferBatchSize*(session: ReproRunQuotaSession): int =
   ## Maximum number of candidates the daemon will accept in a single
@@ -1081,15 +1170,17 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
           # so unrelated work keeps flowing in parallel.
           var deniedRetryBackoff = 0
           var deniedRetryAttempts = 1
+          var firstDeniedMs = -1
           let deniedMessage = decision.diagnostic.diagnosticText()
-          deniedRetryBackoff = nextDenialBackoff(deniedRetryBackoff)
-          reportDenialRetry(requests[inputIndex].label,
-            requests[inputIndex].commandStatsId,
-            deniedMessage, deniedRetryAttempts, deniedRetryBackoff)
-          sleep(deniedRetryBackoff)
-          result[inputIndex] = session.offerWithRunQuota(
-            requests[inputIndex], commands[inputIndex])
+          waitAfterDenial(requests[inputIndex].label,
+            requests[inputIndex].commandStatsId, deniedMessage,
+            deniedRetryAttempts, firstDeniedMs, deniedRetryBackoff)
+          result[inputIndex] = session.offerWithRunQuotaRetry(
+            requests[inputIndex], commands[inputIndex], deniedRetryAttempts,
+            deniedRetryBackoff, firstDeniedMs)
       processed += chunk
+  except ReproRunQuotaDeadlockError:
+    raise
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
 

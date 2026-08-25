@@ -55,16 +55,12 @@ proc generatedProviderDeclaresToolUse(buildDir, toolRef: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  # The socket path needs platform-specific shape:
-  #   Windows: a named pipe (\\.\pipe\...); the runquota daemon's --socket
-  #            argument auto-detects this prefix and switches to pipe mode.
-  #   POSIX:   a regular file path under the platform tempdir; the daemon
-  #            uses Unix sockets there.
-  let socketPath =
-    when defined(windows):
-      "\\\\.\\pipe\\repro-m9-rq-" & $getCurrentProcessId()
-    else:
-      getTempDir() / "repro-m9-rq-" & $getCurrentProcessId() & ".sock"
+  # The socket path needs platform-specific shape (a named pipe on
+  # Windows, a Unix socket in a private directory on POSIX) and the
+  # daemon refuses a POSIX socket in a world-writable directory, so
+  # the shape is derived rather than written out here.
+  let socketPath = runquotaSocketEndpoint(
+    "repro-m9-rq-" & $getCurrentProcessId())
   when not defined(windows):
     if fileExists(socketPath):
       removeFile(socketPath)

@@ -26,6 +26,20 @@ package autoconf:
     nixPackage "nixpkgs#autoconf", executablePath = "bin/autoconf",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Autoconf's release tarball carries a pre-generated configure script,
+    # so its source recipe does not execute autoconf while bootstrapping
+    # itself. The from-source cycle breaker still requires a non-Nix profile
+    # for the declared tool edge; this placeholder provides that profile
+    # without introducing a vendor binary into the resulting package.
+    tarball url = "https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz",
+      sha256 = "ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "configure",
+      packageId = "autoconf@2.72",
+      cpu = "any",
+      os = "any",
+      lockIdentity = "tarball:autoconf@2.72:sha256:ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a"
 
   # -------------------------------------------------------------------
   # DSL-port M9.R.2 — typed Layer-3 CLI surface for ``autoconf``.

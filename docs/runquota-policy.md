@@ -70,9 +70,10 @@ Concretely:
    bounded to a reasonable cap such as a few seconds) so that hot loops
    neither overload the daemon nor waste CPU.
 
-3. Reprobuild re-offers the lease and keeps trying for as long as the
-   build's overall deadline allows. The scheduler treats a still-denied
-   candidate the same way it treats a queued candidate: the action stays
+3. Reprobuild re-offers the lease until the denial deadline expires. The
+   deadline defaults to 30 seconds and can be changed with
+   `REPRO_RUNQUOTA_DENIAL_TIMEOUT` (milliseconds). The scheduler treats a
+   still-denied candidate the same way it treats a queued candidate: the action stays
    in the runnable set, the pool reservation remains held, and other
    independent actions continue to make progress.
 
@@ -94,10 +95,10 @@ Concretely:
    small for this build" as a configuration problem rather than a code
    problem.
 
-The implementation MUST NOT exit with `ReproRunQuotaError` on a denial.
-That exception type is reserved for protocol-level failures (the daemon
-crashed, the session lost framing, codec errors, etc.) — i.e. cases
-where retrying with the same session cannot recover.
+The implementation MUST NOT exit with an ordinary `ReproRunQuotaError` on a
+denial. Once the bounded denial deadline expires it raises the distinct
+`ReproRunQuotaDeadlockError`; protocol-level failures continue to use
+`ReproRunQuotaError`.
 
 ## Examples
 
@@ -123,13 +124,12 @@ solely because of the denial.
 
 ### Static capacity exceeded forever
 
-If the request statically exceeds the daemon's machine budget (for
-example a build that asks for 32 GiB on a 16 GiB host), reprobuild will
-keep retrying. The operator notices the build is stuck via the progress
-stream — every retry emits a denial diagnostic. The fix is to grow the
-daemon's configured budget, lower the recipe's request, or run the
-build on a larger host. Reprobuild does not autonomously decide that
-its caller's resource declaration is "wrong".
+If the request statically exceeds the daemon's machine budget (for example a
+build that asks for 32 GiB on a 16 GiB host), reprobuild retries with visible
+backoff until the denial deadline expires, then reports a distinct
+`static-capacity deadlock`. The fix is to grow the daemon's configured budget,
+lower the recipe's request, or run the build on a larger host. Reprobuild does
+not autonomously down-scale or bypass the caller's resource declaration.
 
 ## Diagnostics & observability
 

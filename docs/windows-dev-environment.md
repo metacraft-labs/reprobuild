@@ -22,7 +22,7 @@ visible there, and invisible everywhere else until it costs you an hour:
 ```
 reprobuild dev environment ready.
   nim          = ...\nim\2.2.8\prebuilt\nim-2.2.8\bin\nim.exe
-  gcc          = ...\gcc\15.2.0\bin\gcc.exe
+  gcc          = ...\gcc\16.1.0\bin\gcc.exe  (reports 16.1.0)
   just         = ...\just\1.51.0\just.exe
   bash         = ...\msys2\msys64\usr\bin\bash.exe
   clingo       = ...\clingo\5.8.0\clingo.dll
@@ -52,14 +52,54 @@ you suspect the code.
 ## What `env.ps1` provisions that is not obvious
 
 `windows/toolchain-versions.env` holds the pins; `windows/ensure-*.ps1` do the
-work. Three of them are hard dependencies whose absence produces a misleading
+work. Four of them are hard dependencies whose absence produces a misleading
 error rather than a missing-dependency message:
 
 | Step | Absent symptom | Why it is not optional |
 |---|---|---|
+| `ensure-gcc` | `Requested command not found: 'gcc.exe ...'` from `nim c` | `nim c` shells out to a C compiler for every module. See below. |
 | `ensure-clingo` | `could not load: clingo.dll` before `main` | `repro_solver`'s FFI is resolved eagerly at module init. There is no degraded mode. |
 | `ensure-nim-bearssl` | `cannot open file: bearssl/ec` | `repro_peer_cache/auth.nim` imports it. Pinned to the same rev as the flake's `bearssl-src`; bump both together. |
 | `ensure-openssl` | `ld.exe: cannot find -lssl` | See below. |
+
+### gcc is pinned, not discovered
+
+`GCC_VERSION` + `GCC_WINLIBS_RELEASE` + `GCC_WINLIBS_SHA256` name one WinLibs
+release. `ensure-gcc.ps1` downloads that archive, verifies its sha256 against
+the pin *and* against the checksum upstream publishes beside it, extracts it to
+`<install-root>\gcc\<version>`, and then checks that the installed binary
+reports the pinned version. Nothing about the result depends on what the host
+already had.
+
+That last part is the whole point, and it is worth stating plainly because the
+two earlier designs both violated it:
+
+* The step used to call `winget install BrechtSanders.WinLibs.POSIX.UCRT`.
+  winget accepts no version argument, so `GCC_VERSION` named a directory and
+  nothing else — one host ran a compiler reporting 16.1.0 out of a directory
+  called `15.2.0` for months. Worse, winget is absent on hosts without the MSIX
+  stack (an ephemeral CI runner has no App Installer), where the step could not
+  provision at all.
+* Provisioning used to be skipped entirely whenever any gcc ≥ 5 was already on
+  `PATH`. A toolchain the build merely *finds* is not pinned; whichever mingw a
+  developer happened to install decided how the code was compiled.
+
+Two consequences to know about:
+
+* A failure here is **fatal**, not a warning. It used to be a warning, and the
+  environment then printed `reprobuild dev environment ready.` with
+  `gcc = (not on PATH)` two lines below it — the actual error arrived half a
+  minute later out of `nim c`, naming neither the environment nor the pin.
+* The release must be the **`posix` / `ucrt`** WinLibs variant, and
+  `ensure-gcc.ps1` parses the release tag to enforce it. The pinned OpenSSL is
+  the MSYS2 `ucrt64` build; mixing C runtimes links cleanly and misbehaves
+  later (see below).
+
+Bump it by picking a release from
+[winlibs_mingw](https://github.com/brechtsanders/winlibs_mingw/releases),
+recording the sha256 published beside the x86_64 `.zip`, and keeping the
+builtin catalog's `packages/gcc_winlibs.nim` entry in step. If you deliberately
+supply your own C toolchain, set `WINDOWS_DIY_SKIP_GCC=1`.
 
 ### OpenSSL, and why it is an environment concern rather than a catalog one
 
@@ -125,20 +165,21 @@ Two related traps while you are here:
   to. If a build produces no output and no `gcc`/`nim` children, check for a
   leftover `repro` process with 0 CPU seconds before re-running.
 
-## Known-unfixed: gcc crashes under the automatic dependency monitor
+## Fixed: access violations under the automatic dependency monitor
 
-Some actions fail with a gcc exit code of `-1073741819` — `0xC0000005`,
-STATUS_ACCESS_VIOLATION — accompanied by
+Older Windows monitor shims could make an action fail with an exit code of
+`-1073741819` — `0xC0000005`, STATUS_ACCESS_VIOLATION — accompanied by
 
 ```
 repro internal io monitor: error: The process cannot access the file because
 it is being used by another process.
 ```
 
-The affected actions all carry `dependencyPolicyKind: dgAutomaticMonitor`. It
-is **nondeterministic**: successive runs of the same target failed 3, then 4,
-then 1 different actions, converging as retries succeed. gcc is crashing, not
-diagnosing a bad input, so nothing in the source is at fault.
+The affected actions all carry `dependencyPolicyKind: dgAutomaticMonitor`. The
+failure was **nondeterministic** because a Win64 callee may leave the upper half
+of the return register undefined for a 32-bit `BOOL` result. Narrowing the full
+register in an injected hook could raise a `RangeDefect` inside the monitored
+process. `io-mon` now applies Windows' 32-bit return-value semantics explicitly.
 
 **Do not "fix" this by disabling the monitor.** A declared-only /
 monitor-disabled dependency mode is a deliberate, documented soundness hole —
@@ -151,8 +192,10 @@ rebuild. It has been introduced by agents without approval more than once
 that genuinely cannot be monitored must FAIL or be NON-CACHEABLE
 (`Monitor-Hook-Shim.md:501`) — never marked complete-on-declared-inputs.
 
-Re-running is the current workaround. The real fix belongs in the Windows
-monitor.
+If this signature returns, first sync `io-mon`, stop any running Reprobuild
+daemon, and run `just build` so `build/lib/librepro_monitor_shim.dll` is rebuilt
+before the daemon starts again. Re-running with a stale DLL can appear to fix
+the problem by chance and is not a valid workaround.
 
 ## Scale: the full suite is long, not broken
 

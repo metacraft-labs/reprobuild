@@ -22,12 +22,30 @@ package libtool:
     nixPackage "nixpkgs#libtool", executablePath = "bin/libtool",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    tarball url = "https://ftp.gnu.org/gnu/libtool/libtool-2.5.4.tar.xz",
+      sha256 = "f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "configure",
+      packageId = "libtool@2.5.4",
+      cpu = "any",
+      os = "any",
+      lockIdentity = "tarball:libtool@2.5.4:sha256:f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675"
 
 package libtoolize:
   provisioning:
     nixPackage "nixpkgs#libtool", executablePath = "bin/libtoolize",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    tarball url = "https://ftp.gnu.org/gnu/libtool/libtool-2.5.4.tar.xz",
+      sha256 = "f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "configure",
+      packageId = "libtoolize@2.5.4",
+      cpu = "any",
+      os = "any",
+      lockIdentity = "tarball:libtoolize@2.5.4:sha256:f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675"
 
 # ---------------------------------------------------------------------------
 # Harvested MSYS2 catalog (cakBuiltin adapter consumer on Windows).

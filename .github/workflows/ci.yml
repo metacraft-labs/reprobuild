@@ -5,6 +5,20 @@ on:
     branches: [main, dev]
   pull_request:
 
+# This workflow supersedes its own older runs, on branches as well as pull
+# requests, and that is deliberate rather than merely inherited.
+#
+# It would be nice for every commit on `dev` to get its own verdict from these
+# jobs. It is not affordable: they run on a small, permanently saturated
+# self-hosted pool, and `dev` takes pushes faster than the pool drains. Letting
+# branch runs accumulate does not buy more verdicts -- it buys a backlog that
+# delays the pull-request checks people are actually waiting on, while the
+# branch verdicts arrive hours late against a commit several pushes old.
+#
+# The gate that must not be skipped therefore does not live here. The suite
+# case-count baseline runs in `suite-case-counts.yml`, on a hosted runner, in
+# seconds, with no cancellation -- so it reaches a verdict on every commit
+# without competing for this pool. See that workflow for the reasoning.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -99,8 +113,9 @@ jobs:
       # scan that answers in seconds -- so it is asked first, and the
       # failure annotation names this step rather than a lint log.
       #
-      # The pre-push hook (flake.nix `pre-commit-check`) is the first line
-      # of defence; this is the one that cannot be bypassed.
+      # This copy is a convenience, not the gate: it shares this job's fate,
+      # and this workflow supersedes its own branch runs. The gate that
+      # always reaches a verdict is `suite-case-counts.yml`.
       - name: Suite case-count baseline
         run: dev-exec bash scripts/check_suite_case_counts.sh
       - name: just lint
@@ -620,6 +635,39 @@ jobs:
             access-tokens = github.com=${{ github.token }}
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_test.outputs.token }}
         run: dev-exec just test
+      # RunQuota daemon diagnostics, collected whether or not anything
+      # failed.
+      #
+      # The `ct` build and a good part of the e2e suite each start their
+      # own `runquotad`, and a daemon that refuses to start says WHY in
+      # `.repro/runquota/runquotad.log` and nowhere else -- the caller
+      # only ever prints "runquotad exited before becoming ready. See
+      # <log>". Those logs sit in the working directory of whichever
+      # tree started the daemon (this repo, and CodeTracer's checkout
+      # next door), and neither is `test-logs/`, so the job used to
+      # discard the one file that explained its own failure and leave a
+      # red run with no diagnosis in it at all. Fold them into the
+      # existing artifact rather than adding a second one.
+      #
+      # Regular files only, and bounded: the same directory can hold
+      # daemon state (sqlite stores, sockets) that is neither small nor
+      # copyable.
+      - name: Collect runquotad diagnostics
+        if: always()
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          dest="${{ github.workspace }}/test-logs/runquota"
+          mkdir -p "$dest"
+          for root in "${{ github.workspace }}" "${{ github.workspace }}/../codetracer"; do
+            [ -d "$root/.repro/runquota" ] || continue
+            name="$(basename "$(cd "$root" && pwd)")"
+            mkdir -p "$dest/$name"
+            find "$root/.repro/runquota" -maxdepth 1 -type f -size -8M \
+              -exec cp {} "$dest/$name/" \; || true
+          done
+          echo "collected runquotad diagnostics:"
+          find "$dest" -type f -printf '  %p (%s bytes)\n' || true
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4

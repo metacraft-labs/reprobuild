@@ -23,6 +23,7 @@ proc runIoMonitorCli(programName: string; args: seq[string]): int =
 
 import repro_provider_runtime
 import repro_project_dsl
+import repro_dsl_stdlib/configurables/variants as solver_variants
 # PMC-4: `repro lock validate` compares a lock's recorded
 # microarchitecture target against this host through the SAME primitive
 # selection uses (`resolvedTargetSatisfiedBy`). A validator with its own
@@ -33,6 +34,10 @@ import repro_dsl_stdlib/packages_schema
 import repro_home_apply/package_catalog
 import repro_standard_provider_protocol
 import repro_runquota
+# M18: ``repro stats`` reads RunQuota's observation store through
+# ``runquotad``'s query interface. This module is the ONLY read path;
+# nothing here opens the store's database file.
+import repro_runquota/stats_query
 import repro_hash
 # M4: unified Workspace-VCS evidence record + derived JSON view.
 # ``writeBuildReport`` embeds the JSON view under the new
@@ -1199,20 +1204,131 @@ proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata;
   payload.addCmakeFingerprintField(meta.providerStateFile)
   weakFingerprintFromText(payload)
 
+const ActionPathPassthrough = ["PATH"]
+  ## The environment variables an action's `PATH` composition takes from
+  ## the HOST. Declared beside `actionPathEntry` below, and used by every
+  ## lowering site that calls it, so the two can never drift apart: a
+  ## site that composes a host value without saying so is exactly the
+  ## defect this pair exists to prevent.
+  ##
+  ## ## THE CLASSIFICATION RULE
+  ##
+  ## An action's declared environment mixes two very different kinds of
+  ## value, and which class a variable belongs in is decided by WHERE
+  ## THE LOWERING GOT IT, not by what it looks like:
+  ##
+  ## * **Obtained by reading the ambient environment** (`getEnv`) or by
+  ##   probing the host filesystem — PASSTHROUGH. The value is a fact
+  ##   about this machine, it does not determine what the action
+  ##   computes, and pinning it would key every edge to one host.
+  ##   `PATH` and `REPROBUILD_SOURCE_ROOT` are the two.
+  ##
+  ## * **Obtained from the solved graph** — DECLARED, by value. These
+  ##   look host-absolute and are not: `DEP_NIM_ROOT`, `BEARSSL_SRC`,
+  ##   `OUT_MIRROR` and the rest of the `DEP_*_ROOT` / `*_SRC` family
+  ##   are `/nix/store` paths, but they are *package identities*. A
+  ##   different `DEP_NIM_ROOT` is a different compiler, and an action
+  ##   built against it really is a different action. Excluding them
+  ##   would be a stale-serve hole, not a portability win.
+  ##
+  ## Two consequences worth being explicit about, because they are the
+  ## first things a reader will suspect are oversights:
+  ##
+  ## 1. Those fifteen `/nix/store` values are in every key BY VALUE.
+  ##    That is deliberate under the rule above, and it is also NOT a
+  ##    change: they arrive through the DSL's `extraEnv`, which
+  ##    `encodeBuildActionPayload` has serialised since v14 and which
+  ##    every lowering site already folds into its fingerprint text via
+  ##    `node.payload`. Keying the environment admitted no new value to
+  ##    any key — every value now in a key was already in one.
+  ##
+  ## 2. It DOES make those keys non-portable across machines, which is
+  ##    the same complaint `repro_build_engine.nim`'s shim-library seed
+  ##    answers differently: it keeps the machine-specific
+  ##    `REPRO_MONITOR_SHIM_LIB` out of `action.env` entirely, injecting
+  ##    it at launch. That is consistent with the rule, not in conflict
+  ##    with it — the shim path is a host probe, not a solved-graph
+  ##    identity, so it is in the first class. Making the solved-graph
+  ##    values portable is content-addressing work, not a reason to
+  ##    reclassify them.
+  ##
+  ## ## Applied unconditionally, and what that costs
+  ##
+  ## Every lowering site that composes a `PATH` passes this whole list;
+  ## there is no per-variable opt-in and no way for a recipe to ask for
+  ## `PATH` to be keyed by value. The price is real and one-directional:
+  ## a recipe that overrides `PATH` explicitly through `extraEnv` gets
+  ## that override applied to the process (it is appended after the
+  ## prefix and wins) but NOT reflected in the key, so two recipes
+  ## differing only in an explicit `extraEnv` `PATH` share a cache
+  ## entry. This is most reachable on inline-exec edges, which carry no
+  ## `profile.profileFingerprint` to distinguish them by other means.
+  ## BuildXL has the same behaviour for the same reason — a passthrough
+  ## variable's value is untracked even when the build sets it — but
+  ## BuildXL lets a spec choose per variable and this does not.
+
+proc actionPathEntry(actionPathPrefix: string): string =
+  ## The action's `PATH`: the resolved tool directories this edge
+  ## declares, then whatever the host has.
+  ##
+  ## ## The `getEnv` here is deliberate, and it is not in a cache key
+  ##
+  ## Every caller pairs this with `envPassthrough =
+  ## ActionPathPassthrough`, which puts `PATH` in BuildXL's passthrough
+  ## class: `keyedOnActionEnvironment` records the NAME and refuses the
+  ## VALUE. So the host's `PATH` cannot reach a cache record, which is
+  ## the property that matters — PR #96's `NIX_STORE_DIR` defect was an
+  ## ambient value entering a record permanently because a key
+  ## computation read the environment.
+  ##
+  ## Keying on this value instead would be a much larger defect than the
+  ## one it appears to fix. The prefix is absolute store paths and the
+  ## tail is the host's `PATH`; neither is the same under `nix develop`
+  ## as in CI. Every edge of every graph would invalidate on any host
+  ## difference. BuildXL reaches the same conclusion twice over: `PATH`
+  ## is one of its untracked base variables
+  ## (`PipEnvironment.cs:88-110`), and a passthrough variable's value is
+  ## not fingerprinted even when the build declares it explicitly
+  ## (`Build-Parameters-(Environment-variables).md:39`).
+  ##
+  ## What this does NOT recover is the PREFIX's contribution: the
+  ## resolved tool directories are also excluded, because they are
+  ## host-absolute for the same reason. For typed-tool edges the tool
+  ## identity is already keyed through `profile.profileFingerprint`.
+  ## For inline-exec edges it is not yet, and making it so needs the
+  ## portable-key work, not a raw path in a key.
+  "PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")
+
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
   # CMake may invoke ``repro build --prepare-only`` while regenerating.
   # Keep that provider-priming call in the current process tree instead of
   # handing a transient CMake binary dir to a second daemon session.
   var env: seq[string] = @["REPRO_DAEMON=off"]
+  # The FOURTH lowering site, and the one that makes the rule worth
+  # stating as a rule: this edge composes its environment by hand, ~400
+  # lines away from the three that go through `lowerGraphAction`, and a
+  # sweep of "the lowering sites" missed it. Both values below are
+  # obtained by reading the ambient environment, so both are
+  # PASSTHROUGH — see `ActionPathPassthrough` for the classification
+  # rule and why keying them by value would be the very defect the
+  # passthrough class exists to prevent.
+  var envPassthrough: seq[string] = @[]
   if meta.providerRoot.len > 0:
     let wrapperPath = meta.values.metadataValue("wrapper_path",
       meta.providerRoot / "bin")
     if wrapperPath.len > 0:
-      env.add("PATH=" & wrapperPath & $PathSep & getEnv("PATH"))
+      env.add(actionPathEntry(wrapperPath))
+      envPassthrough.add("PATH")
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
+    # A machine-specific absolute path read straight from the host, and
+    # the exact shape `repro_build_engine.nim`'s shim-library seed
+    # refuses to put in `action.env` because it "would make the action
+    # ID non-reproducible across machines". Passthrough records that
+    # this edge reads it without pinning one machine's answer.
     env.add("REPROBUILD_SOURCE_ROOT=" & sourceRoot)
+    envPassthrough.add("REPROBUILD_SOURCE_ROOT")
   let depfilePath = cmakeRegenerationDepfile(meta)
   let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
   action("__repro_cmake_regenerate", @[
@@ -1234,7 +1350,8 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     weakFingerprint = cmakeRegenerationFingerprint(meta, publicCliPath),
     depfile = depfilePath,
     dependencyPolicy = requiredMakeDepfilePolicy(depfilePath),
-    env = env)
+    env = env,
+    envPassthrough = envPassthrough)
 
 proc prependProcessPath(path: string) =
   if path.len == 0:
@@ -1588,9 +1705,47 @@ proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
         dirs.add(dir)
   dirs.join($PathSep)
 
+proc scriptInterpreterArgv(executablePath: string): seq[string] =
+  ## Windows does not interpret shebangs before CreateProcessW. Lower a typed
+  ## script tool to its declared interpreter while keeping native executables
+  ## and every non-Windows invocation unchanged.
+  when defined(windows):
+    if not fileExists(extendedPath(executablePath)):
+      return
+    var executableFile: File
+    if not open(executableFile, extendedPath(executablePath), fmRead):
+      return
+    defer:
+      executableFile.close()
+    var marker: array[2, char]
+    if executableFile.readBuffer(addr marker[0], marker.len) != marker.len or
+        marker != ['#', '!']:
+      return
+    var firstLine = ""
+    if not executableFile.readLine(firstLine):
+      return
+    let fields = firstLine.strip().splitWhitespace()
+    if fields.len == 0:
+      return
+    let normalizedInterpreter = fields[0].replace('\\', '/')
+    if normalizedInterpreter.endsWith("/env"):
+      var firstCommandArg = 1
+      if firstCommandArg < fields.len and fields[firstCommandArg] == "-S":
+        inc firstCommandArg
+      for i in firstCommandArg ..< fields.len:
+        result.add(fields[i])
+    else:
+      if normalizedInterpreter.startsWith("/"):
+        result.add(lastPathPart(normalizedInterpreter))
+      else:
+        result.add(fields[0])
+      for i in 1 ..< fields.len:
+        result.add(fields[i])
+
 proc argvForCall*(call: PublicCliCall;
                   profile: PathOnlyToolProfile): seq[string] =
-  result = @[profile.resolvedExecutablePath]
+  result = scriptInterpreterArgv(profile.resolvedExecutablePath)
+  result.add(profile.resolvedExecutablePath)
 
   proc encodedValues(arg: PublicCliArg): seq[string] =
     if arg.nimType.normalize == "seq[string]":
@@ -2093,8 +2248,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # The fix mirrors the typed-tool path below: prepend the called tool and
     # this action's explicit tool refs to PATH, then append per-edge overrides.
     var inlineEnv: seq[string] = @[]
+    var inlineEnvPassthrough: seq[string] = @[]
     if actionPathPrefix.len > 0:
-      inlineEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
+      inlineEnv.add(actionPathEntry(actionPathPrefix))
+      inlineEnvPassthrough = @ActionPathPassthrough
     for entry in payload.env:
       inlineEnv.add(entry[0] & "=" & entry[1])
     return repro_build_engine.action(
@@ -2119,6 +2276,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         payload.dependencyPolicy),
       commandStatsId = commandStatsId,
       env = inlineEnv,
+      envPassthrough = inlineEnvPassthrough,
       requiresElevation = payload.requiresElevation)
 
   if payload.call.packageName == "reprobuild.builtin" and
@@ -2348,8 +2506,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       node.payload
     ].join("\n")
     var mergedEnv: seq[string] = @[]
+    var mergedEnvPassthrough: seq[string] = @[]
     if actionPathPrefix.len > 0:
-      mergedEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
+      mergedEnv.add(actionPathEntry(actionPathPrefix))
+      mergedEnvPassthrough = @ActionPathPassthrough
     # MR10: per-edge env-var injections from the typed-tool wrapper's
     # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
     # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
@@ -2377,7 +2537,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
       commandStatsId = commandStatsId,
-      env = mergedEnv)
+      env = mergedEnv,
+      envPassthrough = mergedEnvPassthrough)
 
   # M9.R.12.2 — fall back to ``packageName`` alone when the recipe's
   # ``nativeBuildDeps:`` declares the tool by its package selector
@@ -2413,6 +2574,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       payload.commandStatsId
     else:
       payload.id
+  let invocationArgv = argvForCall(payload.call, profile)
+  let executableArgIndex = invocationArgv.find(profile.resolvedExecutablePath)
+  let invocationPrefix =
+    if executableArgIndex > 0:
+      invocationArgv[0 ..< executableArgIndex].join("\x1f")
+    else:
+      ""
   let fingerprintText = [
     "reprobuild.localProjectAction.v1",
     payload.id,
@@ -2420,11 +2588,14 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     executableName,
     payload.call.subcommand,
     node.payload,
-    digestHex(profile.profileFingerprint)
+    digestHex(profile.profileFingerprint),
+    invocationPrefix
   ].join("\n")
   var mergedEnv: seq[string] = @[]
+  var mergedEnvPassthrough: seq[string] = @[]
   if actionPathPrefix.len > 0:
-    mergedEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
+    mergedEnv.add(actionPathEntry(actionPathPrefix))
+    mergedEnvPassthrough = @ActionPathPassthrough
   # MR10: per-edge env-var injections from the typed-tool wrapper's
   # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
   # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
@@ -2432,7 +2603,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     mergedEnv.add(entry[0] & "=" & entry[1])
   result = repro_build_engine.action(
     payload.id,
-    argvForCall(payload.call, profile),
+    invocationArgv,
     # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares no
     # lock files is governed by `default`, the one workspace lock.
     governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
@@ -2453,7 +2624,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
     commandStatsId = commandStatsId,
-    env = mergedEnv)
+    env = mergedEnv,
+    envPassthrough = mergedEnvPassthrough)
 
 proc levenshtein(a, b: string): int =
   ## Named-Targets M2 ``unknown_target`` diagnostic helper. A small
@@ -3280,7 +3452,16 @@ proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
 
 const
   LoweredGraphCacheMagic = "RBLG"
-  LoweredGraphCacheVersion = 5'u16
+  # v6 — the lowered-graph cache learned `BuildAction.envPassthrough`.
+  # A v5 record cannot carry it, and a v5 record READ as v6 would come
+  # back with an empty passthrough set: every action's declared-vs-host
+  # classification silently lost on the warm path, which is exactly the
+  # defect the bump exists to make impossible. The weak fingerprint is
+  # stored explicitly so keys do not move, but `launchChildEnv`'s
+  # passthrough resolution and the stage-2 census both read this field,
+  # and a census that answers differently cold and warm is not a
+  # measurement.
+  LoweredGraphCacheVersion = 6'u16
   LoweredGraphAlgorithmVersion = "reprobuild.loweredGraph.v1"
 
 type
@@ -4000,6 +4181,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.argv)
   outp.writeString(action.cwd)
   outp.writeStringSeq(action.env)
+  outp.writeStringSeq(action.envPassthrough)
   outp.writeString(action.pool)
   outp.writeU32Le(action.poolUnits)
   outp.writeU32Le(action.cpuMilli)
@@ -4049,6 +4231,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.argv = readStringSeq(bytes, pos)
   result.cwd = readString(bytes, pos)
   result.env = readStringSeq(bytes, pos)
+  result.envPassthrough = readStringSeq(bytes, pos)
   result.pool = readString(bytes, pos)
   result.poolUnits = readU32Le(bytes, pos)
   result.cpuMilli = readU32Le(bytes, pos)
@@ -4380,6 +4563,30 @@ proc runQuotaAuthorityHeaderLine*(bypassed: bool): string =
   else:
     "runQuota: active (lease authority)"
 
+proc environmentInheritanceHeaderLine*(
+    census: EnvironmentInheritanceCensus): string =
+  ## STAGE 2: the build-header line reporting how much of this graph runs
+  ## on an environment Reprobuild neither declares nor records.
+  ##
+  ## Reprobuild passes `env` as an OVERLAY on the environment the build
+  ## process inherited, so an action declaring nothing runs with the whole
+  ## host environment. That is a real channel and it is currently silent.
+  ## This states its size and changes nothing about it — closing the
+  ## channel breaks edges, and the breakage should be a measured list
+  ## rather than a surprise.
+  ##
+  ## It is a FACT line, not a warning: nothing here is wrong yet, and
+  ## dressing a measurement up as a warning trains people to skip it.
+  if census.totalActions == 0:
+    return "env: no process actions in this graph"
+  let percent = (census.undeclaredActions * 100) div census.totalActions
+  "env: " & $census.declaringActions & "/" & $census.totalActions &
+    " process actions declare a variable, " & $census.passthroughActions &
+    " name a passthrough variable, " & $census.undeclaredActions &
+    " (" & $percent & "%) declare nothing; all " & $census.totalActions &
+    " also inherit the build environment (declared entries overlay it, " &
+    "they do not replace it)"
+
 proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
                       providerInvocationCount: int;
@@ -4609,6 +4816,43 @@ proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
       plan.interfaceFingerprint, plan.providerFingerprint, plan.workDir):
     return
   removeFile(extendedPath(artifactPath))
+
+const ProviderCompileActionId = "__repro_provider_compile"
+
+var providerCompileConsultations: int
+var providerCompileLaunchedInThisProcess: bool
+  ## Per-PROCESS ledger of every engine consultation of the ONE
+  ## ``__repro_provider_compile`` edge, and whether any of them actually
+  ## launched a compile.
+  ##
+  ## Why this has to exist for the log line to mean anything: one
+  ## ``repro build`` reaches the provider-compile edge up to three times —
+  ## the daemon-spawn pool discovery (``getRecipeBuildPools`` →
+  ## ``refreshRecipeProviderSnapshot``), the scoped-tool snapshot refresh,
+  ## and the build itself — for the same reason ``extractInterfaceEdge``
+  ## is reached several times (see ``interfaceEdgeSessionResults``). Only
+  ## the LAST one is logged. The earlier passes are the ones that do the
+  ## work, so the logged pass is a no-op WHENEVER a compile happened, and
+  ## reads byte-identically to an invocation in which nothing happened at
+  ## all. Measured pre-fix: a run that spent 63 s in a real ``nim c`` of
+  ## the provider and a run that did nothing printed the same line.
+  ##
+  ## Scope, stated plainly: this counts consultations in THIS process. All
+  ## the passes above run in one process (the CLI with ``--daemon=off``,
+  ## the daemon session process otherwise), so the count is complete for
+  ## the invocation it describes; it is not a claim about work some other
+  ## process may have done.
+
+proc noteProviderCompileConsultation(buildResult: BuildRunResult) =
+  for item in buildResult.results:
+    if item.id == ProviderCompileActionId:
+      inc providerCompileConsultations
+      if item.launched:
+        providerCompileLaunchedInThisProcess = true
+
+proc providerCompileInvocationSummary(): string =
+  " consultations=" & $providerCompileConsultations &
+    " compiled=" & $providerCompileLaunchedInThisProcess
 
 proc providerCompileFailure(buildResult: BuildRunResult): string =
   for item in buildResult.results:
@@ -5519,6 +5763,16 @@ proc siblingStandardProviderPath(publicCliPath: string): string =
     os.normalizedPath(candidate)
   else:
     ""
+
+proc standardProviderArtifactIdForBinary*(binaryPath: string): string =
+  ## Graph snapshots contain convention-lowered commands, so their identity
+  ## must change whenever the standard-provider implementation changes.
+  ## Content addressing preserves sharing across installations at different
+  ## filesystem paths.
+  if not fileExists(extendedPath(binaryPath)):
+    raise newException(IOError,
+      "standard provider binary does not exist: " & binaryPath)
+  StandardProviderArtifactId & "." & fileContentDigest(binaryPath)
 
 type
   BuildProgressMode = enum
@@ -7323,6 +7577,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     loggedRunQuotaAuthority = true
     logSummary(runQuotaAuthorityHeaderLine(runResult.runQuotaBypassed))
+    # STAGE 2: report the undeclared-environment population beside the
+    # resource-authority line, for the same reason — a state the build
+    # is in that nobody can see is a state nobody can decide about.
+    logSummary(environmentInheritanceHeaderLine(
+      runResult.environmentInheritance))
 
   proc warnRunQuotaBypassIfUsed(runResult: BuildRunResult) =
     if warnedRunQuotaBypass or not fallbackToRunQuotaBypass:
@@ -8259,12 +8518,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       artifact.projectInterface.standardBuildEligible:
     let standardProviderBinary = siblingStandardProviderPath(publicCliPath)
     if standardProviderBinary.len > 0:
+      let standardProviderArtifactId =
+        standardProviderArtifactIdForBinary(standardProviderBinary)
       invocationFastPath = "tier2b-standard-direct"
       logSummary("standardDirect: dispatching " & standardProviderBinary)
       logSummary("project: " & artifact.projectInterface.projectName)
       logSummary("interface: " & interfacePath)
       logSummary("providerBinary: " & standardProviderBinary)
-      logSummary("providerArtifact: " & StandardProviderArtifactId)
+      logSummary("providerArtifact: " & standardProviderArtifactId)
       logSummary("runQuotaSocket: " & runQuotaSocketDiagnostic())
       let synthIdentity = PathOnlyBuildIdentity(
         projectName: artifact.projectInterface.projectName,
@@ -8274,7 +8535,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       let refresh = refreshProviderGraph(RefreshConfig(
         storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
         providerBinaryPath: standardProviderBinary,
-        providerArtifactId: StandardProviderArtifactId,
+        providerArtifactId: standardProviderArtifactId,
         rootEntryPointId: StandardProviderRootEntryPointId,
         rootArguments: result.projectRoot,
         namespace: StandardProviderNamespace,
@@ -8454,11 +8715,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
       warnRunQuotaBypassIfUsed(providerCompileResult)
+      noteProviderCompileConsultation(providerCompileResult)
       for item in providerCompileResult.results:
+        # `status`/`launched`/`cache` describe THIS consultation only.
+        # `consultations`/`compiled` describe the whole invocation, which
+        # is what a reader of this line is actually asking about — see
+        # `providerCompileLaunchedInThisProcess`.
         logAction("providerCompileAction: " & item.id & " status=" &
           $item.status & " launched=" & $item.launched & " cache=" &
           $item.cacheDecision & " wouldLaunch=" & $item.wouldLaunch &
-          (if item.reason.len > 0: " reason=" & item.reason else: ""))
+          (if item.reason.len > 0: " reason=" & item.reason else: "") &
+          providerCompileInvocationSummary())
       if providerCompileResult.hasFailedActions():
         raise newException(OSError, providerCompileFailure(providerCompileResult))
       if not fileExists(extendedPath(providerArtifactPath)):
@@ -13099,7 +13366,8 @@ proc runManifestRefreshHookCommand*(hookName: string;
 # and NOTHING when the workspace is already consistent. Declared here because
 # the implementation needs ``repoRemovalBlockers``, which lives beside the
 # membership verbs far below.
-proc reconcileLocalStateForHook(workspaceRoot: string): seq[string]
+proc reconcileLocalStateForHook(workspaceRoot: string):
+  tuple[loud, quiet: seq[string]]
 
 proc runHooksDispatchCommand(args: openArray[string]): int =
   ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
@@ -14277,10 +14545,14 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   # unset on Windows so child actions (which inherit the daemon's
   # env) likewise hit the default endpoint.
   #
-  # POSIX: keep the per-PID ``.sock`` path in ``$TMPDIR`` — Unix
-  # domain sockets need a concrete filesystem path, the PID guards
-  # against collisions between concurrent daemons, and the
-  # filesystem reclaims the inode when the daemon exits.
+  # POSIX: a per-PID Unix socket, but inside a DIRECTORY OF ITS OWN
+  # rather than loose in ``$TMPDIR``. The socket's parent directory is
+  # the rendezvous point that ``runquotad`` verifies before binding and
+  # every client verifies before connecting, and a shared ``/tmp`` is
+  # root-owned ``1777``, which fails both halves — the daemon exits
+  # before it listens and the build dies with the refusal in its log.
+  # ``runquotaEndpointPath`` owns that rule; see its docs for why the
+  # answer is a private directory and not a laxer check.
   # M9.R.12.3 — declare the standard named pools the convention layer
   # registers (``compile`` + ``fetch``). Without these flags the daemon
   # initialises ``namedPoolCaps`` empty, so every action that requests
@@ -14314,8 +14586,8 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
     putEnv("RUNQUOTA_SOCKET", "")
     let socket = ""
   else:
-    let socket = getTempDir() / ("reprobuild-runquota-" &
-      $getCurrentProcessId() & ".sock")
+    let socket = runquotaEndpointPath(
+      "reprobuild-runquota-" & $getCurrentProcessId())
     if fileExists(socket):
       removeFile(socket)
     var args = @[
@@ -16420,7 +16692,9 @@ proc repositoryNameFromUrl(url: string): string =
   value
 
 proc lockedDepsForWorkspace(workspaceRoot: string;
-                            usesSelectors: seq[string] = @[]): seq[LockedDep] =
+                            usesSelectors: seq[string] = @[];
+                            sourceRecipeRoots: seq[string] = @[]):
+                            seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
   ## url/ref/revision) and a genuinely-computed INTEGRITY multihash. The root
@@ -16482,6 +16756,39 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     siblingDeps.add(dep)
     seenPaths.add(dep.path)
     seenNames.add(dep.name)
+  # A federated source catalog is itself a reproducibility input. Recipe paths
+  # live below that repository, so normalize each one to its enclosing Git
+  # worktree and lock the repository once rather than recording hundreds of
+  # package subdirectories as unrelated dependencies.
+  for recipeRoot in sourceRecipeRoots:
+    let repoRoot = gitTopLevel(recipeRoot)
+    if repoRoot.len == 0:
+      continue
+    let depAbs = absolutePath(repoRoot)
+    if cmpPaths(depAbs, root) == 0:
+      continue
+    let rel = relativePath(depAbs, root).replace('\\', '/')
+    if rel in seenPaths:
+      continue
+    let facts = committedLockRepoFacts(depAbs)
+    let bareName = extractFilename(depAbs.strip(
+      leading = false, trailing = true, chars = {'/', '\\'}))
+    let originName = repositoryNameFromUrl(facts.originUrl)
+    let depName =
+      if originName.len > 0: originName
+      elif bareName.len > 0: bareName
+      else: "source-catalog"
+    if depName in seenNames:
+      continue
+    siblingDeps.add(LockedDep(
+      name: depName, path: rel,
+      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+        gitRef: facts.branch, revision: facts.headSha),
+      integrity: computeDepIntegrity(depAbs, facts.headSha),
+      version: "", visibility: "public", participation: "",
+      depends: @[], tags: @[]))
+    seenPaths.add(rel)
+    seenNames.add(depName)
   var rootDepends: seq[string] = @[]
   for d in siblingDeps: rootDepends.add(d.name)
   result.add(LockedDep(
@@ -17485,6 +17792,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "argv": jsonStringSeq(action.argv),
     "cwd": action.cwd,
     "env": jsonStringSeq(action.env),
+    "envPassthrough": jsonStringSeq(action.envPassthrough),
     "pool": action.pool,
     "poolUnits": action.poolUnits,
     "cpuMilli": action.cpuMilli,
@@ -17829,6 +18137,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       skipCacheHitEvidence: true)
     let providerCompileResult = runBuild(graph([providerCompileAction]),
       providerCompileConfig)
+    # This pass logs nothing of its own, and it is the pass that most
+    # often does the actual compiling. Record it so the ONE line that IS
+    # logged (in `executeBuildTarget`) can report the invocation rather
+    # than just its own last consultation.
+    noteProviderCompileConsultation(providerCompileResult)
     if providerCompileResult.hasFailedActions():
       raise newException(OSError, providerCompileFailure(providerCompileResult))
     # Re-derived from the engine's own decision now that the hand-written
@@ -18029,6 +18342,11 @@ proc refreshRecipeProviderSnapshot(target: string;
       skipCacheHitEvidence: true)
     let providerCompileResult = runBuild(graph([providerCompileAction]),
       providerCompileConfig)
+    # This pass logs nothing of its own, and it is the pass that most
+    # often does the actual compiling. Record it so the ONE line that IS
+    # logged (in `executeBuildTarget`) can report the invocation rather
+    # than just its own last consultation.
+    noteProviderCompileConsultation(providerCompileResult)
     if providerCompileResult.hasFailedActions():
       raise newException(OSError, providerCompileFailure(providerCompileResult))
     if not fileExists(extendedPath(providerArtifactPath)):
@@ -18449,7 +18767,12 @@ type
 
   StatsActionRollup = object
     actionId: string
-    target: string
+    statsKey: string
+      ## The action's RunQuota stats key, carried from the spine row the
+      ## extension row was joined to. It is what ties an action to the
+      ## work RunQuota admitted, and it replaces the M7 store's
+      ## project-local ``target`` field, which the shared store has no
+      ## dimension for.
     resultSamples: int
     cacheSamples: int
     cacheHits: int
@@ -18458,24 +18781,6 @@ type
     inputSamples: int
     maxInputCount: int
     maxOutputCount: int
-
-  StatsTargetRollup = object
-    target: string
-    runIds: HashSet[string]
-    observations: int
-    actionSamples: int
-    launched: int
-    cacheSamples: int
-    cacheHits: int
-    cacheMisses: int
-    buildTotalUs: float
-    buildTotalSamples: int
-
-  StatsWindow = object
-    observationCount: int
-    runIds: HashSet[string]
-    firstMs: int64
-    lastMs: int64
 
 proc nowUnixMsCli(): int64 =
   let current = getTime()
@@ -18506,111 +18811,62 @@ proc safeSnapshotLabel(label: string): string =
 proc statsSnapshotPath(projectRoot, label: string): string =
   defaultStatsSnapshotDir(projectRoot) / (safeSnapshotLabel(label) & ".json")
 
-proc statsWindow(nodes: openArray[JsonNode]): StatsWindow =
-  result.firstMs = int64.high
-  for node in nodes:
-    inc result.observationCount
-    let runId = node{"runId"}.getStr()
-    if runId.len > 0:
-      result.runIds.incl(runId)
-    let occurred = node{"occurredAtUnixMs"}.getBiggestInt(0)
-    if occurred > 0:
-      result.firstMs = min(result.firstMs, occurred)
-      result.lastMs = max(result.lastMs, occurred)
-  if result.firstMs == int64.high:
-    result.firstMs = 0
+proc statsWindowJson(view: SharedStoreView): JsonNode =
+  ## THE QUALIFICATION EVERY REPORTED STATISTIC CARRIES (M18).
+  ##
+  ## Time window, sample count, and the host/hardware profiles the figures
+  ## describe, plus the STATE that says whether they may be believed at
+  ## all. ``observationCount`` is retained as the count of
+  ## ``ext_repro_action`` rows in the window so the shape of this object is
+  ## still the one ``repro stats`` documents; everything beside it is new
+  ## and is what OS-2 and OS-6 require to be visible.
+  result = windowJson(view)
+  result["observationCount"] = %view.actionRows.len
 
-proc statsWindowJson(window: StatsWindow): JsonNode =
-  %*{
-    "observationCount": window.observationCount,
-    "runCount": window.runIds.len,
-    "firstObservationUnixMs": window.firstMs,
-    "lastObservationUnixMs": window.lastMs
-  }
+proc unavailableReason(view: SharedStoreView): string =
+  ## The reason a view carries when the shared store has no figures to
+  ## render. NEVER "no data": each state has its own sentence, because the
+  ## reader's next action differs for each and a view that collapses them
+  ## has told the reader nothing.
+  view.reason
 
-proc cacheDecisionKind(value: string): string =
-  let v = value.normalize()
-  if v.contains("hit"):
-    "hit"
-  elif v.contains("miss"):
-    "miss"
-  elif v.contains("reject"):
-    "rejected"
-  elif v.contains("notcache"):
-    "not-cacheable"
-  else:
-    "other"
-
-proc actionRollups(nodes: openArray[JsonNode]): Table[string, StatsActionRollup] =
-  for node in nodes:
-    let fields = node{"fields"}
-    let actionId = fields{"actionId"}.getStr()
+proc actionRollups(view: SharedStoreView): Table[string, StatsActionRollup] =
+  ## Rolled up from ``ext_repro_action`` rows read back over RQSP.
+  ##
+  ## ONE ROW PER EXECUTION, WHICH IS NOT ONE ROW PER ACTION. RunQuota's
+  ## spine records executions, and a cache HIT is precisely the case where
+  ## nothing executed — so the hit counted here is only the hit an
+  ## execution reported, and ``docs/stats.md`` says so where a reader will
+  ## find it.
+  proc count(row: SharedActionRow; name: string): int =
+    try:
+      parseInt(row.value(name))
+    except ValueError:
+      0
+  for row in view.actionRows:
+    let actionId = row.value("action_id")
     if actionId.len == 0:
       continue
     var item = result.getOrDefault(actionId)
     item.actionId = actionId
-    if item.target.len == 0:
-      item.target = node{"target"}.getStr()
-    case node{"kind"}.getStr()
-    of "action-result":
-      inc item.resultSamples
-      if fields{"launched"}.getBool(false):
-        inc item.launched
-    of "cache-decision":
-      inc item.cacheSamples
-      case cacheDecisionKind(fields{"cacheDecision"}.getStr())
-      of "hit":
-        inc item.cacheHits
-      of "miss":
-        inc item.cacheMisses
-      else:
-        discard
-    of "dependency-evidence":
-      inc item.inputSamples
-      let inputCount =
-        fields{"declaredInputs"}.getInt(0) +
-        fields{"depfileInputs"}.getInt(0) +
-        fields{"monitorReads"}.getInt(0) +
-        fields{"monitorProbes"}.getInt(0)
-      item.maxInputCount = max(item.maxInputCount, inputCount)
-      item.maxOutputCount = max(item.maxOutputCount,
-        fields{"declaredOutputs"}.getInt(0) +
-        fields{"monitorWrites"}.getInt(0))
+    item.statsKey = row.statsKey
+    inc item.resultSamples
+    inc item.launched
+    inc item.cacheSamples
+    case row.value("cache_outcome")
+    of "hit":
+      inc item.cacheHits
+    of "miss":
+      inc item.cacheMisses
     else:
       discard
+    inc item.inputSamples
+    item.maxInputCount = max(item.maxInputCount,
+      row.count("declared_inputs") + row.count("depfile_inputs") +
+        row.count("monitor_reads") + row.count("monitor_probes"))
+    item.maxOutputCount = max(item.maxOutputCount,
+      row.count("declared_outputs") + row.count("monitor_writes"))
     result[actionId] = item
-
-proc targetRollups(nodes: openArray[JsonNode]): Table[string, StatsTargetRollup] =
-  for node in nodes:
-    let target = node{"target"}.getStr("default")
-    var item = result.getOrDefault(target)
-    item.target = target
-    inc item.observations
-    let runId = node{"runId"}.getStr()
-    if runId.len > 0:
-      item.runIds.incl(runId)
-    let fields = node{"fields"}
-    case node{"kind"}.getStr()
-    of "action-result":
-      inc item.actionSamples
-      if fields{"launched"}.getBool(false):
-        inc item.launched
-    of "cache-decision":
-      inc item.cacheSamples
-      case cacheDecisionKind(fields{"cacheDecision"}.getStr())
-      of "hit":
-        inc item.cacheHits
-      of "miss":
-        inc item.cacheMisses
-      else:
-        discard
-    of "metric":
-      if fields{"name"}.getStr() == "repro build total":
-        item.buildTotalUs += fields{"totalUs"}.getFloat(0.0)
-        inc item.buildTotalSamples
-    else:
-      discard
-    result[target] = item
 
 proc graphActionMap(info: BuildGraphInspection): Table[string, BuildAction] =
   for action in info.actions:
@@ -18629,7 +18885,7 @@ proc graphMetadataJson(info: BuildGraphInspection): JsonNode =
   }
 
 proc unavailableStatsJson(command, scope, metric, projectRoot, storePath,
-                          reason: string; window: StatsWindow): JsonNode =
+                          reason: string; view: SharedStoreView): JsonNode =
   %*{
     "schemaId": "reprobuild.stats.rank.v1",
     "command": command,
@@ -18637,11 +18893,25 @@ proc unavailableStatsJson(command, scope, metric, projectRoot, storePath,
     "metric": metric,
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "sampleCount": 0,
     "availability": {"available": false, "reason": reason},
     "rows": newJArray()
   }
+
+proc storeUnavailableStatsJson(command, scope, metric, projectRoot,
+                               storePath: string;
+                               view: SharedStoreView): JsonNode =
+  ## What a view renders when the shared store cannot answer.
+  ##
+  ## THE POINT OF THIS PROC IS THAT IT IS NOT A ZERO. An unreachable
+  ## daemon, a daemon with capture off, a failed query and an empty store
+  ## are four different states, and each arrives here carrying its own
+  ## sentence. Rendering any of them as an empty ranking with
+  ## ``available: true`` would present an absent sample as a complete one,
+  ## which is exactly what OS-2 forbids.
+  unavailableStatsJson(command, scope, metric, projectRoot, storePath,
+    unavailableReason(view), view)
 
 proc outputSizeForAction(projectRoot: string; action: BuildAction): BiggestInt =
   for output in action.outputs:
@@ -18650,23 +18920,28 @@ proc outputSizeForAction(projectRoot: string; action: BuildAction): BiggestInt =
       result += getFileSize(extendedPath(path))
 
 proc actionRankJson(projectRoot, storePath, metric: string; top: int;
-                    nodes: openArray[JsonNode];
+                    view: SharedStoreView;
                     graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
-  let rollups = actionRollups(nodes)
+  let rollups = actionRollups(view)
   let graphById =
     if graphInfo.isSome: graphActionMap(graphInfo.get())
     else: initTable[string, BuildAction]()
   let unavailable = {
-    "build-time": "M7 records run-level timing but not per-action durations",
+    "build-time": "per-action durations are not projected into this view yet",
     "critical-path": "critical-path contribution needs per-action dynamic timings",
     "duration-variance": "duration variance needs multiple per-action duration samples",
-    "peak-memory": "peak memory is not captured by the M7 stats store",
-    "queue-time": "queue time is not captured by the M7 stats store"
+    "peak-memory": "peak memory is not captured by this view",
+    "queue-time": "queue time is not captured by this view"
   }.toTable
   if unavailable.hasKey(metric):
     return unavailableStatsJson("stats rank", "actions", metric, projectRoot,
-      storePath, unavailable[metric], window)
+      storePath, unavailable[metric], view)
+  # THE STORE STATE IS CHECKED BEFORE ANY FIGURE IS COMPUTED, and after the
+  # metric-support check so that "this metric is not projected" keeps its
+  # own reason rather than being masked by a missing daemon.
+  if not figuresArePresentable(view.state):
+    return storeUnavailableStatsJson("stats rank", "actions", metric,
+      projectRoot, storePath, view)
 
   var rows = newJArray()
   type Row = tuple[id: string; value: float; samples: int; evidence: JsonNode]
@@ -18699,7 +18974,7 @@ proc actionRankJson(projectRoot, storePath, metric: string; top: int;
   of "output-size":
     if graphInfo.isNone:
       return unavailableStatsJson("stats rank", "actions", metric, projectRoot,
-        storePath, "output-size needs a materialized build graph", window)
+        storePath, "output-size needs a materialized build graph", view)
     for id, action in graphById:
       raw.add((id, float(outputSizeForAction(projectRoot, action)), 1, %*{
         "outputs": jsonStringSeq(action.outputs)
@@ -18732,7 +19007,7 @@ proc actionRankJson(projectRoot, storePath, metric: string; top: int;
     "metric": metric,
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "sampleCount": rows.len,
     "availability": {"available": rows.len > 0, "reason": ""},
     "rows": rows
@@ -18746,20 +19021,25 @@ proc inputDependents(info: BuildGraphInspection; path: string): HashSet[string]
 proc downstreamClosure(info: BuildGraphInspection; roots: HashSet[string]): HashSet[string]
 
 proc inputRankJson(projectRoot, storePath, metric: string; top: int;
-                   nodes: openArray[JsonNode];
+                   view: SharedStoreView;
                    graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
+  ## STRUCTURAL, NOT HISTORICAL, and deliberately still so. Blast radius
+  ## and fanout are properties of the build graph, so this view does not
+  ## consult the shared store for its figures and does not become
+  ## unavailable when no daemon is running. It still carries the store
+  ## window, because the two historical metrics below are the ones that
+  ## would need it.
   if metric in ["change-frequency", "critical-path-impact"]:
     return unavailableStatsJson("stats rank", "inputs", metric, projectRoot,
       storePath,
       if metric == "change-frequency":
-        "M7 records dependency evidence counts but not changed input paths"
+        "changed input paths are not recorded on the shared store's spine"
       else:
         "critical-path impact needs per-action dynamic timings and input paths",
-      window)
+      view)
   if graphInfo.isNone:
     return unavailableStatsJson("stats rank", "inputs", metric, projectRoot,
-      storePath, "input ranking needs a materialized build graph", window)
+      storePath, "input ranking needs a materialized build graph", view)
   if metric notin ["blast-radius", "fanout"]:
     raise newException(ValueError, "unsupported inputs metric: " & metric)
 
@@ -18801,7 +19081,7 @@ proc inputRankJson(projectRoot, storePath, metric: string; top: int;
     "metric": metric,
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "sampleCount": rows.len,
     "availability": {
       "available": rows.len > 0,
@@ -18812,83 +19092,53 @@ proc inputRankJson(projectRoot, storePath, metric: string; top: int;
   }
 
 proc targetRankJson(projectRoot, storePath, metric: string; top: int;
-                    nodes: openArray[JsonNode]): JsonNode =
-  let window = statsWindow(nodes)
-  if metric == "critical-path":
-    return unavailableStatsJson("stats rank", "targets", metric, projectRoot,
-      storePath, "critical path needs per-action dynamic timings", window)
-  let rollups = targetRollups(nodes)
-  type Row = tuple[target: string; value: float; samples: int; evidence: JsonNode]
-  var raw: seq[Row] = @[]
-  case metric
-  of "build-time":
-    for target, item in rollups:
-      if item.buildTotalSamples > 0:
-        raw.add((target, item.buildTotalUs / float(item.buildTotalSamples),
-          item.buildTotalSamples, %*{
-            "buildTotalUs": item.buildTotalUs,
-            "buildTotalSamples": item.buildTotalSamples
-          }))
-    raw.sort(proc(a, b: Row): int = cmp(b.value, a.value))
-  of "cache-hit-ratio":
-    for target, item in rollups:
-      if item.cacheSamples > 0:
-        raw.add((target, float(item.cacheHits) / float(item.cacheSamples),
-          item.cacheSamples, %*{
-            "cacheHits": item.cacheHits,
-            "cacheMisses": item.cacheMisses,
-            "cacheSamples": item.cacheSamples
-          }))
-    raw.sort(proc(a, b: Row): int = cmp(a.value, b.value))
-  of "rebuild-count":
-    for target, item in rollups:
-      raw.add((target, float(item.launched), item.actionSamples, %*{
-        "launchedActions": item.launched,
-        "actionSamples": item.actionSamples
-      }))
-    raw.sort(proc(a, b: Row): int = cmp(b.value, a.value))
-  else:
+                    view: SharedStoreView): JsonNode =
+  ## TARGETS HAVE NO DIMENSION ON THE SHARED STORE, AND THAT IS STATED
+  ## RATHER THAN APPROXIMATED.
+  ##
+  ## RunQuota's execution spine records host, profile, stats key, owner
+  ## and outcome; the reprobuild TARGET a build was invoked for is not one
+  ## of them, and ``ext_repro_action`` version 1 does not carry it either.
+  ## The M7 project-local store had it because it was written by the
+  ## command that knew it.
+  ##
+  ## There are two ways to keep this view answering: attribute every row
+  ## to the target of whichever invocation happens to be asking, or pool
+  ## every row under one synthetic target. Both produce a number, and
+  ## neither produces the number the caller asked for -- a ranking over
+  ## one bucket is not a ranking, and attributing history to the current
+  ## invocation is a figure about the question rather than about the work.
+  ## OS-2 rules both out, so the view says what it cannot answer and names
+  ## the dimension that would make it answerable.
+  discard top
+  if metric notin ["build-time", "cache-hit-ratio", "rebuild-count",
+      "critical-path"]:
     raise newException(ValueError, "unsupported targets metric: " & metric)
-  let limit = if top <= 0: raw.len else: min(top, raw.len)
-  var rows = newJArray()
-  for index in 0 ..< limit:
-    let row = raw[index]
-    rows.add(%*{
-      "rank": index + 1,
-      "target": row.target,
-      "value": row.value,
-      "sampleCount": row.samples,
-      "evidence": row.evidence
-    })
-  %*{
-    "schemaId": "reprobuild.stats.rank.v1",
-    "command": "stats rank",
-    "scope": "targets",
-    "metric": metric,
-    "projectRoot": projectRoot,
-    "storePath": storePath,
-    "window": statsWindowJson(window),
-    "sampleCount": rows.len,
-    "availability": {
-      "available": rows.len > 0,
-      "reason": if rows.len == 0: "no target observations for metric" else: ""
-    },
-    "rows": rows
-  }
+  let reason =
+    if metric == "critical-path":
+      "critical path needs per-action dynamic timings"
+    else:
+      "the shared observation store carries no reprobuild target dimension; " &
+        "rank by --scope=tools (RunQuota stats key) or --scope=actions instead"
+  unavailableStatsJson("stats rank", "targets", metric, projectRoot,
+    storePath, reason, view)
 
 proc toolRankJson(projectRoot, storePath, metric: string; top: int;
-                  nodes: openArray[JsonNode];
+                  view: SharedStoreView;
                   graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
   if metric in ["build-time", "queue-time", "duration-variance", "peak-memory"]:
     return unavailableStatsJson("stats rank", "tools", metric, projectRoot,
-      storePath, "M7 does not capture per-action resource/timing by tool", window)
+      storePath, "per-tool resource/timing is not projected into this view",
+      view)
   if metric != "cache-hit-ratio":
     raise newException(ValueError, "unsupported tools metric: " & metric)
   if graphInfo.isNone:
     return unavailableStatsJson("stats rank", "tools", metric, projectRoot,
-      storePath, "tool ranking needs a materialized build graph", window)
-  let actions = actionRollups(nodes)
+      storePath, "tool ranking needs a materialized build graph", view)
+  if not figuresArePresentable(view.state):
+    return storeUnavailableStatsJson("stats rank", "tools", metric,
+      projectRoot, storePath, view)
+  let actions = actionRollups(view)
   let graphById = graphActionMap(graphInfo.get())
   type Tool = object
     id: string
@@ -18898,9 +19148,16 @@ proc toolRankJson(projectRoot, storePath, metric: string; top: int;
     actions: HashSet[string]
   var tools = initTable[string, Tool]()
   for actionId, rollup in actions:
-    if not graphById.hasKey(actionId) or rollup.cacheSamples == 0:
+    if rollup.cacheSamples == 0:
       continue
-    var toolId = graphById[actionId].commandStatsId
+    # THE TOOL ID COMES OFF THE SPINE, not out of the graph. RunQuota's
+    # ``stats_key`` IS reprobuild's command stats id, carried on the row
+    # the daemon joined, so the identity a figure is grouped by is the
+    # identity the measurement was recorded under rather than one
+    # re-derived from a graph the measurement never saw.
+    var toolId = rollup.statsKey
+    if toolId.len == 0 and graphById.hasKey(actionId):
+      toolId = graphById[actionId].commandStatsId
     if toolId.len == 0:
       toolId = "unknown-command-shape"
     var item = tools.getOrDefault(toolId)
@@ -18942,7 +19199,7 @@ proc toolRankJson(projectRoot, storePath, metric: string; top: int;
     "metric": metric,
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "sampleCount": rows.len,
     "availability": {
       "available": rows.len > 0,
@@ -18958,8 +19215,11 @@ proc renderStatsRankText(node: JsonNode): string =
   let metric = node{"metric"}.getStr()
   let window = node{"window"}
   lines.add("Stats rank: scope=" & scope & " by=" & metric &
-    " runs=" & $window{"runCount"}.getInt(0) &
-    " observations=" & $window{"observationCount"}.getInt(0))
+    " state=" & window{"state"}.getStr("unknown") &
+    " samples=" & $window{"sampleCount"}.getInt(0) &
+    " observations=" & $window{"observationCount"}.getInt(0) &
+    " window=" & $window{"firstObservationUnixMs"}.getBiggestInt(0) & ".." &
+    $window{"lastObservationUnixMs"}.getBiggestInt(0) & "ms")
   if not node{"availability"}{"available"}.getBool(false):
     lines.add("unavailable: " & node{"availability"}{"reason"}.getStr())
     return lines.join("\n") & "\n"
@@ -18982,24 +19242,40 @@ proc renderStatsRankText(node: JsonNode): string =
   lines.join("\n") & "\n"
 
 proc showActionStatsJson(projectRoot, storePath, actionId: string;
-                         nodes: openArray[JsonNode];
+                         view: SharedStoreView;
                          graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
-  let rollups = actionRollups(nodes)
+  if not figuresArePresentable(view.state):
+    # NOT "unknown action". A missing daemon and an action the store has
+    # never seen are different answers, and reporting the first as the
+    # second would send a reader looking for a typo in the action id.
+    raise newException(ValueError,
+      "the shared observation store has no figures to show: " &
+        unavailableReason(view))
+  let rollups = actionRollups(view)
   if not rollups.hasKey(actionId):
     raise newException(ValueError, "unknown action in stats store: " & actionId)
   let item = rollups[actionId]
   var recent = newJArray()
-  for node in nodes:
-    if node{"fields"}{"actionId"}.getStr() == actionId:
-      recent.add(node)
+  for row in view.actionRows:
+    if row.value("action_id") != actionId:
+      continue
+    var values = newJObject()
+    for i, name in row.columns:
+      if i < row.values.len:
+        values[name] = %row.values[i]
+    recent.add(%*{
+      "executionId": row.executionId,
+      "statsKey": row.statsKey,
+      "profile": profileJson(row.profile),
+      "values": values
+    })
   result = %*{
     "schemaId": "reprobuild.stats.show.v1",
     "command": "stats show",
     "scope": "actions",
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "id": actionId,
     "actionId": actionId,
     "rollup": {
@@ -19049,7 +19325,8 @@ proc renderStatsShowText(node: JsonNode): string =
     lines.add("directDependents: " &
       $node{"rollup"}{"directDependents"}.getInt(0) &
       " blastRadius: " & $node{"rollup"}{"blastRadius"}.getInt(0))
-    lines.add("observed change frequency: unavailable (M7 does not record changed input paths)")
+    lines.add("observed change frequency: unavailable (changed input " &
+      "paths are not recorded on the shared store's spine)")
     lines.add("next: " & node{"graphCommand"}.getStr())
   lines.join("\n") & "\n"
 
@@ -19061,9 +19338,8 @@ proc actionIdsJson(values: HashSet[string]): JsonNode =
   jsonStringSeq(ids)
 
 proc showInputStatsJson(projectRoot, storePath, path: string;
-                        nodes: openArray[JsonNode];
+                        view: SharedStoreView;
                         graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
   if graphInfo.isNone:
     return %*{
       "schemaId": "reprobuild.stats.show.v1",
@@ -19071,7 +19347,7 @@ proc showInputStatsJson(projectRoot, storePath, path: string;
       "scope": "inputs",
       "projectRoot": projectRoot,
       "storePath": storePath,
-      "window": statsWindowJson(window),
+      "window": statsWindowJson(view),
       "path": path,
       "availability": {
         "available": false,
@@ -19086,7 +19362,7 @@ proc showInputStatsJson(projectRoot, storePath, path: string;
     "scope": "inputs",
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "path": path,
     "availability": {"available": true, "reason": ""},
     "rollup": {
@@ -19102,22 +19378,28 @@ proc showInputStatsJson(projectRoot, storePath, path: string;
   }
 
 proc snapshotJson(projectRoot, storePath, label: string;
-                  nodes: openArray[JsonNode];
+                  view: SharedStoreView;
                   graphInfo: Option[BuildGraphInspection]): JsonNode =
-  let window = statsWindow(nodes)
   let actions = actionRankJson(projectRoot, storePath, "cache-miss-count", 0,
-    nodes, graphInfo)
-  let targets = targetRankJson(projectRoot, storePath, "build-time", 0, nodes)
+    view, graphInfo)
+  let tools = toolRankJson(projectRoot, storePath, "cache-hit-ratio", 0,
+    view, graphInfo)
   result = %*{
     "schemaId": "reprobuild.stats.snapshot.v1",
     "label": label,
     "createdAtUnixMs": nowUnixMsCli(),
     "projectRoot": projectRoot,
     "storePath": storePath,
-    "window": statsWindowJson(window),
+    "window": statsWindowJson(view),
     "rollups": {
       "actionsByCacheMissCount": actions{"rows"},
-      "targetsByBuildTime": targets{"rows"}
+      # THE TARGET ROLLUP IS GONE BECAUSE THE DIMENSION IS. A snapshot
+      # that kept the key and filled it with an empty array would record
+      # "no targets were slow" where the truth is "targets are not a
+      # dimension of the store this snapshot is taken from". The tool
+      # rollup replaces it: RunQuota's stats key is the identity the
+      # measurements were actually recorded under.
+      "toolsByCacheHitRatio": tools{"rows"}
     },
     "unavailableMetrics": jsonStringSeq([
       "per-action build-time",
@@ -19135,7 +19417,8 @@ proc snapshotJson(projectRoot, storePath, label: string;
 proc renderSnapshotText(node: JsonNode; path: string): string =
   "stats snapshot: " & node{"label"}.getStr() &
     " observations=" & $node{"window"}{"observationCount"}.getInt(0) &
-    " runs=" & $node{"window"}{"runCount"}.getInt(0) &
+    " samples=" & $node{"window"}{"sampleCount"}.getInt(0) &
+    " state=" & node{"window"}{"state"}.getStr("unknown") &
     "\npath: " & path & "\n"
 
 proc rollupDeltaRows(baseRows, candRows: JsonNode; keyField: string): JsonNode =
@@ -19204,22 +19487,22 @@ proc compareSnapshotsJson(projectRoot, baseline, candidate: string): JsonNode =
     "deltas": {
       "observationCount": cand{"window"}{"observationCount"}.getInt(0) -
         base{"window"}{"observationCount"}.getInt(0),
-      "runCount": cand{"window"}{"runCount"}.getInt(0) -
-        base{"window"}{"runCount"}.getInt(0),
+      "sampleCount": cand{"window"}{"sampleCount"}.getInt(0) -
+        base{"window"}{"sampleCount"}.getInt(0),
       "actionCacheMissRows": cand{"rollups"}{"actionsByCacheMissCount"}.len -
         base{"rollups"}{"actionsByCacheMissCount"}.len,
-      "targetBuildTimeRows": cand{"rollups"}{"targetsByBuildTime"}.len -
-        base{"rollups"}{"targetsByBuildTime"}.len
+      "toolCacheHitRatioRows": cand{"rollups"}{"toolsByCacheHitRatio"}.len -
+        base{"rollups"}{"toolsByCacheHitRatio"}.len
     },
     "rollupDeltas": {
       "actionsByCacheMissCount": rollupDeltaRows(
         base{"rollups"}{"actionsByCacheMissCount"},
         cand{"rollups"}{"actionsByCacheMissCount"},
         "actionId"),
-      "targetsByBuildTime": rollupDeltaRows(
-        base{"rollups"}{"targetsByBuildTime"},
-        cand{"rollups"}{"targetsByBuildTime"},
-        "target")
+      "toolsByCacheHitRatio": rollupDeltaRows(
+        base{"rollups"}{"toolsByCacheHitRatio"},
+        cand{"rollups"}{"toolsByCacheHitRatio"},
+        "toolId")
     },
     "notes": jsonStringSeq([
       "Compare uses current M7 rollups; per-action timing/resource deltas are unavailable until those metrics are captured."
@@ -19231,7 +19514,7 @@ proc renderCompareText(node: JsonNode): string =
   "stats compare: " & node{"baseline"}{"label"}.getStr() & " -> " &
     node{"candidate"}{"label"}.getStr() & "\n" &
     "delta observations: " & $deltas{"observationCount"}.getInt(0) & "\n" &
-    "delta runs: " & $deltas{"runCount"}.getInt(0) & "\n" &
+    "delta samples: " & $deltas{"sampleCount"}.getInt(0) & "\n" &
     "note: " & node{"notes"}[0].getStr() & "\n"
 
 proc maybePrepareStatsGraph(projectRoot, target, publicCliPath, workRoot: string;
@@ -19316,13 +19599,16 @@ proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
     inc i
 
   projectRoot = absolutePath(projectRoot)
-  let storePath = defaultStatsStorePath(projectRoot)
-  let nodes = readStatsObservations(projectRoot)
+  let storePath = derivedStatsStorePath(projectRoot)
+  # ONE QUERY PER INVOCATION, AND EVERY VIEW BELOW RENDERS FROM IT.
+  # ``runquotad`` is the only sanctioned reader of the observation store,
+  # so this is the whole of what ``repro stats`` can know about raw rows.
+  let sharedStore = readSharedStore()
   case view
   of "status":
-    stdout.write(statsStatusText(projectRoot))
+    stdout.write(statsStatusText(projectRoot, sharedStore))
   of "overview":
-    stdout.write(statsOverviewText(projectRoot))
+    stdout.write(statsOverviewText(projectRoot, sharedStore))
   of "rank":
     if scope.len == 0:
       raise newException(ValueError, "stats rank requires --scope")
@@ -19338,13 +19624,16 @@ proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
     let outputNode =
       case scope
       of "actions":
-        actionRankJson(projectRoot, storePath, metric, top, nodes, graphInfo)
+        actionRankJson(projectRoot, storePath, metric, top, sharedStore,
+          graphInfo)
       of "inputs":
-        inputRankJson(projectRoot, storePath, metric, top, nodes, graphInfo)
+        inputRankJson(projectRoot, storePath, metric, top, sharedStore,
+          graphInfo)
       of "targets":
-        targetRankJson(projectRoot, storePath, metric, top, nodes)
+        targetRankJson(projectRoot, storePath, metric, top, sharedStore)
       of "tools":
-        toolRankJson(projectRoot, storePath, metric, top, nodes, graphInfo)
+        toolRankJson(projectRoot, storePath, metric, top, sharedStore,
+          graphInfo)
       else:
         raise newException(ValueError, "unsupported stats scope: " & scope)
     if format == sofJson:
@@ -19365,11 +19654,13 @@ proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
       of "actions":
         if actionId.len == 0:
           raise newException(ValueError, "stats show --scope=actions requires --id")
-        showActionStatsJson(projectRoot, storePath, actionId, nodes, graphInfo)
+        showActionStatsJson(projectRoot, storePath, actionId, sharedStore,
+          graphInfo)
       of "inputs":
         if inputPath.len == 0:
           raise newException(ValueError, "stats show --scope=inputs requires --path")
-        showInputStatsJson(projectRoot, storePath, inputPath, nodes, graphInfo)
+        showInputStatsJson(projectRoot, storePath, inputPath, sharedStore,
+          graphInfo)
       else:
         raise newException(ValueError, "unsupported stats show scope: " & scope)
     if format == sofJson:
@@ -19381,8 +19672,8 @@ proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
       raise newException(ValueError, "stats snapshot requires --label")
     let graphInfo = maybePrepareStatsGraph(projectRoot, target, publicCliPath,
       workRoot, mode)
-    let outputNode = snapshotJson(projectRoot, storePath, safeSnapshotLabel(label),
-      nodes, graphInfo)
+    let outputNode = snapshotJson(projectRoot, storePath,
+      safeSnapshotLabel(label), sharedStore, graphInfo)
     let path = statsSnapshotPath(projectRoot, label)
     createDir(parentDir(path))
     writeFile(path, pretty(outputNode))
@@ -19522,21 +19813,21 @@ proc graphBlastRadiusJson(info: BuildGraphInspection; path: string): JsonNode =
   result["affectedOutputs"] = targetOutputs
   result["note"] = %"Structural graph blast radius; historical observed impact belongs to repro stats rank --scope=inputs --by=blast-radius."
 
-proc latestStatsRunId(projectRoot: string): string =
-  for node in readStatsObservations(projectRoot):
-    let runId = node{"runId"}.getStr()
-    if runId.len > 0:
-      result = runId
-
 proc graphCriticalPathJson(info: BuildGraphInspection; run: string): JsonNode =
-  let selectedRun =
-    if run == "last": latestStatsRunId(info.projectRoot) else: run
+  ## THE SELECTED RUN IS NO LONGER GUESSED FROM A LOCAL FILE. The M7
+  ## project-local JSONL store carried a ``runId`` per observation and this
+  ## view picked the last one out of it; that store is retired, and
+  ## RunQuota's query interface does not expose the ``runs`` table, so
+  ## ``--run=last`` has nothing to resolve against. Reporting an empty
+  ## string as though it were a resolved run id would be a fabricated
+  ## answer, so the view resolves only what the caller named.
   result = analysisBaseJson(info, "critical-path")
   result["run"] = %run
-  result["selectedRunId"] = %selectedRun
+  result["selectedRunId"] = %(if run == "last": "" else: run)
   result["availability"] = %*{
     "available": false,
-    "reason": "M7 stats do not capture per-action dynamic durations required for critical path reconstruction"
+    "reason": "per-action dynamic durations required for critical path " &
+      "reconstruction are not projected from the shared observation store"
   }
   result["criticalPath"] = newJArray()
   result["sampleCount"] = %0
@@ -19743,6 +20034,47 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
         raise err
     if view == "actions":
       discard
+    elif view == "env":
+      # STAGE 2's instrument, and the one that answers "does a host
+      # difference invalidate this graph?" without guessing.
+      #
+      # One line per process action: the weak fingerprint the action
+      # cache is keyed by, followed by the environment declaration that
+      # produced it. Two runs under two different hosts diff to exactly
+      # the set of edges that would rebuild. The alternative — asserting
+      # from the source that nothing host-varying reaches the key — is
+      # how a regression here would be missed, because the reasoning and
+      # the code drift apart silently.
+      #
+      # It lives in the CLI rather than a transcript because a
+      # measurement that exists only in a transcript is a measurement
+      # nobody can repeat.
+      var census: EnvironmentInheritanceCensus
+      var lines: seq[string] = @[]
+      for action in info.actions:
+        if action.kind != bakProcess:
+          continue
+        inc census.totalActions
+        if action.env.len > 0: inc census.declaringActions
+        if action.envPassthrough.len > 0: inc census.passthroughActions
+        if action.env.len == 0 and action.envPassthrough.len == 0:
+          inc census.undeclaredActions
+        var declaredNames: seq[string] = @[]
+        for entry in action.env:
+          let eq = entry.find('=')
+          if eq > 0:
+            declaredNames.add(entry[0 ..< eq])
+        declaredNames.sort()
+        var passthroughNames = @(action.envPassthrough)
+        passthroughNames.sort()
+        lines.add(toHex(action.weakFingerprint.bytes) & " " & action.id &
+          " declared=[" & declaredNames.join(",") & "]" &
+          " passthrough=[" & passthroughNames.join(",") & "]")
+      lines.sort()
+      echo environmentInheritanceHeaderLine(census)
+      for line in lines:
+        echo line
+      return 0
     elif view == "neighborhood":
       if focus.len == 0:
         focus = info.selectedActionId
@@ -25537,6 +25869,225 @@ proc revParse(identity: GitToolIdentity;
     res.output.strip()
   else:
     ""
+
+type
+  GitOperationState* = enum
+    ## Whether a MULTI-STEP git operation is currently in flight in a
+    ## checkout. The managed `post-checkout` / `post-commit` / `post-merge`
+    ## hooks fire in the middle of those operations, and anything they do
+    ## there is done to somebody else's half-finished working tree.
+    gosIdle             ## no operation in flight; the hook owns this moment
+    gosInProgress       ## git is mid-operation; the hook must stand down
+    gosIndeterminate    ## the question could not be answered at all
+
+  GitOperationProbe* = object
+    state*: GitOperationState
+    marker*: string      ## which state path proved it (``gosInProgress``)
+    diagnostic*: string  ## why the probe failed (``gosIndeterminate``)
+
+# `MERGE_HEAD` and `REVERT_HEAD` are DELIBERATELY ABSENT from the set below,
+# on measurement rather than taste. Both are git's own in-progress markers and
+# both were tried; on git 2.50 git clears them BEFORE it invokes either hook,
+# in every path they can be reached from:
+#   * conflicted merge, then `git checkout -f <branch>` — `post-checkout`
+#     fires with `MERGE_HEAD` already gone;
+#   * conflicted merge, then `git commit` — likewise for `post-commit`;
+#   * conflicted `git revert`, then `git revert --continue` — `post-commit`
+#     fires with `REVERT_HEAD` already gone.
+# A name git deletes before it calls you is not a discriminator; it is a
+# branch no test can reach, which is a branch that rots. If a later git keeps
+# them alive across the hook, the case that proves it comes first.
+const InFlightGitStatePaths* = [
+  # `git rebase` (merge/interactive backend, the default since 2.26) and
+  # `git rebase -r`. THE marker for the reported defect.
+  "rebase-merge",
+  # `git rebase --apply` (the am backend) and `git am`. A separate directory
+  # from the above — neither name covers both rebase backends. Note it does
+  # NOT cover that backend's exposed moment: measured, `--apply` rewinds HEAD
+  # and fires `post-checkout` BEFORE creating this directory, which is what
+  # the reflog discriminator below exists for.
+  "rebase-apply",
+  # A pick in flight. Observed present at `post-commit` for every commit the
+  # merge-backend rebase replays, alongside `rebase-merge`.
+  "CHERRY_PICK_HEAD",
+  # A multi-commit `git cherry-pick A..B` / `git revert`. Observed live: the
+  # post-commit hook fires for every picked commit with `sequencer` present
+  # and `CHERRY_PICK_HEAD` absent, so it is not redundant with the name above.
+  "sequencer",
+  # `git bisect`, which checks out a detached commit per step. Reattaching a
+  # branch here destroys the bisect exactly the way it destroys a rebase.
+  "BISECT_LOG",
+]
+
+# The SECOND discriminator, and it is not redundant with the state paths.
+#
+# Measured, not assumed: `git rebase --apply` (the am backend) rewinds HEAD
+# onto the upstream and fires `post-checkout` — detached, flag `1` — BEFORE it
+# creates `rebase-apply`. At that instant not one of the state paths above
+# exists, and a state-path-only probe answers "idle" for a rebase that has
+# already started. Reattaching a branch there is the same corruption as in the
+# merge backend.
+#
+# What git does have at that instant is the reflog entry it just wrote for
+# HEAD: `rebase (start): checkout main`, where an ordinary checkout writes
+# `checkout: moving from X to Y`. That is git's own record of WHY HEAD moved,
+# which is precisely the question.
+#
+# Deliberately only these two actions. `merge` is excluded: a plain
+# `git merge` writes a `merge` reflog entry and then fires `post-merge`, and
+# standing down on it would disable that hook entirely.
+const InFlightGitReflogActions* = ["rebase", "am"]
+
+proc reflogActionSuggestsOperation*(subject: string): bool =
+  ## Does this HEAD reflog subject name an operation that was in flight when
+  ## the hook fired? The subject's shape is ``<action>: <detail>``, with the
+  ## action optionally carrying a parenthetical stage (``rebase (start)``,
+  ## ``rebase -i (start)``). Only the first word is matched, so every spelling
+  ## of a rebase collapses onto ``rebase``.
+  let head = subject.strip()
+  if head.len == 0:
+    return false
+  let colon = head.find(':')
+  let action = (if colon >= 0: head[0 ..< colon] else: head).strip()
+  var firstWord = action
+  let space = action.find(' ')
+  if space >= 0:
+    firstWord = action[0 ..< space]
+  firstWord in InFlightGitReflogActions
+
+proc probeGitOperationInProgress*(identity: GitToolIdentity;
+                                  repoPath: string): GitOperationProbe =
+  ## Is git in the middle of a multi-step operation in this checkout?
+  ##
+  ## Every path is resolved with ``git rev-parse --git-path`` rather than
+  ## by gluing the name onto ``<repo>/.git``. That is not defensive
+  ## politeness — in a LINKED WORKTREE ``<repo>/.git`` is a FILE, so
+  ## ``<repo>/.git/rebase-merge`` can never exist and a naive test is
+  ## unconditionally false there; the real state lives at
+  ## ``<common-dir>/worktrees/<name>/rebase-merge``, and a test against the
+  ## MAIN checkout's ``.git`` misses it too. ``--git-path`` knows which of
+  ## these names are per-worktree and returns the right one.
+  ##
+  ## One subprocess for the whole set: ``rev-parse`` accepts repeated
+  ## ``--git-path`` and answers one line each, and this runs on every commit
+  ## and every checkout in every participating repo.
+  ##
+  ## A probe that cannot answer returns ``gosIndeterminate`` — never
+  ## ``gosIdle``. "I could not tell" and "nothing is happening" have opposite
+  ## consequences for a caller that is deciding whether to touch refs.
+  if repoPath.len == 0:
+    result.state = gosIndeterminate
+    result.diagnostic = "no repository path was supplied"
+    return
+  var command = quoteShell(identity.binaryPath) & " -C " &
+    quoteShell(repoPath) & " rev-parse"
+  for name in InFlightGitStatePaths:
+    command.add(" --git-path " & quoteShell(name))
+  var res: tuple[output: string; exitCode: int]
+  try:
+    res = execCmdEx(command, options = {poStdErrToStdOut, poUsePath},
+      env = scrubbedGitRepositoryEnv())
+  except CatchableError as err:
+    result.state = gosIndeterminate
+    result.diagnostic = "`git rev-parse --git-path` could not be run in " &
+      repoPath & ": " & err.msg
+    return
+  if res.exitCode != 0:
+    result.state = gosIndeterminate
+    result.diagnostic = "`git rev-parse --git-path` failed in " & repoPath &
+      " (exit " & $res.exitCode & "): " & res.output.strip()
+    return
+  var lines: seq[string]
+  for raw in res.output.splitLines():
+    let line = raw.strip()
+    if line.len > 0:
+      lines.add(line)
+  if lines.len != InFlightGitStatePaths.len:
+    # A `git` that answered a different number of paths than it was asked
+    # about is a `git` whose answers cannot be mapped back onto the names.
+    result.state = gosIndeterminate
+    result.diagnostic = "`git rev-parse --git-path` in " & repoPath &
+      " answered " & $lines.len & " path(s) for " &
+      $InFlightGitStatePaths.len & " name(s)"
+    return
+  for i, name in InFlightGitStatePaths:
+    let resolved =
+      if isAbsolute(lines[i]): lines[i]
+      else: repoPath / lines[i]
+    if fileExists(resolved) or dirExists(resolved):
+      result.state = gosInProgress
+      result.marker = name
+      return
+
+  # No state directory — which does NOT yet mean idle. See
+  # ``InFlightGitReflogActions``: the am-backend rebase's rewind fires this
+  # hook before its state directory exists.
+  #
+  # A reflog that cannot be read is NOT indeterminate. An unborn HEAD (a
+  # fresh `git init`, or a clone of an empty repository — both of which fire
+  # `post-checkout`) exits 128 here, and a repo with `core.logAllRefUpdates`
+  # off exits 0 with nothing. Both are ordinary, answerable states in which
+  # git simply recorded no action, so absence of a reflog is absence of THIS
+  # signal, not absence of an answer; the state paths above already gave one.
+  var reflog: tuple[output: string; exitCode: int]
+  try:
+    reflog = execCmdEx(
+      quoteShell(identity.binaryPath) & " -C " & quoteShell(repoPath) &
+        " reflog show --format=%gs -1 HEAD",
+      options = {poUsePath}, env = scrubbedGitRepositoryEnv())
+  except CatchableError:
+    result.state = gosIdle
+    return
+  if reflog.exitCode == 0:
+    let subject = reflog.output.strip().splitLines()[0].strip()
+    if reflogActionSuggestsOperation(subject):
+      result.state = gosInProgress
+      result.marker = "HEAD reflog: " & subject
+      return
+  result.state = gosIdle
+
+proc managedHookStandDown*(hookName, repoPath: string):
+    tuple[standDown: bool; report: string; loud: bool] =
+  ## The gate every managed ``post-*`` hook passes through before it touches
+  ## anything.
+  ##
+  ## Git fires these hooks for its OWN intermediate steps: `post-checkout`
+  ## once per ref update inside a rebase or a bisect, `post-commit` once per
+  ## commit a rebase or a cherry-pick replays. Those are transient states
+  ## belonging to an operation already in flight, and a hook that writes into
+  ## the working tree, pushes a ref, or — as this one did — runs
+  ## `git checkout <branch>` there is corrupting somebody else's operation.
+  ##
+  ## Git's own hook contract supplies no "am I inside an operation" argument,
+  ## so it is answered the way git answers it for itself: the presence of the
+  ## in-flight state paths (`wt_status_get_state` reads the same names).
+  ##
+  ## Returns ``loud = true`` only for the INDETERMINATE case. An in-flight
+  ## skip is a decision, not a problem, and a 50-commit rebase that printed
+  ## 50 lines would teach its user to stop reading them. A probe that could
+  ## not decide is different: the hook is inert and the operator is told so,
+  ## rather than left to infer it from silence.
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    return (true, hookName & " inert: cannot determine whether a git " &
+      "operation is in progress in " & repoPath & " — git is not " &
+      "resolvable (" & err.msg & "); nothing was inspected or modified",
+      true)
+  let probe = probeGitOperationInProgress(identity, repoPath)
+  case probe.state
+  of gosIdle:
+    (false, "", false)
+  of gosInProgress:
+    (true, hookName & " skipped: a git operation is in progress (" &
+      probe.marker & ") in " & repoPath &
+      "; the workspace is reconciled by the operation's own final " &
+      "checkout, or by `repro workspace migrate`", false)
+  of gosIndeterminate:
+    (true, hookName & " inert: cannot determine whether a git operation " &
+      "is in progress — " & probe.diagnostic &
+      "; nothing was inspected or modified", true)
 
 proc expectedBranchTip(identity: GitToolIdentity;
                        repoPath, branch: string;
@@ -35293,6 +35844,15 @@ type
     pcoNoLockFailed      ## Lock writer raised (IO error, VCS query
                          ## failure, missing checkout, ...) and NO lock
                          ## exists.
+    pcoSkippedGitOperation ## Git is mid-rebase / mid-cherry-pick / mid-am /
+                           ## mid-bisect in the repo that fired the hook. The
+                           ## commit this hook saw is one of that operation's
+                           ## intermediate commits, and writing a lock into a
+                           ## working tree its owner has not finished with is
+                           ## how a hook breaks somebody else's rebase.
+    pcoInertGitStateUnknown ## The "is an operation in flight" probe could not
+                            ## answer. The hook did nothing and SAID so — an
+                            ## unanswerable question is not the same as "no".
 
   PostCommitPublication* = enum
     ## Publication state of the record this run wrote, probed WITHOUT any
@@ -35342,6 +35902,8 @@ proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
   of pcoNoLockDirty: "no-lock-dirty-siblings"
   of pcoSkippedNoWorkspace: "skipped-no-workspace"
   of pcoNoLockFailed: "no-lock-failed"
+  of pcoSkippedGitOperation: "skipped-git-operation-in-progress"
+  of pcoInertGitStateUnknown: "inert-git-state-unknown"
 
 proc postCommitPublicationTag(state: PostCommitPublication): string =
   case state
@@ -36011,6 +36573,34 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   report.timestamp = timestamp
   report.exitCode = 0
 
+  # `post-commit` shares `post-checkout`'s exposure: git fires it for EVERY
+  # commit a rebase, a `git am` or a sequencer run replays (observed live,
+  # with `rebase-merge` + `CHERRY_PICK_HEAD` present each time). Everything
+  # below writes `repro.lock` into the working tree and spawns a ref push —
+  # into a tree mid-rebase, on a detached HEAD, for a commit the operation is
+  # about to discard. The post-rebase lock is not lost by standing down: the
+  # pre-push gate refreshes it before anything is published.
+  let postCommitRepo =
+    if parsed.currentRepo.len > 0: parsed.currentRepo
+    else: getCurrentDir()   # the managed hook body cd's to the repo root
+  let standDown = managedHookStandDown("post-commit", postCommitRepo)
+  if standDown.standDown:
+    let anchor =
+      if workspaceRoot.len > 0: workspaceRoot
+      else: enclosingReproShell(parsed.currentRepo)
+    report.workspaceRoot = anchor
+    report.outcome = postCommitOutcomeTag(
+      if standDown.loud: pcoInertGitStateUnknown else: pcoSkippedGitOperation)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
+    report.diagnostic = standDown.report
+    if anchor.len > 0:
+      writePostCommitReport(anchor, report)
+      appendPostCommitLog(anchor,
+        timestamp & " " & report.outcome & " " & report.diagnostic)
+    if standDown.loud:
+      stderr.writeLine("repro " & standDown.report)
+    return 0
+
   # RA-10: no-op outside an initialized workspace. The post-commit hook
   # may be installed under a half-bootstrapped or non-workspace parent —
   # a plain git repo, or a bare ``.repo/`` with no resolved manifest
@@ -36395,14 +36985,23 @@ proc reconcileLocalStateAfterHook(hookName, workspaceRoot,
   ## somebody's git remotes without telling them is not an acceptable thing
   ## for a hook to do quietly, and the log alone is a place nobody looks until
   ## after they are already confused.
+  ##
+  ## The `quiet` half is the mirror image: states the hook OBSERVED and chose
+  ## not to act on, chief among them a detached HEAD, which this arm no longer
+  ## reattaches. They go to the log and not to stderr — the developer detached
+  ## that HEAD themselves, and a hook that reads it back to them after every
+  ## git command is a hook they will turn off.
   if workspaceRoot.len == 0:
     return
   let lines = reconcileLocalStateForHook(workspaceRoot)
-  if lines.len == 0:
+  for line in lines.quiet:
+    appendManifestRefreshLog(timestamp & " " & hookName &
+      " local-state " & line)
+  if lines.loud.len == 0:
     return
   stderr.writeLine("repro " & hookName & ": reconciled workspace-local git " &
     "state against the manifest —")
-  for line in lines:
+  for line in lines.loud:
     stderr.writeLine("  " & line)
     appendManifestRefreshLog(timestamp & " " & hookName &
       " local-state " & line)
@@ -36418,10 +37017,44 @@ proc runManifestRefreshHookCommand*(hookName: string;
   let parsed = parseManifestRefreshArgs(args)
   let timestamp = isoTimestampNow()
 
-  # post-checkout short-circuit: when git reports
+  # post-checkout short-circuit #1 — git's own third argument. The contract
+  # is explicit: ``1`` is a branch checkout, ``0`` is a file checkout
+  # (``git checkout -- <path>``), which retrieves a file from the index and
+  # moves no ref at all. Necessary but NOWHERE NEAR sufficient on its own:
+  # every ref update a rebase performs is a BRANCH checkout and arrives here
+  # with flag ``1``, so this argument cannot see the case that matters.
+  if hookName == "post-checkout" and parsed.positional.len >= 3:
+    if parsed.positional[2] == "0":
+      return 0
+
+  # The discriminator that actually covers the reported case: is git
+  # MID-OPERATION? A rebase, an `am`, a sequencer run and a bisect all fire
+  # these hooks for their own intermediate ref updates, and everything below
+  # this line — the manifest fast-forward and, above all, the local-state
+  # reconciliation — is work done to a working tree its owner has not
+  # finished with. Answered against the repo git fired the hook IN, not the
+  # workspace root: only that checkout knows whether it is mid-rebase.
+  #
+  # Ordered BEFORE the ``prev == new`` inference below on purpose. Both
+  # return 0, but only this one leaves a trace, and the trace is what makes
+  # the decision observable. Measured: a linked-worktree rebase can fire its
+  # first `post-checkout` with ``prev == new``, so the weaker rule would
+  # sometimes swallow the stronger rule's evidence.
+  let hookRepo =
+    if parsed.currentRepo.len > 0: parsed.currentRepo
+    else: getCurrentDir()   # the managed hook body cd's to the repo root
+  let standDown = managedHookStandDown(hookName, hookRepo)
+  if standDown.standDown:
+    appendManifestRefreshLog(timestamp & " " & standDown.report)
+    if standDown.loud:
+      stderr.writeLine("repro " & standDown.report)
+    return 0
+
+  # post-checkout short-circuit #2: when git reports
   # ``<prev-head> <new-head> <flag>`` with ``prev == new``, the
   # participating repo's HEAD did NOT move and the spec says skip
-  # SILENTLY (no log line).
+  # SILENTLY (no log line). An inference rather than a contract, which is
+  # why it is not the thing standing between a rebase and this hook.
   if hookName == "post-checkout" and parsed.positional.len >= 2:
     let prev = parsed.positional[0]
     let newer = parsed.positional[1]
@@ -39162,6 +39795,127 @@ proc decideEvidenceReadTierPolicy*(outcome: UnreadableRepoGateOutcome;
     return ergdWarnAllow
   ergdRefuse
 
+type
+  LockPinFinding = object
+    ## One lock record that PINS a commit an outgoing history rewrite would
+    ## make unreachable. Empty ``orphanOid`` means no such record exists.
+    orphanOid*: string
+    lockedPath*: string     ## the repo path the record pins at ``orphanOid``
+    lockRelPath*: string    ## store-relative path of the offending record
+    lockRoot*: string       ## on-disk root that record was found under
+    lockTriggerSha*: string ## the commit the record is KEYED at
+
+proc looksLikeCommitOid(value: string): bool =
+  ## A manifest ``revision`` may name either a branch or an exact commit. Only
+  ## the branch spelling can be compared against a pushed ref name.
+  if value.len notin {40, 64}: return false
+  for ch in value:
+    if ch notin {'0'..'9', 'a'..'f', 'A'..'F'}: return false
+  true
+
+proc declaredMainlineBranch(resolved: ResolvedProject;
+    repoName: string): string =
+  ## The branch the MANIFEST declares this repo's mainline to be: the repo
+  ## fragment's ``branch``, else its ``revision`` when that names a branch
+  ## rather than a pin, else the project's ``trunk``. Returns "" when the
+  ## manifest declares nothing — the caller must not infer one, because a
+  ## blanket refusal justified by an inference is exactly the shape that
+  ## teaches operators to reach for ``--no-verify``.
+  if repoName.len == 0: return ""
+  for repo in resolved.repos:
+    if repo.name != repoName: continue
+    if repo.branch.len > 0: return repo.branch
+    if repo.revision.len > 0 and not looksLikeCommitOid(repo.revision):
+      return repo.revision
+    break
+  resolved.trunk
+
+proc lockRecordTriggerSha(relPath: string): string =
+  ## The commit a lock record is KEYED at — its filename stem. Handles both
+  ## the canonical per-repo shape ``locks/<project>/<repo>/<sha>.toml`` and the
+  ## monolithic ``locks/<project>/<sha>.toml`` one, because the exclusion below
+  ## must hold for either.
+  let parsed = parseLockRecordRelPath(relPath)
+  if parsed.ok:
+    return parsed.sha.toLowerAscii()
+  let parts = relPath.replace('\\', '/').split('/')
+  if parts.len < 2 or not parts[^1].endsWith(".toml"): return ""
+  let stem = parts[^1][0 ..< parts[^1].len - ".toml".len]
+  var decoded: string
+  if tryDecodeLockPathSegment(stem, decoded) and decoded.len > 0:
+    return decoded.toLowerAscii()
+  stem.toLowerAscii()
+
+proc workspaceLockRoots(workspaceRoot: string;
+    layerLocations: openArray[ManifestLayerLocation]): seq[string] =
+  ## Every on-disk root that can own a ``locks/`` subtree for this workspace.
+  ##
+  ## This deliberately mirrors every arm of ``pickManifestLayerRoot`` rather
+  ## than calling it: that proc answers "where does THIS operation write", and
+  ## a rewrite must be checked against every record the workspace can still
+  ## READ. The arms are the native ``.repro/manifests`` git-checkout store, the
+  ## composer's materialised ``.repro/manifests-<i>-<slug>`` layers, an
+  ## explicitly declared ``[[manifest]]`` layer, the membership root, and the
+  ## workspace root itself. Roots with no ``locks/`` subtree cost nothing.
+  var candidates = @[
+    workspaceRoot / ".repro" / "manifests",
+    manifestsRoot(workspaceRoot),
+    workspaceRoot]
+  for loc in layerLocations:
+    candidates.add(loc.absPath)
+  let reproDirPath = workspaceRoot / ".repro"
+  if dirExists(reproDirPath):
+    for kind, path in walkDir(reproDirPath):
+      if kind in {pcDir, pcLinkToDir} and
+          extractFilename(path).startsWith("manifests-"):
+        candidates.add(path)
+  var seen = initHashSet[string]()
+  for candidate in candidates:
+    if candidate.len == 0: continue
+    let key =
+      try: os.normalizedPath(absolutePath(candidate))
+      except CatchableError: candidate
+    if key in seen: continue
+    seen.incl(key)
+    if dirExists(candidate / "locks"):
+      result.add(candidate)
+
+proc findLockPinningOrphan(identity: GitToolIdentity;
+    lockRoots: openArray[string];
+    orphans: HashSet[string]): LockPinFinding =
+  ## Search every workspace lock record for one that PINS a commit the
+  ## outgoing rewrite would make unreachable.
+  ##
+  ## Records whose OWN trigger commit is in the orphan set are EXCLUDED, and
+  ## that exclusion is the whole reason this is not a restatement of the
+  ## fast-forward rule it replaces. The gate writes a lock keyed at the commit
+  ## it is publishing and pinning that same commit, so after any successful
+  ## push the branch tip is pinned by its own record. Counting that record
+  ## would refuse every rebase-and-force-push in a locked workspace — exactly
+  ## the case this change exists to permit — while protecting nothing: a
+  ## snapshot ANCHORED at a commit that no longer exists cannot be asked for.
+  ##
+  ## What must be protected is a record anchored at a SURVIVING commit (a
+  ## sibling repo's, or an earlier one of this repo's) that pins an orphaned
+  ## commit: that snapshot is still reachable and reproducing it still needs
+  ## the commit this push would delete.
+  if orphans.len == 0: return
+  for root in lockRoots:
+    for cand in orderedLockCandidates(identity, root, "locks/"):
+      let trigger = lockRecordTriggerSha(cand.relPath)
+      if trigger.len > 0 and trigger in orphans:
+        continue
+      let lockPath = root / cand.relPath.replace('/', DirSep)
+      let body =
+        try: readFile(extendedPath(lockPath))
+        except CatchableError: ""
+      if body.len == 0: continue
+      for path, rev in shasFromBody(body):
+        let oid = rev.strip().toLowerAscii()
+        if oid in orphans:
+          return LockPinFinding(orphanOid: oid, lockedPath: path,
+            lockRelPath: cand.relPath, lockRoot: root, lockTriggerSha: trigger)
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
@@ -39603,9 +40357,18 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       # computes exactly that diagnostic and then discards it, leaving
       # `protocolOk` true so nothing else surfaces it either.
       #
-      # This changes no policy: the refusal still stands and a force update is
-      # still declined. It stops the operator being handed an impossible
-      # instruction and names the actual reason instead.
+      # This changes no policy: the refusal still stands. It stops the
+      # operator being handed an impossible instruction and names the actual
+      # reason instead.
+      #
+      # The non-fast-forward case the paragraph above cites is no longer one
+      # of the reasons that reach here — a rewrite now RECEIVES the
+      # provisional classification (it does publish this HEAD) and is judged
+      # by stage 2b instead, which never claims the repo is unpublished. The
+      # remaining reasons are the eligibility ones: a batch, a tag/note-only
+      # update, a deletion, a different SHA, a detached or non-branch local
+      # ref, and the wrong remote. For those, "unpublished" IS the accurate
+      # verdict and this remedy is the accurate wording of it.
       let selfPush =
         obs.name == currentRepoName and obs.headSha.len > 0 and
         obs.headSha == outgoing.headOid and not outgoing.outgoingCurrent
@@ -39629,6 +40392,109 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         property: "unpublished",
         remediation: remediation,
         evidence: evidence))
+      result.exitCode = 2
+      return
+
+  # ---- 2b. outgoing history rewrite --------------------------------------
+  # A push that names one ref, whose local object is the independently
+  # observed HEAD, and whose destination is the manifest-agreed remote branch
+  # PUBLISHES that HEAD — fast-forward or not. ``evaluateOutgoingCurrent``
+  # used to refuse a non-fast-forward there, which fused two different
+  # questions and answered the wrong one: rebasing a feature branch onto a
+  # moved mainline and force-pushing it was reported as `unpublished` with the
+  # remedy "run 'git push'" — the very push being refused. The only way
+  # through was ``--no-verify``, which disables the entire gate, so a rule
+  # meant to protect the workspace taught the bypass on a legitimate case.
+  #
+  # The concern the fast-forward rule really carried is separate and is
+  # decided HERE: workspace locks pin commit SHAs, and a rewrite that makes a
+  # pinned commit unreachable silently breaks reproduction of the snapshot
+  # that pins it. That is a claim about WHAT the overwritten commits are, not
+  # about fast-forwardness, so it is asked only of the commits actually being
+  # discarded, and only when something still depends on them.
+  #
+  # Refusals here never say the repository is unpublished — it is being
+  # published by this very push — and each names what would be lost.
+  if outgoing.outgoingCurrent and
+      outgoing.updateShape in {ouRewrite, ouRewriteOpaque}:
+    let pushedBranch =
+      if outgoing.remoteRef.startsWith("refs/heads/"):
+        outgoing.remoteRef["refs/heads/".len .. ^1]
+      else: outgoing.remoteRef
+    let repoLabel =
+      if currentRepoPath.len > 0: currentRepoPath else: parsed.currentRepo
+    let remoteLabel =
+      if outgoing.remoteName.len > 0: outgoing.remoteName else: "the remote"
+    if outgoing.updateShape == ouRewriteOpaque:
+      # The old tip is not a commit in this checkout, so what the update
+      # discards cannot be enumerated. "Nothing is discarded" and "what is
+      # discarded cannot be seen" are different answers and only the first is
+      # safe to act on, so refuse — but say which one this is.
+      result.failures.add(CheckFailure(
+        repo: repoLabel,
+        property: "history-rewrite-unverifiable",
+        remediation: "run 'git -C " & parsed.currentRepo & " fetch " &
+          remoteLabel & " " & pushedBranch & "' so the commits this update " &
+          "would replace are present locally, then retry the push — HEAD " &
+          outgoing.headOid & " is publishable; this is refused only because " &
+          "the gate cannot see what the update would discard",
+        evidence: "'" & remoteLabel & "/" & pushedBranch & "' is at " &
+          outgoing.remoteOldOid & ", which is not a commit object in this " &
+          "checkout, so the commits this non-fast-forward update would make " &
+          "unreachable cannot be enumerated"))
+      result.exitCode = 2
+      return
+    let orphanedCommits = commitsMadeUnreachable(identity.binaryPath,
+      parsed.currentRepo, outgoing.remoteOldOid, outgoing.headOid)
+    var orphans = initHashSet[string]()
+    orphans.incl(outgoing.remoteOldOid.toLowerAscii())
+    for oid in orphanedCommits:
+      orphans.incl(oid)
+    # A declared MAINLINE is refused regardless of what is pinned. The
+    # asymmetry is the justification: feature branches are rebased constantly
+    # and a rewrite there costs nothing, whereas mainline is what every other
+    # checkout tracks, so rewriting it invalidates teammates' working state —
+    # which no lock records and the check below therefore cannot see. The rule
+    # fires only on a branch the MANIFEST declares, never on an inferred one,
+    # so its false-refusal rate is the rate at which mainline is deliberately
+    # rewritten: near zero, which is what keeps a blanket rule from becoming
+    # a bypass lesson.
+    let mainline = declaredMainlineBranch(resolved, currentRepoName)
+    if mainline.len > 0 and pushedBranch == mainline:
+      result.failures.add(CheckFailure(
+        repo: repoLabel,
+        property: "mainline-history-rewrite",
+        remediation: "do not rewrite the shared mainline '" & pushedBranch &
+          "' — put this work on top of " & outgoing.remoteOldOid &
+          " (rebase onto it, or revert), or push this history to a " &
+          "different branch. HEAD " & outgoing.headOid & " is publishable; " &
+          "only discarding '" & pushedBranch & "' history is refused",
+        evidence: "'" & pushedBranch & "' is the mainline branch the " &
+          "manifest declares for " & currentRepoName &
+          ", and this update is not a fast-forward: it would make " &
+          $orphans.len & " commit(s) unreachable there, including " &
+          outgoing.remoteOldOid))
+      result.exitCode = 2
+      return
+    let pinned = findLockPinningOrphan(identity,
+      workspaceLockRoots(parsed.workspaceRoot, layerLocations), orphans)
+    if pinned.orphanOid.len > 0:
+      result.failures.add(CheckFailure(
+        repo: repoLabel,
+        property: "orphans-locked-commit",
+        remediation: "push this history to a different branch, or keep " &
+          pinned.orphanOid & " reachable from '" & pushedBranch &
+          "' — discarding it makes that lock record unresolvable, and " &
+          "re-pinning it is a coordinated change to shared lock history " &
+          "that this push must not make implicitly. HEAD " & outgoing.headOid &
+          " is publishable; only discarding " & pinned.orphanOid &
+          " is refused",
+        evidence: "lock record " & pinned.lockRelPath & " (keyed at " &
+          pinned.lockTriggerSha & ", which this push does NOT discard) pins " &
+          pinned.lockedPath & " at " & pinned.orphanOid &
+          ", and this non-fast-forward update to '" & pushedBranch &
+          "' would make that commit unreachable",
+        source: pinned.lockRoot / pinned.lockRelPath.replace('/', DirSep)))
       result.exitCode = 2
       return
 
@@ -50458,12 +51324,19 @@ const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
   ## — the env var the compiled provider's ``finalizeVariants()`` honours to
   ## emit the solved inputs.
 
+type CompiledProviderSolverInputs = object
+  variants: seq[variant_encoder.VariantDecl]
+  packages: seq[PackageDecl]
+  text: string
+  toolUses: seq[InterfaceToolUse]
+  usesSelectors: seq[string]
+  defaultToolProvisioning: string
+  sourceRecipeRoots: seq[string]
+
 proc solverInputsFromCompiledProvider(projectDir: string;
-                                      requireSolverBinding = true):
-    Option[tuple[
-    variants: seq[variant_encoder.VariantDecl];
-    packages: seq[PackageDecl]; text: string;
-    usesSelectors: seq[string]]] =
+                                      requireSolverBinding = true;
+                                      strict = false):
+    Option[CompiledProviderSolverInputs] =
   ## MO-12 — obtain solver inputs from the compiled project provider. Compiles
   ## the project's ``repro.nim`` / ``reprobuild.nim`` recipe to a provider
   ## binary and runs it with ``REPRO_EMIT_SOLVER_INPUTS`` set so module-init's
@@ -50475,8 +51348,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
   ## failure, an empty solve} returns ``none`` so the caller falls back to the
   ## ``repro.solver`` sidecar. All scratch lives under the system temp dir, so
   ## refresh still writes NO build artifacts into the project tree.
-  result = none(tuple[variants: seq[variant_encoder.VariantDecl];
-    packages: seq[PackageDecl]; text: string; usesSelectors: seq[string]])
+  result = none(CompiledProviderSolverInputs)
   let match =
     try: resolveProjectFile(projectDir)
     except CatchableError: return result
@@ -50518,6 +51390,17 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     # would be keyed on paths that never exist again and could never hit.
     # This is a best-effort probe for the lock refresh, not a build; its
     # results are thrown away and it writes nothing into the project tree.
+    # A refresh always re-solves. Clear inherited build pins before interface
+    # extraction as well as provider execution: module initialization can run
+    # during either process, and an old pin must not prevent us from observing
+    # the declaration that supersedes it.
+    let inheritedPins = getEnv(LockPinsEnvVar)
+    let inheritedLockPath = getEnv(LockPathEnvVar)
+    delEnv(LockPinsEnvVar)
+    delEnv(LockPathEnvVar)
+    defer:
+      if inheritedPins.len > 0: putEnv(LockPinsEnvVar, inheritedPins)
+      if inheritedLockPath.len > 0: putEnv(LockPathEnvVar, inheritedLockPath)
     let artifact = extractInterfaceFromModule(modulePath, interfacePath,
       stubPath, compileWorkDir, scratchDir, requireStub = false,
       consumerRoot = projectRootForModule(modulePath))
@@ -50548,10 +51431,6 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     # inherited them from an enclosing build would emit the OLD lock's answer
     # as the new solve's inputs and every refresh would be a fixed point. The
     # pins are removed for the probe's lifetime and put back afterwards.
-    let inheritedPins = getEnv(LockPinsEnvVar)
-    let inheritedLockPath = getEnv(LockPathEnvVar)
-    delEnv(LockPinsEnvVar)
-    delEnv(LockPathEnvVar)
     try:
       # A bare manifest request is enough: ``finalizeVariants()`` runs at the
       # provider's MODULE INITIALISATION (the variant decls + finalize call are
@@ -50565,23 +51444,181 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           reason: girExplicitUserRequest))
     finally:
       delEnv(SolverInputsEmitEnvVar)
-      if inheritedPins.len > 0: putEnv(LockPinsEnvVar, inheritedPins)
-      if inheritedLockPath.len > 0: putEnv(LockPathEnvVar, inheritedLockPath)
     if not fileExists(extendedPath(emitPath)):
       return result
     let text = readFile(extendedPath(emitPath))
     let parsed = parseExplainFixture(text)
     if parsed.packages.len == 0 and parsed.variants.len == 0:
       return result
-    return some((variants: parsed.variants, packages: parsed.packages,
-                 text: text, usesSelectors: usesSelectors))
+    return some(CompiledProviderSolverInputs(
+      variants: parsed.variants,
+      packages: parsed.packages,
+      text: text,
+      toolUses: artifact.projectInterface.toolUses,
+      usesSelectors: usesSelectors,
+      defaultToolProvisioning:
+        artifact.projectInterface.defaultToolProvisioning))
   except CatchableError:
+    if strict:
+      raise
     return result
+
+proc dependencyDeclEqual(a, b: DependencyDecl): bool =
+  a.name == b.name and a.range == b.range and a.conditional == b.conditional
+
+proc mergeProviderSolverInputs(aggregate: var CompiledProviderSolverInputs;
+                               incoming: CompiledProviderSolverInputs) =
+  ## Fold independently compiled package providers into one solver universe.
+  ## A global lock must satisfy every selected producer, not only the root
+  ## recipe that happened to start the build.
+  for incomingVariant in incoming.variants:
+    var found = false
+    for existing in aggregate.variants:
+      if existing.name != incomingVariant.name:
+        continue
+      if existing != incomingVariant:
+        raise newException(ValueError,
+          "conflicting variant declarations for '" & incomingVariant.name &
+          "' while composing from-source solver inputs")
+      found = true
+      break
+    if not found:
+      aggregate.variants.add(incomingVariant)
+
+  for incomingPackage in incoming.packages:
+    var match = -1
+    for i, existing in aggregate.packages:
+      if existing.name == incomingPackage.name:
+        match = i
+        break
+    if match < 0:
+      aggregate.packages.add(incomingPackage)
+      continue
+
+    var existing = aggregate.packages[match]
+    if existing.source.len > 0 and incomingPackage.source.len > 0 and
+        existing.source != incomingPackage.source:
+      raise newException(ValueError,
+        "conflicting source declarations for package '" &
+        incomingPackage.name & "'")
+    if existing.source.len == 0:
+      existing.source = incomingPackage.source
+    if existing.instanceOf.len > 0 and incomingPackage.instanceOf.len > 0 and
+        existing.instanceOf != incomingPackage.instanceOf:
+      raise newException(ValueError,
+        "conflicting instance declarations for package '" &
+        incomingPackage.name & "'")
+    if existing.instanceOf.len == 0:
+      existing.instanceOf = incomingPackage.instanceOf
+    if existing.pinned and incomingPackage.pinned and
+        existing.versions != incomingPackage.versions:
+      raise newException(ValueError,
+        "conflicting pinned versions for package '" & incomingPackage.name &
+        "'")
+    if incomingPackage.pinned:
+      existing.pinned = true
+      existing.versions = incomingPackage.versions
+    elif not existing.pinned:
+      for version in incomingPackage.versions:
+        if version notin existing.versions:
+          existing.versions.add(version)
+    for dependency in incomingPackage.depends:
+      var found = false
+      for current in existing.depends:
+        if dependencyDeclEqual(current, dependency):
+          found = true
+          break
+      if not found:
+        existing.depends.add(dependency)
+    for packageVariant in incomingPackage.variants:
+      var found = false
+      for current in existing.variants:
+        if current.name != packageVariant.name:
+          continue
+        if current != packageVariant:
+          raise newException(ValueError,
+            "conflicting package variant declarations for '" &
+            packageVariant.name & "'")
+        found = true
+        break
+      if not found:
+        existing.variants.add(packageVariant)
+    existing.versions.sort()
+    existing.depends.sort(proc(a, b: DependencyDecl): int =
+      result = cmp(a.name, b.name)
+      if result == 0: result = cmp(a.range, b.range)
+      if result == 0: result = cmp($a.conditional, $b.conditional))
+    existing.variants.sort(proc(a, b: variant_encoder.VariantDecl): int =
+      cmp(a.name, b.name))
+    aggregate.packages[match] = existing
+
+  for useDef in incoming.toolUses:
+    var found = false
+    for current in aggregate.toolUses:
+      if current.packageSelector == useDef.packageSelector and
+          current.executableName == useDef.executableName and
+          current.rawConstraint == useDef.rawConstraint:
+        found = true
+        break
+    if not found:
+      aggregate.toolUses.add(useDef)
+  for selector in incoming.usesSelectors:
+    if selector notin aggregate.usesSelectors:
+      aggregate.usesSelectors.add(selector)
+  aggregate.variants.sort(proc(a, b: variant_encoder.VariantDecl): int =
+    cmp(a.name, b.name))
+  aggregate.packages.sort(proc(a, b: PackageDecl): int = cmp(a.name, b.name))
+
+proc foldFromSourceProviderSolverInputs(projectDir: string;
+                                        aggregate: var
+                                          CompiledProviderSolverInputs) =
+  ## Discover the same corpus recipes that from-source execution would select,
+  ## compile their metadata only, and merge their transitive constraints into
+  ## the root solve. No package build action is executed.
+  let recipeRoot = fromSourceRecipeRoot(projectDir)
+  if not dirExists(extendedPath(recipeRoot)):
+    return
+  seedBootstrapCycleBreakTools()
+  var pending = aggregate.toolUses
+  var seenRecipeDirs: seq[string] = @[]
+  var cursor = 0
+  while cursor < pending.len:
+    let useDef = pending[cursor]
+    inc cursor
+    if useDef.executableName.len == 0:
+      continue
+    let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
+    var recipeDir = ""
+    case outcome.kind
+    of rrResolved:
+      recipeDir = outcome.profile.selectedStorePath
+    of rrNeedsBuild:
+      if useDef.executableName in fromSourceCycleBrokenTools:
+        continue
+      recipeDir = outcome.recipeDir
+    of rrSiblingMissing:
+      continue
+    if recipeDir.len == 0:
+      continue
+    recipeDir = absolutePath(recipeDir)
+    if recipeDir in seenRecipeDirs:
+      continue
+    seenRecipeDirs.add(recipeDir)
+    let provider = solverInputsFromCompiledProvider(recipeDir, strict = true)
+    if provider.isNone:
+      continue
+    let producerInputs = provider.get()
+    for transitiveUse in producerInputs.toolUses:
+      pending.add(transitiveUse)
+    aggregate.mergeProviderSolverInputs(producerInputs)
+  aggregate.sourceRecipeRoots = seenRecipeDirs
+  aggregate.text = solver_variants.renderSolverInputsFixture(
+    aggregate.variants, aggregate.packages)
 
 proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string; source: string;
-    usesSelectors: seq[string]] =
+    usesSelectors: seq[string]; sourceRecipeRoots: seq[string]] =
   ## MO-12 — resolve the solver inputs for ``lock refresh`` / ``validate``,
   ## PREFERRING the compiled project provider (the real recipe's solve) and
   ## falling back to the ``repro.solver`` sidecar. An explicit ``--inputs``
@@ -50594,15 +51631,19 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
   if inputsOverride.len == 0:
     let fromProvider = solverInputsFromCompiledProvider(projectDir)
     if fromProvider.isSome:
-      let p = fromProvider.get()
-      return (true, p.variants, p.packages, p.text, "provider", p.usesSelectors)
+      var p = fromProvider.get()
+      if p.defaultToolProvisioning == "from-source":
+        foldFromSourceProviderSolverInputs(projectDir, p)
+      return (true, p.variants, p.packages, p.text, "provider",
+        p.usesSelectors, p.sourceRecipeRoots)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
-    return (true, loaded.variants, loaded.packages, loaded.text, "sidecar", @[])
-  return (false, @[], @[], "", "", @[])
+    return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
+      @[], @[])
+  return (false, @[], @[], "", "", @[], @[])
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
@@ -50643,7 +51684,8 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     endpoints: gen.registries,
     workDir: getTempDir() /
       ("repro-lock-generation-" & $getCurrentProcessId() & "-" & verb),
-    extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors),
+    extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
+      resolved.sourceRecipeRoots),
     entryPoint: entryPoint)
   return 0
 
@@ -50906,7 +51948,7 @@ proc runReproLockValidate(rest: openArray[string]): int =
     var resolved: tuple[found: bool;
       variants: seq[variant_encoder.VariantDecl];
       packages: seq[PackageDecl]; text: string; source: string;
-      usesSelectors: seq[string]]
+      usesSelectors: seq[string]; sourceRecipeRoots: seq[string]]
     try:
       resolved = resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:
@@ -52297,12 +53339,21 @@ type
     ## attempted and did not succeed. A checkout that needed nothing produces
     ## an entry with all three empty, and the drivers drop it — silence is the
     ## steady state, so a second run reports nothing at all.
+    ##
+    ## `notices` are the fourth kind: states this reconciler observed and
+    ## deliberately does not act on FROM A HOOK, because acting would mean
+    ## moving a ref inside somebody else's git operation. They are recorded
+    ## (the cache log keeps the trace) but never printed to stderr — a
+    ## detached HEAD is a position its owner chose, and narrating it on every
+    ## subsequent git command is how a hook trains people to stop reading it.
+    ## `repro workspace migrate` reports the same states on stdout, on demand.
     name*: string
     path*: string
     changes*: seq[string]
     deferrals*: seq[string]
     remedy*: string
     failures*: seq[string]
+    notices*: seq[string]
 
   WorkspaceLocalStateReport* = object
     ## Structured outcome of one `repro workspace migrate` invocation.
@@ -52331,6 +53382,7 @@ proc toJsonNode*(report: WorkspaceLocalStateReport): JsonNode =
     node["deferrals"] = %entry.deferrals
     node["remedy"] = %entry.remedy
     node["failures"] = %entry.failures
+    node["notices"] = %entry.notices
     repos.add(node)
   result["repos"] = repos
   result["membership"] = %report.membership
@@ -52461,11 +53513,23 @@ proc localStateMayBeStale(workspaceRoot: string; repo: ResolvedRepo): bool =
 
 proc reconcileRepoLocalState(identity: GitToolIdentity;
                              workspaceRoot: string; repo: ResolvedRepo;
-                             dryRun: bool): LocalStateRepoReport =
+                             dryRun: bool;
+                             attachDetachedHead: bool): LocalStateRepoReport =
   ## Reconcile ONE checkout's git remotes and HEAD attachment against its
   ## resolved fragment. Idempotent: every step is expressed as "the observed
   ## state differs from the declared state", so a second run finds no
   ## difference, runs no git command, and reports nothing.
+  ##
+  ## ``attachDetachedHead`` gates the ONE step here that moves HEAD. It is
+  ## true for `repro workspace migrate` — an operator verb, typed on purpose,
+  ## at a moment of the operator's choosing — and false for the managed hook
+  ## arm, which runs inside somebody else's `git checkout`. `git checkout`
+  ## from a `post-checkout` hook is a hook overruling the very operation that
+  ## invoked it, and no amount of in-flight detection makes that the right
+  ## default: the in-flight probe answers "is git busy", while this answers
+  ## "was a human asking". Both have to be true, and only the second is
+  ## knowable from the argv. When it is false the reconciler still SAYS what
+  ## it found, with the verb that would fix it.
   result.name = repo.name
   result.path = repo.path
   let repoAbs = workspaceRoot / repo.path
@@ -52618,6 +53682,18 @@ proc reconcileRepoLocalState(identity: GitToolIdentity;
       repo.name & "', then rerun `repro workspace migrate`"
     return
 
+  if not attachDetachedHead:
+    # The hook arm. A detached HEAD is RECORDED, never corrected: a
+    # `post-checkout` hook that runs `git checkout` is a hook overruling the
+    # operation that invoked it, and the operator who typed `git checkout
+    # <sha>` chose that detachment. A `notice` rather than a `deferral` so the
+    # trace lands in the cache log without stderr narrating somebody's own
+    # detached HEAD back at them after every git command.
+    result.notices.add("HEAD is detached and the fragment declares '" &
+      declared & "'; a hook does not move refs (run `repro workspace " &
+      "migrate` to put '" & repo.path & "' back on '" & declared & "')")
+    return
+
   var blockers = repoRemovalBlockers(identity, repoAbs)
   for extra in detachedHeadOnlyCommits(identity, repoAbs):
     blockers.add(extra)
@@ -52650,18 +53726,23 @@ proc reconcileWorkspaceLocalState*(workspaceRoot: string;
                                    repos: seq[ResolvedRepo];
                                    identity: GitToolIdentity;
                                    dryRun = false;
-                                   prefilter = false):
+                                   prefilter = false;
+                                   attachDetachedHead = true):
     seq[LocalStateRepoReport] =
   ## Reconcile every declared checkout. Only repos with something to say are
   ## returned, so an already-consistent workspace yields an empty seq — which
   ## is what lets the hook stay silent without a second "did anything happen"
   ## test.
+  ##
+  ## ``attachDetachedHead`` defaults to true because the operator verb is this
+  ## proc's reason to exist; the hook arm passes false explicitly.
   for repo in repos:
     if prefilter and not localStateMayBeStale(workspaceRoot, repo):
       continue
-    let entry = reconcileRepoLocalState(identity, workspaceRoot, repo, dryRun)
+    let entry = reconcileRepoLocalState(identity, workspaceRoot, repo, dryRun,
+      attachDetachedHead)
     if entry.changes.len > 0 or entry.deferrals.len > 0 or
-        entry.failures.len > 0:
+        entry.failures.len > 0 or entry.notices.len > 0:
       result.add(entry)
 
 proc unresolvableActiveSetNames(workspaceRoot: string): seq[string] =
@@ -52693,6 +53774,8 @@ proc renderLocalStateTextLines(report: WorkspaceLocalStateReport): seq[string] =
       result.add("  SKIPPED — " & deferral)
     for failure in entry.failures:
       result.add("  FAILED — " & failure)
+    for notice in entry.notices:
+      result.add("  NOTICE — " & notice)
     if entry.remedy.len > 0:
       result.add("  remedy: " & entry.remedy)
   for name in report.membership:
@@ -52793,33 +53876,44 @@ proc runWorkspaceMigrateCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
-proc reconcileLocalStateForHook(workspaceRoot: string): seq[string] =
+proc reconcileLocalStateForHook(workspaceRoot: string):
+    tuple[loud, quiet: seq[string]] =
   ## The `post-merge` arm. Best-effort by construction: every failure path
   ## becomes a log line and NOTHING propagates, because a checkout that could
   ## not be reconciled is a thing to fix later, never a reason for somebody's
   ## `git pull` to fail.
   ##
-  ## Returns one line per checkout that changed or was deferred, and an empty
-  ## seq otherwise. A hook that speaks on every pull teaches its user to stop
-  ## reading it, so the quiet path has to be genuinely quiet.
+  ## ``loud`` is what the developer is told on stderr — mutations that
+  ## happened, and failures. ``quiet`` is recorded in the cache log only.
+  ## Both are empty when there is nothing at all to record, which is what
+  ## lets the hook stay silent without a second "did anything happen" test.
+  ##
+  ## ``attachDetachedHead = false``: the remote realignment stays (that is the
+  ## whole point of doing this on `git pull`), the ref-moving step does not.
+  ## It was the reattachment — `git checkout <declared branch>` fired from
+  ## `post-checkout` during a rebase's detached phase — that landed a topic
+  ## branch's commits on the mainline and reported "Successfully rebased".
   try:
     let resolved = resolveWorkspaceProjectShared(workspaceRoot, "",
       "`repro hooks dispatch post-merge`").resolved
     let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
     for entry in reconcileWorkspaceLocalState(workspaceRoot, resolved.repos,
-        identity, dryRun = false, prefilter = true):
+        identity, dryRun = false, prefilter = true,
+        attachDetachedHead = false):
       for change in entry.changes:
-        result.add(entry.path & ": " & change)
+        result.loud.add(entry.path & ": " & change)
       for deferral in entry.deferrals:
-        result.add(entry.path & ": SKIPPED — " & deferral &
+        result.loud.add(entry.path & ": SKIPPED — " & deferral &
           (if entry.remedy.len > 0: " (remedy: " & entry.remedy & ")" else: ""))
       for failure in entry.failures:
-        result.add(entry.path & ": FAILED — " & failure)
+        result.loud.add(entry.path & ": FAILED — " & failure)
+      for notice in entry.notices:
+        result.quiet.add(entry.path & ": NOTICE — " & notice)
     for name in unresolvableActiveSetNames(workspaceRoot):
-      result.add("active set entry '" & name & "' resolves to no repo-set, " &
-        "project or variant (remedy: `repro ws sets list`)")
+      result.loud.add("active set entry '" & name & "' resolves to no " &
+        "repo-set, project or variant (remedy: `repro ws sets list`)")
   except CatchableError as err:
-    result.add("local-state reconciliation skipped: " & err.msg)
+    result.loud.add("local-state reconciliation skipped: " & err.msg)
 
 proc runWorkspaceDisableCommand*(args: openArray[string]): int =
   ## ``repro workspace disable <project>... [--keep-checkouts] [--force]`` —

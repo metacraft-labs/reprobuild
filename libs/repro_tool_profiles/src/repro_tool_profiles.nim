@@ -15,6 +15,7 @@ import repro_domain_types
 import repro_hash
 import repro_interface_artifacts
 import repro_local_store
+import repro_project_dsl/install_mirror_resolver
 # repro_local_store provides the M56 unified store. Every adapter
 # (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
 # out its realized prefix on disk so the same SQLite-backed
@@ -3882,16 +3883,10 @@ const BootstrapCycleBreakTools* = @[
   "libtool", "libtoolize",
   "m4",
   "perl",
-  # M9.R.14d.5 — meson/ninja/python3/pkg-config bootstrap floor.
-  # These are build-system drivers, not C/C++ code that needs to be
-  # compiled from source. Their from-source recipes either need
-  # cross-language toolchains (meson is python, python3 is itself an
-  # entire bootstrap problem) or don't produce a standard executable
-  # artifact under the from-source-custom convention (meson lands
-  # under .repro/build/from-source-custom/<pkg>/, not under
-  # .repro/output/<artifactName>/). Routing them through the stdlib
-  # provisioning skips the unproductive recursion.
-  "meson", "ninja", "python3", "python", "pkg-config", "pkgconf",
+  # The remaining scripting/build drivers lack a source realization that can
+  # terminate its own dependency chain. Meson is deliberately absent: its
+  # custom recipe publishes a complete install mirror and can be auto-recursed.
+  "ninja", "python3", "python", "pkg-config", "pkgconf",
   # M9.R.14g.5 — cmake bootstrap floor. cmake's from-source recipe
   # transitively pulls gcc and (per M9.R.10a) trips the gcc cycle break
   # too late — by then the sub-build worker has already failed because
@@ -3916,18 +3911,23 @@ proc seedBootstrapCycleBreakTools*() =
   for tool in BootstrapCycleBreakTools:
     fromSourceCycleBrokenTools.incl(tool)
 
-proc fromSourceRecipeRoot*(): string =
+proc fromSourceRecipeRoot*(workspaceRoot = ""): string =
   ## Resolve the from-source recipe anchor. Honours
   ## ``REPRO_FROM_SOURCE_ROOT`` first. The legacy in-tree catalog remains
   ## the first automatic candidate, followed by the federated sibling
-  ## ``reprobuild-packages/packages/source`` checkout.
+  ## ``reprobuild-packages/packages/source`` checkout. ``workspaceRoot`` lets
+  ## metadata-only callers such as ``repro lock refresh <path>`` resolve the
+  ## catalog relative to the project being locked instead of the caller's cwd.
   let override = getEnv(FromSourceRootEnvVar)
   if override.len > 0:
     return override
-  let inTree = getCurrentDir() / "recipes" / "packages" / "source"
+  let root =
+    if workspaceRoot.len > 0: absolutePath(workspaceRoot)
+    else: getCurrentDir()
+  let inTree = root / "recipes" / "packages" / "source"
   if dirExists(inTree):
     return inTree
-  let federated = parentDir(getCurrentDir()) / "reprobuild-packages" /
+  let federated = parentDir(root) / "reprobuild-packages" /
     "packages" / "source"
   if dirExists(federated):
     return federated
@@ -4782,6 +4782,11 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   # is empty / missing) so existing tests + the executable-style probe
   # for tools like ``meson`` keep working unchanged.
   let baseCandidate = recipeDir / ".repro" / "output" / name / name
+  if not realizationInfoMatchesCurrentPlatform(recipeDir):
+    return FromSourceResolveResult(kind: rrNeedsBuild,
+      recipeDir: recipeDir,
+      expectedArtifact: baseCandidate,
+      toolName: name)
   var candidates = m9r14dEnumerateArtifacts(recipeDir)
   var resolved = ""
   # Prefer the complete install mirror for executable tools. Its ELF RPATH

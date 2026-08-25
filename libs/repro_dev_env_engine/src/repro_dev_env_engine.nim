@@ -499,8 +499,15 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       "__repro_provider_compile")
     result.stats.providerBuildLaunched =
       result.providerCompileAction.launched
+    # ``asCacheHit`` and ``asUpToDate`` BOTH mean the cache satisfied this edge
+    # and no compile ran; they differ only in whether the outputs had to be
+    # restored from the CAS or were already on disk. A consumer reading
+    # ``cacheHit`` wants to know whether work was avoided, so it must accept
+    # both. Comparing against ``asCacheHit`` alone under-reports every warm
+    # reuse -- see ``repro_cli_support``'s ``providerCompileCacheHit``, which
+    # has always used the set form for this same concept.
     result.stats.providerBuildCacheHit =
-      result.providerCompileAction.status == asCacheHit
+      result.providerCompileAction.status in {asCacheHit, asUpToDate}
     # ``providerBuildSkippedFresh`` used to mean "the hand-written freshness
     # gate said the artifact was fresh, so we never entered the engine". With
     # the gate gone it is re-derived from the engine's own decision: the edge
@@ -552,7 +559,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   result.stats.providerIntrospectionLaunched =
     result.introspectionAction.launched
   result.stats.providerIntrospectionCacheHit =
-    result.introspectionAction.status == asCacheHit
+    result.introspectionAction.status in {asCacheHit, asUpToDate}
   result.stats.artifactWriteLaunched =
     result.stats.providerIntrospectionLaunched
   result.stats.artifactWriteSkipped =
@@ -560,7 +567,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if active.renderShell:
     result.stats.shellRenderingLaunched = result.shellRenderAction.launched
     result.stats.shellRenderingCacheHit =
-      result.shellRenderAction.status == asCacheHit
+      result.shellRenderAction.status in {asCacheHit, asUpToDate}
     result.stats.shellRenderingSkipped =
       not result.stats.shellRenderingLaunched
   else:

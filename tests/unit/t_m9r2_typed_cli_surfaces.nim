@@ -38,7 +38,7 @@
 ## under the same syntax as production recipes.
 {.experimental: "callOperator".}
 
-import std/[unittest]
+import std/[os, unittest]
 
 import repro_cli_support
 import repro_project_dsl
@@ -77,6 +77,20 @@ proc argByName(action: BuildActionDef; name: string): PublicCliArg =
 # ---------------------------------------------------------------------------
 
 suite "DSL-port M9.R.2 — meson typed CLI surface":
+
+  test "typed scripts use their shebang interpreter on Windows":
+    when defined(windows):
+      let scriptPath = getTempDir() /
+        ("reprobuild-shebang-" & $getCurrentProcessId())
+      writeFile(scriptPath, "#!/bin/sh\nexit 0\n")
+      defer:
+        if fileExists(scriptPath):
+          removeFile(scriptPath)
+      let action = meson.setup(srcDir = "./src",
+        buildDir = "./shebang-build")
+      let argv = argvForCall(action.call,
+        PathOnlyToolProfile(resolvedExecutablePath: scriptPath))
+      check argv[0 .. 2] == @["sh", scriptPath, "setup"]
 
   test "meson.setup records buildDir + srcDir positionals + flags":
     let action = meson.setup(srcDir = "./src", buildDir = "./b",

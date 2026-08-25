@@ -95,6 +95,28 @@ import ../packages/pkg_config as pkg_config_module
 
 const FetchScratchSubdir = ".repro/fetch"
 
+const AutotoolsWindowsInstallArgConversionExclusions* =
+  "prefix=;exec_prefix=;bindir=;sbindir=;libdir=;includedir=;" &
+  "datarootdir=;datadir=;mandir=;infodir=;DESTDIR="
+
+proc addWindowsInstallArgConversionExclusions(
+    env: var seq[(string, string)]) =
+  ## Recursive Automake installs pass POSIX install directories back to a
+  ## native make executable. MSYS must leave those VAR=/path arguments intact.
+  when defined(windows):
+    for i, entry in env:
+      if entry[0] == "MSYS2_ARG_CONV_EXCL":
+        var merged = entry[1]
+        for exclusion in AutotoolsWindowsInstallArgConversionExclusions.split(';'):
+          if exclusion.len > 0 and exclusion notin merged.split(';'):
+            if merged.len > 0 and not merged.endsWith(";"):
+              merged.add(';')
+            merged.add(exclusion)
+        env[i] = (entry[0], merged)
+        return
+    env.add(("MSYS2_ARG_CONV_EXCL",
+      AutotoolsWindowsInstallArgConversionExclusions))
+
 proc sanitizedPackageName(packageName: string): string =
   ## Lower the package name to the limited character set the build
   ## engine's action-id slot accepts (alphanumerics + ``-``/``_``/``.``).
@@ -161,7 +183,8 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
+  let staged = extracted & ".repro-extract-" & spec.hashHex
+  let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
@@ -193,13 +216,11 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # only on Windows, where the MSYS2/Git GNU tar needs it. Linux GNU tar would
   # accept it but does not need it either, so gating on Windows keeps the
   # emitted script minimal and portable across all three host tar flavours.
-  let tarForceLocal = when defined(windows): "--force-local " else: ""
   if spec.kind == dfkDataFile:
     script.add("cp \"" & escapedTarball & "\" \"" &
       escapedStaged & "/source\"; ")
   else:
-    script.add("tar " & tarForceLocal & "-xf \"" & escapedTarball & "\" -C \"" &
-      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+    script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
   script.add(": > \"" & escapedStamp & "\"")
@@ -684,6 +705,7 @@ proc autotools_package*(srcDir: string;
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
   for envVar in extraEnv:
     installEnv.add(envVar)
+  addWindowsInstallArgConversionExclusions(installEnv)
   let installDestdir = (block:
     if providerProjectRoot.len > 0:
       providerProjectRoot / buildDir / destdir

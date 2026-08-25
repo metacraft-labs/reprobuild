@@ -179,6 +179,11 @@ for libName in [
   "ct_test_interface",
   "ct_test_nim_unittest",
   "ct_test_unittest_parallel",
+  # RunQuota-Observation-Store M19: the ``HistoryReporter`` write path.
+  # It is NOT part of the three above and must not be: those are linked
+  # into test binaries and into ``repro.nim``'s DSL, while this one
+  # links the RunQuota client. Only ``tools/test-runner`` imports it.
+  "ct_test_history",
   "repro_core",
   "repro_platform",
   "repro_diagnostics",

@@ -34,6 +34,12 @@ import io_mon/codec as ioMonCodec
 import io_mon/writer as ioMonWriter
 import repro_platform
 import repro_runquota
+# M17: the ``ext_repro_action`` schema, the compatibility key, and the
+# row shape. A leaf module by construction — it imports only the hash
+# library — so the engine can build a row without the row's definition
+# reaching back into the engine.
+import repro_build_engine/action_extension
+export action_extension
 
 # M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
 # but is identity-agnostic — the convention populates the identity tuple
@@ -223,6 +229,22 @@ type
     argv*: seq[string]
     cwd*: string
     env*: seq[string]
+    envPassthrough*: seq[string]
+      ## Names of environment variables whose VALUE is the host's, not
+      ## Reprobuild's. BuildXL's `passThroughEnvironmentVariables`, with
+      ## BuildXL's semantics: the NAME is part of what the action is (it
+      ## records "this action reads the host's `PATH`") and enters the
+      ## weak fingerprint; the VALUE never does — including when `env`
+      ## above carries a declared value for the same name, which is
+      ## BuildXL's passthrough-with-value case (the process is launched
+      ## with that value, the fingerprint does not see it).
+      ##
+      ## This exists because keying on the environment BY VALUE is not
+      ## the fix for an unkeyed environment, it is a different defect.
+      ## An action's `PATH` is resolved tool directories prepended to
+      ## the host's; under `nix develop` that is not what it is in CI.
+      ## A key that read it would invalidate every edge of every graph
+      ## on any host difference.
     pool*: string
     poolUnits*: uint32
     cpuMilli*: uint32
@@ -645,6 +667,21 @@ type
     runQuotaBackend*: string
     runQuotaSocket*: string
     evidence*: PathSetEvidence
+    strongFingerprintHex*: string
+      ## M17 (``ext_repro_action``): the ACTION-CACHE KEY the lookup
+      ## compared against, hex-encoded, or "" when the lookup found no
+      ## record at all and there was therefore no key to report. Recorded
+      ## here rather than recomputed later because a cache lookup is the
+      ## only moment at which it exists — and it is the quantity the
+      ## compatibility key must be COARSER than, so a row carrying one
+      ## without the other cannot show that the two diverge.
+    cacheMissReason*: string
+      ## Why the lookup did not hit, in the cache layer's own words
+      ## ("no cache record for weak fingerprint", "input changed: <path>",
+      ## …). Empty when there is nothing to say; stored as SQL NULL so
+      ## "no reason recorded" stays distinguishable from an empty reason.
+    outputBytes*: int64
+      ## Total size of the action's declared outputs after it settled.
 
   SchedulerTraceEvent* = object
     seq*: uint64
@@ -660,10 +697,50 @@ type
   BuildStats* = object
     metrics*: seq[BuildStatsMetric]
 
+  EnvironmentInheritanceCensus* = object
+    ## STAGE 2 — the denominator for the environment Reprobuild does not
+    ## control.
+    ##
+    ## Reprobuild passes an action's `env` as an OVERLAY: the launcher
+    ## layers those entries over the environment the build process
+    ## itself inherited, so an action that declares nothing runs with the
+    ## developer's or the CI runner's entire environment, and nothing
+    ## records that it did. That is not a cache-key defect — closing it
+    ## is a behaviour change that will break real edges — so this counts
+    ## the population first and changes nothing about it.
+    ##
+    ## This is deliberately a CENSUS and not a warning. PR #99's shm drop
+    ## was invisible for the same reason: nobody had put a number on it.
+    ## A number is what makes the next decision arguable.
+    totalActions*: int
+    declaringActions*: int
+      ## Actions carrying at least one `NAME=VALUE` Reprobuild chose.
+    passthroughActions*: int
+      ## Actions naming at least one variable whose value is the host's.
+      ## The name IS recorded (it is in the weak fingerprint); the value
+      ## is not, by design.
+    undeclaredActions*: int
+      ## Actions that declare NOTHING at all.
+      ##
+      ## Read this as "declares nothing", NOT as "inherits nothing".
+      ## EVERY process action inherits the build process environment,
+      ## because `env` is an overlay on it rather than a replacement —
+      ## so the population exposed to the host environment is
+      ## `totalActions`, and this narrower count is only the subset that
+      ## does not even overlay one variable on top.
+      ##
+      ## The distinction is the whole reason this is a census: on this
+      ## repository's own graph `undeclaredActions` is 0 while
+      ## `totalActions` is 1391, and a report that called the first
+      ## number "inheriting" would have said the channel was closed
+      ## when it is open for every edge.
+
   BuildRunResult* = object
     results*: seq[ActionResult]
     trace*: seq[SchedulerTraceEvent]
     stats*: BuildStats
+    environmentInheritance*: EnvironmentInheritanceCensus
+      ## STAGE 2 census of this graph — see `EnvironmentInheritanceCensus`.
     traceEnabled: bool
     runQuotaBypassed*: bool
       ## RA-13: true when at least one action in this build launched without a
@@ -1211,6 +1288,144 @@ proc keyedOnGoverningLock*(fingerprint: ContentDigest;
   framed.add($lock.len & "\x1f" & lock & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc actionEnvironmentKeyText*(env: openArray[string];
+                               envPassthrough: openArray[string]): string =
+  ## The canonical rendering of an action's ENVIRONMENT DECLARATION, in
+  ## BuildXL's two classes.
+  ##
+  ## `Public/Src/Pips/Dll/Graph/PipFingerprinter.cs:360-375` is the whole
+  ## of BuildXL's environment fingerprinting, and it is a two-branch
+  ## order-independent collection over `Process.EnvironmentVariables`:
+  ##
+  ## ```csharp
+  ## if (env.IsPassThrough)
+  ##     fCollection.Add(env.Name.ToString(...), "Pass-through");
+  ## else
+  ##     AddPipData(fCollection, env.Name.ToString(...), env.Value);
+  ## ```
+  ##
+  ## so — declared contributes name AND value, passthrough contributes
+  ## name and a fixed marker. `Documentation/Wiki/Advanced-Features/
+  ## Build-Parameters-(Environment-variables).md:30-39` states the
+  ## consequence: for a passthrough variable "value is not tracked;
+  ## addition or removal is considered for caching", and that holds
+  ## "when the value of passthrough variables is explicitly set in
+  ## DScript to something other than what is in bxl.exe's environment.
+  ## The effect is the same in that the value will not be tracked."
+  ## `BaselineTests.cs:1696-1741` (`PerVariablePassThroughIsHonored`) is
+  ## the executable proof: same declared value, cache HIT iff passthrough.
+  ##
+  ## ## Where this rendering DIVERGES from BuildXL, deliberately
+  ##
+  ## BuildXL puts the literal string `"Pass-through"` in the value slot,
+  ## with no separate type tag. A DECLARED variable whose value happens
+  ## to render to exactly `Pass-through` therefore produces a
+  ## byte-identical contribution to a PASSTHROUGH variable of the same
+  ## name — two different actions, one key. That is a latent
+  ## serve-a-stale-artifact hole, and there is no reason to inherit it.
+  ## Here the class is its own framed field, so no value can impersonate
+  ## a class.
+  ##
+  ## BuildXL also gets order-independence by XOR-ing per-element hashes
+  ## and appends the element count to keep the function injective. A
+  ## sorted, length-framed rendering gets both properties directly and
+  ## stays readable, which matters because this text is what an operator
+  ## diffs when two hosts disagree about a key.
+  ##
+  ## ## Canonicalisation
+  ##
+  ## Duplicate declarations resolve LAST-WRITE-WINS, because that is what
+  ## the spawn-time overlay does (`prependPathDirsToArgvEnv` documents
+  ## the same rule: "Last-write-wins matches the StringTableRef merge").
+  ## A key that disagreed with the spawn would be keying on an
+  ## environment the action never experiences.
+  ##
+  ## Entries with no `=` or an empty name carry no environment and are
+  ## dropped; they cannot become part of a key by accident.
+  ##
+  ## Names are compared CASE-SENSITIVELY here, while Windows environment
+  ## variables are case-insensitive and the spawn path's `PATH` collapse
+  ## uses `cmpIgnoreCase`. On Windows, `Path=x` and `PATH=x` therefore
+  ## render as two records where the process sees one variable. That is
+  ## an OVER-invalidation (two keys for one environment: a redundant
+  ## rebuild) and never a false hit, so it is safe in the direction that
+  ## matters. Folding case here would have to match the spawn path's
+  ## collapse exactly or it would introduce the opposite error, which is
+  ## the unsafe one.
+  ##
+  ## ## This procedure reads NOTHING ambient, and that is load-bearing
+  ##
+  ## It is a pure function of its arguments. PR #96's `NIX_STORE_DIR`
+  ## defect was a transient ambient value entering a cache record
+  ## permanently because a key computation called `getEnv`. No `getEnv`
+  ## may appear here or in `keyedOnActionEnvironment` below; a test
+  ## asserts on the source text of both to keep it that way.
+  const US = "\x1f"
+  const RS = "\x1e"
+  var declared = initOrderedTable[string, string]()
+  for entry in env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    declared[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+  var passthrough = initHashSet[string]()
+  for name in envPassthrough:
+    if name.len > 0:
+      passthrough.incl(name)
+  var names: seq[string] = @[]
+  for name in declared.keys:
+    names.add(name)
+  for name in passthrough:
+    if not declared.hasKey(name):
+      names.add(name)
+  names.sort()
+  var records: seq[string] = @[]
+  for name in names:
+    if passthrough.contains(name):
+      # The declared value, if any, is deliberately NOT rendered.
+      records.add($name.len & US & name & US & "passthrough" & US & "0" & US)
+    else:
+      let value = declared[name]
+      records.add($name.len & US & name & US & "declared" & US &
+        $value.len & US & value)
+  result = records.join(RS)
+
+proc keyedOnActionEnvironment*(fingerprint: ContentDigest;
+                               env: openArray[string];
+                               envPassthrough: openArray[string]):
+    ContentDigest =
+  ## Mix an action's environment DECLARATION into its weak fingerprint.
+  ##
+  ## Applied in `action()` for the same reason `keyedOnGoverningLock` is
+  ## — "by a structural check, not by care". Every `weakFingerprint =`
+  ## argument in the tree is a caller who computed a fingerprint over
+  ## what its edge DOES, and none of them knows that the engine will
+  ## hand the process an environment. A call site that had to remember
+  ## to mix the environment in is a call site that will eventually
+  ## forget, and forgetting is silent: it serves one environment's
+  ## result to another and reports success.
+  ##
+  ## ## The empty declaration is the IDENTITY, and that is required
+  ##
+  ## An edge that declares no environment and no passthrough must
+  ## fingerprint to exactly what it fingerprinted before this existed.
+  ## Otherwise landing this invalidates every action-cache record ever
+  ## written — a correctness fix that ships as a total cache wipe. The
+  ## early return is the property; a test pins it.
+  if env.len == 0 and envPassthrough.len == 0:
+    return fingerprint
+  let text = actionEnvironmentKeyText(env, envPassthrough)
+  if text.len == 0:
+    return fingerprint
+  # Length-framed two-field mix, same shape and rationale as
+  # `keyedOnGoverningLock`: no two distinct (fingerprint, environment)
+  # pairs may collide by concatenation ambiguity.
+  var framed = "action-environment\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  framed.add($text.len & "\x1f" & text & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc weakFingerprintFor*(id: string;
                          governingLockIdentity: LockIdentity): ContentDigest =
   ## The fingerprint `action()` / `builtinAction()` would compute for an edge
@@ -1250,6 +1465,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              dynamicDepsFile = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
              env: openArray[string] = [];
+             envPassthrough: openArray[string] = [];
              requiresElevation = false;
              governingLockIdentity: LockIdentity): BuildAction =
   ## Named-Lock-Files §7.2: `governingLockIdentity` has NO DEFAULT, and that
@@ -1273,13 +1489,20 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     argv: @argv,
     cwd: cwd,
     env: @env,
+    envPassthrough: @envPassthrough,
     pool: pool,
     poolUnits: poolUnits,
     cpuMilli: cpuMilli,
     memoryBytes: memoryBytes,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
-    weakFingerprint: keyedOnGoverningLock(weakFingerprint,
+    # The environment mix is INSIDE the lock mix, so the two compose in
+    # one fixed order for every edge in the tree. An edge that declares
+    # no environment is unaffected — `keyedOnActionEnvironment` is the
+    # identity on the empty declaration — so this does not move any
+    # fingerprint that existed before it.
+    weakFingerprint: keyedOnGoverningLock(
+      keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
       governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     depfile: depfile,
@@ -2088,6 +2311,86 @@ proc converterSpecsForPolicy(action: BuildAction):
     return action.dependencyPolicy.postBuildConverters
   @[]
 
+type
+  MonitorShimPlatform* = enum
+    ## Which io-mon shim a build is running against. Present so the
+    ## library-load-floor question below can be answered for EVERY
+    ## platform on ANY host — see `monitorShimHasLibraryLoadFloor`.
+    mspLinux, mspMacos, mspWindows, mspUnsupported
+
+func monitorShimHasLibraryLoadFloor*(platform: MonitorShimPlatform): bool =
+  ## Does this platform's monitor shim emit `mrLibraryLoad` records?
+  ##
+  ## A FUNCTION OVER A PLATFORM rather than a bare `defined()` constant,
+  ## and that is the whole point. As a constant the Windows answer is
+  ## unreachable from a Linux test run — `defined(linux) or
+  ## defined(macosx)` and a plain `true` are indistinguishable there, so
+  ## a mutation that silently claimed a floor everywhere passed every
+  ## test. Measured: that exact mutation survived. As data, every
+  ## platform's answer is gradeable wherever the suite runs.
+  ##
+  ## The values come from counting `mrLibraryLoad` emission sites in the
+  ## io-mon sibling: `shim/linux_preload.nim` 2,
+  ## `shim/macos_interpose.nim` 2, `shim/windows_interpose.nim` 0.
+  case platform
+  of mspLinux, mspMacos: true
+  of mspWindows, mspUnsupported: false
+
+when defined(linux):
+  const HostMonitorShimPlatform* = mspLinux
+elif defined(macosx):
+  const HostMonitorShimPlatform* = mspMacos
+elif defined(windows):
+  const HostMonitorShimPlatform* = mspWindows
+else:
+  const HostMonitorShimPlatform* = mspUnsupported
+
+const MonitorHasLibraryLoadFloor* =
+  monitorShimHasLibraryLoadFloor(HostMonitorShimPlatform)
+  ## The host's answer to `monitorShimHasLibraryLoadFloor`.
+  ##
+  ## WHAT DEPENDS ON IT. On a platform WITH a floor, every process the
+  ## shim can inject reports at least the dynamic loader plus its own
+  ## dependent libraries, so "the monitor recorded no observation at all"
+  ## is not reachable for an injectable process — the zero-evidence guard
+  ## in `collectEvidence` is a backstop against a backend asserting a
+  ## completeness it has not earned. WITHOUT a floor, an ordinary
+  ## monitored action that performs no interposed read, probe or write
+  ## reaches the guard and stops publishing. That is still the correct,
+  ## fail-closed direction — it re-runs rather than serving a stale
+  ## result — but it is a live operational condition rather than an
+  ## unreachable one, so it has to announce itself. See
+  ## `zeroEvidenceDiagnostic`.
+
+proc zeroEvidenceDiagnostic*(actionId: string;
+                             hasLibraryLoadFloor: bool): string =
+  ## The diagnostic for an action whose monitor reported success while
+  ## recording nothing. Split out and exported so BOTH branches are
+  ## gradeable on any host: the no-floor branch is the one that matters
+  ## operationally and it is not reachable on the platform this is
+  ## usually built on, so a `when`-guarded string literal would ship
+  ## untested.
+  result = "action '" & actionId & "': monitor reported success but " &
+    "recorded no observation of any kind (no reads, writes, probes or " &
+    "enumerations). The recorded input set would be the declared inputs " &
+    "alone, which cannot be distinguished from 'the monitor observed " &
+    "nothing'. Action-cache publish skipped — an action with no " &
+    "monitorable evidence is NON-CACHEABLE per Monitor-Hook-Shim.md " &
+    "§\"Failure Semantics\" and Reprobuild-Development.milestones.org " &
+    "M17, never complete-on-declared-inputs."
+  if hasLibraryLoadFloor:
+    result.add(" This platform HAS a library-load floor, so an injectable " &
+      "process cannot normally reach this state; suspect the monitor " &
+      "backend rather than the action.")
+  else:
+    result.add(" This platform has NO library-load floor (its shim emits " &
+      "no library-load records), so an action that performs no interposed " &
+      "read, probe or write reaches this state legitimately and will " &
+      "re-run on EVERY build, permanently, until it gains observable " &
+      "evidence or is marked `cacheable = false`. If that is not what you " &
+      "want, the fix is a library-load floor in the platform's shim, not " &
+      "a weaker guard here.")
+
 proc monitorEvidenceRequired(action: BuildAction): bool =
   ## Monitor evidence is required for monitored policies once an RMDF
   ## (monitor depfile) has actually been wired up for the action. The only
@@ -2311,6 +2614,73 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
     case record.kind
     of mrFileRead:
       evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+    of mrLibraryLoad:
+      # A library the dynamic loader MAPPED into the action. This is a
+      # content dependency and nothing else: change the file, change what
+      # the action computes.
+      #
+      # It needs its own arm because it cannot arrive as an `mrFileRead`.
+      # `ld.so` resolves `DT_NEEDED` entries with its own internal open,
+      # before the preloaded shim's hooks exist, so a dependent DSO
+      # passes through no interposed `open` at all — io-mon emits it from
+      # the loaded-object enumeration instead, and the `else: discard`
+      # below swallowed every one. Measured on `env true`, a process that
+      # touches no file of its own: 18 `mrLibraryLoad` records covering
+      # 14 distinct PATHS and 9 distinct SONAMEs, `mesComplete`, and
+      # `monitorReads: 0`. The three counts differ for two separate
+      # reasons and both are worth knowing: four sonames are emitted
+      # twice under the identical path (duplicate records, deduped by
+      # `addUnique`), and five appear under two DIFFERENT store paths
+      # because `env` exec'd a second image linked against a different
+      # glibc. So the fold contributes 14 inputs here, not 18 and not 9.
+      #
+      # io-mon sets `observationKind = moFileRead` on these deliberately
+      # so every consumer keying on the observation kind treats them as
+      # content reads (io-mon `types.nim:36`); folding them into
+      # `monitorReads` is that contract's consumer half.
+      #
+      # WHAT ABOUT THE SHIM'S OWN LOAD CLOSURE? io-mon excludes the shim
+      # library itself (`shim/linux_preload.nim`, so that "upgrading
+      # io-mon would not invalidate every cached action") but not the
+      # libraries the shim's own `DT_NEEDED` pulls in, so it is fair to
+      # ask whether this fold now puts the monitor's libc into every
+      # action's key. Measured, and the answer is no in the case that
+      # matters, for a reason worth writing down: the loader maps ONE
+      # object per soname, so when the action has its own libc the shim
+      # binds to THAT one and adds nothing. On the real
+      # `reprobuild.test_execute.t_smoke_ct_test_interface` edge the six
+      # recorded libraries are all under the TEST BINARY's glibc
+      # (`…-glibc-2.42-51` reached via its own RPATH), none under the
+      # shim's separate glibc store path. The shim's closure shows up
+      # alone only when the action has no closure of its own — measured
+      # on a `-nostdlib` binary, where those six ARE the shim's.
+      #
+      # So DO NOT "fix" this by dropping the shim's closure by path. In
+      # the common case there is nothing there to drop, and on any host
+      # where repro and the toolchain resolve to the SAME glibc store
+      # path such a filter would drop the action's genuine libc — which
+      # is this defect, for the single most consequential library there
+      # is. The sound fix is attribution, not filtering: record whether a
+      # loaded object is reachable from the MAIN IMAGE's `DT_NEEDED`
+      # closure and let the consumer drop only the unreachable ones. That
+      # belongs in io-mon, which is the only side that can see the
+      # dependency graph. Until it exists, an action whose recorded libc
+      # is the shim's rather than its own pays a spurious cross-host
+      # cache MISS — an efficiency cost in the fail-closed direction, not
+      # a stale hit.
+      #
+      # UNCONDITIONALLY, with no allowlist for immutable package stores.
+      # Sandbox-And-Monitoring.md §"Open Design Questions" left "how much
+      # library-load information is required for correctness" open; the
+      # answer taken here is "all of it", because an allowlist is exactly
+      # what kept this invisible — on NixOS every loaded DSO is a store
+      # path, so exempting store paths would leave the fix asserting
+      # nothing while a host with a mutable `/usr/lib` still served stale
+      # results. Cost: one `lstat` per loaded DSO on the warm path.
+      # `cacheInputPaths` still drops the ones under the action's own
+      # tool roots, and `isVolatileMonitorPath` above still drops
+      # `/run`-resident driver libraries.
+      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
     of mrFileOpen:
       case record.observationKind
       of moFileRead, moFileOpen:
@@ -2351,6 +2721,18 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
       evidence.monitorWrites.addUnique(seen.monitorWrites, output)
     for probe in pathSet.probes:
       evidence.monitorProbes.addUnique(seen.monitorProbes, probe)
+    for enumerated in pathSet.enumerations:
+      # Mirrors the ``mrDirectoryEnumerate`` arm of
+      # ``foldMonitorDepFileEvidence``: an enumeration is BOTH an
+      # existence dependency (so it stays in ``monitorProbes``, which
+      # every existing consumer reads) AND a membership dependency (so it
+      # is recorded separately for ``cacheEnumeratedDirectories``). A
+      # converter-reported enumeration must land in exactly the same two
+      # places as a monitor-reported one, or the two evidence sources
+      # would disagree about what the same observation means.
+      evidence.monitorProbes.addUnique(seen.monitorProbes, enumerated)
+      evidence.monitorDirectoryEnumerations.addUnique(
+        seen.monitorDirectoryEnumerations, enumerated)
   for diagnostic in pathSet.diagnostics:
     evidence.diagnostics.add(diagnostic)
 
@@ -2471,26 +2853,96 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
     # mrEventLoss record. See M9.R.60.D + M9.R.68 + M9.R.70 characterizations
     # and recipes/reproos-image/run-evidence/m9r72/m9r72_phaseB_gap_enumeration.txt
     # Gap I.
-    if action.monitorDepfile.len == 0:
-      result.evidence.diagnostics.add(
-        "dependency policy requires monitor evidence but no RMDF path is selected")
-      # Genuine Level 3: no monitoring output at all. Preserve the M9.R.60.2
-      # non-cacheable carve-out (workspace sync fetch on hosts without a
-      # monitor CLI wired).
-      result.monitorStatus = worseMonitorStatus(result.monitorStatus,
-        mesMonitorUnavailable)
-      if action.cacheable:
-        result.publishable = false
-      if strict and not result.publishable:
-        discard
-      return
+    # There is no `monitorDepfile.len == 0` arm here, and there must not
+    # be one: `monitorEvidenceRequired` — the condition guarding this
+    # whole block — already requires `monitorDepfile.len > 0`, so such a
+    # branch is unreachable. It existed and was dead. The Level 3
+    # "monitoring unavailable" case it claimed to cover is decided
+    # EARLIER and differently: `monitoredAction` returns a
+    # "requires an io-monitor driver" diagnostic for a cacheable action
+    # with no monitor CLI, and the scheduler turns a non-empty
+    # `plan.diagnostic` into `asFailed`. That is the FAIL arm, not the
+    # non-cacheable arm; do not describe it as the latter.
     try:
       let status = foldMonitorDepFileEvidence(action.monitorDepfile,
         action.cwd, result.evidence, seen)
       result.monitorStatus = worseMonitorStatus(result.monitorStatus, status)
       case status
       of mesComplete:
-        discard
+        # An action that observed NOTHING is not cacheable, even though
+        # the monitor reported success.
+        #
+        # This is the engine predicate that
+        # `repro_core/dependency_gathering.nim` has documented since M17
+        # ("actions with no monitorable evidence ... are made
+        # NON-CACHEABLE, never marked complete-on-declared-inputs") and
+        # that nothing enforced. It was documentation plus two
+        # hand-applied `cacheable = false` call sites; an action that
+        # reached this point with an empty observation set published a
+        # record keyed on its declared inputs alone and was reused
+        # against every change to everything else it touched.
+        #
+        # WHY IT MATTERS NOW. A zero-output edge used to be an
+        # unconditional cache miss, so such an action re-ran regardless
+        # of what its record said. Once test-execute edges became
+        # cacheable on their recorded inputs alone, the record became the
+        # only thing standing between the edge and a stale skip.
+        #
+        # WHY `disableCacheHits` AND NOT `publishable = false`.
+        # Monitor-Hook-Shim.md:501 offers two arms — "fail the monitored
+        # action OR make it non-cacheable, depending on policy". Failing
+        # a successful, exit-0 action to punish its monitor is the wrong
+        # one: it breaks builds for a soundness property that the
+        # cheaper arm secures completely. Skipping the publish means the
+        # action succeeds now and re-executes next time, which IS
+        # non-cacheable.
+        #
+        # WHY NO "THIS ACTION DECLARES IT READS NOTHING" ESCAPE HATCH.
+        # Three reasons, in order of weight. (a) The declaration is
+        # unfalsifiable exactly where it is load-bearing: it only takes
+        # effect when the evidence is empty, i.e. when the monitor cannot
+        # corroborate it. (b) No such concept exists in the specs, and
+        # its nearest neighbour — a declared-only gathering mode — is
+        # explicitly prohibited and has been re-introduced by agents more
+        # than once (see the note in
+        # `repro_core/dependency_gathering.nim`). (c) On a platform with
+        # a library-load floor it is not needed: measured on this host,
+        # every process the shim can inject reports at least the loader
+        # plus its dependent libraries (6 records for a `-nostdlib`
+        # dynamic binary; 18 records naming 14 distinct paths / 9
+        # distinct sonames for `env true`), and a process the shim CANNOT
+        # inject — a static binary — already trips `mrEventLoss` and
+        # lands on the Level 2 arm below. An edge that genuinely needs to
+        # run without evidence already has a sanctioned answer with no
+        # new soundness surface: `cacheable = false`.
+        #
+        # READ (c) NARROWLY — it is platform-conditional and the
+        # condition is real. `MonitorHasLibraryLoadFloor` is false on
+        # Windows, whose shim emits no library-load records at all, so
+        # there an ordinary monitored action that performs no interposed
+        # read, probe or write DOES reach this branch and stops
+        # publishing for good. The guard is deliberately NOT scoped away
+        # from such platforms: scoping it off would hand exactly the
+        # platform with no floor the original soundness hole AND no
+        # signal that it has it. Instead the diagnostic says which regime
+        # it is in — see `zeroEvidenceDiagnostic` — so the outcome is a
+        # report rather than a silent permanent non-publish. The
+        # behaviour is the fail-closed direction on every platform; only
+        # its reachability differs.
+        #
+        # The test is deliberately narrow — no observation of ANY kind
+        # from ANY source, including a recognized report's
+        # `depfileInputs`. An action with one recorded probe has said
+        # something about the world and keeps its record.
+        if action.cacheable and
+            result.evidence.monitorReads.len == 0 and
+            result.evidence.monitorWrites.len == 0 and
+            result.evidence.monitorProbes.len == 0 and
+            result.evidence.monitorDirectoryEnumerations.len == 0 and
+            result.evidence.depfileInputs.len == 0:
+          result.evidence.diagnostics.add(
+            zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
+          result.disableCacheHits = true
       of mesKnownScopeLoss:
         # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
         # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
@@ -3920,6 +4372,45 @@ proc launchChildEnv(action: BuildAction;
   # those are for local A/B diagnosis, not something the engine seeds.)
   for entry in action.env:
     result.add(entry)
+  # BuildXL `PipEnvironment.GetEffectiveEnvironmentVariables`
+  # (`Public/Src/Engine/ProcessPipExecutor/PipEnvironment.cs:116-152`)
+  # resolves every passthrough variable that carries NO declared value
+  # by NAME out of the build engine's own process environment, and
+  # silently drops the ones the host does not have. That is what this
+  # does, and it is the half of the passthrough contract that lives at
+  # LAUNCH time rather than at key time:
+  #
+  #   * the NAME was recorded in the weak fingerprint by
+  #     `keyedOnActionEnvironment` when the graph was built;
+  #   * the VALUE is read HERE, from the host, per launch.
+  #
+  # A variable the action already declares is left alone — the declared
+  # value wins, exactly as in BuildXL's layering, where declared values
+  # are overridden onto the base set before the by-name passthrough
+  # resolution runs and only value-less passthroughs reach it.
+  #
+  # Today this is very nearly a no-op: the RunQuota launcher layers
+  # these entries OVER the inherited environment, so an undeclared
+  # passthrough already reaches the child by plain inheritance. It is
+  # written explicitly anyway because inheritance is the channel
+  # Reprobuild does not control and does not record, and when that
+  # channel is closed this is the mechanism that keeps a declared
+  # passthrough working.
+  if action.envPassthrough.len > 0:
+    var declaredNames = initHashSet[string]()
+    for entry in action.env:
+      let eq = entry.find('=')
+      if eq > 0:
+        declaredNames.incl(entry[0 ..< eq])
+    var emitted = initHashSet[string]()
+    for name in action.envPassthrough:
+      if name.len == 0 or declaredNames.contains(name) or
+          emitted.contains(name):
+        continue
+      emitted.incl(name)
+      if not existsEnv(name):
+        continue
+      result.add(name & "=" & getEnv(name))
 
 proc bypassActionLogDir(cacheRoot: string): string =
   ## **M1 milestone** (Windows-bypass-stdio-capture). Per-action log
@@ -4962,6 +5453,112 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       reason: "materialized-binary-cache-no-entries",
       stderr: "no tagged materialized binary-cache entries in selected graph"))
 
+# ---------------------------------------------------------------------------
+# ``ext_repro_action`` (M17)
+# ---------------------------------------------------------------------------
+
+proc actionKindName(kind: BuildActionKind): string =
+  ($kind).replace("bak", "").toLowerAscii()
+
+proc measuredOutputBytes(action: BuildAction): int64 =
+  ## Total size of the action's declared outputs, MEASURED after the
+  ## action settled. Missing outputs contribute nothing rather than
+  ## failing the row: an observation must never fail the work.
+  for output in action.outputs:
+    let path =
+      if output.isAbsolute or action.cwd.len == 0: output
+      else: action.cwd / output
+    try:
+      if fileExists(extendedPath(path)):
+        result += int64(getFileSize(extendedPath(path)))
+    except CatchableError:
+      discard
+
+proc emitActionExtensionRows(session: ReproRunQuotaSession;
+                             runResult: BuildRunResult;
+                             actionsById: Table[string, BuildAction]) =
+  ## One ``ext_repro_action`` row per execution RunQuota admitted.
+  ##
+  ## ROWS EXIST FOR EXECUTIONS, NOT FOR ACTIONS, and the difference is
+  ## not a shortcut. RunQuota's spine records executions; a cache HIT is
+  ## precisely the case where nothing executed, so there is no spine row
+  ## for an extension row to be joined to. What the rows therefore carry
+  ## is the cache decision that LED TO a launch -- miss, refused,
+  ## not-cacheable, hybrid cutoff -- together with the reason, which is
+  ## the "why did this rebuild" question the store exists to answer.
+  ## A reader counting hits from this table alone would undercount them,
+  ## and ``docs/stats.md`` says so where a reader will find it.
+  ##
+  ## BEST EFFORT, ALWAYS. Nothing here may fail a build (OS-4), and
+  ## nothing here may block it (OS-1): the declaration is one round trip
+  ## made once per build after every action has settled, and each row is
+  ## a single buffered write with no reply.
+  if session.isNil or not session.active:
+    return
+  var declared = false
+  for item in runResult.results:
+    if not item.launched or item.leaseId == 0:
+      continue
+    if item.id notin actionsById:
+      continue
+    let action = actionsById[item.id]
+    if not declared:
+      # Declared lazily: a build that admitted nothing should not create
+      # a table for rows it will never write.
+      let refusal = session.declareRunQuotaExtension(
+        ReproActionExtensionId, ReproActionExtensionOwner,
+        ReproActionSchemaVersion, reproActionMigrations())
+      if refusal.len > 0:
+        return
+      declared = true
+    let toolIdentity = action.toolIdentityRefs.join(",")
+    let toolKind =
+      if action.toolIdentityRefs.len > 0: action.toolIdentityRefs[0]
+      else: ""
+    let cacheOutcome =
+      case item.cacheDecision
+      of cdNotCacheable: racNotCacheable
+      of cdMiss: racMiss
+      of cdHit: racHit
+      of cdHybridCutoff: racHybridCutoff
+      of cdRejected: racRefused
+    let compatibility = compatibilityKey(
+      actionKindName(action.kind), action.commandStatsId, toolKind,
+      toolIdentity, action.argv, action.outputs)
+    session.recordRunQuotaExtensionRow(
+      item.leaseId, ReproActionExtensionId, ReproActionSchemaVersion,
+      reproActionColumns(),
+      @[
+        extText(item.id),
+        extText(actionKindName(action.kind)),
+        extText(compatibility),
+        extText($cacheOutcome),
+        (if item.cacheMissReason.len > 0: extText(item.cacheMissReason)
+         else: extNull()),
+        extText(toHex(action.weakFingerprint.bytes)),
+        (if item.strongFingerprintHex.len > 0:
+           extText(item.strongFingerprintHex)
+         else: extNull()),
+        (if action.pool.len > 0: extText(action.pool) else: extNull()),
+        extInt(int64(action.poolUnits)),
+        extInt(measuredOutputBytes(action)),
+        # SUBSTITUTION IS A PROPERTY OF THE ACTION KIND, not a flag some
+        # other code path has to remember to set. The one launched form
+        # of substitution is the binary-cache substitute edge; a
+        # peer-cache install settles as a HIT and therefore has no
+        # execution row at all, so a boolean on the result would have
+        # been false on every row that exists.
+        extInt(if action.kind == bakBinaryCacheSubstitute: 1'i64 else: 0'i64),
+        (if toolKind.len > 0: extText(toolKind) else: extNull()),
+        (if toolIdentity.len > 0: extText(toolIdentity) else: extNull()),
+        extInt(int64(item.evidence.declaredInputs.len)),
+        extInt(int64(item.evidence.declaredOutputs.len)),
+        extInt(int64(item.evidence.depfileInputs.len)),
+        extInt(int64(item.evidence.monitorReads.len)),
+        extInt(int64(item.evidence.monitorWrites.len)),
+        extInt(int64(item.evidence.monitorProbes.len))
+      ])
+
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # Process-global accumulators; zero them so this build reports its own cost
   # rather than its own plus every earlier build in this process.
@@ -5039,6 +5636,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
   runResult.traceEnabled = not config.suppressTrace
+  # STAGE 2 census — count, do not change. Taken over the graph as it
+  # will actually be scheduled, after dependency inference, so the number
+  # describes the build that runs rather than the graph as authored.
+  for censusAction in buildGraph.actions:
+    if censusAction.kind != bakProcess:
+      # Built-in actions do not fork, so they have no environment to
+      # inherit and do not belong in this denominator.
+      continue
+    inc runResult.environmentInheritance.totalActions
+    if censusAction.env.len > 0:
+      inc runResult.environmentInheritance.declaringActions
+    if censusAction.envPassthrough.len > 0:
+      inc runResult.environmentInheritance.passthroughActions
+    if censusAction.env.len == 0 and censusAction.envPassthrough.len == 0:
+      inc runResult.environmentInheritance.undeclaredActions
   let validateStart = statStart()
   validateGraph(buildGraph)
   finishStat("repro graph validate", validateStart)
@@ -5229,6 +5841,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         "status=" & $res.statusCode & " bytes=" & $res.bytesUploaded)
     finishStat("repro binary-cache publish", publishStart)
 
+  proc fastNoopReuseReason(action: BuildAction): string =
+    ## The whole-graph fast scan and the regular scheduler decide the SAME
+    ## state — "the record revalidated and the declared outputs (if any)
+    ## are already on disk" — so they must report it the same way. The
+    ## scheduler calls that state `asUpToDate` / `cdHit` with reason
+    ## `outputs-present` or `no-declared-outputs` (see the `aclHit` /
+    ## `reusableInPlace` branch below). The fast scan used to call it
+    ## `asCacheHit` / `cdHit` with an EMPTY reason, which is the
+    ## scheduler's vocabulary for something else entirely: a record whose
+    ## outputs were MISSING and had to be materialized out of the CAS
+    ## (reason `restored`). Two different events wearing one label is
+    ## exactly what makes a status field unreadable.
+    if action.declaresNoOutputs(): "no-declared-outputs"
+    else: "outputs-present"
+
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
     # Backfill needs each full action-cache record so it can publish the
     # validated, materialized output. The regular scheduler already performs
@@ -5238,6 +5865,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
     if config.progressCallback != nil:
+      return none(BuildRunResult)
+    # A forced rebuild is a request to re-execute, and `config.forceRebuild`
+    # is read in exactly one place: the scheduler's per-action cache
+    # decision. A whole-graph short-circuit that returns before the
+    # scheduler runs therefore silently DISCARDS the request — every edge
+    # comes back `asCacheHit` / `cdHit` / `launched = false` and nothing
+    # re-runs. `repro build --force-rebuild` never exposed this only
+    # because rendering progress installs a callback, which the bail-out
+    # above already catches; an engine-API caller that renders nothing got
+    # the flag dropped on the floor.
+    if config.forceRebuild:
       return none(BuildRunResult)
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
@@ -5274,8 +5912,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         for action in buildGraph.actions:
           fastResult.results.add(ActionResult(
             id: action.id,
-            status: asCacheHit,
+            status: asUpToDate,
             cacheDecision: cdHit,
+            reason: fastNoopReuseReason(action),
             dependencyPolicyKind: action.dependencyPolicy.kind))
         finishStat("repro cache hit result materialize", resultMaterializeStart)
         finishMetadataCacheStats(metadataCache)
@@ -5331,8 +5970,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         else: hotRecords[i]
       fastResult.results.add(ActionResult(
         id: action.id,
-        status: asCacheHit,
+        status: asUpToDate,
         cacheDecision: cdHit,
+        reason: fastNoopReuseReason(action),
         dependencyPolicyKind: action.dependencyPolicy.kind,
         evidence: cacheHitEvidence(action, record)))
     finishStat("repro cache hit result materialize", resultMaterializeStart)
@@ -5663,6 +6303,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           failRunningAction(j, "runquota inline grant polling failed: " &
             err.msg)
           return j
+
+  proc recordCacheLookupFacts(id: string; lookup: ActionCacheLookup) =
+    ## M17: pin the ACTION-CACHE KEY and the miss reason at the only
+    ## moment they exist.
+    ##
+    ## ``reason`` alone will not do: ``completeSuccess`` overwrites it
+    ## with the settle detail, so for exactly the actions that go on to
+    ## LAUNCH -- the ones that get an ``ext_repro_action`` row -- the
+    ## reason the cache missed is gone by the time the row is built.
+    ## The strong fingerprint is worse still: it is not stored on the
+    ## action at all, only on the record the lookup compared against.
+    let idx = idToIndex.resultIndex(id)
+    runResult.results[idx].cacheMissReason = lookup.message
+    runResult.results[idx].strongFingerprintHex =
+      if lookup.record.strongFingerprint.bytes == default(array[32, byte]):
+        ""
+      else:
+        toHex(lookup.record.strongFingerprint.bytes)
 
   proc completeSuccess(id: string; status: ActionStatus; cacheDecision: CacheDecision;
                        launched: bool; detail = "") =
@@ -6057,15 +6715,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             cacheRejectedOutput = true
             runResult.trace(id, "cache-rejected",
               runResult.results[idToIndex.resultIndex(id)].reason)
+            recordCacheLookupFacts(id, lookup)
           of aclMissInputChanged:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: "input-changed"
+            recordCacheLookupFacts(id, lookup)
             cacheMissInputChanged = true
           else:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: $lookup.status
+            recordCacheLookupFacts(id, lookup)
         elif not action.cacheable:
           runResult.results[idToIndex.resultIndex(id)].reason = "not-cacheable"
 
@@ -6236,7 +6897,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 action.cacheInputPaths(evidence.evidence),
                 action.outputs, action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache)
+                metadataCache = addr fileMetadataCache,
+                # An elevated edge reaches this site instead of the
+                # monitored one, and it used to record every directory
+                # input with NO membership digest. That is not "less
+                # precise": a recorded `mtimeNs = 0` means "not
+                # membership-tracked", such a directory is never
+                # re-listed, and the hit path does not re-record — so the
+                # record was PERMANENTLY existence-only
+                # (Incremental-Invalidation.md:814-821). The evidence was
+                # already collected two lines up; only the hand-off was
+                # missing.
+                enumeratedDirectories =
+                  action.cacheEnumeratedDirectories(evidence.evidence))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, action.id), record)
@@ -6294,7 +6967,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishStat("repro builtin execute", builtinStart)
           let idx = idToIndex.resultIndex(id)
           let previousCacheDecision = runResult.results[idx].cacheDecision
+          # M17: the cache-lookup facts were recorded BEFORE the action
+          # ran and would be wiped by this assignment. They are carried
+          # for the same reason the cache decision is -- the settled
+          # result describes the execution, not the lookup that led to
+          # it, and the lookup is the only place either fact exists.
+          let previousMissReason = runResult.results[idx].cacheMissReason
+          let previousStrongFingerprint =
+            runResult.results[idx].strongFingerprintHex
           runResult.results[idx] = finished
+          runResult.results[idx].cacheMissReason = previousMissReason
+          runResult.results[idx].strongFingerprintHex =
+            previousStrongFingerprint
           runResult.results[idx].dependencyPolicyKind =
             plan.action.dependencyPolicy.kind
           runResult.results[idx].cacheDecision =
@@ -6353,7 +7037,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache)
+                metadataCache = addr fileMetadataCache,
+                # Same omission as the elevated site above, reached by
+                # builtin edges and by anything whose plan is not a
+                # `bakProcess`. A builtin cannot be wrapped in the
+                # io-monitor, so its enumeration evidence arrives either
+                # from a converter path set or from a monitor depfile a
+                # direct engine caller prewired — both of which
+                # `collectEvidence` has already folded by this point.
+                enumeratedDirectories =
+                  plan.action.cacheEnumeratedDirectories(evidence.evidence))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
@@ -6488,6 +7181,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         var batchFailure = ""
         try:
           offers = offerWithRunQuotaBatch(inlineRunQuotaSession, requests, commands)
+        except ReproRunQuotaDeadlockError:
+          # A whole frontier blocked by requests the authority cannot ever
+          # admit is a build-level scheduler deadlock, not an action process
+          # failure. Preserve the typed outcome for the CLI diagnostic.
+          raise
         except CatchableError as err:
           batchFailure = err.msg
         finishStat("repro runquota launch", batchStart)
@@ -6710,7 +7408,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
       let idx = idToIndex.resultIndex(finished.id)
       let previousCacheDecision = runResult.results[idx].cacheDecision
+      # M17: see the built-in merge above. Recorded at lookup time,
+      # carried across the settle.
+      let previousMissReason = runResult.results[idx].cacheMissReason
+      let previousStrongFingerprint =
+        runResult.results[idx].strongFingerprintHex
       runResult.results[idx] = finished
+      runResult.results[idx].cacheMissReason = previousMissReason
+      runResult.results[idx].strongFingerprintHex = previousStrongFingerprint
       runResult.results[idx].dependencyPolicyKind =
         runningItem.action.dependencyPolicy.kind
       runResult.results[idx].monitorDepfilePath = runningItem.action.monitorDepfile
@@ -6820,6 +7525,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         terminateRunningAction(item)
         item.process.close()
     if inlineRunQuotaSessionOpen:
+      emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       inlineRunQuotaSession.close()
   finishStat("repro scheduler total", totalStart)
   finishMetadataCacheStats(fileMetadataCache)

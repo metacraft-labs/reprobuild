@@ -117,6 +117,20 @@ type
     adapter*: CatalogAdapterKind
     outcome*: ChainStepOutcome
     reason*: string
+    capabilityShortfall*: bool
+      ## PMC-4 — this adapter had the package and REFUSED it because the host
+      ## cannot execute what it offers (``breMicroarchFloorNotSatisfied``), as
+      ## opposed to not having it at all.
+      ##
+      ## The distinction is the whole point. "I don't have it" is a reason to
+      ## try the next adapter. "I have it and this machine cannot run it" is
+      ## not: the next adapters include ``cakPath``, which probes PATH for a
+      ## SAME-NAMED executable, and resolving to that looks like success while
+      ## delivering a binary nobody declared. That is PMC-1's
+      ## silent-fallthrough hazard in new clothing, and it is why this is a
+      ## typed field rather than a substring of ``reason`` -- a diagnostic
+      ## string is not a control-flow signal, and sniffing one would break the
+      ## first time the wording changed.
 
   CatalogResolution* = object
     ## The production catalog's verdict for one package reference.
@@ -374,6 +388,71 @@ proc baselineMicroarchLevel*(family: PlatformCpu): MicroarchLevel =
   of pcX86_64: mlX86_64_v1
   of pcAny, pcAArch64, pcX86: mlNone
 
+const DefaultTargetFloorEnvVar* = "REPRO_DEFAULT_TARGET_FLOOR"
+  ## PMC-4 deliverable 3, the central half: the floor an artifact is BUILT to
+  ## target when its package does not say.
+  ##
+  ## Read this alongside ``HostMicroarchLevelEnvVar`` and note they are
+  ## opposites, because conflating them is the whole hazard. That one declares
+  ## what a host may be GIVEN (a ceiling, read on the consuming side). This one
+  ## declares what an artifact is BUILT FOR (a floor, chosen on the producing
+  ## side). Raising the ceiling lets a machine accept more; raising the floor
+  ## makes what you produce run on fewer machines.
+
+proc defaultTargetFloor*(): MicroarchLevel =
+  ## PMC-4: the fleet-wide default floor. **Conservative, and deliberately so.**
+  ##
+  ## Spack optimises for the BUILD host by default, which is exactly why Spack
+  ## binaries famously fail to run elsewhere: every artifact silently inherits
+  ## the capabilities of whichever machine happened to build it, and the
+  ## failure surfaces as a SIGILL on a different machine much later. A
+  ## cache-oriented system wants the opposite trade — a floor low enough that
+  ## one cached artifact serves the whole fleet, with higher levels taken
+  ## EXPLICITLY by the packages that can justify losing that reuse.
+  ##
+  ## So the default is ``mlNone``: no floor, runs anywhere. It is not an
+  ## absence of policy — it IS the policy, and the constant exists so that
+  ## changing it is one obvious edit rather than an archaeology exercise
+  ## across call sites.
+  ##
+  ## The per-package opt-in override is ``cpu_level`` on the arm itself
+  ## (``effectiveTargetFloor`` below), which is where a package that genuinely
+  ## needs AVX-512 says so and accepts the narrower audience.
+  ##
+  ## Same refusal discipline as the host override: an unreadable value is an
+  ## error, never a silent default. A typo here would otherwise lower the
+  ## fleet's floor without anyone noticing, and "we shipped v1 artifacts for a
+  ## month" is discovered by benchmark, not by error.
+  let raw = getEnv(DefaultTargetFloorEnvVar, "")
+  if raw.len == 0:
+    return mlNone
+  let parsed = parseMicroarchLevelToken(raw)
+  if not parsed.ok:
+    raise newException(ValueError,
+      DefaultTargetFloorEnvVar & "='" & raw & "' is not a microarchitecture " &
+      "level. Expected one of x86-64-v1 / x86-64-v2 / x86-64-v3 / " &
+      "x86-64-v4 (or the bare v1..v4, or 'none' for no floor). This " &
+      "variable declares what artifacts are BUILT FOR; an unreadable value " &
+      "is refused rather than defaulted, because defaulting it would " &
+      "silently change which machines can run what this fleet produces.")
+  parsed.level
+
+proc effectiveTargetFloor*(declared: MicroarchLevel;
+                           fleetDefault = mlNone): MicroarchLevel =
+  ## Resolve a package's floor: its own declaration if it made one, else the
+  ## fleet default.
+  ##
+  ## ``fleetDefault`` is a DEFAULTED PARAMETER rather than a call to
+  ## ``defaultTargetFloor()`` in the body, for the same reason ``hostLevel``
+  ## is: a test must be able to name a synthetic fleet policy without setting
+  ## a process-wide environment variable, and a pure function of its arguments
+  ## is the only shape that allows it.
+  ##
+  ## A package that declares ``mlNone`` explicitly is indistinguishable from
+  ## one that declared nothing, and that is correct: ``mlNone`` means "no
+  ## floor", so there is nothing for it to be overriding.
+  if declared != mlNone: declared else: fleetDefault
+
 proc detectHostMicroarchLevel*(family = detectHostCpu()): MicroarchLevel =
   ## PMC-2: what does this host provide?
   ##
@@ -616,12 +695,203 @@ proc detectHostCpuFeatures*(family = detectHostCpu()): set[CpuFeature] =
         "would present as an unexplained refusal far from this variable.")
   parsed.features
 
-proc detectHostTarget*(): PlatformTarget =
-  ## The full structured target for this host: family + declared level +
-  ## declared feature set.
+# ---------------------------------------------------------------------------
+# PMC-4/PMC-6 — the BUILD machine and the HOST target are two different things
+#
+# Everything above answers questions about "the host", and until now that word
+# carried two meanings that happen to coincide today. They stop coinciding the
+# moment a cross build exists, and the failure is silent: artifacts built with
+# instructions the target machine cannot execute, discovered as a SIGILL far
+# from here.
+#
+# The vocabulary is Nix's, because the build engine already uses it
+# (`repro_build_engine/platform.nim`: `buildPlatformTriple()` vs
+# `resolvedTargetTriple()`, `dkNative` vs `dkBuild`/`dkRuntime`, with `"native"`
+# as the BUILD == HOST sentinel). Adding a second, parallel vocabulary here is
+# the mistake PMC-3 avoided when it made the psABI level sugar over feature
+# sets rather than a rival source of truth.
+#
+#   BUILD machine  the machine running `repro` right now. A MEASURED FACT --
+#                  cpuid says what it says. Tools that RUN during the build
+#                  (`nativeBuildDeps:`, `dkNative`) must satisfy this one:
+#                  a compiler that traps on this machine is useless no matter
+#                  what it is producing.
+#
+#   HOST target    what the produced artifacts must RUN on. A DECISION, not a
+#                  measurement. `buildDeps:` / `runtimeDeps:` (`dkBuild`,
+#                  `dkRuntime`) and every published artifact must satisfy this
+#                  one. It is what belongs in the lock identity and the cache
+#                  key, because it is the thing that makes two artifacts
+#                  genuinely different.
+#
+# Why the existing REPRO_HOST_* variables are already the right seam: they say
+# what the RUN target provides, which is exactly the host axis. Setting them
+# BELOW the build machine is a cross build in miniature -- "produce something
+# that runs on less than this machine" -- and it is the shape a real cross
+# build takes. That is why they had to refuse an unparseable value rather than
+# defaulting: a silently-defaulted override is a cross build quietly resolving
+# as native, which is precisely the failure this section exists to prevent.
+#
+# The asymmetry to keep hold of: the host target may be LOWER than the build
+# machine (build conservative artifacts on a capable machine -- the normal,
+# desirable case). It being HIGHER is not automatically wrong either
+# (cross-compiling for a more capable machine), but it means native tools and
+# produced artifacts no longer share a floor, so they must be resolved
+# separately. Either way the two must never be silently substituted for one
+# another, which is what a single "host" concept guarantees will eventually
+# happen.
+# ---------------------------------------------------------------------------
+
+type
+  TargetRole* = enum
+    ## Which of the two targets a resolution is asking about.
+    trBuildMachine = "build"
+      ## The machine running the build. Satisfied by `nativeBuildDeps:`.
+    trHostTarget = "host"
+      ## What the produced artifacts must run on. Satisfied by `buildDeps:` /
+      ## `runtimeDeps:`, and what the lock identity and cache key carry.
+
+proc buildMachineTarget*(): PlatformTarget =
+  ## What the machine running `repro` actually provides. A MEASUREMENT:
+  ## `cpuid` / `xgetbv`, never an override.
+  ##
+  ## Deliberately not overridable. The REPRO_HOST_* variables describe the
+  ## target you are building FOR; letting them also rewrite what this machine
+  ## IS would make a cross build unable to resolve its own compiler -- you
+  ## would be telling reprobuild that the machine executing gcc lacks
+  ## instructions gcc's binary actually uses. When cross compilation lands,
+  ## the build machine stays measured and only the host target moves.
+  let family = detectHostCpu()
+  initPlatformTarget(family, baselineMicroarchLevel(family),
+    probeHostCpuFeatures())
+
+type
+  HostTargetResolver* = proc(): PlatformTarget {.gcsafe, closure.}
+    ## PMC-6 — the seam that makes the microarchitecture host target and the
+    ## engine's `targetTriple` ONE input instead of two.
+    ##
+    ## ## Why a closure and not a direct read
+    ##
+    ## `targetTriple` is a SOLVER VARIANT. Resolving it needs the solver, and
+    ## this module must not import it -- the same layering rule that made the
+    ## build engine take a `TargetTripleResolver` closure rather than reaching
+    ## for `repro_dsl_stdlib` itself (`repro_build_engine/platform.nim`).
+    ##
+    ## So the CLI, which is the only layer that can see both, wires a closure
+    ## here exactly as it already wires one there. This module stays a leaf,
+    ## and the two axes acquire a single decision point instead of two
+    ## independent ones that agree only by coincidence of defaults.
+    ##
+    ## `nil` means "nobody wired one", which is the library and test case: the
+    ## environment-based default below applies, and behaviour is what it was
+    ## before PMC-6.
+
+var hostTargetResolverHook: HostTargetResolver = nil
+  ## Deliberately private. A caller SETS it through `setHostTargetResolver`
+  ## and can never read it back, so no code path can start branching on
+  ## "was a resolver wired?" -- which would reintroduce the two-answers
+  ## problem in a new shape.
+
+proc setHostTargetResolver*(resolver: HostTargetResolver) =
+  ## Wire the single host-target authority. Called once by the CLI driver.
+  ##
+  ## Passing `nil` restores the environment-based default; that is what tests
+  ## do to get back to a known state, and it is why this is idempotent rather
+  ## than a one-shot install.
+  hostTargetResolverHook = resolver
+
+proc environmentHostTarget*(): PlatformTarget =
+  ## The host target as described by `REPRO_HOST_MICROARCH_LEVEL` /
+  ## `REPRO_HOST_CPU_FEATURES` alone, ignoring any wired resolver.
+  ##
+  ## Exposed so the CLI's resolver can COMPOSE it -- read the variant, fall
+  ## back to the environment -- rather than reimplementing the parsing and
+  ## refusal rules and letting the two copies drift.
   let family = detectHostCpu()
   initPlatformTarget(family, detectHostMicroarchLevel(family),
     detectHostCpuFeatures(family))
+
+proc hostTarget*(): PlatformTarget =
+  ## What the produced artifacts must run on.
+  ##
+  ## The wired resolver when there is one; otherwise the environment, which
+  ## itself defaults to the build machine -- the `"native"` sentinel the build
+  ## engine already uses, and why one "host" concept worked for so long.
+  if hostTargetResolverHook != nil:
+    return hostTargetResolverHook()
+  environmentHostTarget()
+
+proc isCrossTargeted*(buildT, hostT: PlatformTarget): bool =
+  ## True when the two targets have diverged, i.e. this is no longer a
+  ## `"native"` build in the build engine's sense.
+  ##
+  ## Exposed because the interesting diagnostics and cache decisions hang off
+  ## this being observable, rather than each caller re-deriving it from a
+  ## comparison it might get subtly wrong.
+  # An UNSTATED host feature set is not a disagreement.
+  #
+  # PMC-3 made features DECLARED rather than probed: `detectHostCpuFeatures`
+  # answers `{}` unless `REPRO_HOST_CPU_FEATURES` says otherwise, while
+  # `buildMachineTarget` genuinely measures the silicon. Comparing those two
+  # raw values reported CROSS on an ordinary native machine with no
+  # configuration at all -- the host had said nothing and the build machine
+  # had said everything.
+  #
+  # So a divergence requires the host to have STATED something different.
+  # Family and level always count (both always have a value); features count
+  # only once the host has named some, which is exactly when a caller has
+  # taken a position on what the target provides.
+  buildT.family != hostT.family or
+    buildT.level != hostT.level or
+    (hostT.features != {} and hostT.features != buildT.features)
+
+proc targetRoleForDepKind*(kind: string): TargetRole =
+  ## PMC-6 — route a dependency to the target that must satisfy it, keyed on
+  ## the engine's own `DepKind` spelling.
+  ##
+  ## Takes the kind as a STRING rather than importing `repro_build_engine`.
+  ## That import would be a layering inversion (the engine deliberately does
+  ## not depend on this side either), and the vocabulary here is three fixed
+  ## tokens that the engine already serialises.
+  ##
+  ##   * `nativeBuildDeps:` / `dkNative` -- tools that RUN during the build.
+  ##     They execute on the BUILD machine, so a compiler that traps here is
+  ##     useless no matter what it is producing.
+  ##   * `buildDeps:` / `dkBuild` and `runtimeDeps:` / `dkRuntime` -- libraries
+  ##     the produced binaries link or load. They must satisfy the HOST target,
+  ##     because that is where those binaries will run.
+  ##
+  ## The default is the HOST target, and that direction is deliberate: an
+  ## unrecognised kind that resolved against the build machine could let an
+  ## artifact silently inherit capabilities the target lacks, which is a SIGILL
+  ## on someone else's machine. Resolving against the host target instead can
+  ## only ever be too conservative -- it may refuse something that would have
+  ## worked, loudly, here.
+  case kind
+  of "dkNative", "native", "nativeBuildDeps": trBuildMachine
+  else: trHostTarget
+
+proc targetForRole*(role: TargetRole; buildT, hostT: PlatformTarget):
+    PlatformTarget =
+  ## Route a dependency to the target that must satisfy it.
+  ##
+  ## Pure and fully parameterised on purpose: a test names both targets and
+  ## asks the routing question directly, with no machine involved. That is the
+  ## same seam `hostCpu`/`hostOs`/`hostLevel`/`hostFeatures` keep on the
+  ## resolution entry points, and it is what makes cross-compilation behaviour
+  ## testable on hardware that can only ever be one of the two.
+  case role
+  of trBuildMachine: buildT
+  of trHostTarget: hostT
+
+proc detectHostTarget*(): PlatformTarget =
+  ## The HOST target -- what produced artifacts must run on.
+  ##
+  ## Retained as the established name (the binary-cache compat check and the
+  ## PMC-2/PMC-3 tests call it). `hostTarget()` is the same value under a name
+  ## that says which of the two axes it is; prefer that in new code, and reach
+  ## for `buildMachineTarget()` when you mean the machine doing the work.
+  hostTarget()
 
 proc raisePackageUnavailableOnPlatform*(packageId: string;
                                         availability: PackageAvailability;
@@ -1486,6 +1756,9 @@ proc tryResolveBuiltin(packageId: string;
     # rather than stopping at this frame.
     step.reason = "resolveBuiltinPackage: " & $res.error & " (" &
       res.errorDetail & ")"
+    # PMC-4: mark a CAPABILITY refusal so the chain can refuse to fall through
+    # to ``cakPath``. See ``ChainStep.capabilityShortfall``.
+    step.capabilityShortfall = res.error == breMicroarchFloorNotSatisfied
     return (false, CatalogResolution())
   step.outcome = csoResolved
   # The SUCCESS reason is left byte-identical to its pre-PMC-2 text. Every
@@ -1730,6 +2003,10 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
     if chain.len == 0: defaultAdapterChain()
     else: chain
   var trace: seq[ChainStep] = @[]
+  # PMC-4: has some adapter already said "I have this and this host cannot run
+  # it"? See the ``cakPath`` arm below for why that is not the same as "I do
+  # not have it", and why only ``cakPath`` is poisoned by it.
+  var capabilityRefusal = ""
   for adapter in effective:
     var step = ChainStep(adapter: adapter, outcome: csoAdapterUnavailable,
       reason: "")
@@ -1737,6 +2014,8 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
     of cakBuiltin:
       let outcome = tryResolveBuiltin(packageId, version, hostCpu, hostOs,
         hostLevel, hostFeatures, step)
+      if step.capabilityShortfall and capabilityRefusal.len == 0:
+        capabilityRefusal = step.reason
       trace.add(step)
       if outcome.found:
         var resolution = outcome.resolution
@@ -1757,6 +2036,34 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
         resolution.chainTrace = trace
         return resolution
     of cakPath:
+      # PMC-4 — the silent-wrong-thing gate, and the reason this whole flag
+      # exists.
+      #
+      # ``cakPath`` probes the host's PATH for a SAME-NAMED executable. If an
+      # earlier adapter refused because the host cannot execute what the
+      # catalog offers, probing PATH does not recover from that: it resolves
+      # a DIFFERENT, undeclared binary that merely shares a name, and reports
+      # success. The user asked for a package with an x86-64-v3 floor and got
+      # whatever ``foo.exe`` was first on PATH.
+      #
+      # This is exactly the hazard PMC-1 closed for declared availability
+      # (`Package-Model.md`: "``cakPath`` stops being reachable for a package
+      # known to be unavailable"), reappearing on the capability axis. PMC-1
+      # could gate in front of the loop because availability is known before
+      # any adapter runs; a floor shortfall is only discovered by ASKING the
+      # builtin adapter, so the gate has to live here instead.
+      #
+      # Only ``cakPath`` is poisoned. ``cakNix`` and ``cakScoop`` resolve
+      # genuinely different artifacts that may well satisfy this host, and
+      # refusing them would turn a safety fix into an outage.
+      if capabilityRefusal.len > 0:
+        step.outcome = csoAdapterUnavailable
+        step.reason = "refused: the builtin catalog has this package but " &
+          "this host cannot run it, and resolving a same-named executable " &
+          "from PATH would substitute an undeclared binary for the one that " &
+          "was refused (" & capabilityRefusal & ")"
+        trace.add(step)
+        continue
       let outcome = tryResolvePath(packageId, binaries, step)
       trace.add(step)
       if outcome.found:

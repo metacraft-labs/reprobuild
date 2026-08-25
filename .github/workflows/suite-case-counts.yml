@@ -1,0 +1,69 @@
+name: Suite case counts
+
+# The one gate that has to reach a verdict on every commit.
+#
+# WHAT IT CATCHES
+#
+# `scripts/reprobuild-suite-static-case-counts.tsv` records how many test cases
+# each declared test source contains. Adding a `test "…":` without refreshing it
+# leaves the baseline disagreeing with the tree, and `just lint` fails from that
+# moment on -- for everyone, not for the author, who has already pushed. Whoever
+# branches next inherits a red tree and someone else's regeneration.
+#
+# WHY IT IS ITS OWN WORKFLOW
+#
+# The check was already an early step of the `lint` job in `ci.yml`, and that
+# was not enough. `ci.yml` runs on a small, permanently saturated self-hosted
+# pool and supersedes its own older runs, so a rapid series of pushes to `dev`
+# cancelled each run before it reached a verdict: over one recent day, twenty of
+# twenty-five `dev` runs ended `cancelled` rather than passed or failed --
+# including the runs for every commit that moved the baseline. A check that is
+# cancelled is not a check.
+#
+# Removing the cancellation from `ci.yml` is not the answer either: those jobs
+# take the better part of an hour, and letting them accumulate starves the
+# pull-request checks people are waiting on without producing timely verdicts.
+#
+# So the cheap gate is separated from the expensive suite. This is a source
+# scan -- no compiler, no built binaries, no nix, no siblings, roughly five
+# seconds on the full tree -- which is what makes it affordable to run on every
+# commit with no cancellation at all.
+#
+# RUNNER CLASS (CIP-5 exemption)
+#
+# `ubuntu-latest`, not the `eph-linux-x64` class the policy assigns to nix jobs.
+# This is not a nix job: it needs bash, git and python3 from the standard image
+# and nothing else, so `setup-dev-env` would cost minutes to provision a shell
+# the check never uses. Running it hosted also keeps it off the pool it exists
+# to be independent of -- if it queued behind the same jobs `ci.yml` queues
+# behind, separating it would have bought nothing.
+#
+# The pre-push hook (`flake.nix`'s `suite-case-counts`) covers the same ground
+# locally and is the faster feedback, but it cannot be relied on: it is a
+# pre-commit hook whose config is regenerated only on dev-shell entry, so a
+# contributor whose shell predates the hook pushes with no gate at all and no
+# warning that it is missing. This workflow is the layer that does not depend
+# on anyone's local state.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+# No `concurrency` block, deliberately: there is nothing to supersede. The job
+# is seconds long, so a backlog cannot form, and every commit gets its own
+# answer.
+
+permissions:
+  contents: read
+
+jobs:
+  suite-case-counts:
+    name: Suite case-count baseline
+    # EXEMPTION (CIP-5): hosted runner -- pure-python source scan, no nix
+    # toolchain, kept off the self-hosted pool by design. See header.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the baseline against the tree
+        run: bash scripts/check_suite_case_counts.sh

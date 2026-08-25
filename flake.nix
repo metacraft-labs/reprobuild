@@ -24,7 +24,28 @@
       # overrides this to the ``dev`` sibling clone; pin the default here so the
       # override-free ``lint`` and ``nix-build`` jobs resolve the same source.
       url = "github:metacraft-labs/runquota/dev";
-      flake = false;
+      # A FLAKE INPUT, NOT A BARE SOURCE TREE. Both uses are served by the one
+      # pin: ``${runquota-src}`` still coerces to the fetched source root (so
+      # ``RUNQUOTA_SRC`` and every ``--path:`` into ``libs/*/src`` are
+      # unchanged), and ``runquota-src.packages.<system>.default`` gives us the
+      # daemon+CLI built by runquota's OWN package derivation instead of a copy
+      # of it maintained here.
+      #
+      # Why that matters: runquota's ``runquotad`` / ``runquota`` binaries have
+      # their own dependency closure, and it grows. M13b's published aggregate
+      # table made ``runquota_daemon`` and ``runquota_cli_support`` import
+      # ``shm_lease/*``, which runquota's package derivation feeds itself from
+      # its own ``nim-shm-lease`` input. A mirrored derivation here would have
+      # to re-learn that input — and the next one — even though reprobuild
+      # imports none of those modules; it compiles only
+      # ``runquota_client``/``_codec``/``_core``/``_ipc``/``_process``/``_protocol``
+      # from the source tree, and none of them reach ``shm_lease``.
+      # Delegating the build keeps runquota's transitive dependencies
+      # runquota's business.
+      #
+      # ``nixos-modules`` follows ours so runquota's package set is this
+      # flake's package set — one nixpkgs evaluation, not two.
+      inputs.nixos-modules.follows = "nixos-modules";
     };
     io-mon-src = {
       # io-mon ships the ``io_mon`` Nim package (the byte-identical wire-format
@@ -375,40 +396,29 @@
               sourceRoot
             else
               throw "ct-trace-format-src must contain ${requiredModule}";
-          # Build the RunQuota daemon (and CLI) from the ``runquota-src``
-          # input, the same source the reprobuild client compiles against
+          # The RunQuota daemon (and CLI), built from the ``runquota-src``
+          # input — the same source the reprobuild client compiles against
           # (``RUNQUOTA_SRC``). Putting this on the dev-shell PATH means the
           # auto-started ``runquotad`` tracks the pinned/overridable source
           # rather than a separately-installed binary, so
           # ``--override-input runquota-src path:../runquota`` yields a daemon
           # built from the local sibling — no ``RUNQUOTAD_BIN`` and no push
-          # needed to iterate. Mirrors runquota's own flake package.
-          runquotaTools = pkgs.stdenv.mkDerivation {
-            pname = "runquota";
-            version = "0.1.0";
-            src = runquota-src;
-            strictDeps = true;
-            dontConfigure = true;
-            nativeBuildInputs = [
-              pkgs.bash
-              pkgs.coreutils
-              pkgs.just
-              nimFork
-            ];
-            buildPhase = ''
-              runHook preBuild
-              mkdir -p test-logs
-              ${pkgs.bash}/bin/bash scripts/build_apps.sh 2>&1 | tee test-logs/build.log
-              runHook postBuild
-            '';
-            installPhase = ''
-              runHook preInstall
-              mkdir -p "$out/bin"
-              install -m755 build/bin/runquota "$out/bin/runquota"
-              install -m755 build/bin/runquotad "$out/bin/runquotad"
-              runHook postInstall
-            '';
-          };
+          # needed to iterate.
+          #
+          # RUNQUOTA'S OWN PACKAGE, NOT A COPY OF IT. This used to be a
+          # hand-maintained ``mkDerivation`` that re-ran runquota's
+          # ``scripts/build_apps.sh`` here — a mirror of runquota's
+          # ``packages.default``, and mirrors rot. runquota's binaries have a
+          # dependency closure that reprobuild does not share: M13b's published
+          # aggregate table made ``runquota_daemon`` / ``runquota_cli_support``
+          # import ``shm_lease/*`` from ``nim-shm-lease``, wired through
+          # ``SHM_LEASE_SRC`` in runquota's own dev shell and package
+          # derivation. The mirror had no such wiring, so bumping the pin to a
+          # post-M13b revision broke every ``nix develop`` here with
+          # ``cannot open file: shm_lease/anchor`` — in a module reprobuild
+          # never imports. Delegating to ``packages.default`` means this flake
+          # states no opinion about runquota's dependencies, now or next time.
+          runquotaTools = runquota-src.packages.${system}.default;
           # Build CodeTracer's standalone cross-language test driver ``ct-test``
           # from the ``codetracer-src`` input and put it on the dev-shell PATH.
           # Same shape and same motivation as ``runquotaTools`` above: the tool
@@ -1268,6 +1278,29 @@
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
+            # Read by RUNQUOTA'S ``config.nims``, not by ours.
+            #
+            # ``RUNQUOTA_SRC`` above serves the compile reprobuild does itself,
+            # which reaches only runquota's client-side libraries. But several
+            # entry points in this shell build runquota's DAEMON, in runquota's
+            # own checkout, with runquota's own build files:
+            # ``scripts/run-m23-benchmark.sh`` and ``scripts/run_tests.sh`` both
+            # run ``just build`` there when ``build/bin/runquotad`` is absent,
+            # and the Justfile's runquota-facing integration recipes do the same.
+            # That build compiles ``runquota_stats_table``, which imports
+            # ``shm_lease/anchor``, and runquota's ``config.nims`` resolves it
+            # from this variable (falling back to a ``../nim-shm-lease``
+            # sibling, which no CI layout of ours provides). Without it the
+            # daemon build stops at ``cannot open file: shm_lease/anchor`` and
+            # takes the benchmark suite down with it.
+            #
+            # THE VALUE IS RUNQUOTA'S OWN PIN, reached through its flake rather
+            # than restated here, for the same reason ``runquotaTools`` delegates
+            # to ``runquota-src.packages.<system>.default``: a second pin of the
+            # same dependency is a second thing to bump, and the two would
+            # eventually disagree about which revision runquota builds against.
+            # Nothing here needs updating when runquota moves its pin.
+            SHM_LEASE_SRC = "${runquota-src.inputs.nim-shm-lease}/src";
             SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [

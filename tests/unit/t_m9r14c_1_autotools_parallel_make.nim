@@ -220,6 +220,10 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
         srcDir = "./src",
         destdir = "D:\\work\\pcre2\\out")
       check ("DESTDIR", "D:/work/pcre2/out") in pkg.installMakeEdge.env
+      when defined(windows):
+        check ("MSYS2_ARG_CONV_EXCL",
+          AutotoolsWindowsInstallArgConversionExclusions) in
+          pkg.installMakeEdge.env
       var registeredInstall = default(BuildActionDef)
       for action in registeredBuildActions():
         if action.id == pkg.installMakeEdge.id:
@@ -227,6 +231,27 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
       check "D:/work/pcre2/out" in registeredInstall.declaredOutputs
     finally:
       clearCurrentOwningPackageOverride()
+
+  test "Windows install preserves recipe argument conversion exclusions":
+    when defined(windows):
+      resetDslPortFetchState()
+      setCurrentOwningPackageOverride("windowsInstallEnvPkg")
+      try:
+        let pkg = autotools_package(
+          srcDir = "./src",
+          extraEnv = @[("MSYS2_ARG_CONV_EXCL", "-DROOT=;")])
+        var values: seq[string] = @[]
+        for (key, value) in pkg.installMakeEdge.env:
+          if key == "MSYS2_ARG_CONV_EXCL":
+            values.add(value)
+        check values.len == 1
+        check values[0].startsWith("-DROOT=;")
+        for exclusion in
+            AutotoolsWindowsInstallArgConversionExclusions.split(';'):
+          if exclusion.len > 0:
+            check exclusion in values[0].split(';')
+      finally:
+        clearCurrentOwningPackageOverride()
 
   test "compile + install action ids are stable across host core counts":
     # The action id derivation must not depend on the host's core

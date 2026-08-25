@@ -4004,13 +4004,14 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
                                    stamp: string): string =
   ## Compose the fetch-script body. Mirrors the autotools / cmake /
   ## meson constructors' fetch-script shape: curl → hash-verify → tar
-  ## --force-local extract → touch stamp. ``file://`` URLs work natively
+  ## extract → touch stamp. ``file://`` URLs work natively
   ## via curl.
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
+  let staged = extracted & ".repro-extract-" & spec.hashHex
+  let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
@@ -4028,22 +4029,24 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
     script.add("cp \"" & escapedTarball & "\" \"" &
       escapedStaged & "/source\"; ")
   else:
-    script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+    script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
   script.add("touch \"" & escapedStamp & "\"")
   script
 
-proc dslPortSubstituteShellPlaceholders(command, fetchPath, extractedPath,
-                                       outPath: string): string =
+proc dslPortSubstituteShellPlaceholders*(command, fetchPath, extractedPath,
+                                        outPath: string): string =
   ## Replace ``$fetch`` / ``$extracted`` / ``$out`` in ``command``.
   ## Mirrors ``from_source_custom.substitutePlaceholders`` byte-for-byte
   ## so a recipe routed through the per-project provider gets the same
   ## substituted argv as one routed through the standard provider.
-  result = command.replace("$extracted", extractedPath)
-  result = result.replace("$fetch", fetchPath)
-  result = result.replace("$out", outPath)
+  let shellFetchPath = fetchPath.replace("\\", "/")
+  let shellExtractedPath = extractedPath.replace("\\", "/")
+  let shellOutPath = outPath.replace("\\", "/")
+  result = command.replace("$extracted", shellExtractedPath)
+  result = result.replace("$fetch", shellFetchPath)
+  result = result.replace("$out", shellOutPath)
 
 proc dslPortSanitizeIdPart(value: string): string =
   for ch in value:
