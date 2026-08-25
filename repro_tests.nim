@@ -362,7 +362,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
     binary: "build/test-bin/t_engine_action_create_dyndep",
@@ -451,7 +452,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim",
     binary: "build/test-bin/t_nlf_stat4_baseline_fingerprints",
@@ -7722,7 +7724,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_build_progress_modes.nim",
     binary: "build/test-bin/t_build_progress_modes",
@@ -7964,7 +7967,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim",
     binary: "build/test-bin/t_cross_tier_move_between_layers_errors_loudly",
@@ -8359,7 +8363,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_every_launch_path_is_monitored.nim",
     binary: "build/test-bin/t_every_launch_path_is_monitored",
@@ -8385,7 +8390,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_extension_type_lifted_and_consumed.nim",
     binary: "build/test-bin/t_extension_type_lifted_and_consumed",
@@ -9365,7 +9371,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim",
     binary: "build/test-bin/t_migrate_leaves_a_pinned_checkout_on_its_pin",
@@ -9715,7 +9722,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.nim",
     binary: "build/test-bin/t_pre_push_warns_and_allows_on_unreachable_personal_backend",
@@ -9840,7 +9848,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_provider_file_driven_fanout_cleanup.nim",
     binary: "build/test-bin/t_provider_file_driven_fanout_cleanup",
@@ -10379,7 +10388,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_single_platform_entries_declare_platforms.nim",
     binary: "build/test-bin/t_single_platform_entries_declare_platforms",
@@ -10432,7 +10442,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_status_health_add_remove_use_unified_resolver.nim",
     binary: "build/test-bin/t_status_health_add_remove_use_unified_resolver",
@@ -10575,7 +10586,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim",
     binary: "build/test-bin/t_team_backend_routed_lock_reads_back_and_is_idempotent",
@@ -11348,7 +11360,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_capabilities.nim",
     binary: "build/test-bin/t_capabilities",
