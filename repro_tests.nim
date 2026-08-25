@@ -9230,6 +9230,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_m20_second_runner_generic_layer.nim",
+    binary: "build/test-bin/t_m20_second_runner_generic_layer",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_m9r21_4_hardware_e2e.nim",
     binary: "build/test-bin/t_m9r21_4_hardware_e2e",
     defines: @[],

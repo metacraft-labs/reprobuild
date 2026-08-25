@@ -107,6 +107,18 @@ import std/[algorithm, atomics, json, locks, os, osproc, parseopt, streams,
 # migrated, because nothing reads it.
 import ct_test_history
 
+# RunQuota-Observation-Store M20: the READ side, §17.3's ``stats flaky`` and
+# ``stats duration``.
+#
+# IT IS A SEPARATE LIBRARY FROM THE REPORTER ABOVE, AND THE SEPARATION IS THE
+# POINT. The queries read ``ext_test_execution`` and nothing else, so they
+# answer identically for every runner that writes the generic layer — which is
+# what OS-8's "populated by at least two different runners" is worth only if
+# the reading side is neutral too. A query hosted inside CodeTracer's reporter
+# would make every other runner's statistics reachable only by linking
+# CodeTracer's write path.
+import repro_test_stats
+
 when defined(posix):
   import std/posix
 elif defined(windows):
@@ -4474,5 +4486,35 @@ when defined(posix):
   if internalParams.len > 0 and
       internalParams[0] == ProcessGroupWrapperFlag:
     quit(processGroupWrapperMain(internalParams[1 .. ^1]))
+
+# RunQuota-Observation-Store M20 / §17.3: ``stats flaky`` and
+# ``stats duration``, answered from the shared observation store.
+#
+# DISPATCHED BEFORE ``main()`` BECAUSE IT IS NOT A TEST RUN: it starts no
+# workers, scans no bin dir and builds nothing. Routing it through the run
+# parser would make a query fail on a host with no test binaries, which is the
+# ordinary case for somebody asking what has been flaky lately.
+#
+# THE ANSWER IS RUNNER-BLIND, WHICH IS THE WHOLE REASON IT IS HERE RATHER THAN
+# INSIDE THE HISTORY REPORTER. It reads ``ext_test_execution`` and no other
+# table, so a row this runner wrote and a row another runner wrote are the
+# same input to it — M20's "query indistinguishably", as a property of the
+# implementation rather than of the fixture.
+block statsDispatch:
+  let statsParams = commandLineParams()
+  if statsParams.len < 2 or statsParams[0] != "stats":
+    break statsDispatch
+  var asJson = false
+  var hostScope = false
+  for arg in statsParams[2 .. ^1]:
+    case arg
+    of "--json", "--output-format=json": asJson = true
+    of "--scope=host": hostScope = true
+    else:
+      stderr.writeLine "repro_test_runner stats: unknown argument " & arg
+      quit(2)
+  let answer = runTestStatsQuery(statsParams[1], asJson, hostScope)
+  stdout.write(answer.text)
+  quit(answer.exitCode)
 
 main()
