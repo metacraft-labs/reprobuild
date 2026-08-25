@@ -41,7 +41,7 @@
 
 import std/[os, osproc, strutils, unittest]
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 const producerRecipe = """
 import repro_project_dsl

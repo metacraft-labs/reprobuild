@@ -31,7 +31,7 @@ import std/[os, osproc, strutils, tables, unittest]
 import repro_cli_support
 import repro_lock
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 # Three solved packages, all carrying a source provenance: two store-realized,
 # one registry-sourced. ``app`` depends on ``nim`` so the solve has real edges.

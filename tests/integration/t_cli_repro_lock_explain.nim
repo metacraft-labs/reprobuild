@@ -13,7 +13,7 @@
 
 import std/[json, os, osproc, strutils, unittest]
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 proc writeFixture(path: string; content: string) =
   writeFile(path, content)

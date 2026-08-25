@@ -49,7 +49,7 @@
 
 import std/[json, os, osproc, strutils, unittest]
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 # The producer's UNIQUE stamp — the built ``prod`` binary echoes exactly this.
 # It cannot appear unless the sibling was built from source AND its binary ran.

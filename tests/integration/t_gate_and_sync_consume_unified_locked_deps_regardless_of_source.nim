@@ -33,7 +33,7 @@ import repro_lock
 import repro_workspace_manifests
 import git_tool
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 const solverInputs = """
 package app

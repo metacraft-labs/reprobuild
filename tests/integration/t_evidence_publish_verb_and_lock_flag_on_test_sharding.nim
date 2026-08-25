@@ -39,7 +39,7 @@ import evidence
 
 import "../e2e/sharding/sharding_test_support"
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 proc q(value: string): string = quoteShell(value)
 

@@ -65,7 +65,7 @@ import std/[os, osproc, strutils, tempfiles, unittest]
 when defined(posix):
   from std/posix import Mode, chmod, geteuid
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 proc cannotModelUnreadableDirectory(): bool =
   when defined(posix):

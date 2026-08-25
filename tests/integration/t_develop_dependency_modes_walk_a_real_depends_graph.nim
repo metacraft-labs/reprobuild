@@ -70,7 +70,7 @@
 
 import std/[algorithm, os, osproc, strutils, tempfiles, unittest]
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 proc q(value: string): string = quoteShell(value)
 

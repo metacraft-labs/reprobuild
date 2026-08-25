@@ -25,7 +25,7 @@
 
 import std/[os, osproc, strutils, unittest]
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 # The recipe's ``uses:`` drives the provider's solve to ``nim 2.4.0``.
 const providerRecipe = """

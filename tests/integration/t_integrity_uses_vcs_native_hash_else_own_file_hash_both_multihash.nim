@@ -23,7 +23,7 @@
 
 import std/[os, osproc, strutils, unittest]
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 const solverInputs = """
 package app

@@ -71,7 +71,7 @@ import std/[os, osproc, strutils, unittest]
 
 import repro_lock
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 # The sibling library's UNIQUE greeting stamp — the produced consumer binary
 # writes exactly this. It cannot appear unless ``import greetlib`` resolved the

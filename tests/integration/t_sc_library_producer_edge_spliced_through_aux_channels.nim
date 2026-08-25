@@ -68,7 +68,7 @@
 
 import std/[json, os, osproc, strutils, unittest]
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 # The producer library's UNIQUE stamp — the library function returns exactly
 # this string. It cannot appear in the consumer's marker unless the sibling

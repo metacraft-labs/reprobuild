@@ -58,7 +58,7 @@
 
 import std/[os, osproc, strutils, unittest]
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 # The executable producer's UNIQUE stamp — the built ``exeprod`` binary echoes
 # exactly this. It cannot appear unless the sibling was built from source AND

@@ -157,7 +157,7 @@ when defined(scTyped10Mistyped):
   # with ``-d:scTyped10Mistyped`` fails — the compile-arm falsification.
   discard sctyped10schema.bogusverb(socket = "/x")
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 # The executable producer's UNIQUE stamp — the built ``sctypedexe`` script writes
 # exactly this to its ``--socket`` path. It cannot appear unless the sibling was

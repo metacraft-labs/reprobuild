@@ -34,7 +34,7 @@ import std/[os, osproc, strutils, unittest]
 import repro_cli_support
 import repro_lock
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
 # Two packages with DECLARED source provenance: ``app`` realizes into the repro
 # store; ``leftpad`` is fetched from a package registry.
