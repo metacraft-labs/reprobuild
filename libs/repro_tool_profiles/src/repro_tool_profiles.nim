@@ -136,7 +136,18 @@ type
     realizationBoundary*: string
     executableName*: string
     pathSearchList*: seq[string]
+      ## The directories the resolver walked. Kept on the profile because
+      ## the engine threads it onto the action's ``PATH`` and several
+      ## freshness checks probe it — but deliberately NOT part of
+      ## ``profileFingerprint``. Where we looked is not evidence about
+      ## what we found; see ``resolvedExecutableContentDigest``.
     resolvedExecutablePath*: string
+    resolvedExecutableDigest*: string
+      ## blake3 content digest of ``resolvedExecutablePath``'s bytes, or
+      ## ``""`` / ``"missing"`` / ``"unreadable"`` sentinels. This is the
+      ## profile's content identity and IS fingerprinted: it is what makes
+      ## dropping ``pathSearchList`` from the key sound rather than a
+      ## stale-serve hole.
     # M9.R.14e.1 — additional search-path channels populated by the
     # from-source resolver when the sibling recipe's install tree carries
     # the relevant artefacts. The engine threads each list onto a
@@ -206,7 +217,13 @@ type
     executableName*: string
     subcommand*: string
     pathSearchList*: seq[string]
+      ## Threaded onto the action environment; NOT fingerprinted. See the
+      ## matching field on ``PathOnlyToolProfile``.
     resolvedExecutablePath*: string
+    resolvedExecutableDigest*: string
+      ## Mirror of the profile's content identity, copied through by
+      ## ``actionIdentityFor`` and fingerprinted into
+      ## ``actionFingerprint``.
     # M9.R.14e.1 — mirror of ``PathOnlyToolProfile``'s extra search-path
     # channels. The provider-compile pass copies these fields out of the
     # resolved profile and into the per-action identity so the CLI's
@@ -278,7 +295,12 @@ const
   # (``pkgConfigSearchList`` / ``cmakePrefixList`` / ``cpathList`` /
   # ``libraryPathList``) to ``PathOnlyToolProfile`` + ``ToolActionIdentity``
   # so the engine can thread them onto per-action env vars at fork time.
-  ArtifactVersion = 7'u16
+  # v8 — ``resolvedExecutableDigest`` on both the profile and the action
+  # identity. The digest is a KEY input, so it has to survive the
+  # artifact round-trip: a field that is fingerprinted but not serialized
+  # would make a cached identity re-hash to a different fingerprint on
+  # every read.
+  ArtifactVersion = 8'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
   NixMaterializationVersion = 3'u16
 
@@ -501,15 +523,64 @@ proc collectConfiguredProbes(executablePath, packageSelector,
   for probe in configuredProbes(packageSelector, executableName):
     result.add(runProbe(executablePath, probe))
 
+proc resolvedExecutableContentDigest*(path: string): string =
+  ## The CONTENT identity of the executable a tool profile resolved to.
+  ##
+  ## The profile fingerprint used to hash ``pathSearchList`` — the
+  ## verbatim ``$PATH`` the resolver walked. Where we LOOKED is not
+  ## evidence about what we FOUND: two hosts with a byte-identical
+  ## ``$PATH`` can still ship different ``/usr/bin/gcc``, and two hosts
+  ## with different ``$PATH`` can resolve the identical binary. Hashing
+  ## the search list therefore bought no soundness while making every
+  ## action-cache key a function of the caller's shell.
+  ##
+  ## ``resolvedExecutablePath`` alone cannot replace it — it is a path
+  ## STRING. Dropping the search list without adding a content identity
+  ## would let two hosts whose ``/usr/bin/gcc`` differ in content key
+  ## identically, trading over-invalidation for a stale-serve hole. This
+  ## digest is what closes that: same path + different bytes ⇒ different
+  ## key.
+  ##
+  ## Deliberately NOT memoized on ``(path, size, mtime)``: an in-place
+  ## replacement of equal size within one filesystem timestamp tick is
+  ## precisely the case the digest exists to catch, and a stat-keyed memo
+  ## would reopen the hole it closes. The read is a cold-path cost, paid
+  ## once per tool profile per resolution (and tool identities are
+  ## themselves cached on disk).
+  if path.len == 0:
+    return ""
+  if not fileExists(extendedPath(path)):
+    return "missing"
+  try:
+    result = "blake3:" & blake3.toHex(blake3.digest(readFile(extendedPath(path))))
+  except CatchableError:
+    # An unreadable resolved executable is a real, distinguishable state.
+    # Returning a sentinel keeps the key stable and never silently equal
+    # to a readable file's digest.
+    result = "unreadable"
+
 proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   var payload: seq[byte] = @[]
-  # v6 — M9.R.14e.1 folded the four extra search-path channels into the
-  # profile fingerprint so two from-source recipes that stage different
-  # ``pkgconfig`` / ``include`` / ``lib`` dirs hash to distinct cache
-  # keys. The old domain tag was ``v5``; bumping mechanically invalidates
-  # already-cached profiles from before the search-path extension so the
-  # engine refuses to re-use a profile that lacks the new channels.
-  payload.writeString("reprobuild.toolProfile.v6")
+  # v7 — the profile fingerprint now keys on WHAT WAS RESOLVED, not on
+  # WHERE THE RESOLVER LOOKED. ``pathSearchList`` (the verbatim host
+  # ``$PATH`` in path-only mode) is no longer hashed; the resolved
+  # executable's blake3 content digest is hashed in its place. See
+  # ``resolvedExecutableContentDigest`` for why the swap is sound in both
+  # directions, and
+  # ``tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim``
+  # for the paired assertions.
+  #
+  # Dropping the search list loses nothing for the non-path adapters
+  # either: nix/tarball/scoop/from-source profiles derive
+  # ``pathSearchList`` from ``selectedStorePath`` /
+  # ``resolvedExecutablePath`` / the recipe artefact dir, all of which
+  # remain hashed below. Only path-only mode ever put ambient host state
+  # in there.
+  #
+  # v6 → v7 mechanically invalidates every profile cached under the old
+  # scheme, which is required: an old profile carries no
+  # ``resolvedExecutableDigest`` and must not be re-used as if it did.
+  payload.writeString("reprobuild.toolProfile.v7")
   payload.writeString(profile.installMethod)
   payload.writeString(profile.packageSelector)
   payload.writeString(profile.packageId)
@@ -527,8 +598,8 @@ proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   payload.writeString(profile.lockIdentity)
   payload.writeString(profile.realizationBoundary)
   payload.writeString(profile.executableName)
-  payload.writeStringSeq(profile.pathSearchList)
   payload.writeString(profile.resolvedExecutablePath)
+  payload.writeString(profile.resolvedExecutableDigest)
   payload.writeStringSeq(profile.pkgConfigSearchList)
   payload.writeStringSeq(profile.cmakePrefixList)
   payload.writeStringSeq(profile.cpathList)
@@ -557,11 +628,13 @@ proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
 
 proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   var payload: seq[byte] = @[]
-  # See ``profileFingerprintFor`` — v5 → v6 bump for the M9.R.14e.1
-  # search-path channels. Two from-source siblings with different staged
-  # install trees produce two distinct action fingerprints so the
-  # engine never reuses a stale identity across staged-tree variations.
-  payload.writeString("reprobuild.toolAction.v6")
+  # See ``profileFingerprintFor`` — v6 → v7 swaps the hashed
+  # ``pathSearchList`` for the resolved executable's content digest, for
+  # the same reason and with the same paired guarantees. The action
+  # identity keys a second, parallel structure; if the digest reached the
+  # profile but not here, the action fingerprint would still be blind to
+  # the tool's content.
+  payload.writeString("reprobuild.toolAction.v7")
   payload.writeString(identity.providerEntrypointId)
   payload.writeString(identity.installMethod)
   payload.writeString(identity.packageSelector)
@@ -581,8 +654,8 @@ proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   payload.writeString(identity.realizationBoundary)
   payload.writeString(identity.executableName)
   payload.writeString(identity.subcommand)
-  payload.writeStringSeq(identity.pathSearchList)
   payload.writeString(identity.resolvedExecutablePath)
+  payload.writeString(identity.resolvedExecutableDigest)
   payload.writeStringSeq(identity.pkgConfigSearchList)
   payload.writeStringSeq(identity.cmakePrefixList)
   payload.writeStringSeq(identity.cpathList)
@@ -606,6 +679,15 @@ proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   payload.writeString(identity.scoopRoot)
   payload.writeString(identity.scoopJunctionTarget)
   blake3DomainDigest(payload, hdActionFingerprint)
+
+proc refreshProfileIdentity(profile: var PathOnlyToolProfile) =
+  ## The single place a profile's identity is sealed: hash the resolved
+  ## executable's bytes, then fingerprint. Every adapter goes through
+  ## here so no construction site can produce a profile whose fingerprint
+  ## claims a content identity it never computed.
+  profile.resolvedExecutableDigest =
+    resolvedExecutableContentDigest(profile.resolvedExecutablePath)
+  profile.profileFingerprint = profileFingerprintFor(profile)
 
 proc findExecutableOnPath(executableName: string;
                           pathSearchList: openArray[string]): string =
@@ -755,7 +837,7 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
       result.applySidecarProfile(sidecar)
       result.probes = collectConfiguredProbes(result.resolvedExecutablePath,
         useDef.packageSelector, useDef.executableName)
-      result.profileFingerprint = profileFingerprintFor(result)
+      refreshProfileIdentity(result)
       return
 
   let resolved = findExecutableOnPath(useDef.executableName, searchList)
@@ -780,7 +862,7 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
 
-  result.profileFingerprint = profileFingerprintFor(result)
+  refreshProfileIdentity(result)
 
 proc lockedNixpkgsRef(baseRef, narHash: string): string =
   result = baseRef
@@ -1243,7 +1325,7 @@ proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
     addUniquePath(profile.cpathList, storePath / "include")
     addUniquePath(profile.libraryPathList, storePath / "lib")
     addUniquePath(profile.libraryPathList, storePath / "lib64")
-  profile.profileFingerprint = profileFingerprintFor(profile)
+  refreshProfileIdentity(profile)
 
 when defined(windows):
   proc resolveNixTool*(useDef: InterfaceToolUse;
@@ -1495,7 +1577,7 @@ else:
       result.realizedStorePaths.add(unified.absolutePath)
       writeCachedNixMaterialization(storeRoot, useDef, plan, result)
 
-    result.profileFingerprint = profileFingerprintFor(result)
+    refreshProfileIdentity(result)
 
 proc normalizedSha256(value: string): string =
   result = value.strip().toLowerAscii()
@@ -2393,7 +2475,7 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
 
-  result.profileFingerprint = profileFingerprintFor(result)
+  refreshProfileIdentity(result)
 
 # ---------------------------------------------------------------------------
 # MR5 -- Bootstrap toolchain resolution for the interface-extract step.
@@ -3662,7 +3744,7 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
             probeResult.output)
         result.probes.add(probeResult)
 
-  result.profileFingerprint = profileFingerprintFor(result)
+  refreshProfileIdentity(result)
 
 proc verifyScoopExecutionProfile*(prefix: string) =
   ## Reads the receipt at `prefix` and recomputes the execution profile
@@ -3741,6 +3823,8 @@ proc metadataFor(identity: ToolActionIdentity): DynamicValue =
     entry("executableName", cborText(identity.executableName)),
     entry("pathSearchList", cborArray(pathValues)),
     entry("resolvedExecutablePath", cborText(identity.resolvedExecutablePath)),
+    entry("resolvedExecutableDigest",
+      cborText(identity.resolvedExecutableDigest)),
     entry("probes", cborArray(probeValues)),
     entry("adapterStrength", cborText(strengthName(identity.adapterStrength))),
     entry("cachePortability", cborText(portabilityName(
@@ -4724,7 +4808,7 @@ proc dryRunPlannedFromSourceProfile(useDef: InterfaceToolUse;
     adapterStrength: asStrong,
     cachePortability: cpLocalOnly,
     practicalHardening: phNone)
-  result.profileFingerprint = profileFingerprintFor(result)
+  refreshProfileIdentity(result)
 
 proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
                                recipeRoot = ""): FromSourceResolveResult =
@@ -5036,7 +5120,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
 
   profile.probes = collectConfiguredProbes(absolute,
     useDef.packageSelector, useDef.executableName)
-  profile.profileFingerprint = profileFingerprintFor(profile)
+  refreshProfileIdentity(profile)
   FromSourceResolveResult(kind: rrResolved, profile: profile)
 
 proc resolveFromSourceTool*(useDef: InterfaceToolUse;
@@ -5305,6 +5389,11 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     subcommand: profile.installMethod,
     pathSearchList: profile.pathSearchList,
     resolvedExecutablePath: profile.resolvedExecutablePath,
+    # The action identity keys a second, parallel structure. Carrying the
+    # profile's content digest through is what stops ``actionFingerprint``
+    # from being blind to the tool's bytes once ``pathSearchList`` left
+    # the payload.
+    resolvedExecutableDigest: profile.resolvedExecutableDigest,
     probes: profile.probes,
     adapterStrength: profile.adapterStrength,
     cachePortability: profile.cachePortability,
@@ -5453,6 +5542,9 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeStringSeq(profile.cmakePrefixList)
   outp.writeStringSeq(profile.cpathList)
   outp.writeStringSeq(profile.libraryPathList)
+  # v8 — the resolved executable's content digest. Emitted after the v7
+  # search-path block, same trailing-extension discipline.
+  outp.writeString(profile.resolvedExecutableDigest)
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -5517,6 +5609,14 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
     result.cmakePrefixList = readStringSeq(bytes, pos)
     result.cpathList = readStringSeq(bytes, pos)
     result.libraryPathList = readStringSeq(bytes, pos)
+  if version >= 8'u16:
+    result.resolvedExecutableDigest = readString(bytes, pos)
+  # A v < 8 artifact leaves the digest empty. Its stored
+  # ``profileFingerprint`` was computed under the v6 profile scheme and
+  # will not equal ``profileFingerprintFor(result)``, so every freshness
+  # check that recomputes the fingerprint rejects it and forces a fresh
+  # resolution. That is the intended outcome — an old profile carries no
+  # content identity and must not be reused as if it did.
   result.profileFingerprint = readDigest(bytes, pos)
 
 proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
@@ -5563,6 +5663,8 @@ proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeStringSeq(identity.cmakePrefixList)
   outp.writeStringSeq(identity.cpathList)
   outp.writeStringSeq(identity.libraryPathList)
+  # v8 — content digest of the resolved executable (see ``writeProfile``).
+  outp.writeString(identity.resolvedExecutableDigest)
 
 proc readActionIdentity(bytes: openArray[byte];
     pos: var int; version: uint16): ToolActionIdentity =
@@ -5632,6 +5734,8 @@ proc readActionIdentity(bytes: openArray[byte];
     result.cmakePrefixList = readStringSeq(bytes, pos)
     result.cpathList = readStringSeq(bytes, pos)
     result.libraryPathList = readStringSeq(bytes, pos)
+  if version >= 8'u16:
+    result.resolvedExecutableDigest = readString(bytes, pos)
 
 proc encodePathOnlyBuildIdentity*(identity: PathOnlyBuildIdentity): seq[byte] =
   var payload: seq[byte] = @[]
@@ -5718,6 +5822,7 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
     "executableName": profile.executableName,
     "pathSearchList": profile.pathSearchList,
     "resolvedExecutablePath": profile.resolvedExecutablePath,
+    "resolvedExecutableDigest": profile.resolvedExecutableDigest,
     "probes": probes,
     "adapterStrength": strengthName(profile.adapterStrength),
     "cachePortability": portabilityName(profile.cachePortability),
@@ -5766,6 +5871,7 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     "subcommand": identity.subcommand,
     "pathSearchList": identity.pathSearchList,
     "resolvedExecutablePath": identity.resolvedExecutablePath,
+    "resolvedExecutableDigest": identity.resolvedExecutableDigest,
     "probes": probes,
     "adapterStrength": strengthName(identity.adapterStrength),
     "cachePortability": portabilityName(identity.cachePortability),

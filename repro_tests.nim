@@ -10878,6 +10878,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim",
+    binary: "build/test-bin/t_tool_profile_keys_on_resolution_not_search_path",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r9_auto_recurse.nim",
     binary: "build/test-bin/t_m9r9_auto_recurse",
     defines: @[],

@@ -89,7 +89,12 @@
 ## actions.** The practical cost is smaller than it sounds — those keys
 ## are already 100% host-dependent through `pathSearchList` in
 ## `profileFingerprintFor`, so they do not survive a host change either
-## way — but it is a wipe, and (4) is not evidence against it. What (4)
+## way — but it is a wipe, and (4) is not evidence against it. (That
+## remaining host-dependency is now gone: `profileFingerprintFor` keys
+## on the resolved executable's content digest instead of the search
+## list — see
+## `tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim`.
+## Landing THAT was a second total wipe.) What (4)
 ## does buy is stated and tested in its reachable half: built-in
 ## (non-forking) actions cannot declare an environment at all, so their
 ## records survive.
