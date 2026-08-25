@@ -7022,6 +7022,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         var batchFailure = ""
         try:
           offers = offerWithRunQuotaBatch(inlineRunQuotaSession, requests, commands)
+        except ReproRunQuotaDeadlockError:
+          # A whole frontier blocked by requests the authority cannot ever
+          # admit is a build-level scheduler deadlock, not an action process
+          # failure. Preserve the typed outcome for the CLI diagnostic.
+          raise
         except CatchableError as err:
           batchFailure = err.msg
         finishStat("repro runquota launch", batchStart)
