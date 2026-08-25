@@ -53,6 +53,7 @@ libs/repro_build_engine/tests/t_engine_multiple_outputs_produce_multiple_names.n
 libs/repro_build_engine/tests/t_engine_target_export_table_records_ambiguity.nim	nim	1
 libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph.nim	nim	1
 libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim	nim	6
+libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/test_action_cache_restore_narrow_payloads.nim	nim	5
 libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	9
@@ -73,6 +74,7 @@ libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	4
 libs/repro_cas_store/tests/t_cas_ingest_link.nim	nim	25
 libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim	nim	17
 libs/repro_cas_store/tests/t_cas_materialize_link.nim	nim	24
+libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	nim	11
 libs/repro_cas_store/tests/t_link_capability_facts.nim	nim	41
 libs/repro_cas_store/tests/t_link_capability_probe.nim	nim	20
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14

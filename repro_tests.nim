@@ -374,6 +374,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim",
+    binary: "build/test-bin/t_m4_publisher_path_stores_output_blobs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim",
     binary: "build/test-bin/t_nlf_stat4_baseline_fingerprints",
     defines: @[],
@@ -528,6 +536,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_cas_store/tests/t_cas_materialize_link.nim",
     binary: "build/test-bin/t_cas_materialize_link",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim",
+    binary: "build/test-bin/t_cas_store_occupancy_cost",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
