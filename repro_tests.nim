@@ -8230,6 +8230,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_managed_hooks_stand_down_during_git_operations.nim",
+    binary: "build/test-bin/t_managed_hooks_stand_down_during_git_operations",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim",
     binary: "build/test-bin/t_manifest_copyfile_linkfile_materialized_after_sync",
     defines: @[],

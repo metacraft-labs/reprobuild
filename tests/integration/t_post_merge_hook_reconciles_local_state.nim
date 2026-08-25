@@ -16,18 +16,27 @@
 ## would double the ways this can be half-installed.
 ##
 ## Asserted:
-##   1. Dispatching `post-merge` against a stale workspace reconciles it: the
-##      prefix-named remote becomes `origin` and the detached HEAD attaches to
-##      the declared branch.
-##   2. It reports what it changed, per repo, on stderr — the migration is not
-##      allowed to be silent about mutating somebody's `.git/config`.
-##   3. It exits 0. Git aborts nothing on a non-zero `post-merge`, but the
+##   1. Dispatching `post-merge` against a stale workspace reconciles its
+##      REMOTES: the prefix-named remote becomes `origin`, carrying its URL
+##      and tracking refs.
+##   2. It does NOT move HEAD. The hook arm used to attach a detached HEAD to
+##      the declared branch by running `git checkout <branch>`, which is how a
+##      `post-checkout` firing inside a rebase's detached phase reattached the
+##      mainline and let the rebase replay a topic branch onto it. A hook does
+##      not move refs; it records what it saw and names the operator verb.
+##      `repro workspace migrate` still attaches, because a human typed it.
+##   3. It reports what it changed, per repo, on stderr — the migration is not
+##      allowed to be silent about mutating somebody's `.git/config`. The
+##      detached HEAD it declined to touch goes to the LOG instead: the
+##      developer chose that detachment, and narrating it back at them after
+##      every git command is how a hook gets switched off.
+##   4. It exits 0. Git aborts nothing on a non-zero `post-merge`, but the
 ##      contract is that this can never be the reason a pull looks broken, so
 ##      the exit code is asserted rather than assumed.
-##   4. A second dispatch against the now-consistent workspace is SILENT and
-##      still exits 0. A hook that narrates every pull is a hook people learn
-##      to ignore.
-##   5. A workspace it cannot resolve at all does not turn into a failed
+##   5. A second dispatch against the now-reconciled workspace is SILENT on
+##      stderr and still exits 0. A hook that narrates every pull is a hook
+##      people learn to ignore.
+##   6. A workspace it cannot resolve at all does not turn into a failed
 ##      `git pull`: exit 0, no crash.
 ##
 ## No mocks: real `git init --bare` origins over `file://`, a real clone, and
@@ -131,6 +140,8 @@ suite "the post-merge hook reconciles workspace-local git state":
         q(prefix & "/lib-a") & " " & q(checkout))
       discard requireGit(gitBin, "-C " & q(checkout) &
         " checkout --quiet --detach HEAD")
+      let detachedAt = requireGit(gitBin, "-C " & q(checkout) &
+        " rev-parse HEAD").strip()
 
       # The hook fires in the participating repo, exactly as git would fire it
       # after a merge landed there.
@@ -140,23 +151,36 @@ suite "the post-merge hook reconciles workspace-local git state":
 
       check "origin" in remoteNames(gitBin, checkout)
       check "metacraft-labs" notin remoteNames(gitBin, checkout)
-      check headBranch(gitBin, checkout) == "dev"
+
+      # HEAD is exactly where the developer left it. A hook does not move
+      # refs — not even onto the branch the fragment declares, and not even
+      # when it could do so losslessly.
+      check headBranch(gitBin, checkout) == ""
+      check requireGit(gitBin, "-C " & q(checkout) &
+        " rev-parse HEAD").strip() == detachedAt
 
       # It said what it did. Both halves matter: the repo it touched, and the
       # change it made.
       check first.output.contains("lib-a")
       check first.output.contains("renamed to 'origin'")
-      check first.output.contains("detached HEAD attached")
       # ...and pointed at the surface that can re-run it.
       check first.output.contains("repro workspace migrate")
+      # ...but never claimed to have moved HEAD, because it did not.
+      check not first.output.contains("detached HEAD attached")
 
       # The same trace is durable, not just a one-shot line on a terminal that
-      # has since scrolled.
+      # has since scrolled — and the untouched detached HEAD is recorded
+      # there, which is the half stderr deliberately does not carry.
       let logPath = cacheHome / "repro" / "manifest-refresh.log"
       check fileExists(logPath)
-      check readFile(logPath).contains("local-state")
+      let logBody = readFile(logPath)
+      checkpoint("log: " & logBody)
+      check logBody.contains("local-state")
+      check logBody.contains("NOTICE — HEAD is detached")
+      check logBody.contains("a hook does not move refs")
 
-      # Second dispatch on a now-consistent workspace: nothing to say.
+      # Second dispatch on a now-reconciled workspace: nothing to say on
+      # stderr, even though HEAD is still detached.
       let second = dispatchPostMerge(checkout, cacheHome)
       checkpoint("second dispatch: " & second.output)
       check second.code == 0
