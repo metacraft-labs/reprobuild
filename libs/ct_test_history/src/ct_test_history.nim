@@ -79,7 +79,9 @@ import std/[locks, strutils]
 
 import ct_test_interface/test_execution_extension
 import ct_test_interface/codetracer_test_extension
-export test_execution_extension, codetracer_test_extension
+import ct_test_interface/test_run_context_extension
+export test_execution_extension, codetracer_test_extension,
+  test_run_context_extension
 
 import runquota_core
 import runquota_codec
@@ -206,6 +208,16 @@ type
     active: bool
     genericOk: bool
     codetracerOk: bool
+    runContextOk: bool
+    gitCommit: string
+    gitBranch: string
+      ## THE REVISION THIS RUN IS OF, resolved ONCE by the caller and
+      ## held for the whole session. Not re-read per execution: a
+      ## checkout that moved mid-run would otherwise attribute some
+      ## cases to one revision and some to another, and every one of
+      ## those attributions would be a guess about when the move
+      ## happened. Empty means "the caller did not know", which is
+      ## written as SQL NULL and read back as UNKNOWN.
     nextCandidateId: uint64
     uncapturedExecutions: int
       ## Executions whose history is INCOMPLETE — the daemon queued or
@@ -255,14 +267,21 @@ proc sampleProcessTreeRss*(rootPid: uint64): uint64 =
   if sample.diagnostic.code == diagOk: sample.residentMemoryBytes
   else: 0'u64
 
-proc open*(reporter: ptr HistoryReporter): bool =
-  ## Connect, register the session and declare both extensions.
+proc open*(reporter: ptr HistoryReporter;
+           gitCommit = ""; gitBranch = ""): bool =
+  ## Connect, register the session and declare the extensions.
   ##
   ## RETURNS FALSE RATHER THAN RAISING when there is no daemon. OS-4: "a
   ## missing daemon MUST NOT be reported as an error". The caller keeps
   ## running tests with capture off.
+  ##
+  ## THE REVISION IS THE CALLER'S TO RESOLVE, and both parameters default
+  ## to empty. A caller that does not know it records no revision, which
+  ## ``last-pass`` reports as UNKNOWN — never as a fabricated value.
   initLock(reporter.lock)
   reporter.nextCandidateId = 1'u64
+  reporter.gitCommit = gitCommit
+  reporter.gitBranch = gitBranch
   try:
     reporter.client = connectDefault()
   except CatchableError:
@@ -291,6 +310,17 @@ proc open*(reporter: ptr HistoryReporter): bool =
       CodetracerTestSchemaVersion, codetracerTestMigrations()).len == 0
   except CatchableError:
     reporter.codetracerOk = false
+  # THE THIRD DECLARATION IS CONDITIONAL ON KNOWING SOMETHING TO PUT IN
+  # IT. A run with no revision declares no table, so a store that has
+  # only ever seen revision-less runs does not carry an empty one, and
+  # "no ``ext_test_run_context`` row" keeps one meaning rather than two.
+  if gitCommit.len > 0 or gitBranch.len > 0:
+    try:
+      reporter.runContextOk = reporter.session.declareExtension(
+        TestRunContextExtensionId, TestRunContextExtensionOwner,
+        TestRunContextSchemaVersion, testRunContextMigrations()).len == 0
+    except CatchableError:
+      reporter.runContextOk = false
   true
 
 proc capturing*(reporter: ptr HistoryReporter): bool =
@@ -482,6 +512,17 @@ proc recordRows*(reporter: ptr HistoryReporter; testLease: var TestLease;
           cellText(specific.statusDisagreement),
           cellText(specific.harnessError)
         ])
+    if reporter.runContextOk:
+      # THE REVISION, ONE ROW PER EXECUTION AND NOT ONE PER RUN. It is a
+      # run-level fact stored at execution grain because the spine is the
+      # only key the extension mechanism offers, and because that is the
+      # grain ``last-pass`` reads it back at: the answer to "when did this
+      # test last pass, and at which revision" is one execution's, not one
+      # run's.
+      reporter.session.recordExtensionRow(testLease.leaseId,
+        TestRunContextExtensionId, TestRunContextSchemaVersion,
+        testRunContextColumns(),
+        @[cellText(reporter.gitCommit), cellText(reporter.gitBranch)])
   except CatchableError:
     inc reporter.uncapturedExecutions
   release(reporter.lock)

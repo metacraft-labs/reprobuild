@@ -1033,6 +1033,7 @@ tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_d
 tests/integration/t_locking_explain_reports_resolved_tier_backend_and_layer.nim	nim	1
 tests/integration/t_long_operations_announce_plan_and_emit_live_progress.nim	nim	1
 tests/integration/t_m20_second_runner_generic_layer.nim	nim	3
+tests/integration/t_m21_point_in_time_queries.nim	nim	2
 tests/integration/t_m9r21_4_hardware_e2e.nim	nim	3
 tests/integration/t_m9r22b_2_apply_loopback.nim	nim	5
 tests/integration/t_macho_runtime_audit.nim	nim	15
@@ -1292,6 +1293,7 @@ tests/unit/t_hcr_agent_runtime.nim	nim	4
 tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_library_stage_alias.nim	nim	3
+tests/unit/t_m21_history_fed_scheduling.nim	nim	22
 tests/unit/t_m9q_from_source_provisioning.nim	nim	9
 tests/unit/t_m9r10a_cycle_break.nim	nim	7
 tests/unit/t_m9r10a_exec_name_audit.nim	nim	5
