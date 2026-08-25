@@ -224,7 +224,8 @@ else
     fi
   done < <(
     find tools/tap-test-runner libs/repro_generic_test_recorder \
-      ../reprobuild-test-adapters/src -name '*.nim' 2>/dev/null
+      libs/ct_test_interface ../reprobuild-test-adapters/src \
+      -name '*.nim' 2>/dev/null
   )
 fi
 if [[ "${tap_runner_stale}" -eq 1 ]]; then
