@@ -10229,6 +10229,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_runner_cpu_progress_liveness.nim",
+    binary: "build/test-bin/t_runner_cpu_progress_liveness",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
     binary: "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
     defines: @[],

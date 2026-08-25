@@ -284,10 +284,15 @@ done < <(
 
 # D6 per-test timeout plus an outer wall-clock backstop for runner wedges.
 RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
-# ``--test-timeout`` is an *idle* deadline (no output for N seconds), and the
+# ``--test-timeout`` is a *no-progress* deadline: the runner kills a case only
+# after it has produced no output AND its process group has consumed no
+# measurable CPU for N seconds. (Output alone was the old rule; it read CPU
+# starvation under parallelism as a hang and manufactured false failures.) The
 # runner also enforces a hard ceiling of AbsoluteTimeoutMultiplier (4) times
-# that value -- see tools/test-runner/repro_test_runner.nim:1874. So this
-# number sets a per-binary wall-clock ceiling of 4x, not of 1x.
+# that value -- see drainAndWaitWithTimeout in
+# tools/test-runner/repro_test_runner.nim -- which is what actually stops a
+# livelock, since a spinner satisfies the CPU signal forever. So this number
+# sets a per-binary wall-clock ceiling of 4x, not of 1x.
 #
 # At the previous 600 that ceiling was 40 minutes, and the slowest binary in
 # the suite needs far longer than that: test-logs/parallel-run.json (a full

@@ -1143,6 +1143,7 @@ tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim	nim	2
 tests/integration/t_run_consumes_opaque_out_of_tree.nim	nim	1
 tests/integration/t_run_consumes_session_store_out_of_tree.nim	nim	1
 tests/integration/t_run_edge_session_resolver_auto.nim	nim	2
+tests/integration/t_runner_cpu_progress_liveness.nim	nim	4
 tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim	nim	6
 tests/integration/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim	nim	1
 tests/integration/t_sc_develop_mode_consumes_sibling_exe_and_lib_from_source.nim	nim	1
