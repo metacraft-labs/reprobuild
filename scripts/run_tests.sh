@@ -238,6 +238,52 @@ if [[ "${tap_runner_stale}" -eq 1 ]]; then
     tools/tap-test-runner/repro_tap_test_runner.nim
 fi
 
+# The M3 runner (`tools/test-runner`) is built here for exactly the reason the
+# M20 runner above is: a dozen tests SPAWN `build/bin/repro_test_runner`
+# (t_repro_test_runner_*, t_m20_second_runner_generic_layer,
+# t_ext_test_execution_rows, t_d6_runner_test_timeout, the B5 and sharding e2e
+# cases), so it is an INPUT to those tests and not an output of compiling them.
+#
+# It used to be built only in the `else` of the ct-test-runner branch further
+# down, i.e. only on hosts where `ct-test-runner` is absent from PATH. On a host
+# that HAS ct-test-runner — which is the direnv dev shell's own configuration,
+# since `ctTestTools` is in the shell's packages — nothing rebuilt it, and those
+# tests silently exercised whatever binary happened to be on disk. Conditions
+# that a runner change is supposed to make pass were therefore unreachable
+# without a hand build, which is the opposite of a gate.
+#
+# Staleness is judged against everything the runner LINKS, not just its own
+# entry point: `repro_test_runner.nim` imports `ct_test_history` and
+# `repro_test_stats`, and both of those import `ct_test_interface`. Watching
+# only the entry point let an edit to any of those three ship a stale runner —
+# the same class of miss the entry-point-only check was added to prevent.
+runner_bin="build/bin/repro_test_runner${exe_ext}"
+runner_stale=0
+if [[ ! -x "${runner_bin}" ]]; then
+  runner_stale=1
+else
+  while IFS= read -r runner_src; do
+    if [[ "${runner_src}" -nt "${runner_bin}" ]]; then
+      runner_stale=1
+      break
+    fi
+  done < <(
+    find tools/test-runner libs/repro_test_stats libs/ct_test_history \
+      libs/ct_test_interface -name '*.nim' 2>/dev/null
+  )
+fi
+if [[ "${runner_stale}" -eq 1 ]]; then
+  printf 'Building M3 runner: %s\n' "${runner_bin}" >&2
+  nim c \
+    -d:release \
+    --threads:on \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/repro_test_runner \
+    --out:"${runner_bin}" \
+    tools/test-runner/repro_test_runner.nim
+fi
+
 # Step 3: build the apps, helpers, fixtures, and test binaries through
 # the engine. Cap parallelism for memory-constrained CI runners.
 if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
@@ -355,25 +401,10 @@ if [[ -n "${ct_test_runner}" && -x "${ct_test_runner}" ]]; then
 else
   printf 'ct-test-runner not built; falling back to M3 internal runner (overall timeout %s)\n' \
     "${RUNNER_TIMEOUT}" >&2
-  runner_bin="build/bin/repro_test_runner${exe_ext}"
-  # Rebuild when the binary is missing OR older than its source. Nothing
-  # else in the tree builds this binary — it is not a `repro.nim` target
-  # and not in apps/entrypoints.txt — so an existence-only check let a
-  # stale runner survive every edit to tools/test-runner/, silently
-  # running a 2h suite with reporting behaviour that no longer matches
-  # the source under review.
-  if [[ ! -x "${runner_bin}" ]] ||
-     [[ tools/test-runner/repro_test_runner.nim -nt "${runner_bin}" ]]; then
-    printf 'Building M3 fallback runner: %s\n' "${runner_bin}" >&2
-    nim c \
-      -d:release \
-      --threads:on \
-      --hints:off \
-      --warnings:off \
-      --nimcache:build/nimcache/repro_test_runner \
-      --out:"${runner_bin}" \
-      tools/test-runner/repro_test_runner.nim
-  fi
+  # ``runner_bin`` is built unconditionally earlier in this script — the
+  # binary is an input to a dozen tests, not just this fallback path, so it
+  # cannot be built here without leaving those tests running a stale one on
+  # every host that has ct-test-runner.
   # Default to one worker for heavy nested builds unless explicitly overridden.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
