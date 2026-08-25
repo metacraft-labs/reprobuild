@@ -178,7 +178,16 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 23'u16
+  BuildActionPayloadVersion = 24'u16
+    ## v24: Windows-Build-Correctness M6 — appends the TOOL's entropy
+    ## blessing: one strict sentinel byte for the ``NonDeterminismPolicy``
+    ## ordinal followed by the length-prefixed justification string.
+    ## v23-and-earlier payloads decode as ``ndpUnblessed`` with an empty
+    ## justification, which is the FAIL-CLOSED direction: a payload written
+    ## before the blessing existed cannot have carried one, and reading a
+    ## missing field as "blessed" would restore cache publication for every
+    ## legacy artefact on the strength of a byte that was never written.
+    ##
     ## v23: appends the platform role parallel to each tool-identity
     ## reference. v22-and-earlier payloads decode with an empty list and
     ## retain the legacy build-dependency default.
@@ -1269,6 +1278,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   cacheable = true;
                   commandStatsId = "";
                   dependencyPolicy = defaultDependencyPolicy();
+                  nonDeterminism = ndpUnblessed;
+                  nonDeterminismJustification = "";
                   actionCachePolicy = defaultActionCachePolicy();
                   outputTag = "";
                   env: openArray[(string, string)] = [];
@@ -1337,6 +1348,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     cacheable: cacheable,
     commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
     dependencyPolicy: dependencyPolicy,
+    nonDeterminism: nonDeterminism,
+    nonDeterminismJustification: nonDeterminismJustification,
     actionCachePolicy: actionCachePolicy,
     outputTag: outputTag,
     env: actionEnv,
@@ -1868,6 +1881,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
                           cacheable = true;
                           commandStatsId = "";
                           dependencyPolicy = defaultDependencyPolicy();
+                          nonDeterminism = ndpUnblessed;
+                          nonDeterminismJustification = "";
                           actionCachePolicy = defaultActionCachePolicy();
                           extraEnv: openArray[(string, string)] = []):
     BuildActionDef {.dynOrStatic.} =
@@ -1889,6 +1904,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
     cacheable = cacheable,
     commandStatsId = commandStatsId,
     dependencyPolicy = dependencyPolicy,
+    nonDeterminism = nonDeterminism,
+    nonDeterminismJustification = nonDeterminismJustification,
     actionCachePolicy = actionCachePolicy,
     env = extraEnv)
 
@@ -2100,6 +2117,8 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
                            cacheable = true;
                            commandStatsId = "";
                            dependencyPolicy = defaultDependencyPolicy();
+                           nonDeterminism = ndpUnblessed;
+                           nonDeterminismJustification = "";
                            actionCachePolicy = defaultActionCachePolicy();
                            extraEnv: openArray[(string, string)] = []):
     BuildActionDef {.dynOrStatic.} =
@@ -2121,6 +2140,8 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
     cacheable = cacheable,
     commandStatsId = commandStatsId,
     dependencyPolicy = dependencyPolicy,
+    nonDeterminism = nonDeterminism,
+    nonDeterminismJustification = nonDeterminismJustification,
     actionCachePolicy = actionCachePolicy,
     extraEnv = extraEnv)
 
@@ -2677,6 +2698,12 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   payload.writeU32Le(uint32(action.toolIdentityRefKinds.len))
   for kind in action.toolIdentityRefKinds:
     payload.writeByte(byte(ord(kind)))
+  # v24: Windows-Build-Correctness M6 — the tool's entropy blessing. One
+  # strict enum byte plus the justification the DSL required before it
+  # would accept the blessing, so the engine's diagnostic can quote the
+  # reason rather than merely asserting that one exists.
+  payload.writeByte(byte(ord(action.nonDeterminism)))
+  payload.writeString(action.nonDeterminismJustification)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -2693,7 +2720,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
       9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
-      17'u16, 18'u16, 19'u16, 20'u16, 21'u16, 22'u16,
+      17'u16, 18'u16, 19'u16, 20'u16, 21'u16, 22'u16, 23'u16,
       BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
@@ -2857,6 +2884,23 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
       result.toolIdentityRefKinds[i] = ToolIdentityRefKind(rawKind)
   else:
     result.toolIdentityRefKinds = @[]
+  if version >= 24'u16:
+    # M6 v24: the tool's entropy blessing. Strict 0..ord(high) sentinel —
+    # same strictness as v19's requiresElevation and v21's cwdKind — so a
+    # mutated payload fails closed with a structured error instead of
+    # decoding to whichever ordinal the corrupted byte happens to name.
+    # That matters more here than for the other sentinels: one of the two
+    # ordinals SUPPRESSES a cache-publication guard.
+    let blessingByte = readByte(bytes, pos)
+    if blessingByte > byte(ord(high(NonDeterminismPolicy))):
+      raisePayload("invalid nonDeterminism ordinal in build action payload")
+    result.nonDeterminism = NonDeterminismPolicy(blessingByte)
+    result.nonDeterminismJustification = readString(bytes, pos)
+  else:
+    # v23-and-earlier payloads predate the blessing. Decode as UNBLESSED:
+    # absence of the field is absence of a blessing, never the reverse.
+    result.nonDeterminism = ndpUnblessed
+    result.nonDeterminismJustification = ""
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

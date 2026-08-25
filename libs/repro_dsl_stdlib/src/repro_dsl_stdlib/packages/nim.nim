@@ -114,6 +114,37 @@ package nim:
     cli:
       dependencyPolicy automaticMonitor
 
+      # Windows-Build-Correctness M6 — the entropy blessing, declared HERE,
+      # on the tool, once. Every ``nim.c(...)`` and ``nim.js(...)`` edge in
+      # every recipe inherits it with nothing on the edge, which is the
+      # whole design: a recipe author writes ``nim.c(...)`` and gets the
+      # right answer without knowing that entropy exists.
+      #
+      # The blessing is scoped to ENTROPY, not to determinism in general. It
+      # says an ``mrNonDeterministic`` record from a nim process is not a
+      # reason to withhold a cache entry. It does not touch the file,
+      # library-load, ipc or external-content evidence that decides whether
+      # the capture is complete, and it says nothing about clock reads
+      # (``mrTimeRead``), which are a separate signal for exactly the reason
+      # that blessing them would mean blessing every program alive.
+      nonDeterminism entropyBlessed,
+        justification = "The nim compiler's randomness is confined to " &
+          "naming things it then throws away -- temporary files and " &
+          "temporary directories under its nimcache -- and to hash-table " &
+          "seeding inside its own process. Neither reaches an output: the " &
+          "generated C, the object files and the linked binary are named " &
+          "from the module path and the --out:/--nimcache: arguments, all " &
+          "of which are in the action's argv and therefore in its cache " &
+          "key. A temp name that differed between two runs would change no " &
+          "byte of the product. Measured on this host against the M5 " &
+          "shim, a full monitored `nim c` (nim driving gcc and ld, 25 206 " &
+          "records, mcComplete, eventLoss=0) in fact emitted ZERO " &
+          "mrNonDeterministic records at all, so the blessing is a " &
+          "declaration about what nim's randomness is FOR rather than a " &
+          "waiver being cashed in today -- which is the point: it must be " &
+          "in place before a nim or CRT revision starts drawing entropy on " &
+          "a path that does not affect the output."
+
       subcmd "c":
         flag defines is seq[string],
           alias = "-d:",

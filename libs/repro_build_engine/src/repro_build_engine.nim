@@ -177,6 +177,19 @@ type
     dynamicDepsFile*: string
     monitorDepfile*: string
     dependencyPolicy*: DependencyGatheringPolicy
+    nonDeterminism*: NonDeterminismPolicy
+      ## Windows-Build-Correctness M6 — the entropy blessing of the TOOL
+      ## this action invokes, declared in that tool's CLI spec and lowered
+      ## here by ``repro_cli_support``. ``ndpUnblessed`` (the zero value) is
+      ## the default for every hand-constructed and legacy action, which is
+      ## the fail-closed direction: an action nobody vouched for pays for
+      ## observed entropy with its cache publication. Read by
+      ## ``collectEvidence``.
+    nonDeterminismJustification*: string
+      ## The tool's own stated reason, quoted into the action's evidence
+      ## diagnostics so ``repro why`` can answer "why did this keep caching
+      ## despite reading randomness?" without the reader having to go and
+      ## find the package spec.
     builtinText*: string
     builtinEntries*: seq[string]
     targetNames*: seq[string]
@@ -490,6 +503,61 @@ type
       ## ``nil`` so an inadvertent elevated edge surfaces with the
       ## spec-mandated diagnostic instead of running.
 
+  EntropyCallerOrigin* = enum
+    ## Windows-Build-Correctness M6 — where an observed entropy read came
+    ## from, as far as the capture can tell. READ THE CASES LITERALLY; the
+    ## middle one is narrower than its io-mon spelling suggests.
+    ecoMainImage
+      ## The Windows shim's `caller=program`. The return address of the call
+      ## lay inside the main EXE image, so this is the monitored program's
+      ## own code. This inference is SOUND in this direction.
+    ecoOutsideMainImage
+      ## The Windows shim's `caller=system` — and the one token in this
+      ## whole design that must not be over-read. It means "the return
+      ## address was not in the main EXE image", which covers ntdll's and
+      ## the loader's startup baseline AND a bundled libcrypto, a compiler
+      ## plugin, or a native extension under an interpreter host. The
+      ## program's own randomness routinely lands here, and the shim's
+      ## per-(source, origin) dedup collapses even the count, so there is
+      ## no residual to notice it by. Treating this as "no program
+      ## randomness" would silently grade an unblessed program
+      ## deterministic. This engine therefore treats it EXACTLY like
+      ## `ecoMainImage` for the cache decision; it is kept as a distinct
+      ## case only so the diagnostic can say which one it saw.
+    ecoUnattributed
+      ## No `caller=` token at all. This is the macOS and Linux shape:
+      ## those arms attribute at the SHIM and emit `mrNonDeterministic`
+      ## only for the program's own use, so an absent token means "already
+      ## filtered", not "unknown". Same consequence as the two above.
+
+  EntropyObservation* = object
+    source*: string
+      ## The entry point io-mon named: `BCryptGenRandom`, `ProcessPrng`,
+      ## `RtlGenRandom`, `CryptGenRandom`, `getentropy`, `arc4random`,
+      ## `getrandom`, ...
+    origin*: EntropyCallerOrigin
+
+  EntropyObservability* = enum
+    ## Whether the capture's own backend declaration says entropy COULD be
+    ## observed. This exists because the absence of `mrNonDeterministic`
+    ## records is only meaningful if the monitor was able to produce them:
+    ## "the shim has no entropy hooks" and "the program read no entropy"
+    ## are the same silence, and this milestone's whole subject is telling
+    ## those two apart.
+    entUnknown
+      ## The capture carries no `mrBackendProfile` record, so it makes no
+      ## claim either way. Deliberately the ZERO value, so a `PathSetEvidence`
+      ## that was never folded starts here rather than at `entObserved`.
+    entObserved
+      ## A backend profile is present and lists `non-determinism` among its
+      ## supported capabilities. Absence of entropy records is then real
+      ## evidence of absence.
+    entNotObserved
+      ## A backend profile is present and does NOT list `non-determinism`,
+      ## or the capture carries an explicit `mrCapabilityGap` for it. The
+      ## monitor could not have seen an entropy read, so silence proves
+      ## nothing.
+
   PathSetEvidence* = object
     declaredInputs*: seq[string]
     declaredOutputs*: seq[string]
@@ -498,6 +566,16 @@ type
     monitorWrites*: seq[string]
     monitorProbes*: seq[string]
     diagnostics*: seq[string]
+    entropyObservations*: seq[EntropyObservation]
+      ## M6 — one entry per distinct (source, origin) the capture recorded.
+      ## io-mon already dedupes per source per caller-origin per process, so
+      ## this stays small even for a build that draws randomness in a loop.
+      ## Deliberately NOT folded into `monitorReads`: an entropy read is not
+      ## a file whose content can be fingerprinted, which is exactly why it
+      ## needs a policy rather than a cache-key entry.
+    entropyObservability*: EntropyObservability
+      ## M6 — what the capture's backend profile says about whether entropy
+      ## reads are observable at all.
 
   MonitorEvidenceStatus* = enum
     ## M9.R.72.3 — spec-graded monitor-loss status. Implements the ladder
@@ -1127,6 +1205,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
+             nonDeterminism = ndpUnblessed;
+             nonDeterminismJustification = "";
              env: openArray[string] = [];
              requiresElevation = false;
              governingLockIdentity: LockIdentity): BuildAction =
@@ -1163,6 +1243,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
     dependencyPolicy: effectiveDependencyPolicy,
+    nonDeterminism: nonDeterminism,
+    nonDeterminismJustification: nonDeterminismJustification,
     requiresElevation: requiresElevation)
 
 proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
@@ -1770,6 +1852,90 @@ proc monitorProfileEvidenceComplete(detail: string): bool =
     if pair.len == 2 and pair[0] == "evidenceComplete":
       return pair[1] == "true"
 
+const NonDeterminismCapabilityId = "non-determinism"
+  ## io-mon's `capabilityId(mcapNonDeterminism)`. Matched against both the
+  ## `supported=` list of an `mrBackendProfile` record and the `capability=`
+  ## token of an `mrCapabilityGap` record.
+
+proc monitorProfileSupportsNonDeterminism*(detail: string): bool =
+  ## M6 — does this `mrBackendProfile` record advertise entropy observation?
+  ##
+  ## The profile detail is `backend=...;supported=a,b,c;required=...;
+  ## evidenceComplete=...` (io-mon `capabilities.backendProfileRecord`). A
+  ## profile that does not name `non-determinism` among its supported
+  ## capabilities cannot have produced an `mrNonDeterministic` record, so its
+  ## silence on entropy is not evidence.
+  ##
+  ## Note this reads `supported=`, not `required=`: `required` says only
+  ## which capabilities the CALLER asked for, which answers a different
+  ## question (io-mon `types.MonitorCapabilityGap.inputChannel` makes the same
+  ## point about the gap record's `required` flag).
+  for part in detail.split(';'):
+    let pair = part.split("=", 1)
+    if pair.len == 2 and pair[0] == "supported":
+      for capability in pair[1].split(','):
+        if capability == NonDeterminismCapabilityId:
+          return true
+      return false
+  false
+
+proc capabilityGapIsNonDeterminism*(recordPath, detail: string): bool =
+  ## M6 — is this `mrCapabilityGap` record the entropy one?
+  ##
+  ## io-mon writes the capability id into the record's `path` AND into the
+  ## detail's `capability=` token (`capabilities.capabilityGapRecord`). Both
+  ## are checked because they are written by different lines and a consumer
+  ## that trusted only one would go quiet if either changed.
+  if recordPath == NonDeterminismCapabilityId:
+    return true
+  for part in detail.split(';'):
+    let pair = part.split("=", 1)
+    if pair.len == 2 and pair[0] == "capability":
+      return pair[1] == NonDeterminismCapabilityId
+  false
+
+proc entropyCallerOrigin*(detail: string): EntropyCallerOrigin =
+  ## M6 — classify an `mrNonDeterministic` record's caller attribution.
+  ##
+  ## Windows details read `entropy source=<fn> caller=program|system`; the
+  ## macOS (`non-deterministic entropy source`) and Linux (`linux
+  ## non-deterministic source`) arms carry no `caller=` token because those
+  ## shims filter at the hook and only emit the program's own use.
+  ##
+  ## FAIL-CLOSED ON AMBIGUITY: only a SINGLE `caller=program` token yields
+  ## `ecoMainImage`. A duplicated token is attacker-shaped evidence (io-mon's
+  ## `trustedDetailToken` refuses to resolve one for the same reason), and
+  ## here the safe answer is the one that keeps the observation
+  ## consequential.
+  var seen = 0
+  var value = ""
+  for token in detail.split({' ', '\t', '\n', '\r'}):
+    if token.startsWith("caller="):
+      inc seen
+      value = token["caller=".len .. ^1]
+  if seen == 0:
+    return ecoUnattributed
+  if seen == 1 and value == "program":
+    return ecoMainImage
+  ecoOutsideMainImage
+
+proc describeEntropyOrigin(origin: EntropyCallerOrigin): string =
+  case origin
+  of ecoMainImage: "the program's own main image (caller=program)"
+  of ecoOutsideMainImage:
+    "outside the main image (caller=system: ntdll's baseline OR the " &
+      "program's own bundled DLL -- indistinguishable)"
+  of ecoUnattributed:
+    "the program's own code (shim-side attribution, no caller token)"
+
+proc addEntropyObservation(evidence: var PathSetEvidence;
+                           source: string; origin: EntropyCallerOrigin) =
+  for existing in evidence.entropyObservations:
+    if existing.source == source and existing.origin == origin:
+      return
+  evidence.entropyObservations.add(
+    EntropyObservation(source: source, origin: origin))
+
 proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
   ##
@@ -1948,6 +2114,31 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
         not monitorProfileEvidenceComplete(record.detail):
       result = worseMonitorStatus(result, mesUnknownScopeLoss)
 
+    # M6 — entropy evidence and the capability declaration that says whether
+    # entropy COULD have been evidenced. Neither touches ``result``: an
+    # entropy read is not a monitoring loss (io-mon SAW it), and a
+    # non-determinism capability gap is not in
+    # ``InputEvidenceCapabilities`` so it does not move the completeness
+    # floor. Both are carried out on ``evidence`` for ``collectEvidence`` to
+    # weigh against the invoked tool's blessing.
+    case record.kind
+    of mrNonDeterministic:
+      addEntropyObservation(evidence, record.path,
+        entropyCallerOrigin(record.detail))
+    of mrBackendProfile:
+      # A gap record already seen wins: ``entNotObserved`` is the
+      # conservative answer and must not be relaxed by a profile parsed
+      # afterwards.
+      if evidence.entropyObservability != entNotObserved:
+        evidence.entropyObservability =
+          if monitorProfileSupportsNonDeterminism(record.detail): entObserved
+          else: entNotObserved
+    of mrCapabilityGap:
+      if capabilityGapIsNonDeterminism(record.path, record.detail):
+        evidence.entropyObservability = entNotObserved
+    else:
+      discard
+
     let materialized = materialPath(cwd, record.path)
     case record.kind
     of mrFileRead:
@@ -1992,6 +2183,104 @@ proc collectConvertedEvidence(action: BuildAction;
                               specs: openArray[PostBuildDependencyConverterSpec];
                               evidence: var PathSetEvidence;
                               seen: var EvidenceSeenSets): bool
+
+proc applyEntropyBlessingPolicy(action: BuildAction;
+                                collection: var EvidenceCollection) =
+  ## Windows-Build-Correctness M6 — the consumer half of the entropy
+  ## blessing.
+  ##
+  ## io-mon reports THAT an executable consumed randomness and refuses to
+  ## decide what it means: `mrNonDeterministic` deliberately does not force
+  ## `mcIncomplete`, because the read WAS observed, so nothing is missing
+  ## from the capture. This is the caller policy io-mon defers to.
+  ##
+  ## THE CONSEQUENCE, and why it is this one. An unblessed tool that read
+  ## entropy loses its action-cache PUBLICATION (`disableCacheHits`) and
+  ## nothing else. The action still runs, still succeeds, and its outputs
+  ## are still used by everything downstream — which is right, because
+  ## nothing about this evidence says the outputs are wrong. What it says is
+  ## that they may not be REPRODUCIBLE, and a cache entry is a promise that
+  ## re-running the same inputs yields the same bytes. Refusing to make that
+  ## promise costs a rebuild; making it falsely serves the wrong bytes
+  ## forever. Note also what is NOT done: `publishable` stays true (a
+  ## non-deterministic action is not a failed action) and
+  ## `monitorStatus` is untouched, so this does NOT trip the scheduler's
+  ## session-wide `sessionCachePublishDisabled` — one tool's randomness must
+  ## not make every other action in the build uncacheable.
+  ##
+  ## HOW `caller=system` IS HANDLED, which is the load-bearing decision.
+  ## io-mon's Windows attribution token distinguishes main-EXE-image from
+  ## everything else, NOT program from system (see `EntropyCallerOrigin`).
+  ## Filtering `caller=system` away as "the loader's baseline" would silently
+  ## grade an unblessed program deterministic whenever its randomness came
+  ## through its own bundled DLL — a false clean, the exact failure this
+  ## campaign exists to prevent. So EVERY origin is consequential here; the
+  ## origin is recorded and reported but never used to excuse an observation.
+  ##
+  ## That is affordable because the feared cost did not materialise. Measured
+  ## on this host against the M5 shim: a monitored `cmd /c ver` (39 records),
+  ## `where.exe cmd` (336 records) and a full `nim c` compile driving gcc and
+  ## ld (25 206 records, `mcComplete`, `eventLoss=0`) each produced ZERO
+  ## `mrNonDeterministic` records — the ntdll startup baseline that would have
+  ## flagged everything is not in fact reported for these programs. What did
+  ## report was `powershell -NoProfile -Command 1+1`: three sources
+  ## (`ProcessPrng`, `RtlGenRandom`, `CryptGenRandom`), all `caller=system`,
+  ## i.e. a .NET interpreter host drawing randomness through its own runtime
+  ## — precisely the case a `caller=system` filter would have excused.
+  ##
+  ## ABSENCE OF EVIDENCE IS NOT EVIDENCE OF ABSENCE. If the capture's own
+  ## backend profile says entropy could not be observed, "no entropy records"
+  ## carries no information, and an unblessed action is treated exactly as if
+  ## it had read entropy. This is what makes the whole policy fail closed
+  ## against an older shim or a backend without the capability, and it is
+  ## read from the machinery M4/M5 built for it: the profile record's
+  ## `supported=` list and the `mrCapabilityGap` records.
+  if not action.cacheable:
+    # An action that never publishes has nothing to withhold, and saying so
+    # in its diagnostics would be noise on every fetch edge.
+    return
+  let observations = collection.evidence.entropyObservations
+  if action.nonDeterminism == ndpEntropyBlessed:
+    if observations.len > 0:
+      var sources: seq[string] = @[]
+      for observation in observations:
+        sources.add(observation.source)
+      collection.evidence.diagnostics.add(
+        "entropy observed (" & sources.join(", ") & ") but the invoking " &
+        "tool is blessed in its CLI spec, so it is not treated as a " &
+        "determinism problem: " & action.nonDeterminismJustification &
+        " Spec: Windows-Build-Correctness-Bitness-And-Capabilities." &
+        "milestones.org M6.")
+    return
+  if observations.len > 0:
+    var described: seq[string] = @[]
+    for observation in observations:
+      described.add(observation.source & " from " &
+        describeEntropyOrigin(observation.origin))
+    collection.evidence.diagnostics.add(
+      "action-cache publish skipped: this action's process tree read " &
+      "entropy (" & described.join("; ") & ") and the tool it invokes is " &
+      "not blessed. Declare `nonDeterminism entropyBlessed, justification " &
+      "= \"...\"` in the tool's CLI spec if its randomness cannot reach " &
+      "its output. Note that caller attribution is one-way: an entropy " &
+      "read reported from outside the main image is NOT evidence that the " &
+      "program itself drew none. Spec: " &
+      "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
+    collection.disableCacheHits = true
+    return
+  if collection.evidence.entropyObservability != entObserved:
+    collection.evidence.diagnostics.add(
+      "action-cache publish skipped: the capture's backend " &
+      (if collection.evidence.entropyObservability == entNotObserved:
+         "declares that entropy reads are not observable"
+       else:
+         "is not declared at all (no backend-profile record), so entropy " &
+         "observability is unknown") &
+      ", and the tool this action invokes is not blessed. No " &
+      "`mrNonDeterministic` record is therefore not evidence that no " &
+      "randomness was consumed. Spec: " &
+      "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
+    collection.disableCacheHits = true
 
 proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
   result.publishable = true
@@ -2184,6 +2473,7 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
         result.evidence.diagnostics.add("monitor depfile is incomplete")
         if action.cacheable:
           result.publishable = false
+      applyEntropyBlessingPolicy(action, result)
     except MonitorDepFileReaderError as err:
       result.evidence.diagnostics.add("monitor depfile read failed: " & err.msg)
       # A decode error means the RMDF file is corrupt — cannot classify the

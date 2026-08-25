@@ -2040,6 +2040,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
+      # Windows-Build-Correctness M6 — carry the invoked TOOL's entropy
+      # blessing onto the engine action. Lowered as its own pair rather
+      # than folded into ``lowerDependencyPolicy`` because it must survive
+      # a wrapper that replaces the dependency policy wholesale, which
+      # ``nim.c`` does (see ``compileDependencyPolicy``).
+      nonDeterminism = payload.nonDeterminism,
+      nonDeterminismJustification = payload.nonDeterminismJustification,
       commandStatsId = commandStatsId,
       env = inlineEnv,
       requiresElevation = payload.requiresElevation)
@@ -2154,6 +2161,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
+      # Windows-Build-Correctness M6 — carry the invoked TOOL's entropy
+      # blessing onto the engine action. Lowered as its own pair rather
+      # than folded into ``lowerDependencyPolicy`` because it must survive
+      # a wrapper that replaces the dependency policy wholesale, which
+      # ``nim.c`` does (see ``compileDependencyPolicy``).
+      nonDeterminism = payload.nonDeterminism,
+      nonDeterminismJustification = payload.nonDeterminismJustification,
       commandStatsId = commandStatsId)
 
   let executableName = payload.call.executableName
@@ -2299,6 +2313,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
+      # Windows-Build-Correctness M6 — carry the invoked TOOL's entropy
+      # blessing onto the engine action. Lowered as its own pair rather
+      # than folded into ``lowerDependencyPolicy`` because it must survive
+      # a wrapper that replaces the dependency policy wholesale, which
+      # ``nim.c`` does (see ``compileDependencyPolicy``).
+      nonDeterminism = payload.nonDeterminism,
+      nonDeterminismJustification = payload.nonDeterminismJustification,
       commandStatsId = commandStatsId,
       env = mergedEnv)
 
@@ -2375,6 +2396,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     actionCachePolicy = actionCachePolicy,
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
+    # M6 — see the comment at the sibling lowering sites.
+    nonDeterminism = payload.nonDeterminism,
+    nonDeterminismJustification = payload.nonDeterminismJustification,
     commandStatsId = commandStatsId,
     env = mergedEnv)
 
@@ -3206,7 +3230,13 @@ proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
 
 const
   LoweredGraphCacheMagic = "RBLG"
-  LoweredGraphCacheVersion = 5'u16
+  LoweredGraphCacheVersion = 6'u16
+    ## v6: Windows-Build-Correctness M6 — the lowered ``BuildAction`` now
+    ## carries the invoked tool's entropy blessing. The version bump
+    ## invalidates v5 entries rather than decoding them with a guessed
+    ## value, because the two ordinals are not interchangeable: reading a
+    ## v5 record as blessed would restore cache publication for an action
+    ## nobody vouched for.
   LoweredGraphAlgorithmVersion = "reprobuild.loweredGraph.v1"
 
 type
@@ -3938,6 +3968,9 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeString(action.dynamicDepsFile)
   outp.writeString(action.monitorDepfile)
   outp.writeDependencyPolicy(action.dependencyPolicy)
+  # M6 v6: the invoked tool's entropy blessing plus its stated reason.
+  outp.add(byte(ord(action.nonDeterminism)))
+  outp.writeString(action.nonDeterminismJustification)
   outp.writeString(action.builtinText)
   outp.writeStringSeq(action.builtinEntries)
   outp.writeStringSeq(action.targetNames)
@@ -3990,6 +4023,12 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.dynamicDepsFile = readString(bytes, pos)
   result.monitorDepfile = readString(bytes, pos)
   result.dependencyPolicy = readDependencyPolicy(bytes, pos)
+  # M6 v6: strict sentinel — a corrupt byte must not decode to a blessing.
+  let blessingByte = readByteValue(bytes, pos)
+  if blessingByte > byte(ord(high(NonDeterminismPolicy))):
+    raiseEnvelopeError(eeMalformed, "invalid nonDeterminism ordinal")
+  result.nonDeterminism = NonDeterminismPolicy(blessingByte)
+  result.nonDeterminismJustification = readString(bytes, pos)
   result.builtinText = readString(bytes, pos)
   result.builtinEntries = readStringSeq(bytes, pos)
   result.targetNames = readStringSeq(bytes, pos)

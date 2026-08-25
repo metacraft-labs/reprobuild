@@ -61,6 +61,7 @@ libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	1
 libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim	nim	2
 libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim	nim	1
 libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim	nim	5
+libs/repro_build_engine/tests/test_m6_entropy_blessing.nim	nim	17
 libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim	nim	8
 libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	4
 libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	7
@@ -93,7 +94,7 @@ libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim	nim	6
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	5
 libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim	nim	3
 libs/repro_cli_support/tests/test_engine_publisher_wiring.nim	nim	5
-libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim	nim	2
+libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim	nim	3
 libs/repro_cli_support/tests/test_m10_home_gc_cli.nim	nim	7
 libs/repro_cli_support/tests/test_m2_env_ps1_migration_clean.nim	nim	8
 libs/repro_cli_support/tests/test_m69_home_add_versioned.nim	nim	5
@@ -147,6 +148,7 @@ libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim	nim	21
 libs/repro_dsl_stdlib/tests/t_nim_c_cpu_flag.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_nim_c_windows_exe_output.nim	nim	4
+libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_nim_ssl_dependency.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
@@ -363,6 +365,7 @@ libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim	nim	4
 libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emission.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	3
+libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim	nim	5
 libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6

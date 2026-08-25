@@ -486,6 +486,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/test_m6_entropy_blessing.nim",
+    binary: "build/test-bin/test_m6_entropy_blessing",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_s5_own_output_is_not_a_cache_input.nim",
     binary: "build/test-bin/test_s5_own_output_is_not_a_cache_input",
     defines: @[],
@@ -1104,6 +1112,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim",
     binary: "build/test-bin/t_ndem2_generation_log",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim",
+    binary: "build/test-bin/t_nim_entropy_blessing",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -2880,6 +2896,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_multi_package_macro.nim",
     binary: "build/test-bin/t_multi_package_macro",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim",
+    binary: "build/test-bin/t_m6_non_determinism_codec",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

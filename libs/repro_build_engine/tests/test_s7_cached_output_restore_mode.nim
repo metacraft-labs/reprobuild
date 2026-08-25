@@ -40,7 +40,7 @@ import std/[os, sequtils, strutils, tempfiles, unittest]
 import repro_build_engine
 import repro_core
 import repro_local_store
-import io_mon/[types, writer]
+import io_mon/[capabilities, types, writer]
 
 const UnitRoot =
   when defined(windows): "C:/repro-s7-unit"
@@ -69,6 +69,26 @@ proc fileWrite(path: string): MonitorRecord =
   MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
     osPid: 7777, threadId: 7777, path: path, detail: "")
 
+proc capturePreamble(): seq[MonitorRecord] =
+  ## The records EVERY real io-mon capture opens with: the backend-profile
+  ## record plus one capability-gap record per capability this backend does
+  ## not support (io-mon ``capabilities.profileRecords``).
+  ##
+  ## This fixture used to omit them, which made its RMDFs a shape io-mon
+  ## cannot produce — a capture that names no backend and declares no
+  ## capabilities. That mattered once the engine started asking the capture
+  ## what it could OBSERVE (Windows-Build-Correctness M6: an unblessed tool
+  ## may not publish a cache entry when the monitor could not have seen an
+  ## entropy read, because "no entropy records" and "no entropy hooks" are
+  ## the same silence). A fixture that answers "no backend at all" is
+  ## answering a question it was never meant to be asked.
+  ##
+  ## Built from ``defaultHooksMonitorProfile()`` rather than hand-written so
+  ## it stays the host backend's real declaration — including its real gaps
+  ## — instead of an optimistic hand-rolled one that would quietly stop
+  ## representing the shim it stands in for.
+  profileRecords(defaultHooksMonitorProfile())
+
 proc writeRmdf(path: string; records: seq[MonitorRecord]) =
   ## Copy the encoded bytes into a fresh string rather than
   ## ``cast[string](encodeCanonical(...))`` — the spelling S5's fixture uses.
@@ -90,7 +110,7 @@ proc writeRmdf(path: string; records: seq[MonitorRecord]) =
   ## it does not own, with a foreign ``cap`` and no NUL terminator, whose
   ## lifetime is then tied to a value the compiler is free to move. It is
   ## two lines to not depend on any of that.
-  let raw = encodeCanonical(records)
+  let raw = encodeCanonical(capturePreamble() & records)
   var text = newString(raw.len)
   if raw.len > 0:
     copyMem(addr text[0], unsafeAddr raw[0], raw.len)

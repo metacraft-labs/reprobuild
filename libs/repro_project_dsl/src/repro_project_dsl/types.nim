@@ -137,6 +137,17 @@ type
       ## ``@["build", "target"]``. Anonymous ``call:`` keeps the path empty.
     params*: seq[CliParamDef]
     dependencyPolicy*: BuildActionDependencyPolicy
+    nonDeterminism*: NonDeterminismPolicy
+      ## Windows-Build-Correctness M6 — the tool's entropy blessing, declared
+      ## once with ``nonDeterminism entropyBlessed, justification = "..."``
+      ## inside the ``cli:`` block and inherited by every nested ``subcmd``
+      ## exactly the way ``dependencyPolicy`` is. Defaults to
+      ## ``ndpUnblessed``.
+    nonDeterminismJustification*: string
+      ## Why the blessing above is sound. Required when the policy is
+      ## ``ndpEntropyBlessed`` (the macro rejects a bare blessing), carried
+      ## through to the engine so ``repro why`` can print the reason a
+      ## tool's randomness was ignored instead of leaving it to folklore.
     providerEntrypointId*: string
     outputFlags*: seq[string]
       ## Named-Targets M0: cumulative union of every ``outputs`` statement on
@@ -580,6 +591,17 @@ type
     cacheable*: bool
     commandStatsId*: string
     dependencyPolicy*: BuildActionDependencyPolicy
+    nonDeterminism*: NonDeterminismPolicy
+      ## Windows-Build-Correctness M6 — the entropy blessing of the TOOL this
+      ## edge invokes, stamped by the generated wrapper from the tool's CLI
+      ## spec. It is deliberately NOT a formal parameter of that wrapper: an
+      ## edge must not be able to bless a tool, and — just as important — a
+      ## hand-written alias like ``nim.c`` cannot silently DROP the blessing
+      ## the way it already replaces ``dependencyPolicy`` (see
+      ## ``compileDependencyPolicy`` in ``packages/nim.nim``).
+    nonDeterminismJustification*: string
+      ## The tool's stated reason, carried alongside the blessing so the
+      ## engine's evidence diagnostics can quote it.
     actionCachePolicy*: ActionCacheFingerprintPolicy
     targetNames*: seq[string]
       ## Named-Targets M1: implicit names recorded per build edge. One

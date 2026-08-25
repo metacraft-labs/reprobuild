@@ -29,6 +29,48 @@ type
     decIncompleteNeedsValidation
     decDiagnosticOnly
 
+  NonDeterminismPolicy* = enum
+    ## Windows-Build-Correctness M6 — what an OBSERVED entropy read by a
+    ## monitored action means for that action's cache publication.
+    ##
+    ## io-mon records `mrNonDeterministic` when a monitored process reads an
+    ## entropy source (`BCryptGenRandom` / `ProcessPrng` / `RtlGenRandom` /
+    ## `CryptGenRandom` on Windows, `getentropy` / `arc4random*` on macOS,
+    ## `getrandom` on Linux). That record is deliberately NOT a monitoring
+    ## loss — io-mon SAW the read, so nothing is missing from the capture —
+    ## and io-mon says so at the declaration of the record kind: "caller
+    ## policy decides whether that evidence invalidates the build/cache
+    ## result". This enum is that policy.
+    ##
+    ## THE BLESSING IS A PROPERTY OF THE TOOL, NOT OF THE EDGE. It is
+    ## declared once in the tool's CLI spec (`nonDeterminism entropyBlessed,
+    ## justification = "..."` inside a `package`'s `cli:` block) and the DSL
+    ## stamps it onto every action that invokes that tool. A recipe writes
+    ## `nim.c(...)` and gets the right answer without knowing that entropy
+    ## exists; correspondingly, a recipe CANNOT bless a tool it happens to
+    ## call, because the generated wrapper hard-codes the tool's declaration
+    ## rather than exposing it as an overridable parameter.
+    ndpUnblessed
+      ## The default, and the fail-closed one. Nobody has vouched for this
+      ## tool's use of randomness, so observed entropy in the action's
+      ## process tree costs the action its action-cache publication (the
+      ## action still SUCCEEDS — the result is used, it is just not
+      ## remembered). The same applies when the capture's own backend
+      ## profile says entropy could not be observed at all: "the monitor
+      ## cannot see it" is not "it did not happen".
+    ndpEntropyBlessed
+      ## The tool's author (in reprobuild's own package spec) states that
+      ## randomness this tool draws does not reach its outputs, so an
+      ## entropy observation is evidence about the tool's internals and not
+      ## about the reproducibility of its result. `nonDeterminismJustification`
+      ## carries WHY, and the DSL refuses a blessing without one.
+      ##
+      ## Note what this does NOT bless: it is scoped to entropy
+      ## (`mrNonDeterministic`). Clock reads (`mrTimeRead`) are a separate
+      ## signal precisely because almost every program reads a clock, and
+      ## nothing here weakens the file/library/ipc/external-content evidence
+      ## that decides completeness.
+
   DependencyFormatName* = distinct string
 
   ExpectedDependencyFile* = object

@@ -33,7 +33,7 @@ import std/[os, strutils, tempfiles, unittest]
 
 import repro_build_engine
 import repro_local_store
-import io_mon/[types, writer]
+import io_mon/[capabilities, types, writer]
 
 const UnitRoot =
   when defined(windows): "C:/repro-s5-unit"
@@ -66,6 +66,23 @@ proc fileRead(path: string): MonitorRecord =
 proc pathProbe(path: string): MonitorRecord =
   MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
     osPid: 4242, threadId: 4242, path: path, detail: "")
+
+proc rmdfBytes(records: varargs[MonitorRecord]): string =
+  ## Encode a capture the way io-mon really writes one: the backend-profile
+  ## record and its capability gaps first (``profileRecords``), then the
+  ## observations.
+  ##
+  ## The preamble is not decoration. The engine asks the capture what it was
+  ## able to OBSERVE before it decides whether silence means anything
+  ## (Windows-Build-Correctness M6), and a hand-built RMDF that names no
+  ## backend answers "unknown" — which is not the shape any real capture
+  ## has. Writing the preamble here keeps these cases testing the property
+  ## they are about rather than an RMDF shape io-mon cannot emit.
+  let raw = encodeCanonical(profileRecords(defaultHooksMonitorProfile()) &
+    @records)
+  result = newString(raw.len)
+  if raw.len > 0:
+    copyMem(addr result[0], unsafeAddr raw[0], raw.len)
 
 suite "S5 an action's own declared output is not one of its inputs":
 
@@ -167,8 +184,7 @@ suite "S5 an action's own declared output is not one of its inputs":
     writeFile(workRoot / "state" / "db.idx", "prior state\n")
 
     let rmdfPath = tempRoot / "tool.rdep"
-    writeFile(rmdfPath, cast[string](encodeCanonical(
-      @[fileRead(workRoot / "state" / "db.idx")])))
+    writeFile(rmdfPath, rmdfBytes(fileRead(workRoot / "state" / "db.idx")))
 
     var act = builtinAction(bakWriteText, "incremental",
       cwd = workRoot,
@@ -224,11 +240,11 @@ suite "S5 an action's own declared output is not one of its inputs":
     writeFile(neighbourPath, "neighbour\n")
 
     let rmdfPath = tempRoot / "copy.rdep"
-    writeFile(rmdfPath, cast[string](encodeCanonical(@[
+    writeFile(rmdfPath, rmdfBytes(
       fileRead(sourcePath),
       fileRead(neighbourPath),
       fileRead(outputPath),
-      pathProbe(outputPath)])))
+      pathProbe(outputPath)))
 
     var act = builtinAction(bakCopyFile, "produce",
       cwd = workRoot,
@@ -286,11 +302,11 @@ suite "S5 an action's own declared output is not one of its inputs":
     writeFile(neighbourPath, "neighbour\n")
 
     let rmdfPath = tempRoot / "copy.rdep"
-    writeFile(rmdfPath, cast[string](encodeCanonical(@[
+    writeFile(rmdfPath, rmdfBytes(
       fileRead(sourcePath),
       fileRead(neighbourPath),
       fileRead(outputPath),
-      pathProbe(outputPath)])))
+      pathProbe(outputPath)))
 
     var act = builtinAction(bakCopyFile, "produce",
       cwd = workRoot,
