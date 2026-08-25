@@ -1303,6 +1303,26 @@
             SHM_LEASE_SRC = "${runquota-src.inputs.nim-shm-lease}/src";
             SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
+            # Same contract as SQLITE_PREFIX/XXHASH_PREFIX above, and the same
+            # value the installed wrapper already `--set-default`s: it is how
+            # `reproLibPathFlags` (libs/repro_interface_artifacts) finds the
+            # clingo lib dir for the `-L` + `-Wl,-rpath` it puts on the
+            # interface-extract / provider compile.
+            #
+            # It was the ONLY one of that family missing from this shell, and
+            # LD_LIBRARY_PATH above does not stand in for it: on darwin dyld
+            # ignores LD_LIBRARY_PATH entirely, and `repro_solver` names its
+            # dynlib `@rpath/libclingo.dylib` precisely so LC_RPATH is what
+            # resolves the module-init dlopen. Without the rpath the extract
+            # runner reprobuild compiles for a project aborts before `main`
+            # with `could not load: @rpath/libclingo.dylib`, failing every
+            # build that extracts an interface — `t_ext_repro_action_rows`
+            # (M17) and `t_stats_reads_shared_store` (M18) among them, which
+            # left two milestone gates unrunnable in the sanctioned shell.
+            # The store-wide `*-clingo-*` scan in `nixPrefix` is a last-resort
+            # fallback for hosts with no prefix at all; it is not a substitute
+            # for naming the clingo this shell actually provides.
+            CLINGO_PREFIX = pkgs.clingo;
             packages = [
               runquotaTools
               # ``ct-test`` — CodeTracer's cross-language test driver. On PATH
