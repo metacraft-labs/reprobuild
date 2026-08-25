@@ -1032,6 +1032,7 @@ tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim	nim	1
 tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim	nim	1
 tests/integration/t_locking_explain_reports_resolved_tier_backend_and_layer.nim	nim	1
 tests/integration/t_long_operations_announce_plan_and_emit_live_progress.nim	nim	1
+tests/integration/t_m20_second_runner_generic_layer.nim	nim	3
 tests/integration/t_m9r21_4_hardware_e2e.nim	nim	3
 tests/integration/t_m9r22b_2_apply_loopback.nim	nim	5
 tests/integration/t_macho_runtime_audit.nim	nim	15

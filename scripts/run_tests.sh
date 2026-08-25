@@ -200,6 +200,44 @@ if [[ -d "../reprobuild-cmake" ]]; then
   bash scripts/build_reprobuild_cmake_prereq.sh "${exe_ext}"
 fi
 
+# RunQuota-Observation-Store M20: the SECOND test runner
+# (`tools/tap-test-runner`, built on the `reprobuild-test-adapters` contract).
+# `tests/integration/t_m20_second_runner_generic_layer.nim` spawns it, so it is
+# an INPUT to that test rather than an output of compiling it — a run that
+# rebuilt only the test would drive whatever binary happened to be on disk, and
+# the test raises rather than skipping when it is absent.
+#
+# Rebuilt when missing OR older than any of its sources, for the reason the
+# M3 fallback runner below carries the same rule: nothing else in the tree
+# builds it (it is not a `repro.nim` target and not in apps/entrypoints.txt),
+# so an existence-only check would let a stale binary survive every edit to
+# the runner or to the adapter package it links.
+tap_runner_bin="build/bin/repro_tap_test_runner${exe_ext}"
+tap_runner_stale=0
+if [[ ! -x "${tap_runner_bin}" ]]; then
+  tap_runner_stale=1
+else
+  while IFS= read -r tap_src; do
+    if [[ "${tap_src}" -nt "${tap_runner_bin}" ]]; then
+      tap_runner_stale=1
+      break
+    fi
+  done < <(
+    find tools/tap-test-runner libs/repro_generic_test_recorder \
+      ../reprobuild-test-adapters/src -name '*.nim' 2>/dev/null
+  )
+fi
+if [[ "${tap_runner_stale}" -eq 1 ]]; then
+  printf 'Building M20 second runner: %s\n' "${tap_runner_bin}" >&2
+  nim c \
+    --threads:on \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/repro_tap_test_runner \
+    --out:"${tap_runner_bin}" \
+    tools/tap-test-runner/repro_tap_test_runner.nim
+fi
+
 # Step 3: build the apps, helpers, fixtures, and test binaries through
 # the engine. Cap parallelism for memory-constrained CI runners.
 if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
