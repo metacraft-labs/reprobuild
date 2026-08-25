@@ -40,7 +40,45 @@ proc normalizedPath*(path: string): NormalizedPath =
 proc `$`*(path: NormalizedPath): string =
   path.value
 
-from std/os import absolutePath, normalizedPath
+from std/os import absolutePath, normalizedPath, getTempDir, `/`
+
+proc runquotaEndpointPath*(name: string): string =
+  ## Where a locally spawned ``runquotad`` listens — and the ONE place
+  ## that derivation lives, because it used to live in twenty-three.
+  ##
+  ## THE SOCKET GETS A DIRECTORY OF ITS OWN. It is never a bare path
+  ## dropped into the shared temp directory, and that is not tidiness.
+  ## The socket's PARENT DIRECTORY is the rendezvous point: `runquotad`
+  ## verifies it before it will bind, and every client verifies it again
+  ## before it will connect — owned by this user, correct mode, and never
+  ## group- or world-writable. A shared ``/tmp`` is root-owned ``1777``
+  ## and fails both halves, so a socket placed straight into it is
+  ## refused with `refusing a path owned by uid 0 with mode 1777` and the
+  ## daemon exits before it ever prints its listening line.
+  ##
+  ## THE REFUSAL IS RIGHT, and is why this is a path change rather than a
+  ## flag that turns the check off: a rendezvous point any local user can
+  ## write is a rendezvous point any local user can REPLACE, and what
+  ## this daemon hands out is the machine's whole build budget. A caller
+  ## that binds in a world-writable directory is offering every local
+  ## account the chance to answer for it.
+  ##
+  ## A directory that is not there yet, `runquotad` CREATES, with exactly
+  ## the mode it requires; it only refuses one it found already made. So
+  ## the per-caller directory below needs no privileged provisioning step
+  ## — and it also keeps the daemon's published stats table, which lands
+  ## BESIDE the socket, out of a shared directory where concurrent builds
+  ## would collide on one file.
+  ##
+  ## ``name`` must already be unique to the caller — a PID, normally.
+  ##
+  ## Windows has neither directory nor mode here: named pipes live in the
+  ## kernel object namespace and carry their own ACL, so the name is used
+  ## as a pipe name directly and nothing above applies.
+  when defined(windows):
+    "\\\\.\\pipe\\runquotad-" & name.replace('\\', '_').replace('/', '_')
+  else:
+    getTempDir() / name / "runquota.sock"
 
 proc extendedPath*(path: string): string =
   ## On Windows, rewrites a path into the `\\?\` extended-length form so
