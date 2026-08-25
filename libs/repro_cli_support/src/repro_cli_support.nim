@@ -39512,6 +39512,127 @@ proc decideEvidenceReadTierPolicy*(outcome: UnreadableRepoGateOutcome;
     return ergdWarnAllow
   ergdRefuse
 
+type
+  LockPinFinding = object
+    ## One lock record that PINS a commit an outgoing history rewrite would
+    ## make unreachable. Empty ``orphanOid`` means no such record exists.
+    orphanOid*: string
+    lockedPath*: string     ## the repo path the record pins at ``orphanOid``
+    lockRelPath*: string    ## store-relative path of the offending record
+    lockRoot*: string       ## on-disk root that record was found under
+    lockTriggerSha*: string ## the commit the record is KEYED at
+
+proc looksLikeCommitOid(value: string): bool =
+  ## A manifest ``revision`` may name either a branch or an exact commit. Only
+  ## the branch spelling can be compared against a pushed ref name.
+  if value.len notin {40, 64}: return false
+  for ch in value:
+    if ch notin {'0'..'9', 'a'..'f', 'A'..'F'}: return false
+  true
+
+proc declaredMainlineBranch(resolved: ResolvedProject;
+    repoName: string): string =
+  ## The branch the MANIFEST declares this repo's mainline to be: the repo
+  ## fragment's ``branch``, else its ``revision`` when that names a branch
+  ## rather than a pin, else the project's ``trunk``. Returns "" when the
+  ## manifest declares nothing — the caller must not infer one, because a
+  ## blanket refusal justified by an inference is exactly the shape that
+  ## teaches operators to reach for ``--no-verify``.
+  if repoName.len == 0: return ""
+  for repo in resolved.repos:
+    if repo.name != repoName: continue
+    if repo.branch.len > 0: return repo.branch
+    if repo.revision.len > 0 and not looksLikeCommitOid(repo.revision):
+      return repo.revision
+    break
+  resolved.trunk
+
+proc lockRecordTriggerSha(relPath: string): string =
+  ## The commit a lock record is KEYED at — its filename stem. Handles both
+  ## the canonical per-repo shape ``locks/<project>/<repo>/<sha>.toml`` and the
+  ## monolithic ``locks/<project>/<sha>.toml`` one, because the exclusion below
+  ## must hold for either.
+  let parsed = parseLockRecordRelPath(relPath)
+  if parsed.ok:
+    return parsed.sha.toLowerAscii()
+  let parts = relPath.replace('\\', '/').split('/')
+  if parts.len < 2 or not parts[^1].endsWith(".toml"): return ""
+  let stem = parts[^1][0 ..< parts[^1].len - ".toml".len]
+  var decoded: string
+  if tryDecodeLockPathSegment(stem, decoded) and decoded.len > 0:
+    return decoded.toLowerAscii()
+  stem.toLowerAscii()
+
+proc workspaceLockRoots(workspaceRoot: string;
+    layerLocations: openArray[ManifestLayerLocation]): seq[string] =
+  ## Every on-disk root that can own a ``locks/`` subtree for this workspace.
+  ##
+  ## This deliberately mirrors every arm of ``pickManifestLayerRoot`` rather
+  ## than calling it: that proc answers "where does THIS operation write", and
+  ## a rewrite must be checked against every record the workspace can still
+  ## READ. The arms are the native ``.repro/manifests`` git-checkout store, the
+  ## composer's materialised ``.repro/manifests-<i>-<slug>`` layers, an
+  ## explicitly declared ``[[manifest]]`` layer, the membership root, and the
+  ## workspace root itself. Roots with no ``locks/`` subtree cost nothing.
+  var candidates = @[
+    workspaceRoot / ".repro" / "manifests",
+    manifestsRoot(workspaceRoot),
+    workspaceRoot]
+  for loc in layerLocations:
+    candidates.add(loc.absPath)
+  let reproDirPath = workspaceRoot / ".repro"
+  if dirExists(reproDirPath):
+    for kind, path in walkDir(reproDirPath):
+      if kind in {pcDir, pcLinkToDir} and
+          extractFilename(path).startsWith("manifests-"):
+        candidates.add(path)
+  var seen = initHashSet[string]()
+  for candidate in candidates:
+    if candidate.len == 0: continue
+    let key =
+      try: os.normalizedPath(absolutePath(candidate))
+      except CatchableError: candidate
+    if key in seen: continue
+    seen.incl(key)
+    if dirExists(candidate / "locks"):
+      result.add(candidate)
+
+proc findLockPinningOrphan(identity: GitToolIdentity;
+    lockRoots: openArray[string];
+    orphans: HashSet[string]): LockPinFinding =
+  ## Search every workspace lock record for one that PINS a commit the
+  ## outgoing rewrite would make unreachable.
+  ##
+  ## Records whose OWN trigger commit is in the orphan set are EXCLUDED, and
+  ## that exclusion is the whole reason this is not a restatement of the
+  ## fast-forward rule it replaces. The gate writes a lock keyed at the commit
+  ## it is publishing and pinning that same commit, so after any successful
+  ## push the branch tip is pinned by its own record. Counting that record
+  ## would refuse every rebase-and-force-push in a locked workspace — exactly
+  ## the case this change exists to permit — while protecting nothing: a
+  ## snapshot ANCHORED at a commit that no longer exists cannot be asked for.
+  ##
+  ## What must be protected is a record anchored at a SURVIVING commit (a
+  ## sibling repo's, or an earlier one of this repo's) that pins an orphaned
+  ## commit: that snapshot is still reachable and reproducing it still needs
+  ## the commit this push would delete.
+  if orphans.len == 0: return
+  for root in lockRoots:
+    for cand in orderedLockCandidates(identity, root, "locks/"):
+      let trigger = lockRecordTriggerSha(cand.relPath)
+      if trigger.len > 0 and trigger in orphans:
+        continue
+      let lockPath = root / cand.relPath.replace('/', DirSep)
+      let body =
+        try: readFile(extendedPath(lockPath))
+        except CatchableError: ""
+      if body.len == 0: continue
+      for path, rev in shasFromBody(body):
+        let oid = rev.strip().toLowerAscii()
+        if oid in orphans:
+          return LockPinFinding(orphanOid: oid, lockedPath: path,
+            lockRelPath: cand.relPath, lockRoot: root, lockTriggerSha: trigger)
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
@@ -39953,9 +40074,18 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       # computes exactly that diagnostic and then discards it, leaving
       # `protocolOk` true so nothing else surfaces it either.
       #
-      # This changes no policy: the refusal still stands and a force update is
-      # still declined. It stops the operator being handed an impossible
-      # instruction and names the actual reason instead.
+      # This changes no policy: the refusal still stands. It stops the
+      # operator being handed an impossible instruction and names the actual
+      # reason instead.
+      #
+      # The non-fast-forward case the paragraph above cites is no longer one
+      # of the reasons that reach here — a rewrite now RECEIVES the
+      # provisional classification (it does publish this HEAD) and is judged
+      # by stage 2b instead, which never claims the repo is unpublished. The
+      # remaining reasons are the eligibility ones: a batch, a tag/note-only
+      # update, a deletion, a different SHA, a detached or non-branch local
+      # ref, and the wrong remote. For those, "unpublished" IS the accurate
+      # verdict and this remedy is the accurate wording of it.
       let selfPush =
         obs.name == currentRepoName and obs.headSha.len > 0 and
         obs.headSha == outgoing.headOid and not outgoing.outgoingCurrent
@@ -39979,6 +40109,109 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         property: "unpublished",
         remediation: remediation,
         evidence: evidence))
+      result.exitCode = 2
+      return
+
+  # ---- 2b. outgoing history rewrite --------------------------------------
+  # A push that names one ref, whose local object is the independently
+  # observed HEAD, and whose destination is the manifest-agreed remote branch
+  # PUBLISHES that HEAD — fast-forward or not. ``evaluateOutgoingCurrent``
+  # used to refuse a non-fast-forward there, which fused two different
+  # questions and answered the wrong one: rebasing a feature branch onto a
+  # moved mainline and force-pushing it was reported as `unpublished` with the
+  # remedy "run 'git push'" — the very push being refused. The only way
+  # through was ``--no-verify``, which disables the entire gate, so a rule
+  # meant to protect the workspace taught the bypass on a legitimate case.
+  #
+  # The concern the fast-forward rule really carried is separate and is
+  # decided HERE: workspace locks pin commit SHAs, and a rewrite that makes a
+  # pinned commit unreachable silently breaks reproduction of the snapshot
+  # that pins it. That is a claim about WHAT the overwritten commits are, not
+  # about fast-forwardness, so it is asked only of the commits actually being
+  # discarded, and only when something still depends on them.
+  #
+  # Refusals here never say the repository is unpublished — it is being
+  # published by this very push — and each names what would be lost.
+  if outgoing.outgoingCurrent and
+      outgoing.updateShape in {ouRewrite, ouRewriteOpaque}:
+    let pushedBranch =
+      if outgoing.remoteRef.startsWith("refs/heads/"):
+        outgoing.remoteRef["refs/heads/".len .. ^1]
+      else: outgoing.remoteRef
+    let repoLabel =
+      if currentRepoPath.len > 0: currentRepoPath else: parsed.currentRepo
+    let remoteLabel =
+      if outgoing.remoteName.len > 0: outgoing.remoteName else: "the remote"
+    if outgoing.updateShape == ouRewriteOpaque:
+      # The old tip is not a commit in this checkout, so what the update
+      # discards cannot be enumerated. "Nothing is discarded" and "what is
+      # discarded cannot be seen" are different answers and only the first is
+      # safe to act on, so refuse — but say which one this is.
+      result.failures.add(CheckFailure(
+        repo: repoLabel,
+        property: "history-rewrite-unverifiable",
+        remediation: "run 'git -C " & parsed.currentRepo & " fetch " &
+          remoteLabel & " " & pushedBranch & "' so the commits this update " &
+          "would replace are present locally, then retry the push — HEAD " &
+          outgoing.headOid & " is publishable; this is refused only because " &
+          "the gate cannot see what the update would discard",
+        evidence: "'" & remoteLabel & "/" & pushedBranch & "' is at " &
+          outgoing.remoteOldOid & ", which is not a commit object in this " &
+          "checkout, so the commits this non-fast-forward update would make " &
+          "unreachable cannot be enumerated"))
+      result.exitCode = 2
+      return
+    let orphanedCommits = commitsMadeUnreachable(identity.binaryPath,
+      parsed.currentRepo, outgoing.remoteOldOid, outgoing.headOid)
+    var orphans = initHashSet[string]()
+    orphans.incl(outgoing.remoteOldOid.toLowerAscii())
+    for oid in orphanedCommits:
+      orphans.incl(oid)
+    # A declared MAINLINE is refused regardless of what is pinned. The
+    # asymmetry is the justification: feature branches are rebased constantly
+    # and a rewrite there costs nothing, whereas mainline is what every other
+    # checkout tracks, so rewriting it invalidates teammates' working state —
+    # which no lock records and the check below therefore cannot see. The rule
+    # fires only on a branch the MANIFEST declares, never on an inferred one,
+    # so its false-refusal rate is the rate at which mainline is deliberately
+    # rewritten: near zero, which is what keeps a blanket rule from becoming
+    # a bypass lesson.
+    let mainline = declaredMainlineBranch(resolved, currentRepoName)
+    if mainline.len > 0 and pushedBranch == mainline:
+      result.failures.add(CheckFailure(
+        repo: repoLabel,
+        property: "mainline-history-rewrite",
+        remediation: "do not rewrite the shared mainline '" & pushedBranch &
+          "' — put this work on top of " & outgoing.remoteOldOid &
+          " (rebase onto it, or revert), or push this history to a " &
+          "different branch. HEAD " & outgoing.headOid & " is publishable; " &
+          "only discarding '" & pushedBranch & "' history is refused",
+        evidence: "'" & pushedBranch & "' is the mainline branch the " &
+          "manifest declares for " & currentRepoName &
+          ", and this update is not a fast-forward: it would make " &
+          $orphans.len & " commit(s) unreachable there, including " &
+          outgoing.remoteOldOid))
+      result.exitCode = 2
+      return
+    let pinned = findLockPinningOrphan(identity,
+      workspaceLockRoots(parsed.workspaceRoot, layerLocations), orphans)
+    if pinned.orphanOid.len > 0:
+      result.failures.add(CheckFailure(
+        repo: repoLabel,
+        property: "orphans-locked-commit",
+        remediation: "push this history to a different branch, or keep " &
+          pinned.orphanOid & " reachable from '" & pushedBranch &
+          "' — discarding it makes that lock record unresolvable, and " &
+          "re-pinning it is a coordinated change to shared lock history " &
+          "that this push must not make implicitly. HEAD " & outgoing.headOid &
+          " is publishable; only discarding " & pinned.orphanOid &
+          " is refused",
+        evidence: "lock record " & pinned.lockRelPath & " (keyed at " &
+          pinned.lockTriggerSha & ", which this push does NOT discard) pins " &
+          pinned.lockedPath & " at " & pinned.orphanOid &
+          ", and this non-fast-forward update to '" & pushedBranch &
+          "' would make that commit unreachable",
+        source: pinned.lockRoot / pinned.lockRelPath.replace('/', DirSep)))
       result.exitCode = 2
       return
 
