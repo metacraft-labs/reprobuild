@@ -1,30 +1,38 @@
-## Every ``-d:ssl`` edge needs OpenSSL's ``-L``, not just the ones that were
-## looked at.
+## Every ``-d:ssl`` edge gets OpenSSL's ``-L``, and none of them gets it from
+## the recipe.
 ##
 ## ``nim.c`` appends ``-lssl -lcrypto`` to any edge whose ``defines`` include
-## ``ssl`` (``opensslPassLForSsl``). It does NOT supply a search path for
-## them. On Linux and macOS the ``nixPackage`` entry behind ``uses:
-## "openssl"`` does; on Windows that entry resolves to whichever
-## ``openssl.exe`` is on PATH -- typically Git-for-Windows', which ships no
-## development libraries at all -- so the link dies on ``ld.exe: cannot find
-## -lssl``. ``repro.nim``'s ``windowsOpensslPassL()`` closes that by probing
-## MSYS2's mingw64 lib directory and contributing a ``-L``.
+## ``ssl``. On Linux and macOS the ``nixPackage`` arm behind ``uses:
+## "openssl"`` supplies a search path for them; on Windows the package
+## declared nothing at all, so the link died on ``ld.exe: cannot find -lssl``.
 ##
-## The failure mode this file exists for is not "the fix is wrong". It is
-## "the fix reached some edges". ``opensslPassL`` was originally threaded into
-## exactly two edges, both in ``.#test-helpers`` -- which happened to be the
-## collection the work was validated against. The three ``.#apps`` edges that
-## also set ``-d:ssl``, including the one that builds ``repro`` itself, were
-## left with ``-lssl -lcrypto`` and nowhere to find them, so ``.#apps`` could
-## not link on Windows at all.
+## The failure mode this file was written for is not "the fix is wrong". It is
+## "the fix reached some edges". The original fix lived in ``repro.nim`` as
+## ``windowsOpensslPassL()`` and was threaded onto the ``passL`` of exactly two
+## edges, both in ``.#test-helpers`` — which happened to be the collection the
+## work was validated against. The three ``.#apps`` edges that also set
+## ``-d:ssl``, including the one that builds ``repro`` itself, were left with
+## ``-lssl -lcrypto`` and nowhere to find them, so ``.#apps`` could not link on
+## Windows at all. Note the shape of that: the three ``.#apps`` edges agreed
+## with each other perfectly. They just disagreed with ``.#test-helpers``.
 ##
-## Partial coverage is therefore the thing to assert against, and both tests
-## below are written to catch it rather than to catch a wholly missing fix:
-## the static one demands the flag at EVERY ssl edge the recipe declares, and
-## the dynamic one demands that the edges agree with each other about the
-## search path they receive. Under the original bug the two test-helper edges
-## carried a ``-L`` and the three apps edges did not, which is precisely a
-## disagreement.
+## M8 moved the derivation into ``nim.c`` itself, off the openssl package's
+## declared Windows layout (``repro_dsl_stdlib/openssl_layout``). That changes
+## what the STATIC test can usefully ask. "Does every ssl edge thread the
+## helper?" is now the wrong question — there is no helper to thread, and a
+## test still demanding one would pass only while someone kept re-adding the
+## thing the milestone removed. The question that survives the change is the
+## one the bug was really about: *can an ssl edge in this recipe express a
+## search path of its own at all?* If the answer is no, partial coverage is
+## unreachable by construction rather than by vigilance.
+##
+## So the static test now asserts the ABSENCE of a per-edge OpenSSL path, and
+## the engine test keeps asking the lowered graph — with the assertion
+## strengthened from "the edges agree" to "the edges agree AND, where the host
+## can supply one, the directory they were given really holds the import
+## libraries". Agreement alone was all the old mechanism could promise, since
+## it could legitimately contribute nothing; a derivation that reports a
+## directory can be held to the stronger claim.
 
 import std/[json, os, osproc, strtabs, strutils, tables, unittest]
 
@@ -150,9 +158,32 @@ proc passLValues(action: JsonNode): seq[string] =
     if value.startsWith("--passL:"):
       result.add(value[len("--passL:") .. ^1])
 
+proc holdsImportLibraries(dir: string): bool =
+  ## Whether ``dir`` really carries an import library for both stems `nim.c`
+  ## emits. Same acceptance rule as the package's own, restated here rather
+  ## than imported so this test still fails if the package's rule is loosened
+  ## to accept a directory the linker cannot use.
+  if dir.len == 0 or not dirExists(dir):
+    return false
+  for stem in ["ssl", "crypto"]:
+    var found = false
+    for name in ["lib" & stem & ".dll.a", stem & ".dll.a", "lib" & stem & ".a",
+                 "lib" & stem & ".lib", stem & ".lib"]:
+      if fileExists(dir / name):
+        found = true
+        break
+    if not found:
+      return false
+  true
+
 suite "every ssl edge receives OpenSSL's link path":
 
-  test "static: every -d:ssl edge in repro.nim threads opensslPassL":
+  test "static: no -d:ssl edge in repro.nim carries a search path of its own":
+    # M8 inverted this assertion deliberately. It used to demand that every
+    # ssl edge thread ``opensslPassL``; the search path now comes from the
+    # openssl package via ``nim.c``, so an edge that names one is a recipe
+    # taking back a decision the producer owns — and the moment one edge can,
+    # the others can be forgotten, which is the whole bug.
     let repoRoot = findRepoRoot()
     let text = projectText(repoRoot)
     let edges = sslEdgesOf(text)
@@ -172,18 +203,30 @@ suite "every ssl edge receives OpenSSL's link path":
       $countOccurrences(text, "\"ssl\""))
     check edges.len == countOccurrences(text, "\"ssl\"")
 
-    var uncovered: seq[string] = @[]
+    var selfSupplied: seq[string] = @[]
     for edge in edges:
       if edge.actionId.len == 0:
-        uncovered.add("<unparsed edge at line " & $edge.startLine & ">")
-      elif "opensslPassL" notin edge.passLLine:
-        uncovered.add(edge.actionId & " (passL: " &
-          (if edge.passLLine.len == 0: "<absent>" else: edge.passLLine) & ")")
-    if uncovered.len > 0:
-      checkpoint("ssl edges without opensslPassL: " & uncovered.join(", "))
-    check uncovered.len == 0
+        selfSupplied.add("<unparsed edge at line " & $edge.startLine & ">")
+        continue
+      let line = edge.passLLine
+      if "openssl" in line.toLowerAscii or "-L" in line or "lssl" in line or
+          "lcrypto" in line:
+        selfSupplied.add(edge.actionId & " (passL: " & line & ")")
+    if selfSupplied.len > 0:
+      checkpoint("ssl edges naming an OpenSSL path themselves: " &
+        selfSupplied.join(", "))
+    check selfSupplied.len == 0
 
-  test "engine: every ssl edge is handed the same OpenSSL search path":
+    # The recipe is still allowed to OFFER a prefix — it provisions MSYS2's
+    # OpenSSL into a dev-deps tree only it knows about — but that is a prefix
+    # handed to the package, not a flag handed to an edge. Exactly one such
+    # offer, so the "which edges did it reach?" question cannot come back.
+    checkpoint("registerOpensslPrefixCandidate occurrences: " &
+      $countOccurrences(text, "registerOpensslPrefixCandidate("))
+    check countOccurrences(text, "registerOpensslPrefixCandidate(") == 1
+    check "proc windowsOpensslPassL" notin text
+
+  test "engine: every ssl edge is handed the same usable OpenSSL search path":
     # The static test reads the recipe; this one reads the argv the engine
     # will actually run. The edges to look for still come out of the recipe
     # scan, so a newly added ssl edge is covered without touching this file --
@@ -194,14 +237,12 @@ suite "every ssl edge receives OpenSSL's link path":
     # invocation pays for compiling the project provider, and on Windows that
     # currently dominates everything else this test does.
     #
-    # The assertion is AGREEMENT rather than "a -L is present", and that is
-    # deliberate: `windowsOpensslPassL()` legitimately contributes nothing on
-    # a host without MSYS2's OpenSSL, and nothing at all off Windows. What is
-    # never legitimate is some ssl edges getting the path and others not,
-    # which is exactly the state this fix found the tree in -- and note that
-    # BOTH collections have to be in one comparison for that to be caught:
-    # before the fix, the three `.#apps` edges agreed with each other
-    # perfectly. They just disagreed with `.#test-helpers`.
+    # AGREEMENT is asserted unconditionally; USABILITY is asserted whenever a
+    # path was supplied at all. A host with no OpenSSL development libraries
+    # anywhere legitimately gets nothing (and fails the link with a clear
+    # `cannot find -lssl`), but a host that gets a directory must get one the
+    # linker can actually resolve `-lssl` in -- a `-L` that resolves nothing
+    # is worse than none, because it looks like the channel was supplied.
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
     check fileExists(reproBin)
@@ -290,3 +331,21 @@ suite "every ssl edge receives OpenSSL's link path":
         checkpoint("ssl edges disagreeing about the OpenSSL search path: " &
           disagreeing.join("; "))
       check disagreeing.len == 0
+
+      # M8: what was handed over has to be usable. Before M8 this could only
+      # ever have been "they agree", because the value came from a probe that
+      # was allowed to produce nothing on a host that nonetheless had OpenSSL.
+      var unusable: seq[string] = @[]
+      for id, paths in searchPathOf:
+        if paths.len == 0:
+          continue
+        for entry in paths.split("\x1f"):
+          if not entry.startsWith("-L"):
+            continue
+          let dir = entry[2 .. ^1]
+          if not holdsImportLibraries(dir):
+            unusable.add(id & " -> " & dir)
+      if unusable.len > 0:
+        checkpoint("ssl edges handed a -L with no OpenSSL import library " &
+          "in it: " & unusable.join("; "))
+      check unusable.len == 0

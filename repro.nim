@@ -54,6 +54,12 @@ import repro_dsl_stdlib/types
               # side-by-side Windows monitor artefact names live in one module
               # so the recipe and the regression test spell them once.
 import repro_dsl_stdlib/monitor_shim_artifacts
+              # M8: the openssl package's own library-channel vocabulary. This
+              # recipe offers ONE prefix to it (the MSYS2 install in this
+              # repo's Windows dev-deps tree) and takes no part in deciding
+              # the linker flags — see the ``registerOpensslPrefixCandidate``
+              # call in the ``build:`` block below.
+import repro_dsl_stdlib/openssl_layout
 
 proc sanitizeStaticExec(val: string): string =
   var cleanLines: seq[string] = @[]
@@ -526,10 +532,12 @@ package reprobuild:
 
       # OpenSSL's import libraries live in the same MSYS2 mingw64 lib dir
       # (`pacman -S mingw-w64-x86_64-openssl`). Adding it here serves tools
-      # invoked BY HAND from the activated shell; graph-built binaries get
-      # `-L` on their argv instead (see `windowsOpensslPassL` below), because
-      # the engine composes each action's environment rather than inheriting
-      # the shell's, so LIBRARY_PATH would never reach them.
+      # invoked BY HAND from the activated shell and NOTHING ELSE; graph-built
+      # binaries get `-L` on their argv, derived by `nim.c` from the openssl
+      # package's declared layout (M8). LIBRARY_PATH could not serve them
+      # anyway: the engine composes each action's environment rather than
+      # inheriting the shell's, which is the point of the "not ambient"
+      # requirement.
       let msys2OpenSsl = msys2Root / "mingw64" / "lib"
       if fileExists(msys2OpenSsl / "libssl.dll.a") or
           fileExists(msys2OpenSsl / "libssl.a"):
@@ -788,49 +796,37 @@ package reprobuild:
       else:
         @[]
 
-    proc windowsOpensslPassL(): seq[string] =
-      ## ``-L`` for OpenSSL's import libraries on Windows.
-      ##
-      ## ``uses: "openssl"`` above states the intent: graph-built binaries
-      ## should receive OpenSSL's library channels "instead of depending on
-      ## ambient NIX_LDFLAGS". On Linux and macOS the ``nixPackage`` entry in
-      ## ``packages/openssl.nim`` delivers exactly that. On Windows it
-      ## delivered nothing, because that package declares ONLY a nixPackage:
-      ## path-mode resolution finds whichever ``openssl.exe`` is on PATH --
-      ## typically Git-for-Windows', which ships the executable and no
-      ## development libraries at all.
-      ##
-      ## Meanwhile ``nim.c`` appends ``-lssl -lcrypto`` whenever ``-d:ssl`` is
-      ## set (``opensslPassLForSsl``), with no ``-L`` to go with them. So both
-      ## SSL-linking edges failed with ``ld.exe: cannot find -lssl`` even in a
-      ## fully activated environment -- a declared dependency that reached
-      ## neither the flags nor the paths.
-      ##
-      ## The flags go on the ARGV rather than into LIBRARY_PATH/CPATH. gcc
-      ## does honour those (verified: the same link succeeds with them set),
-      ## but the engine composes each action's environment deliberately
-      ## instead of inheriting the launching shell's -- which is the whole
-      ## point of the "not ambient NIX_LDFLAGS" requirement. An env-var fix
-      ## would re-introduce the dependency the declaration exists to remove,
-      ## and would leave the action's inputs under-described.
-      ##
-      ## MSYS2's mingw64 is where a Windows host actually has these
-      ## (``pacman -S mingw-w64-x86_64-openssl``). Probing for the import
-      ## library rather than assuming the directory means a host without the
-      ## package contributes nothing, and the link fails with the same clear
-      ## "cannot find -lssl" rather than a bogus ``-L`` that resolves nothing.
-      when defined(windows):
-        let libDir = windowsDiyInstallRoot() / "msys2" / "msys64" /
-          "mingw64" / "lib"
-        if fileExists(libDir / "libssl.dll.a") or
-            fileExists(libDir / "libssl.a"):
-          @["-L" & libDir]
-        else:
-          @[]
-      else:
-        @[]
-
-    let opensslPassL = windowsOpensslPassL()
+    # M8 — OpenSSL's search path is the PRODUCER's to supply.
+    #
+    # This used to be ``windowsOpensslPassL()``: a proc right here that
+    # computed ``-L<diyRoot>/msys2/msys64/mingw64/lib`` and threaded it onto
+    # the ``passL`` of every ``-d:ssl`` edge. That worked and was still wrong
+    # twice over. The directory was a literal rather than a layout, and it was
+    # the CONSUMER supplying a path the package should have declared — so
+    # ``uses: "openssl"``'s promise ("graph-built binaries receive OpenSSL's
+    # library channels") stayed false on Windows no matter how many recipes
+    # patched around it.
+    #
+    # ``packages/openssl.nim`` now declares a pinned, hashed Windows arm and
+    # ``repro_dsl_stdlib/openssl_layout`` names the prefix shapes it can have,
+    # so ``nim.c`` derives ``-L`` itself from whichever OpenSSL the engine's
+    # own resolver binds. The ``passL =`` lists below carry no OpenSSL entry at
+    # all any more; there is nothing left for an edge to forget to thread, and
+    # a new ``-d:ssl`` edge is covered the moment it is written.
+    #
+    # What is left here is a PREFIX, not a flag. This repository provisions
+    # MSYS2's ``mingw-w64-x86_64-openssl`` into its Windows dev-deps tree
+    # (``windows/`` + ``repro home apply``) — a location only this recipe
+    # knows — and Git-for-Windows' library-free ``openssl.exe`` is on nearly
+    # every Windows host's PATH ahead of it. Offering the prefix keeps that
+    # host working without giving the consumer a say in the flags: the package
+    # decides whether the prefix satisfies its declared layout, which
+    # directory to name, and that PATH resolution is consulted first (see
+    # ``windowsOpensslLinkSearchDir``'s stated precedence). A prefix with no
+    # OpenSSL in it contributes nothing.
+    when defined(windows):
+      registerOpensslPrefixCandidate(
+        windowsDiyInstallRoot() / "msys2" / "msys64" / "mingw64")
 
     let reproRuntimePassL = nixRuntimePassLForLibraries(@[
       "libclingo.so", "libclingo.dylib"])
@@ -1089,13 +1085,14 @@ package reprobuild:
       binary = "build/bin/repro",
       defines = @["release", "reproVendoredHash", "ssl"],
       paths = ioMonNimPaths & sourceOnlyNimPaths,
-      # ``-d:ssl`` makes ``nim.c`` append ``-lssl -lcrypto``; without the
-      # matching ``-L`` this link dies on ``ld.exe: cannot find -lssl``.
-      # ``windowsOpensslPassL`` is what supplies it, and it has to reach
-      # EVERY ssl edge -- it originally reached only the two ``test-helpers``
-      # ones, so ``.#apps`` (the collection that builds ``repro`` itself)
-      # could not link on Windows at all.
-      passL = reproRuntimePassL & opensslPassL,
+      # ``-d:ssl`` makes ``nim.c`` append ``-lssl -lcrypto`` AND the ``-L``
+      # that resolves them (M8). Nothing OpenSSL-shaped belongs in this list:
+      # the reason this edge once carried one is that the search path was
+      # threaded per-edge and reached only two of the five -- ``.#apps``, the
+      # collection that builds ``repro`` itself, could not link on Windows at
+      # all. Derivation in ``nim.c`` is what makes partial coverage
+      # unexpressible.
+      passL = reproRuntimePassL,
       nimcache = "build/nimcache/repro",
       # The public launcher sits on the prompt-time dev-env no-op path.
       # Build it with the vendored portable hash backend so each no-op spawn
@@ -1224,7 +1221,6 @@ package reprobuild:
       binary = "build/bin/repro-binary-cache",
       defines = @["release", "ssl"],
       paths = sourceOnlyNimPaths,
-      passL = opensslPassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
       actionId = "reprobuild.apps.repro-binary-cache"))
@@ -1246,7 +1242,6 @@ package reprobuild:
       binary = "build/bin/repro-harvest-apt",
       defines = @["release", "ssl"],
       paths = @["apps/repro-harvest-apt/src"] & sourceOnlyNimPaths,
-      passL = opensslPassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-harvest-apt",
       actionId = "reprobuild.apps.repro-harvest-apt"))
@@ -1535,7 +1530,7 @@ package reprobuild:
       binary = "build/test-bin/repro_binary_cache_m6",
       defines = @["ssl"],
       paths = sourceOnlyNimPaths,
-      passL = testRuntimePassL & opensslPassL,
+      passL = testRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_m6",
       actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
@@ -1545,7 +1540,7 @@ package reprobuild:
       binary = "build/test-bin/repro_binary_cache_client_cli",
       defines = @["ssl"],
       paths = sourceOnlyNimPaths,
-      passL = testRuntimePassL & opensslPassL,
+      passL = testRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_client_cli",
       actionId = "reprobuild.test_helpers.repro_binary_cache_client_cli"))

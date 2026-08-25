@@ -34,6 +34,14 @@ import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
+# M8: the OpenSSL library channel, declared by the openssl package rather than
+# probed by each consumer. Imported as the LAYOUT module, not as
+# ``packages/openssl`` — importing the package module would run its
+# ``package openssl:`` registration as a side effect of importing ``nim``,
+# putting a catalog entry into every recipe's registry that did not ask for
+# one.
+import repro_dsl_stdlib/openssl_layout
+
 # L3 PUBLISH-SCOPE (public-interface publishing for hand-authored
 # ``build:`` blocks). ``blake3`` composes the recipe-revision digest;
 # ``repro_core`` resolves the recipe file bytes. ``repro_project_dsl``
@@ -312,8 +320,35 @@ proc usesSslDefine(defines: openArray[string]): bool =
       return true
 
 proc opensslPassLForSsl(defines: openArray[string]): seq[string] =
+  ## The linker arguments a ``-d:ssl`` edge needs: the two libraries, AND the
+  ## search path that makes them resolvable.
+  ##
+  ## Emitting only ``-lssl -lcrypto`` was the M8 defect. On Linux and macOS the
+  ## ``nixPackage`` arm behind ``uses: "openssl"`` supplies the path; on
+  ## Windows the package declared no arm at all, so every ssl edge linked with
+  ## two names and nowhere to look, and the gap was patched in reprobuild's own
+  ## recipe (``windowsOpensslPassL``) with a hard-coded MSYS2 directory.
+  ##
+  ## ``windowsOpensslLinkSearchDir`` replaces that literal with a derivation:
+  ## the prefix of the ``openssl.exe`` the engine's own path-mode resolver
+  ## picks, inverted through the package's declared ``binDir``/``linkLibDir``
+  ## layout, and accepted only if that directory really holds import libraries
+  ## for both stems. A host that provides no OpenSSL development libraries
+  ## contributes no ``-L`` and fails with the same "cannot find -lssl" as
+  ## before — never a path that resolves nothing.
+  ##
+  ## The flags go on the ARGV rather than into ``LIBRARY_PATH``/``CPATH``. gcc
+  ## honours those, but the engine composes each action's environment
+  ## deliberately instead of inheriting the launching shell's, which is the
+  ## whole point of "not ambient NIX_LDFLAGS"; an env-based fix would
+  ## re-introduce the dependency the declaration exists to remove and leave the
+  ## action's inputs under-described.
   if usesSslDefine(defines):
-    result = @["-lssl", "-lcrypto"]
+    let searchDir = windowsOpensslLinkSearchDir()
+    if searchDir.len > 0:
+      result.add("-L" & searchDir)
+    result.add("-lssl")
+    result.add("-lcrypto")
 
 proc compileDependencyPolicy(cacheDir: string;
                              cacheable: bool;

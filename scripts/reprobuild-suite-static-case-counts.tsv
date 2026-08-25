@@ -147,9 +147,11 @@ libs/repro_dsl_stdlib/tests/t_nde_k1_plasma.nim	nim	24
 libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim	nim	21
 libs/repro_dsl_stdlib/tests/t_nim_c_cpu_flag.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_nim_c_ssl_link_path.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_nim_c_windows_exe_output.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_nim_ssl_dependency.nim	nim	2
+libs/repro_dsl_stdlib/tests/t_openssl_windows_link_channel.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_smoke_catalog_audit_m29.nim	nim	5
