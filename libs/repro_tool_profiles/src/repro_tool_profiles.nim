@@ -15,6 +15,7 @@ import repro_domain_types
 import repro_hash
 import repro_interface_artifacts
 import repro_local_store
+import repro_project_dsl/install_mirror_resolver
 # repro_local_store provides the M56 unified store. Every adapter
 # (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
 # out its realized prefix on disk so the same SQLite-backed
@@ -4781,6 +4782,11 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   # is empty / missing) so existing tests + the executable-style probe
   # for tools like ``meson`` keep working unchanged.
   let baseCandidate = recipeDir / ".repro" / "output" / name / name
+  if not realizationInfoMatchesCurrentPlatform(recipeDir):
+    return FromSourceResolveResult(kind: rrNeedsBuild,
+      recipeDir: recipeDir,
+      expectedArtifact: baseCandidate,
+      toolName: name)
   var candidates = m9r14dEnumerateArtifacts(recipeDir)
   var resolved = ""
   # Prefer the complete install mirror for executable tools. Its ELF RPATH

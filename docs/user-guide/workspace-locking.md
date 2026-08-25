@@ -524,6 +524,8 @@ make sense.
   | `no-lock-dirty-siblings` | **No lock exists.** An in-scope repo has uncommitted changes; a lock recorded over them would not reproduce the tree it claims. Commit or stash them and run `repro workspace lock`. |
   | `no-lock-failed` | **No lock exists.** The lock writer failed; the diagnostic names the reason (commonly a declared repo with no checkout). |
   | `skipped-no-workspace` | Not a workspace; the hook does not apply here. |
+  | `skipped-git-operation-in-progress` | Git was mid-rebase / mid-cherry-pick / mid-bisect in the repo that fired the hook. The commit the hook saw is one of that operation's intermediate commits, so nothing was written into the working tree and no ref was pushed. The diagnostic names the marker that proved it. The pre-push gate refreshes the lock before anything is published, so no lock is lost. |
+  | `inert-git-state-unknown` | The hook could not determine whether a git operation was in progress (git unresolvable, or the repo path is not a checkout). It did nothing and said so on stderr — "I could not tell" is not the same answer as "nothing is happening". |
 
   The report also carries `pendingRecords` (unpublished records for the
   trigger repo in the store) and `strandedRecords` — those pending

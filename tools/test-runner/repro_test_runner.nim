@@ -97,6 +97,16 @@
 import std/[algorithm, atomics, json, locks, os, osproc, parseopt, streams,
             strtabs, strutils, tables, tempfiles, times]
 
+# RunQuota-Observation-Store M19: the ``HistoryReporter`` write path.
+#
+# THE RUNNER DOES NOT OPEN A DATABASE, AND THERE IS NO ``.nimtest/history.db``.
+# ``Nim-Parallel-Test-Framework.md`` §17.3 §"How these read": "The runner MUST
+# NOT open the store's database file directly: ``runquotad`` is the only
+# sanctioned reader". §17.1.2 replaced the per-runner history backend with
+# RunQuota's shared observation store outright — the old path is retired, not
+# migrated, because nothing reads it.
+import ct_test_history
+
 when defined(posix):
   import std/posix
 elif defined(windows):
@@ -396,6 +406,16 @@ type
     ## "two workers race on ``putEnv``" hazard called out in the
     ## Test-Edges-And-Parallel-Runner milestones.
     baseEnv: ptr seq[tuple[key, value: string]]
+    ## M19: the shared ``HistoryReporter``. A POINTER to one object on
+    ## the main thread's frame, not one reporter per worker: the daemon
+    ## opens exactly one ``runs`` row per registered session, so a
+    ## session per worker would shatter a single test run into N run
+    ## records and every cross-run query in §17.3 would count them as N
+    ## runs. ``nil`` (and a reporter whose ``open`` returned false) means
+    ## capture is off, which is the ordinary no-daemon case and not an
+    ## error.
+    history: ptr HistoryReporter
+    memoryLimitBytes: uint64
 
   TestProcess = object
     process: Process
@@ -2375,11 +2395,36 @@ proc finalDrainNonBlocking(p: Process; output: var string) =
     # If bytes are still flowing we keep looping the fixed number of
     # passes; we never extend the loop based on EOF.
 
-proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
-    tuple[output: string; exitCode: int; timedOut: bool;
-          timeoutDescription: string] =
+type ChildRunOutcome = object
+  ## What the wait loop observed about one child process.
+  ##
+  ## Introduced by M19 because ``termination`` needs facts an exit code
+  ## cannot carry: RunQuota's spine distinguishes ``oom_killed`` from
+  ## ``exited``, and both of those are non-zero exits. ``memoryExceeded``
+  ## is the only field that can make that distinction, and it is TRUE
+  ## ONLY WHEN THIS RUNNER ITSELF KILLED THE CHILD for crossing its
+  ## declared memory reservation — an observation, never an inference
+  ## over a status byte.
+  output: string
+  exitCode: int
+  timedOut: bool
+  timeoutDescription: string
+  memoryExceeded: bool
+  peakRssBytes: uint64
+
+proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
+                             memoryLimitBytes = 0'u64): ChildRunOutcome =
   ## Deadline-aware variant of ``drainAndWait``. When ``timeoutSec <= 0``
-  ## the call delegates to ``drainAndWait`` (preserving M3 behaviour).
+  ## and no memory ceiling is configured the call delegates to
+  ## ``drainAndWait`` (preserving M3 behaviour).
+  ##
+  ## ``memoryLimitBytes`` (M19, 0 = OFF and the default) is the resident
+  ## size the test's whole process tree may reach. Crossing it kills the
+  ## group through exactly the same bounded TERM → grace → KILL path a
+  ## timeout uses, and reports ``memoryExceeded``. The ceiling is the
+  ## same figure the RunQuota lease reserved for this test, so "the test
+  ## exceeded its reservation" and "the runner killed it" are one event
+  ## rather than two that have to be correlated afterwards.
   ##
   ## ``timeoutSec`` is interpreted as a **no-progress** deadline, not a
   ## fixed wall-clock budget: the test is killed only after it has shown
@@ -2427,9 +2472,14 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
   ## Windows is not a supported runner host today. On macOS the output
   ## signal works and the CPU signal does not; that host keeps the
   ## pre-existing output-only semantics.
-  if timeoutSec <= 0:
+  ##
+  ## A memory ceiling is reason enough to poll on its own: with
+  ## ``timeoutSec <= 0`` but ``memoryLimitBytes`` set, the loop still
+  ## runs and both time deadlines become infinite rather than the loop
+  ## being skipped (see ``idleDeadlineSec``).
+  if timeoutSec <= 0 and memoryLimitBytes == 0'u64:
     let (output, exitCode) = drainAndWait(testProcess)
-    return (output, exitCode, false, "")
+    return ChildRunOutcome(output: output, exitCode: exitCode)
 
   let p = testProcess.process
   var output = ""
@@ -2443,7 +2493,13 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
   let processGroup =
     when defined(posix): testProcess.processGroup
     else: 0
-  let absoluteDeadlineSec = timeoutSec.float * AbsoluteTimeoutMultiplier.float
+  # A memory ceiling on its own must still poll, so an absent idle
+  # deadline becomes an infinite one rather than turning the loop off.
+  let idleDeadlineSec =
+    if timeoutSec <= 0: Inf else: timeoutSec.float
+  let absoluteDeadlineSec =
+    if timeoutSec <= 0: Inf
+    else: timeoutSec.float * AbsoluteTimeoutMultiplier.float
   let cpuThreshold = cpuProgressThresholdSec(timeoutSec)
   let cpuInterval = cpuSampleIntervalSec(timeoutSec)
   var cpuSeen = CpuUnavailable
@@ -2462,6 +2518,9 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
   let cpuTracked = cpuLivenessAvailable(processGroup)
   var timedOut = false
   var timeoutDescription = ""
+  var memoryExceeded = false
+  var peakRssBytes = 0'u64
+  let childPid = uint64(max(p.processID, 0))
 
   proc observedNumbers(now: float): string =
     ## The evidence line that accompanies every kill.
@@ -2487,7 +2546,9 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
         output.add(
           "\nrepro_test_runner: interrupted; owned process group killed.\n")
         discard finishInterruptedTestProcess(testProcess, output)
-        return (output, TimeoutExitCode, true, "INTERRUPTED")
+        return ChildRunOutcome(output: output, exitCode: TimeoutExitCode,
+          timedOut: true, timeoutDescription: "INTERRUPTED",
+          peakRssBytes: peakRssBytes)
     when defined(posix):
       var code = -1
       var childComplete = false
@@ -2528,7 +2589,8 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
       else:
         finalDrainNonBlocking(p, output)
         close(p)
-      return (output, code, false, "")
+      return ChildRunOutcome(output: output, exitCode: code,
+        peakRssBytes: peakRssBytes)
     # Drain whatever the live child has emitted since the last poll.
     # Non-blocking, so this never parks on a silent test. Any new bytes
     # are forward progress and reset the no-progress clock.
@@ -2538,6 +2600,31 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
       # Rebase the CPU comparison too: the required advance is measured
       # from the most recent progress point, whichever signal produced it.
       cpuAtLastProgress = cpuSeen
+    # M19: sample the resident size of the child's WHOLE PROCESS TREE.
+    #
+    # The tree, not the direct child: on POSIX the direct child is the
+    # process-group supervisor and the test itself is its descendant, so
+    # sampling only the child would read the supervisor's few hundred KiB
+    # and the ceiling would never fire — a check that cannot fail.
+    #
+    # Sampled through RunQuota's own host backend rather than a ``ps``
+    # subprocess: ``ps -o rss`` is entitlement-gated on current macOS and
+    # fails outright there, which would have made this a Linux-only
+    # mechanism that read green on macOS.
+    if memoryLimitBytes > 0'u64 and childPid > 0'u64:
+      let rss = sampleProcessTreeRss(childPid)
+      if rss > peakRssBytes:
+        peakRssBytes = rss
+      if rss > memoryLimitBytes:
+        output.add("\nrepro_test_runner: resident set of the test process " &
+          "tree reached " & $rss & " bytes, above the " &
+          $memoryLimitBytes & "-byte reservation; killing it as an " &
+          "out-of-memory kill.\n")
+        memoryExceeded = true
+        timeoutDescription =
+          "MEMORY LIMIT EXCEEDED: " & $rss & " > " & $memoryLimitBytes &
+          " bytes"
+        break
     var now = epochTime()
     # Second signal: has the process group burned CPU? A starved test is
     # quiet but advancing; a deadlocked one is quiet and flat.
@@ -2555,7 +2642,7 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
           cpuAtLastProgress = cpuSeen
           lastProgress = now
       now = epochTime()
-    if (now - lastProgress) > timeoutSec.float:
+    if (now - lastProgress) > idleDeadlineSec:
       let evidence = observedNumbers(now)
       # Never claim a signal that was not actually read. "no CPU
       # progress" is a measurement; "CPU unmeasured" is an admission.
@@ -2638,7 +2725,127 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
   close(p)
   when defined(posix):
     cleanupProcessGroupPaths(testProcess)
-  result = (output, TimeoutExitCode, timedOut, timeoutDescription)
+  result = ChildRunOutcome(output: output, exitCode: TimeoutExitCode,
+    timedOut: timedOut, timeoutDescription: timeoutDescription,
+    memoryExceeded: memoryExceeded, peakRssBytes: peakRssBytes)
+
+# ---------------------------------------------------------------------------
+# RunQuota-Observation-Store M19 — the reporter's runner-side glue
+# ---------------------------------------------------------------------------
+
+const DefaultLeaseMemoryBytes = 128'u64 * 1024'u64 * 1024'u64
+  ## What a test reserves when no ceiling is configured. Matches the
+  ## reprobuild engine's own per-action default, so a test and a compile
+  ## are admitted against the same units.
+
+proc leaseMemoryBytes(memoryLimitBytes: uint64): uint64 =
+  ## THE CEILING IS THE RESERVATION, not a second number beside it.
+  ##
+  ## A runner that reserved one figure from RunQuota and enforced a
+  ## different one would be reporting ``oom_killed`` for a process that
+  ## never exceeded what the store says it was admitted for, and no
+  ## reader of the two rows could reconcile them.
+  if memoryLimitBytes > 0'u64: memoryLimitBytes else: DefaultLeaseMemoryBytes
+
+proc historyStatus(res: TestResult; outcome: ChildRunOutcome;
+                   groupRefused: bool): TestHistoryStatus =
+  ## Map the runner's verdict onto the framework-neutral vocabulary.
+  ##
+  ## THE VOCABULARY IS THE SPECIFICATION'S, NOT THIS RUNNER'S, which is
+  ## why the mapping lives here rather than the enum being widened to
+  ## fit: ``timeout`` and ``leak`` are outcomes any parallel runner
+  ## produces, and ``xfail``/``xpass`` are read from the case's own
+  ## catalog row rather than invented.
+  if groupRefused:
+    # A case whose processes outlived a bounded kill. ``leak`` is the
+    # vocabulary's name for exactly this and nothing else.
+    return thsLeak
+  if outcome.timedOut:
+    return thsTimeout
+  case res.status
+  of tsSkip: thsSkip
+  of tsPass:
+    if res.testCase.protocolAware and res.testCase.meta.xfail.len > 0: thsXpass
+    else: thsPass
+  else:
+    if res.testCase.protocolAware and res.testCase.meta.xfail.len > 0: thsXfail
+    else: thsFail
+
+proc reportExecution(history: ptr HistoryReporter; testLease: var TestLease;
+                     res: TestResult; outcome: ChildRunOutcome;
+                     groupRefused = false) =
+  ## Close the lease and write both extension rows for one execution.
+  ##
+  ## A HARNESS ERROR WRITES NO EXTENSION ROW, DELIBERATELY. ``tsHarnessError``
+  ## means the runner obtained no verdict about the code under test; the
+  ## generic layer's ``status`` vocabulary has no member for that and
+  ## inventing one — or borrowing ``fail`` — would put a statement about
+  ## the RUN into a column every flake and pass-rate query reads as a
+  ## statement about the TREE. The lease is still finished, so the spine
+  ## keeps an execution row whose ``termination`` is ``refused``, which is
+  ## the honest record that something was admitted and produced nothing.
+  if not testLease.captured:
+    return
+  let harnessFault = res.status == tsHarnessError
+  # SIGNAL, INFERRED FROM THE 128+N CONVENTION AND SAID TO BE INFERRED.
+  # The process-group wrapper records a status integer, not a raw wait
+  # status word, so 128+N is the only signal evidence the runner has —
+  # the same evidence, and the same caveat, as ``describeChildExit``.
+  var signalNumber = 0
+  if not outcome.timedOut and not outcome.memoryExceeded and
+      outcome.exitCode > 128 and outcome.exitCode <= 128 + 64:
+    signalNumber = outcome.exitCode - 128
+  history.finishExecution(testLease, TestExecutionOutcome(
+    exitCode:
+      if outcome.exitCode < 0: 1 else: outcome.exitCode,
+    signal: signalNumber,
+    # A timeout or a ceiling kill IS a signalled death — the runner sent
+    # the SIGKILL itself — but ``memoryLimitExceeded`` is checked ahead of
+    # it by the daemon, so the OOM arm is not swallowed by the signal arm.
+    signalled: signalNumber != 0 or outcome.timedOut or
+      outcome.memoryExceeded,
+    peakRssBytes: outcome.peakRssBytes,
+    processCount: 0'u32,
+    memoryLimitExceeded: outcome.memoryExceeded,
+    timedOut: outcome.timedOut,
+    launchFailed: harnessFault))
+  if not harnessFault:
+    var generic = GenericTestFacts(
+      testId:
+        if res.testCase.qualifiedName.len > 0: res.testCase.qualifiedName
+        else: res.testCase.binaryStem,
+      suite: res.testCase.suite,
+      status: historyStatus(res, outcome, groupRefused),
+      durationMs: res.durationMs,
+      durationKnown: true,
+      # ONE ATTEMPT. This runner does not retry, so every row is the
+      # first and ``retry_of`` is NULL. Recording a fixed 1 is a
+      # measurement, not a placeholder: the ordinal is known.
+      attempt: 1,
+      retryOf: "",
+      errorMessage: res.exception,
+      skipReason: res.skipReason,
+      # The runner spawns children with ``poStdErrToStdOut``, so what it
+      # holds is the MERGED stream. ``stderr_len`` is therefore unknown
+      # rather than zero; see the column note in the schema module.
+      stdoutLen: res.stdout.len,
+      stdoutKnown: true,
+      stderrLen: 0,
+      stderrKnown: false)
+    if generic.errorMessage.len == 0 and res.checkpoints.len > 0:
+      generic.errorMessage = res.checkpoints[0]
+    let specific = CodetracerTestFacts(
+      # The trace columns §17.1.2 names are absent for a test that
+      # records nothing, which is every test in reprobuild's own suite.
+      # They are declared so a CodeTracer run does not need a migration.
+      protocolAware: res.testCase.protocolAware,
+      runName: res.testCase.runName,
+      bodyHash: res.testCase.meta.bodyHash,
+      checkpointCount: res.checkpointCount,
+      statusDisagreement: res.statusDisagreement,
+      harnessError: res.harnessError)
+    history.recordRows(testLease, generic, specific)
+  history.releaseLease(testLease)
 
 const WholeBinarySkipMarker = "[SKIPPED] "
   ## The console formatter's own status marker for a skipped case
@@ -2690,10 +2897,20 @@ proc wholeBinarySkippedCases(output: string): seq[string] =
 
 proc runWholeBinary(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]];
-                    testTimeoutSec: int): TestResult =
+                    testTimeoutSec: int;
+                    history: ptr HistoryReporter = nil;
+                    memoryLimitBytes = 0'u64): TestResult =
   result.testCase = tc
   result.status = tsFail
   let t0 = epochTime()
+  # M19: one RunQuota lease around this execution. Acquired BEFORE the
+  # spawn and finished AFTER the wait, so the spine row's start, finish
+  # and duration describe the test rather than the bookkeeping around it.
+  var testLease = history.acquireLease(
+    (if tc.qualifiedName.len > 0: tc.qualifiedName else: tc.binaryStem),
+    memoryBytes = leaseMemoryBytes(memoryLimitBytes))
+  var childOutcome: ChildRunOutcome
+  var groupRefused = false
   # Wrap the whole spawn-drain-wait sequence so a sporadic
   # ``Bad file descriptor [OSError]`` from the residual fork hazard
   # documented above is reported instead of tearing down the worker
@@ -2716,18 +2933,31 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
     # pinning them changes no output that was already being produced.
     childEnv["NIMTEST_OUTPUT_LVL"] = "PRINT_ALL"
     childEnv["NIMTEST_COLOR"] = "never"
+    history.markStarting(testLease)
     let p = spawnedProcess(tc.binary, args = [], env = childEnv)
+    history.markRunning(testLease, uint64(max(p.process.processID, 0)),
+      when defined(posix): uint64(max(p.processGroup, 0)) else: 0'u64)
     # Past this point the child exists, so a fault is a collection
     # failure and must not be reported as a spawn failure — mislabelling
     # the phase is what sent the first investigation of this defect at
     # the wrong code.
     whichPhase = "child started but its result could not be collected"
-    let (output, exitCode, timedOut, timeoutDescription) =
-      drainAndWaitWithTimeout(p, testTimeoutSec)
-    if timedOut:
+    childOutcome = drainAndWaitWithTimeout(p, testTimeoutSec,
+      memoryLimitBytes)
+    let output = childOutcome.output
+    let exitCode = childOutcome.exitCode
+    if childOutcome.memoryExceeded:
+      # A FAIL, and one that the spine row will label ``oom_killed``
+      # rather than ``exited`` — which is the whole point of recording a
+      # termination kind beside an exit status.
       result.status = tsFail
       result.stdout =
-        "repro_test_runner: " & timeoutDescription &
+        "repro_test_runner: " & childOutcome.timeoutDescription &
+        "; SIGKILLed\n" & output
+    elif childOutcome.timedOut:
+      result.status = tsFail
+      result.stdout =
+        "repro_test_runner: " & childOutcome.timeoutDescription &
         "; SIGKILLed\n" & output
     else:
       result.stdout = output
@@ -2763,6 +2993,7 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
     # ``harness_errors``, which is a statement about the run.
     result.status = tsFail
     result.stdout = e.msg
+    groupRefused = true
   except OSError as e:
     # NOT a test failure: nothing was observed about the code under test.
     # See ``TestStatus.tsHarnessError``.
@@ -2776,6 +3007,7 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
       "repro_test_runner: " & whichPhase & " (i/o): " & e.msg & "\n"
   result.durationMs = int((epochTime() - t0) * 1000)
   result.stderr = ""
+  history.reportExecution(testLease, result, childOutcome, groupRefused)
 
 proc signalName(sig: int): string =
   ## Name for a signal number, or "" when it is not one this runner can
@@ -2852,7 +3084,9 @@ proc missingDocumentDiagnostic(resultFile: string; exitCode: int;
 
 proc runOneProtocol(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]];
-                    testTimeoutSec: int): TestResult =
+                    testTimeoutSec: int;
+                    history: ptr HistoryReporter = nil;
+                    memoryLimitBytes = 0'u64): TestResult =
   result.testCase = tc
   result.status = tsFail
   let resultFile = resultsDir / (tc.binaryStem & "__" &
@@ -2902,11 +3136,20 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   var phase = ""
   var childStarted = false
   var p: TestProcess
+  # M19: the lease spans the execution, so the spine row's start, finish
+  # and duration describe the test rather than the queueing around it.
+  var testLease = history.acquireLease(
+    (if tc.qualifiedName.len > 0: tc.qualifiedName else: tc.binaryStem),
+    memoryBytes = leaseMemoryBytes(memoryLimitBytes))
+  var childOutcome: ChildRunOutcome
   try:
+    history.markStarting(testLease)
     # ``runName`` is the catalog's own ``name``, never a reconstruction.
     p = spawnedProcess(
       tc.binary, args = ["--run", tc.runName], env = childEnv)
     childStarted = true
+    history.markRunning(testLease, uint64(max(p.process.processID, 0)),
+      when defined(posix): uint64(max(p.processGroup, 0)) else: 0'u64)
   except OSError as e:
     spawnFailed = true
     phase = "spawn failed: " & e.msg
@@ -2915,8 +3158,12 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     phase = "spawn failed (i/o): " & e.msg
   if childStarted:
     try:
-      (output, exitCode, timedOut, timeoutDescription) =
-        drainAndWaitWithTimeout(p, testTimeoutSec)
+      childOutcome = drainAndWaitWithTimeout(p, testTimeoutSec,
+        memoryLimitBytes)
+      output = childOutcome.output
+      exitCode = childOutcome.exitCode
+      timedOut = childOutcome.timedOut
+      timeoutDescription = childOutcome.timeoutDescription
     except ProcessGroupRefusal as e:
       # Named before the harness-fault handlers so a leaked process group
       # can never be re-absorbed into ERROR.
@@ -2933,7 +3180,7 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     result.harnessError = phase
     output = "repro_test_runner: " & phase & "\n" & output
   result.durationMs = int((epochTime() - t0) * 1000)
-  if timedOut:
+  if timedOut or childOutcome.memoryExceeded:
     result.stdout =
       "repro_test_runner: " & timeoutDescription &
       "; SIGKILLed\n" & output
@@ -2954,7 +3201,10 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     # case leaked processes past a bounded kill — so this is a defect in
     # the tree and belongs in ``failed``.
     result.status = tsFail
-  elif timedOut:
+  elif timedOut or childOutcome.memoryExceeded:
+    # A ceiling kill is a FAIL for the same reason a timeout is: the
+    # runner observed the case misbehaving. What separates the two on the
+    # spine is ``termination``, not the status.
     result.status = tsFail
   else:
     case exitCode
@@ -2996,7 +3246,11 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   # manufacture a bogus ``status_disagreement``).
   let documentPresent = fileExists(resultFile)
   var documentUnreadable = false
-  if not spawnFailed and not timedOut and not groupRefused and
+  # A memory-killed child is excluded for exactly the reason a timed-out
+  # one is: its document, if any, predates the kill and must not be
+  # allowed to overturn the runner's own verdict with a stale PASS.
+  if not spawnFailed and not timedOut and not childOutcome.memoryExceeded and
+      not groupRefused and
       result.status != tsHarnessError and documentPresent:
     try:
       let doc = parseJson(readFile(resultFile))
@@ -3076,7 +3330,8 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   # Scoped to exactly the branch that would have read the document, so a
   # timeout, a refusal and a spawn fault — each of which already writes
   # its own account — are untouched.
-  if not spawnFailed and not timedOut and not groupRefused and
+  if not spawnFailed and not timedOut and not childOutcome.memoryExceeded and
+      not groupRefused and
       result.status != tsHarnessError and result.status != tsPass and
       (not documentPresent or documentUnreadable):
     result.runnerDiagnosis =
@@ -3085,6 +3340,7 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   if result.statusDisagreement.len > 0:
     result.stdout.add("\nrepro_test_runner: protocol disagreement: " &
       result.statusDisagreement & "\n")
+  history.reportExecution(testLease, result, childOutcome, groupRefused)
 
 proc nextCase(queue: ptr Queue; failFast: bool;
               out_case: var TestCase): bool =
@@ -3311,10 +3567,10 @@ proc workerLoop(args: WorkerArgs) =
     try:
       if tc.protocolAware:
         res = runOneProtocol(tc, args.resultsDir, args.baseEnv[],
-          args.testTimeoutSec)
+          args.testTimeoutSec, args.history, args.memoryLimitBytes)
       else:
         res = runWholeBinary(tc, args.resultsDir, args.baseEnv[],
-          args.testTimeoutSec)
+          args.testTimeoutSec, args.history, args.memoryLimitBytes)
     except CatchableError as e:
       res = TestResult(
         testCase: tc,
@@ -3346,7 +3602,8 @@ proc countStatusDisagreements(results: seq[TestResult]): int =
 
 proc writeSummary(summaryPath: string; results: seq[TestResult];
                   wallTimeMs: int; threadsUsed: int;
-                  selection: SelectionDecision; deselectedCases: int) =
+                  selection: SelectionDecision; deselectedCases: int;
+                  historyCaptured: bool; historyUncaptured: int) =
   var total = results.len
   var passed = 0
   var failed = 0
@@ -3465,6 +3722,17 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
   summary["status_disagreements"] = %countStatusDisagreements(results)
   summary["wall_time_ms"] = %wallTimeMs
   summary["threads"] = %threadsUsed
+  # M19: whether this run's executions reached RunQuota's observation
+  # store. Recorded because a reader of this artifact otherwise cannot
+  # tell "the store has no rows for this run because there was no daemon"
+  # from "the store lost them" — and an absent history that reads as a
+  # complete one is the failure OS-2 is about.
+  summary["runquota_history"] = %historyCaptured
+  # OS-2: how many executions ran with no lease behind them, because the
+  # daemon queued or denied the candidate. A run whose history is thin
+  # says how thin rather than presenting the rows it did get as the
+  # whole picture.
+  summary["runquota_history_uncaptured"] = %historyUncaptured
   # Why this run's case set is the size it is. Without this a reader of
   # the artifact cannot tell a deliberately selected subset from a run
   # that lost cases — the two produce the same shape of document and the
@@ -3505,6 +3773,27 @@ type
       ## ``--catalog-read PATH``: consult this catalog and skip cases
       ## whose ``bodyHash`` it positively vouches for. Empty means "run
       ## everything", which is the default and always remains available.
+    historyEnabled: bool
+      ## M19. ON by default and turned off by ``--no-runquota-history``
+      ## / ``REPRO_TEST_NO_RUNQUOTA_HISTORY=1``. "On" means "record if a
+      ## daemon answers": with no daemon the reporter's ``open`` returns
+      ## false and the run proceeds unchanged, because OS-4 says a
+      ## missing daemon MUST NOT be reported as an error.
+      ##
+      ## THIS FLAG DOES NOT GATE THE RUNNER'S CONCURRENCY. See
+      ## ``HistoryReporter.acquireLease``: a candidate the daemon queues
+      ## is abandoned rather than waited for, so admission never
+      ## reorders or delays a test. OS-1 is the reason — "Recording an
+      ## observation MUST NOT block ... Losing an observation is always
+      ## preferable to perturbing the work being observed" — and the
+      ## decision about whether RunQuota should also SCHEDULE this
+      ## runner belongs to a later milestone, not to a reporter.
+    memoryLimitMb: int
+      ## ``--test-memory-limit-mb=N`` (env ``REPRO_TEST_MEMORY_LIMIT_MB``),
+      ## 0 = off and the default. The resident size a test's whole
+      ## process tree may reach, which is ALSO the memory it reserves
+      ## from RunQuota. A test that crosses it is killed and its spine
+      ## row reads ``termination = oom_killed`` rather than ``exited``.
 
 proc defaultThreads(): int =
   let env = getEnv("REPRO_TEST_THREADS")
@@ -3530,6 +3819,13 @@ proc parseArgs(): RunnerOpts =
   result.testTimeoutSec = 0
   result.catalogWritePath = ""
   result.catalogReadPath = ""
+  result.historyEnabled = getEnv("REPRO_TEST_NO_RUNQUOTA_HISTORY", "") notin
+    ["1", "true", "yes"]
+  result.memoryLimitMb = 0
+  let memoryLimitEnv = getEnv("REPRO_TEST_MEMORY_LIMIT_MB", "")
+  if memoryLimitEnv.len > 0:
+    try: result.memoryLimitMb = max(0, parseInt(memoryLimitEnv))
+    except ValueError: discard
   var p = initOptParser(commandLineParams())
   while true:
     p.next()
@@ -3564,6 +3860,17 @@ proc parseArgs(): RunnerOpts =
           quit(2)
         if result.testTimeoutSec < 0:
           result.testTimeoutSec = 0
+      of "no-runquota-history": result.historyEnabled = false
+      of "runquota-history": result.historyEnabled = true
+      of "test-memory-limit-mb":
+        try:
+          result.memoryLimitMb = parseInt(p.val)
+        except ValueError:
+          stderr.writeLine "repro_test_runner: --test-memory-limit-mb " &
+            "requires an integer (megabytes)"
+          quit(2)
+        if result.memoryLimitMb < 0:
+          result.memoryLimitMb = 0
       of "help", "h":
         echo "repro_test_runner — protocol-level parallel test runner"
         # The old text said "default $NPROC". It never was: an absent or
@@ -3595,6 +3902,14 @@ proc parseArgs(): RunnerOpts =
           "mistaken for a hung one);"
         echo "                      hard ceiling 4xN still kills a livelock " &
           "(seconds, 0=off)"
+        echo "  --no-runquota-history"
+        echo "                      do not record executions into " &
+          "RunQuota's observation store"
+        echo "  --test-memory-limit-mb=N"
+        echo "                      resident ceiling per test tree, and " &
+          "the RunQuota memory reservation;"
+        echo "                      a test that crosses it is killed and " &
+          "recorded as oom_killed (0=off)"
         quit(0)
       else:
         stderr.writeLine "repro_test_runner: unknown option --" & p.key
@@ -3986,6 +4301,26 @@ proc main() =
       {fpUserRead, fpUserWrite, fpUserExec})
     var interruptThread = startInterruptWaiter()
 
+  # ---- M19: open the observation reporter --------------------------------
+  #
+  # OPENED HERE, ON THE MAIN THREAD, BEFORE ANY WORKER OR EXCLUSIVE CASE
+  # RUNS, and closed after every one of them has finished. One session
+  # for the whole invocation, so the daemon opens one ``runs`` row for
+  # this run rather than one per worker.
+  #
+  # A FAILURE TO OPEN IS NOT AN ERROR AND IS NOT ANNOUNCED AS ONE (OS-4:
+  # "a missing daemon MUST NOT be reported as an error"). The run
+  # proceeds with capture off and the summary says so, which is the
+  # difference between a quiet degradation and a silent one.
+  let memoryLimitBytes =
+    if opts.memoryLimitMb > 0: uint64(opts.memoryLimitMb) * 1024'u64 * 1024'u64
+    else: 0'u64
+  var history: HistoryReporter
+  var historyPtr: ptr HistoryReporter = nil
+  if opts.historyEnabled:
+    if open(addr history):
+      historyPtr = addr history
+
   let wallT0 = epochTime()
   progressStartEpoch = wallT0
   # Started before the exclusive phase, not before the worker pool: the
@@ -4005,10 +4340,10 @@ proc main() =
       try:
         if tc.protocolAware:
           res = runOneProtocol(tc, opts.resultsDir, baseEnv,
-            opts.testTimeoutSec)
+            opts.testTimeoutSec, historyPtr, memoryLimitBytes)
         else:
           res = runWholeBinary(tc, opts.resultsDir, baseEnv,
-            opts.testTimeoutSec)
+            opts.testTimeoutSec, historyPtr, memoryLimitBytes)
       except CatchableError as e:
         res = TestResult(
           testCase: tc,
@@ -4033,7 +4368,9 @@ proc main() =
     failFast: failFast,
     testTimeoutSec: opts.testTimeoutSec,
     activeCount: addr activeCount,
-    baseEnv: addr baseEnv)
+    baseEnv: addr baseEnv,
+    history: historyPtr,
+    memoryLimitBytes: memoryLimitBytes)
 
   let nThreads =
     if queue.items.len == 0 or (failFast and exclusiveFailed):
@@ -4067,8 +4404,14 @@ proc main() =
 
   let wallMs = int((epochTime() - wallT0) * 1000)
 
+  # Closed only after every worker and every exclusive case has finished,
+  # so no thread can be holding the socket while the session is torn down.
+  let historyCaptured = historyPtr.capturing()
+  let historyUncaptured = historyPtr.uncaptured()
+  historyPtr.close()
+
   writeSummary(opts.summaryPath, results, wallMs, nThreads,
-    selection, deselectedCases)
+    selection, deselectedCases, historyCaptured, historyUncaptured)
 
   var passed = 0
   var failed = 0

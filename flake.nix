@@ -1278,6 +1278,29 @@
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
+            # Read by RUNQUOTA'S ``config.nims``, not by ours.
+            #
+            # ``RUNQUOTA_SRC`` above serves the compile reprobuild does itself,
+            # which reaches only runquota's client-side libraries. But several
+            # entry points in this shell build runquota's DAEMON, in runquota's
+            # own checkout, with runquota's own build files:
+            # ``scripts/run-m23-benchmark.sh`` and ``scripts/run_tests.sh`` both
+            # run ``just build`` there when ``build/bin/runquotad`` is absent,
+            # and the Justfile's runquota-facing integration recipes do the same.
+            # That build compiles ``runquota_stats_table``, which imports
+            # ``shm_lease/anchor``, and runquota's ``config.nims`` resolves it
+            # from this variable (falling back to a ``../nim-shm-lease``
+            # sibling, which no CI layout of ours provides). Without it the
+            # daemon build stops at ``cannot open file: shm_lease/anchor`` and
+            # takes the benchmark suite down with it.
+            #
+            # THE VALUE IS RUNQUOTA'S OWN PIN, reached through its flake rather
+            # than restated here, for the same reason ``runquotaTools`` delegates
+            # to ``runquota-src.packages.<system>.default``: a second pin of the
+            # same dependency is a second thing to bump, and the two would
+            # eventually disagree about which revision runquota builds against.
+            # Nothing here needs updating when runquota moves its pin.
+            SHM_LEASE_SRC = "${runquota-src.inputs.nim-shm-lease}/src";
             SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [

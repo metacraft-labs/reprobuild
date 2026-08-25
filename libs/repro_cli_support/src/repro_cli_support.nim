@@ -13388,7 +13388,8 @@ proc runManifestRefreshHookCommand*(hookName: string;
 # and NOTHING when the workspace is already consistent. Declared here because
 # the implementation needs ``repoRemovalBlockers``, which lives beside the
 # membership verbs far below.
-proc reconcileLocalStateForHook(workspaceRoot: string): seq[string]
+proc reconcileLocalStateForHook(workspaceRoot: string):
+  tuple[loud, quiet: seq[string]]
 
 proc runHooksDispatchCommand(args: openArray[string]): int =
   ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
@@ -14566,10 +14567,14 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   # unset on Windows so child actions (which inherit the daemon's
   # env) likewise hit the default endpoint.
   #
-  # POSIX: keep the per-PID ``.sock`` path in ``$TMPDIR`` — Unix
-  # domain sockets need a concrete filesystem path, the PID guards
-  # against collisions between concurrent daemons, and the
-  # filesystem reclaims the inode when the daemon exits.
+  # POSIX: a per-PID Unix socket, but inside a DIRECTORY OF ITS OWN
+  # rather than loose in ``$TMPDIR``. The socket's parent directory is
+  # the rendezvous point that ``runquotad`` verifies before binding and
+  # every client verifies before connecting, and a shared ``/tmp`` is
+  # root-owned ``1777``, which fails both halves — the daemon exits
+  # before it listens and the build dies with the refusal in its log.
+  # ``runquotaEndpointPath`` owns that rule; see its docs for why the
+  # answer is a private directory and not a laxer check.
   # M9.R.12.3 — declare the standard named pools the convention layer
   # registers (``compile`` + ``fetch``). Without these flags the daemon
   # initialises ``namedPoolCaps`` empty, so every action that requests
@@ -14603,8 +14608,8 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
     putEnv("RUNQUOTA_SOCKET", "")
     let socket = ""
   else:
-    let socket = getTempDir() / ("reprobuild-runquota-" &
-      $getCurrentProcessId() & ".sock")
+    let socket = runquotaEndpointPath(
+      "reprobuild-runquota-" & $getCurrentProcessId())
     if fileExists(socket):
       removeFile(socket)
     var args = @[
@@ -25887,6 +25892,225 @@ proc revParse(identity: GitToolIdentity;
   else:
     ""
 
+type
+  GitOperationState* = enum
+    ## Whether a MULTI-STEP git operation is currently in flight in a
+    ## checkout. The managed `post-checkout` / `post-commit` / `post-merge`
+    ## hooks fire in the middle of those operations, and anything they do
+    ## there is done to somebody else's half-finished working tree.
+    gosIdle             ## no operation in flight; the hook owns this moment
+    gosInProgress       ## git is mid-operation; the hook must stand down
+    gosIndeterminate    ## the question could not be answered at all
+
+  GitOperationProbe* = object
+    state*: GitOperationState
+    marker*: string      ## which state path proved it (``gosInProgress``)
+    diagnostic*: string  ## why the probe failed (``gosIndeterminate``)
+
+# `MERGE_HEAD` and `REVERT_HEAD` are DELIBERATELY ABSENT from the set below,
+# on measurement rather than taste. Both are git's own in-progress markers and
+# both were tried; on git 2.50 git clears them BEFORE it invokes either hook,
+# in every path they can be reached from:
+#   * conflicted merge, then `git checkout -f <branch>` — `post-checkout`
+#     fires with `MERGE_HEAD` already gone;
+#   * conflicted merge, then `git commit` — likewise for `post-commit`;
+#   * conflicted `git revert`, then `git revert --continue` — `post-commit`
+#     fires with `REVERT_HEAD` already gone.
+# A name git deletes before it calls you is not a discriminator; it is a
+# branch no test can reach, which is a branch that rots. If a later git keeps
+# them alive across the hook, the case that proves it comes first.
+const InFlightGitStatePaths* = [
+  # `git rebase` (merge/interactive backend, the default since 2.26) and
+  # `git rebase -r`. THE marker for the reported defect.
+  "rebase-merge",
+  # `git rebase --apply` (the am backend) and `git am`. A separate directory
+  # from the above — neither name covers both rebase backends. Note it does
+  # NOT cover that backend's exposed moment: measured, `--apply` rewinds HEAD
+  # and fires `post-checkout` BEFORE creating this directory, which is what
+  # the reflog discriminator below exists for.
+  "rebase-apply",
+  # A pick in flight. Observed present at `post-commit` for every commit the
+  # merge-backend rebase replays, alongside `rebase-merge`.
+  "CHERRY_PICK_HEAD",
+  # A multi-commit `git cherry-pick A..B` / `git revert`. Observed live: the
+  # post-commit hook fires for every picked commit with `sequencer` present
+  # and `CHERRY_PICK_HEAD` absent, so it is not redundant with the name above.
+  "sequencer",
+  # `git bisect`, which checks out a detached commit per step. Reattaching a
+  # branch here destroys the bisect exactly the way it destroys a rebase.
+  "BISECT_LOG",
+]
+
+# The SECOND discriminator, and it is not redundant with the state paths.
+#
+# Measured, not assumed: `git rebase --apply` (the am backend) rewinds HEAD
+# onto the upstream and fires `post-checkout` — detached, flag `1` — BEFORE it
+# creates `rebase-apply`. At that instant not one of the state paths above
+# exists, and a state-path-only probe answers "idle" for a rebase that has
+# already started. Reattaching a branch there is the same corruption as in the
+# merge backend.
+#
+# What git does have at that instant is the reflog entry it just wrote for
+# HEAD: `rebase (start): checkout main`, where an ordinary checkout writes
+# `checkout: moving from X to Y`. That is git's own record of WHY HEAD moved,
+# which is precisely the question.
+#
+# Deliberately only these two actions. `merge` is excluded: a plain
+# `git merge` writes a `merge` reflog entry and then fires `post-merge`, and
+# standing down on it would disable that hook entirely.
+const InFlightGitReflogActions* = ["rebase", "am"]
+
+proc reflogActionSuggestsOperation*(subject: string): bool =
+  ## Does this HEAD reflog subject name an operation that was in flight when
+  ## the hook fired? The subject's shape is ``<action>: <detail>``, with the
+  ## action optionally carrying a parenthetical stage (``rebase (start)``,
+  ## ``rebase -i (start)``). Only the first word is matched, so every spelling
+  ## of a rebase collapses onto ``rebase``.
+  let head = subject.strip()
+  if head.len == 0:
+    return false
+  let colon = head.find(':')
+  let action = (if colon >= 0: head[0 ..< colon] else: head).strip()
+  var firstWord = action
+  let space = action.find(' ')
+  if space >= 0:
+    firstWord = action[0 ..< space]
+  firstWord in InFlightGitReflogActions
+
+proc probeGitOperationInProgress*(identity: GitToolIdentity;
+                                  repoPath: string): GitOperationProbe =
+  ## Is git in the middle of a multi-step operation in this checkout?
+  ##
+  ## Every path is resolved with ``git rev-parse --git-path`` rather than
+  ## by gluing the name onto ``<repo>/.git``. That is not defensive
+  ## politeness — in a LINKED WORKTREE ``<repo>/.git`` is a FILE, so
+  ## ``<repo>/.git/rebase-merge`` can never exist and a naive test is
+  ## unconditionally false there; the real state lives at
+  ## ``<common-dir>/worktrees/<name>/rebase-merge``, and a test against the
+  ## MAIN checkout's ``.git`` misses it too. ``--git-path`` knows which of
+  ## these names are per-worktree and returns the right one.
+  ##
+  ## One subprocess for the whole set: ``rev-parse`` accepts repeated
+  ## ``--git-path`` and answers one line each, and this runs on every commit
+  ## and every checkout in every participating repo.
+  ##
+  ## A probe that cannot answer returns ``gosIndeterminate`` — never
+  ## ``gosIdle``. "I could not tell" and "nothing is happening" have opposite
+  ## consequences for a caller that is deciding whether to touch refs.
+  if repoPath.len == 0:
+    result.state = gosIndeterminate
+    result.diagnostic = "no repository path was supplied"
+    return
+  var command = quoteShell(identity.binaryPath) & " -C " &
+    quoteShell(repoPath) & " rev-parse"
+  for name in InFlightGitStatePaths:
+    command.add(" --git-path " & quoteShell(name))
+  var res: tuple[output: string; exitCode: int]
+  try:
+    res = execCmdEx(command, options = {poStdErrToStdOut, poUsePath},
+      env = scrubbedGitRepositoryEnv())
+  except CatchableError as err:
+    result.state = gosIndeterminate
+    result.diagnostic = "`git rev-parse --git-path` could not be run in " &
+      repoPath & ": " & err.msg
+    return
+  if res.exitCode != 0:
+    result.state = gosIndeterminate
+    result.diagnostic = "`git rev-parse --git-path` failed in " & repoPath &
+      " (exit " & $res.exitCode & "): " & res.output.strip()
+    return
+  var lines: seq[string]
+  for raw in res.output.splitLines():
+    let line = raw.strip()
+    if line.len > 0:
+      lines.add(line)
+  if lines.len != InFlightGitStatePaths.len:
+    # A `git` that answered a different number of paths than it was asked
+    # about is a `git` whose answers cannot be mapped back onto the names.
+    result.state = gosIndeterminate
+    result.diagnostic = "`git rev-parse --git-path` in " & repoPath &
+      " answered " & $lines.len & " path(s) for " &
+      $InFlightGitStatePaths.len & " name(s)"
+    return
+  for i, name in InFlightGitStatePaths:
+    let resolved =
+      if isAbsolute(lines[i]): lines[i]
+      else: repoPath / lines[i]
+    if fileExists(resolved) or dirExists(resolved):
+      result.state = gosInProgress
+      result.marker = name
+      return
+
+  # No state directory — which does NOT yet mean idle. See
+  # ``InFlightGitReflogActions``: the am-backend rebase's rewind fires this
+  # hook before its state directory exists.
+  #
+  # A reflog that cannot be read is NOT indeterminate. An unborn HEAD (a
+  # fresh `git init`, or a clone of an empty repository — both of which fire
+  # `post-checkout`) exits 128 here, and a repo with `core.logAllRefUpdates`
+  # off exits 0 with nothing. Both are ordinary, answerable states in which
+  # git simply recorded no action, so absence of a reflog is absence of THIS
+  # signal, not absence of an answer; the state paths above already gave one.
+  var reflog: tuple[output: string; exitCode: int]
+  try:
+    reflog = execCmdEx(
+      quoteShell(identity.binaryPath) & " -C " & quoteShell(repoPath) &
+        " reflog show --format=%gs -1 HEAD",
+      options = {poUsePath}, env = scrubbedGitRepositoryEnv())
+  except CatchableError:
+    result.state = gosIdle
+    return
+  if reflog.exitCode == 0:
+    let subject = reflog.output.strip().splitLines()[0].strip()
+    if reflogActionSuggestsOperation(subject):
+      result.state = gosInProgress
+      result.marker = "HEAD reflog: " & subject
+      return
+  result.state = gosIdle
+
+proc managedHookStandDown*(hookName, repoPath: string):
+    tuple[standDown: bool; report: string; loud: bool] =
+  ## The gate every managed ``post-*`` hook passes through before it touches
+  ## anything.
+  ##
+  ## Git fires these hooks for its OWN intermediate steps: `post-checkout`
+  ## once per ref update inside a rebase or a bisect, `post-commit` once per
+  ## commit a rebase or a cherry-pick replays. Those are transient states
+  ## belonging to an operation already in flight, and a hook that writes into
+  ## the working tree, pushes a ref, or — as this one did — runs
+  ## `git checkout <branch>` there is corrupting somebody else's operation.
+  ##
+  ## Git's own hook contract supplies no "am I inside an operation" argument,
+  ## so it is answered the way git answers it for itself: the presence of the
+  ## in-flight state paths (`wt_status_get_state` reads the same names).
+  ##
+  ## Returns ``loud = true`` only for the INDETERMINATE case. An in-flight
+  ## skip is a decision, not a problem, and a 50-commit rebase that printed
+  ## 50 lines would teach its user to stop reading them. A probe that could
+  ## not decide is different: the hook is inert and the operator is told so,
+  ## rather than left to infer it from silence.
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    return (true, hookName & " inert: cannot determine whether a git " &
+      "operation is in progress in " & repoPath & " — git is not " &
+      "resolvable (" & err.msg & "); nothing was inspected or modified",
+      true)
+  let probe = probeGitOperationInProgress(identity, repoPath)
+  case probe.state
+  of gosIdle:
+    (false, "", false)
+  of gosInProgress:
+    (true, hookName & " skipped: a git operation is in progress (" &
+      probe.marker & ") in " & repoPath &
+      "; the workspace is reconciled by the operation's own final " &
+      "checkout, or by `repro workspace migrate`", false)
+  of gosIndeterminate:
+    (true, hookName & " inert: cannot determine whether a git operation " &
+      "is in progress — " & probe.diagnostic &
+      "; nothing was inspected or modified", true)
+
 proc expectedBranchTip(identity: GitToolIdentity;
                        repoPath, branch: string;
                        remoteName: string = "origin"): string =
@@ -35642,6 +35866,15 @@ type
     pcoNoLockFailed      ## Lock writer raised (IO error, VCS query
                          ## failure, missing checkout, ...) and NO lock
                          ## exists.
+    pcoSkippedGitOperation ## Git is mid-rebase / mid-cherry-pick / mid-am /
+                           ## mid-bisect in the repo that fired the hook. The
+                           ## commit this hook saw is one of that operation's
+                           ## intermediate commits, and writing a lock into a
+                           ## working tree its owner has not finished with is
+                           ## how a hook breaks somebody else's rebase.
+    pcoInertGitStateUnknown ## The "is an operation in flight" probe could not
+                            ## answer. The hook did nothing and SAID so — an
+                            ## unanswerable question is not the same as "no".
 
   PostCommitPublication* = enum
     ## Publication state of the record this run wrote, probed WITHOUT any
@@ -35691,6 +35924,8 @@ proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
   of pcoNoLockDirty: "no-lock-dirty-siblings"
   of pcoSkippedNoWorkspace: "skipped-no-workspace"
   of pcoNoLockFailed: "no-lock-failed"
+  of pcoSkippedGitOperation: "skipped-git-operation-in-progress"
+  of pcoInertGitStateUnknown: "inert-git-state-unknown"
 
 proc postCommitPublicationTag(state: PostCommitPublication): string =
   case state
@@ -36360,6 +36595,34 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   report.timestamp = timestamp
   report.exitCode = 0
 
+  # `post-commit` shares `post-checkout`'s exposure: git fires it for EVERY
+  # commit a rebase, a `git am` or a sequencer run replays (observed live,
+  # with `rebase-merge` + `CHERRY_PICK_HEAD` present each time). Everything
+  # below writes `repro.lock` into the working tree and spawns a ref push —
+  # into a tree mid-rebase, on a detached HEAD, for a commit the operation is
+  # about to discard. The post-rebase lock is not lost by standing down: the
+  # pre-push gate refreshes it before anything is published.
+  let postCommitRepo =
+    if parsed.currentRepo.len > 0: parsed.currentRepo
+    else: getCurrentDir()   # the managed hook body cd's to the repo root
+  let standDown = managedHookStandDown("post-commit", postCommitRepo)
+  if standDown.standDown:
+    let anchor =
+      if workspaceRoot.len > 0: workspaceRoot
+      else: enclosingReproShell(parsed.currentRepo)
+    report.workspaceRoot = anchor
+    report.outcome = postCommitOutcomeTag(
+      if standDown.loud: pcoInertGitStateUnknown else: pcoSkippedGitOperation)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
+    report.diagnostic = standDown.report
+    if anchor.len > 0:
+      writePostCommitReport(anchor, report)
+      appendPostCommitLog(anchor,
+        timestamp & " " & report.outcome & " " & report.diagnostic)
+    if standDown.loud:
+      stderr.writeLine("repro " & standDown.report)
+    return 0
+
   # RA-10: no-op outside an initialized workspace. The post-commit hook
   # may be installed under a half-bootstrapped or non-workspace parent —
   # a plain git repo, or a bare ``.repo/`` with no resolved manifest
@@ -36744,14 +37007,23 @@ proc reconcileLocalStateAfterHook(hookName, workspaceRoot,
   ## somebody's git remotes without telling them is not an acceptable thing
   ## for a hook to do quietly, and the log alone is a place nobody looks until
   ## after they are already confused.
+  ##
+  ## The `quiet` half is the mirror image: states the hook OBSERVED and chose
+  ## not to act on, chief among them a detached HEAD, which this arm no longer
+  ## reattaches. They go to the log and not to stderr — the developer detached
+  ## that HEAD themselves, and a hook that reads it back to them after every
+  ## git command is a hook they will turn off.
   if workspaceRoot.len == 0:
     return
   let lines = reconcileLocalStateForHook(workspaceRoot)
-  if lines.len == 0:
+  for line in lines.quiet:
+    appendManifestRefreshLog(timestamp & " " & hookName &
+      " local-state " & line)
+  if lines.loud.len == 0:
     return
   stderr.writeLine("repro " & hookName & ": reconciled workspace-local git " &
     "state against the manifest —")
-  for line in lines:
+  for line in lines.loud:
     stderr.writeLine("  " & line)
     appendManifestRefreshLog(timestamp & " " & hookName &
       " local-state " & line)
@@ -36767,10 +37039,44 @@ proc runManifestRefreshHookCommand*(hookName: string;
   let parsed = parseManifestRefreshArgs(args)
   let timestamp = isoTimestampNow()
 
-  # post-checkout short-circuit: when git reports
+  # post-checkout short-circuit #1 — git's own third argument. The contract
+  # is explicit: ``1`` is a branch checkout, ``0`` is a file checkout
+  # (``git checkout -- <path>``), which retrieves a file from the index and
+  # moves no ref at all. Necessary but NOWHERE NEAR sufficient on its own:
+  # every ref update a rebase performs is a BRANCH checkout and arrives here
+  # with flag ``1``, so this argument cannot see the case that matters.
+  if hookName == "post-checkout" and parsed.positional.len >= 3:
+    if parsed.positional[2] == "0":
+      return 0
+
+  # The discriminator that actually covers the reported case: is git
+  # MID-OPERATION? A rebase, an `am`, a sequencer run and a bisect all fire
+  # these hooks for their own intermediate ref updates, and everything below
+  # this line — the manifest fast-forward and, above all, the local-state
+  # reconciliation — is work done to a working tree its owner has not
+  # finished with. Answered against the repo git fired the hook IN, not the
+  # workspace root: only that checkout knows whether it is mid-rebase.
+  #
+  # Ordered BEFORE the ``prev == new`` inference below on purpose. Both
+  # return 0, but only this one leaves a trace, and the trace is what makes
+  # the decision observable. Measured: a linked-worktree rebase can fire its
+  # first `post-checkout` with ``prev == new``, so the weaker rule would
+  # sometimes swallow the stronger rule's evidence.
+  let hookRepo =
+    if parsed.currentRepo.len > 0: parsed.currentRepo
+    else: getCurrentDir()   # the managed hook body cd's to the repo root
+  let standDown = managedHookStandDown(hookName, hookRepo)
+  if standDown.standDown:
+    appendManifestRefreshLog(timestamp & " " & standDown.report)
+    if standDown.loud:
+      stderr.writeLine("repro " & standDown.report)
+    return 0
+
+  # post-checkout short-circuit #2: when git reports
   # ``<prev-head> <new-head> <flag>`` with ``prev == new``, the
   # participating repo's HEAD did NOT move and the spec says skip
-  # SILENTLY (no log line).
+  # SILENTLY (no log line). An inference rather than a contract, which is
+  # why it is not the thing standing between a rebase and this hook.
   if hookName == "post-checkout" and parsed.positional.len >= 2:
     let prev = parsed.positional[0]
     let newer = parsed.positional[1]
@@ -53055,12 +53361,21 @@ type
     ## attempted and did not succeed. A checkout that needed nothing produces
     ## an entry with all three empty, and the drivers drop it — silence is the
     ## steady state, so a second run reports nothing at all.
+    ##
+    ## `notices` are the fourth kind: states this reconciler observed and
+    ## deliberately does not act on FROM A HOOK, because acting would mean
+    ## moving a ref inside somebody else's git operation. They are recorded
+    ## (the cache log keeps the trace) but never printed to stderr — a
+    ## detached HEAD is a position its owner chose, and narrating it on every
+    ## subsequent git command is how a hook trains people to stop reading it.
+    ## `repro workspace migrate` reports the same states on stdout, on demand.
     name*: string
     path*: string
     changes*: seq[string]
     deferrals*: seq[string]
     remedy*: string
     failures*: seq[string]
+    notices*: seq[string]
 
   WorkspaceLocalStateReport* = object
     ## Structured outcome of one `repro workspace migrate` invocation.
@@ -53089,6 +53404,7 @@ proc toJsonNode*(report: WorkspaceLocalStateReport): JsonNode =
     node["deferrals"] = %entry.deferrals
     node["remedy"] = %entry.remedy
     node["failures"] = %entry.failures
+    node["notices"] = %entry.notices
     repos.add(node)
   result["repos"] = repos
   result["membership"] = %report.membership
@@ -53219,11 +53535,23 @@ proc localStateMayBeStale(workspaceRoot: string; repo: ResolvedRepo): bool =
 
 proc reconcileRepoLocalState(identity: GitToolIdentity;
                              workspaceRoot: string; repo: ResolvedRepo;
-                             dryRun: bool): LocalStateRepoReport =
+                             dryRun: bool;
+                             attachDetachedHead: bool): LocalStateRepoReport =
   ## Reconcile ONE checkout's git remotes and HEAD attachment against its
   ## resolved fragment. Idempotent: every step is expressed as "the observed
   ## state differs from the declared state", so a second run finds no
   ## difference, runs no git command, and reports nothing.
+  ##
+  ## ``attachDetachedHead`` gates the ONE step here that moves HEAD. It is
+  ## true for `repro workspace migrate` — an operator verb, typed on purpose,
+  ## at a moment of the operator's choosing — and false for the managed hook
+  ## arm, which runs inside somebody else's `git checkout`. `git checkout`
+  ## from a `post-checkout` hook is a hook overruling the very operation that
+  ## invoked it, and no amount of in-flight detection makes that the right
+  ## default: the in-flight probe answers "is git busy", while this answers
+  ## "was a human asking". Both have to be true, and only the second is
+  ## knowable from the argv. When it is false the reconciler still SAYS what
+  ## it found, with the verb that would fix it.
   result.name = repo.name
   result.path = repo.path
   let repoAbs = workspaceRoot / repo.path
@@ -53376,6 +53704,18 @@ proc reconcileRepoLocalState(identity: GitToolIdentity;
       repo.name & "', then rerun `repro workspace migrate`"
     return
 
+  if not attachDetachedHead:
+    # The hook arm. A detached HEAD is RECORDED, never corrected: a
+    # `post-checkout` hook that runs `git checkout` is a hook overruling the
+    # operation that invoked it, and the operator who typed `git checkout
+    # <sha>` chose that detachment. A `notice` rather than a `deferral` so the
+    # trace lands in the cache log without stderr narrating somebody's own
+    # detached HEAD back at them after every git command.
+    result.notices.add("HEAD is detached and the fragment declares '" &
+      declared & "'; a hook does not move refs (run `repro workspace " &
+      "migrate` to put '" & repo.path & "' back on '" & declared & "')")
+    return
+
   var blockers = repoRemovalBlockers(identity, repoAbs)
   for extra in detachedHeadOnlyCommits(identity, repoAbs):
     blockers.add(extra)
@@ -53408,18 +53748,23 @@ proc reconcileWorkspaceLocalState*(workspaceRoot: string;
                                    repos: seq[ResolvedRepo];
                                    identity: GitToolIdentity;
                                    dryRun = false;
-                                   prefilter = false):
+                                   prefilter = false;
+                                   attachDetachedHead = true):
     seq[LocalStateRepoReport] =
   ## Reconcile every declared checkout. Only repos with something to say are
   ## returned, so an already-consistent workspace yields an empty seq — which
   ## is what lets the hook stay silent without a second "did anything happen"
   ## test.
+  ##
+  ## ``attachDetachedHead`` defaults to true because the operator verb is this
+  ## proc's reason to exist; the hook arm passes false explicitly.
   for repo in repos:
     if prefilter and not localStateMayBeStale(workspaceRoot, repo):
       continue
-    let entry = reconcileRepoLocalState(identity, workspaceRoot, repo, dryRun)
+    let entry = reconcileRepoLocalState(identity, workspaceRoot, repo, dryRun,
+      attachDetachedHead)
     if entry.changes.len > 0 or entry.deferrals.len > 0 or
-        entry.failures.len > 0:
+        entry.failures.len > 0 or entry.notices.len > 0:
       result.add(entry)
 
 proc unresolvableActiveSetNames(workspaceRoot: string): seq[string] =
@@ -53451,6 +53796,8 @@ proc renderLocalStateTextLines(report: WorkspaceLocalStateReport): seq[string] =
       result.add("  SKIPPED — " & deferral)
     for failure in entry.failures:
       result.add("  FAILED — " & failure)
+    for notice in entry.notices:
+      result.add("  NOTICE — " & notice)
     if entry.remedy.len > 0:
       result.add("  remedy: " & entry.remedy)
   for name in report.membership:
@@ -53551,33 +53898,44 @@ proc runWorkspaceMigrateCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
-proc reconcileLocalStateForHook(workspaceRoot: string): seq[string] =
+proc reconcileLocalStateForHook(workspaceRoot: string):
+    tuple[loud, quiet: seq[string]] =
   ## The `post-merge` arm. Best-effort by construction: every failure path
   ## becomes a log line and NOTHING propagates, because a checkout that could
   ## not be reconciled is a thing to fix later, never a reason for somebody's
   ## `git pull` to fail.
   ##
-  ## Returns one line per checkout that changed or was deferred, and an empty
-  ## seq otherwise. A hook that speaks on every pull teaches its user to stop
-  ## reading it, so the quiet path has to be genuinely quiet.
+  ## ``loud`` is what the developer is told on stderr — mutations that
+  ## happened, and failures. ``quiet`` is recorded in the cache log only.
+  ## Both are empty when there is nothing at all to record, which is what
+  ## lets the hook stay silent without a second "did anything happen" test.
+  ##
+  ## ``attachDetachedHead = false``: the remote realignment stays (that is the
+  ## whole point of doing this on `git pull`), the ref-moving step does not.
+  ## It was the reattachment — `git checkout <declared branch>` fired from
+  ## `post-checkout` during a rebase's detached phase — that landed a topic
+  ## branch's commits on the mainline and reported "Successfully rebased".
   try:
     let resolved = resolveWorkspaceProjectShared(workspaceRoot, "",
       "`repro hooks dispatch post-merge`").resolved
     let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
     for entry in reconcileWorkspaceLocalState(workspaceRoot, resolved.repos,
-        identity, dryRun = false, prefilter = true):
+        identity, dryRun = false, prefilter = true,
+        attachDetachedHead = false):
       for change in entry.changes:
-        result.add(entry.path & ": " & change)
+        result.loud.add(entry.path & ": " & change)
       for deferral in entry.deferrals:
-        result.add(entry.path & ": SKIPPED — " & deferral &
+        result.loud.add(entry.path & ": SKIPPED — " & deferral &
           (if entry.remedy.len > 0: " (remedy: " & entry.remedy & ")" else: ""))
       for failure in entry.failures:
-        result.add(entry.path & ": FAILED — " & failure)
+        result.loud.add(entry.path & ": FAILED — " & failure)
+      for notice in entry.notices:
+        result.quiet.add(entry.path & ": NOTICE — " & notice)
     for name in unresolvableActiveSetNames(workspaceRoot):
-      result.add("active set entry '" & name & "' resolves to no repo-set, " &
-        "project or variant (remedy: `repro ws sets list`)")
+      result.loud.add("active set entry '" & name & "' resolves to no " &
+        "repo-set, project or variant (remedy: `repro ws sets list`)")
   except CatchableError as err:
-    result.add("local-state reconciliation skipped: " & err.msg)
+    result.loud.add("local-state reconciliation skipped: " & err.msg)
 
 proc runWorkspaceDisableCommand*(args: openArray[string]): int =
   ## ``repro workspace disable <project>... [--keep-checkouts] [--force]`` —
