@@ -2640,6 +2640,54 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
     cleanupProcessGroupPaths(testProcess)
   result = (output, TimeoutExitCode, timedOut, timeoutDescription)
 
+const WholeBinarySkipMarker = "[SKIPPED] "
+  ## The console formatter's own status marker for a skipped case
+  ## (``lib/pure/unittest.nim``: ``ConsoleOutputFormatter.testEnded``
+  ## prints ``[", $status, "] ", testName``). This is the ONLY channel a
+  ## whole-binary run has for a skip.
+  ##
+  ## Why there is no other channel. ``unittest``'s result document and
+  ## its exit-code-2 convention both live behind ``protocolMode ==
+  ## pmRun`` — i.e. behind ``--run <case>``. A binary executed whole is
+  ## ``pmDefault``: it writes no document, and its exit code is 1 if any
+  ## case FAILED and 0 otherwise. A skipped case therefore exits 0 and is
+  ## indistinguishable, by exit code alone, from a case that passed.
+  ##
+  ## This is NOT the failure-text sniffing this codebase has been
+  ## removing. It reads the harness's own structured status marker for a
+  ## status it already computed, not free-form diagnostic prose, and it
+  ## can only move an outcome from PASS to SKIP — never from FAIL to
+  ## anything.
+
+proc wholeBinarySkippedCases(output: string): seq[string] =
+  ## Names of the cases a whole-binary run reported as skipped.
+  ##
+  ## Anchored to the start of the (indented) line, because that is where
+  ## the formatter puts the marker: a case inside a ``suite`` is printed
+  ## with a two-space prefix and a suite-less one with none. Anchoring
+  ## rejects a mid-line mention (``… saw "[SKIPPED] foo" …``).
+  ##
+  ## It does NOT reject a line-anchored one. A whole binary that prints
+  ## its own line beginning ``[SKIPPED] `` — most plausibly a test that
+  ## echoes a nested unittest log, which carries the formatter's own
+  ## two-space indent — is read as a skip, and no parse of free-form
+  ## child stdout can tell that apart from the real thing. Measured: a
+  ## one-case fixture that passes and echoes ``  [SKIPPED] x`` is
+  ## reported SKIP.
+  ##
+  ## That residue is bounded by the caller, and bounded on the safe
+  ## side. Only a PASS is ever re-read, so the worst outcome is a
+  ## passing binary reported as skipped — which a zero-skip gate turns
+  ## RED and names. A failure can never be absorbed. Recovering the
+  ## remaining fidelity needs the binary to become enumerable, so that
+  ## the skip arrives on the result-document channel instead of on
+  ## stdout; it does not need a cleverer pattern.
+  result = @[]
+  for rawLine in output.splitLines():
+    let line = rawLine.strip()
+    if line.startsWith(WholeBinarySkipMarker):
+      result.add(line[WholeBinarySkipMarker.len .. ^1].strip())
+
 proc runWholeBinary(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]];
                     testTimeoutSec: int): TestResult =
@@ -2658,6 +2706,16 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
     var childEnv = newStringTable(modeCaseSensitive)
     for (k, v) in baseEnv:
       childEnv[k] = v
+    # The skip census below reads the console formatter's status markers,
+    # so the two knobs that can suppress them are pinned rather than
+    # inherited. ``NIMTEST_OUTPUT_LVL=PRINT_FAILURES`` in an ambient
+    # environment would print nothing for a skipped case and silently
+    # restore the exact blind spot this exists to close;
+    # ``NIMTEST_COLOR=always`` would wrap the marker in escapes. Both
+    # values are ``unittest``'s own defaults for a piped child, so
+    # pinning them changes no output that was already being produced.
+    childEnv["NIMTEST_OUTPUT_LVL"] = "PRINT_ALL"
+    childEnv["NIMTEST_COLOR"] = "never"
     let p = spawnedProcess(tc.binary, args = [], env = childEnv)
     # Past this point the child exists, so a fault is a collection
     # failure and must not be reported as a spawn failure — mislabelling
@@ -2682,6 +2740,22 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
           "child reported harness exit " & $HarnessErrorExitCode &
           " (could not start the test)"
       else: result.status = tsFail
+      if result.status == tsPass:
+        # A whole binary exits 0 whether every case passed or some case
+        # called ``skip()`` — the exit-code-2 skip convention is
+        # ``--run``-only (see ``WholeBinarySkipMarker``). Reporting PASS
+        # here made ``skip=0`` in the run summary mean "no PER-CASE skip",
+        # not "no skip", so a zero-skip gate read green while the console
+        # log carried ``[SKIPPED]`` lines nobody was counting.
+        #
+        # Only PASS is reclassified. A binary that also FAILED stays
+        # FAILED: a skip must never be able to absorb a failure.
+        let skipped = wholeBinarySkippedCases(output)
+        if skipped.len > 0:
+          result.status = tsSkip
+          result.skipReason =
+            "whole-binary run: " & $skipped.len &
+            " unittest case(s) skipped: " & skipped.join(", ")
   except ProcessGroupRefusal as e:
     # A verdict WAS reached: the case leaked processes that outlived
     # bounded cleanup. That is a defect in the tree, so it is FAIL and it

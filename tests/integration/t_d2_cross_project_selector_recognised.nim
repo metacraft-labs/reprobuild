@@ -11,9 +11,18 @@
 ## 2. **Behavioural**. Resolve the declared ``runquota`` workspace member
 ##    (including from a linked reprobuild worktree), then run
 ##    ``./build/bin/repro build runquota:runquotad --tool-provisioning=path
-##    --daemon=off`` and assert the invocation exits cleanly (no usage
-##    dump). When exit code is 0, additionally assert the sibling's
-##    ``../runquota/build/bin/runquotad`` artifact materialises.
+##    --daemon=off`` and assert it succeeds: no usage dump, exit 0, and
+##    the sibling's ``../runquota/build/bin/runquotad`` artifact present
+##    and non-empty afterwards.
+##
+##    ``looksLikeUsageDump`` is an ASSERTION here, not a classifier: it
+##    fires ``check not …`` to name the specific pre-D2 regression shape,
+##    and it can only ever turn a green into a red. It never reclassifies
+##    a failure into a skip, and it does not stand in for the exit-code
+##    assertion, which is made unconditionally. The arm that used to
+##    accept any non-zero exit "as long as it isn't a usage dump" is
+##    gone — under it, a selector that resolved and then built nothing was
+##    indistinguishable from one that worked.
 ##
 ## The B0 ``t_b0_repro_build_runquota_daemon`` test already covers the
 ## end-to-end "binary is executable and responds to ``--version``"
@@ -101,18 +110,21 @@ suite "Deferred Item D2: <pkg>:<target> cross-project selector recognised":
       let (output, exitCode) =
         execCmdEx(cmd, workingDir = reprobuildRoot)
       checkpoint("exit=" & $exitCode)
-      # The pre-D2 failure shape: CLI rejection with usage dump. Even
-      # when the run can't complete (tool-resolution / nim missing /
-      # libclingo issues), the selector must NOT trigger a usage
-      # dump — that's the D2 contract.
+      # The pre-D2 failure shape, named first because it gives the
+      # sharpest diagnosis: a usage dump means the CLI REJECTED
+      # ``runquota:runquotad`` rather than resolving it.
+      if looksLikeUsageDump(output) or exitCode != 0:
+        checkpoint(output)
       check not looksLikeUsageDump(output)
+      # And the build itself. Tolerating a non-zero exit here — the
+      # former "MVP arm" — meant the only thing this case could ever
+      # detect was the usage dump: a selector that resolved and then
+      # failed to build anything reported exactly the same green as one
+      # that built the sibling. D2's contract is that the qualified
+      # selector reaches the sibling project and BUILDS it, so that is
+      # what is asserted.
+      check exitCode == 0
       if exitCode == 0:
-        # Stretch behavioural check — when the build actually
-        # completed, the sibling artifact must exist.
         check fileExists(runquotadBinary)
         if fileExists(runquotadBinary):
           check getFileInfo(runquotadBinary).size > 0
-      else:
-        # MVP arm — exit code != 0 is acceptable as long as it's not
-        # the pre-D2 usage-dump shape. Surface the output for triage.
-        checkpoint(output)

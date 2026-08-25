@@ -10076,6 +10076,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_repro_test_runner_counts_whole_binary_skips.nim",
+    binary: "build/test-bin/t_repro_test_runner_counts_whole_binary_skips",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_repro_test_runner_parallel_n_workers.nim",
     binary: "build/test-bin/t_repro_test_runner_parallel_n_workers",
     defines: @[],

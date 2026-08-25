@@ -1126,6 +1126,7 @@ tests/integration/t_repro_test_reports_no_certificate_with_remedy_when_dirty_or_
 tests/integration/t_repro_test_runner_aggregate_exit_code.nim	nim	2
 tests/integration/t_repro_test_runner_catalog_selection.nim	nim	0
 tests/integration/t_repro_test_runner_consumes_result_document.nim	nim	0
+tests/integration/t_repro_test_runner_counts_whole_binary_skips.nim	nim	2
 tests/integration/t_repro_test_runner_parallel_n_workers.nim	nim	2
 tests/integration/t_repro_test_runner_process_group_cleanup.nim	nim	9
 tests/integration/t_repro_test_runner_relative_results_git_config.nim	nim	1
