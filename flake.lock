@@ -1367,6 +1367,22 @@
         "type": "github"
       }
     },
+    "nim-shm-lease": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1787532379,
+        "narHash": "sha256-iGn2tdtIYKuAMkHOH0XT8KtLx5Fe0eFBXFieJyFgzrk=",
+        "owner": "metacraft-labs",
+        "repo": "nim-shm-lease",
+        "rev": "2e8b66fdd260ed356dca440fe6394e1f56fe0018",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "nim-shm-lease",
+        "type": "github"
+      }
+    },
     "nim-shm-queue-src": {
       "flake": false,
       "locked": {
@@ -2383,13 +2399,33 @@
       }
     },
     "runquota-src": {
-      "flake": false,
+      "inputs": {
+        "flake-parts": [
+          "runquota-src",
+          "nixos-modules",
+          "flake-parts"
+        ],
+        "git-hooks": [
+          "runquota-src",
+          "nixos-modules",
+          "git-hooks-nix"
+        ],
+        "nim-shm-lease": "nim-shm-lease",
+        "nixos-modules": [
+          "nixos-modules"
+        ],
+        "nixpkgs": [
+          "runquota-src",
+          "nixos-modules",
+          "nixpkgs-unstable"
+        ]
+      },
       "locked": {
-        "lastModified": 1782279680,
-        "narHash": "sha256-xFJ30wKib5O1KLgiGchzCF3G4rPsEEsx8DdQoJxzEzM=",
+        "lastModified": 1787618104,
+        "narHash": "sha256-93KLZF8xbw+MSF8Xxthe20IlZbCQcIpkdyJF/bSESEI=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "aa3a30182ec11be9bc703f8b5b6fcf5a2ab625c4",
+        "rev": "b71e8e9061b479334d9b78638cfb828af2db938d",
         "type": "github"
       },
       "original": {
