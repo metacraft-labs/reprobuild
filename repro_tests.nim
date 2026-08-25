@@ -8318,6 +8318,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_microarch_lives_in_the_key_not_the_namespace.nim",
+    binary: "build/test-bin/t_microarch_lives_in_the_key_not_the_namespace",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim",
     binary: "build/test-bin/t_migrate_leaves_a_pinned_checkout_on_its_pin",
     defines: @[],
