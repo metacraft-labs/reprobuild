@@ -155,14 +155,18 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
 
     let read1 = MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
       osPid: 1, threadId: 1, path: "/a.h", detail: "")
+    # The ``run=<id>`` stamp is what `stampRunId` appends to every Linux
+    # record; these details are the shape a real RMDF carries, not a
+    # simplified one. See the classifier suite's "the detail shape a REAL
+    # RMDF carries" case for why that distinction is load-bearing.
     let closeRange = MonitorRecord(kind: mrEventLoss,
       observationKind: moEventLoss,
       osPid: 1, threadId: 1,
-      detail: "libc raw syscall unsupported nr=436")
+      detail: "libc raw syscall unsupported nr=436 run=1787695082.5534084")
     let getPid = MonitorRecord(kind: mrEventLoss,
       observationKind: moEventLoss,
       osPid: 1, threadId: 1,
-      detail: "libc raw syscall unsupported nr=39")
+      detail: "libc raw syscall unsupported nr=39 run=1787695082.5534084")
 
     let encoded = encodeCanonical(@[read1, closeRange, getPid])
     writeFile(rmdfPath, cast[string](encoded))
@@ -192,7 +196,7 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
     let closeRange = MonitorRecord(kind: mrEventLoss,
       observationKind: moEventLoss,
       osPid: 1, threadId: 1,
-      detail: "libc raw syscall unsupported nr=436")
+      detail: "libc raw syscall unsupported nr=436 run=1787695082.5534084")
     let subtreeLoss = MonitorRecord(kind: mrEventLoss,
       observationKind: moEventLoss,
       osPid: 0, threadId: 0,

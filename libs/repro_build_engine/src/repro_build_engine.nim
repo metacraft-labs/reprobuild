@@ -2439,12 +2439,13 @@ proc benignRawSyscallLoss*(detail: string): bool =
   ## model are handled by ``classifyRawFileSyscall``; everything else falls
   ## through to ``recordRawSyscallClassification``, which emits
   ##
-  ##     "libc raw syscall unsupported nr=<N>"       (libc wrapper route)
-  ##     "inline raw syscall unsupported nr=<N>"     (inline-trap route)
+  ##     "libc raw syscall unsupported nr=<N> run=<id>"    (libc wrapper route)
+  ##     "inline raw syscall unsupported nr=<N> run=<id>"  (inline-trap route)
   ##
   ## (io-mon ``src/io_mon/shim/linux_preload.nim``, ``rawSyscallSourceName`` +
-  ## ``recordRawSyscallClassification``.) The detail string carries the syscall
-  ## NUMBER and nothing else — no arguments, no fds, no paths.
+  ## ``recordRawSyscallClassification``, then ``stampRunId`` on the way out of
+  ## ``emitRecord``.) Beyond the syscall NUMBER and the run stamp the detail
+  ## carries nothing — no arguments, no fds, no paths.
   ##
   ## Such a record means "the shim saw a syscall it does not model", which is
   ## only a correctness problem when the syscall in question could open, read,
@@ -2539,22 +2540,56 @@ proc benignRawSyscallLoss*(detail: string): bool =
     "libc raw syscall unsupported nr=",
     "inline raw syscall unsupported nr=",
   ]
+  # THE NUMBER IS NOT THE END OF THE STRING. Every record the Linux shim
+  # emits passes through ``stampRunId`` (io-mon ``linux_preload.nim``),
+  # which appends a whitespace-separated ``run=<id>`` token to ``detail``.
+  # A real RMDF therefore carries
+  #
+  #     "libc raw syscall unsupported nr=436 run=1787695082.5534084"
+  #
+  # not "…nr=436". A first cut of this classifier required the remainder
+  # after the prefix to be a bare decimal and so matched nothing a real
+  # build ever produces: every synthetic unit test passed and the edge it
+  # was written to rescue kept re-executing. Parse the remainder as
+  # whitespace-separated FIELDS — field 0 is the syscall number, and each
+  # remaining field must be a stamping token named below.
+  #
+  # The trailing-token list is an allowlist for the same reason the number
+  # table is. A token this classifier has not reasoned about could carry
+  # meaning, so an unrecognised one fails closed. The cost of a future
+  # io-mon stamp landing here is cache loss, not unsoundness — and that is
+  # the direction this whole classifier is required to err in.
+  const BenignTrailingTokenPrefixes = [
+    "run=",   # linux_preload.nim `stampRunId` / macos_interpose.nim
+  ]
   for prefix in RawSyscallUnsupportedPrefixes:
     if not detail.startsWith(prefix):
       continue
-    let digits = detail[prefix.len .. ^1]
+    let fields = detail[prefix.len .. ^1].splitWhitespace()
+    if fields.len == 0:
+      # "nr=" with nothing after it.
+      return false
+    for i in 1 ..< fields.len:
+      var recognised = false
+      for tokenPrefix in BenignTrailingTokenPrefixes:
+        # ``len > tokenPrefix.len`` rejects a valueless "run=", which is
+        # not a shape the stamper produces.
+        if fields[i].startsWith(tokenPrefix) and fields[i].len > tokenPrefix.len:
+          recognised = true
+          break
+      if not recognised:
+        return false
     # Require a bare unsigned decimal, which is the only shape io-mon's
     # ``$number`` produces. ``parseInt`` alone is not enough: it accepts a
     # leading '+' or '-', so "nr=+436" would otherwise reach the allowlist.
     # A detail shape this classifier has not reasoned about fails closed.
-    for ch in digits:
+    for ch in fields[0]:
       if ch notin {'0' .. '9'}:
         return false
     var number: int64
     try:
-      # Rejects the empty remainder ("nr=") and any value too large for
-      # ``int``; both fail closed.
-      number = int64(parseInt(digits))
+      # Rejects any value too large for ``int``; fails closed.
+      number = int64(parseInt(fields[0]))
     except ValueError:
       return false
     return number in BenignRawSyscallNumbers
@@ -2648,13 +2683,17 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
     return mesUnknownScopeLoss
   # Benign raw-syscall class (Level 0). What makes this arm unable to downgrade
   # a recognised loss class is that the two prefixes it matches are disjoint
-  # from every prefix above — not its position, which is defensive only.
-  # (Mutation-checked: moving this arm to the front of the chain changes no
-  # observable behaviour.) The property that actually keeps a mixed RMDF
-  # fail-closed lives one level up, in ``foldMonitorDepFileEvidence``'s
-  # ``worseMonitorStatus`` fold, and is pinned by
-  # ``test_m9r72_phaseD_end_to_end.nim``'s "benign raw syscall does not rescue
-  # an RMDF that also lost a subtree".
+  # from every prefix above — not its position, which is defensive only. (No
+  # prefix in the const block above is a prefix of "libc raw syscall
+  # unsupported nr=" or "inline raw syscall unsupported nr=", nor the reverse,
+  # so the dispatch order over this chain is not observable.)
+  #
+  # The property that actually keeps a mixed RMDF fail-closed lives one level
+  # up, in ``foldMonitorDepFileEvidence``'s ``worseMonitorStatus`` fold, and is
+  # pinned by ``test_m9r72_phaseD_end_to_end.nim``'s "benign raw syscall does
+  # not rescue an RMDF that also lost a subtree". THIS suite cannot see that
+  # property: inverting the fold leaves every classifier check green
+  # (mutation-verified) while the phase-D case fails.
   if benignRawSyscallLoss(detail):
     return mesComplete
   # Unknown detail — fail closed conservatively.

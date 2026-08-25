@@ -120,6 +120,52 @@ suite "M9.R.72.3 monitor-loss classifier":
       check classifyEventLossDetail(
         "libc raw syscall unsupported nr=172") == mesComplete
 
+  test "the detail shape a REAL RMDF carries classifies as Level 0":
+    # THE REGRESSION THIS SUITE ORIGINALLY MISSED.
+    #
+    # Every record the Linux shim emits goes through `stampRunId`
+    # (io-mon `linux_preload.nim`), which appends a whitespace-separated
+    # `run=<id>` token to `detail`. The strings below are copied verbatim
+    # out of
+    #   .repro/build/repro/build-engine-cache/monitor-depfiles/
+    #     reprobuild.test_execute.t_zero_output_edge_is_cacheable.rdep
+    # produced by a real `repro build '.#test#t_zero_output_edge_is_cacheable'`
+    # on this host. The first version of `benignRawSyscallLoss` required the
+    # remainder after `nr=` to be a bare decimal, so it matched NONE of them:
+    # every synthetic case above passed while the edge this class was written
+    # to rescue kept re-executing on every build.
+    #
+    # A synthetic detail string is not evidence about a real RMDF. Keep at
+    # least one case here that is a byte-for-byte capture.
+    when defined(linux) and defined(amd64):
+      check classifyEventLossDetail(
+        "libc raw syscall unsupported nr=436 run=1787695082.5534084") ==
+        mesComplete
+      check classifyEventLossDetail(
+        "libc raw syscall unsupported nr=39 run=1787695082.5534084") ==
+        mesComplete
+      check classifyEventLossDetail(
+        "inline raw syscall unsupported nr=436 run=1787695082.5534084") ==
+        mesComplete
+      # The run stamp must not launder a number that is NOT on the allowlist.
+      check classifyEventLossDetail(
+        "libc raw syscall unsupported nr=257 run=1787695082.5534084") ==
+        mesUnknownScopeLoss
+
+  test "unrecognised trailing tokens fail closed":
+    # The trailing-token list is an allowlist for the same reason the number
+    # table is: a token this classifier has not reasoned about could carry
+    # meaning. A future io-mon stamp landing here costs cache, not soundness.
+    check classifyEventLossDetail(
+      "libc raw syscall unsupported nr=436 run=17.5 diag-ctx=[phase=init]") ==
+      mesUnknownScopeLoss
+    check classifyEventLossDetail(
+      "libc raw syscall unsupported nr=436 nr=257 run=17.5") ==
+      mesUnknownScopeLoss
+    # A valueless stamp is not a shape the stamper produces.
+    check classifyEventLossDetail(
+      "libc raw syscall unsupported nr=436 run=") == mesUnknownScopeLoss
+
   test "raw syscall numbers outside the allowlist still fail closed":
     # The allowlist is an allowlist, not an inversion of the default. Every
     # number that has not been individually justified stays Level 2.
