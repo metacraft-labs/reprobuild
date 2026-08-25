@@ -573,6 +573,36 @@
               pass_filenames = false;
               always_run = true;
             };
+            # The vacuous-case gate, at the same PUSH boundary and for the
+            # same reasons as the case-count baseline above.
+            #
+            # A test case whose only assertion is `check true` reports [OK]
+            # and increments the pass count, so it is invisible to every
+            # downstream signal -- the suite, the summary, the coverage
+            # numbers. It is strictly worse than a skip, which this repo
+            # already refuses, because a skip is at least counted. Running
+            # the suite cannot find one; only a source scan can, and this
+            # one costs seconds.
+            hooks.vacuous-test-cases = {
+              enable = true;
+              name = "no test case asserts only `check true`";
+              stages = [ "pre-push" ];
+              entry = "${pkgs.writeShellScript "reprobuild-check-vacuous-test-cases" ''
+                export PATH=${
+                  pkgs.lib.makeBinPath [
+                    pkgs.bash
+                    pkgs.coreutils
+                    pkgs.git
+                    pkgs.gnugrep
+                    pkgs.python3
+                  ]
+                }:$PATH
+                exec ${pkgs.python3}/bin/python3 scripts/check_vacuous_test_cases.py
+              ''}";
+              language = "system";
+              pass_filenames = false;
+              always_run = true;
+            };
           };
           reprobuildSource = ./.;
           runtimeLibraries = [
