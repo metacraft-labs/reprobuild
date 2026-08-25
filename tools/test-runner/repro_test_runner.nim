@@ -3038,7 +3038,120 @@ const
     ## the case's own result document keep every line; this bound exists
     ## so one pathological case cannot bury the other 6800 in the log.
 
+  DefaultHeartbeatIntervalSec = 60
+    ## How often the heartbeat restates where the run is. Sixty seconds is
+    ## short enough that a stall is visible within a minute and long enough
+    ## that a multi-hour log gains a couple of hundred lines, not thousands.
+    ## Override with ``REPRO_TEST_RUNNER_HEARTBEAT_SEC`` when watching a run
+    ## interactively (and so the runner's own regression can observe a
+    ## heartbeat without waiting a minute for one).
+
+  HeartbeatIntervalEnv = "REPRO_TEST_RUNNER_HEARTBEAT_SEC"
+
+  HeartbeatPollMs = 250
+    ## Sleep granularity of the heartbeat thread. It wakes often so the run
+    ## can join it promptly at the end; it only PRINTS once per configured
+    ## interval (see ``heartbeatIntervalSec``).
+
+# ---------------------------------------------------------------------------
+# Live progress ledger
+# ---------------------------------------------------------------------------
+#
+# A full run takes hours, and until this existed the only progress signal was
+# the per-case line: no denominator, no elapsed, no running failure count, and
+# nothing at all while a single slow case held a worker. A run that hit the
+# outer ``timeout`` therefore yielded NOTHING a reader could act on — the
+# summary JSON is written once, at the end, so a killed run had neither a
+# summary nor any way to tell 20% done from 90% done.
+#
+# Everything below goes to STDERR. Stdout is the machine-readable side of the
+# runner's contract (``--list-json`` catalogs and anything a caller pipes), so
+# human progress must never be written there.
+var
+  progressTotal: Atomic[int]
+    ## Cases scheduled for this run. Published once, before the first case.
+  progressDone: Atomic[int]
+  progressFailed: Atomic[int]
+    ## Failures AND harness errors: from the console's point of view both are
+    ## "this run is not going to be green", which is what a reader watching a
+    ## long run needs to know without waiting for the summary.
+  progressActive: Atomic[int]
+  progressStartEpoch: float
+  heartbeatStop: Atomic[bool]
+
+proc formatElapsed(seconds: float): string =
+  let total = int(seconds)
+  let h = total div 3600
+  let m = (total mod 3600) div 60
+  let s = total mod 60
+  if h > 0:
+    $h & "h" & align($m, 2, '0') & "m" & align($s, 2, '0') & "s"
+  else:
+    $m & "m" & align($s, 2, '0') & "s"
+
+proc progressPrefix(done, total: int): string =
+  ## ``[123/1183 10%]`` — the denominator is the whole point: a bare running
+  ## count cannot distinguish a run that is nearly finished from one that has
+  ## barely started.
+  if total > 0:
+    "[" & $done & "/" & $total & " " & $(done * 100 div total) & "%] "
+  else:
+    "[" & $done & "] "
+
+proc emitHeartbeat() =
+  let done = progressDone.load(moRelaxed)
+  let total = progressTotal.load(moRelaxed)
+  let failed = progressFailed.load(moRelaxed)
+  let active = progressActive.load(moRelaxed)
+  let elapsed = epochTime() - progressStartEpoch
+  var msg = "repro_test_runner: " & progressPrefix(done, total) &
+    "elapsed=" & formatElapsed(elapsed) &
+    " running=" & $active & " failed=" & $failed
+  if done > 0 and total > done:
+    # A projection, explicitly labelled as one. It assumes the remaining
+    # cases cost what the finished ones did, which they will not exactly —
+    # but "about two more hours" is the difference between waiting and
+    # killing the run, and that judgement is impossible without a number.
+    let projected = elapsed / done.float * (total - done).float
+    msg.add(" eta~" & formatElapsed(projected))
+  msg.add("\n")
+  stderr.write(msg)
+  stderr.flushFile()
+
+proc heartbeatIntervalSec(): int =
+  ## A non-numeric or non-positive override is ignored rather than treated as
+  ## "off": losing the heartbeat is exactly the failure mode it exists to
+  ## remove, so it must not be switchable by a typo.
+  let configured = getEnv(HeartbeatIntervalEnv, "")
+  if configured.len == 0:
+    return DefaultHeartbeatIntervalSec
+  try:
+    let parsed = parseInt(configured)
+    if parsed > 0: parsed else: DefaultHeartbeatIntervalSec
+  except ValueError:
+    DefaultHeartbeatIntervalSec
+
+proc heartbeatMain(intervalSec: int) {.thread.} =
+  ## Restates the ledger on a fixed interval so a run that is slow, stalled or
+  ## about to be killed by the outer ``timeout`` still says where it got to.
+  ## Without it a single long case (the suite has one worth ~81 minutes) makes
+  ## the log indistinguishable from a wedge.
+  var sinceLastMs = 0
+  while not heartbeatStop.load(moAcquire):
+    sleep(HeartbeatPollMs)
+    sinceLastMs += HeartbeatPollMs
+    if sinceLastMs >= intervalSec * 1000:
+      sinceLastMs = 0
+      if not heartbeatStop.load(moAcquire):
+        emitHeartbeat()
+
 proc emitProgress(quiet: bool; res: TestResult) =
+  # The ledger is maintained even under ``--quiet``: the heartbeat and the
+  # end-of-run accounting must not depend on whether per-case lines are being
+  # printed, or a quiet run would report zero progress.
+  let done = progressDone.fetchAdd(1, moRelaxed) + 1
+  if res.status in {tsFail, tsHarnessError}:
+    discard progressFailed.fetchAdd(1, moRelaxed)
   if quiet:
     return
   let label = "[" & $res.status & "]"
@@ -3060,7 +3173,8 @@ proc emitProgress(quiet: bool; res: TestResult) =
   # ``writeLine`` calls would interleave with other workers' lines at
   # ``--threads=8`` and stop being readable as a unit — which is the same
   # way the diagnosis gets lost that this block exists to prevent.
-  var msg = label & " " & name & " (" & $res.durationMs & "ms)" &
+  var msg = progressPrefix(done, progressTotal.load(moRelaxed)) &
+    label & " " & name & " (" & $res.durationMs & "ms)" &
     reason & "\n"
   if res.statusDisagreement.len > 0:
     msg.add("  ! protocol disagreement: " & res.statusDisagreement & "\n")
@@ -3110,6 +3224,7 @@ proc workerLoop(args: WorkerArgs) =
     if not nextCase(args.queue, args.failFast, tc):
       break
     discard atomicInc(args.activeCount[])
+    discard progressActive.fetchAdd(1, moRelaxed)
     var res: TestResult
     # Defence in depth: ``runOneProtocol`` and ``runWholeBinary`` both
     # catch the spawn-time ``OSError``/``IOError`` paths internally,
@@ -3134,6 +3249,7 @@ proc workerLoop(args: WorkerArgs) =
         harnessError: "worker exception: " & e.msg,
         stdout: "repro_test_runner: worker exception: " & e.msg & "\n")
     discard atomicDec(args.activeCount[])
+    discard progressActive.fetchSub(1, moRelaxed)
 
     acquire(args.resultsLock[])
     args.results[].add(res)
@@ -3376,7 +3492,12 @@ proc parseArgs(): RunnerOpts =
           result.testTimeoutSec = 0
       of "help", "h":
         echo "repro_test_runner — protocol-level parallel test runner"
-        echo "  --threads N         worker count (default $NPROC)"
+        # The old text said "default $NPROC". It never was: an absent or
+        # non-positive --threads has always been clamped to 1 twenty lines
+        # below. Callers that want a host-derived value compute it themselves
+        # (scripts/test_parallelism.sh), which is where the nested-build
+        # budget lives.
+        echo "  --threads N         worker count (default 1)"
         echo "  --bin-dir DIR       scan DIR for test binaries"
         echo "  --no-build          skip ``repro build test`` step"
         echo "  --summary-json P    write per-run JSON summary to P"
@@ -3392,7 +3513,8 @@ proc parseArgs(): RunnerOpts =
         echo "                      hashes cover compiled sources only, " &
           "not data files read at run"
         echo "                      time, env vars or external tools"
-        echo "  --quiet             suppress per-test progress lines"
+        echo "  --quiet             suppress per-test progress lines " &
+          "(the periodic heartbeat stays)"
         echo "  --test-timeout=N    per-test idle timeout; output resets it, " &
           "as does process-group CPU"
         echo "                      progress (so a CPU-starved test is not " &
@@ -3696,6 +3818,11 @@ proc main() =
       stderr.writeLine "repro_test_runner: hash-difference selection " &
         "deselected 0 cases (catalog unusable)"
 
+  # Publish the denominator BEFORE the first case runs. Every progress line
+  # from here on carries "done of total", which is the difference between a
+  # log a reader can act on and one that only says work is happening.
+  progressTotal.store(totalCases, moRelaxed)
+
   var resultsLock: Lock
   initLock(resultsLock)
   var results: seq[TestResult] = @[]
@@ -3786,6 +3913,12 @@ proc main() =
     var interruptThread = startInterruptWaiter()
 
   let wallT0 = epochTime()
+  progressStartEpoch = wallT0
+  # Started before the exclusive phase, not before the worker pool: the
+  # exclusive cases are the slowest in the suite and run one at a time, so
+  # they are exactly the stretch where the log would otherwise go quiet.
+  var heartbeatThread: Thread[int]
+  createThread(heartbeatThread, heartbeatMain, heartbeatIntervalSec())
   var exclusiveFailed = false
 
   if exclusiveItems.len > 0 and not (failFast and queue.failFastTriggered):
@@ -3793,6 +3926,7 @@ proc main() =
       when defined(posix):
         if interruptedSignal.load(moAcquire) != 0:
           break
+      discard progressActive.fetchAdd(1, moRelaxed)
       var res: TestResult
       try:
         if tc.protocolAware:
@@ -3809,6 +3943,7 @@ proc main() =
           harnessError: "exclusive worker exception: " & e.msg,
           stdout: "repro_test_runner: exclusive worker exception: " &
             e.msg & "\n")
+      discard progressActive.fetchSub(1, moRelaxed)
       results.add(res)
       emitProgress(opts.quiet, res)
       if failFast and res.status in {tsFail, tsHarnessError}:
@@ -3835,6 +3970,11 @@ proc main() =
   for i in 0 ..< nThreads:
     createThread(threads[i], workerMain, args)
   joinThreads(threads)
+
+  # Joined before the cleanup barrier below so no heartbeat line can interleave
+  # with the fatal-cleanup diagnostics or the final summary.
+  heartbeatStop.store(true, moRelease)
+  joinThread(heartbeatThread)
 
   when defined(posix):
     # `interruptedSignal` is stored before the waiter starts cleanup. Retaining

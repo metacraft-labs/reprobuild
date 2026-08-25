@@ -57,7 +57,7 @@
 ## already does). That is a known wart tracked by the "graph-owned test
 ## artifacts" milestone; it is not new debt introduced here.
 
-import std/[json, os, osproc, strutils, times, unittest]
+import std/[json, os, osproc, strutils, tempfiles, times, unittest]
 
 const RepoMarker = "repro.nim"
 
@@ -147,9 +147,17 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
-proc compileFixture(src, bin, source: string) =
+proc compileFixture(src, bin, source, nimcache: string) =
+  # ``--nimcache`` inside this process's own work directory. Without it Nim
+  # derives the cache from the fixture's NAME (``~/.cache/nim/<stem>_r``),
+  # and all three arms of this file compile all three fixtures — as separate
+  # processes, concurrently, under any ``--threads`` above one. They then
+  # overwrite each other's object files and the link fails with undefined
+  # references to symbols another arm was mid-way through rewriting, which
+  # this file reported as a failure of the liveness behaviour under test.
   writeFile(src, source)
-  let cmd = "nim c -d:release --hints:off --warnings:off --out:" &
+  let cmd = "nim c -d:release --hints:off --warnings:off " &
+    "--nimcache:" & quoteShell(nimcache) & " --out:" &
     quoteShell(bin) & " " & quoteShell(src)
   let (output, exitCode) = execCmdEx(cmd)
   if exitCode != 0:
@@ -215,10 +223,21 @@ proc readCase(tests: JsonNode; stem: string): CaseFindings =
 
 proc runFixtures(): RunFindings =
   let repoRoot = findRepoRoot()
-  let tmpDir = getTempDir() / "reprobuild_runner_cpu_progress_liveness"
-  if dirExists(tmpDir):
-    removeDir(tmpDir)
-  createDir(tmpDir)
+  # A UNIQUE directory, not a fixed name under $TMPDIR.
+  #
+  # The three behavioural cases in this file are three separate PROCESSES —
+  # the runner executes protocol-aware cases one per ``--run`` — and each of
+  # them calls this proc. With a fixed path the first thing each process did
+  # was ``removeDir`` the directory the others were compiling into, so at any
+  # ``--threads`` above one the arms deleted each other's fixtures and
+  # reported "cannot open t_cpu_liveness_working.nim" / "cannot open output
+  # file" as a FAILURE of the runner behaviour under test. Observed at
+  # --threads=4: one arm lost on one run, all three on the next.
+  #
+  # ``mkdtemp`` gives each process its own namespace, so the arms are
+  # independent by construction rather than by luck of scheduling. Every
+  # assertion is unchanged.
+  let tmpDir = createTempDir("reprobuild_runner_cpu_progress_liveness-", "")
   defer:
     try:
       removeDir(tmpDir)
@@ -234,7 +253,7 @@ proc runFixtures(): RunFindings =
       "t_cpu_liveness_wedged": WedgedFixtureSource,
       "t_cpu_liveness_livelock": LivelockFixtureSource}.items:
     compileFixture(tmpDir / (stem & ".nim"), binDir / addFileExt(stem, ExeExt),
-      source)
+      source, tmpDir / "nimcache" / stem)
 
   let summaryPath = tmpDir / "summary.json"
   let runnerCmd = @[
