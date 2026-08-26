@@ -34936,15 +34936,15 @@ proc parsePostCommitArgs(args: openArray[string]):
 # post-commit process exiting.
 #
 #   * POSIX: a new session via ``setsid ... &`` with stdio to /dev/null.
-#   * Windows (RA-19): a detached child via ``cmd /c start /b "" ...``
-#     with stdio to NUL — ``start /b`` launches the re-invoked
-#     ``repro hooks cache-push`` without a new window and returns
-#     immediately, so the commit is never blocked.
+#   * Windows (W4): a SHELL-FREE detached child — ``CreateProcessW`` with
+#     ``DETACHED_PROCESS`` and stdio bound to ``NUL``. No ``cmd.exe``, no
+#     ``start /b``. See ``spawnDetachedNoShell`` below for why the shell
+#     route is not merely inelegant but unusable here.
 #
-# The DECISION (which detach mechanism + command line for a given OS) is
+# The DECISION (which detach mechanism + child argv for a given OS) is
 # factored into the pure ``cachePushSpawnCommand`` below so it is
-# computable and assertable on any host; only the actual ``execShellCmd``
-# launch is platform-guarded.
+# computable and assertable on any host; only the actual launch is
+# platform-guarded.
 
 type
   WorkspaceTargetOs* = enum
@@ -34957,46 +34957,55 @@ type
 
   CachePushSpawnSpec* = object
     ## The fully-resolved, platform-parameterized spec for the detached
-    ## post-commit cache push. ``shellInvocation`` is the command handed to
-    ## the host shell; ``detach`` names the mechanism (for diagnostics /
-    ## tests). Empty ``shellInvocation`` means "nothing to launch".
+    ## post-commit cache push. ``detach`` names the mechanism (for
+    ## diagnostics / tests).
+    ##
+    ## ``argv`` is the child's REAL argument vector and is the single
+    ## "is there anything to launch?" signal on every target: empty argv
+    ## means nothing to do. ``shellInvocation`` is populated ONLY where a
+    ## shell is genuinely the detach mechanism — i.e. POSIX. On Windows it
+    ## is deliberately EMPTY, because there is no correct Windows shell
+    ## string to build here and leaving a plausible-looking one in the
+    ## record is how the next caller re-acquires the W4 defect.
     targetOs*: WorkspaceTargetOs
-    detach*: string            ## e.g. "setsid&" (POSIX) / "start /b" (Win)
-    shellInvocation*: string   ## the command string for the host shell
+    detach*: string            ## "setsid&" (POSIX) / "CreateProcess:detached"
+    argv*: seq[string]         ## the child's argv; empty ⇒ nothing to launch
+    shellInvocation*: string   ## POSIX shell command; EMPTY on wtWindows
 
 proc cachePushSpawnCommand*(targetOs: WorkspaceTargetOs;
                             exePath, repoRoot, workspaceName: string):
                             CachePushSpawnSpec =
   ## PURE decision function: given a target OS and the re-invocation
-  ## arguments, build the detached-spawn command for the post-commit eager
-  ## cache push. No process is launched here — callers feed
-  ## ``shellInvocation`` to the host shell under a platform guard.
+  ## arguments, build the detached-spawn plan for the post-commit eager
+  ## cache push. No process is launched here.
   ##
   ##   * ``wtPosix``  → ``setsid <repro hooks cache-push …> </dev/null
-  ##                    >/dev/null 2>&1 &`` (new session, fully detached).
-  ##   * ``wtWindows``→ ``cmd /c start /b "" <repro hooks cache-push …>
-  ##                    >NUL 2>&1`` (no new window, returns immediately).
+  ##                    >/dev/null 2>&1 &`` (new session, fully detached),
+  ##                    fed to ``sh -c``. ``quoteShell`` on POSIX IS the
+  ##                    ``sh`` quoting convention, so the round trip is
+  ##                    lossless and the shell earns its place.
+  ##   * ``wtWindows``→ NO shell string at all: the caller spawns ``argv``
+  ##                    directly with ``CreateProcessW`` +
+  ##                    ``DETACHED_PROCESS`` (``spawnDetachedNoShell``).
+  ##                    ``cmd.exe`` cannot round-trip a ``quoteShell``ed
+  ##                    command line — see W4 and the long comment on
+  ##                    ``spawnDetachedNoShell``.
   ##
-  ## Returns an empty ``shellInvocation`` when ``workspaceName`` or
-  ## ``exePath`` is empty (nothing to push / no re-invokable binary).
+  ## Returns an empty ``argv`` when ``workspaceName`` or ``exePath`` is
+  ## empty (nothing to push / no re-invokable binary).
   result.targetOs = targetOs
   if workspaceName.len == 0 or exePath.len == 0:
     return
-  let childArgs = shellCommand(@[exePath, "hooks", "cache-push",
-    "--repo-root", repoRoot, "--workspace-name", workspaceName])
+  result.argv = @[exePath, "hooks", "cache-push",
+    "--repo-root", repoRoot, "--workspace-name", workspaceName]
   case targetOs
   of wtPosix:
     result.detach = "setsid&"
     result.shellInvocation =
-      "setsid " & childArgs & " </dev/null >/dev/null 2>&1 &"
+      "setsid " & shellCommand(result.argv) & " </dev/null >/dev/null 2>&1 &"
   of wtWindows:
-    # ``start /b`` (via ``cmd /c``) launches the child without a console
-    # window and returns immediately, detaching it from the post-commit
-    # process. The empty ``""`` is ``start``'s title argument (required so
-    # a quoted exe path is not mistaken for the title). Stdio → NUL.
-    result.detach = "start /b"
-    result.shellInvocation =
-      "start /b \"\" " & childArgs & " >NUL 2>&1"
+    result.detach = "CreateProcess:detached"
+    result.shellInvocation = ""
 
 proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
   ## Resolve the workspace's project repos in the best-effort post-commit /
@@ -35146,18 +35155,121 @@ proc runCachePushCommand*(args: openArray[string]): int =
     discard
   0
 
+when defined(windows):
+  proc spawnDetachedNoShell*(argv: openArray[string]): bool =
+    ## Launch ``argv`` as a fully detached Windows child — no console, no
+    ## window, no shell, stdio bound to ``NUL`` — and return WITHOUT
+    ## waiting for it. Returns false when the child could not be started.
+    ##
+    ## WHY THIS EXISTS AND WHY IT DOES NOT USE ``cmd.exe`` (W4)
+    ## -------------------------------------------------------
+    ## Windows offers exactly one shell-level detach, ``cmd /c start /b ""
+    ## <child>``, and its mandatory empty title argument puts a literal
+    ## ``"`` inside a string that ``cmd.exe`` must re-parse. Nim's
+    ## ``quoteShell`` is ``quoteShellWindows``, which escapes an embedded
+    ## ``"`` as ``\"`` — the ``CommandLineToArgvW`` / C-runtime
+    ## convention. ``cmd.exe`` DOES NOT IMPLEMENT THAT CONVENTION: it
+    ## treats ``\`` as an ordinary character and toggles its quote state
+    ## on the following ``"``. The title therefore arrived as ``\"\"``,
+    ## cmd's quote state broke, two ``cmd.exe`` generations sat alive at
+    ## ~0 CPU indefinitely, the child was never started, and the caller —
+    ## the real git ``post-commit`` hook — blocked on them. A ``git
+    ## commit`` in a hooked Windows workspace hung.
+    ##
+    ## The mismatch is a CLASS, not one bad character. ``quoteShellWindows``
+    ## quotes on whitespace only, so every other ``cmd`` metacharacter —
+    ## ``&``, ``^``, ``|``, ``<``, ``>``, ``(``, ``)``, ``%VAR%`` — reaches
+    ## a cmd command line bare, and all of them are legal in an NTFS path.
+    ## Dropping the ``quoteShell`` would have fixed the one observed hang
+    ## and left the rest of the class armed.
+    ##
+    ## So the fix is to stop asking a shell to re-parse a command line:
+    ##
+    ##   * ``CreateProcessW`` consumes ``quoteShellWindows``'s convention,
+    ##     which is ITS OWN convention — correct by construction, for
+    ##     spaces (``C:\Program Files\…``) and metacharacters alike.
+    ##   * ``DETACHED_PROCESS`` gives a child with no console and no
+    ##     window, which is what ``start /b`` was being asked for.
+    ##   * Three inheritable ``NUL`` handles give the stdio redirection
+    ##     ``>NUL 2>&1`` was there for, so the child cannot write into the
+    ##     commit's output and cannot die on a broken pipe.
+    ##
+    ## ``lpApplicationName`` is passed explicitly as well as ``argv[0]`` in
+    ## the command line, so ``CreateProcessW``'s space-probing search of an
+    ## unquoted first token never applies.
+    ##
+    ## Handle inheritance is left at the process-wide default (the NUL
+    ## handles must be inherited, which requires ``bInheritHandles``).
+    ## That matches what ``osproc.startProcess`` — every other child spawn
+    ## in this codebase — already does, and what the ``cmd`` route did
+    ## before it; narrowing it would need a ``PROC_THREAD_ATTRIBUTE_``
+    ## ``HANDLE_LIST`` here and nowhere else, which is inconsistency
+    ## without safety.
+    if argv.len == 0:
+      return false
+
+    var commandLine = ""
+    for i, arg in argv:
+      if i > 0:
+        commandLine.add(' ')
+      commandLine.add(quoteShellWindows(arg))
+
+    var inheritable = SECURITY_ATTRIBUTES(
+      nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
+      lpSecurityDescriptor: nil,
+      bInheritHandle: 1)
+    let nulName = newWideCString("NUL")
+    let shareMode = DWORD(FILE_SHARE_READ or FILE_SHARE_WRITE)
+    let nulIn = createFileW(nulName, DWORD(GENERIC_READ), shareMode,
+      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
+    let nulOut = createFileW(nulName, DWORD(GENERIC_WRITE), shareMode,
+      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
+    let nulErr = createFileW(nulName, DWORD(GENERIC_WRITE), shareMode,
+      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
+    defer:
+      for handle in [nulIn, nulOut, nulErr]:
+        if handle != INVALID_HANDLE_VALUE and handle != Handle(0):
+          discard closeHandle(handle)
+    if nulIn == INVALID_HANDLE_VALUE or nulOut == INVALID_HANDLE_VALUE or
+        nulErr == INVALID_HANDLE_VALUE:
+      return false
+
+    var startup = STARTUPINFO()
+    startup.cb = int32(sizeof(STARTUPINFO))
+    startup.dwFlags = STARTF_USESTDHANDLES
+    startup.hStdInput = nulIn
+    startup.hStdOutput = nulOut
+    startup.hStdError = nulErr
+
+    var spawned = PROCESS_INFORMATION()
+    var applicationName = newWideCString(argv[0])
+    var mutableCommandLine = newWideCString(commandLine)
+    let created = createProcessW(applicationName, mutableCommandLine,
+      nil, nil, 1, DETACHED_PROCESS, nil, nil, startup, spawned)
+    if created == 0:
+      return false
+    # Neither handle is waited on: the point is detachment. Closing them
+    # releases OUR references; the child keeps running.
+    discard closeHandle(spawned.hThread)
+    discard closeHandle(spawned.hProcess)
+    true
+
 proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   ## Fire a detached, fire-and-forget cache-ref push and return
   ## immediately so the originating commit is never blocked. The child
   ## re-invokes ``repro hooks cache-push`` detached from the parent.
   ## Best-effort: any failure to even launch the child is swallowed.
   ##
-  ## The command itself is computed by the pure ``cachePushSpawnCommand``
-  ## (POSIX ``setsid … &`` vs Windows ``start /b``); only the host-shell
+  ## The plan is computed by the pure ``cachePushSpawnCommand``; only the
   ## launch is platform-guarded.
   ##   * POSIX: ``sh -c "setsid … &"`` — new session, stdio to /dev/null.
-  ##   * Windows (RA-19): ``cmd /c "start /b …"`` — no new window, returns
-  ##     immediately, stdio to NUL.
+  ##     ``quoteShell`` on POSIX IS ``sh``'s own quoting convention, so
+  ##     the shell round trip is lossless and the shell is doing real work
+  ##     (``setsid`` + the ``&`` background fork).
+  ##   * Windows (W4): ``CreateProcessW`` + ``DETACHED_PROCESS`` with
+  ##     stdio to ``NUL``, straight from ``spec.argv``. No shell is
+  ##     involved, so no quoting convention has to survive a second
+  ##     parser. See ``spawnDetachedNoShell``.
   if workspaceName.len == 0:
     return
   let myExe = getAppFilename()
@@ -35168,11 +35280,11 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   else:
     const targetOs = wtPosix
   let spec = cachePushSpawnCommand(targetOs, myExe, repoRoot, workspaceName)
-  if spec.shellInvocation.len == 0:
+  if spec.argv.len == 0:
     return
   try:
     when defined(windows):
-      discard execShellCmd("cmd /c " & q(spec.shellInvocation))
+      discard spawnDetachedNoShell(spec.argv)
     else:
       discard execShellCmd("sh -c " & q(spec.shellInvocation))
   except CatchableError:
@@ -50580,6 +50692,32 @@ proc windowsProvisioningPlan*(installRoot: string;
     # installRoot) is put on $env:PATH for this PowerShell session.
     activateCommand: ". " & q(installRoot & "\\env.ps1"))
 
+when defined(windows):
+  proc runPowerShellCommand(command: string): int =
+    ## Run one PowerShell ``-Command`` string, inheriting the operator's
+    ## stdio, and return its exit code (``-1`` if it could not be started).
+    ##
+    ## The ``-Command`` payload is passed as a REAL argv element, not
+    ## spliced into a shell command line. It used to be
+    ## ``execShellCmd("powershell -NoProfile -Command " & quoteShell(cmd))``,
+    ## which is the W4 defect in its second habitat: ``execShellCmd`` is C
+    ## ``system()``, i.e. ``cmd /c <string>``, and ``quoteShell`` on Windows
+    ## escapes an embedded ``"`` as ``\"`` — a convention ``cmd.exe`` does
+    ## not implement. The install commands DO embed quotes as soon as the
+    ## install root contains a space (``q(toolDir)`` above), which is the
+    ## ``%LOCALAPPDATA%`` of any account whose user name has one, so the
+    ## quoted install root reached PowerShell mangled. ``startProcess``
+    ## hands the argv to ``CreateProcessW`` under ``CreateProcessW``'s own
+    ## quoting rules, and no second parser ever sees the string.
+    try:
+      let child = startProcess("powershell",
+        args = @["-NoProfile", "-Command", command],
+        options = {poUsePath, poParentStreams})
+      result = child.waitForExit()
+      child.close()
+    except CatchableError:
+      result = -1
+
 proc runWorkspaceProvisionCommand*(args: openArray[string]): int =
   ## ``repro workspace provision`` — ensure the host toolchain and activate
   ## the workspace env. On Linux/macOS this is a no-op (the Nix devShell /
@@ -50613,15 +50751,12 @@ proc runWorkspaceProvisionCommand*(args: openArray[string]): int =
       stdout.writeLine("repro workspace provision: ensuring " & step.tool)
       # Run the idempotent check; install only when it fails. Best-effort
       # per tool — a failed ensure is reported, not fatal to the others.
-      let checkRc = execShellCmd("powershell -NoProfile -Command " &
-        q(step.checkCommand))
+      let checkRc = runPowerShellCommand(step.checkCommand)
       if checkRc != 0:
-        discard execShellCmd("powershell -NoProfile -Command " &
-          q(step.installCommand))
+        discard runPowerShellCommand(step.installCommand)
     stdout.writeLine("repro workspace provision: activating env via " &
       plan.activation.activateCommand)
-    discard execShellCmd("powershell -NoProfile -Command " &
-      q(plan.activation.activateCommand))
+    discard runPowerShellCommand(plan.activation.activateCommand)
     return 0
   else:
     # POSIX hosts get their toolchain from the Nix devShell / scaffolded

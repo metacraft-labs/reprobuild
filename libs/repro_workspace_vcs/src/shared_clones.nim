@@ -474,7 +474,18 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
   if not looksLikeGitDir(sharedBarePath):
     return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
       diagnostic: "shared bare missing for cache-push: " & sharedBarePath)
-  let cacheRef = "refs/cache" / workspaceName / useBranch
+  # A git ref name is NOT a filesystem path: its separator is '/' on every
+  # platform, including Windows. Nim's ``/`` is ``DirSep``-aware, so building
+  # this with it produced ``refs\cache\<ws>\<branch>`` on Windows — ``joinPath``
+  # rewrites the ``/`` already inside the left operand too, so the WHOLE ref
+  # name came back backslashed — and git rejected the push with
+  # ``fatal: invalid refspec``. The push is best-effort
+  # and the caller discards its result, so the whole RA-5 cache-ref mechanism
+  # was a silent no-op on Windows — found while proving W4's detached child
+  # actually runs. The readers below (``cacheRefWorkspaces``,
+  # ``pruneDeadCacheRefs``) already split on '/', so this is the one site that
+  # disagreed with the rest of the file.
+  let cacheRef = "refs/cache/" & workspaceName & "/" & useBranch
   # ``HEAD:<cacheRef>`` pushes whatever the working tree currently has
   # checked out; the cache ref is the destination in the bare.
   let res = runGit(gitBin,

@@ -8022,6 +8022,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_post_commit_dispatch_returns_and_detached_push_lands.nim",
+    binary: "build/test-bin/t_post_commit_dispatch_returns_and_detached_push_lands",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_post_commit_publishes_evidence_and_excludes_from_cache_push.nim",
     binary: "build/test-bin/t_post_commit_publishes_evidence_and_excludes_from_cache_push",
     defines: @[],
