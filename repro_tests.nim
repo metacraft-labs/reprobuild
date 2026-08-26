@@ -7596,6 +7596,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/packaging/t_m0_packaging_layer_deb_rpm_tarball.nim",
+    binary: "build/test-bin/t_m0_packaging_layer_deb_rpm_tarball",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/path-only/t_path_only_tool_interfaces.nim",
     binary: "build/test-bin/t_path_only_tool_interfaces",
     defines: @[],
