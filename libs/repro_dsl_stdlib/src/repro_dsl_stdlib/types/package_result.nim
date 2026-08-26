@@ -391,7 +391,8 @@ proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
   ## ``<recipeRoot>/<depName>/.repro/output/install/usr/lib``. The
   ## returned strings are POSIX-style with forward slashes so the
   ## emitted shell script does not need additional escaping. Order is
-  ## (nativeBuildDeps, then buildDeps) in source-declaration order —
+  ## (nativeBuildDeps, then buildDeps, then runtimeDeps) in
+  ## source-declaration order —
   ## deterministic across runs.
   ##
   ## **Direct-only** — this helper enumerates ONLY the package's
@@ -409,6 +410,8 @@ proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
     m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
   for raw in registeredBuildDeps(packageName):
     m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
+  for raw in registeredRuntimeDeps(packageName):
+    m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
 
 # ---------------------------------------------------------------------------
 # M9.R.30.2 — transitive RPATH propagation via per-recipe manifest file.
@@ -417,9 +420,8 @@ proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
 # The architectural gap surfaced by M9.R.29 (DE binaries' RPATH missing
 # transitive libs — sway → wlroots → libdrm gap; kwin → libz; mutter →
 # libGLESv2; plasmashell → libmount) was that ``m9r14fCollectDepMirrorLibDirs``
-# walks only DIRECT buildDeps + nativeBuildDeps. The recipes'
-# ``runtimeDeps:`` blocks all carry the M9.R.5b TODO (empty `discard`)
-# so they cannot serve as the propagation channel.
+# previously walked only DIRECT buildDeps + nativeBuildDeps. Runtime
+# dependencies now use the same direct and propagated-library channels.
 #
 # M9.R.30.2 closes the gap with the same mechanism Nix uses for
 # ``propagatedBuildInputs``: each recipe's install-mirror writes a
@@ -456,7 +458,8 @@ proc m9r30CollectDepPropagatedManifestPaths*(projectRoot, packageName: string):
   ## that hasn't been built yet contributes nothing) and folds every
   ## line into the consumer's RPATH.
   ##
-  ## Order: (nativeBuildDeps, then buildDeps) in source-declaration
+  ## Order: (nativeBuildDeps, then buildDeps, then runtimeDeps) in
+  ## source-declaration
   ## order — same as ``m9r14fCollectDepMirrorLibDirs`` so the resulting
   ## RPATH preserves a deterministic "direct first, then propagated"
   ## structure.
@@ -477,6 +480,8 @@ proc m9r30CollectDepPropagatedManifestPaths*(projectRoot, packageName: string):
   for raw in registeredNativeBuildDeps(packageName):
     appendManifestPath(result, raw)
   for raw in registeredBuildDeps(packageName):
+    appendManifestPath(result, raw)
+  for raw in registeredRuntimeDeps(packageName):
     appendManifestPath(result, raw)
 
 proc m9r30ReadPropagatedLibDirs*(manifestPaths: openArray[string]):
@@ -1691,6 +1696,10 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     if dep.len > 0 and dep notin mirrorToolRefs:
       mirrorToolRefs.add(dep)
   for raw in registeredBuildDeps(packageName):
+    let dep = m9r14fStripDepConstraint(raw)
+    if dep.len > 0 and dep notin mirrorToolRefs:
+      mirrorToolRefs.add(dep)
+  for raw in registeredRuntimeDeps(packageName):
     let dep = m9r14fStripDepConstraint(raw)
     if dep.len > 0 and dep notin mirrorToolRefs:
       mirrorToolRefs.add(dep)

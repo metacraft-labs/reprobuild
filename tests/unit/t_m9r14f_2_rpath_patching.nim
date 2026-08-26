@@ -40,6 +40,7 @@
 
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
+import repro_project_dsl
 import repro_dsl_stdlib/types/package_result
 
 suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
@@ -84,6 +85,20 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", deps)
     for dep in deps:
       check script.contains(dep)
+
+  test "runtime dependencies contribute mirror libraries and manifests":
+    const packageName = "m9r14fRuntimeDependencyConsumer"
+    registerPackageDep(packageName, "runtime", "gcc >=11")
+
+    let libDirs = m9r14fCollectDepMirrorLibDirs(
+      "/recipes/cmake", packageName)
+    check "/recipes/gcc/.repro/output/install/usr/lib" in libDirs
+    check "/recipes/gcc/.repro/output/install/usr/lib64" in libDirs
+
+    let manifests = m9r30CollectDepPropagatedManifestPaths(
+      "/recipes/cmake", packageName)
+    check manifests == @[
+      "/recipes/gcc/.repro/output/install/.m9r30_propagated_libdirs.txt"]
 
   test "emitted_script_is_deterministic_idempotent":
     let deps = @[
