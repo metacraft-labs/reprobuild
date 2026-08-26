@@ -45,6 +45,7 @@ import std/[json, os, osproc, posix, streams, strutils, tempfiles, times,
 import repro_test_support
 
 import runquota_client
+import runquota_core
 import runquota_protocol
 
 const
@@ -55,6 +56,10 @@ const
     ## branch from outside. Reaching it by editing the counter, or by
     ## asserting the flag on a store that never lost anything, would be the
     ## vacuity this campaign keeps finding.
+  ContradictoryStatsKey = "m18_contradictory_execution"
+    ## The stats id of the execution the daemon refuses to store. Named so
+    ## the arm below can assert the row's ABSENCE by key rather than by a
+    ## count that a differently-shaped store could also satisfy.
 
 proc repoRoot(): string = getCurrentDir()
 
@@ -254,7 +259,19 @@ proc lossTotal(socketPath: string): int64 =
     root{"write_failures"}.getBiggestInt(0) +
     root{"rejected"}.getBiggestInt(0) +
     root{"extension_rows_refused"}.getBiggestInt(0) +
-    root{"deferred_batches_refused"}.getBiggestInt(0)
+    root{"deferred_batches_refused"}.getBiggestInt(0) +
+    root{"executions_contradictory"}.getBiggestInt(0)
+
+proc contradictoryCount(socketPath: string): int64 =
+  ## The ONE counter the contradiction arm below is about, read on its own
+  ## so that arm can say WHICH loss moved rather than only that the total
+  ## did — a total that also moves for five other reasons would let an
+  ## implementation reading any one of them pass.
+  putEnv("RUNQUOTA_SOCKET", socketPath)
+  var client = connectDefault()
+  defer: client.close()
+  let root = parseJson(client.inspectionJson("observations")){"observations"}
+  root{"executions_contradictory"}.getBiggestInt(0)
 
 proc injectCountedLoss(socketPath: string) =
   ## Offer the daemon a row for an extension nobody declared. The daemon
@@ -276,6 +293,52 @@ proc waitForLossAtLeast(socketPath: string; atLeast: int64): int64 =
   let deadline = epochTime() + 15.0
   while epochTime() < deadline:
     result = lossTotal(socketPath)
+    if result >= atLeast:
+      return
+    sleep(100)
+
+proc injectContradictoryExecution(socketPath: string) =
+  ## Finish a real lease with a finish that contradicts its own evidence:
+  ## a resource-limit KILL claim (``hardLimitOrOom``) beside ``exit_status
+  ## = 0`` and no signal. The daemon refuses to store the row — an
+  ## immutable row asserting both that a process was killed for exceeding a
+  ## bound and that it exited successfully is unfalsifiable — and counts
+  ## the loss under ``executions_contradictory``.
+  ##
+  ## THE CLIENT IS NEVER TOLD, and that is the point. Refusing
+  ## ``LeaseFinished`` is not available to the daemon: it is how the
+  ## authority learns the resources are free, so an error in its place
+  ## would strand the lease. The finish is therefore ACKNOWLEDGED, this
+  ## proc returns normally, and the counter is the only surface on which
+  ## the whole missing execution exists.
+  ##
+  ## A LOSS A WELL-BEHAVED CLIENT CANNOT PRODUCE, like the undeclared
+  ## extension row above: ``RunQuotaLease.finish`` cross-validates
+  ## ``outcome`` against ``hardLimitOrOom`` nowhere, so this needs no
+  ## forged frame — one argument list on the public API reaches it.
+  putEnv("RUNQUOTA_SOCKET", socketPath)
+  var client = connectDefault()
+  defer: client.close()
+  var session = client.registerSession("m18-contradiction-injector", "0.1.0")
+  var request = resourceRequest("m18-contradiction", milliCpu(1000),
+    bytes(64'u64 * 1024'u64 * 1024'u64))
+  request.commandStatsId = ContradictoryStatsKey
+  var lease = session.requestLease(request)
+  doAssert lease.active
+  lease.markStarting()
+  lease.markRunning(childProcessId = uint64(getCurrentProcessId()))
+  lease.finish(outcome = leaseFinishFailed, exitCode = 0'u32, signal = 0'u32,
+    peakMemoryBytes = 1_000'u64, processCount = 1'u32,
+    hardLimitOrOom = true)
+  lease.release()
+  session.closeSession()
+
+proc waitForContradictoryAtLeast(socketPath: string; atLeast: int64): int64 =
+  ## Same shape as ``waitForLossAtLeast``: a MONOTONIC counter, polled for a
+  ## minimum.
+  let deadline = epochTime() + 15.0
+  while epochTime() < deadline:
+    result = contradictoryCount(socketPath)
     if result >= atLeast:
       return
     sleep(100)
@@ -459,6 +522,104 @@ suite "M18 repro stats reads the shared store":
       let statusText = statsText(projectRoot, socketPath, ["status"])
       check statusText.contains("INCOMPLETE")
       check statusText.contains("extension-rows-refused=")
+
+    test "a window thinned by a refused CONTRADICTORY execution is INCOMPLETE too":
+      # THE SAME OS-2 CLAUSE, REACHED BY THE LOSS THE VIEW DID NOT READ.
+      #
+      # `runquotad` refuses to store an execution whose own evidence
+      # disagrees with itself, acknowledges the finish anyway (refusing it
+      # would strand the lease), and counts the whole missing execution
+      # under `executions_contradictory`. That counter is a SIXTH loss key,
+      # and a client summing only the other five renders a store that has
+      # silently lost an entire execution as `complete`. OS-2 forbids
+      # exactly that: a thinned sample must never be presentable as whole,
+      # because statistics over a silently truncated window read as
+      # authoritative.
+      #
+      # THIS ARM IS DELIBERATELY NOT A LINE IN THE ARM ABOVE. Folded in
+      # there, the extension-row refusal would already have driven the
+      # window to `incomplete` and the assertion would hold on a client
+      # that never read this key at all — the state would be right for the
+      # wrong reason. Here the contradictory execution is the ONLY loss in
+      # the store, so `incomplete` is reachable only by reading it.
+      let tempRoot = createTempDir("repro-m18-contra", "")
+      let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
+      let socketRoot = getTempDir() / ("rq-m18c-" & $getCurrentProcessId())
+      removeDir(socketRoot)
+      createDir(socketRoot)
+      let socketPath = rendezvousDir(socketRoot) / "d.sock"
+      let stateDir = socketRoot / "state"
+      createDir(stateDir)
+      var daemon = startRunQuotaDaemon(socketPath, stateDir / "host-id")
+      defer:
+        daemon.stop()
+        putEnv("RUNQUOTA_SOCKET", previousSocket)
+        removeDir(socketRoot)
+        removeDir(tempRoot)
+
+      let projectRoot = tempRoot / "project"
+      writeCopyProject(projectRoot, "m18Contra", 2)
+      discard runBuild(projectRoot, tempRoot, "work-1", socketPath)
+      let before = waitForActionRows(projectRoot, socketPath, 2)
+
+      # DIRECTION ONE, AND IT IS NOT DECORATION. An implementation that
+      # reports every window `incomplete` — including one that added the
+      # sixth counter to the total but read it as a constant, or that
+      # tripped `incomplete` off `known` rather than off a count — passes
+      # the second half of this arm and is worthless. Every counter is
+      # zero here, and the window must say `complete`.
+      check before{"window"}{"state"}.getStr() == "complete"
+      check before{"window"}{"complete"}.getBool(false)
+      check before{"window"}{"loss"}{"known"}.getBool(false)
+      check before{"window"}{"loss"}{"total"}.getBiggestInt(-1) == 0
+      check before{"window"}{"loss"}{"contradictoryExecutions"}
+        .getBiggestInt(-1) == 0
+      let renderedRows = before{"rows"}.len
+      let renderedSamples = before{"window"}{"sampleCount"}.getInt(0)
+      check renderedRows >= 2
+      check renderedSamples >= 2
+
+      # NON-VACUITY, ASSERTED BEFORE THE INJECTION. The five older counters
+      # are all zero, so anything that changes below changed because of the
+      # contradictory execution and nothing else.
+      check lossTotal(socketPath) == 0
+
+      injectContradictoryExecution(socketPath)
+      check waitForContradictoryAtLeast(socketPath, 1) >= 1
+
+      let after = actionRank(projectRoot, socketPath)
+      let window = after{"window"}
+      # DIRECTION TWO: the same store, one whole execution poorer.
+      check window{"state"}.getStr() == "incomplete"
+      check not window{"complete"}.getBool(true)
+      check window{"loss"}{"contradictoryExecutions"}.getBiggestInt(0) >= 1
+      # AND IT IS COUNTED IN THE TOTAL. A field carried beside the total but
+      # left out of it renders "INCOMPLETE: 0 observations counted lost",
+      # which tells a reader the sample is thinned and then denies it.
+      check window{"loss"}{"total"}.getBiggestInt(0) >= 1
+      # THE OTHER FIVE DID NOT MOVE, so the state above cannot be explained
+      # by any loss except this one.
+      check window{"loss"}{"dropped"}.getBiggestInt(-1) == 0
+      check window{"loss"}{"writeFailures"}.getBiggestInt(-1) == 0
+      check window{"loss"}{"rejected"}.getBiggestInt(-1) == 0
+      check window{"loss"}{"extensionRowsRefused"}.getBiggestInt(-1) == 0
+      check window{"loss"}{"deferredBatchesRefused"}.getBiggestInt(-1) == 0
+
+      # THE EXECUTION REALLY IS MISSING, not merely counted. The spine holds
+      # exactly what it held before the injection: the refusal cost a whole
+      # row, which is why the loss had to be visible somewhere at all.
+      check window{"sampleCount"}.getInt(-1) == renderedSamples
+      check after{"rows"}.len == renderedRows
+      # And the figures are still rendered — "incomplete" labels a sample,
+      # it does not suppress one.
+      check window{"available"}.getBool(false)
+
+      # The human surface says it too, and names the counter. A reader who
+      # does not pass --json is the one most likely to read the numbers as
+      # authoritative.
+      let statusText = statsText(projectRoot, socketPath, ["status"])
+      check statusText.contains("INCOMPLETE")
+      check statusText.contains("contradictory-executions=1")
 
     test "a scope the shared store cannot answer says so instead of ranking nothing":
       # THE HONEST-DEGRADATION CLAUSE. RunQuota's spine has no reprobuild

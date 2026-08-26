@@ -7502,6 +7502,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_finish_outcome_reaches_the_spine.nim",
+    binary: "build/test-bin/t_finish_outcome_reaches_the_spine",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim",
     binary: "build/test-bin/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source",
     defines: @[],
@@ -8217,7 +8225,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     source: "tests/integration/t_m21_point_in_time_queries.nim",
     binary: "build/test-bin/t_m21_point_in_time_queries",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),

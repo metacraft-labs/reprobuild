@@ -108,6 +108,19 @@ type
     extensionRowsRefused*: int64
       ## ``ext_repro_action`` rows the daemon would not store. Same shape.
     deferredBatchesRefused*: int64
+    contradictoryExecutions*: int64
+      ## WHOLE EXECUTIONS the daemon refused to store because the finish
+      ## that reported them contradicted its own evidence -- a kill claim
+      ## beside ``exit_status = 0``. The daemon acknowledges the finish
+      ## anyway (refusing ``LeaseFinished`` would strand the lease), so the
+      ## client believes it reported an execution the store does not hold,
+      ## and this counter is the ONLY place that loss is visible.
+      ##
+      ## COUNTED SEPARATELY FROM ``rejected`` for the reason the daemon
+      ## keeps the two keys apart: ``rejected`` is a refused SAMPLE of a
+      ## live execution, this is the execution itself. Both are losses, so
+      ## both enter ``totalLost`` -- a window thinned by either one is
+      ## thinned, and OS-2 does not grade thinning by cause.
 
   SharedActionRow* = object
     ## One ``ext_repro_action`` row with the spine context RunQuota joined
@@ -146,6 +159,19 @@ type
       ## as one whose sample size is not stated: on a shared host a
       ## host-wide window silently includes other users' builds, and a
       ## reader who cannot see that reads it as this project's.
+      ##
+      ## THERE IS NO ``spanApplied`` HERE, AND THAT IS A FINDING RATHER
+      ## THAN AN OVERSIGHT. ``scopeApplied`` is carried because the daemon
+      ## CAN disagree with the request — the estimate path widens an owner
+      ## scope to host and says so — so the answer carries information the
+      ## request does not. ``spanApplied`` cannot: ``ProfileSpan`` and
+      ## ``ProfileSpanWire`` are ordinal-identical two-value enums, the
+      ## daemon sets the field to ``request.span.toStore.toWire``, and
+      ## nothing anywhere overrides it. A field carried on that basis would
+      ## be the REQUEST wearing the answer's clothes — worse than absent,
+      ## because a reader takes "applied" for a daemon-confirmed fact.
+      ## Host qualification is genuinely carried, by ``profiles`` (OS-6),
+      ## which is derived from the ROWS and is rendered on every surface.
     endpoint*: string
     captureEnabled*: bool
     storePath*: string
@@ -189,7 +215,8 @@ proc totalLost*(loss: SharedStoreLoss): int64 =
   if not loss.known:
     return 0
   loss.dropped + loss.writeFailures + loss.rejected +
-    loss.extensionRowsRefused + loss.deferredBatchesRefused
+    loss.extensionRowsRefused + loss.deferredBatchesRefused +
+    loss.contradictoryExecutions
 
 proc sampleCount*(view: SharedStoreView): int =
   ## The number of SPINE rows the figures were computed over. Reported
@@ -297,6 +324,7 @@ proc lossJson*(loss: SharedStoreLoss): JsonNode =
     "rejected": loss.rejected,
     "extensionRowsRefused": loss.extensionRowsRefused,
     "deferredBatchesRefused": loss.deferredBatchesRefused,
+    "contradictoryExecutions": loss.contradictoryExecutions,
     "total": loss.totalLost
   }
 
@@ -369,6 +397,8 @@ proc parseLoss(payload: string): SharedStoreLoss =
       root{"extension_rows_refused"}.getBiggestInt(0)
     result.deferredBatchesRefused =
       root{"deferred_batches_refused"}.getBiggestInt(0)
+    result.contradictoryExecutions =
+      root{"executions_contradictory"}.getBiggestInt(0)
   except CatchableError:
     result = SharedStoreLoss()
 
