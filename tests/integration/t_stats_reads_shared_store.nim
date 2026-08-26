@@ -45,6 +45,7 @@ import std/[json, os, osproc, posix, streams, strutils, tempfiles, times,
 import repro_test_support
 
 import runquota_client
+from runquota_ipc import sendFrame, receiveFrame
 import runquota_core
 import runquota_protocol
 
@@ -290,24 +291,25 @@ proc waitForLossAtLeast(socketPath: string; atLeast: int64): int64 =
     sleep(100)
 
 proc injectContradictoryExecution(socketPath: string) =
-  ## Finish a real lease with a finish that contradicts its own evidence:
-  ## a resource-limit KILL claim (``hardLimitOrOom``) beside ``exit_status
-  ## = 0`` and no signal. The daemon refuses to store the row — an
-  ## immutable row asserting both that a process was killed for exceeding a
-  ## bound and that it exited successfully is unfalsifiable — and counts
-  ## the loss under ``executions_contradictory``.
+  ## Finish a real lease with BYTES that claim a kill and evidence none:
+  ## ``oom_killed`` beside ``exit_status = 0`` and no signal. The daemon
+  ## refuses the frame — an immutable row asserting both that a process
+  ## was killed for exceeding a bound and that it exited successfully is
+  ## unfalsifiable — and counts the loss under
+  ## ``executions_contradictory``, which is the surface this test reads.
   ##
-  ## THE CLIENT IS NEVER TOLD, and that is the point. Refusing
-  ## ``LeaseFinished`` is not available to the daemon: it is how the
-  ## authority learns the resources are free, so an error in its place
-  ## would strand the lease. The finish is therefore ACKNOWLEDGED, this
-  ## proc returns normally, and the counter is the only surface on which
-  ## the whole missing execution exists.
+  ## A FORGED FRAME, WHICH IT DID NOT USED TO NEED. ``RunQuotaLease
+  ## .finish`` once took the outcome and the kill evidence as separate
+  ## defaulted parameters and cross-validated neither, so one argument
+  ## list on the public API reached this state. It takes a ``LeaseFinish``
+  ## now, which has nowhere to put a kill with no evidence, so the only
+  ## remaining producer of these bytes is something that never went
+  ## through a constructor — a peer on an older major version, or this.
   ##
-  ## A LOSS A WELL-BEHAVED CLIENT CANNOT PRODUCE, like the undeclared
-  ## extension row above: ``RunQuotaLease.finish`` cross-validates
-  ## ``outcome`` against ``hardLimitOrOom`` nowhere, so this needs no
-  ## forged frame — one argument list on the public API reaches it.
+  ## THE LEASE IS RELEASED EXPLICITLY. The daemon answers with an error
+  ## rather than an ack, so the lease is still ``running`` and still holds
+  ## capacity; a supervising client that read that error would release,
+  ## and so does this.
   putEnv("RUNQUOTA_SOCKET", socketPath)
   var client = connectDefault()
   defer: client.close()
@@ -319,9 +321,25 @@ proc injectContradictoryExecution(socketPath: string) =
   doAssert lease.active
   lease.markStarting()
   lease.markRunning(childProcessId = uint64(getCurrentProcessId()))
-  lease.finish(outcome = leaseFinishFailed, exitCode = 0'u32, signal = 0'u32,
-    peakMemoryBytes = 1_000'u64, processCount = 1'u32,
-    hardLimitOrOom = true)
+  var payload = encodeLeaseFinished(LeaseFinishedMessage(
+    sessionId: session.id,
+    leaseId: lease.id,
+    finish: oomKilled(killedWithExitCode(137'u32)),
+    peakMemoryBytes: 1_000'u64,
+    processCount: 1'u32,
+    diagnostic: okDiagnostic()))
+  # The exit-status word follows the two ids and the kind, so zeroing it
+  # leaves the kill claim with nothing to support it.
+  const ExitStatusAt = 8 + 8 + 4
+  doAssert payload[ExitStatusAt] == char(137)
+  for i in 0 ..< 4:
+    payload[ExitStatusAt + i] = '\0'
+  inc client.nextRequestId
+  client.connection.sendFrame(encodeFrame(rqLeaseFinished, FrameFlagRequest,
+    client.nextRequestId, payload))
+  var answer: RqspFrame
+  doAssert client.connection.receiveFrame(answer)
+  doAssert answer.header.messageKind == rqError
   lease.release()
   session.closeSession()
 
@@ -539,7 +557,7 @@ suite "M18 repro stats reads the shared store":
       let socketRoot = getTempDir() / ("rq-m18c-" & $getCurrentProcessId())
       removeDir(socketRoot)
       createDir(socketRoot)
-      let socketPath = rendezvousDir(socketRoot) / "d.sock"
+      let socketPath = runquotaRendezvousDir(socketRoot) / "d.sock"
       let stateDir = socketRoot / "state"
       createDir(stateDir)
       var daemon = startRunQuotaDaemon(socketPath, stateDir / "host-id")

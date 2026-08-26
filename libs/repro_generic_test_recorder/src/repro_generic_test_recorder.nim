@@ -246,7 +246,7 @@ proc finishExecution*(recorder: ptr GenericTestRecorder;
                       process: GenericTestOutcomeProcess) =
   ## Close the lease with the facts the spine row is composed from.
   ##
-  ## NO ``leaseFinishResourceLimit`` ARM, and its absence is deliberate:
+  ## NO ``lfOomKilled`` ARM, and its absence is deliberate:
   ## this runner enforces no memory ceiling, so it never KNOWS a kill was
   ## an OOM. Reporting one would put a guess where ``ct_test_history``
   ## puts an observation, and ``termination = oom_killed`` would stop
@@ -255,17 +255,22 @@ proc finishExecution*(recorder: ptr GenericTestRecorder;
     return
   acquire(recorder.lock)
   try:
+    let status = uint32(max(process.exitCode, 0))
+    let signal = uint32(max(process.signal, 0))
     testLease.lease.finish(
       outcome =
-        if process.launchFailed: leaseFinishLaunchFailed
-        elif process.signalled: leaseFinishCrashed
-        elif process.exitCode != 0: leaseFinishFailed
-        else: leaseFinishSucceeded,
-      exitCode = uint32(max(process.exitCode, 0)),
-      signal = uint32(max(process.signal, 0)),
+        # A CRASH NAMES ITS SIGNAL OR IT IS NOT ONE. ``lfCrashed`` carries
+        # the signal and nothing else, so a runner that saw an abnormal
+        # death but cannot say which signal delivered it has no crash to
+        # report — the status it does hold is reported as the failure it
+        # is, rather than as a crash with the signal field left at zero.
+        if process.launchFailed: launchFailed()
+        elif process.signalled and signal != 0'u32: crashed(signal)
+        elif status != 0'u32: failed(status)
+        elif process.signalled: cancelled()
+        else: succeeded(),
       peakMemoryBytes = 0'u64,
-      processCount = 1'u32,
-      hardLimitOrOom = false)
+      processCount = 1'u32)
   except CatchableError:
     testLease.captured = false
   release(recorder.lock)
