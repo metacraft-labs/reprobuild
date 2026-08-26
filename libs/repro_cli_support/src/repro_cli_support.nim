@@ -8286,8 +8286,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # is intentionally left to the existing host/PATH behavior. Every other
   # selector (host / nix / tarball / scoop / corpus-recipe) is untouched, so a
   # build that consumes no cross-repo producer is byte-identical to today.
-  if not materializedOnly and not prepareOnly and
-      result.projectRoot.len > 0:
+  if not materializedOnly and result.projectRoot.len > 0:
     # Producer materialization follows the selected action closure. Both typed
     # calls and library-consuming actions carry their dependencies through
     # ``toolIdentityRefs``; ``scopedToolArtifact`` retains only those refs.
@@ -19975,7 +19974,7 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
   if target.len == 0:
     target = "."
 
-  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
+  var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   try:
     let info = prepareBuildGraphInspection(target, mode, publicCliPath,
       # Preserve the project anchor while selecting the named target as the
@@ -20500,7 +20499,7 @@ proc runWhyCommand(args: openArray[string]; publicCliPath: string): int =
       renderWhyPackageText(graph.solution, subject, graph.source,
                            graph.lockPath)
 
-  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
+  var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   try:
     let info =
       try:
