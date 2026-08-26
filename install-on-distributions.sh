@@ -3,6 +3,9 @@ set -euo pipefail
 
 PRODUCT="Reprobuild"
 DEFAULT_FLAKE_REF="github:metacraft-labs/reprobuild#reprobuild"
+# Public Cloudflare-fronted R2 host that serves the released binary archives and
+# this installer (see .github/workflows/release.yml). Override for testing.
+DOWNLOAD_BASE="${REPROBUILD_DOWNLOAD_BASE:-https://downloads.reprobuild.com}"
 
 eprint_note() {
   echo "[${PRODUCT} installer] $1" >&2
@@ -40,16 +43,54 @@ have_command() {
   command -v "$1" >/dev/null 2>&1
 }
 
-install_with_nix_profile() {
-  local flake_ref="${REPROBUILD_FLAKE_REF:-$DEFAULT_FLAKE_REF}"
+# True only for a developer checkout (piped `curl | sh` has none).
+have_local_checkout() {
+  local root
+  root="$(script_dir 2>/dev/null)" || return 1
+  [ -f "$root/apps/entrypoints.txt" ]
+}
 
-  if ! have_command nix; then
-    return 1
+fetch() {
+  local url="$1" out="$2"
+  if have_command curl; then
+    curl -fSL "$url" -o "$out"
+  elif have_command wget; then
+    wget -qO "$out" "$url"
+  else
+    eprint_error "need curl or wget to download ${PRODUCT}"
   fi
+}
 
-  eprint_note "Installing ${PRODUCT} with nix profile from ${flake_ref}"
-  nix profile install "$flake_ref" || eprint_error "nix profile install failed"
-  eprint_success
+# reprobuild release-platforms.json uses <os>-<arch> tuples, e.g. linux-x86_64,
+# darwin-aarch64. Map the host to the published asset's platform tag.
+detect_platform() {
+  local os arch
+  case "$(uname -s)" in
+    Linux) os=linux ;;
+    Darwin) os=darwin ;;
+    *) eprint_error "unsupported OS '$(uname -s)' for the binary installer; use --method nix-profile" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=x86_64 ;;
+    arm64 | aarch64) arch=aarch64 ;;
+    *) eprint_error "unsupported architecture '$(uname -m)'" ;;
+  esac
+  printf '%s-%s\n' "$os" "$arch"
+}
+
+verify_sha256() {
+  local file="$1" expected="$2"
+  local actual=""
+  if have_command sha256sum; then
+    actual="$(sha256sum "$file" | awk '{print $1}')"
+  elif have_command shasum; then
+    actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+  else
+    eprint_warning "no sha256 tool found; skipping checksum verification"
+    return 0
+  fi
+  [ "$actual" = "$expected" ] ||
+    eprint_error "checksum mismatch for $(basename "$file") (expected ${expected}, got ${actual})"
 }
 
 copy_tree_files() {
@@ -64,6 +105,69 @@ copy_tree_files() {
   while IFS= read -r -d '' path; do
     install "-m${mode}" "$path" "$target_dir/$(basename "$path")"
   done < <(find "$source_dir" -maxdepth 1 -type f -print0)
+}
+
+path_hint() {
+  local prefix="$1"
+  if ! command -v repro >/dev/null 2>&1; then
+    case ":$PATH:" in
+      *":$prefix/bin:"*) ;;
+      *) eprint_warning "$prefix/bin is not on PATH; add it to your shell profile to run 'repro'" ;;
+    esac
+  fi
+}
+
+# Primary path for `curl https://install.reprobuild.com | sh`: fetch the
+# pre-built binary archive from downloads.reprobuild.com and install it into a
+# prefix. Mirrors the CodeTracer installer.
+install_from_download() {
+  local prefix="${REPROBUILD_INSTALL_PREFIX:-$HOME/.local}"
+  local channel="${REPROBUILD_CHANNEL:-latest}"
+  local platform
+  platform="$(detect_platform)"
+  local asset="reprobuild-${channel}-${platform}.tar.gz"
+  local url="${DOWNLOAD_BASE}/${asset}"
+  local tmp
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+
+  eprint_note "Downloading ${asset} from ${DOWNLOAD_BASE}"
+  fetch "$url" "$tmp/$asset"
+
+  if fetch "${url}.sha256" "$tmp/$asset.sha256" 2>/dev/null; then
+    verify_sha256 "$tmp/$asset" "$(awk '{print $1}' "$tmp/$asset.sha256")"
+  else
+    eprint_warning "no ${asset}.sha256 published; skipping checksum verification"
+  fi
+
+  eprint_note "Extracting ${PRODUCT} into ${prefix}"
+  mkdir -p "$tmp/unpacked"
+  tar -xzf "$tmp/$asset" -C "$tmp/unpacked"
+
+  # The archive is a bin/+lib/ tree, possibly nested one directory deep.
+  local bindir
+  bindir="$(find "$tmp/unpacked" -maxdepth 3 -type d -name bin | head -n 1)"
+  [ -n "$bindir" ] || eprint_error "unexpected archive layout: no bin/ directory in ${asset}"
+  local root
+  root="$(dirname "$bindir")"
+
+  copy_tree_files "$root/bin" "$prefix/bin" 755
+  copy_tree_files "$root/lib" "$prefix/lib" 755
+  path_hint "$prefix"
+  eprint_success
+}
+
+install_with_nix_profile() {
+  local flake_ref="${REPROBUILD_FLAKE_REF:-$DEFAULT_FLAKE_REF}"
+
+  if ! have_command nix; then
+    return 1
+  fi
+
+  eprint_note "Installing ${PRODUCT} with nix profile from ${flake_ref}"
+  nix profile install "$flake_ref" || eprint_error "nix profile install failed"
+  eprint_success
 }
 
 ensure_local_build() {
@@ -96,24 +200,29 @@ install_from_local_checkout() {
   eprint_note "Installing runtime libraries into $prefix/lib"
   copy_tree_files "$root/build/lib" "$prefix/lib" 755
 
-  if ! command -v repro >/dev/null 2>&1; then
-    case ":$PATH:" in
-      *":$prefix/bin:"*) ;;
-      *) eprint_warning "$prefix/bin is not on PATH; add it to your shell profile to run 'repro'" ;;
-    esac
-  fi
-
+  path_hint "$prefix"
   eprint_success
 }
 
 usage() {
   cat <<'EOF'
-Usage: install-on-distributions.sh [--method auto|nix-profile|local-prefix] [--prefix PATH]
+Usage: install-on-distributions.sh [--method auto|download|nix-profile|local-prefix] [--prefix PATH]
+
+Methods:
+  auto          download a released binary (default for `curl | sh`); a developer
+                checkout instead uses nix-profile or a local build.
+  download      fetch the released binary archive from downloads.reprobuild.com.
+  nix-profile   nix profile install the flake package.
+  local-prefix  build from a local checkout and install into a prefix.
 
 Environment:
+  REPROBUILD_DOWNLOAD_BASE    Base URL for released archives
+                              default: https://downloads.reprobuild.com
+  REPROBUILD_CHANNEL          Release channel/version tag (e.g. latest, v1.2.3)
+                              default: latest
   REPROBUILD_FLAKE_REF        Nix flake package to install
                               default: github:metacraft-labs/reprobuild#reprobuild
-  REPROBUILD_INSTALL_PREFIX   Prefix for local-prefix installs
+  REPROBUILD_INSTALL_PREFIX   Prefix for download/local-prefix installs
                               default: $HOME/.local
   REPROBUILD_SOURCE_ROOT      Source checkout for local-prefix installs
                               default: directory containing this script
@@ -134,7 +243,7 @@ while [ "$#" -gt 0 ]; do
       export REPROBUILD_INSTALL_PREFIX="$2"
       shift 2
       ;;
-    -h|--help)
+    -h | --help)
       usage
       exit 0
       ;;
@@ -146,11 +255,19 @@ done
 
 case "$method" in
   auto)
-    if have_command nix; then
-      install_with_nix_profile
+    # Piped `curl | sh` has no checkout -> install a released binary. A developer
+    # checkout prefers nix (reproducible) or a local build.
+    if have_local_checkout; then
+      if have_command nix; then
+        install_with_nix_profile
+      fi
+      install_from_local_checkout
+    else
+      install_from_download
     fi
-    eprint_warning "nix was not found; falling back to local prefix install"
-    install_from_local_checkout
+    ;;
+  download)
+    install_from_download
     ;;
   nix-profile)
     install_with_nix_profile ||
