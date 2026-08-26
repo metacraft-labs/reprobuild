@@ -909,6 +909,7 @@ tests/integration/t_default_target_floor_is_conservative.nim	nim	7
 tests/integration/t_dependency_report_and_converter_paths.nim	nim	1
 tests/integration/t_dev_env_allow.nim	nim	1
 tests/integration/t_dev_env_artifact.nim	nim	2
+tests/integration/t_dev_shell_override_guards.nim	nim	15
 tests/integration/t_develop_all_clones_deps_at_locked_revisions.nim	nim	1
 tests/integration/t_develop_all_clones_into_a_second_placement_root.nim	nim	1
 tests/integration/t_develop_all_refuses_to_report_an_absent_checkout.nim	nim	1

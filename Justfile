@@ -427,6 +427,12 @@ lint:
     bash ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
     bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
+    # The dev-shell honesty gate. Here rather than only in the suite for the
+    # same reason as the case-count gate below: it reads .envrc and .direnv and
+    # needs nothing compiled, and the failure it catches — a cached dev shell
+    # built from a source that has since moved — is the failure that makes
+    # every OTHER lint step below it report a fiction.
+    bash ./scripts/check_dev_shell_env.sh 2>&1 | tee -a test-logs/lint.log
     # The suite case-count gate. Deliberately here and not only in the test
     # suite: it reads the sources and needs nothing compiled, so it is the
     # one coverage check that can answer before a six-hour build phase.
