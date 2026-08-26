@@ -8459,6 +8459,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_finish_outcome_reaches_the_spine.nim",
+    binary: "build/test-bin/t_finish_outcome_reaches_the_spine",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim",
     binary: "build/test-bin/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source",
     defines: @[],

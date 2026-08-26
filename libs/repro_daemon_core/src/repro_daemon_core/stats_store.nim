@@ -307,7 +307,12 @@ proc statsStatusText*(projectRoot: string; view: SharedStoreView): string =
       " write-failures=" & $view.loss.writeFailures &
       " rejected=" & $view.loss.rejected &
       " extension-rows-refused=" & $view.loss.extensionRowsRefused &
-      " deferred-batches-refused=" & $view.loss.deferredBatchesRefused & "\n")
+      " deferred-batches-refused=" & $view.loss.deferredBatchesRefused &
+      # A WHOLE EXECUTION THE STORE DOES NOT HOLD, and the only surface a
+      # reader can learn it from: the client that reported it was
+      # acknowledged, so nothing upstream of here knows the row is gone.
+      " contradictory-executions=" & $view.loss.contradictoryExecutions &
+      "\n")
   else:
     result.add("counted losses: unknown (the daemon did not report them)\n")
   result.add("derived store: " & storePath & "\n")
