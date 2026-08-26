@@ -317,8 +317,8 @@
 ## dependency evidence the engine actually produced, not a call
 ## assertion.
 
-import std/[algorithm, compilesettings, os, osproc, sequtils, sets, strutils,
-            tables, tempfiles, unittest]
+import std/[algorithm, compilesettings, os, osproc, sequtils, sets, streams,
+            strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_core
@@ -1137,26 +1137,63 @@ type DaemonHandle = object
   socket: string
   started: bool
 
-proc startRunQuotaDaemon(repoRoot: string; cpuMilli: int): DaemonHandle =
+proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
+                         cpuMilli: int): DaemonHandle =
   ## Real runquotad over a real unix socket. ``cpuMilli`` is the whole
   ## host budget: L3b needs it small enough that two concurrent actions
   ## cannot both be granted at once.
+  ##
+  ## THE SOCKET GETS A RENDEZVOUS DIRECTORY OF ITS OWN, provisioned by
+  ## ``runquotaRendezvousDir`` — which is RunQuota's own rule, not a copy
+  ## of it. This used to be a bare ``getTempDir()/repro-hm4-rq-<pid>.sock``,
+  ## and once RunQuota started verifying the socket's PARENT directory
+  ## that placed the rendezvous in root-owned ``1777`` ``/tmp``: the
+  ## daemon refused with ``runquota endpoint directory /tmp: refusing a
+  ## path owned by uid 0 with mode 1777`` and exited before listening.
+  ## Every case needing a daemon — L2, L3, L3b, and the cross-path
+  ## identity comparison — then reported ``[SKIPPED]`` and the file
+  ## reported a clean run while the NEGATIVE half of the hosting oracle
+  ## (L2/L3/L3b must NOT host in-process) had not executed at all. That
+  ## is the failure mode this file exists to prevent, one level up, so
+  ## the fixture must not be able to produce it again: see the
+  ## "every enumerated launch path actually executed" case.
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = getTempDir() / ("repro-hm4-rq-" & $getCurrentProcessId() &
-    ".sock")
+  let socketPath = runquotaRendezvousDir(endpointRoot) / "runquota.sock"
   removeFile(socketPath)
+  # ``poStdErrToStdOut`` so a refusal — which runquotad writes and then
+  # exits on — is CAPTURABLE rather than lost to an inherited terminal.
+  # The failure path below is the only reader; runquotad is quiet after
+  # its startup lines, which is the same assumption the other
+  # daemon-spawning tests in this suite make.
   let daemon = startProcess(daemonBin, args = [
     "--socket", socketPath,
     "--cpu-milli", $cpuMilli,
     "--memory-bytes", "17179869184"
-  ], options = {poUsePath})
+  ], options = {poUsePath, poStdErrToStdOut})
+  var died = false
   for _ in 0 ..< 400:
     if statExists(socketPath):
       putEnv("RUNQUOTA_SOCKET", socketPath)
       return DaemonHandle(process: daemon, socket: socketPath, started: true)
+    # A REFUSAL EXITS; it does not hang. Noticing that here turns a
+    # ten-second silent timeout into an immediate, quotable diagnosis.
+    if not daemon.running:
+      died = true
+      break
     sleep(25)
-  daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear: " & socketPath)
+  if not died:
+    daemon.terminate()
+  discard daemon.waitForExit()
+  var output = ""
+  try:
+    output = daemon.outputStream.readAll().strip()
+  except CatchableError:
+    discard
+  daemon.close()
+  raise newException(OSError,
+    "runquotad did not bind " & socketPath &
+    (if died: " (it exited first)" else: " (timed out)") &
+    (if output.len > 0: "; it said: " & output else: "; it said nothing"))
 
 proc stop(handle: var DaemonHandle) =
   if not handle.started: return
@@ -1185,10 +1222,18 @@ proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
     # ``BuildEngineConfig.hostMonitorInProcess``). It is requested here for
     # EVERY launch path, not only for L1, and that is what keeps the negative
     # half of the oracle honest: with the switch on across the board, the only
-    # thing deciding who hosts is whether the ENGINE is the process that
-    # spawns. A change that let L2/L3/L3b host would show up as a
-    # ``.host.stdout`` under their cache roots rather than being masked by a
-    # config they never set.
+    # thing deciding who hosts is the engine's own hosting decision. A change
+    # that let L2/L3/L3b host would show up as a ``.host.stdout`` under their
+    # cache roots rather than being masked by a config they never set.
+    #
+    # NOT "whether the ENGINE spawns", which is the tempting shorthand and is
+    # WRONG: L3/L3b spawn inside the engine process too, from
+    # ``offerWithRunQuotaBatch`` / the grant poller, and those sites never
+    # consult ``plan.hostInProcess``. Relaxing the hosting decision to cover
+    # them strips the CLI wrapper without starting a host, so they run
+    # unmonitored while the negative oracle here stays green — it is the
+    # POSITIVE monitoring oracle (``checkMonitoredEvidence``) that catches
+    # that one. Both halves are load-bearing, and they catch different paths.
     hostMonitorInProcess: true)
   case lp.kind
   of lpBypassRunQuota:
@@ -1268,6 +1313,27 @@ proc evidenceShape(res: ActionResult;
     render("monitorProbes", ev.monitorProbes),
     render("diagnostics", ev.diagnostics)
   ].join("\n")
+
+proc shapeList(shape, field: string): seq[string] =
+  ## The entries of one ``<field>=[a b c]`` line of an ``evidenceShape``.
+  ## Reading the field back out is what lets the non-vacuity pin below say
+  ## something about EVERY entry rather than about one exact rendering.
+  for line in shape.splitLines():
+    if line.startsWith(field & "=[") and line.endsWith("]"):
+      let inner = line[(field.len + 2) ..< line.high]
+      if inner.len == 0:
+        return @[]
+      return inner.split(' ')
+  @[]
+
+proc looksLikeSharedObject(path: string): bool =
+  ## A dynamic object the loader maps into the monitored child. Matched on
+  ## the NAME rather than on a store prefix, because the prefix is a fact
+  ## about this host and the suffix is a fact about the file:
+  ## ``libc.so.6`` and ``ld-linux-x86-64.so.2`` carry a version after the
+  ## extension, so ``endsWith(".so")`` alone would miss both.
+  path.endsWith(".so") or path.contains(".so.") or path.endsWith(".dylib") or
+    path.contains(".dylib.") or path.toLowerAscii().endsWith(".dll")
 
 proc caseSubstitutions(tempRoot, caseDir, workRoot, marker,
                        outPath: string): seq[(string, string)] =
@@ -1947,9 +2013,15 @@ suite "every_launch_path_is_monitored":
     var daemon: DaemonHandle
     var runQuotaError = ""
     try:
-      daemon = startRunQuotaDaemon(repoRoot, cpuMilli = 1000)
+      daemon = startRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = 1000)
     except CatchableError as err:
       runQuotaError = err.msg
+
+    ## Which enumerated paths this run actually EXECUTED, as opposed to
+    ## reported something about. Written by the case bodies below and
+    ## asserted by its own case afterwards — see that case for why a
+    ## count is not a formality here.
+    var executedPaths = initHashSet[LaunchPathKind]()
 
     ## The monitored launch paths, parameterised over the enumeration.
     ## Looping over ``EnumeratedLaunchPaths`` rather than hand-copying a
@@ -1960,10 +2032,26 @@ suite "every_launch_path_is_monitored":
       let lp = launchPath
       test "monitored evidence is complete via " & lp.name:
         if lp.needsRunQuota and runQuotaError.len > 0:
-          # Named, not quietly omitted.
-          echo "[fixture N/A] ", lp.name,
-            " needs a real runquota/runquotad: ", runQuotaError
-          skip()
+          # A FAILURE, NOT A SKIP, and the distinction is the whole point.
+          #
+          # This used to `skip()`. runquotad is not an optional extra
+          # here: `requireRunQuotaDaemonBin` already RAISES when the
+          # binary is absent, `just test` builds it, and this file's
+          # header commits to "a real runquotad over a real unix socket".
+          # So every reason this branch can be reached is a BROKEN
+          # FIXTURE — a wrong socket location, a stale binary, a refused
+          # rendezvous — and a broken fixture that reports [SKIPPED]
+          # reports a green run for the four cases that carry the
+          # negative half of the hosting oracle. That happened: a socket
+          # in world-writable /tmp made L2/L3/L3b and the identity
+          # comparison skip, and the file reported 6 OK / 0 FAILED with
+          # the oracle's negative direction unexecuted.
+          echo "[", lp.name, "] the RunQuota fixture did not come up: ",
+            runQuotaError,
+            "\n  This case cannot run without it, and a launch path that ",
+            "does not run is a launch path this gate is not covering. ",
+            "Fix the fixture; do not skip the case."
+          check runQuotaError.len == 0
         else:
           let caseDir = tempRoot / ("case-" & $ord(lp.kind))
           let workRoot = caseDir / "work"
@@ -2020,6 +2108,54 @@ suite "every_launch_path_is_monitored":
               res.evidenceShape(caseSubstitutions(tempRoot, caseDir,
                 workRoot, marker, workRoot / "out.txt")))
 
+          # RECORDED LAST, AND THE POSITION IS THE ASSERTION. Recording it
+          # on ENTRY would only prove the body STARTED: a case that
+          # returned early, or whose exception a ``try`` swallowed, would
+          # still count itself, run ZERO of the checks above, and report
+          # ``[OK]`` — the vacuous-case shape, wearing this case's
+          # approval. Both were tried against the entry-recording version
+          # and both passed it. Recorded here, after the last assertion,
+          # the set means "this path ran to the end of its checks", which
+          # is the property the case below claims.
+          executedPaths.incl lp.kind
+
+    test "every enumerated launch path actually executed":
+      ## THE SKIP COUNT IS PART OF THE RESULT, so it is asserted rather
+      ## than read off a summary line nobody checks.
+      ##
+      ## This file's whole value is the RUNTIME hosting oracle, and half
+      ## of that oracle is NEGATIVE: L1 must be hosted in-process and
+      ## L2/L3/L3b must NOT be, which is what proves hosting did not
+      ## silently spread beyond the one path that can have it. The
+      ## negative half lives entirely in the three cases that need a real
+      ## runquotad. A fixture problem that made exactly those three (plus
+      ## the identity comparison) report ``[SKIPPED]`` therefore removed
+      ## the negative half of the oracle while the file still reported
+      ## ``0 FAILED`` — which is indistinguishable, in any CI summary or
+      ## any commit message, from the property having been checked.
+      ##
+      ## So the coverage itself is an assertion. The case bodies record
+      ## the paths they really ran; this case requires that set to be the
+      ## whole enumeration. A future skip, an early ``return``, a
+      ## swallowed exception, or a row quietly dropped from the loop all
+      ## redden HERE with the missing paths named, even if every case
+      ## that did run passed.
+      var missing: seq[string] = @[]
+      for lp in EnumeratedLaunchPaths:
+        if lp.kind notin executedPaths:
+          missing.add lp.name
+      if missing.len > 0:
+        echo "these enumerated launch paths did not execute: ",
+          missing.join(", "),
+          "\n  A launch path that does not run is a launch path this ",
+          "gate is not covering, and the cases that need a real ",
+          "runquotad are the ones carrying the NEGATIVE half of the ",
+          "hosting oracle (L2/L3/L3b must not host in-process).",
+          "\n  RunQuota fixture status: ",
+          (if runQuotaError.len > 0: runQuotaError else: "started")
+      check missing.len == 0
+      check executedPaths.len == EnumeratedLaunchPaths.len
+
     test "evidence is identical across launch paths":
       ## ``evidence_is_identical_across_launch_paths``.
       ##
@@ -2037,9 +2173,14 @@ suite "every_launch_path_is_monitored":
       ## is hosted has to reproduce this exact shape, and that is only a
       ## usable comparison if the shape was recorded before the change.
       if runQuotaError.len > 0:
-        echo "[fixture N/A] cross-path evidence identity needs a real ",
-          "runquota/runquotad for L2/L3/L3b: ", runQuotaError
-        skip()
+        # Not a skip, for the reason spelled out on the per-path cases:
+        # this comparison is the only place the two HOSTING MECHANISMS
+        # are checked against each other, and it cannot be made from L1
+        # alone. Without L2/L3/L3b there is nothing to compare, and
+        # "nothing to compare" is a failed fixture, not a pass.
+        echo "cross-path evidence identity needs a real runquotad for ",
+          "L2/L3/L3b, and the fixture did not come up: ", runQuotaError
+        check runQuotaError.len == 0
       else:
         # Five actions across the four paths, all recorded.
         check recordedEvidence.len == 5
@@ -2047,14 +2188,56 @@ suite "every_launch_path_is_monitored":
         if recordedEvidence.len > 0:
           # NOT VACUOUS. Identical-but-empty would satisfy the
           # comparison below while proving nothing, so the shared shape
-          # is pinned: exactly the marker was read, and there are no
-          # diagnostics.
+          # is pinned: the fixture's own read is there, nothing else that
+          # is not a mapped library is, and there are no diagnostics.
+          #
+          # THIS PIN WAS STALE, AND THE SKIP IS WHY NOBODY SAW IT. It
+          # read ``monitorReads=[<marker>]`` — an EXACT set — which was
+          # true when it was written (2026-08-23, 4ea1e0bb) and stopped
+          # being true one day later: 6d8c883b (PR #98, 2026-08-24) began
+          # folding ``mrLibraryLoad`` records into ``monitorReads``
+          # deliberately, with its own rationale recorded at the fold
+          # ("a library the dynamic loader MAPPED into the action …
+          # folding them into ``monitorReads`` is that contract's
+          # consumer half"). From that commit the shared shape carries
+          # the six C-runtime objects the loader maps into the monitored
+          # child, and this assertion could not hold — but the case it
+          # lives in was SKIPPING for want of a runquotad, so it never
+          # ran and the staleness was invisible.
+          #
+          # MEASURED, NOT ASSUMED, that this is the evidence contract and
+          # not an io-mon regression: driving the same fixture through
+          # ``repro internal io monitor`` under the newly built shim and
+          # under the PREVIOUS one (``librepro_monitor_shim.so.old``)
+          # produced the identical six ``library-load`` records both
+          # times. ``ldd`` on the fixture also shows it links only libc
+          # and ld-linux, so libdl/libm/libpthread/librt are mapped on
+          # the shim's behalf — which is exactly what a "libraries this
+          # action ran against" dependency is.
+          #
+          # So the pin is re-derived rather than deleted, and it is not
+          # weaker: every read must be either the fixture's marker or a
+          # shared object, and the marker must be present. An empty read
+          # set fails it, a read set that lost the marker fails it, and a
+          # stray file that is neither fails it. What it no longer does
+          # is pin the exact list of DSOs a particular host maps.
           let shape = recordedEvidence[0].shape
-          if not shape.contains("\nmonitorReads=[<marker>]\n"):
+          let reads = shapeList(shape, "monitorReads")
+          if "<marker>" notin reads:
             echo "[", recordedEvidence[0].label,
-              "] the shared evidence shape does not read exactly the ",
-              "marker:\n", shape
-          check shape.contains("\nmonitorReads=[<marker>]\n")
+              "] the shared evidence shape does not read the marker:\n",
+              shape
+          check "<marker>" in reads
+          var unexplained: seq[string] = @[]
+          for entry in reads:
+            if entry != "<marker>" and not looksLikeSharedObject(entry):
+              unexplained.add entry
+          if unexplained.len > 0:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape reads paths that are neither ",
+              "the fixture's marker nor a mapped shared object: ",
+              unexplained.join(" "), "\n", shape
+          check unexplained.len == 0
           check shape.contains("\nmonitorWrites=[<out>]\n")
           check shape.contains("\ndiagnostics=[]")
 

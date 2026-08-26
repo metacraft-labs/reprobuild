@@ -72,14 +72,6 @@ proc socketIsBound(path: string): bool =
   var info: Stat
   lstat(path.cstring, info) == 0 and S_ISSOCK(info.st_mode)
 
-proc rendezvousDir(root: string): string =
-  ## ``runquotad`` refuses a rendezvous directory whose mode it did not
-  ## verify as created, so the test creates it with the mode the daemon
-  ## requires rather than inheriting the umask's.
-  result = root / "ep"
-  createDir(result)
-  setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
-
 type DaemonHandle = object
   process: Process
 
@@ -299,7 +291,7 @@ suite "M18 repro stats reads the shared store":
       let socketRoot = getTempDir() / ("rq-m18s-" & $getCurrentProcessId())
       removeDir(socketRoot)
       createDir(socketRoot)
-      let endpointDir = rendezvousDir(socketRoot)
+      let endpointDir = runquotaRendezvousDir(socketRoot)
       let socketPath = endpointDir / "d.sock"
       let deadSocketPath = endpointDir / "nobody-is-here.sock"
       let stateDir = socketRoot / "state"
@@ -412,7 +404,7 @@ suite "M18 repro stats reads the shared store":
       let socketRoot = getTempDir() / ("rq-m18d-" & $getCurrentProcessId())
       removeDir(socketRoot)
       createDir(socketRoot)
-      let socketPath = rendezvousDir(socketRoot) / "d.sock"
+      let socketPath = runquotaRendezvousDir(socketRoot) / "d.sock"
       let stateDir = socketRoot / "state"
       createDir(stateDir)
       var daemon = startRunQuotaDaemon(socketPath, stateDir / "host-id")
@@ -473,7 +465,7 @@ suite "M18 repro stats reads the shared store":
       let socketRoot = getTempDir() / ("rq-m18t-" & $getCurrentProcessId())
       removeDir(socketRoot)
       createDir(socketRoot)
-      let socketPath = rendezvousDir(socketRoot) / "d.sock"
+      let socketPath = runquotaRendezvousDir(socketRoot) / "d.sock"
       let stateDir = socketRoot / "state"
       createDir(stateDir)
       var daemon = startRunQuotaDaemon(socketPath, stateDir / "host-id")

@@ -33,6 +33,13 @@ import std/[os, osproc, streams, strtabs, strutils, unittest]
 
 from repro_core/paths import extendedPath, runquotaEndpointPath
 
+# Narrow, named import: ``runquota_ipc`` is RunQuota's own endpoint-trust
+# module, and ``runquotaRendezvousDir`` below delegates the "where may a
+# socket live" rule to it rather than keeping a second copy of the mode.
+# Named symbols only — a wildcard import would drag ``connect``/``close``
+# over ``std/net`` spellings a test file may also be using.
+from runquota_ipc import ensureEndpointDir, unixEndpoint
+
 when defined(windows):
   import std/winlean
 else:
@@ -501,6 +508,49 @@ proc runquotaSocketEndpoint*(name: string): string =
   ## product's own daemon spawn, because a test that binds somewhere the
   ## shipped code would not is a test of something nobody runs.
   runquotaEndpointPath(name)
+
+proc runquotaRendezvousDir*(root: string): string =
+  ## THE one place a test that owns a scratch tree decides where a
+  ## locally spawned ``runquotad`` may bind. Returns the directory; the
+  ## caller appends its own socket file name.
+  ##
+  ## WHY A DIRECTORY OF ITS OWN, AND NOT ``root`` ITSELF. The socket's
+  ## PARENT DIRECTORY is the rendezvous point RunQuota verifies — the
+  ## daemon before it binds and every client before it connects — and it
+  ## must be owned by the configured owner and never group- or
+  ## world-writable. A socket dropped straight into ``getTempDir()`` fails
+  ## both halves: ``/tmp`` is root-owned ``1777``, so ``runquotad`` exits
+  ## with ``runquota endpoint directory /tmp: refusing a path owned by uid
+  ## 0 with mode 1777`` before it ever prints its listening line. That
+  ## refusal is right — a rendezvous any local user can write is one any
+  ## local user can REPLACE — so this is a path change, never a flag that
+  ## turns the check off.
+  ##
+  ## THE MODE IS NOT WRITTEN DOWN HERE, and that is the point of routing
+  ## through ``runquota_ipc.ensureEndpointDir`` instead of a local
+  ## ``createDir`` + ``setFilePermissions(0700)``. The required mode is a
+  ## FUNCTION OF THE HOST: ``rendezvousPolicy()`` yields ``0700``/owner-only
+  ## on a host with no ``runquota`` group, and ``0750`` group-gated on a
+  ## host that has one. Four copies of this helper had ``0700`` hard-coded
+  ## and were silently correct only in the first case; on a provisioned
+  ## host they would have created a directory the daemon then refuses for
+  ## the OPPOSITE reason (``refusing mode 0700, required 0750``). Asking
+  ## RunQuota to provision and verify its own rendezvous keeps the test on
+  ## exactly the rule the product enforces, with no second copy of it.
+  ##
+  ## ``ensureEndpointDir`` VERIFIES as well as creates, and raises
+  ## ``EndpointTrustError`` carrying the refusal text when it cannot. A
+  ## caller must let that propagate: a fixture that cannot get a
+  ## trustworthy rendezvous has not "skipped", it has failed to set up.
+  result = root / "ep"
+  when defined(posix):
+    ensureEndpointDir(unixEndpoint(result / "runquota.sock"))
+  else:
+    # Windows: named pipes live in the kernel object namespace and carry
+    # their own ACL, so there is no directory to own and no mode to
+    # widen. The directory is still created because callers put other
+    # per-daemon scratch beside the endpoint.
+    createDir(result)
 
 proc runquotaEndpointReachable*(endpoint: string): bool =
   ## Polled readiness check used by ``ensureRunQuotaDaemon`` helpers

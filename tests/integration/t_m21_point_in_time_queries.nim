@@ -309,10 +309,7 @@ proc setUpRun(tag: string): RunEnvironment =
     $getCurrentProcessId())
   removeDir(result.socketRoot)
   createDir(result.socketRoot)
-  createDir(result.socketRoot / "ep")
-  setFilePermissions(result.socketRoot / "ep",
-    {fpUserRead, fpUserWrite, fpUserExec})
-  result.socketPath = result.socketRoot / "ep" / "d.sock"
+  result.socketPath = runquotaRendezvousDir(result.socketRoot) / "d.sock"
   createDir(result.socketRoot / "state")
   result.observationDb = result.socketRoot / "state" / "observations.db"
   result.binDir = result.tempRoot / "bin"

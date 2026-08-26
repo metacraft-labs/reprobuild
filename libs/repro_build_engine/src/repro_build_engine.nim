@@ -3683,7 +3683,12 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # only to put a hosting process in between, and there no longer is one.
       # ``monitorCliPath`` is still what gates monitoring on/off (an
       # unconfigured driver still means "no monitor is wired"), so this branch
-      # changes WHO hosts and nothing about WHETHER an action is monitored.
+      # changes WHO hosts and nothing about WHETHER an action is monitored —
+      # PROVIDED the launch site the caller had in mind actually hosts.
+      # Stripping the wrapper is half of a two-part handshake, and this proc
+      # cannot check the other half; the caller's decision is what guarantees
+      # it. See the hosting decision in ``runBuild`` for which launch sites
+      # honour ``hostInProcess`` and which silently would not.
       result.hostInProcess = true
     else:
       result.action.argv = @[monitorCli] & config.monitorCliArgs &
@@ -7969,6 +7974,35 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             bypassRunQuota = not inlineRunQuota
           else:
             bypassRunQuota = launchBypassesRunQuota()
+        # ``bypassRunQuota`` IS A SAFETY CONJUNCT, NOT A SCOPE NOTE. Read
+        # this before widening it.
+        #
+        # Saying "hosted" here does two independent things: it tells
+        # ``monitoredAction`` to leave the argv ALONE (no
+        # ``repro internal io monitor`` wrapper), and it tells the launch
+        # site below to start an in-process host instead. Only the bypass
+        # and helper launch sites consult ``plan.hostInProcess`` at all.
+        # The INLINE RunQuota sites do not: an inline launch is staged into
+        # ``stagedInlineLaunches`` and ``continue``s before that branch is
+        # ever reached, and the batch flush / grant poller spawn the child
+        # themselves as part of binding it to a lease.
+        #
+        # So dropping ``bypassRunQuota`` from this conjunction does not
+        # merely "enable hosting on more paths". An inline action would
+        # lose the wrapper AND get no host: it would run completely
+        # UNMONITORED, produce no RMDF, and be graded as if the monitor had
+        # simply found nothing — no error, no diagnostic, nothing in the
+        # build report. That was measured, not reasoned: with the conjunct
+        # removed, the inline actions in
+        # ``tests/integration/t_every_launch_path_is_monitored.nim`` come
+        # back with an EMPTY read set and "RMDF file does not exist".
+        #
+        # Hosting an inline action therefore requires the inline spawn
+        # sites to consult ``plan.hostInProcess`` first — which in turn
+        # needs a lease that can adopt an already-spawned child, and costs
+        # RunQuota the per-action resource accounting it measures by owning
+        # the spawn. Until that exists, this conjunct is what keeps a
+        # hosted plan and a hosting launch site from drifting apart.
         let hostMonitorInProcess = InProcessMonitorHostSupported and
           config.hostMonitorInProcess and
           action.kind == bakProcess and bypassRunQuota
@@ -8118,6 +8152,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # already supports batched candidate decisions, so this turns
           # an O(N) chain of synchronous round-trips at parallel=N into
           # a single round-trip per wave.
+          #
+          # NOTE THE ``continue``: this path leaves before the launch
+          # branch below, so it NEVER consults ``plan.hostInProcess``. It
+          # is correct today only because the hosting decision above
+          # requires ``bypassRunQuota``, so an inline action's plan is
+          # never hosted. If that conjunct is ever relaxed, this staging
+          # has to learn about hosting in the same change — otherwise the
+          # action arrives here with an unwrapped argv and no host, and
+          # runs unmonitored without saying so.
           stagedInlineLaunches.add(StagedInlineLaunch(
             id: id,
             pool: poolName,

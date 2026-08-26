@@ -97,13 +97,6 @@ proc socketIsBound(path: string): bool =
   var info: Stat
   lstat(path.cstring, info) == 0 and S_ISSOCK(info.st_mode)
 
-proc rendezvousDir(root: string): string =
-  ## ``runquotad`` refuses a rendezvous directory whose mode it did not
-  ## verify as created.
-  result = root / "ep"
-  createDir(result)
-  setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
-
 type DaemonHandle = object
   process: Process
 
@@ -327,7 +320,7 @@ proc setUpRun(tag: string): RunEnvironment =
     $getCurrentProcessId())
   removeDir(result.socketRoot)
   createDir(result.socketRoot)
-  result.socketPath = rendezvousDir(result.socketRoot) / "d.sock"
+  result.socketPath = runquotaRendezvousDir(result.socketRoot) / "d.sock"
   let stateDir = result.socketRoot / "state"
   createDir(stateDir)
   result.daemon = startRunQuotaDaemon(result.socketPath, stateDir / "host-id")
