@@ -57,10 +57,11 @@
 ## per-test memory ceiling: while a test runs, the reporter samples the
 ## resident size of the child's whole process tree through RunQuota's
 ## own host backend, and when a test crosses the ceiling the runner
-## kills it and reports ``hardLimitOrOom`` on the lease. The daemon maps
-## that to ``termination = oom_killed`` while an ordinary non-zero exit
-## maps to ``exited``. This is a fact the runner OBSERVED (it did the
-## killing), not a heuristic over a status byte.
+## kills it and reports ``lfOomKilled`` on the lease, together with the
+## status the kill left behind. The daemon maps that to ``termination =
+## oom_killed`` while an ordinary non-zero exit maps to ``exited``. This
+## is a fact the runner OBSERVED (it did the killing), not a heuristic
+## over a status byte.
 ##
 ## The ceiling is off unless configured, so an unconfigured run behaves
 ## exactly as it did before and reports ``exited`` for every ordinary
@@ -429,33 +430,55 @@ proc finishExecution*(reporter: ptr HistoryReporter; testLease: var TestLease;
                       outcome: TestExecutionOutcome) =
   ## Close the lease with the facts the spine row is composed from.
   ##
-  ## ``hardLimitOrOom`` IS THE WHOLE POINT OF THIS PROC. It is the one
-  ## bit that decides between ``termination = oom_killed`` and
+  ## ``memoryLimitExceeded`` IS THE WHOLE POINT OF THIS PROC. It is the
+  ## one bit that decides between ``termination = oom_killed`` and
   ## ``termination = exited`` for two processes whose exit statuses are
-  ## both non-zero and carry no other difference.
+  ## both non-zero and carry no other difference — and it is a fact this
+  ## runner OBSERVED, because it did the killing.
+  ##
+  ## THE CONCLUSION AND ITS EVIDENCE NOW TRAVEL TOGETHER. The old call
+  ## handed the daemon an outcome, an exit code, a signal and a
+  ## ``hardLimitOrOom`` flag as four independent arguments and let the
+  ## daemon work out which combination it had; ``LeaseFinish`` names one
+  ## conclusion and carries exactly what that conclusion needs, so the
+  ## mapping is made here, once, in the open.
+  ##
+  ## THE DEADLINE IS NOW SAID RATHER THAN SWALLOWED. This used to report a
+  ## timed-out test as ``leaseFinishCrashed`` with no signal, because the
+  ## protocol had no member for a deadline; it has one, ``lfTimedOut``
+  ## takes the evidence this runner holds (the wrapper's status integer),
+  ## and ``timeout`` is a strictly more specific word than ``signalled``
+  ## for a kill this runner sent at a deadline it set.
   if not testLease.captured or not reporter.capturing():
     return
+  let status = uint32(max(outcome.exitCode, 0))
+  let signal = uint32(max(outcome.signal, 0))
+  var kill: KillEvidence
+  let evidenced = killEvidence(status, signal, kill)
   acquire(reporter.lock)
   try:
     testLease.lease.finish(
-      # THERE IS NO ``leaseFinishTimedOut``, AND NOT INVENTING ONE IS
-      # THE POINT. The protocol's outcome set was designed for
-      # admission accounting; the runner's own timeout kill arrives at
-      # the daemon as a signalled exit, which is what it is. Mapping it
-      # onto ``leaseFinishResourceLimit`` to get a distinct termination
-      # would put a timeout in the ``oom_killed`` bucket and destroy
-      # the one distinction this milestone exists to preserve.
       outcome =
-        if outcome.memoryLimitExceeded: leaseFinishResourceLimit
-        elif outcome.launchFailed: leaseFinishLaunchFailed
-        elif outcome.signalled: leaseFinishCrashed
-        elif outcome.exitCode != 0: leaseFinishFailed
-        else: leaseFinishSucceeded,
-      exitCode = uint32(max(outcome.exitCode, 0)),
-      signal = uint32(max(outcome.signal, 0)),
+        # NO CLAIM THIS RUNNER CANNOT EVIDENCE. A kill needs a non-zero
+        # status or a non-zero signal; with neither there is nothing to
+        # falsify the claim with, and ``cancelled()`` is what is left that
+        # is true. That used to be the daemon's refusal and a lost row.
+        #
+        # THE MEMORY KILL IS TESTED FIRST, WHICH IS THE ORDER THE DAEMON
+        # USED TO IMPOSE: its ladder resolved ``hardLimitOrOom`` ahead of
+        # every other arm, so an execution that was both launch-faulted
+        # and over the ceiling was recorded as the OOM. Keeping the order
+        # here keeps the word the same.
+        if outcome.memoryLimitExceeded and evidenced: oomKilled(kill)
+        elif outcome.launchFailed: launchFailed()
+        elif outcome.timedOut and evidenced: timedOut(kill)
+        elif outcome.memoryLimitExceeded or outcome.timedOut: cancelled()
+        elif outcome.signalled and signal != 0'u32: crashed(signal)
+        elif status != 0'u32: failed(status)
+        elif outcome.signalled: cancelled()
+        else: succeeded(),
       peakMemoryBytes = outcome.peakRssBytes,
-      processCount = outcome.processCount,
-      hardLimitOrOom = outcome.memoryLimitExceeded)
+      processCount = outcome.processCount)
   except CatchableError:
     testLease.captured = false
   release(reporter.lock)

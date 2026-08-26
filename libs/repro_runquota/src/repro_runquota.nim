@@ -541,8 +541,39 @@ proc finishSignal(completion: ProcessCompletion;
         return uint32(max(int(WTERMSIG(status)), 0))
   0'u32
 
+proc deadlineKill(completion: ProcessCompletion; child: LaunchedProcess;
+                  kill: var KillEvidence): bool =
+  ## The evidence for a DEADLINE kill, or false when this supervisor holds
+  ## none.
+  ##
+  ## NOT EXPORTED, for the reason ``finishSignal`` above is not.
+  ##
+  ## ``lfTimedOut`` DEMANDS EVIDENCE, WHERE THE OLD WIRE MERELY INVITED
+  ## IT. A deadline claim used to travel beside a signal field the client
+  ## was free to leave at zero, and ``runquotad`` refused the resulting row
+  ## after the fact; ``KillEvidence`` asks for it up front, so this is the
+  ## proc that decides whether the deadline may be claimed at all.
+  ##
+  ## AND WINDOWS CAN NOW ANSWER. ``finishSignal``'s decode is POSIX-only
+  ## because it reads a wait status; on Windows ``waitStatus`` holds the
+  ## raw EXIT CODE of the killed child, which is evidence of exactly the
+  ## same kind and which ``killedWithExitCode`` accepts. Before
+  ## ``KillEvidence`` there was nowhere to put it, so every timed-out
+  ## execution on Windows degraded to ``cancelled`` and ``timeout`` was a
+  ## termination no Windows run could reach.
+  if not completion.timedOut:
+    return false
+  when defined(posix):
+    killEvidence(0'u32, finishSignal(completion, child), kill)
+  elif defined(windows):
+    killEvidence(
+      if child.waitStatus > 0: uint32(child.waitStatus) else: 0'u32,
+      0'u32, kill)
+  else:
+    false
+
 proc finishOutcome(completion: ProcessCompletion;
-                   killSignal: uint32): LeaseFinishOutcome =
+                   child: LaunchedProcess): LeaseFinish =
   ## What this supervisor saw, said in the vocabulary the spine records.
   ##
   ## THE DEADLINE IS TESTED FIRST, AND NOT FOLDED INTO ``cancelled``.
@@ -552,21 +583,28 @@ proc finishOutcome(completion: ProcessCompletion;
   ## make the deadline unreachable rather than merely under-reported.
   ##
   ## WHAT THE OLD COLLAPSE ACTUALLY PRODUCED, MEASURED RATHER THAN
-  ## ASSUMED: ``leaseFinishCancelled`` beside ``signal = 0`` (the deadline
-  ## branch leaves ``signaled`` false, see ``finishSignal``), which the
-  ## daemon's mapping resolves past its OOM, deadline and signal tests to
-  ## ``case leaseFinishCancelled`` — and every timed-out execution landed
-  ## on the spine as ``refused``. Not merely coarse: ``refused`` is the
-  ## word for work that never ran. The deadline is the most specific fact
-  ## available here and the only one no other party can reconstruct —
-  ## RunQuota imposes no deadlines, so if this client does not say it, the
-  ## store can never learn it.
+  ## ASSUMED: ``cancelled`` beside no signal, which the daemon's mapping
+  ## resolved past its OOM, deadline and signal tests to ``refused`` — and
+  ## every timed-out execution landed on the spine as work that never ran.
+  ## The deadline is the most specific fact available here and the only one
+  ## no other party can reconstruct — RunQuota imposes no deadlines, so if
+  ## this client does not say it, the store can never learn it.
   ##
   ## AND NOT OTHERWISE. A cancel the child honoured promptly carries
-  ## ``cancelled`` and NOT ``timedOut``, and still reports
-  ## ``leaseFinishCancelled``; only ``timedOut`` produces
-  ## ``leaseFinishTimedOut``, so ``timeout`` on the spine means a deadline
-  ## fired and nothing else.
+  ## ``cancelled`` and NOT ``timedOut``; only ``timedOut`` produces
+  ## ``lfTimedOut``, so ``timeout`` on the spine means a deadline fired and
+  ## nothing else.
+  ##
+  ## THE SIGNAL TEST NOW SITS ABOVE THE CANCEL TEST, WHICH REVERSES THE
+  ## OLD ORDER AND PRESERVES THE OLD ANSWER. ``terminate()`` sets
+  ## ``cancelSent``, so a child that dies of the SIGTERM arrives here with
+  ## BOTH ``cancelled`` and ``signaled``; the old code called that
+  ## ``leaseFinishCancelled`` and put the signal in a SEPARATE wire field,
+  ## and the daemon's mapping — which tested that field before it read the
+  ## outcome — recorded ``signalled``. ``cancelled()`` now has no field to
+  ## carry a signal in, so the same execution has to be NAMED ``crashed``
+  ## here to land on the same word there. ``t_finish_outcome_reaches_the
+  ## _spine``'s middle arm is exactly this case and is what caught it.
   ##
   ## WHICH DEADLINE, SPELLED OUT RATHER THAN LEFT TO THE READER. Nothing
   ## in reprobuild passes a ``timeout`` to ``waitForCompletion`` — the
@@ -581,38 +619,44 @@ proc finishOutcome(completion: ProcessCompletion;
   ## look at. Recording it here rather than letting a future reader infer
   ## a budget that does not exist.
   ##
-  ## WIRE SKEW, RECORDED RATHER THAN GUARDED. ``leaseFinishTimedOut`` is
-  ## ordinal 6, and ``decodeLeaseFinished`` bounds the wire ordinal by the
-  ## RECEIVER's ``high(LeaseFinishOutcome)``. A daemon built before that
-  ## member existed (``high`` == 5) therefore REFUSES the frame rather than
-  ## misreading it — and a refused ``LeaseFinished`` is not a lost message
-  ## but a STRANDED LEASE: ``supervisorLost`` still holds capacity and no
-  ## path reaps it. No negotiation is added here because the skew is not
-  ## reachable in this workspace: reprobuild builds ``runquotad`` from
-  ## ``../runquota`` in the same tree that supplies this enum
+  ## WIRE SKEW, RECORDED RATHER THAN GUARDED. ``leaseFinishFromWire``
+  ## bounds the wire ordinal by the RECEIVER's ``high(LeaseFinishKind)``,
+  ## and the finish's whole shape changed with RQSP major 2 — so a daemon
+  ## built against major 1 does not merely misread this frame, it refuses
+  ## the HELLO and no lease is taken at all. That is the honest failure and
+  ## it needs no guard here: reprobuild builds ``runquotad`` from
+  ## ``../runquota`` in the same tree that supplies these types
   ## (``scripts/run_tests.sh`` step 2), so client and daemon share one
-  ## definition by construction. A deployment that pins an independently
-  ## released ``runquotad`` would have to reach this note first.
+  ## definition by construction.
   ##
-  ## AND THE DEADLINE IS ONLY CLAIMED WHEN THE FINISH CAN CARRY IT.
-  ## ``leaseFinishTimedOut`` is one of the values ``runquotad`` reads as a
-  ## KILL CLAIM, and a kill claim beside ``exit_status = 0`` and no signal
-  ## is refused outright — no row at all, counted as a contradiction. So a
-  ## timed-out completion whose kill signal could not be recovered
-  ## (``killSignal == 0``) degrades to ``leaseFinishCancelled``, which is
-  ## true of it and storable. A LOST EXECUTION IS WORSE THAN A COARSE
-  ## ONE: the coarse row still carries the duration, the peak RSS and the
-  ## profile, and a reader can see that something ended it.
-  if completion.timedOut and killSignal != 0'u32:
-    leaseFinishTimedOut
+  ## AND THE DEADLINE IS ONLY CLAIMED WHEN THE FINISH CAN CARRY IT. This
+  ## used to be a rule the daemon enforced after the fact: ``lfTimedOut``
+  ## is a kill claim, a kill claim with no evidence was refused outright,
+  ## and a client that made one lost the row. It is now a rule the TYPE
+  ## enforces — ``timedOut`` takes a ``KillEvidence`` and there is no way
+  ## to build one out of nothing — so a timed-out completion whose kill
+  ## could not be recovered degrades to ``cancelled()``, which is true of
+  ## it and storable. A LOST EXECUTION IS WORSE THAN A COARSE ONE: the
+  ## coarse row still carries the duration, the peak RSS and the profile,
+  ## and a reader can see that something ended it.
+  var kill: KillEvidence
+  let killSignal = finishSignal(completion, child)
+  if deadlineKill(completion, child, kill):
+    timedOut(kill)
+  elif completion.signaled and killSignal != 0'u32:
+    crashed(killSignal)
   elif completion.cancelled or completion.timedOut:
-    leaseFinishCancelled
-  elif completion.signaled:
-    leaseFinishCrashed
-  elif completion.exited and completion.exitCode == 0:
-    leaseFinishSucceeded
+    cancelled()
+  elif completion.exited and completion.exitCode > 0:
+    failed(uint32(completion.exitCode))
+  elif completion.exited:
+    succeeded()
   else:
-    leaseFinishFailed
+    # NEITHER EXITED NOR SIGNALLED NOR CANCELLED: the wait came back with
+    # no verdict at all. The old code called this ``leaseFinishFailed``
+    # with exit status 0 — a clean exit reported as a failure, which is
+    # the same shape of untruth these types exist to prevent.
+    cancelled()
 
 proc acquireCliArgs*(request: ReproResourceRequest;
                      command: ReproCommandSpec): seq[string] =
@@ -882,12 +926,10 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         processGroupId = child.info.processGroupId,
         cleanupRegistered = true)
       let completion = child.waitForCompletion()
-      let killSignal = finishSignal(completion, child)
+      let outcome = finishOutcome(completion, child)
       child.close()
       lease.finish(
-        outcome = finishOutcome(completion, killSignal),
-        exitCode = if completion.exited: uint32(max(completion.exitCode, 0)) else: 0'u32,
-        signal = killSignal,
+        outcome = outcome,
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount)
       result = ReproRunQuotaExecution(
@@ -907,7 +949,7 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         leaseFinishedSent: true)
     except CatchableError:
       if lease.active and lease.state == leaseClientStarting:
-        lease.finish(outcome = leaseFinishLaunchFailed)
+        lease.finish(outcome = launchFailed())
         result.leaseFinishedSent = true
       raise
     finally:
@@ -1111,7 +1153,7 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
       completed: false)
   except CatchableError:
     if lease.active and lease.state == leaseClientStarting:
-      lease.finish(outcome = leaseFinishLaunchFailed)
+      lease.finish(outcome = launchFailed())
     if lease.active:
       lease.release()
     raise
@@ -1344,15 +1386,13 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
     if not running.child.pollCompletion():
       discard running.child.waitForCompletion()
     let completion = running.child.completion
-    let killSignal = finishSignal(completion, running.child)
+    let outcome = finishOutcome(completion, running.child)
     running.child.close()
     var leaseFinishedSent = false
     var leaseReleased = false
     try:
       running.lease.finish(
-        outcome = finishOutcome(completion, killSignal),
-        exitCode = if completion.exited: uint32(max(completion.exitCode, 0)) else: 0'u32,
-        signal = killSignal,
+        outcome = outcome,
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount)
       leaseFinishedSent = true
@@ -1380,15 +1420,13 @@ proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
     raise newException(ReproRunQuotaError, "runquota process is not active")
   try:
     let completion = running.child.cancelAndWait()
-    let killSignal = finishSignal(completion, running.child)
+    let outcome = finishOutcome(completion, running.child)
     running.child.close()
     var leaseFinishedSent = false
     var leaseReleased = false
     try:
       running.lease.finish(
-        outcome = finishOutcome(completion, killSignal),
-        exitCode = if completion.exited: uint32(max(completion.exitCode, 0)) else: 0'u32,
-        signal = killSignal,
+        outcome = outcome,
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount)
       leaseFinishedSent = true

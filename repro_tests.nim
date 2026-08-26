@@ -8465,7 +8465,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim",
     binary: "build/test-bin/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source",
