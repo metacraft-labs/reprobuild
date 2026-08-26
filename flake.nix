@@ -64,7 +64,28 @@
       # io-mon no longer imports at all. fs_snoop.nim / writer.nim now
       # ``import shm_gset`` + ``shm_gset/transport``, so this pin requires the
       # nim-shm-gset-src input below and its SHM_GSET_SRC wiring.
-      url = "github:metacraft-labs/io-mon/3a7c15cd037dabc4c5dd7f3fe327334ffdaca4b9";
+      #
+      # In-Process-Monitor-Hosting HM-4 — bumped to the IoMon-Decomposed-Host-API
+      # DH-4 tip. The engine hosts io-mon's consumer IN-PROCESS now, and the
+      # decomposed lifecycle it calls (``startMonitor`` / ``pollMonitor`` /
+      # ``finishMonitor``, plus ``FsSnoopRequest.env`` / ``.cwd``) does not exist
+      # at all in the previous pin: at ``3a7c15cd`` ``fs_snoop`` exports only
+      # ``findShimLibrary`` / ``completeness`` / ``records`` / ``runMonitored`` /
+      # ``runFsSnoopCli``, and ``FsSnoopRequest`` has neither ``env`` nor ``cwd``.
+      # THIS PIN IS THE PREREQUISITE, not a refresh — io-mon's source having the
+      # API is not the same thing as reprobuild's BUILD having it. Note that a
+      # developer shell entered through ``.envrc`` sets NIX_FLAKE_OVERRIDE_AUTO=1
+      # and therefore resolves ``IO_MON_SRC`` from a ``../io-mon`` sibling when one
+      # exists; this pin is what the sandboxed package build and the override-free
+      # CI jobs use, and it is the revision the two must agree on.
+      #
+      # Bumped again to the sweep-cost fix: ``finishMonitor``'s §4.1 descendant
+      # sweep no longer walks all of /proc per call (~105 ms → ~6 ms), which is
+      # what makes in-process hosting a throughput WIN rather than a regression,
+      # and the same commit closes a false-complete hole in which an ``opendir`` /
+      # ``readdir`` fault during the sweep was silently reported as "no
+      # descendants" instead of as an incomplete observation.
+      url = "github:metacraft-labs/io-mon/30e54993547363efa46a646556b32c5f2dc930fd";
       flake = false;
     };
     nim-shm-gset-src = {

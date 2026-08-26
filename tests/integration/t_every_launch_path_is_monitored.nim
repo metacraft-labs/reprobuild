@@ -36,12 +36,16 @@
 ##
 ## The three-way launch decision is taken at ``:6251-6257``.
 ##
-##   L1  BYPASS RUNQUOTA — monitored
+##   L1  BYPASS RUNQUOTA — monitored, and HOSTED IN-PROCESS
 ##       when ``launchBypassesRunQuota()`` (:5349): ``config.bypassRunQuota``,
 ##       ``REPROBUILD_NO_RUNQUOTA``, or ``fallbackToRunQuotaBypass`` with an
 ##       unreachable daemon. No lease.
-##       spawn: ``startBypassRunQuotaProcess`` (:3981) -> ``startDirect``
-##       (:3997), in the engine process.
+##       spawn: ``startMonitorHost`` -> io-mon's ``startMonitor``, in the
+##       engine process, with no ``repro internal io monitor`` child in
+##       between (In-Process-Monitor-Hosting HM-4). The pre-HM-4 form —
+##       ``startBypassRunQuotaProcess`` -> ``startDirect`` — is still the
+##       code path when the monitor is not hosted (Windows, or an action
+##       with no monitor policy), and is still pinned below.
 ##       backend label ``runquota-bypass``.
 ##
 ##   L2  RUNQUOTA HELPER PROCESS — monitored
@@ -95,13 +99,46 @@
 ## monitored paths" is a decision on the record rather than an omission.
 ##
 ##
+## WHO HOSTS THE MONITOR (In-Process-Monitor-Hosting HM-4)
+## ------------------------------------------------------
+## "Monitored" and "hosted in-process" are two different properties and
+## this file now checks both, because they came apart in HM-4.
+##
+##   * L1 is HOSTED IN-PROCESS. The engine calls io-mon's decomposed host
+##     API (``startMonitor`` / ``pollMonitor`` / ``finishMonitor``)
+##     directly and the monitored root is its own child.
+##   * L2, L3 and L3b are MONITORED BY THE CLI WRAPPER, still. Not an
+##     oversight and not a fallback — io-mon OWNS the spawn (DH-4: "spawn
+##     supplied by the caller is not delivered and should not be
+##     expected"), so a path can host the monitor only if the ENGINE is
+##     the process that spawns. L2's argv is spawned by a separate
+##     ``repro __repro-runquota-helper`` process, two deep. L3 and L3b are
+##     spawned inside ``offerWithRunQuotaBatch`` /
+##     ``startGrantedWithRunQuota``, which spawn the child themselves as
+##     part of binding it to the granted lease; hosting there needs a
+##     RunQuota lease that can ADOPT an already-spawned child, which is a
+##     change to the RunQuota adapter and not to the engine.
+##
+## That split is exactly why ``evidence is identical across launch
+## paths`` matters more after HM-4 than before it: it is now comparing
+## TWO HOSTING MECHANISMS against each other on the same fixture, not
+## four call sites into one mechanism. ``checkTookLaunchPath`` also pins
+## which mechanism each case used, by looking for the per-action stdio
+## capture files that only the in-process host writes — so a regression
+## in either direction (L1 quietly falling back to the wrapper, or a
+## wrapper path quietly acquiring a host) reddens.
+##
+##
 ## THE TWO SEAMS
 ## -------------
 ## Four launch paths do not need four monitor wirings, because they share
 ## both halves of the wiring:
 ##
-##   * ARGV — the monitor wrapper is prepended in exactly ONE proc,
-##     ``monitoredAction`` (:2734), called from exactly ONE site (:6144).
+##   * ARGV — the monitor decision is taken in exactly ONE proc,
+##     ``monitoredAction``, called from exactly ONE site. Since HM-4 that
+##     proc either prepends the CLI wrapper or reports
+##     ``hostInProcess = true``; either way it is the only place an action
+##     acquires (or fails to acquire) a monitor.
 ##   * ARGV+ENV CONTRACT — all four paths obtain their ``ReproCommandSpec``
 ##     from exactly ONE proc, ``preparedRunQuotaCommand`` (:3953), whose
 ##     own doc-comment says it exists to "Build one argv/env contract for
@@ -401,10 +438,20 @@ type EngineSourceFile = object
 ## and no rewrite-warning template there either, so the compile-time linter
 ## does not see them at all — which is the other half of why they needed a
 ## row here.
-const SpawnPrimitives: array[40, tuple[name: string; expected: int;
+const SpawnPrimitives: array[43, tuple[name: string; expected: int;
                                        why: string]] = [
   ("startProcess", 3,
     "post-build converter, the L2 RunQuota helper, the nix daemon"),
+  # In-Process-Monitor-Hosting HM-4. ``startMonitor`` is a REAL spawn — it is
+  # io-mon's only spawn site for a monitored tree — so the engine hosting the
+  # monitor is a launch path in its own right and is pinned like any other.
+  # ``pollMonitor`` and ``finishMonitor`` are on the list for the same reason
+  # ``commandSpec`` is: on the Windows arm the spawn is DEFERRED into them
+  # (``runWithMonitorShim`` spawns and waits in one call), so a call to either
+  # can put a child on the road even though neither does so on POSIX.
+  ("startMonitor", 1, "HM-4: L1 hosts io-mon in-process"),
+  ("pollMonitor", 1, "HM-4: advances a hosted monitor; SPAWNS on Windows"),
+  ("finishMonitor", 1, "HM-4: consumes a hosted monitor; SPAWNS on Windows"),
   ("uncontrolledStartProcess", 0, "the escape hatch; unused by the engine"),
   ("startDirect", 1, "L1 bypass-runquota"),
   ("offerWithRunQuotaBatch", 1, "L3 inline-runquota"),
@@ -475,7 +522,8 @@ const CommandSpecConstructions = 1
 const SpawnNameTails = ["startprocess", "startdirect", "execcmdex",
                         "execprocess", "execshellcmd", "findexe",
                         "execcmd", "execprocesses", "launchprocess",
-                        "commandspec", "runmonitored"]
+                        "commandspec", "runmonitored",
+                        "startmonitor", "pollmonitor", "finishmonitor"]
 
 ## THE CAPABILITY GATE, and the reason the rows above are not the whole
 ## answer. Counting names is only ever as complete as the list of names.
@@ -625,11 +673,26 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "close", "maxOfferBatchSize", "pollRunQuotaGrants",
                "cancelQueued", "defaultRunQuotaWindowsPipePath",
                "probeWindowsPipeOwner", "terminateStalePipeOwner"]),
+    # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
+    # names and the engine called none of them; the decomposed host API
+    # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS
+    # WHAT REPORTED THEM — bumping reprobuild's io-mon pin turned the case red
+    # with all seven named, before a line of engine code had changed. That is
+    # the audit doing its job on an UPSTREAM change, which is the case it was
+    # written for and had not yet been exercised on.
+    #
+    # ``pollMonitor`` and ``finishMonitor`` are classified as spawning
+    # deliberately, even though on POSIX neither starts anything: the Windows
+    # arm defers the spawn into them, so "can this put a child on the road"
+    # is true of both on at least one platform, and the classification has to
+    # be the union rather than this machine's answer.
     CapabilitySurface(key: "io_mon", audit: caFullSurface,
       sourceRel: "io_mon/fs_snoop.nim",
-      spawning: @["runMonitored", "runFsSnoopCli"],
+      spawning: @["runMonitored", "runFsSnoopCli", "startMonitor",
+                  "pollMonitor", "finishMonitor"],
       inert: @["appendLauncherEventLoss", "findShimLibrary", "completeness",
-               "records"]),
+               "records", "monitorLifecycleCounts", "live", "hasExited",
+               "rootPid"]),
     # The escape hatches, and the rewrite templates that warn about the
     # stdlib names. The templates are pattern rewrites, but they are also
     # ordinary exported templates that can be called by name, so they are
@@ -660,11 +723,24 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # `SYNCHRONIZE`, `MAXIMUM_WAIT_OBJECTS` and `WOHandleArray` are a type
     # and constants rather than routines, so they appear in
     # `allowedSymbols` and in neither classification list.
+    # ``Mode`` / ``umask`` / ``dup`` / ``dup2`` / ``close`` are HM-4's
+    # in-process spawn context (``beginMonitorSpawnContext``): io-mon spawns
+    # with ``poParentStreams``, so the monitored child inherits the ENGINE's
+    # descriptors 1 and 2 and the engine's file-creation mask, and both have
+    # to be set across the spawn now that no wrapper shell is doing it. None
+    # of the five starts a child; ``Mode`` is a type and so appears only in
+    # ``allowedSymbols``.
+    #
+    # This row is the gate working rather than the gate being widened: the
+    # five were REFUSED on the first run after the engine change, each named
+    # individually, and each had to be classified before the suite would go
+    # green again.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRel: "posix/posix.nim",
       spawning: @[],
-      inert: @["kill", "setpgid"],
-      allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid"]),
+      inert: @["kill", "setpgid", "umask", "dup", "dup2", "close"],
+      allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
+                        "Mode", "umask", "dup", "dup2", "close"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRel: "windows/winlean.nim",
       spawning: @[],
@@ -1091,7 +1167,16 @@ proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
     monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
     maxParallelism: 2'u32,
     stdoutLimit: 256 * 1024,
-    stderrLimit: 256 * 1024)
+    stderrLimit: 256 * 1024,
+    # In-process hosting is OPT-IN and off in production (see
+    # ``BuildEngineConfig.hostMonitorInProcess``). It is requested here for
+    # EVERY launch path, not only for L1, and that is what keeps the negative
+    # half of the oracle honest: with the switch on across the board, the only
+    # thing deciding who hosts is whether the ENGINE is the process that
+    # spawns. A change that let L2/L3/L3b host would show up as a
+    # ``.host.stdout`` under their cache roots rather than being masked by a
+    # config they never set.
+    hostMonitorInProcess: true)
   case lp.kind
   of lpBypassRunQuota:
     result.bypassRunQuota = true
@@ -1199,12 +1284,33 @@ proc helperResultFilesWritten(cacheRoot: string): int =
     if kind == pcFile and path.endsWith(".json"):
       inc result
 
+proc inProcessHostCaptureFiles(cacheRoot: string): int =
+  ## In-Process-Monitor-Hosting HM-4. The in-process host redirects the
+  ## monitored child's descriptors 1 and 2 into
+  ## ``<cacheRoot>/actions/<stem>.host.stdout`` / ``.host.stderr`` across the
+  ## spawn, because io-mon spawns with ``poParentStreams`` and the child would
+  ## otherwise inherit the ENGINE's terminal. Nothing else in the engine writes
+  ## a ``.host.stdout``, so their presence is a runtime witness that this
+  ## action was hosted IN-PROCESS rather than by a ``repro internal io
+  ## monitor`` child — which no field of ``ActionResult`` reports, because the
+  ## whole point is that the two are indistinguishable downstream.
+  let dir = cacheRoot / "actions"
+  if not dirExists(dir): return 0
+  for kind, path in walkDir(dir):
+    if kind == pcFile and path.endsWith(".host.stdout"):
+      inc result
+
 ## ---------------------------------------------------------------------
 ## Path-identity oracle: prove the case really took the launch path it
 ## is named for, instead of quietly degrading to another one and passing
 ## for the wrong reason. ``runQuotaBackend`` alone cannot do this — on a
 ## granted lease it carries the runquota PROCESS backend name
 ## (``posix-fork-exec-poll``), not the engine's path label.
+##
+## Since HM-4 it also pins WHICH HOSTING MECHANISM ran, in both
+## directions: L1 must be hosted in-process, and L2/L3/L3b must not be.
+## Without the negative half, "every path hosts in-process" and "no path
+## does" would both satisfy a check written only for L1.
 ## ---------------------------------------------------------------------
 template checkTookLaunchPath(lp: LaunchPath; run: BuildRunResult;
                              res: ActionResult; cacheRoot: string) =
@@ -1214,14 +1320,22 @@ template checkTookLaunchPath(lp: LaunchPath; run: BuildRunResult;
     check res.runQuotaBackend == "runquota-bypass"
     check res.leaseId == 0'u64
     check helperResultFilesWritten(cacheRoot) == 0
+    if inProcessHostCaptureFiles(cacheRoot) == 0:
+      echo "[", lp.name, "] no in-process host stdio capture under ",
+        cacheRoot / "actions",
+        ": this action was monitored by a `repro internal io monitor` child,",
+        " not by the engine. HM-4 regressed on L1."
+    check inProcessHostCaptureFiles(cacheRoot) > 0
   of lpRunQuotaHelper:
     check not run.runQuotaBypassed
     check res.leaseId != 0'u64
     check helperResultFilesWritten(cacheRoot) > 0
+    check inProcessHostCaptureFiles(cacheRoot) == 0
   of lpInlineRunQuota, lpInlineRunQuotaQueued:
     check not run.runQuotaBypassed
     check res.leaseId != 0'u64
     check helperResultFilesWritten(cacheRoot) == 0
+    check inProcessHostCaptureFiles(cacheRoot) == 0
 
 ## ---------------------------------------------------------------------
 ## The shared oracle: this action's dependency evidence proves the child
@@ -1272,15 +1386,30 @@ suite "every_launch_path_is_monitored":
     ## without this file being revisited.
     let src = readFile(getCurrentDir() / EngineSource)
 
-    # SEAM 1 (argv): the monitor wrapper is prepended in exactly one
-    # proc, called from exactly one site.
+    # SEAM 1 (argv): the monitor decision is taken in exactly one proc,
+    # called from exactly one site. Since HM-4 that proc also decides WHO
+    # hosts, which is why the call now carries the extra argument.
     check countOccurrences(src, "proc monitoredAction(") == 1
     check countOccurrences(src,
-      "monitoredAction(action, config, cacheRoot)") == 1
+      "monitoredAction(action, config, cacheRoot,") == 1
 
-    # SEAM 2 (argv+env contract): one definition + three uses, one per
-    # non-deferred launch path. L3b reuses L3's spec.
-    check countOccurrences(src, "preparedRunQuotaCommand(") == 4
+    # SEAM 2 (argv+env contract): one definition + FOUR uses. Three are the
+    # non-deferred launch paths (L3b reuses L3's spec); the fourth is the
+    # in-process host, which takes the same contract with the shell umask
+    # wrapper switched off — see ``preparedRunQuotaCommand``'s doc-comment
+    # for why that wrapper cannot survive into a monitored tree.
+    check countOccurrences(src, "preparedRunQuotaCommand(") == 5
+
+    # SEAM 3 (HM-4, hosting): the engine becomes io-mon's host in exactly
+    # one proc, called from exactly one site, and the three decomposed
+    # lifecycle calls appear exactly once each. A launch path that acquired
+    # its own host — or L1 losing the one it has — moves one of these.
+    check countOccurrences(src, "proc startMonitorHost(") == 1
+    check countOccurrences(src,
+      "startMonitorHost(monitorHosts, plan.action, config,") == 1
+    check countOccurrences(src, "startMonitor(monitorHostRequest(") == 1
+    check countOccurrences(src, "pollMonitor(pool.handles[slot])") == 1
+    check countOccurrences(src, "finishMonitor(move(pool.handles[slot]))") == 1
 
     # Every spawn site NAMED IN THE TABLE really exists in the engine —
     # so a row cannot describe a path that was deleted or renamed.

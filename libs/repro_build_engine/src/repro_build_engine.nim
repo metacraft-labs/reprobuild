@@ -15,7 +15,15 @@ when defined(windows):
     MAXIMUM_WAIT_OBJECTS, WOHandleArray, openProcess, closeHandle,
     waitForMultipleObjects
 elif defined(posix):
-  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid
+  # ``Mode`` / ``umask`` / ``dup`` / ``dup2`` / ``close`` are the
+  # In-Process-Monitor-Hosting HM-4 spawn context and nothing else. io-mon
+  # spawns with ``poParentStreams``, so a monitored child inherits THIS
+  # process's descriptors 1 and 2, and the canonical 0022 file-creation mask
+  # used to arrive through the ``/bin/sh -c 'umask 022 && …'`` wrapper the
+  # monitor CLI ran under. Both are re-established across the spawn instead —
+  # see ``beginMonitorSpawnContext``. None of the five starts a child.
+  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
+    dup, dup2, close
 
 import repro_core
 import repro_depfile
@@ -481,6 +489,15 @@ type
     # launches child processes directly under leases instead of spawning a
     # `repro __repro-runquota-helper` process for every action.
     inlineRunQuota*: bool
+    # OPT-IN, and OFF by default because measurement says so. When true, the
+    # engine hosts io-mon's consumer itself on the launch paths it spawns
+    # (today only the RunQuota-bypass path) instead of putting a
+    # ``repro internal io monitor`` process in between. The mechanism works and
+    # is exercised by the suite; what does not hold is the LATENCY case for
+    # turning it on by default. See the "who hosts the monitor" block below
+    # ``preparedRunQuotaCommand`` for the numbers and for what would have to
+    # change before this becomes the default.
+    hostMonitorInProcess*: bool
     dryRun*: bool
     progressCallback*: BuildProgressCallback
     cancelCallback*: BuildCancelCallback
@@ -1037,6 +1054,12 @@ type
     rpkInlineRunQuotaPending
     rpkInlineRunQuota
     rpkInlineRunQuotaFailed
+    rpkMonitorHost
+      ## In-Process-Monitor-Hosting HM-4. The engine is io-mon's HOST for this
+      ## action: there is no ``repro internal io monitor`` child in between,
+      ## and the monitored tree's root is a direct child of this process. The
+      ## handle that owns it lives in the scheduler's ``MonitorHostPool`` at
+      ## ``monitorSlot`` — see that type for why it is not a field here.
 
   RunningAction = object
     id: string
@@ -1050,6 +1073,15 @@ type
     queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
     inlineFailure: ActionResult
     resultPath: string
+    monitorSlot: int
+      ## HM-4. Index into the scheduler's ``MonitorHostPool`` for an
+      ## ``rpkMonitorHost`` entry; ``-1`` for every other kind. An INDEX and
+      ## not the ``MonitorHandle`` itself: a handle is non-copyable by
+      ## construction (IoMon-Decomposed-Host-API DH-2 makes "two owners of one
+      ## consumer" unrepresentable), and embedding one here would propagate
+      ## that to ``RunningAction`` and to the scheduler's ``seq`` of them —
+      ## where ``var item = running[i]`` and ``running.delete(i)`` are both
+      ## copies.
     when defined(posix):
       processGroupPid: int
     when defined(windows):
@@ -3489,8 +3521,29 @@ proc dependencyEvidencePath*(cacheRoot, actionId: string): string =
     (sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId) & ".rbar")
 
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
-                     cacheRoot: string): tuple[action: BuildAction;
-                                               diagnostic: string] =
+                     cacheRoot: string;
+                     hostInProcess: bool): tuple[action: BuildAction;
+                                                 diagnostic: string;
+                                                 hostInProcess: bool] =
+  ## SEAM 1 of two (the other is ``preparedRunQuotaCommand``): everything that
+  ## decides whether an action is monitored, and how, happens here.
+  ##
+  ## In-Process-Monitor-Hosting HM-4 — ``hostInProcess`` says the launch site
+  ## about to run this action is one the ENGINE spawns, so the engine can be
+  ## io-mon's host itself. When it is true the argv is left ALONE and only the
+  ## evidence path is selected; when it is false the historical
+  ## ``<repro> internal io monitor --depfile <f> -- <argv>`` wrapper is
+  ## prepended and a second ``repro`` process does the hosting.
+  ##
+  ## The caller decides, not this proc, because "which launch path" is not
+  ## knowable from an action: see the launch decision in ``runBuild``, which
+  ## is now taken BEFORE the monitor plan for exactly this reason.
+  ##
+  ## Both forms select the SAME depfile path and both produce the SAME
+  ## evidence — ``finishMonitor`` writes the canonical RMDF that
+  ## ``foldMonitorDepFileEvidence`` reads, byte for byte what the CLI wrote
+  ## (IoMon-Decomposed-Host-API DH-4), so nothing downstream of
+  ## ``action.monitorDepfile`` can tell the two apart.
   result.action = action
   if action.dependencyPolicy.kind notin MonitorPolicyKinds:
     return
@@ -3544,8 +3597,17 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
     let depfile = cacheRoot / "monitor-depfiles" /
       (sanitizeActionId(action.id) & ".rdep")
     result.action.monitorDepfile = depfile
-    result.action.argv = @[monitorCli] & config.monitorCliArgs &
-      @["--depfile", depfile, "--"] & action.argv
+    if hostInProcess:
+      # HM-4 — the ENGINE is the host. The argv stays exactly what the recipe
+      # wrote, because io-mon spawns it directly; the wrapper below exists
+      # only to put a hosting process in between, and there no longer is one.
+      # ``monitorCliPath`` is still what gates monitoring on/off (an
+      # unconfigured driver still means "no monitor is wired"), so this branch
+      # changes WHO hosts and nothing about WHETHER an action is monitored.
+      result.hostInProcess = true
+    else:
+      result.action.argv = @[monitorCli] & config.monitorCliArgs &
+        @["--depfile", depfile, "--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
     # ``launchChildEnv`` (NOT here on ``result.action.env``). The seed
     # MUST NOT enter the action's fingerprint — the absolute path of
@@ -4747,10 +4809,20 @@ proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
     for entry in argv: result.add(entry)
 
 proc preparedRunQuotaCommand(action: BuildAction;
-                             config: BuildEngineConfig): ReproCommandSpec =
+                             config: BuildEngineConfig;
+                             shellUmaskWrap = true): ReproCommandSpec =
   ## Build one argv/env contract for direct, helper, and inline launches.
   ## Sharing this prevents bypass execution from drifting away from normal
   ## RunQuota execution as tool-path and compiler flags evolve.
+  ##
+  ## In-Process-Monitor-Hosting HM-4 — ``shellUmaskWrap = false`` is the
+  ## in-process host's form. The 0022 mask still applies; it is set around the
+  ## spawn (``beginMonitorSpawnContext``) instead of by a wrapping
+  ## ``/bin/sh -c 'umask 022 && …'``. That matters for EVIDENCE and not for
+  ## tidiness: with the engine hosting, a wrapper shell would itself be inside
+  ## the monitored tree, and its own reads and probes would land in the
+  ## action's dependency set — where today the shell sits outside the monitor,
+  ## one process above it.
   when defined(macosx):
     if action.monitorDepfile.len > 0 and resolveNonSipShell().len == 0:
       raiseEngine("SIP-safe monitored launch requires a non-SIP shell; " &
@@ -4768,11 +4840,485 @@ proc preparedRunQuotaCommand(action: BuildAction;
     includePaths.systemDirs)
   let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
   ReproCommandSpec(
-    argv: umaskWrappedArgv(deferred.argv),
+    argv: (if shellUmaskWrap: umaskWrappedArgv(deferred.argv)
+           else: deferred.argv),
     cwd: action.cwd,
     env: deferred.env,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
+
+# ---------------------------------------------------------------------------
+# In-Process-Monitor-Hosting HM-4 — the engine hosts io-mon's consumer itself.
+#
+# WHAT THIS IS. A monitored action is normally launched as
+# ``<repro> internal io monitor --depfile <f> -- <argv>``: the engine spawns a
+# SECOND ``repro`` process whose only job is to be io-mon's host, and that
+# process spawns the real command. When ``BuildEngineConfig.hostMonitorInProcess``
+# is set, the launch paths the engine spawns skip that: the engine drives
+# io-mon's decomposed host API directly (``startMonitor`` -> ``pollMonitor`` ->
+# ``finishMonitor``, IoMon-Decomposed-Host-API DH-2) and the monitored tree's
+# root is a direct child of the engine.
+#
+# IT IS OFF BY DEFAULT, on measurement, and the measurement is at the bottom of
+# this block. Everything below describes what happens when it is ON.
+#
+# WHICH PATHS, AND WHY NOT ALL FOUR. io-mon OWNS the spawn — DH-4 says plainly
+# that "spawn supplied by the caller is not delivered and should not be
+# expected", because a host that owned the spawn would be back to the §4.1
+# hand-rolled-host hazard the whole decomposition exists to close. So a launch
+# path can host the monitor only if the ENGINE is the process that spawns:
+#
+#   * L1 bypass — the engine spawns. HOSTED.
+#   * L2 RunQuota helper — the engine spawns ``repro
+#     __repro-runquota-helper …`` and THAT process spawns the action, two
+#     processes deep. There is no spawn here to hand to io-mon, so this path
+#     keeps the CLI wrapper. ``repro internal io monitor`` is therefore still
+#     a PRODUCTION path and not only a debugging entry point.
+#   * L3 / L3b inline RunQuota — the engine spawns, but not directly:
+#     ``offerWithRunQuotaBatch`` and ``startGrantedWithRunQuota`` spawn the
+#     child THEMSELVES as part of binding it to the granted lease
+#     (``lease.markRunning(childProcessId, processGroupId, …)``). Hosting
+#     there needs a RunQuota lease that can adopt a child the caller already
+#     spawned, which is a change to the RunQuota adapter's contract and not to
+#     this file. They keep the CLI wrapper for now.
+#
+# A path that keeps the wrapper is NOT degraded — it is monitored exactly as
+# it was, by the same io-mon code, and ``evidence is identical across launch
+# paths`` in tests/integration/t_every_launch_path_is_monitored.nim is what
+# holds the two forms to the same evidence.
+#
+# WHEN THE SCHEDULER FINISHES A MONITOR: on the poll pass that first observes
+# the root's exit, for EVERY monitor that has exited, not only the one the
+# scheduler goes on to reap. This is a deliberate choice with an evidence
+# consequence, measured by DH-4 (item 3 of its landing record): the §4.1
+# detached-descendant grace window OPENS when ``finishMonitor`` runs, so a
+# monitor left sitting in the queue grades a descendant that dies in the
+# interval ``mcComplete`` where the reference (batch) form grades it
+# ``mcIncomplete`` — on identical inputs, with nothing wrong. Finishing on the
+# observing pass pins the window's opening to root-exit DETECTION, so it is
+# one poll interval (~1 ms) after the real exit and does not vary with how
+# many other actions happen to be in flight. What it costs: a monitor whose
+# descendants are still alive blocks this loop for the grace window (500 ms by
+# default) where the spawned form blocked a separate process. That
+# serialisation is real, and it is the price of the evidence agreeing with the
+# reference rather than with the scheduler's queue depth.
+#
+# AND THIS IS WHY ``BuildEngineConfig.hostMonitorInProcess`` DEFAULTS TO FALSE.
+# The case for hosting is latency: one process spawn per monitored action
+# removed. That spawn IS removed and it IS worth something — but the monitor's
+# end-of-action work moves with it, out of N concurrent monitor processes and
+# into this one loop, where it is paid SERIALLY. Which of the two dominates is
+# a question about the workload, and it was measured rather than argued.
+#
+# Linux, 32 cores, ~850 live processes, hosted and wrapped arms compiled from
+# the same source and run INTERLEAVED so machine drift cancels. Milliseconds
+# per action, 3-5 samples per cell, spread shown:
+#
+#   40 trivial actions           hosted        wrapped
+#     parallelism 1              26-46         58-64      hosting ~2x FASTER
+#     parallelism 4              15-27         18-24      a wash
+#
+#   120 trivial actions          hosted        wrapped
+#     parallelism 8 (default)    14-18         6-11       hosting ~2x SLOWER
+#     parallelism 16             11-26         5-10       hosting ~2-3x SLOWER
+#     parallelism 32             13-26         4-11       hosting ~2-3x SLOWER
+#
+#   80 actions, parallelism 8, per-action work varied:
+#     ~0 ms of work              15-33         8-13       hosting ~2-3x SLOWER
+#     ~100 ms of work            26-35         21-23      hosting ~20% slower
+#     ~500 ms of work            76-82         72-81      indistinguishable
+#
+# The mechanism is arithmetic. `startMonitor` is cheap; `finishMonitor` costs
+# ~14 ms per action here, and a hosted build pays it one action at a time —
+# 120 actions x ~14 ms is the ~1.7 s the parallelism-8 row shows, and it does
+# not improve with more parallelism because nothing about it is parallel. The
+# wrapped form pays the same ~14 ms inside N concurrent processes. So hosting
+# wins whenever there is nothing to overlap (parallelism 1), and loses whenever
+# an action is cheaper than `parallelism x 14 ms` of real work.
+#
+# The absolute numbers belong to one machine at one moment and are NOT a
+# specification; the SHAPE is the finding, and the shape is that the default
+# parallelism is 8 and typical actions are cheaper than ~112 ms of work.
+#
+# WHAT WOULD CHANGE THE ANSWER: `finishMonitor` leaving the scheduler's serial
+# path. Its cost is already down an order of magnitude from where this
+# milestone started — the io-mon revision pinned in flake.nix cut the §4.1
+# descendant sweep from ~105 ms to ~6 ms, which is what turned a hard ceiling
+# of 5-6 actions/second into the ~70/second measured above. That was enough to
+# make hosting viable and not enough to make it preferable. An async flush, or
+# a finish that does not block the poll loop, is the remaining item; re-measure
+# at the parallelism the build actually uses before flipping the default.
+# ---------------------------------------------------------------------------
+
+const InProcessMonitorHostSupported* = defined(linux) or defined(macosx)
+  ## Windows is deliberately excluded. ``pollMonitor`` BLOCKS on that arm
+  ## (DH-2: ``runWithMonitorShim`` spawns and waits in one call, so the first
+  ## poll performs the whole run), and an N-way poll loop over blocking polls
+  ## executes serially — hosting in-process there would turn a parallel build
+  ## into a sequential one. The wrapper stays on Windows until
+  ## nim-stackable-hooks grows a non-blocking spawn.
+
+type
+  MonitorHostRecord = object
+    ## Per-slot bookkeeping for one hosted monitor. Everything here is plain
+    ## data; the ``MonitorHandle`` itself lives in a parallel ``seq`` because
+    ## it is non-copyable and this record is not.
+    inUse: bool
+    finished: bool
+    handleLive: bool
+      ## This slot's ``MonitorHandle`` still owns a consumer and a monitored
+      ## tree — i.e. it has NOT been moved into ``finishMonitor`` and has not
+      ## been dropped.
+      ##
+      ## Tracked separately from ``finished`` because the two come apart on
+      ## the failure paths: ``pollMonitor`` raising marks the slot finished
+      ## WITHOUT consuming the handle, and so does ``rootPid`` raising after a
+      ## successful ``startMonitor``. Keying teardown off ``finished`` would
+      ## then free a slot whose handle is still live, and the next action to
+      ## recycle that slot would assign over it — running io-mon's drop
+      ## teardown, which WAITS for a monitored root nobody has killed. That is
+      ## a build that stops making progress, so the invariant "a slot is only
+      ## released once its handle is dead" is maintained explicitly here.
+    failure: string
+    exitCode: int
+    rootPid: int
+    stdoutPath: string
+    stderrPath: string
+
+  MonitorHostPool = object
+    ## The scheduler's in-flight monitors.
+    ##
+    ## A ``seq[MonitorHandle]`` is legal and a copy out of one is not: DH-2
+    ## makes ``=copy`` a compile error so that "two owners of one consumer"
+    ## cannot be written down, and that propagates through ``seq``. Every
+    ## access below therefore either indexes in place or ``move``s out. Slots
+    ## are recycled but NEVER deleted — ``seq.delete`` shifts elements by
+    ## assignment, which is exactly the copy the type refuses.
+    handles: seq[MonitorHandle]
+    records: seq[MonitorHostRecord]
+
+proc allocMonitorHostSlot(pool: var MonitorHostPool): int =
+  for i in 0 ..< pool.records.len:
+    if not pool.records[i].inUse:
+      pool.records[i] = MonitorHostRecord(inUse: true)
+      return i
+  pool.handles.add(MonitorHandle())
+  pool.records.add(MonitorHostRecord(inUse: true))
+  pool.records.len - 1
+
+proc monitorHostRequest(action: BuildAction;
+                        command: ReproCommandSpec): FsSnoopRequest =
+  ## Project the ONE argv+env contract every launch path shares onto io-mon's
+  ## request. Both sides layer over the hosting process's own environment
+  ## (``ReproCommandSpec.env`` through RunQuota's process backend,
+  ## ``FsSnoopRequest.env`` through io-mon's ``childEnv``), so the monitored
+  ## child sees the same variables it saw when a second ``repro`` process was
+  ## in between — which is what makes the two hosting forms comparable at all.
+  result = FsSnoopRequest(
+    command: command.argv,
+    depFilePath: action.monitorDepfile,
+    cwd: command.cwd,
+    streamMode: fsoNone,
+    passthroughChildStdout: true,
+    passthroughChildStderr: true)
+  for entry in command.env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    result.env.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+
+when defined(posix):
+  type MonitorSpawnContext = object
+    savedIn: cint
+    savedOut: cint
+    savedErr: cint
+    nullFile: File
+    outFile: File
+    errFile: File
+    savedMask: Mode
+    active: bool
+
+  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
+    ## Re-establish, across io-mon's spawn, the three things the retired
+    ## ``/bin/sh -c 'umask 022 && <repro> internal io monitor …'`` wrapper and
+    ## RunQuota's process backend used to provide for free.
+    ##
+    ## STDIO. io-mon spawns with ``poParentStreams``, so the monitored child
+    ## inherits THIS process's descriptors 0, 1 and 2 — for the engine, the
+    ## user's terminal, not a per-action capture. Pointing 1 and 2 at two
+    ## per-action files across the spawn gives the engine back separate
+    ## ``stdout`` and ``stderr``, and does it WITHOUT the monitored tree
+    ## opening anything: the child inherits descriptors that are already open,
+    ## so no ``open`` of a log path enters its dependency evidence. (A shell
+    ## redirect inside the monitored command would have put both log paths
+    ## into ``monitorWrites`` — which is why this is done here and not there.)
+    ##
+    ## STDIN, and it is descriptor 0 that makes this a correctness fix rather
+    ## than a capture convenience. EVERY other launch path gives the child
+    ## ``/dev/null`` on descriptor 0 — RunQuota's POSIX backend opens it
+    ## explicitly before ``execvp`` (``runquota_process.nim``), so an action
+    ## that reads stdin sees immediate EOF. ``poParentStreams`` hands the child
+    ## the ENGINE's stdin instead, which in a normal ``repro build`` is the
+    ## user's terminal: a monitored action that reads stdin would block the
+    ## build waiting for a keystroke, or worse, eat one. Redirecting it here
+    ## makes the hosted path answer EOF like every other path.
+    ##
+    ## UMASK. ``umaskWrappedArgv`` (M9.R.36.3) pins every spawned tool to the
+    ## canonical 0022 mask by wrapping the argv in a shell. A hosted action has
+    ## no wrapper shell to carry it, and monitoring one would add the shell's
+    ## own reads to the action's evidence, so the mask is set here and restored
+    ## immediately; a child inherits it across ``fork``.
+    ##
+    ## SAFE BECAUSE THE SCHEDULER IS SINGLE-THREADED. The engine runs N
+    ## concurrent child PROCESSES from one poll loop, not N threads
+    ## (``createThread`` has zero occurrences in this library), so nothing else
+    ## can observe the window between this call and ``endMonitorSpawnContext``.
+    ## If the engine ever grows worker threads, this is the first thing that
+    ## breaks, and it breaks by interleaving one action's output into
+    ## another's.
+    flushFile(stdout)
+    flushFile(stderr)
+    result.savedIn = dup(cint(0))
+    result.savedOut = dup(cint(1))
+    result.savedErr = dup(cint(2))
+    if result.savedIn < 0 or result.savedOut < 0 or result.savedErr < 0:
+      if result.savedIn >= 0: discard close(result.savedIn)
+      if result.savedOut >= 0: discard close(result.savedOut)
+      if result.savedErr >= 0: discard close(result.savedErr)
+      raiseEngine("in-process monitor host: cannot duplicate stdio")
+
+    proc closeSaved(ctx: MonitorSpawnContext) =
+      discard close(ctx.savedIn)
+      discard close(ctx.savedOut)
+      discard close(ctx.savedErr)
+
+    if not open(result.nullFile, "/dev/null", fmRead):
+      closeSaved(result)
+      raiseEngine("in-process monitor host: cannot open /dev/null")
+    if not open(result.outFile, outPath, fmWrite):
+      close(result.nullFile)
+      closeSaved(result)
+      raiseEngine("in-process monitor host: cannot open stdout capture " &
+        outPath)
+    if not open(result.errFile, errPath, fmWrite):
+      close(result.nullFile)
+      close(result.outFile)
+      closeSaved(result)
+      raiseEngine("in-process monitor host: cannot open stderr capture " &
+        errPath)
+    discard dup2(cint(getFileHandle(result.nullFile)), cint(0))
+    discard dup2(cint(getFileHandle(result.outFile)), cint(1))
+    discard dup2(cint(getFileHandle(result.errFile)), cint(2))
+    result.savedMask = umask(Mode(0o022))
+    result.active = true
+
+  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
+    if not ctx.active:
+      return
+    ctx.active = false
+    discard umask(ctx.savedMask)
+    flushFile(stdout)
+    flushFile(stderr)
+    discard dup2(ctx.savedIn, cint(0))
+    discard dup2(ctx.savedOut, cint(1))
+    discard dup2(ctx.savedErr, cint(2))
+    discard close(ctx.savedIn)
+    discard close(ctx.savedOut)
+    discard close(ctx.savedErr)
+    close(ctx.nullFile)
+    close(ctx.outFile)
+    close(ctx.errFile)
+else:
+  type MonitorSpawnContext = object
+    active: bool
+
+  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
+    discard outPath
+    discard errPath
+
+  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
+    discard ctx
+
+proc monitorHostStdioStem(actionId: string): string =
+  sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId)
+
+proc releaseMonitorHostSlot(pool: var MonitorHostPool; slot: int) =
+  ## Return one slot to the pool, killing and dropping its monitor first if the
+  ## handle is still live.
+  ##
+  ## THE ONLY WAY A SLOT IS FREED. Every caller goes through here so the pool's
+  ## one invariant — a recyclable slot's handle is dead — cannot be broken by
+  ## adding another exit path. The root is killed BEFORE the handle is dropped
+  ## because dropping runs io-mon's teardown, which waits for the monitored
+  ## root before releasing the consumer (IoMon-Decomposed-Host-API DH-2): that
+  ## ordering is what makes an orphaned producer unrepresentable, and it is
+  ## also what would otherwise let a still-running child hold the build open
+  ## for as long as it liked.
+  if slot < 0 or slot >= pool.records.len: return
+  if pool.records[slot].handleLive:
+    when defined(posix):
+      let pid = pool.records[slot].rootPid
+      if pid > 0:
+        when defined(linux):
+          signalDescendants(pid, SIGKILL)
+        discard kill(Pid(pid), SIGKILL)
+    block:
+      let handle = move(pool.handles[slot])
+      discard handle.live
+  pool.records[slot] = MonitorHostRecord()
+
+proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
+                      config: BuildEngineConfig; cacheRoot: string): int =
+  ## Bring io-mon's consumer up and launch the monitored tree, returning the
+  ## pool slot that owns both. Raises like any other launch primitive; the
+  ## caller turns a raise into the same ``process launch failed`` result the
+  ## other paths produce.
+  let command = preparedRunQuotaCommand(action, config, shellUmaskWrap = false)
+  if command.argv.len == 0:
+    raiseEngine("in-process monitor host: action has empty argv: " & action.id)
+  let logDir = bypassActionLogDir(cacheRoot)
+  createDir(extendedPath(logDir))
+  let stem = monitorHostStdioStem(action.id)
+  let outPath = logDir / (stem & ".host.stdout")
+  let errPath = logDir / (stem & ".host.stderr")
+  var ctx = beginMonitorSpawnContext(outPath, errPath)
+  var slot = -1
+  try:
+    slot = allocMonitorHostSlot(pool)
+    pool.records[slot].stdoutPath = outPath
+    pool.records[slot].stderrPath = errPath
+    pool.handles[slot] = startMonitor(monitorHostRequest(action, command))
+    pool.records[slot].handleLive = true
+    pool.records[slot].rootPid = int(rootPid(pool.handles[slot]))
+  except CatchableError:
+    if slot >= 0:
+      # Never release a slot whose handle is still live — see
+      # ``MonitorHostRecord.handleLive``. ``startMonitor`` may have succeeded
+      # and a later statement raised.
+      releaseMonitorHostSlot(pool, slot)
+    raise
+  finally:
+    endMonitorSpawnContext(ctx)
+  slot
+
+proc completeMonitorHost(pool: var MonitorHostPool; slot: int) =
+  ## Consume the handle and record the outcome. ``finishMonitor`` waits for the
+  ## root itself when it has not exited — exactly what ``runMonitored`` relies
+  ## on — so there is no spin here.
+  if slot < 0 or slot >= pool.records.len: return
+  if not pool.records[slot].inUse or pool.records[slot].finished: return
+  # ``finishMonitor`` consumes the handle whether it returns or raises, so the
+  # slot stops owning one the moment the ``move`` is evaluated.
+  pool.records[slot].handleLive = false
+  try:
+    let outcome = finishMonitor(move(pool.handles[slot]))
+    pool.records[slot].exitCode = outcome.exitCode
+  except CatchableError as err:
+    # A monitor fault must fail ONE action, never the host — see
+    # tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim,
+    # which states that as a property of the engine precisely so it keeps its
+    # meaning now that the process boundary is gone.
+    pool.records[slot].failure = "io-monitor host failed: " & err.msg
+  pool.records[slot].finished = true
+
+proc settleMonitorHost(pool: var MonitorHostPool; slot: int): bool =
+  ## Advance one hosted monitor without blocking, and FINISH it the moment its
+  ## root has exited. See the header for why finishing is not deferred to the
+  ## point where the scheduler reaps the action.
+  if slot < 0 or slot >= pool.records.len: return false
+  if not pool.records[slot].inUse: return false
+  if pool.records[slot].finished: return true
+  var exited = false
+  try:
+    exited = pollMonitor(pool.handles[slot])
+  except CatchableError as err:
+    pool.records[slot].failure = "io-monitor poll failed: " & err.msg
+    pool.records[slot].finished = true
+    return true
+  if not exited:
+    return false
+  completeMonitorHost(pool, slot)
+  true
+
+proc readCapturedStdio(path: string; limit: int): string =
+  ## Read back one of the in-process host's stdio captures, applying the same
+  ## HEAD truncation RunQuota's process backend applies while draining a pipe
+  ## (``runquota_process.appendBounded`` keeps the first ``limit`` bytes), and
+  ## then REWRITE the file at that size.
+  ##
+  ## The rewrite is not tidiness. RunQuota's capture is bounded in MEMORY while
+  ## the child runs — everything past the limit is drained and dropped — but a
+  ## redirected descriptor has no such bound, so an action that writes gigabytes
+  ## writes gigabytes into the cache root. Truncating on read bounds what
+  ## SURVIVES the action to ``limit``; what it cannot bound is the peak, and
+  ## that difference is a real one against the spawned form. A ``cacheRoot`` on
+  ## a small filesystem plus a runaway monitored action is the shape to watch.
+  if path.len == 0 or not fileExists(extendedPath(path)):
+    return ""
+  try:
+    result = readFile(extendedPath(path))
+  except CatchableError:
+    return ""
+  if limit > 0 and result.len > limit:
+    result = result[0 ..< limit]
+    try:
+      writeFile(extendedPath(path), result)
+    except CatchableError:
+      discard
+
+proc finishMonitorHostAction(pool: var MonitorHostPool; id: string; slot: int;
+                             config: BuildEngineConfig;
+                             cacheRoot: string): ActionResult =
+  ## Turn a hosted monitor into the same ``ActionResult`` shape the direct
+  ## RunQuota-bypass launch produces, including the historical per-action log
+  ## files diagnostics and focused engine tests read.
+  completeMonitorHost(pool, slot)
+  result = ActionResult(
+    id: id,
+    launched: true,
+    runQuotaBackend: "runquota-bypass")
+  if slot < 0 or slot >= pool.records.len:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = "in-process monitor host: no slot for " & id
+    return
+  let record = pool.records[slot]
+  # ``completeMonitorHost`` above normally leaves the handle dead, but not when
+  # ``settleMonitorHost`` already marked the slot finished on a POLL failure —
+  # that path never consumed it. ``releaseMonitorHostSlot`` is what closes that
+  # gap; going through it is why this is not a bare record reset.
+  releaseMonitorHostSlot(pool, slot)
+  let capturedOut = readCapturedStdio(record.stdoutPath, config.stdoutLimit)
+  let capturedErr = readCapturedStdio(record.stderrPath, config.stderrLimit)
+  try:
+    writeFile(extendedPath(bypassActionStdoutLogPath(cacheRoot, id)),
+      capturedOut)
+  except CatchableError:
+    discard
+  try:
+    writeFile(extendedPath(bypassActionStderrLogPath(cacheRoot, id)),
+      capturedErr)
+  except CatchableError:
+    discard
+  result.stdout = stripMonitorBanner(capturedOut)
+  result.stderr = stripMonitorBanner(capturedErr)
+  if record.failure.len > 0:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = [result.stderr, record.failure].join("\n").strip()
+  else:
+    result.exitCode = record.exitCode
+    result.status = if record.exitCode == 0: asSucceeded else: asFailed
+
+proc abandonMonitorHost(pool: var MonitorHostPool; slot: int) =
+  ## Tear a hosted monitor down on cancellation or shutdown. Kills the
+  ## monitored root and drops the handle — see ``releaseMonitorHostSlot``,
+  ## which owns that ordering and is the only place a slot is freed. This
+  ## exists as a named call site so the scheduler's shutdown path reads the
+  ## same as its helper-path neighbour, ``terminateRunningAction``.
+  if slot < 0 or slot >= pool.records.len: return
+  if not pool.records[slot].inUse: return
+  releaseMonitorHostSlot(pool, slot)
 
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig):
@@ -6280,6 +6826,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     cmp(idToIndex[a], idToIndex[b])
 
   var running: seq[RunningAction] = @[]
+  # In-Process-Monitor-Hosting HM-4 — the in-flight io-mon consumers this
+  # build hosts itself. A build-scoped local rather than a module global: the
+  # pool owns live consumers and live monitored trees, and its teardown is the
+  # ``finally`` below, so its lifetime has to be exactly this build's.
+  var monitorHosts = MonitorHostPool()
   var launchedSucceeded = initHashSet[string]()
   var runQuotaDaemonReachable: Option[bool]
 
@@ -6443,7 +6994,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## entries, so cap its timeout while one is active.
     for item in running:
       if item.processKind in {rpkInlineRunQuota, rpkInlineRunQuotaPending,
-                              rpkInlineRunQuotaFailed, rpkBypassProcess}:
+                              rpkInlineRunQuotaFailed, rpkBypassProcess,
+                              rpkMonitorHost}:
         return true
     false
 
@@ -7136,8 +7688,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           launchedAny = true
           continue
 
+        # In-Process-Monitor-Hosting HM-4 — the launch decision is taken HERE,
+        # before the monitor is planned, because only a path the ENGINE spawns
+        # can host io-mon in-process and the monitor plan is what records that
+        # choice. It used to sit just above the spawn, ~130 lines below.
+        #
+        # Guarded on ``bakProcess`` so nothing changes for a built-in action:
+        # ``tryEnsureInlineRunQuotaSession`` opens a real session, and a
+        # built-in never launches anything that would use one. The two
+        # variables are consumed unchanged at the spawn site; only the point
+        # at which they are computed moved.
+        var bypassRunQuota = false
+        var inlineRunQuota = false
+        if action.kind == bakProcess:
+          if config.inlineRunQuota and not effectiveBypassRunQuota:
+            inlineRunQuota = tryEnsureInlineRunQuotaSession()
+            bypassRunQuota = not inlineRunQuota
+          else:
+            bypassRunQuota = launchBypassesRunQuota()
+        let hostMonitorInProcess = InProcessMonitorHostSupported and
+          config.hostMonitorInProcess and
+          action.kind == bakProcess and bypassRunQuota
+
         let monitorPlanStart = statStart()
-        let plan = monitoredAction(action, config, cacheRoot)
+        let plan = monitoredAction(action, config, cacheRoot,
+          hostMonitorInProcess)
         finishStat("repro monitor plan", monitorPlanStart)
         if plan.diagnostic.len > 0:
           statuses[id] = asFailed
@@ -7264,13 +7839,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         poolRunning[poolName] = used + units
         inc launchSeq
         let resultPath = runQuotaResultRoot / ($launchSeq & ".json")
-        var bypassRunQuota = false
-        var inlineRunQuota = false
-        if config.inlineRunQuota and not effectiveBypassRunQuota:
-          inlineRunQuota = tryEnsureInlineRunQuotaSession()
-          bypassRunQuota = not inlineRunQuota
-        else:
-          bypassRunQuota = launchBypassesRunQuota()
+        # ``bypassRunQuota`` / ``inlineRunQuota`` were decided above the
+        # monitor plan (HM-4). Their consumption is unchanged.
         # RA-13: record that this run launched at least one action with no
         # RunQuota lease so the build header + run report can surface the
         # unsafe-for-concurrent state (it never makes concurrent cross-
@@ -7297,14 +7867,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let launchStart = statStart()
         var process: Process
         var directProcess: ReproDirectRunningProcess
+        var monitorSlot = -1
         var processKind =
-          if bypassRunQuota: rpkBypassProcess
+          if plan.hostInProcess: rpkMonitorHost
+          elif bypassRunQuota: rpkBypassProcess
           else: rpkHelperProcess
         let startEvent = "launched"
         let startDetail = "pool=" & poolName
         var launchFailure = ""
         try:
-          if bypassRunQuota:
+          if plan.hostInProcess:
+            # HM-4 — the engine IS io-mon's host for this action. Reached only
+            # when the monitor plan said so, which it only does for a launch
+            # path the engine spawns.
+            monitorSlot = startMonitorHost(monitorHosts, plan.action, config,
+              cacheRoot)
+          elif bypassRunQuota:
             directProcess = startBypassRunQuotaProcess(plan.action, config)
           else:
             process = startRunQuotaProcess(plan.action, config, resultPath)
@@ -7344,10 +7922,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           processKind: processKind,
           process: process,
           directProcess: directProcess,
-          resultPath: resultPath
+          resultPath: resultPath,
+          monitorSlot: monitorSlot
         )
         when defined(posix):
-          if not bypassRunQuota:
+          if not bypassRunQuota and not plan.hostInProcess:
             runningAction.processGroupPid = assignProcessGroup(process)
         running.add(runningAction)
         runResult.trace(id, startEvent, startDetail)
@@ -7432,7 +8011,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               processKind: processKind,
               runQuotaProcess: runQuotaProcess,
               queuedRunQuotaProcess: queuedRunQuotaProcess,
-              resultPath: staged.resultPath
+              resultPath: staged.resultPath,
+              monitorSlot: -1
             ))
             runResult.trace(staged.id, startEvent, startDetail)
             emitProgress(bpkActionStarted, staged.id)
@@ -7504,6 +8084,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           nextGrantPoll = epochTime() + 0.025
           if runIndex >= 0:
             break
+        # In-Process-Monitor-Hosting HM-4 — settle EVERY hosted monitor whose
+        # root has exited before choosing which action to reap, and settle
+        # them in their own pass so the choice cannot skip any.
+        #
+        # This is the timing decision the milestone asks to be made
+        # deliberately. ``settleMonitorHost`` runs ``finishMonitor`` as soon as
+        # ``pollMonitor`` answers true, and the §4.1 detached-descendant grace
+        # window opens at that call (DH-4). Doing it inside the selection loop
+        # below would leave every monitor after the first one in the pass
+        # unfinished until the scheduler got round to it, so a descendant that
+        # died in between would be graded ``mcComplete`` here and
+        # ``mcIncomplete`` by the reference form — a divergence produced by
+        # queue depth rather than by anything about the action.
+        for j in 0 ..< running.len:
+          if running[j].processKind == rpkMonitorHost:
+            discard settleMonitorHost(monitorHosts, running[j].monitorSlot)
         # Cheap inline-only checks first: queued/failed inline-runquota
         # entries are not handle-based and the OS won't wake us for them.
         # Inline-RunQuota processes do their own pipe / handle wait in
@@ -7512,6 +8108,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           case running[j].processKind
           of rpkInlineRunQuotaPending:
             discard
+          of rpkMonitorHost:
+            if monitorHosts.records[running[j].monitorSlot].finished:
+              runIndex = j
+              break
           of rpkInlineRunQuota:
             if running[j].runQuotaProcess.pollCompletion():
               runIndex = j
@@ -7570,6 +8170,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runningItem.runQuotaProcess)
         of rpkInlineRunQuotaFailed:
           runningItem.inlineFailure
+        of rpkMonitorHost:
+          finishMonitorHostAction(
+            monitorHosts,
+            runningItem.id,
+            runningItem.monitorSlot,
+            config,
+            cacheRoot)
         of rpkBypassProcess:
           finishBypassRunQuotaProcess(
             runningItem.id,
@@ -7708,6 +8315,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           discard item.runQuotaProcess.cancelAndWait()
       of rpkInlineRunQuotaFailed:
         discard
+      of rpkMonitorHost:
+        # HM-4 — kill the monitored root, then let the handle go. Dropping it
+        # reaps the root before releasing the consumer, so no producer is ever
+        # left publishing into a released set (LF-2); killing first is what
+        # keeps that reap from blocking shutdown indefinitely.
+        abandonMonitorHost(monitorHosts, item.monitorSlot)
       of rpkBypassProcess:
         if item.directProcess.active and not item.directProcess.completed:
           discard item.directProcess.cancelAndWait()

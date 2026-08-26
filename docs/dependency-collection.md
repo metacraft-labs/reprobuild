@@ -14,6 +14,32 @@ Tool implementation files are not project inputs: the engine removes monitored
 paths below resolved tool roots because those paths are already represented by
 the tool identity.
 
+### Who runs the monitor
+
+By default the engine launches a monitored action through a separate
+`repro internal io monitor` process, which hosts the monitor and spawns the
+command. The engine can instead host the monitor itself, with the command as
+its own direct child and no process in between; this is off by default and is
+requested per build.
+
+Hosting in-process removes one process spawn per monitored action, but it moves
+the monitor's end-of-action work onto the scheduler's single loop, where it is
+paid one action at a time instead of concurrently. Measured on Linux, that
+trade is a win only when actions are launched one at a time: at the default
+parallelism it costs roughly 2x for very short actions, about 20% for actions
+doing ~100 ms of work, and nothing measurable for actions doing ~500 ms or
+more. Prefer the default unless you have measured your own workload.
+
+One operational difference is worth knowing before enabling it. Through the
+default path, an action's captured `stdout` and `stderr` are bounded in memory
+while it runs — output past the limit is read and discarded, so a runaway
+action costs no disk. The in-process host redirects the child's output straight
+into `<cacheRoot>/actions/` instead, and a redirected file has no such bound: it
+is truncated to the limit only once the action finishes. An action that writes
+gigabytes therefore writes gigabytes into the cache root before anything
+truncates it. If `cacheRoot` is on a small filesystem, that peak is the thing to
+watch.
+
 Package definitions may declare additional monitored input prefixes that should
 not participate in the action cache key:
 
