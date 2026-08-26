@@ -1871,6 +1871,28 @@ proc lowerDependencyPolicy(actionId, depfile: string;
           "makeDepfilePolicy")
     result = DependencyGatheringPolicy(kind: dgAutomaticMonitor,
         completeness: decComplete)
+  of bdpTrustedDeclaredInputs:
+    # HAZARDOUS, owner-authorized 2026-08-21. No monitor wrap and no result
+    # processing: the author's inline list IS the evidence. ``decComplete``
+    # keeps the edge cacheable, which is simultaneously the point of the
+    # policy and its entire hazard, because nothing ever re-checks the list.
+    # ``dgTrustedDeclaredInputs`` is deliberately absent from the engine's
+    # ``MonitorPolicyKinds``, so ``monitoredAction`` returns early and no
+    # ``LD_PRELOAD`` shim is injected.
+    #
+    # Guards are re-checked here, not only in the constructor, because a
+    # policy can also arrive from a decoded payload.
+    if policy.trustedInputs.len == 0:
+      raise newException(ValueError,
+        "action " & actionId & " uses trustedDeclaredInputsPolicy with an " &
+          "empty input list; that would disable dependency tracking entirely")
+    if policy.trustedReason.len == 0:
+      raise newException(ValueError,
+        "action " & actionId & " uses trustedDeclaredInputsPolicy without a " &
+          "reason; the justification is surfaced in the build report")
+    result = DependencyGatheringPolicy(
+      kind: dgTrustedDeclaredInputs,
+      completeness: decComplete)
   of bdpMakeDepfile:
     # MR16: ``policy.depfiles`` is the canonical multi-path list.
     # ``depfile`` (the per-action legacy single-path field) is merged

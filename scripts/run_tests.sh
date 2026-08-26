@@ -285,15 +285,25 @@ if [[ "${runner_stale}" -eq 1 ]]; then
     tools/test-runner/repro_test_runner.nim
 fi
 
-# Step 3: build the apps, helpers, fixtures, and test binaries through
-# the engine. Cap parallelism for memory-constrained CI runners.
+# Step 3: build the apps, helpers, fixtures, and test binaries through the
+# engine. Parallelism comes from the host's real capacity — cores AND
+# available memory — rather than from the profile of the smallest CI runner;
+# see scripts/test_parallelism.sh for the budget and the evidence behind it.
+available_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+available_mem_mb="$(reprobuild_available_memory_mb)"
+# Remember whether the build parallelism is ours to manage. An explicit
+# REPROBUILD_MAX_PARALLELISM is a statement about the whole run, so the
+# execution phase below must not quietly rewrite it.
+repro_parallelism_is_default=0
 if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
-  available_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+  repro_parallelism_is_default=1
   export REPROBUILD_MAX_PARALLELISM="$(
-    reprobuild_default_test_build_parallelism "${available_cores}"
+    reprobuild_default_test_build_parallelism \
+      "${available_cores}" "${available_mem_mb}"
   )"
 fi
-printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PARALLELISM=%s)\n' \
+printf 'Building apps + test-helpers + test-builds via repro (%s cores, %s MiB available, REPROBUILD_MAX_PARALLELISM=%s)\n' \
+  "${available_cores}" "${available_mem_mb:-unknown}" \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
 # A cold action cache has to compile every test binary from scratch, which
 # exceeds 90m on CI hardware (an observed cold run reached 969/1168 before
@@ -369,10 +379,15 @@ done < <(
 
 # D6 per-test timeout plus an outer wall-clock backstop for runner wedges.
 RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
-# ``--test-timeout`` is an *idle* deadline (no output for N seconds), and the
+# ``--test-timeout`` is a *no-progress* deadline: the runner kills a case only
+# after it has produced no output AND its process group has consumed no
+# measurable CPU for N seconds. (Output alone was the old rule; it read CPU
+# starvation under parallelism as a hang and manufactured false failures.) The
 # runner also enforces a hard ceiling of AbsoluteTimeoutMultiplier (4) times
-# that value -- see tools/test-runner/repro_test_runner.nim:1874. So this
-# number sets a per-binary wall-clock ceiling of 4x, not of 1x.
+# that value -- see drainAndWaitWithTimeout in
+# tools/test-runner/repro_test_runner.nim -- which is what actually stops a
+# livelock, since a spinner satisfies the CPU signal forever. So this number
+# sets a per-binary wall-clock ceiling of 4x, not of 1x.
 #
 # At the previous 600 that ceiling was 40 minutes, and the slowest binary in
 # the suite needs far longer than that: test-logs/parallel-run.json (a full
@@ -387,6 +402,33 @@ RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
 # runner's own documentation already assumes for the per-test timeout
 # (repro_test_runner.nim:531); 600 was a drift away from that intent.
 TEST_TIMEOUT="${REPROBUILD_TEST_TIMEOUT:-1800}"
+
+# Execution-phase budget. Concurrency here is multiplicative — a test process
+# routinely spawns a nested ``repro build`` — so the host budget is SPLIT
+# between test workers and the workers each nested build may use, rather than
+# handed to either one whole. ``threads * nested`` never exceeds the budget by
+# construction; see scripts/test_parallelism.sh.
+#
+# The old default was one worker, justified by exactly this nested-build
+# concern. It is a real concern and the wrong remedy: at one worker a measured
+# run completed 293 of 1183 cases in 3h57m (~16h implied), while the same
+# suite at eight workers finished 1183/1183 in ~3h25m. Surrendering thirty-one
+# of thirty-two cores is not how you avoid oversubscribing them.
+if [[ -z "${REPROBUILD_TEST_THREADS:-}" ]]; then
+  REPROBUILD_TEST_THREADS="$(
+    reprobuild_default_test_threads "${available_cores}" "${available_mem_mb}"
+  )"
+fi
+if (( repro_parallelism_is_default == 1 )); then
+  # Only when the build parallelism was ours to pick. An operator who pinned
+  # REPROBUILD_MAX_PARALLELISM meant it for the whole run.
+  export REPROBUILD_MAX_PARALLELISM="$(
+    reprobuild_default_nested_build_parallelism \
+      "${available_cores}" "${available_mem_mb}"
+  )"
+fi
+printf 'Executing tests with %s worker(s); nested builds get REPROBUILD_MAX_PARALLELISM=%s\n' \
+  "${REPROBUILD_TEST_THREADS}" "${REPROBUILD_MAX_PARALLELISM}" >&2
 
 ct_test_runner="${CT_TEST_RUNNER:-}"
 if [[ -z "${ct_test_runner}" ]]; then
@@ -406,10 +448,9 @@ else
   # binary is an input to a dozen tests, not just this fallback path, so it
   # cannot be built here without leaving those tests running a stale one on
   # every host that has ct-test-runner.
-  # Default to one worker for heavy nested builds unless explicitly overridden.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
-    --threads=${REPROBUILD_TEST_THREADS:-1} \
+    --threads=${REPROBUILD_TEST_THREADS} \
     --test-timeout=${TEST_TIMEOUT} \
     --bin-dir=build/test-bin \
     --summary-json=test-logs/parallel-run.json \

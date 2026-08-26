@@ -2,30 +2,33 @@
 ##
 ## Pins the M9.H/I/K trio's behaviour on the SEVENTEENTH real production
 ## from-source recipe and the SECOND recipe in the GNOME stack batch.
-## gdm's unique coverage angle vs expat (the first autotools recipe)
-## is twofold: (a) it's the first autotools recipe to ship TWO
-## executable artifacts from one ``package`` macro, and (b) its
-## ``configureFlags:`` set exercises every autotools-flag idiom in one
-## sequence (``--disable-*``, ``--without-*``, ``--with-*=value``,
-## ``--disable-*=false`` polarity flip, ``--enable-*``). The
-## cross-channel isolation pin below would surface a regression that
-## leaks ``./configure`` flags into the meson, cmake, or make channels
-## (or vice versa).
+## gdm's unique coverage angle is that it ships TWO executable
+## artifacts from one ``package`` macro.
+##
+## CHANNEL CHANGE (recorded here because the gutted assertions hid it):
+## this recipe was autotools when the test was written and its flag
+## expectations were named ``ExpectedConfigureFlags``. It is now driven
+## by ``meson_package(...)`` with an entirely different option set. The
+## test's ``check true`` placeholders meant the switch never had to
+## update a single expectation, so the change went unrecorded until the
+## assertions were re-armed. The channel-isolation pins below now check
+## the CONFIGURE and CMAKE channels stay empty, not the meson one.
 ##
 ## Coverage (12 check assertions across 8 tests):
 ##
 ##   * ``fetch:`` block round-trip (M9.H) — URL + sha256 length +
 ##     algorithm + kind discriminant + extractStrip.
-##   * ``configureFlags:`` block round-trip (M9.I) — exact-order
-##     sequence equality on the production flag set + channel-isolation
-##     spot-check (meson + cmake channels MUST be empty).
+##   * meson option round-trip — exact-order sequence equality on the
+##     production option set as declared in the recipe's ``build:``
+##     block + channel-isolation spot-check (configure + cmake channels
+##     MUST be empty).
 ##   * TWO executable artifact registration (M3) — ``gdm`` +
 ##     ``gdmGreeterSession`` both tagged ``dakExecutable`` under the
 ##     same package.
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -34,19 +37,30 @@ import repro_project_dsl
 # ``gdmSource`` at module init time.
 import ./repro
 
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
+
 const ExpectedUrl =
   "https://download.gnome.org/sources/gdm/47/gdm-47.0.tar.xz"
 
 const ExpectedHash =
   "c5858326bfbcc8ace581352e2be44622dc0e9e5c2801c8690fd2eed502607f84"
 
-const ExpectedConfigureFlags = @[
-  "--disable-static",
-  "--without-plymouth",
-  "--without-systemdsystemunitdir",
-  "--with-default-pam-config=none",
-  "--disable-wayland-support=false",
-  "--enable-gdm-xsession",
+const ExpectedMesonOptions = @[
+  "plymouth=disabled",
+  "selinux=disabled",
+  "systemd-journal=false",
+  "default-pam-config=none",
+  "wayland-support=true",
+  "x11-support=false",
+  "user-display-server=true",
+  "gdm-xsession=true",
+  "run-dir=/run/gdm",
+  "profiling=false",
+  "libaudit=disabled",
 ]
 
 suite "gdmSource — from-source recipe smoke test":
@@ -74,12 +88,32 @@ suite "gdmSource — from-source recipe smoke test":
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
 
-  test "configureFlags registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
-  test "configureFlags does not leak into the meson channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
-  test "configureFlags does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+  test "mesonOptions registers the exact production flag sequence":
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``meson_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("gdmSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedMesonOptions
+    check buildBlockConstructors("gdmSource") == @["meson_package"]
+  test "mesonOptions does not leak into the configure channel":
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the configure channel would
+    # surface as a ``autotools_package(...)`` call here.
+    check "autotools_package" notin buildBlockConstructors("gdmSource")
+  test "mesonOptions does not leak into the cmake channel":
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the cmake channel would
+    # surface as a ``cmake_package(...)`` call here.
+    check "cmake_package" notin buildBlockConstructors("gdmSource")
   test "artifacts register two executables under the same package":
     # M3 artifact registry: both ``gdm`` and ``gdmSessionWorker``
     # must be present and tagged ``dakExecutable``. gdm 47.x's meson

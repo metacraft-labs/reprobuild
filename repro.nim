@@ -911,11 +911,91 @@ package reprobuild:
             "reprobuild.test_helpers.legacy_cache_peer_origin_dev")
           executeDeps.add(
             "reprobuild.test_helpers.legacy_cache_peer_legacy_wire")
+      # ------------------------------------------------------------------
+      # Dependency policy for this execute edge
+      # ------------------------------------------------------------------
+      #
+      # Almost every test gets the default, ``automaticMonitorPolicy()``: the
+      # engine wraps the command in ``repro internal io monitor``, which
+      # injects an ``LD_PRELOAD`` interposer and records what the test really
+      # read. That is the baseline and it is what keeps the action cache
+      # sound — a changed input is OBSERVED, so the edge re-runs.
+      #
+      # A tiny number of tests cannot run that way, structurally. They
+      # perform ``LD_PRELOAD`` interposition THEMSELVES — that is the
+      # behaviour under test. Two interposers hooking the same libc entry
+      # points in one process re-enter each other: our monitor's ``open``
+      # hook calls into the test's, whose hook calls ``open`` again. Not
+      # theoretical: running the full suite through the graph path wedged
+      # exactly here. ``t_stackable_hooks_extracted_process_tree`` sat with
+      # its fixture spinning at 94% CPU for over nineteen hours while the
+      # test blocked in ``pipe_read`` and the monitor in ``do_wait``;
+      # ``/proc/<pid>/maps`` showed both ``librepro_monitor_shim.so`` and the
+      # test's own ``libstackable_shim.so`` mapped into the same process.
+      #
+      # For those tests we declare the inputs and tell the engine to trust
+      # them. ``trustedDeclaredInputsPolicy`` resolves to
+      # ``dgTrustedDeclaredInputs``, which is deliberately absent from the
+      # engine's ``MonitorPolicyKinds``, so ``monitoredAction`` returns early
+      # and no shim is injected. It keeps ``decComplete``, so the edge stays
+      # cacheable.
+      #
+      # NOTE the second half of that fix, which is easy to miss: the engine
+      # must ALSO withhold the ``REPRO_MONITOR_SHIM_LIB`` env seed for this
+      # policy (see ``launchChildEnv``). Suppressing the wrap alone is not
+      # enough — io-mon's preload runtime propagates whatever that variable
+      # names into child processes, so a test building its own interposer
+      # from that runtime re-injects OUR shim into its children and livelocks
+      # again. Measured directly: wrap suppressed, seed still present, and
+      # the fixture came up with two shims on ``LD_PRELOAD`` at 92% CPU.
+      #
+      # WHY AN EXPLICIT PER-TEST FLAG rather than an env var or a blanket
+      # "tests are not monitored" rule: unrestricted forms of "trust the
+      # declared inputs" were added to this codebase three times and removed
+      # every time as a soundness hole (``dgDeclaredOnly``,
+      # ``declaredOnlyDependencyPolicy``,
+      # ``REPRO_MACOS_DISABLE_ACTION_MONITOR``); see the history note in
+      # ``repro_core/dependency_gathering.nim``. The narrow form here was
+      # authorized by the repository owner on 2026-08-21 on the explicit
+      # condition that it stay discouraged and visible. Hence: a field on one
+      # ``TestSpec`` row, greppable, defaulting to ``false``, with a
+      # constructor that refuses an empty list or a missing reason.
+      #
+      # THE HAZARD YOU INHERIT BY SETTING IT: the declared list is never
+      # checked against reality. If one of these tests grows a dependency, or
+      # a listed path moves, the cache will NOT notice — the edge keeps
+      # serving a result built from inputs that have since changed, silently,
+      # until a human edits the list below.
+      #
+      # PREFER, WHERE POSSIBLE, the sound alternatives, both of which keep
+      # real evidence AND caching:
+      #   * ``makeDepfilePolicy`` when the action emits its own depfile.
+      #   * ``makeDepfilePolicy`` pointed at a depfile produced by ANOTHER
+      #     edge ordered before this one — the engine resolves a report path
+      #     against the action's cwd and reads it after the action runs, so
+      #     it need not be that action's own output. These two tests compile
+      #     their shim AT RUNTIME; lifting that compile into its own graph
+      #     edge (which milestone M3 wants regardless) would produce a
+      #     depfile this edge could consume, and this flag could then be
+      #     dropped. That is the intended end state, not this.
+      let executePolicy =
+        if spec.selfInterposes:
+          trustedDeclaredInputsPolicy(
+            inputs = @[spec.binary] & @(requiredBinaries),
+            reason =
+              "test performs LD_PRELOAD interposition itself; the engine's " &
+              "io-monitor injects a second interposer and the two livelock " &
+              "on the same libc entry points (observed: 19h spin in " &
+              "t_stackable_hooks_extracted_process_tree). Inputs are " &
+              "declared and UNVERIFIED — see the note above this call.")
+        else:
+          automaticMonitorPolicy()
       let executeEdge = edge.testBinary.run(
         deps = executeDeps,
         requiredBinaries = requiredBinaries,
         actionId = executeActionId,
-        registerImplicitName = false)
+        registerImplicitName = false,
+        dependencyPolicy = executePolicy)
       reprobuildTestExecuteActions.add(executeEdge)
 
     # Bootstrap-And-Self-Build B4: Python tests join the ``test``

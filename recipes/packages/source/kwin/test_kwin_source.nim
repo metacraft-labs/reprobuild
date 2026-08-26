@@ -34,6 +34,12 @@ import repro_project_dsl
 # ``kwinSource`` at module init time.
 import ./repro
 
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
+
 const ExpectedUrl =
   # M9.R.15f.5 drive-by — the recipe long since switched to the
   # upstream download.kde.org URL but this constant was never
@@ -90,11 +96,19 @@ proc cacheVarValue(action: BuildActionDef; name: string): string =
   ""
 
 const ExpectedCmakeFlags = @[
-  "-DBUILD_TESTING=OFF",
-  "-DKWIN_BUILD_TABBOX=OFF",
-  "-DKWIN_BUILD_X11=OFF",
-  "-DKWIN_BUILD_KCMS=OFF",
-  "-DCMAKE_BUILD_TYPE=Release",
+  "BUILD_TESTING=OFF",
+  "KWIN_BUILD_TABBOX=OFF",
+  "KWIN_BUILD_X11=OFF",
+  "KWIN_BUILD_KCMS=OFF",
+  "KWIN_BUILD_GLOBALSHORTCUTS=OFF",
+  "KWIN_BUILD_NOTIFICATIONS=OFF",
+  "KWIN_BUILD_SCREENLOCKER=OFF",
+  "KWIN_BUILD_RUNNERS=OFF",
+  "CMAKE_BUILD_TYPE=Release",
+  "CMAKE_C_FLAGS=",
+  "CMAKE_CXX_FLAGS=",
+  "CMAKE_EXE_LINKER_FLAGS=-Wl,--copy-dt-needed-entries ",
+  "CMAKE_SHARED_LINKER_FLAGS=-Wl,--copy-dt-needed-entries ",
 ]
 
 suite "kwinSource — from-source recipe smoke test":
@@ -123,7 +137,18 @@ suite "kwinSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "cmakeFlags registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``cmake_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("kwinSource")
+    check declared.found
+    # Several elements are resolver-derived include and link flags built
+    # at build-block eval time, so only the literal elements are pinned.
+    check declared.values == ExpectedCmakeFlags
+    check buildBlockConstructors("kwinSource") == @["cmake_package"]
   test "M9.R.81 threads dependency roots into configure env and include flags":
     withRecipeRootEnv:
       resetBuildActionRegistry()
@@ -148,9 +173,17 @@ suite "kwinSource — from-source recipe smoke test":
       check not cFlags.contains("/opt/repro/reprobuild/recipes/packages/source")
 
   test "cmakeFlags does not leak into the meson channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the meson channel would
+    # surface as a ``meson_package(...)`` call here.
+    check "meson_package" notin buildBlockConstructors("kwinSource")
   test "cmakeFlags does not leak into the configure channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the configure channel would
+    # surface as a ``autotools_package(...)`` call here.
+    check "autotools_package" notin buildBlockConstructors("kwinSource")
   test "artifacts register an executable + a library with correct kinds":
     # M3 artifact registry: ``kwinWayland`` is tagged ``dakExecutable``
     # while ``libKWin`` is tagged ``dakLibrary``. This is the FIRST

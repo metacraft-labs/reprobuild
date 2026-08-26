@@ -186,4 +186,9 @@ suite "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub deps":
 
   else:
     test "non_linux_host_documents_runtime_skip_q5":
-      check true
+      # Platform gate -- see the sibling note in t_m9r14f_2_rpath_patching.
+      # The structural assertions above run everywhere; only the patchelf
+      # probe needs Linux. The structured marker keeps the unrun coverage
+      # countable instead of hiding it behind a passing assertion.
+      echo "[platform N/A] t_m9r15q_5_rpath_nix_stub_deps: " &
+        "the patchelf runtime probe requires Linux"

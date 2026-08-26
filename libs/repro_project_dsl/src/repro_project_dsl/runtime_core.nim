@@ -230,7 +230,14 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 23'u16
+  BuildActionPayloadVersion = 24'u16
+    ## v24: appends ``trustedInputs`` + ``trustedReason`` to the dependency
+    ## policy, carrying the HAZARDOUS ``bdpTrustedDeclaredInputs`` payload
+    ## (owner-authorized 2026-08-21). Both are appended at the END of the
+    ## policy record, so v23-and-earlier payloads decode unchanged with empty
+    ## values — and empty is exactly what every other policy kind carries, so
+    ## no existing action's encoding shifts.
+    ##
     ## v23: appends the platform role parallel to each tool-identity
     ## reference. v22-and-earlier payloads decode with an empty list and
     ## retain the legacy build-dependency default.
@@ -1317,6 +1324,60 @@ proc automaticMonitorPolicy*(
 # Reprobuild-Development.milestones.org M17); actions that genuinely have no
 # monitorable evidence (e.g. a pure network fetch) are made NON-CACHEABLE per
 # Monitor-Hook-Shim.md:501, never marked complete-on-declared-inputs.
+
+proc trustedDeclaredInputsPolicy*(inputs: openArray[string];
+                                  reason: string):
+    BuildActionDependencyPolicy {.dynOrStatic.} =
+  ## HAZARDOUS, DISCOURAGED. Declare an edge's inputs inline and have the
+  ## engine trust them: no monitoring, no result processing, no verification.
+  ##
+  ## TRY THESE FIRST — both keep caching AND keep evidence real:
+  ##   * ``makeDepfilePolicy`` when the action emits its own depfile.
+  ##   * ``makeDepfilePolicy`` pointed at a depfile produced by ANOTHER edge
+  ##     ordered before this one. The engine resolves a report path against
+  ##     the action's cwd and reads it after the action runs — it does not
+  ##     require the file to be that action's own output. A runtime step that
+  ##     compiles something can therefore be lifted into its own edge whose
+  ##     depfile this edge consumes.
+  ##
+  ## Correct ONLY when the action cannot be monitored at all and nothing in
+  ## the graph describes its inputs. Today that means an action performing
+  ## ``LD_PRELOAD`` interposition itself: the monitor's interposer and the
+  ## action's re-enter each other on the same libc entry points and livelock.
+  ## Inconvenience, slowness, or noisy evidence are not reasons.
+  ##
+  ## THE HAZARD you accept: a list that is wrong, or that goes stale when a
+  ## dependency moves, will NOT invalidate the cache. The edge keeps serving a
+  ## result built from inputs that have since changed — silently,
+  ## indefinitely, until a human edits the list. Whoever writes one owns it.
+  ##
+  ## ``reason`` is mandatory and appears in the build report, so an edge that
+  ## is trusted rather than verified is visible in output instead of being
+  ## discoverable only by reading the recipe.
+  ##
+  ## Owner-authorized 2026-08-21 for the narrow self-interposing-test case,
+  ## with the explicit instruction that its use stay discouraged. The
+  ## unrestricted forms of this idea — ``dgDeclaredOnly``,
+  ## ``declaredOnlyDependencyPolicy``, ``REPRO_MACOS_DISABLE_ACTION_MONITOR``
+  ## — remain banned; see repro_core/dependency_gathering.nim.
+  var declared: seq[string] = @[]
+  for path in inputs:
+    if path.len > 0 and path notin declared:
+      declared.add(path)
+  if declared.len == 0:
+    raise newException(ValueError,
+      "trustedDeclaredInputsPolicy requires at least one declared input: " &
+        "an empty list would silently disable dependency tracking entirely, " &
+        "which is the soundness hole this policy is narrowly scoped to avoid")
+  if reason.strip().len == 0:
+    raise newException(ValueError,
+      "trustedDeclaredInputsPolicy requires a reason explaining why this " &
+        "edge cannot be monitored; it is surfaced in the build report so the " &
+        "trust is visible rather than buried in the recipe")
+  BuildActionDependencyPolicy(
+    kind: bdpTrustedDeclaredInputs,
+    trustedInputs: declared,
+    trustedReason: reason)
 
 proc makeDepfilePolicy*(depfile = "";
                         depfiles: openArray[string] = [];
@@ -2653,6 +2714,11 @@ proc writeDependencyPolicy(outp: var seq[byte];
   outp.writeByte(byte(ord(policy.kind)))
   outp.writeStringSeq(policy.depfiles)
   outp.writeStringSeq(policy.ignoredInputPrefixes)
+  # v24: appended LAST so older readers, which stop after
+  # ``ignoredInputPrefixes``, are unaffected. Empty for every kind except
+  # ``bdpTrustedDeclaredInputs``.
+  outp.writeStringSeq(policy.trustedInputs)
+  outp.writeString(policy.trustedReason)
 
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16):
     BuildActionDependencyPolicy =
@@ -2661,7 +2727,10 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16)
   # ``bdpDeclaredOnly`` case is gone (Reprobuild-Development M17). The
   # removal only dropped the last enum case, so no other ordinal shifts and
   # the on-wire encoding of the surviving kinds is unchanged.
-  if kind > byte(ord(bdpMakeDepfile)):
+  # ``bdpTrustedDeclaredInputs`` is the highest valid ordinal. It was APPENDED
+  # after ``bdpMakeDepfile``, so every pre-existing ordinal is unchanged and
+  # old payloads still decode.
+  if kind > byte(ord(bdpTrustedDeclaredInputs)):
     raisePayload("invalid dependency policy kind in build action payload")
   result.kind = BuildActionDependencyPolicyKind(kind)
   if version >= 15'u16:
@@ -2676,6 +2745,12 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16)
       result.depfiles = @[legacy]
   if version >= 10'u16:
     result.ignoredInputPrefixes = readStringSeq(bytes, pos)
+  if version >= 24'u16:
+    # v24: the HAZARDOUS ``bdpTrustedDeclaredInputs`` payload. Empty for
+    # every other kind, so a v23 payload decoding to empty is correct rather
+    # than merely tolerable.
+    result.trustedInputs = readStringSeq(bytes, pos)
+    result.trustedReason = readString(bytes, pos)
 
 proc writeActionCachePolicy(outp: var seq[byte];
                             policy: ActionCacheFingerprintPolicy) =
@@ -2835,10 +2910,14 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
       raisePayload("unknown build action payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
-      17'u16, 18'u16, 19'u16, 20'u16, 21'u16, 22'u16,
-      BuildActionPayloadVersion}:
+  # Every version from 1 up to the current one is readable: each bump has only
+  # ever APPENDED fields, and each appended field is gated on its own
+  # ``version >=`` check below. Written as a RANGE rather than a hand-listed
+  # set because the set form silently dropped the previous version each time
+  # the constant was bumped — a v24 binary then rejected every graph a v23
+  # binary had cached, with "unsupported build action payload version", and
+  # the only way back was deleting the cache.
+  if version < 1'u16 or version > BuildActionPayloadVersion:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:

@@ -149,10 +149,14 @@ suite "DSL-port M9.R.11 — runquota daemon discovery + recovery":
     # responsible for surfacing the diagnostic — keeping discovery side-
     # effect-free lets multiple call sites probe cheaply.
     putEnv("RUNQUOTAD_BIN", "")
-    # We can't easily clear PATH or fake the sibling-repo away, but the
-    # tautology + the absence-of-exception check pins the contract.
-    discard findRunQuotaDaemonBin()
-    check true
+    # The previous shape discarded the result and asserted ``true``, which
+    # could not fail and so pinned nothing -- a helper that started raising,
+    # or one deleted and stubbed out, both passed. Totality is about the
+    # RETURNED VALUE, so bind it and assert on it: either the empty string
+    # (nothing discoverable on this host) or a path that actually exists.
+    # A helper that returned a stale or invented path fails here.
+    let found = findRunQuotaDaemonBin()
+    check found.len == 0 or fileExists(found)
 
   test "sibling-repo discovery finds runquotad in the canonical layout":
     # When the test runs inside the metacraft workspace (D:/metacraft/

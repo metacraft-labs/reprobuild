@@ -437,6 +437,13 @@ lint:
     # suite: it reads the sources and needs nothing compiled, so it is the
     # one coverage check that can answer before a six-hour build phase.
     python3 ./scripts/reprobuild_suite_inventory.py --check-static-case-counts 2>&1 | tee -a test-logs/lint.log
+    # The vacuous-case gate, sibling to the case-count gate above and for the
+    # same reason: a source scan, no compiler, answers in seconds. It refuses
+    # a test case whose only assertion is `check true` -- a shape that reports
+    # [OK] and increments the pass count, so running the suite can never
+    # surface it. See the script header for the 268-case incident that
+    # motivated it.
+    python3 ./scripts/check_vacuous_test_cases.py 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
 
 format:

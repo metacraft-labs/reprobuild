@@ -46,7 +46,11 @@ when not defined(windows):
   suite "M63 gate 2: e2e_repro_home_apply_noop":
     test "platform N/A":
       echo "[platform N/A] t_e2e_repro_home_apply_noop: requires Windows and a real Scoop install"
-      check true
+      # The `[platform N/A]` marker above IS this case's statement: it is the
+      # repository's structured, greppable declaration that the coverage does
+      # not apply to this host. A `check true` beside it added nothing and
+      # taught the shape that an assertion which cannot fail is acceptable
+      # filler, so it is gone.
 else:
   suite "M63 gate 2: e2e_repro_home_apply_noop":
     test "re-apply with no changes short-circuits to no-op":

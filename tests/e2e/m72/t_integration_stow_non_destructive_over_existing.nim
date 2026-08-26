@@ -117,7 +117,11 @@ when not defined(windows):
   suite "M72 gate 3: integration_stow_non_destructive_over_existing":
     test "platform N/A":
       echo "[platform N/A] t_integration_stow_non_destructive_over_existing: currently exercises the Windows stow gate"
-      check true
+      # The `[platform N/A]` marker above IS this case's statement: it is the
+      # repository's structured, greppable declaration that the coverage does
+      # not apply to this host. A `check true` beside it added nothing and
+      # taught the shape that an assertion which cannot fail is acceptable
+      # filler, so it is gone.
 else:
   suite "M72 gate 3: integration_stow_non_destructive_over_existing":
 

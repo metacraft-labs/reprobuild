@@ -2105,6 +2105,19 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
     if policy.ignoredInputPrefixes.len > 0:
       parts.add(ignoredCode())
     "makeDepfilePolicy(" & parts.join(", ") & ")"
+  of bdpTrustedDeclaredInputs:
+    # Round-trips through the constructor rather than an object literal, so
+    # the regenerated code re-runs the guards: a regenerated recipe cannot
+    # end up with an empty list or a missing justification that the
+    # hand-written one would have been refused for.
+    var inputsCode = "@["
+    for i, path in policy.trustedInputs:
+      if i > 0:
+        inputsCode.add(", ")
+      inputsCode.add(escForCode(path))
+    inputsCode.add("]")
+    "trustedDeclaredInputsPolicy(" & inputsCode & ", " &
+      escForCode(policy.trustedReason) & ")"
 
 proc packageUseSeqLiteral(uses: seq[PackageUseDef]): string =
   ## DSL-port M9.R.1: shared serializer for ``seq[PackageUseDef]``

@@ -187,6 +187,7 @@ type
       ## same shape and semantics as ``extraPassC`` but for the
       ## linker side.
     targetOs: TargetOs
+    selfInterposes: bool
       ## Bootstrap-And-Self-Build B4: per-test target-OS guard for the
       ## ``extraPassC`` / ``extraPassL`` activation. See ``TargetOs``.
 
@@ -336,6 +337,29 @@ proc legacySingleFileScan(repoRoot, rel: string): bool =
   except IOError, OSError:
     return false
 
+const SelfInterposingTestStems = [
+  "t_stackable_hooks_extracted_process_tree",
+  "t_m9r40_1_probe_clean_env"
+]
+  ## Tests that perform ``LD_PRELOAD`` interposition THEMSELVES, and so cannot
+  ## be observed by the engine's io-monitor: two interposers on the same libc
+  ## entry points re-enter each other and livelock. Their execute edges get
+  ## ``trustedDeclaredInputsPolicy`` — declared, UNVERIFIED inputs and no
+  ## monitoring. See the long note at the execute-edge call site in
+  ## ``repro.nim`` for the hazard and the sound alternatives.
+  ##
+  ## Deliberately an explicit list rather than sniffed from source text: a
+  ## heuristic matching any file mentioning "LD_PRELOAD" would silently opt
+  ## tests OUT of dependency tracking as a side effect of a comment. Four
+  ## other test files mention it without injecting a shim and must keep
+  ## normal monitoring. Adding a stem here should be justified in review.
+
+proc isSelfInterposingTestStem(stem: string): bool =
+  for candidate in SelfInterposingTestStems:
+    if candidate == stem:
+      return true
+  false
+
 proc detectReproBinaryUsage(reach: Reachability; repoRoot, rel: string): bool =
   ## Bootstrap-And-Self-Build B3: ``true`` when running this test ends up
   ## executing the engine-built ``build/bin/repro``.
@@ -460,6 +484,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
     var extraPassC: seq[string] = @[]
     var extraPassL: seq[string] = @[]
     var targetOs = soAny
+    let selfInterposes = isSelfInterposingTestStem(stem)
     if isHcrTestStem(stem):
       extraPassC = @[HcrExtraPassC]
       extraPassL = @[HcrExtraPassL]
@@ -473,7 +498,8 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
       requiresReproBinary: detectReproBinaryUsage(reach, repoRoot, rel),
       extraPassC: extraPassC,
       extraPassL: extraPassL,
-      targetOs: targetOs))
+      targetOs: targetOs,
+      selfInterposes: selfInterposes))
 
 proc acceptPythonTest(rel: string): bool =
   ## Bootstrap-And-Self-Build B4: discover Python tests participating in
@@ -584,6 +610,13 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
   result.add("    extraPassC*: seq[string]\n")
   result.add("    extraPassL*: seq[string]\n")
   result.add("    targetOs*: TargetOs\n")
+  result.add("    selfInterposes*: bool\n")
+  result.add("      ## HAZARDOUS opt-out: this test performs LD_PRELOAD\n")
+  result.add("      ## interposition itself and cannot be observed by the\n")
+  result.add("      ## engine's own interposer. Its execute edge is given\n")
+  result.add("      ## ``trustedDeclaredInputsPolicy`` — declared, UNVERIFIED\n")
+  result.add("      ## inputs and no monitoring. See the note at the\n")
+  result.add("      ## execute-edge call site in ``repro.nim``.\n")
   result.add("\n")
   result.add("const reprobuildTestSpecs*: seq[TestSpec] = @[\n")
   for i, edge in edges:
@@ -605,7 +638,9 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     result.add("    requiresReproBinary: " & reqLit & ",\n")
     result.add("    extraPassC: " & seqLiteral(edge.extraPassC) & ",\n")
     result.add("    extraPassL: " & seqLiteral(edge.extraPassL) & ",\n")
-    result.add("    targetOs: " & targetOsLit & ")" & sep & "\n")
+    result.add("    targetOs: " & targetOsLit & ",\n")
+    result.add("    selfInterposes: " & (if edge.selfInterposes: "true"
+                                         else: "false") & ")" & sep & "\n")
   result.add("]\n")
   result.add("\n")
   result.add("## Bootstrap-And-Self-Build B4: Python tests discovered\n")

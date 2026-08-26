@@ -2051,16 +2051,170 @@ proc spawnedProcess(binary: string; args: openArray[string];
       sleep(ParentSpawnRetryDelayMs * attempt)
   raise lastError
 
+const CpuUnavailable = -1.0
+  ## Sentinel returned by ``processGroupCpuSeconds`` for "this host (or
+  ## this moment) cannot tell me how much CPU the test's process group
+  ## has consumed". It is NOT zero: zero means "measured, and the group
+  ## burned nothing", which is the signature of a genuine wedge. Folding
+  ## the two together would turn every non-Linux host into a host that
+  ## believes every test is deadlocked.
+
+when defined(linux):
+  let ClockTicksPerSec = block:
+    ## ``/proc/<pid>/stat`` reports CPU in clock ticks, not seconds.
+    let raw = sysconf(SC_CLK_TCK)
+    if raw > 0: raw.float else: 100.0
+
+  proc procStatFields(statText: string): seq[string] =
+    ## Split one ``/proc/<pid>/stat`` line into its fields *after* the
+    ## comm field. Field 2 (``comm``) is parenthesised and may itself
+    ## contain spaces and parentheses — ``t (weird) name`` is a legal
+    ## thread name — so a naive ``splitWhitespace`` of the whole line
+    ## silently shifts every later index. Scanning from the LAST ``)``
+    ## is the documented-safe parse.
+    ##
+    ## Index 0 of the result is field 3 (``state``); so field N is at
+    ## index N - 3: pgrp (5) at 2, utime (14) at 11, stime (15) at 12,
+    ## cutime (16) at 13, cstime (17) at 14.
+    let closeParen = statText.rfind(')')
+    if closeParen < 0:
+      return @[]
+    statText[closeParen + 1 .. ^1].splitWhitespace()
+
+  proc processGroupCpuSeconds(processGroup: int): float =
+    ## Cumulative CPU (user + system) consumed by every live process in
+    ## ``processGroup``, including the CPU of descendants those processes
+    ## have already reaped (``cutime``/``cstime``).
+    ##
+    ## This is the liveness signal the idle deadline needs and stdout
+    ## cannot provide. A test starved of CPU by fifteen sibling workers
+    ## — or by unrelated load on a shared CI runner — is *silent* while
+    ## still advancing; a deadlocked test is silent and NOT advancing.
+    ## Output alone cannot separate those two, and treating silence as a
+    ## hang is what made a 16-worker sweep kill 28 live cases at ~600 s
+    ## and fail seven tests that pass at one worker.
+    ##
+    ## Including ``cutime``/``cstime`` keeps the sum monotone across a
+    ## fork-heavy test: when a member is reaped its own time does not
+    ## vanish from the total, it moves into its parent's child-time
+    ## counters, and the parent is in the same group. Without that, a
+    ## test that spawns and reaps compilers would appear to *lose* CPU
+    ## between samples.
+    ##
+    ## Membership is by process group, matching the unit the runner
+    ## already owns and kills (``TestProcess.processGroup``, established
+    ## by the wrapper's ``setpgid``). A descendant that calls ``setsid``
+    ## leaves the group and stops contributing to the signal — such a
+    ## case degrades to the old output-only behaviour rather than
+    ## misreporting, and the owner-token cleanup path still reaps it.
+    ##
+    ## Matching by PGID cannot pick up a stranger: the supervisor anchor
+    ## is deliberately kept alive (and reaped only after cleanup) so the
+    ## kernel cannot recycle this PGID while the case is running — the
+    ## same invariant ``signalProcessGroup`` relies on to make a negative
+    ## -PID signal safe.
+    if processGroup <= 0 or not dirExists("/proc"):
+      return CpuUnavailable
+    var total = 0.0
+    var members = 0
+    for kind, path in walkDir("/proc"):
+      if kind != pcDir:
+        continue
+      let base = path.lastPathPart
+      if base.len == 0 or base[0] notin {'0' .. '9'}:
+        continue
+      var statText = ""
+      try:
+        statText = readFile(path / "stat")
+      except CatchableError:
+        # The process exited between readdir and open. Not an error:
+        # its CPU is already accounted for in its parent's child-time.
+        continue
+      let fields = procStatFields(statText)
+      if fields.len < 15:
+        continue
+      var ticks = 0.0
+      try:
+        if parseInt(fields[2]) != processGroup:
+          continue
+        for idx in 11 .. 14:
+          ticks += parseFloat(fields[idx])
+      except ValueError:
+        continue
+      total += ticks
+      inc members
+    if members == 0:
+      # No live member found. Report "unavailable" rather than 0.0 so a
+      # momentarily-empty scan cannot be mistaken for measured idleness.
+      return CpuUnavailable
+    total / ClockTicksPerSec
+
+  proc cpuLivenessAvailable(processGroup: int): bool =
+    ## Cheap "is the signal usable at all" probe, kept separate from the
+    ## sampler so the poll loop does not pay for a full ``/proc`` walk on
+    ## a case that finishes in 40 ms. The suite has 1200+ such cases.
+    processGroup > 0 and dirExists("/proc")
+
+else:
+  proc processGroupCpuSeconds(processGroup: int): float =
+    ## No portable per-process-group CPU accounting is wired up outside
+    ## Linux yet. Returning the sentinel makes ``drainAndWaitWithTimeout``
+    ## fall back to the previous output-only idle deadline verbatim, so
+    ## non-Linux hosts keep exactly the behaviour they had — including
+    ## the starvation false-kill. That gap is real and deliberate: an
+    ## unverified ``proc_pid_rusage`` path would be worse than a
+    ## documented fallback.
+    discard processGroup
+    CpuUnavailable
+
+  proc cpuLivenessAvailable(processGroup: int): bool =
+    discard processGroup
+    false
+
+const CpuProgressFloorSec = 0.25
+  ## Absolute floor for "the group did some work". One clock tick is
+  ## 10 ms on every host we run on, so 0.25 s is 25 ticks — far above
+  ## sampling quantisation, and unreachable by a group that is genuinely
+  ## blocked (a wedged group accrues exactly zero).
+
+const CpuProgressMinFraction = 0.01
+  ## …and the floor is scaled up with the idle window, so the rule reads
+  ## "the group must consume at least 1% of one core over the window".
+  ## At the 1800 s default that is 18 s of CPU per 1800 s. A test that is
+  ## merely starved clears this by orders of magnitude even at extreme
+  ## oversubscription; a test that is deadlocked clears nothing.
+
+proc cpuProgressThresholdSec(timeoutSec: int): float =
+  max(CpuProgressFloorSec, CpuProgressMinFraction * timeoutSec.float)
+
+proc cpuSampleIntervalSec(timeoutSec: int): float =
+  ## Scanning ``/proc`` is cheap but not free, and N workers scan it
+  ## concurrently. Sampling ~10x per idle window keeps the resolution
+  ## far finer than the decision it feeds while bounding the cost; the
+  ## clamp keeps short windows (the regression tests use 3-6 s) responsive
+  ## and long ones (the 1800 s default) inexpensive.
+  clamp(timeoutSec.float / 10.0, 1.0, 15.0)
+
 const AbsoluteTimeoutMultiplier = 4
-  ## The per-test ``--test-timeout`` is interpreted as an *idle*
-  ## deadline (no output produced for that long ⇒ kill), not a fixed
-  ## wall-clock budget. ``AbsoluteTimeoutMultiplier × testTimeoutSec`` is
-  ## the hard ceiling: a test that keeps emitting output but never
-  ## finishes is still killed once total wall time crosses it, so a
-  ## chatty-but-genuinely-stuck test (e.g. a busy spin that logs every
-  ## iteration) cannot run forever. With the default 600 s idle deadline
-  ## this caps any single test at 40 min, well inside the 4 h runner-
-  ## phase backstop.
+  ## The per-test ``--test-timeout`` is interpreted as a *no-progress*
+  ## deadline (neither output nor CPU advance for that long ⇒ kill), not
+  ## a fixed wall-clock budget. ``AbsoluteTimeoutMultiplier ×
+  ## testTimeoutSec`` is the hard ceiling, and BOTH conditions must
+  ## exist:
+  ##
+  ##   * no-progress kills a test that is genuinely wedged (silent and
+  ##     burning no CPU);
+  ##   * the absolute ceiling kills a test that keeps *making* progress
+  ##     by the liveness signal but never finishes — a chatty stuck loop,
+  ##     or a livelock like the real ``t_stackable_hooks_extracted_
+  ##     process_tree`` spin that held 94% CPU for 19 hours. Progress-
+  ##     based liveness alone would let that run forever, which is
+  ##     precisely why the ceiling is not optional.
+  ##
+  ## The two are reported with distinct ``timeoutDescription`` prefixes
+  ## (``IDLE TIMEOUT`` vs ``ABSOLUTE TIMEOUT``) so a log line alone says
+  ## which rule fired. With the default 600 s window this caps any single
+  ## test at 40 min, well inside the 4 h runner-phase backstop.
 
 proc drainAndWait(testProcess: TestProcess):
     tuple[output: string; exitCode: int] =
@@ -2292,37 +2446,57 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
   ## exceeded its reservation" and "the runner killed it" are one event
   ## rather than two that have to be correlated afterwards.
   ##
-  ## ``timeoutSec`` is interpreted as an **idle** deadline, not a fixed
-  ## wall-clock budget: the test is killed only after it has produced no
-  ## new output for ``timeoutSec`` seconds. A polling loop drains the
-  ## pipe non-blockingly every ~``TimeoutPollIntervalMs`` and resets the
-  ## idle clock whenever bytes arrive. A genuinely-slow-but-alive heavy
-  ## e2e test under shared-runner contention keeps emitting progress
-  ## output, so it is *not* killed; a truly hung test (silent on its
-  ## output stream — exactly the D6 ``sleep(60_000)`` shape, and the
-  ## real ``t_local_daemons_control_plane_m11`` leaked-daemon stall)
-  ## produces nothing and is killed once the idle window elapses.
+  ## ``timeoutSec`` is interpreted as a **no-progress** deadline, not a
+  ## fixed wall-clock budget: the test is killed only after it has shown
+  ## no sign of forward progress for ``timeoutSec`` seconds. Two
+  ## independent signals count as progress, and either one resets the
+  ## clock:
+  ##
+  ##   1. **Output.** A polling loop drains the pipe non-blockingly every
+  ##      ~``TimeoutPollIntervalMs``; any new bytes are progress.
+  ##   2. **CPU consumed by the test's process group.** Sampled from
+  ##      ``/proc`` (see ``processGroupCpuSeconds``) every
+  ##      ``cpuSampleIntervalSec``; an advance of at least
+  ##      ``cpuProgressThresholdSec`` since the last recorded progress
+  ##      point is progress.
+  ##
+  ## Signal 2 is the one that is correct at any parallelism, and it is
+  ## why this proc no longer equates silence with a hang. A heavy e2e
+  ## test starved by fifteen sibling workers (or by unrelated load on
+  ## this shared CI runner) can be quiet for many minutes while running
+  ## perfectly well; the pure output heuristic killed 28 such cases at
+  ## ~600 s in one 16-worker sweep and turned seven 1-worker passes into
+  ## 16-worker failures. A genuinely wedged test — the D6
+  ## ``sleep(60_000)`` shape, or the real
+  ## ``t_local_daemons_control_plane_m11`` leaked-daemon stall — is silent
+  ## AND burns no CPU, so it is still killed on the same deadline it was
+  ## killed on before.
   ##
   ## An absolute ceiling of ``AbsoluteTimeoutMultiplier × timeoutSec``
-  ## still applies so a chatty-but-stuck test (keeps logging, never
-  ## finishes) cannot run forever — this is the "sane upper bound" that
-  ## keeps the progress heuristic from masking a real hang.
+  ## still applies, and is now load-bearing rather than a backstop: a
+  ## livelock (a spin loop at 94% CPU) satisfies the CPU-progress signal
+  ## forever, so only the ceiling can end it. See
+  ## ``AbsoluteTimeoutMultiplier``.
   ##
-  ## On expiry (idle or absolute) the child is SIGTERM'd, given
+  ## Both kill paths report which rule fired and the numbers behind it —
+  ## elapsed, group CPU consumed, CPU advance since the last progress
+  ## point, and the age of the last output — so a timeout in a CI log is
+  ## diagnosable without a live process to inspect.
+  ##
+  ## On expiry (no-progress or absolute) the child is SIGTERM'd, given
   ## ``TimeoutKillGraceSec`` to exit, then SIGKILL'd.
   ##
-  ## Why the idle semantics matter: the M3 fixed-budget timeout false-
-  ## killed live heavy e2e tests (``t_e2e_local_reprobuild_project_build``
-  ## et al.) when the shared box was oversubscribed — they were making
-  ## progress, just slowly. The original D6 hang it was built to defeat
-  ## (a test that left ``repro-daemon`` children holding the inherited
-  ## pipe open after exec returned) is *silent*, so the idle deadline
-  ## still catches it without masking it.
+  ## On non-POSIX hosts ``drainAvailable`` is a no-op and
+  ## ``processGroupCpuSeconds`` reports ``CpuUnavailable``, so the loop
+  ## degrades to the original fixed-budget behaviour — acceptable since
+  ## Windows is not a supported runner host today. On macOS the output
+  ## signal works and the CPU signal does not; that host keeps the
+  ## pre-existing output-only semantics.
   ##
-  ## On non-POSIX hosts ``drainAvailable`` is a no-op, so the loop
-  ## degrades to the original fixed-budget behaviour (no mid-flight
-  ## drain, idle clock never resets) — acceptable since Windows is not a
-  ## supported runner host today.
+  ## A memory ceiling is reason enough to poll on its own: with
+  ## ``timeoutSec <= 0`` but ``memoryLimitBytes`` set, the loop still
+  ## runs and both time deadlines become infinite rather than the loop
+  ## being skipped (see ``idleDeadlineSec``).
   if timeoutSec <= 0 and memoryLimitBytes == 0'u64:
     let (output, exitCode) = drainAndWait(testProcess)
     return ChildRunOutcome(output: output, exitCode: exitCode)
@@ -2331,6 +2505,14 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
   var output = ""
   let start = epochTime()
   var lastProgress = start
+    ## Last moment EITHER signal showed forward progress. This is the
+    ## clock the no-progress deadline measures against.
+  var lastOutput = start
+    ## Last moment bytes arrived. Reported in the diagnostic so a kill
+    ## line distinguishes "quiet but working" from "quiet and dead".
+  let processGroup =
+    when defined(posix): testProcess.processGroup
+    else: 0
   # A memory ceiling on its own must still poll, so an absent idle
   # deadline becomes an infinite one rather than turning the loop off.
   let idleDeadlineSec =
@@ -2338,11 +2520,46 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
   let absoluteDeadlineSec =
     if timeoutSec <= 0: Inf
     else: timeoutSec.float * AbsoluteTimeoutMultiplier.float
+  let cpuThreshold = cpuProgressThresholdSec(timeoutSec)
+  let cpuInterval = cpuSampleIntervalSec(timeoutSec)
+  var cpuSeen = CpuUnavailable
+    ## Highest group-CPU total observed so far (``CpuUnavailable`` until
+    ## the first sample lands). Tracked as a running maximum: a scan that
+    ## races a member's exit can read low, and a transient dip must never
+    ## be mistaken for regression.
+  var cpuAtLastProgress = CpuUnavailable
+    ## The reading ``cpuSeen`` is compared against. Re-based whenever
+    ## EITHER signal shows progress, so the required advance is always
+    ## measured from the most recent progress point.
+  var lastCpuSample = start
+    ## No sample is taken at t=0 on purpose: the first one lands a whole
+    ## ``cpuInterval`` in, so a case that finishes quickly never touches
+    ## ``/proc`` at all.
+  let cpuTracked = cpuLivenessAvailable(processGroup)
   var timedOut = false
   var timeoutDescription = ""
   var memoryExceeded = false
   var peakRssBytes = 0'u64
   let childPid = uint64(max(p.processID, 0))
+
+  proc observedNumbers(now: float): string =
+    ## The evidence line that accompanies every kill.
+    let cpuText =
+      if cpuSeen == CpuUnavailable: "unavailable"
+      else: formatFloat(cpuSeen, ffDecimal, 2) & "s"
+    let advanceText =
+      if cpuSeen == CpuUnavailable or cpuAtLastProgress == CpuUnavailable:
+        "unavailable"
+      else:
+        formatFloat(cpuSeen - cpuAtLastProgress, ffDecimal, 2) & "s"
+    "elapsed=" & formatFloat(now - start, ffDecimal, 1) &
+      "s group-cpu=" & cpuText &
+      " cpu-since-last-progress=" & advanceText &
+      " last-output-age=" & formatFloat(now - lastOutput, ffDecimal, 1) &
+      "s last-progress-age=" & formatFloat(now - lastProgress, ffDecimal, 1) &
+      "s cpu-progress-threshold=" &
+      formatFloat(cpuThreshold, ffDecimal, 2) & "s"
+
   while true:
     when defined(posix):
       if interruptedSignal.load(moAcquire) != 0:
@@ -2396,9 +2613,13 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
         peakRssBytes: peakRssBytes)
     # Drain whatever the live child has emitted since the last poll.
     # Non-blocking, so this never parks on a silent test. Any new bytes
-    # are forward progress and reset the idle clock.
+    # are forward progress and reset the no-progress clock.
     if drainAvailable(p, output) > 0:
-      lastProgress = epochTime()
+      lastOutput = epochTime()
+      lastProgress = lastOutput
+      # Rebase the CPU comparison too: the required advance is measured
+      # from the most recent progress point, whichever signal produced it.
+      cpuAtLastProgress = cpuSeen
     # M19: sample the resident size of the child's WHOLE PROCESS TREE.
     #
     # The tree, not the direct child: on POSIX the direct child is the
@@ -2424,22 +2645,55 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
           "MEMORY LIMIT EXCEEDED: " & $rss & " > " & $memoryLimitBytes &
           " bytes"
         break
-    let now = epochTime()
+    var now = epochTime()
+    # Second signal: has the process group burned CPU? A starved test is
+    # quiet but advancing; a deadlocked one is quiet and flat.
+    if cpuTracked and (now - lastCpuSample) >= cpuInterval:
+      lastCpuSample = now
+      let sample = processGroupCpuSeconds(processGroup)
+      if sample != CpuUnavailable and sample > cpuSeen:
+        cpuSeen = sample
+        if cpuAtLastProgress == CpuUnavailable:
+          # First successful reading: it establishes the baseline and
+          # claims nothing. CPU burned before it is not evidence of
+          # progress *since the last progress point*.
+          cpuAtLastProgress = cpuSeen
+        elif cpuSeen - cpuAtLastProgress >= cpuThreshold:
+          cpuAtLastProgress = cpuSeen
+          lastProgress = now
+      now = epochTime()
     if (now - lastProgress) > idleDeadlineSec:
-      output.add("\nrepro_test_runner: no output for " & $timeoutSec &
-        "s (idle deadline); treating as hung.\n")
+      let evidence = observedNumbers(now)
+      # Never claim a signal that was not actually read. "no CPU
+      # progress" is a measurement; "CPU unmeasured" is an admission.
+      let cpuMeasured = cpuTracked and cpuSeen != CpuUnavailable
+      let signals =
+        if cpuMeasured: "no output and no CPU progress"
+        elif cpuTracked: "no output; the CPU signal never returned a reading"
+        else: "no output; the CPU signal is unavailable on this host"
+      output.add("\nrepro_test_runner: no progress for " & $timeoutSec &
+        "s (idle deadline; " & signals & "); treating as hung. " &
+        evidence & "\n")
       timedOut = true
+      # The leading clause is stable text other tooling greps for; the
+      # bracketed evidence is what makes a timeout diagnosable from the
+      # log alone.
       timeoutDescription =
-        "IDLE TIMEOUT after " & $timeoutSec & "s without output"
+        "IDLE TIMEOUT after " & $timeoutSec & "s without output" &
+        (if cpuMeasured: " or CPU progress" else: "") &
+        " [" & evidence & "]"
       break
     if (now - start) > absoluteDeadlineSec:
+      let evidence = observedNumbers(now)
       output.add("\nrepro_test_runner: exceeded absolute ceiling of " &
         $absoluteDeadlineSec.int & "s (" & $AbsoluteTimeoutMultiplier &
-        "x the idle deadline) while still producing output; treating " &
-        "as stuck.\n")
+        "x the no-progress deadline) while still showing progress; " &
+        "treating as stuck (livelock or an unbounded loop). " &
+        evidence & "\n")
       timedOut = true
       timeoutDescription =
-        "ABSOLUTE TIMEOUT after " & $absoluteDeadlineSec.int & "s"
+        "ABSOLUTE TIMEOUT after " & $absoluteDeadlineSec.int & "s" &
+        " [" & evidence & "]"
       break
     sleep(TimeoutPollIntervalMs)
 
@@ -2613,6 +2867,54 @@ proc reportExecution(history: ptr HistoryReporter; testLease: var TestLease;
     history.recordRows(testLease, generic, specific)
   history.releaseLease(testLease)
 
+const WholeBinarySkipMarker = "[SKIPPED] "
+  ## The console formatter's own status marker for a skipped case
+  ## (``lib/pure/unittest.nim``: ``ConsoleOutputFormatter.testEnded``
+  ## prints ``[", $status, "] ", testName``). This is the ONLY channel a
+  ## whole-binary run has for a skip.
+  ##
+  ## Why there is no other channel. ``unittest``'s result document and
+  ## its exit-code-2 convention both live behind ``protocolMode ==
+  ## pmRun`` — i.e. behind ``--run <case>``. A binary executed whole is
+  ## ``pmDefault``: it writes no document, and its exit code is 1 if any
+  ## case FAILED and 0 otherwise. A skipped case therefore exits 0 and is
+  ## indistinguishable, by exit code alone, from a case that passed.
+  ##
+  ## This is NOT the failure-text sniffing this codebase has been
+  ## removing. It reads the harness's own structured status marker for a
+  ## status it already computed, not free-form diagnostic prose, and it
+  ## can only move an outcome from PASS to SKIP — never from FAIL to
+  ## anything.
+
+proc wholeBinarySkippedCases(output: string): seq[string] =
+  ## Names of the cases a whole-binary run reported as skipped.
+  ##
+  ## Anchored to the start of the (indented) line, because that is where
+  ## the formatter puts the marker: a case inside a ``suite`` is printed
+  ## with a two-space prefix and a suite-less one with none. Anchoring
+  ## rejects a mid-line mention (``… saw "[SKIPPED] foo" …``).
+  ##
+  ## It does NOT reject a line-anchored one. A whole binary that prints
+  ## its own line beginning ``[SKIPPED] `` — most plausibly a test that
+  ## echoes a nested unittest log, which carries the formatter's own
+  ## two-space indent — is read as a skip, and no parse of free-form
+  ## child stdout can tell that apart from the real thing. Measured: a
+  ## one-case fixture that passes and echoes ``  [SKIPPED] x`` is
+  ## reported SKIP.
+  ##
+  ## That residue is bounded by the caller, and bounded on the safe
+  ## side. Only a PASS is ever re-read, so the worst outcome is a
+  ## passing binary reported as skipped — which a zero-skip gate turns
+  ## RED and names. A failure can never be absorbed. Recovering the
+  ## remaining fidelity needs the binary to become enumerable, so that
+  ## the skip arrives on the result-document channel instead of on
+  ## stdout; it does not need a cleverer pattern.
+  result = @[]
+  for rawLine in output.splitLines():
+    let line = rawLine.strip()
+    if line.startsWith(WholeBinarySkipMarker):
+      result.add(line[WholeBinarySkipMarker.len .. ^1].strip())
+
 proc runWholeBinary(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]];
                     testTimeoutSec: int;
@@ -2641,6 +2943,16 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
     var childEnv = newStringTable(modeCaseSensitive)
     for (k, v) in baseEnv:
       childEnv[k] = v
+    # The skip census below reads the console formatter's status markers,
+    # so the two knobs that can suppress them are pinned rather than
+    # inherited. ``NIMTEST_OUTPUT_LVL=PRINT_FAILURES`` in an ambient
+    # environment would print nothing for a skipped case and silently
+    # restore the exact blind spot this exists to close;
+    # ``NIMTEST_COLOR=always`` would wrap the marker in escapes. Both
+    # values are ``unittest``'s own defaults for a piped child, so
+    # pinning them changes no output that was already being produced.
+    childEnv["NIMTEST_OUTPUT_LVL"] = "PRINT_ALL"
+    childEnv["NIMTEST_COLOR"] = "never"
     history.markStarting(testLease)
     let p = spawnedProcess(tc.binary, args = [], env = childEnv)
     history.markRunning(testLease, uint64(max(p.process.processID, 0)),
@@ -2678,6 +2990,22 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
           "child reported harness exit " & $HarnessErrorExitCode &
           " (could not start the test)"
       else: result.status = tsFail
+      if result.status == tsPass:
+        # A whole binary exits 0 whether every case passed or some case
+        # called ``skip()`` — the exit-code-2 skip convention is
+        # ``--run``-only (see ``WholeBinarySkipMarker``). Reporting PASS
+        # here made ``skip=0`` in the run summary mean "no PER-CASE skip",
+        # not "no skip", so a zero-skip gate read green while the console
+        # log carried ``[SKIPPED]`` lines nobody was counting.
+        #
+        # Only PASS is reclassified. A binary that also FAILED stays
+        # FAILED: a skip must never be able to absorb a failure.
+        let skipped = wholeBinarySkippedCases(output)
+        if skipped.len > 0:
+          result.status = tsSkip
+          result.skipReason =
+            "whole-binary run: " & $skipped.len &
+            " unittest case(s) skipped: " & skipped.join(", ")
   except ProcessGroupRefusal as e:
     # A verdict WAS reached: the case leaked processes that outlived
     # bounded cleanup. That is a defect in the tree, so it is FAIL and it
@@ -3060,7 +3388,120 @@ const
     ## the case's own result document keep every line; this bound exists
     ## so one pathological case cannot bury the other 6800 in the log.
 
+  DefaultHeartbeatIntervalSec = 60
+    ## How often the heartbeat restates where the run is. Sixty seconds is
+    ## short enough that a stall is visible within a minute and long enough
+    ## that a multi-hour log gains a couple of hundred lines, not thousands.
+    ## Override with ``REPRO_TEST_RUNNER_HEARTBEAT_SEC`` when watching a run
+    ## interactively (and so the runner's own regression can observe a
+    ## heartbeat without waiting a minute for one).
+
+  HeartbeatIntervalEnv = "REPRO_TEST_RUNNER_HEARTBEAT_SEC"
+
+  HeartbeatPollMs = 250
+    ## Sleep granularity of the heartbeat thread. It wakes often so the run
+    ## can join it promptly at the end; it only PRINTS once per configured
+    ## interval (see ``heartbeatIntervalSec``).
+
+# ---------------------------------------------------------------------------
+# Live progress ledger
+# ---------------------------------------------------------------------------
+#
+# A full run takes hours, and until this existed the only progress signal was
+# the per-case line: no denominator, no elapsed, no running failure count, and
+# nothing at all while a single slow case held a worker. A run that hit the
+# outer ``timeout`` therefore yielded NOTHING a reader could act on — the
+# summary JSON is written once, at the end, so a killed run had neither a
+# summary nor any way to tell 20% done from 90% done.
+#
+# Everything below goes to STDERR. Stdout is the machine-readable side of the
+# runner's contract (``--list-json`` catalogs and anything a caller pipes), so
+# human progress must never be written there.
+var
+  progressTotal: Atomic[int]
+    ## Cases scheduled for this run. Published once, before the first case.
+  progressDone: Atomic[int]
+  progressFailed: Atomic[int]
+    ## Failures AND harness errors: from the console's point of view both are
+    ## "this run is not going to be green", which is what a reader watching a
+    ## long run needs to know without waiting for the summary.
+  progressActive: Atomic[int]
+  progressStartEpoch: float
+  heartbeatStop: Atomic[bool]
+
+proc formatElapsed(seconds: float): string =
+  let total = int(seconds)
+  let h = total div 3600
+  let m = (total mod 3600) div 60
+  let s = total mod 60
+  if h > 0:
+    $h & "h" & align($m, 2, '0') & "m" & align($s, 2, '0') & "s"
+  else:
+    $m & "m" & align($s, 2, '0') & "s"
+
+proc progressPrefix(done, total: int): string =
+  ## ``[123/1183 10%]`` — the denominator is the whole point: a bare running
+  ## count cannot distinguish a run that is nearly finished from one that has
+  ## barely started.
+  if total > 0:
+    "[" & $done & "/" & $total & " " & $(done * 100 div total) & "%] "
+  else:
+    "[" & $done & "] "
+
+proc emitHeartbeat() =
+  let done = progressDone.load(moRelaxed)
+  let total = progressTotal.load(moRelaxed)
+  let failed = progressFailed.load(moRelaxed)
+  let active = progressActive.load(moRelaxed)
+  let elapsed = epochTime() - progressStartEpoch
+  var msg = "repro_test_runner: " & progressPrefix(done, total) &
+    "elapsed=" & formatElapsed(elapsed) &
+    " running=" & $active & " failed=" & $failed
+  if done > 0 and total > done:
+    # A projection, explicitly labelled as one. It assumes the remaining
+    # cases cost what the finished ones did, which they will not exactly —
+    # but "about two more hours" is the difference between waiting and
+    # killing the run, and that judgement is impossible without a number.
+    let projected = elapsed / done.float * (total - done).float
+    msg.add(" eta~" & formatElapsed(projected))
+  msg.add("\n")
+  stderr.write(msg)
+  stderr.flushFile()
+
+proc heartbeatIntervalSec(): int =
+  ## A non-numeric or non-positive override is ignored rather than treated as
+  ## "off": losing the heartbeat is exactly the failure mode it exists to
+  ## remove, so it must not be switchable by a typo.
+  let configured = getEnv(HeartbeatIntervalEnv, "")
+  if configured.len == 0:
+    return DefaultHeartbeatIntervalSec
+  try:
+    let parsed = parseInt(configured)
+    if parsed > 0: parsed else: DefaultHeartbeatIntervalSec
+  except ValueError:
+    DefaultHeartbeatIntervalSec
+
+proc heartbeatMain(intervalSec: int) {.thread.} =
+  ## Restates the ledger on a fixed interval so a run that is slow, stalled or
+  ## about to be killed by the outer ``timeout`` still says where it got to.
+  ## Without it a single long case (the suite has one worth ~81 minutes) makes
+  ## the log indistinguishable from a wedge.
+  var sinceLastMs = 0
+  while not heartbeatStop.load(moAcquire):
+    sleep(HeartbeatPollMs)
+    sinceLastMs += HeartbeatPollMs
+    if sinceLastMs >= intervalSec * 1000:
+      sinceLastMs = 0
+      if not heartbeatStop.load(moAcquire):
+        emitHeartbeat()
+
 proc emitProgress(quiet: bool; res: TestResult) =
+  # The ledger is maintained even under ``--quiet``: the heartbeat and the
+  # end-of-run accounting must not depend on whether per-case lines are being
+  # printed, or a quiet run would report zero progress.
+  let done = progressDone.fetchAdd(1, moRelaxed) + 1
+  if res.status in {tsFail, tsHarnessError}:
+    discard progressFailed.fetchAdd(1, moRelaxed)
   if quiet:
     return
   let label = "[" & $res.status & "]"
@@ -3082,7 +3523,8 @@ proc emitProgress(quiet: bool; res: TestResult) =
   # ``writeLine`` calls would interleave with other workers' lines at
   # ``--threads=8`` and stop being readable as a unit — which is the same
   # way the diagnosis gets lost that this block exists to prevent.
-  var msg = label & " " & name & " (" & $res.durationMs & "ms)" &
+  var msg = progressPrefix(done, progressTotal.load(moRelaxed)) &
+    label & " " & name & " (" & $res.durationMs & "ms)" &
     reason & "\n"
   if res.statusDisagreement.len > 0:
     msg.add("  ! protocol disagreement: " & res.statusDisagreement & "\n")
@@ -3132,6 +3574,7 @@ proc workerLoop(args: WorkerArgs) =
     if not nextCase(args.queue, args.failFast, tc):
       break
     discard atomicInc(args.activeCount[])
+    discard progressActive.fetchAdd(1, moRelaxed)
     var res: TestResult
     # Defence in depth: ``runOneProtocol`` and ``runWholeBinary`` both
     # catch the spawn-time ``OSError``/``IOError`` paths internally,
@@ -3161,6 +3604,7 @@ proc workerLoop(args: WorkerArgs) =
         harnessError: "worker exception: " & e.msg,
         stdout: "repro_test_runner: worker exception: " & e.msg & "\n")
     discard atomicDec(args.activeCount[])
+    discard progressActive.fetchSub(1, moRelaxed)
 
     acquire(args.resultsLock[])
     args.results[].add(res)
@@ -3561,7 +4005,12 @@ proc parseArgs(): RunnerOpts =
           result.memoryLimitMb = 0
       of "help", "h":
         echo "repro_test_runner — protocol-level parallel test runner"
-        echo "  --threads N         worker count (default $NPROC)"
+        # The old text said "default $NPROC". It never was: an absent or
+        # non-positive --threads has always been clamped to 1 twenty lines
+        # below. Callers that want a host-derived value compute it themselves
+        # (scripts/test_parallelism.sh), which is where the nested-build
+        # budget lives.
+        echo "  --threads N         worker count (default 1)"
         echo "  --bin-dir DIR       scan DIR for test binaries"
         echo "  --no-build          skip ``repro build test`` step"
         echo "  --summary-json P    write per-run JSON summary to P"
@@ -3577,9 +4026,14 @@ proc parseArgs(): RunnerOpts =
         echo "                      hashes cover compiled sources only, " &
           "not data files read at run"
         echo "                      time, env vars or external tools"
-        echo "  --quiet             suppress per-test progress lines"
-        echo "  --test-timeout=N    per-test idle timeout; output resets it; " &
-          "hard ceiling 4xN (seconds, 0=off)"
+        echo "  --quiet             suppress per-test progress lines " &
+          "(the periodic heartbeat stays)"
+        echo "  --test-timeout=N    per-test idle timeout; output resets it, " &
+          "as does process-group CPU"
+        echo "                      progress (so a CPU-starved test is not " &
+          "mistaken for a hung one);"
+        echo "                      hard ceiling 4xN still kills a livelock " &
+          "(seconds, 0=off)"
         echo "  --no-runquota-history"
         echo "                      do not record executions into " &
           "RunQuota's observation store"
@@ -4092,6 +4546,11 @@ proc main() =
       stderr.writeLine "repro_test_runner: hash-difference selection " &
         "deselected 0 cases (catalog unusable)"
 
+  # Publish the denominator BEFORE the first case runs. Every progress line
+  # from here on carries "done of total", which is the difference between a
+  # log a reader can act on and one that only says work is happening.
+  progressTotal.store(totalCases, moRelaxed)
+
   var resultsLock: Lock
   initLock(resultsLock)
   var results: seq[TestResult] = @[]
@@ -4212,6 +4671,12 @@ proc main() =
       historyPtr = addr history
 
   let wallT0 = epochTime()
+  progressStartEpoch = wallT0
+  # Started before the exclusive phase, not before the worker pool: the
+  # exclusive cases are the slowest in the suite and run one at a time, so
+  # they are exactly the stretch where the log would otherwise go quiet.
+  var heartbeatThread: Thread[int]
+  createThread(heartbeatThread, heartbeatMain, heartbeatIntervalSec())
   var exclusiveFailed = false
 
   if exclusiveItems.len > 0 and not (failFast and queue.failFastTriggered):
@@ -4219,6 +4684,7 @@ proc main() =
       when defined(posix):
         if interruptedSignal.load(moAcquire) != 0:
           break
+      discard progressActive.fetchAdd(1, moRelaxed)
       var res: TestResult
       try:
         let caseTimeoutSec =
@@ -4237,6 +4703,7 @@ proc main() =
           harnessError: "exclusive worker exception: " & e.msg,
           stdout: "repro_test_runner: exclusive worker exception: " &
             e.msg & "\n")
+      discard progressActive.fetchSub(1, moRelaxed)
       results.add(res)
       emitProgress(opts.quiet, res)
       if failFast and res.status in {tsFail, tsHarnessError}:
@@ -4265,6 +4732,11 @@ proc main() =
   for i in 0 ..< nThreads:
     createThread(threads[i], workerMain, args)
   joinThreads(threads)
+
+  # Joined before the cleanup barrier below so no heartbeat line can interleave
+  # with the fatal-cleanup diagnostics or the final summary.
+  heartbeatStop.store(true, moRelease)
+  joinThread(heartbeatThread)
 
   when defined(posix):
     # `interruptedSignal` is stored before the waiter starts cleanup. Retaining

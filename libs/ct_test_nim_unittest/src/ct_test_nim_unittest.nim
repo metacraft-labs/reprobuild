@@ -297,7 +297,8 @@ proc run*(self: NimUnittestBinary; filter = "";
           poolUnits = 1'u32;
           cacheable = true;
           actionCachePolicy = defaultActionCachePolicy();
-          registerImplicitName = true):
+          registerImplicitName = true;
+          dependencyPolicy = automaticMonitorPolicy()):
     BuildActionDef {.discardable.} =
   ## Emit one execution edge that runs the test binary. The bound
   ## ``self.path`` flows in as a synthesised ``binary`` input flag so
@@ -323,6 +324,23 @@ proc run*(self: NimUnittestBinary; filter = "";
   ## edge's selector. The default stays ``true`` so existing single-
   ## edge call sites (the Typed-Outputs M1 fixtures, ad-hoc one-off
   ## ``run`` calls) keep their implicit-name behaviour.
+  ##
+  ## ``dependencyPolicy`` selects how the engine gathers this edge's runtime
+  ## inputs. The default, ``automaticMonitorPolicy()``, is the baseline for
+  ## opaque tools: the engine wraps the command in ``repro internal io
+  ## monitor``, which injects an ``LD_PRELOAD`` interposer to observe reads.
+  ##
+  ## A test that performs ``LD_PRELOAD`` interposition ITSELF cannot be
+  ## observed that way — two interposers on the same libc entry points
+  ## re-enter each other. Such a test passes ``makeDepfilePolicy(...)`` where
+  ## a depfile describing its inputs exists, or, as a last resort,
+  ## ``trustedDeclaredInputsPolicy(...)``. Both resolve to kinds outside the
+  ## engine's ``MonitorPolicyKinds``, so no wrap and no shim injection happen.
+  ##
+  ## This is NOT a way to skip dependency tracking. Declaring inputs
+  ## statically and calling the action complete is a soundness hole that was
+  ## removed from this codebase and must not return; see the note on
+  ## ``dgDeclaredOnly`` in repro_core/dependency_gathering.nim.
   ##
   ## ``pool`` / ``poolUnits`` forward the execute edge into a named
   ## engine build pool (``recordToolInvocation`` → ``BuildAction.pool``;
@@ -359,7 +377,7 @@ proc run*(self: NimUnittestBinary; filter = "";
     pool = pool,
     poolUnits = poolUnits,
     cacheable = cacheable,
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = dependencyPolicy,
     actionCachePolicy = actionCachePolicy)
   if registerImplicitName:
     let implicitNames = computeImplicitTargetNames(call, @["binary"])

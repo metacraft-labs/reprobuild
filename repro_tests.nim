@@ -70,6 +70,13 @@ type
     extraPassC*: seq[string]
     extraPassL*: seq[string]
     targetOs*: TargetOs
+    selfInterposes*: bool
+      ## HAZARDOUS opt-out: this test performs LD_PRELOAD
+      ## interposition itself and cannot be observed by the
+      ## engine's own interposer. Its execute edge is given
+      ## ``trustedDeclaredInputsPolicy`` — declared, UNVERIFIED
+      ## inputs and no monitoring. See the note at the
+      ## execute-edge call site in ``repro.nim``.
 
 const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
@@ -79,7 +86,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim",
     binary: "build/test-bin/t_smoke_ct_test_nim_unittest",
@@ -87,7 +95,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim",
     binary: "build/test-bin/t_backward_compat_std_unittest_test_runs_unchanged",
@@ -95,7 +104,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim",
     binary: "build/test-bin/t_ct_test_runner_full_suite_parity",
@@ -103,7 +113,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim",
     binary: "build/test-bin/t_ct_test_runner_partition_file_mode",
@@ -111,7 +122,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim",
     binary: "build/test-bin/t_every_test_binary_speaks_list_json_protocol",
@@ -119,7 +131,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim",
     binary: "build/test-bin/t_smoke_ct_test_unittest_parallel",
@@ -127,7 +140,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim",
     binary: "build/test-bin/t_test_binary_run_one_writes_result_file",
@@ -135,7 +149,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p1_module_loads.nim",
     binary: "build/test-bin/t_a2_5_p1_module_loads",
@@ -143,7 +158,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p2_manifest_fetch.nim",
     binary: "build/test-bin/t_a2_5_p2_manifest_fetch",
@@ -151,7 +167,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p3_streaming_sink.nim",
     binary: "build/test-bin/t_a2_5_p3_streaming_sink",
@@ -159,7 +176,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p4_engine_dispatch.nim",
     binary: "build/test-bin/t_a2_5_p4_engine_dispatch",
@@ -167,7 +185,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p5_closure_walk.nim",
     binary: "build/test-bin/t_a2_5_p5_closure_walk",
@@ -175,7 +194,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p6_daemon_substitute.nim",
     binary: "build/test-bin/t_a2_5_p6_daemon_substitute",
@@ -183,7 +203,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p6_daemon_substitute_ipc.nim",
     binary: "build/test-bin/t_a2_5_p6_daemon_substitute_ipc",
@@ -191,7 +212,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p7_in_process_substitute.nim",
     binary: "build/test-bin/t_a2_5_p7_in_process_substitute",
@@ -199,7 +221,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p8_throughput_bench.nim",
     binary: "build/test-bin/t_a2_5_p8_throughput_bench",
@@ -207,7 +230,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a3_p1_cache_key.nim",
     binary: "build/test-bin/t_a3_p1_cache_key",
@@ -215,7 +239,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim",
     binary: "build/test-bin/t_a3_p2_cli_substitute",
@@ -223,7 +248,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim",
     binary: "build/test-bin/t_a3_p6_closure_walk_r4",
@@ -231,7 +257,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim",
     binary: "build/test-bin/t_a4_p2_sentinel_wait",
@@ -239,7 +266,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim",
     binary: "build/test-bin/t_client_cli_prefix_substitute",
@@ -247,7 +275,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_r1_caches_config.nim",
     binary: "build/test-bin/t_r1_caches_config",
@@ -255,7 +284,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_r1_client_trust.nim",
     binary: "build/test-bin/t_r1_client_trust",
@@ -263,7 +293,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/test_auto_credentials.nim",
     binary: "build/test-bin/test_auto_credentials",
@@ -271,7 +302,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_client/tests/test_publish_in_process.nim",
     binary: "build/test-bin/test_publish_in_process",
@@ -279,7 +311,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_server/tests/t_a2_p1_manifest_roundtrip.nim",
     binary: "build/test-bin/t_a2_p1_manifest_roundtrip",
@@ -287,7 +320,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_server/tests/t_a2_p2_rest_surface.nim",
     binary: "build/test-bin/t_a2_p2_rest_surface",
@@ -295,7 +329,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim",
     binary: "build/test-bin/t_repro_binary_cache_https_publish_authz",
@@ -303,7 +338,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_action_cache_output_integrity.nim",
     binary: "build/test-bin/t_action_cache_output_integrity",
@@ -311,7 +347,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim",
     binary: "build/test-bin/t_annotation_perturbs_no_fingerprint",
@@ -319,7 +356,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim",
     binary: "build/test-bin/t_declared_env_is_in_the_cache_key",
@@ -327,7 +365,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
     binary: "build/test-bin/t_engine_action_create_dyndep",
@@ -335,7 +374,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim",
     binary: "build/test-bin/t_engine_implicit_target_name_basename_rule",
@@ -343,7 +383,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_implicit_target_name_hook_overrides_canonical.nim",
     binary: "build/test-bin/t_engine_implicit_target_name_hook_overrides_canonical",
@@ -351,7 +392,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
     binary: "build/test-bin/t_engine_macos_sip_safe_launch",
@@ -359,7 +401,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_emits_execution_edge.nim",
     binary: "build/test-bin/t_engine_method_call_on_typed_field_emits_execution_edge",
@@ -367,7 +410,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_multiple_outputs_produce_multiple_names.nim",
     binary: "build/test-bin/t_engine_multiple_outputs_produce_multiple_names",
@@ -375,7 +419,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_target_export_table_records_ambiguity.nim",
     binary: "build/test-bin/t_engine_target_export_table_records_ambiguity",
@@ -383,7 +428,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph.nim",
     binary: "build/test-bin/t_engine_typed_output_recorded_in_normalized_graph",
@@ -391,7 +437,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim",
     binary: "build/test-bin/t_fingerprint_audit_every_action_has_lock_identity",
@@ -399,7 +446,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim",
     binary: "build/test-bin/t_force_rebuild_is_honored_by_engine_api",
@@ -407,7 +455,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim",
     binary: "build/test-bin/t_nlf_stat4_baseline_fingerprints",
@@ -415,7 +464,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim",
     binary: "build/test-bin/t_workspace_declaring_nothing_unchanged",
@@ -423,7 +473,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim",
     binary: "build/test-bin/t_zero_evidence_edge_is_not_cacheable",
@@ -431,7 +482,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim",
     binary: "build/test-bin/t_zero_output_edge_is_cacheable",
@@ -439,7 +491,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim",
     binary: "build/test-bin/test_binary_cache_publisher_hook",
@@ -447,7 +500,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim",
     binary: "build/test-bin/test_builtin_copy_file_idempotent",
@@ -455,7 +509,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim",
     binary: "build/test-bin/test_bypass_argv_fidelity",
@@ -463,7 +518,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim",
     binary: "build/test-bin/test_dependency_rerun_cache_lookup",
@@ -471,7 +527,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim",
     binary: "build/test-bin/test_elevated_inline_exec_hook",
@@ -479,7 +536,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim",
     binary: "build/test-bin/test_m9r72_monitor_loss_classifier",
@@ -487,7 +545,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim",
     binary: "build/test-bin/test_m9r72_phaseD_end_to_end",
@@ -495,7 +554,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim",
     binary: "build/test-bin/test_m9r73_narrow_invalidation",
@@ -503,7 +563,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim",
     binary: "build/test-bin/test_m9r75_double_write_reject",
@@ -511,7 +572,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim",
     binary: "build/test-bin/test_m9r75_source_write_reject",
@@ -519,7 +581,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_no_progress_diagnostic.nim",
     binary: "build/test-bin/test_no_progress_diagnostic",
@@ -527,7 +590,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
     binary: "build/test-bin/test_tool_identity_env_plumbing",
@@ -535,7 +599,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim",
     binary: "build/test-bin/test_umask_wrap_both_spawn_paths",
@@ -543,7 +608,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cas_store/tests/t_repro_cas_store_basic.nim",
     binary: "build/test-bin/t_repro_cas_store_basic",
@@ -551,7 +617,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_action_cache_root_resolution.nim",
     binary: "build/test-bin/t_action_cache_root_resolution",
@@ -559,7 +626,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_daemon_carried_environment.nim",
     binary: "build/test-bin/t_daemon_carried_environment",
@@ -567,7 +635,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim",
     binary: "build/test-bin/t_develop_override_records_the_identity_it_replaced",
@@ -575,7 +644,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim",
     binary: "build/test-bin/t_e2e_watch_via_adapter",
@@ -583,7 +653,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim",
     binary: "build/test-bin/t_infra_apply_profile_without_live_state",
@@ -591,7 +662,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim",
     binary: "build/test-bin/t_lock_binding_governs_per_name",
@@ -599,7 +671,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim",
     binary: "build/test-bin/t_lock_list_without_a_build_block",
@@ -607,7 +680,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
     binary: "build/test-bin/t_lock_publish_push_race_classification",
@@ -615,7 +689,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim",
     binary: "build/test-bin/t_lock_record_repo_component_is_one_path_segment",
@@ -623,7 +698,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim",
     binary: "build/test-bin/t_m5_peer_cache_build_wiring",
@@ -631,7 +707,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim",
     binary: "build/test-bin/t_m9r41_infra_install_root",
@@ -639,7 +716,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim",
     binary: "build/test-bin/t_m9r74_resolve_canonical_execroot",
@@ -647,7 +725,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim",
     binary: "build/test-bin/t_materialized_publication_respects_target_selection",
@@ -655,7 +734,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
     binary: "build/test-bin/t_partition_plan_json_round_trip",
@@ -663,7 +743,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim",
     binary: "build/test-bin/t_partition_planner_degrades_gracefully_on_cold_cache",
@@ -671,7 +752,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim",
     binary: "build/test-bin/t_partition_planner_reads_runquota_estimates",
@@ -679,7 +761,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim",
     binary: "build/test-bin/t_phase_g_cli_wiring",
@@ -687,7 +770,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim",
     binary: "build/test-bin/t_strategy_unknown_name_refused",
@@ -695,7 +779,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim",
     binary: "build/test-bin/t_watch_ct_incremental_flags",
@@ -703,7 +788,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/test_engine_publisher_wiring.nim",
     binary: "build/test-bin/test_engine_publisher_wiring",
@@ -711,7 +797,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim",
     binary: "build/test-bin/test_lowered_graph_cache_round_trip",
@@ -719,7 +806,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/test_m10_home_gc_cli.nim",
     binary: "build/test-bin/test_m10_home_gc_cli",
@@ -727,7 +815,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/test_m2_env_ps1_migration_clean.nim",
     binary: "build/test-bin/test_m2_env_ps1_migration_clean",
@@ -735,7 +824,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/test_m69_home_add_versioned.nim",
     binary: "build/test-bin/test_m69_home_add_versioned",
@@ -743,7 +833,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cli_support/tests/test_m70_migrate_from_env_scripts.nim",
     binary: "build/test-bin/test_m70_migrate_from_env_scripts",
@@ -751,7 +842,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_cmake_trycompile/tests/test_envelope_v3.nim",
     binary: "build/test-bin/test_envelope_v3",
@@ -759,7 +851,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_ambient_execution_external_import.nim",
     binary: "build/test-bin/t_ambient_execution_external_import",
@@ -767,7 +860,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_convention_attribution.nim",
     binary: "build/test-bin/t_convention_attribution",
@@ -775,7 +869,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_cpp_dep_scanner.nim",
     binary: "build/test-bin/t_cpp_dep_scanner",
@@ -783,7 +878,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_deps_refresh_check.nim",
     binary: "build/test-bin/t_deps_refresh_check",
@@ -791,7 +887,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_go_dep_scanner.nim",
     binary: "build/test-bin/t_go_dep_scanner",
@@ -799,7 +896,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_jsts_dep_scanner.nim",
     binary: "build/test-bin/t_jsts_dep_scanner",
@@ -807,7 +905,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_nim_dep_scanner.nim",
     binary: "build/test-bin/t_nim_dep_scanner",
@@ -815,7 +914,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_project_file_alias.nim",
     binary: "build/test-bin/t_project_file_alias",
@@ -823,7 +923,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_python_dep_scanner.nim",
     binary: "build/test-bin/t_python_dep_scanner",
@@ -831,7 +932,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_rust_dep_scanner.nim",
     binary: "build/test-bin/t_rust_dep_scanner",
@@ -839,7 +941,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_show_conventions_cli.nim",
     binary: "build/test-bin/t_show_conventions_cli",
@@ -847,7 +950,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_show_conventions_manual_deps.nim",
     binary: "build/test-bin/t_show_conventions_manual_deps",
@@ -855,7 +959,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_core/tests/t_smoke_repro_core.nim",
     binary: "build/test-bin/t_smoke_repro_core",
@@ -863,7 +968,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_daemon_core/tests/t_l4_daemon_leases.nim",
     binary: "build/test-bin/t_l4_daemon_leases",
@@ -871,7 +977,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim",
     binary: "build/test-bin/t_deploy_agent_cli_compiles_manifest_profile",
@@ -879,7 +986,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim",
     binary: "build/test-bin/t_repro_deploy_agent_converges_from_signed_manifest",
@@ -887,7 +995,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim",
     binary: "build/test-bin/t_repro_deploy_agent_manifest_v2_secrets",
@@ -895,7 +1004,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_materialises_secrets.nim",
     binary: "build/test-bin/t_repro_deploy_agent_materialises_secrets",
@@ -903,7 +1013,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_records_tick_history.nim",
     binary: "build/test-bin/t_repro_deploy_agent_records_tick_history",
@@ -911,7 +1022,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_records_tick_status.nim",
     binary: "build/test-bin/t_repro_deploy_agent_records_tick_status",
@@ -919,7 +1031,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim",
     binary: "build/test-bin/t_repro_deploy_agent_rejects_wrong_signer",
@@ -927,7 +1040,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_secrets_seal_open.nim",
     binary: "build/test-bin/t_repro_deploy_agent_secrets_seal_open",
@@ -935,7 +1049,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim",
     binary: "build/test-bin/t_repro_https_cache_end_to_end",
@@ -943,7 +1058,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c1_catalog_round_trip.nim",
     binary: "build/test-bin/t_c1_catalog_round_trip",
@@ -951,7 +1067,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim",
     binary: "build/test-bin/t_c1_dsl_parse",
@@ -959,7 +1076,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c1_dsl_realize_hash.nim",
     binary: "build/test-bin/t_c1_dsl_realize_hash",
@@ -967,7 +1085,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c2_apt_index.nim",
     binary: "build/test-bin/t_c2_apt_index",
@@ -975,7 +1094,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c2_recursive_identity.nim",
     binary: "build/test-bin/t_c2_recursive_identity",
@@ -983,7 +1103,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_catalog_claude_code.nim",
     binary: "build/test-bin/t_catalog_claude_code",
@@ -991,7 +1112,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim",
     binary: "build/test-bin/t_committed_lock_pins_versions",
@@ -999,7 +1121,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim",
     binary: "build/test-bin/t_committed_lock_variants_are_hard",
@@ -1007,7 +1130,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_d2_dnf_index.nim",
     binary: "build/test-bin/t_d2_dnf_index",
@@ -1015,7 +1139,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_d2_pacman_index.nim",
     binary: "build/test-bin/t_d2_pacman_index",
@@ -1023,7 +1148,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_develop_dependency_source_is_read_not_solved.nim",
     binary: "build/test-bin/t_develop_dependency_source_is_read_not_solved",
@@ -1031,7 +1157,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_develop_sibling_variants_reach_the_solve.nim",
     binary: "build/test-bin/t_develop_sibling_variants_reach_the_solve",
@@ -1039,7 +1166,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_doc_comment_malformed_directive_is_compile_error.nim",
     binary: "build/test-bin/t_doc_comment_malformed_directive_is_compile_error",
@@ -1047,7 +1175,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_doc_comment_position_from_first_line.nim",
     binary: "build/test-bin/t_doc_comment_position_from_first_line",
@@ -1055,7 +1184,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim",
     binary: "build/test-bin/t_doc_comment_reaches_listing_and_diagnostic",
@@ -1063,7 +1193,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim",
     binary: "build/test-bin/t_m67_bulk_catalog",
@@ -1071,7 +1202,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim",
     binary: "build/test-bin/t_m68_baseline_catalog",
@@ -1079,7 +1211,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_m8_bulk_catalog.nim",
     binary: "build/test-bin/t_m8_bulk_catalog",
@@ -1087,7 +1220,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim",
     binary: "build/test-bin/t_nde0a_apt_jammy",
@@ -1095,7 +1229,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde0d_dbus_broker.nim",
     binary: "build/test-bin/t_nde0d_dbus_broker",
@@ -1103,7 +1238,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde0g_graphics_stack.nim",
     binary: "build/test-bin/t_nde0g_graphics_stack",
@@ -1111,7 +1247,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde0k_kernel.nim",
     binary: "build/test-bin/t_nde0k_kernel",
@@ -1119,7 +1256,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde0s_systemd_session.nim",
     binary: "build/test-bin/t_nde0s_systemd_session",
@@ -1127,7 +1265,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde_g1_gnome.nim",
     binary: "build/test-bin/t_nde_g1_gnome",
@@ -1135,7 +1274,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde_h1_sway.nim",
     binary: "build/test-bin/t_nde_h1_sway",
@@ -1143,7 +1283,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde_k1_plasma.nim",
     binary: "build/test-bin/t_nde_k1_plasma",
@@ -1151,7 +1292,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim",
     binary: "build/test-bin/t_ndem1_reproos_desktop",
@@ -1159,7 +1301,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim",
     binary: "build/test-bin/t_ndem2_generation_log",
@@ -1167,7 +1310,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nim_c_windows_exe_output.nim",
     binary: "build/test-bin/t_nim_c_windows_exe_output",
@@ -1175,7 +1319,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nim_ssl_dependency.nim",
     binary: "build/test-bin/t_nim_ssl_dependency",
@@ -1183,7 +1328,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_one_toolchain_resolution_path.nim",
     binary: "build/test-bin/t_one_toolchain_resolution_path",
@@ -1191,7 +1337,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_prefix_layout.nim",
     binary: "build/test-bin/t_prefix_layout",
@@ -1199,7 +1346,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_smoke_catalog_audit_m29.nim",
     binary: "build/test-bin/t_smoke_catalog_audit_m29",
@@ -1207,7 +1355,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_smoke_configurables.nim",
     binary: "build/test-bin/t_smoke_configurables",
@@ -1215,7 +1364,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim",
     binary: "build/test-bin/t_smoke_expand_archive",
@@ -1223,7 +1373,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim",
     binary: "build/test-bin/t_smoke_generated_config",
@@ -1231,7 +1382,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim",
     binary: "build/test-bin/t_smoke_phase_e_requires_elevation",
@@ -1239,7 +1391,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_solver_inputs_canonical_under_random_permutations.nim",
     binary: "build/test-bin/t_solver_inputs_canonical_under_random_permutations",
@@ -1247,7 +1400,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim",
     binary: "build/test-bin/t_solver_inputs_render_order_independent",
@@ -1255,7 +1409,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_undeclared_lock_file_is_compile_error.nim",
     binary: "build/test-bin/t_undeclared_lock_file_is_compile_error",
@@ -1263,7 +1418,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim",
     binary: "build/test-bin/t_unsatisfiable_lock_reports_conflict",
@@ -1271,7 +1427,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_versioned_provisioning_schema.nim",
     binary: "build/test-bin/t_versioned_provisioning_schema",
@@ -1279,7 +1436,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_with_lock_file_block_scope.nim",
     binary: "build/test-bin/t_with_lock_file_block_scope",
@@ -1287,7 +1445,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim",
     binary: "build/test-bin/test_m69_package_macro",
@@ -1295,7 +1454,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim",
     binary: "build/test-bin/t_m2_nixos_darwin_modules",
@@ -1303,7 +1463,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_elevation/tests/t_sandbox_m1_fhssandbox_driver.nim",
     binary: "build/test-bin/t_sandbox_m1_fhssandbox_driver",
@@ -1311,7 +1472,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_elevation/tests/t_smoke_repro_elevation.nim",
     binary: "build/test-bin/t_smoke_repro_elevation",
@@ -1319,7 +1481,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_elevation/tests/t_windows_service_recovery_digest.nim",
     binary: "build/test-bin/t_windows_service_recovery_digest",
@@ -1327,7 +1490,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_adapter_chain.nim",
     binary: "build/test-bin/t_adapter_chain",
@@ -1335,7 +1499,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter.nim",
     binary: "build/test-bin/t_builtin_adapter",
@@ -1343,7 +1508,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim",
     binary: "build/test-bin/t_builtin_adapter_7z_nested",
@@ -1351,7 +1517,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim",
     binary: "build/test-bin/t_builtin_adapter_7z_sfx_flatten",
@@ -1359,7 +1526,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter_installer.nim",
     binary: "build/test-bin/t_builtin_adapter_installer",
@@ -1367,7 +1535,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim",
     binary: "build/test-bin/t_builtin_adapter_installer_innosetup_fpc",
@@ -1375,7 +1544,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter_installer_nsis_erlang.nim",
     binary: "build/test-bin/t_builtin_adapter_installer_nsis_erlang",
@@ -1383,7 +1553,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter_launcher_emit_composer.nim",
     binary: "build/test-bin/t_builtin_adapter_launcher_emit_composer",
@@ -1391,7 +1562,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim",
     binary: "build/test-bin/t_builtin_adapter_msys2",
@@ -1399,7 +1571,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter_pre_install_runner.nim",
     binary: "build/test-bin/t_builtin_adapter_pre_install_runner",
@@ -1407,7 +1580,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_home_gc.nim",
     binary: "build/test-bin/t_home_gc",
@@ -1415,7 +1589,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_junction_aware_remove.nim",
     binary: "build/test-bin/t_junction_aware_remove",
@@ -1423,7 +1598,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_plan_topological_sort.nim",
     binary: "build/test-bin/t_plan_topological_sort",
@@ -1431,7 +1607,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_preview_chain.nim",
     binary: "build/test-bin/t_preview_chain",
@@ -1439,7 +1616,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_realize_honors_adapter_preference.nim",
     binary: "build/test-bin/t_realize_honors_adapter_preference",
@@ -1447,7 +1625,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_realize_honors_requested_version.nim",
     binary: "build/test-bin/t_realize_honors_requested_version",
@@ -1455,7 +1634,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_runtime_library_binding.nim",
     binary: "build/test-bin/t_runtime_library_binding",
@@ -1463,7 +1643,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_runtime_library_launch_plan.nim",
     binary: "build/test-bin/t_runtime_library_launch_plan",
@@ -1471,7 +1652,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_smoke_home_apply.nim",
     binary: "build/test-bin/t_smoke_home_apply",
@@ -1479,7 +1661,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/test_m1_fpc_resolves.nim",
     binary: "build/test-bin/test_m1_fpc_resolves",
@@ -1487,7 +1670,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/test_m25_adapter_preference_parse.nim",
     binary: "build/test-bin/test_m25_adapter_preference_parse",
@@ -1495,7 +1679,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/test_m25_adapter_preference_plumbed.nim",
     binary: "build/test-bin/test_m25_adapter_preference_plumbed",
@@ -1503,7 +1688,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim",
     binary: "build/test-bin/test_m25_adapter_preference_text_macro_parity",
@@ -1511,7 +1697,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/test_m69_apply_end_to_end.nim",
     binary: "build/test-bin/test_m69_apply_end_to_end",
@@ -1519,7 +1706,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/test_m69_catalog_lookup.nim",
     binary: "build/test-bin/test_m69_catalog_lookup",
@@ -1527,7 +1715,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/test_m69_env_export.nim",
     binary: "build/test-bin/test_m69_env_export",
@@ -1535,7 +1724,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim",
     binary: "build/test-bin/test_m69_env_userpath_multi_package",
@@ -1543,7 +1733,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_generations/tests/t_smoke_home_generations.nim",
     binary: "build/test-bin/t_smoke_home_generations",
@@ -1551,7 +1742,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_intent/tests/t_smoke_home_intent.nim",
     binary: "build/test-bin/t_smoke_home_intent",
@@ -1559,7 +1751,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_resources/tests/t_registry_root_override.nim",
     binary: "build/test-bin/t_registry_root_override",
@@ -1567,7 +1760,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_resources/tests/t_resource_type_registry.nim",
     binary: "build/test-bin/t_resource_type_registry",
@@ -1575,7 +1769,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_resources/tests/t_smoke_home_resources.nim",
     binary: "build/test-bin/t_smoke_home_resources",
@@ -1583,7 +1778,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_home_rollback/tests/t_smoke_home_rollback.nim",
     binary: "build/test-bin/t_smoke_home_rollback",
@@ -1591,7 +1787,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim",
     binary: "build/test-bin/t_smoke_repro_homebrew_adapter",
@@ -1599,7 +1796,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim",
     binary: "build/test-bin/t_smoke_phase_g_runinfraapply_dispatch",
@@ -1607,7 +1805,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_infra/tests/t_smoke_repro_infra.nim",
     binary: "build/test-bin/t_smoke_repro_infra",
@@ -1615,7 +1814,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_multi_package_merge.nim",
     binary: "build/test-bin/t_multi_package_merge",
@@ -1623,7 +1823,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim",
     binary: "build/test-bin/t_provider_nimcache_key_tracks_external_libs",
@@ -1631,7 +1832,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim",
     binary: "build/test-bin/t_reprobuild_source_root_from_binary_location",
@@ -1639,7 +1841,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim",
     binary: "build/test-bin/t_rp1_provider_artifact_edge_identity",
@@ -1647,7 +1850,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim",
     binary: "build/test-bin/t_rp4_resource_codec_roundtrip",
@@ -1655,7 +1859,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim",
     binary: "build/test-bin/t_runtime_tool_uses_codec",
@@ -1663,7 +1868,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_windows_dynlib_staging.nim",
     binary: "build/test-bin/t_windows_dynlib_staging",
@@ -1671,7 +1877,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim",
     binary: "build/test-bin/t_windows_long_command_script",
@@ -1679,7 +1886,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim",
     binary: "build/test-bin/test_library_codec_roundtrip",
@@ -1687,7 +1895,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_launch_plan/tests/t_codec_smoke.nim",
     binary: "build/test-bin/t_codec_smoke",
@@ -1695,7 +1904,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_local_store/tests/t_a4_p4_eviction.nim",
     binary: "build/test-bin/t_a4_p4_eviction",
@@ -1703,7 +1913,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_local_store/tests/t_c3_sandbox_manifest.nim",
     binary: "build/test-bin/t_c3_sandbox_manifest",
@@ -1711,7 +1922,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_local_store/tests/t_m8_multi_output_realize.nim",
     binary: "build/test-bin/t_m8_multi_output_realize",
@@ -1719,7 +1931,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_local_store/tests/t_sqlite_smoke.nim",
     binary: "build/test-bin/t_sqlite_smoke",
@@ -1727,7 +1940,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock/tests/t_lock_identity_feature_change_differs.nim",
     binary: "build/test-bin/t_lock_identity_feature_change_differs",
@@ -1735,7 +1949,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock/tests/t_lock_identity_rename_invalidates_nothing.nim",
     binary: "build/test-bin/t_lock_identity_rename_invalidates_nothing",
@@ -1743,7 +1958,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock/tests/t_lock_identity_solver_tie_no_collision.nim",
     binary: "build/test-bin/t_lock_identity_solver_tie_no_collision",
@@ -1751,7 +1967,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock/tests/t_lock_identity_two_names_one_content.nim",
     binary: "build/test-bin/t_lock_identity_two_names_one_content",
@@ -1759,7 +1976,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock/tests/t_lock_writer_output_reads_back.nim",
     binary: "build/test-bin/t_lock_writer_output_reads_back",
@@ -1767,7 +1985,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock/tests/t_provenance_reports_shared_names.nim",
     binary: "build/test-bin/t_provenance_reports_shared_names",
@@ -1775,7 +1994,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock/tests/t_selection_is_not_the_same_as_absence.nim",
     binary: "build/test-bin/t_selection_is_not_the_same_as_absence",
@@ -1783,7 +2003,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock/tests/t_selection_status_survives_the_lock_round_trip.nim",
     binary: "build/test-bin/t_selection_status_survives_the_lock_round_trip",
@@ -1791,7 +2012,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_cli_binding_forms.nim",
     binary: "build/test-bin/t_cli_binding_forms",
@@ -1799,7 +2021,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_declarations_are_emitted_eagerly.nim",
     binary: "build/test-bin/t_declarations_are_emitted_eagerly",
@@ -1807,7 +2030,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_declared_but_unbound_falls_back.nim",
     binary: "build/test-bin/t_declared_but_unbound_falls_back",
@@ -1815,7 +2039,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_default_is_restrictive.nim",
     binary: "build/test-bin/t_default_is_restrictive",
@@ -1823,7 +2048,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_doc_comment_attachment_rules.nim",
     binary: "build/test-bin/t_doc_comment_attachment_rules",
@@ -1831,7 +2057,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_inherited_default_is_traceable.nim",
     binary: "build/test-bin/t_inherited_default_is_traceable",
@@ -1839,7 +2066,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_multi_version_allowed_builds.nim",
     binary: "build/test-bin/t_multi_version_allowed_builds",
@@ -1847,7 +2075,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_opaque_consumption_never_refused.nim",
     binary: "build/test-bin/t_opaque_consumption_never_refused",
@@ -1855,7 +2084,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_split_is_reported.nim",
     binary: "build/test-bin/t_split_is_reported",
@@ -1863,7 +2093,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_two_versions_one_link_forbidden_errors.nim",
     binary: "build/test-bin/t_two_versions_one_link_forbidden_errors",
@@ -1871,7 +2102,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_two_versions_separate_binaries_allowed.nim",
     binary: "build/test-bin/t_two_versions_separate_binaries_allowed",
@@ -1879,7 +2111,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_files/tests/t_unification_attempted_before_splitting.nim",
     binary: "build/test-bin/t_unification_attempted_before_splitting",
@@ -1887,7 +2120,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_designation_propagates_to_closure.nim",
     binary: "build/test-bin/t_designation_propagates_to_closure",
@@ -1895,7 +2129,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_develop_checkout_once_products_per_lock_file.nim",
     binary: "build/test-bin/t_develop_checkout_once_products_per_lock_file",
@@ -1903,7 +2138,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_hidden_lock_shares_with_committed.nim",
     binary: "build/test-bin/t_hidden_lock_shares_with_committed",
@@ -1911,7 +2147,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim",
     binary: "build/test-bin/t_lock_generation_one_path_four_entry_points",
@@ -1919,7 +2156,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_materiality_interval_covers_the_gap.nim",
     binary: "build/test-bin/t_materiality_interval_covers_the_gap",
@@ -1927,7 +2165,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_materiality_irrelevant_metadata_no_invalidation.nim",
     binary: "build/test-bin/t_materiality_irrelevant_metadata_no_invalidation",
@@ -1935,7 +2174,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_materiality_relevant_metadata_invalidates.nim",
     binary: "build/test-bin/t_materiality_relevant_metadata_invalidates",
@@ -1943,7 +2183,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_materiality_strategy_changes_what_is_material.nim",
     binary: "build/test-bin/t_materiality_strategy_changes_what_is_material",
@@ -1951,7 +2192,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_metadata_object_kinds_are_distinguishable.nim",
     binary: "build/test-bin/t_metadata_object_kinds_are_distinguishable",
@@ -1959,7 +2201,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_native_build_deps_land_in_different_lock_files.nim",
     binary: "build/test-bin/t_native_build_deps_land_in_different_lock_files",
@@ -1967,7 +2210,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_no_feature_leak_across_host_target.nim",
     binary: "build/test-bin/t_no_feature_leak_across_host_target",
@@ -1975,7 +2219,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_one_library_two_consumers_two_instances.nim",
     binary: "build/test-bin/t_one_library_two_consumers_two_instances",
@@ -1983,7 +2228,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_pinned_artifact_does_not_inherit.nim",
     binary: "build/test-bin/t_pinned_artifact_does_not_inherit",
@@ -1991,7 +2237,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_pinned_build_touches_no_network.nim",
     binary: "build/test-bin/t_pinned_build_touches_no_network",
@@ -1999,7 +2246,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_strategy_composes_with_named_lock_file.nim",
     binary: "build/test-bin/t_strategy_composes_with_named_lock_file",
@@ -2007,7 +2255,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_strategy_does_not_write_back.nim",
     binary: "build/test-bin/t_strategy_does_not_write_back",
@@ -2015,7 +2264,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_strategy_false_minimum_is_caught.nim",
     binary: "build/test-bin/t_strategy_false_minimum_is_caught",
@@ -2023,7 +2273,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_strategy_lowest_and_highest_differ.nim",
     binary: "build/test-bin/t_strategy_lowest_and_highest_differ",
@@ -2031,7 +2282,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_strategy_lowest_vs_lowest_direct.nim",
     binary: "build/test-bin/t_strategy_lowest_vs_lowest_direct",
@@ -2039,7 +2291,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_strategy_without_candidates_is_reported.nim",
     binary: "build/test-bin/t_strategy_without_candidates_is_reported",
@@ -2047,7 +2300,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_variant_conditioned_uses_over_approximated.nim",
     binary: "build/test-bin/t_variant_conditioned_uses_over_approximated",
@@ -2055,7 +2309,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim",
     binary: "build/test-bin/t_n7_multicast_windows_smoke",
@@ -2063,7 +2318,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_action_cache_reader_consults_peer_on_miss.nim",
     binary: "build/test-bin/t_peer_cache_action_cache_reader_consults_peer_on_miss",
@@ -2071,7 +2327,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim",
     binary: "build/test-bin/t_peer_cache_admin_cli_status",
@@ -2079,7 +2336,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_advertise_v1_decoded_as_v2.nim",
     binary: "build/test-bin/t_peer_cache_advertise_v1_decoded_as_v2",
@@ -2087,7 +2345,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_advertise_v2_codec_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_advertise_v2_codec_round_trip",
@@ -2095,7 +2354,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_bearssl_200_peer_tls_convergence.nim",
     binary: "build/test-bin/t_peer_cache_bearssl_200_peer_tls_convergence",
@@ -2103,7 +2363,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_bearssl_ecdsa_smoke.nim",
     binary: "build/test-bin/t_peer_cache_bearssl_ecdsa_smoke",
@@ -2111,7 +2372,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_bearssl_tls_context_smoke.nim",
     binary: "build/test-bin/t_peer_cache_bearssl_tls_context_smoke",
@@ -2119,7 +2381,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_bearssl_tls_partition_recovery.nim",
     binary: "build/test-bin/t_peer_cache_bearssl_tls_partition_recovery",
@@ -2127,7 +2390,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_cert_validity_window_enforced.nim",
     binary: "build/test-bin/t_peer_cache_cert_validity_window_enforced",
@@ -2135,7 +2399,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_cli_lan_spec_enables_multicast.nim",
     binary: "build/test-bin/t_peer_cache_cli_lan_spec_enables_multicast",
@@ -2143,7 +2408,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_cli_lan_tls_query.nim",
     binary: "build/test-bin/t_peer_cache_cli_lan_tls_query",
@@ -2151,7 +2417,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_codec_frame_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_codec_frame_round_trip",
@@ -2159,7 +2426,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_codec_version_mismatch_rejected.nim",
     binary: "build/test-bin/t_peer_cache_codec_version_mismatch_rejected",
@@ -2167,7 +2435,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_connection_pool_eviction_lru.nim",
     binary: "build/test-bin/t_peer_cache_connection_pool_eviction_lru",
@@ -2175,7 +2444,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_cuckoo_filter_delete_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_cuckoo_filter_delete_round_trip",
@@ -2183,7 +2453,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_cuckoo_filter_false_positive_rate.nim",
     binary: "build/test-bin/t_peer_cache_cuckoo_filter_false_positive_rate",
@@ -2191,7 +2462,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_sign_verify_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_ecdsa_sign_verify_round_trip",
@@ -2199,7 +2471,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_signed_advertisement_tamper_rejection.nim",
     binary: "build/test-bin/t_peer_cache_ecdsa_signed_advertisement_tamper_rejection",
@@ -2207,7 +2480,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_trust_anchor_file_format.nim",
     binary: "build/test-bin/t_peer_cache_ecdsa_trust_anchor_file_format",
@@ -2215,7 +2489,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_event_stream_jsonl_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_event_stream_jsonl_round_trip",
@@ -2223,7 +2498,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_fetch_corrupted_payload_rejected.nim",
     binary: "build/test-bin/t_peer_cache_fetch_corrupted_payload_rejected",
@@ -2231,7 +2507,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_fetch_loopback_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_fetch_loopback_round_trip",
@@ -2239,7 +2516,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_fetch_oversize_truncated_flag.nim",
     binary: "build/test-bin/t_peer_cache_fetch_oversize_truncated_flag",
@@ -2247,7 +2525,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_find_peers_with_blob_uses_filter.nim",
     binary: "build/test-bin/t_peer_cache_find_peers_with_blob_uses_filter",
@@ -2255,7 +2534,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_handshake_rejects_unknown_peer_id.nim",
     binary: "build/test-bin/t_peer_cache_handshake_rejects_unknown_peer_id",
@@ -2263,7 +2543,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_loopback_three_peer_discovery.nim",
     binary: "build/test-bin/t_peer_cache_loopback_three_peer_discovery",
@@ -2271,7 +2552,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_metrics_prometheus_format.nim",
     binary: "build/test-bin/t_peer_cache_metrics_prometheus_format",
@@ -2279,7 +2561,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_mint_cert_ca_signed_chain.nim",
     binary: "build/test-bin/t_peer_cache_mint_cert_ca_signed_chain",
@@ -2287,7 +2570,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_mint_cert_self_signed_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_mint_cert_self_signed_round_trip",
@@ -2295,7 +2579,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_multicast_cidr_allowlist_drops_off_network.nim",
     binary: "build/test-bin/t_peer_cache_multicast_cidr_allowlist_drops_off_network",
@@ -2303,7 +2588,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_multicast_loopback_discovery.nim",
     binary: "build/test-bin/t_peer_cache_multicast_loopback_discovery",
@@ -2311,7 +2597,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_registry_advertise_snapshot_and_delta.nim",
     binary: "build/test-bin/t_peer_cache_registry_advertise_snapshot_and_delta",
@@ -2319,7 +2606,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_self_signed_cert_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_self_signed_cert_round_trip",
@@ -2327,7 +2615,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_sim_fetch_workload_hits_peer_cache.nim",
     binary: "build/test-bin/t_peer_cache_sim_fetch_workload_hits_peer_cache",
@@ -2335,7 +2624,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_sim_mixed_tenant_isolation.nim",
     binary: "build/test-bin/t_peer_cache_sim_mixed_tenant_isolation",
@@ -2343,7 +2633,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_sim_report_renders_markdown.nim",
     binary: "build/test-bin/t_peer_cache_sim_report_renders_markdown",
@@ -2351,7 +2642,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_simulation_200_peer_convergence.nim",
     binary: "build/test-bin/t_peer_cache_simulation_200_peer_convergence",
@@ -2359,7 +2651,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_simulation_partition_recovery.nim",
     binary: "build/test-bin/t_peer_cache_simulation_partition_recovery",
@@ -2367,7 +2660,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_50_peer_convergence.nim",
     binary: "build/test-bin/t_peer_cache_swim_50_peer_convergence",
@@ -2375,7 +2669,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_dissemination_piggyback.nim",
     binary: "build/test-bin/t_peer_cache_swim_dissemination_piggyback",
@@ -2383,7 +2678,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_incarnation_self_refute.nim",
     binary: "build/test-bin/t_peer_cache_swim_incarnation_self_refute",
@@ -2391,7 +2687,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_indirect_probe_K_3.nim",
     binary: "build/test-bin/t_peer_cache_swim_indirect_probe_K_3",
@@ -2399,7 +2696,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_partition_recovery.nim",
     binary: "build/test-bin/t_peer_cache_swim_partition_recovery",
@@ -2407,7 +2705,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tier2_central_fallthrough.nim",
     binary: "build/test-bin/t_peer_cache_tier2_central_fallthrough",
@@ -2415,7 +2714,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tier2_eviction_policy.nim",
     binary: "build/test-bin/t_peer_cache_tier2_eviction_policy",
@@ -2423,7 +2723,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tier2_inter_rack_advertisement.nim",
     binary: "build/test-bin/t_peer_cache_tier2_inter_rack_advertisement",
@@ -2431,7 +2732,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tier2_preferred_in_fetch_order.nim",
     binary: "build/test-bin/t_peer_cache_tier2_preferred_in_fetch_order",
@@ -2439,7 +2741,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_application_data_flows_through_tunnel.nim",
     binary: "build/test-bin/t_peer_cache_tls_application_data_flows_through_tunnel",
@@ -2447,7 +2750,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_handshake_rejects_unknown_cert.nim",
     binary: "build/test-bin/t_peer_cache_tls_handshake_rejects_unknown_cert",
@@ -2455,7 +2759,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_handshake_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_tls_handshake_round_trip",
@@ -2463,7 +2768,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_handshake_validates_cert_chain.nim",
     binary: "build/test-bin/t_peer_cache_tls_handshake_validates_cert_chain",
@@ -2471,7 +2777,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_mixed_mode_compat.nim",
     binary: "build/test-bin/t_peer_cache_tls_mixed_mode_compat",
@@ -2479,7 +2786,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_ca_isolation.nim",
     binary: "build/test-bin/t_peer_cache_tls_per_tenant_ca_isolation",
@@ -2487,7 +2795,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_isolation.nim",
     binary: "build/test-bin/t_peer_cache_tls_per_tenant_isolation",
@@ -2495,7 +2804,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_tls_signed_advertisement_round_trip",
@@ -2503,7 +2813,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile/tests/t_smoke_phase_g_action_edges.nim",
     binary: "build/test-bin/t_smoke_phase_g_action_edges",
@@ -2511,7 +2822,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile/tests/t_smoke_repro_profile.nim",
     binary: "build/test-bin/t_smoke_repro_profile",
@@ -2519,7 +2831,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim",
     binary: "build/test-bin/t_infra_apply_audits_build_action_edges",
@@ -2527,7 +2840,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim",
     binary: "build/test-bin/t_infra_apply_substitutes_from_cache",
@@ -2535,7 +2849,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_smoke_apply_integration.nim",
     binary: "build/test-bin/t_smoke_apply_integration",
@@ -2543,7 +2858,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim",
     binary: "build/test-bin/t_smoke_infra_apply_broker_spawn",
@@ -2551,7 +2867,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_smoke_module_imports.nim",
     binary: "build/test-bin/t_smoke_module_imports",
@@ -2559,7 +2876,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim",
     binary: "build/test-bin/t_smoke_phase_g_action_edges_integration",
@@ -2567,7 +2885,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim",
     binary: "build/test-bin/t_smoke_profile_adapter",
@@ -2575,7 +2894,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
     binary: "build/test-bin/t_smoke_repro_profile_compile",
@@ -2583,7 +2903,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim",
     binary: "build/test-bin/t_smoke_system_apply_integration",
@@ -2591,7 +2912,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_compile/tests/t_template_in_template_named_args.nim",
     binary: "build/test-bin/t_template_in_template_named_args",
@@ -2599,7 +2921,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim",
     binary: "build/test-bin/t_smoke_repro_profile_intent",
@@ -2607,7 +2930,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_bootloader.nim",
     binary: "build/test-bin/t_dsl_bootloader",
@@ -2615,7 +2939,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_input_wiring.nim",
     binary: "build/test-bin/t_dsl_build_input_wiring",
@@ -2623,7 +2948,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_package_empty.nim",
     binary: "build/test-bin/t_dsl_build_package_empty",
@@ -2631,7 +2957,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_records_output_for_library.nim",
     binary: "build/test-bin/t_dsl_build_records_output_for_library",
@@ -2639,7 +2966,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_with_executable.nim",
     binary: "build/test-bin/t_dsl_build_with_executable",
@@ -2647,7 +2975,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_bool.nim",
     binary: "build/test-bin/t_dsl_cli_params_bool",
@@ -2655,7 +2984,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_flag.nim",
     binary: "build/test-bin/t_dsl_cli_params_flag",
@@ -2663,7 +2993,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_pos.nim",
     binary: "build/test-bin/t_dsl_cli_params_pos",
@@ -2671,7 +3002,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_composition_for_loop.nim",
     binary: "build/test-bin/t_dsl_composition_for_loop",
@@ -2679,7 +3011,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_enum.nim",
     binary: "build/test-bin/t_dsl_config_enum",
@@ -2687,7 +3020,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim",
     binary: "build/test-bin/t_dsl_config_override",
@@ -2695,7 +3029,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim",
     binary: "build/test-bin/t_dsl_config_scalar",
@@ -2703,7 +3038,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_seq_enum.nim",
     binary: "build/test-bin/t_dsl_config_seq_enum",
@@ -2711,7 +3047,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_ident_form.nim",
     binary: "build/test-bin/t_dsl_executable_ident_form",
@@ -2719,7 +3056,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_string_form.nim",
     binary: "build/test-bin/t_dsl_executable_string_form",
@@ -2727,7 +3065,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_action_emission.nim",
     binary: "build/test-bin/t_dsl_fetch_action_emission",
@@ -2735,7 +3074,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_data_file.nim",
     binary: "build/test-bin/t_dsl_fetch_data_file",
@@ -2743,7 +3083,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_git.nim",
     binary: "build/test-bin/t_dsl_fetch_git",
@@ -2751,7 +3092,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_tarball.nim",
     binary: "build/test-bin/t_dsl_fetch_tarball",
@@ -2759,7 +3101,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_files.nim",
     binary: "build/test-bin/t_dsl_files",
@@ -2767,7 +3110,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_configfile.nim",
     binary: "build/test-bin/t_dsl_fs_configfile",
@@ -2775,7 +3119,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_directory.nim",
     binary: "build/test-bin/t_dsl_fs_directory",
@@ -2783,7 +3128,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_managedblock_multi.nim",
     binary: "build/test-bin/t_dsl_fs_managedblock_multi",
@@ -2791,7 +3137,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_managedblock_single.nim",
     binary: "build/test-bin/t_dsl_fs_managedblock_single",
@@ -2799,7 +3146,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_configfile.nim",
     binary: "build/test-bin/t_dsl_fs_materialise_configfile",
@@ -2807,7 +3155,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_fnv_fallback.nim",
     binary: "build/test-bin/t_dsl_fs_materialise_fnv_fallback",
@@ -2815,7 +3164,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_managedblock.nim",
     binary: "build/test-bin/t_dsl_fs_materialise_managedblock",
@@ -2823,7 +3173,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_symlink.nim",
     binary: "build/test-bin/t_dsl_fs_symlink",
@@ -2831,7 +3182,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_reads_build_context.nim",
     binary: "build/test-bin/t_dsl_helper_proc_reads_build_context",
@@ -2839,7 +3191,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_within_artifact.nim",
     binary: "build/test-bin/t_dsl_helper_proc_within_artifact",
@@ -2847,7 +3200,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_library.nim",
     binary: "build/test-bin/t_dsl_library",
@@ -2855,7 +3209,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_library_body_unclaimed_members.nim",
     binary: "build/test-bin/t_dsl_library_body_unclaimed_members",
@@ -2863,7 +3218,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_output_ref.nim",
     binary: "build/test-bin/t_dsl_output_ref",
@@ -2871,7 +3227,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim",
     binary: "build/test-bin/t_dsl_package_empty",
@@ -2879,7 +3236,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_expression_setters.nim",
     binary: "build/test-bin/t_dsl_provisioning_expression_setters",
@@ -2887,7 +3245,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_literal_unchanged.nim",
     binary: "build/test-bin/t_dsl_provisioning_literal_unchanged",
@@ -2895,7 +3254,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_runtime_library_declaration.nim",
     binary: "build/test-bin/t_dsl_runtime_library_declaration",
@@ -2903,7 +3263,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_runtime_library_resolution.nim",
     binary: "build/test-bin/t_dsl_runtime_library_resolution",
@@ -2911,7 +3272,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_self_hosting_tool_dep_name_collision.nim",
     binary: "build/test-bin/t_dsl_self_hosting_tool_dep_name_collision",
@@ -2919,7 +3281,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_args.nim",
     binary: "build/test-bin/t_dsl_service_args",
@@ -2927,7 +3290,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_basic.nim",
     binary: "build/test-bin/t_dsl_service_basic",
@@ -2935,7 +3299,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_dependencies.nim",
     binary: "build/test-bin/t_dsl_service_dependencies",
@@ -2943,7 +3308,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_description.nim",
     binary: "build/test-bin/t_dsl_service_description",
@@ -2951,7 +3317,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim",
     binary: "build/test-bin/t_dsl_service_executable_ref",
@@ -2959,7 +3326,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_expression_setters.nim",
     binary: "build/test-bin/t_dsl_service_expression_setters",
@@ -2967,7 +3335,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim",
     binary: "build/test-bin/t_dsl_shell_action",
@@ -2975,7 +3344,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim",
     binary: "build/test-bin/t_dsl_validate",
@@ -2983,7 +3353,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim",
     binary: "build/test-bin/t_dsl_variant_uses",
@@ -2991,7 +3362,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim",
     binary: "build/test-bin/t_dsl_versions_expression_values",
@@ -2999,7 +3371,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
     binary: "build/test-bin/t_dsl_versions_single",
@@ -3007,7 +3380,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
     binary: "build/test-bin/t_dependency_lists_are_not_merged_at_serialization",
@@ -3015,7 +3389,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
@@ -3023,7 +3398,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim",
     binary: "build/test-bin/t_dsl_executable_cli_only_no_build",
@@ -3031,7 +3407,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_implicit_target_name_hook_compiles.nim",
     binary: "build/test-bin/t_dsl_implicit_target_name_hook_compiles",
@@ -3039,7 +3416,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_m5_composition_smoke.nim",
     binary: "build/test-bin/t_dsl_m5_composition_smoke",
@@ -3047,7 +3425,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_m6_test_suite_smoke.nim",
     binary: "build/test-bin/t_dsl_m6_test_suite_smoke",
@@ -3055,7 +3434,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_forward_reference_error.nim",
     binary: "build/test-bin/t_dsl_outputs_forward_reference_error",
@@ -3063,7 +3443,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_lexical_scope_parent_subcmd.nim",
     binary: "build/test-bin/t_dsl_outputs_lexical_scope_parent_subcmd",
@@ -3071,7 +3452,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_lexical_scope_root_flag_inherited.nim",
     binary: "build/test-bin/t_dsl_outputs_lexical_scope_root_flag_inherited",
@@ -3079,7 +3461,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_multiple_flags_one_statement.nim",
     binary: "build/test-bin/t_dsl_outputs_multiple_flags_one_statement",
@@ -3087,7 +3470,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_sibling_scope_invisible_error.nim",
     binary: "build/test-bin/t_dsl_outputs_sibling_scope_invisible_error",
@@ -3095,7 +3479,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_statement_basic_accepted.nim",
     binary: "build/test-bin/t_dsl_outputs_statement_basic_accepted",
@@ -3103,7 +3488,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_statements_accumulate.nim",
     binary: "build/test-bin/t_dsl_outputs_statements_accumulate",
@@ -3111,7 +3497,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_typed_complex_path_expression.nim",
     binary: "build/test-bin/t_dsl_outputs_typed_complex_path_expression",
@@ -3119,7 +3506,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_typed_field_emitted_on_subtype.nim",
     binary: "build/test-bin/t_dsl_outputs_typed_field_emitted_on_subtype",
@@ -3127,7 +3515,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_typed_form_parsed.nim",
     binary: "build/test-bin/t_dsl_outputs_typed_form_parsed",
@@ -3135,7 +3524,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_typed_multiple_interfaces.nim",
     binary: "build/test-bin/t_dsl_outputs_typed_multiple_interfaces",
@@ -3143,7 +3533,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_unknown_flag_error.nim",
     binary: "build/test-bin/t_dsl_outputs_unknown_flag_error",
@@ -3151,7 +3542,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_untyped_form_unchanged.nim",
     binary: "build/test-bin/t_dsl_outputs_untyped_form_unchanged",
@@ -3159,7 +3551,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_run_consumes_roundtrip.nim",
     binary: "build/test-bin/t_dsl_run_consumes_roundtrip",
@@ -3167,7 +3560,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_run_target_named_and_listed.nim",
     binary: "build/test-bin/t_dsl_run_target_named_and_listed",
@@ -3175,7 +3569,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim",
     binary: "build/test-bin/t_dsl_state_group_membership",
@@ -3183,7 +3578,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim",
     binary: "build/test-bin/t_engine_path_expression_uses_flag_value",
@@ -3191,7 +3587,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emission.nim",
     binary: "build/test-bin/t_engine_typed_output_field_populated_at_action_emission",
@@ -3199,7 +3596,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim",
     binary: "build/test-bin/t_engine_typed_output_payload_codec_round_trip",
@@ -3207,7 +3605,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim",
     binary: "build/test-bin/t_m9r74_action_cwd_kind_codec",
@@ -3215,7 +3614,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim",
     binary: "build/test-bin/t_m9r75_declared_outputs_codec",
@@ -3223,7 +3623,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim",
     binary: "build/test-bin/t_m9r79_registry_mutators",
@@ -3231,7 +3632,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_multi_package_macro.nim",
     binary: "build/test-bin/t_multi_package_macro",
@@ -3239,7 +3641,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim",
     binary: "build/test-bin/t_tool_identity_ref_kind_codec",
@@ -3247,7 +3650,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/test_depends_on_macro.nim",
     binary: "build/test-bin/test_depends_on_macro",
@@ -3255,7 +3659,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_project_dsl/tests/test_library_macro.nim",
     binary: "build/test-bin/test_library_macro",
@@ -3263,7 +3668,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim",
     binary: "build/test-bin/t_attr_missing_interface_diagnostic",
@@ -3271,7 +3677,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim",
     binary: "build/test-bin/t_attr_ssz_envelope_roundtrip",
@@ -3279,7 +3686,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_resources/tests/t_l1_state_store.nim",
     binary: "build/test-bin/t_l1_state_store",
@@ -3287,7 +3695,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_resources/tests/t_l2_lease_edge.nim",
     binary: "build/test-bin/t_l2_lease_edge",
@@ -3295,7 +3704,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_resources/tests/t_l3_reaper.nim",
     binary: "build/test-bin/t_l3_reaper",
@@ -3303,7 +3713,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_resources/tests/t_resource_provider_lane.nim",
     binary: "build/test-bin/t_resource_provider_lane",
@@ -3311,7 +3722,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_resources/tests/t_rp4_resource_type_macro.nim",
     binary: "build/test-bin/t_rp4_resource_type_macro",
@@ -3319,7 +3731,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim",
     binary: "build/test-bin/t_rp5b_resource_protocol_marshalling",
@@ -3327,7 +3740,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim",
     binary: "build/test-bin/t_rss_ssz_envelope_roundtrip",
@@ -3335,7 +3749,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_solver/tests/t_unselected_package_is_recorded_as_unselected.nim",
     binary: "build/test-bin/t_unselected_package_is_recorded_as_unselected",
@@ -3343,7 +3758,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_ada_direct_convention.nim",
     binary: "build/test-bin/test_ada_direct_convention",
@@ -3351,7 +3767,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim",
     binary: "build/test-bin/test_c_cpp_autotools_convention",
@@ -3359,7 +3776,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim",
     binary: "build/test-bin/test_c_cpp_cmake_convention",
@@ -3367,7 +3785,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim",
     binary: "build/test-bin/test_c_cpp_direct_convention",
@@ -3375,7 +3794,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim",
     binary: "build/test-bin/test_c_cpp_make_convention",
@@ -3383,7 +3803,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim",
     binary: "build/test-bin/test_c_cpp_meson_convention",
@@ -3391,7 +3812,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_convention_registry_dispatch.nim",
     binary: "build/test-bin/test_convention_registry_dispatch",
@@ -3399,7 +3821,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_crude_fallback.nim",
     binary: "build/test-bin/test_crude_fallback",
@@ -3407,7 +3830,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_crystal_convention.nim",
     binary: "build/test-bin/test_crystal_convention",
@@ -3415,7 +3839,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim",
     binary: "build/test-bin/test_csharp_dotnet_convention",
@@ -3423,7 +3848,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_d_direct_convention.nim",
     binary: "build/test-bin/test_d_direct_convention",
@@ -3431,7 +3857,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_elixir_mix_convention.nim",
     binary: "build/test-bin/test_elixir_mix_convention",
@@ -3439,7 +3866,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_emit_cache_m18.nim",
     binary: "build/test-bin/test_emit_cache_m18",
@@ -3447,7 +3875,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_emit_cache_m29.nim",
     binary: "build/test-bin/test_emit_cache_m29",
@@ -3455,7 +3884,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim",
     binary: "build/test-bin/test_erlang_rebar3_convention",
@@ -3463,7 +3893,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_examples_layout.nim",
     binary: "build/test-bin/test_examples_layout",
@@ -3471,7 +3902,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_fortran_direct_convention.nim",
     binary: "build/test-bin/test_fortran_direct_convention",
@@ -3479,7 +3911,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_from_source_autotools_convention.nim",
     binary: "build/test-bin/test_from_source_autotools_convention",
@@ -3487,7 +3920,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_from_source_cmake_convention.nim",
     binary: "build/test-bin/test_from_source_cmake_convention",
@@ -3495,7 +3929,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_from_source_custom_convention.nim",
     binary: "build/test-bin/test_from_source_custom_convention",
@@ -3503,7 +3938,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_from_source_make_convention.nim",
     binary: "build/test-bin/test_from_source_make_convention",
@@ -3511,7 +3947,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_from_source_meson_convention.nim",
     binary: "build/test-bin/test_from_source_meson_convention",
@@ -3519,7 +3956,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_go_convention.nim",
     binary: "build/test-bin/test_go_convention",
@@ -3527,7 +3965,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_go_direct_convention.nim",
     binary: "build/test-bin/test_go_direct_convention",
@@ -3535,7 +3974,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim",
     binary: "build/test-bin/test_haskell_cabal_convention",
@@ -3543,7 +3983,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_java_maven_convention.nim",
     binary: "build/test-bin/test_java_maven_convention",
@@ -3551,7 +3992,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_jsts_convention.nim",
     binary: "build/test-bin/test_jsts_convention",
@@ -3559,7 +4001,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_jsts_direct_convention.nim",
     binary: "build/test-bin/test_jsts_direct_convention",
@@ -3567,7 +4010,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim",
     binary: "build/test-bin/test_kotlin_gradle_convention",
@@ -3575,7 +4019,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_mode1_loader.nim",
     binary: "build/test-bin/test_mode1_loader",
@@ -3583,7 +4028,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_nim_convention.nim",
     binary: "build/test-bin/test_nim_convention",
@@ -3591,7 +4037,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim",
     binary: "build/test-bin/test_ocaml_dune_convention",
@@ -3599,7 +4046,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_pascal_direct_convention.nim",
     binary: "build/test-bin/test_pascal_direct_convention",
@@ -3607,7 +4055,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_php_composer_convention.nim",
     binary: "build/test-bin/test_php_composer_convention",
@@ -3615,7 +4064,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_project_file_alias.nim",
     binary: "build/test-bin/test_project_file_alias",
@@ -3623,7 +4073,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_python_convention.nim",
     binary: "build/test-bin/test_python_convention",
@@ -3631,7 +4082,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_python_direct_convention.nim",
     binary: "build/test-bin/test_python_direct_convention",
@@ -3639,7 +4091,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim",
     binary: "build/test-bin/test_ruby_bundler_convention",
@@ -3647,7 +4100,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_rust_convention.nim",
     binary: "build/test-bin/test_rust_convention",
@@ -3655,7 +4109,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_rust_direct_convention.nim",
     binary: "build/test-bin/test_rust_direct_convention",
@@ -3663,7 +4118,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim",
     binary: "build/test-bin/test_swift_swiftpm_convention",
@@ -3671,7 +4127,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_zig_direct_convention.nim",
     binary: "build/test-bin/test_zig_direct_convention",
@@ -3679,7 +4136,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_system_apply/tests/t_b1_dsl_composition.nim",
     binary: "build/test-bin/t_b1_dsl_composition",
@@ -3687,7 +4145,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_system_apply/tests/t_b1_dsl_lowering.nim",
     binary: "build/test-bin/t_b1_dsl_lowering",
@@ -3695,7 +4154,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_system_apply/tests/t_b1_dsl_parse.nim",
     binary: "build/test-bin/t_b1_dsl_parse",
@@ -3703,7 +4163,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_system_apply/tests/t_b2_pipeline.nim",
     binary: "build/test-bin/t_b2_pipeline",
@@ -3711,7 +4172,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_system_rollback/tests/t_b3_rollback_unit.nim",
     binary: "build/test-bin/t_b3_rollback_unit",
@@ -3719,7 +4181,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim",
     binary: "build/test-bin/t_workspace_sibling_ignore_set",
@@ -3727,7 +4190,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/adwaita-icon-theme/test_adwaita_icon_theme_source.nim",
     binary: "build/test-bin/test_adwaita_icon_theme_source",
@@ -3735,7 +4199,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/alsa-lib/test_alsa_lib_source.nim",
     binary: "build/test-bin/test_alsa_lib_source",
@@ -3743,7 +4208,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/at-spi2-core/test_at_spi2_core_source.nim",
     binary: "build/test-bin/test_at_spi2_core_source",
@@ -3751,7 +4217,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/attica/test_attica_source.nim",
     binary: "build/test-bin/test_attica_source",
@@ -3759,7 +4226,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/autoconf/test_autoconf_source.nim",
     binary: "build/test-bin/test_autoconf_source",
@@ -3767,7 +4235,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/automake/test_automake_source.nim",
     binary: "build/test-bin/test_automake_source",
@@ -3775,7 +4244,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/bash/test_bash_source.nim",
     binary: "build/test-bin/test_bash_source",
@@ -3783,7 +4253,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/binutils/test_binutils_source.nim",
     binary: "build/test-bin/test_binutils_source",
@@ -3791,7 +4262,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/boost/test_boost_source.nim",
     binary: "build/test-bin/test_boost_source",
@@ -3799,7 +4271,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/btrfs-progs/test_btrfs_progs_source.nim",
     binary: "build/test-bin/test_btrfs_progs_source",
@@ -3807,7 +4280,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/busybox/test_busybox_source.nim",
     binary: "build/test-bin/test_busybox_source",
@@ -3815,7 +4289,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ca-certificates/test_ca_certificates_source.nim",
     binary: "build/test-bin/test_ca_certificates_source",
@@ -3823,7 +4298,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/cairo/test_cairo_source.nim",
     binary: "build/test-bin/test_cairo_source",
@@ -3831,7 +4307,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/cmake/test_cmake_source.nim",
     binary: "build/test-bin/test_cmake_source",
@@ -3839,7 +4316,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/coreutils/test_coreutils_source.nim",
     binary: "build/test-bin/test_coreutils_source",
@@ -3847,7 +4325,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/create-dmg/test_create_dmg_source.nim",
     binary: "build/test-bin/test_create_dmg_source",
@@ -3855,7 +4334,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/cryptsetup/test_cryptsetup_source.nim",
     binary: "build/test-bin/test_cryptsetup_source",
@@ -3863,7 +4343,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/dbus-broker/test_dbus_broker_source.nim",
     binary: "build/test-bin/test_dbus_broker_source",
@@ -3871,7 +4352,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/dbus/test_dbus_source.nim",
     binary: "build/test-bin/test_dbus_source",
@@ -3879,7 +4361,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/dejavu-fonts/test_dejavu_fonts_source.nim",
     binary: "build/test-bin/test_dejavu_fonts_source",
@@ -3887,7 +4370,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/dosfstools/test_dosfstools_source.nim",
     binary: "build/test-bin/test_dosfstools_source",
@@ -3895,7 +4379,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/duktape/test_duktape_source.nim",
     binary: "build/test-bin/test_duktape_source",
@@ -3903,7 +4388,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/e2fsprogs/test_e2fsprogs_source.nim",
     binary: "build/test-bin/test_e2fsprogs_source",
@@ -3911,7 +4397,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/eudev/test_eudev_source.nim",
     binary: "build/test-bin/test_eudev_source",
@@ -3919,7 +4406,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/expat/test_expat_source.nim",
     binary: "build/test-bin/test_expat_source",
@@ -3927,7 +4415,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/extra-cmake-modules/test_extra_cmake_modules_source.nim",
     binary: "build/test-bin/test_extra_cmake_modules_source",
@@ -3935,7 +4424,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ffmpeg/test_ffmpeg_source.nim",
     binary: "build/test-bin/test_ffmpeg_source",
@@ -3943,7 +4433,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/font-util/test_font_util_source.nim",
     binary: "build/test-bin/test_font_util_source",
@@ -3951,7 +4442,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/fontconfig/test_fontconfig_source.nim",
     binary: "build/test-bin/test_fontconfig_source",
@@ -3959,7 +4451,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/freetype/test_freetype_source.nim",
     binary: "build/test-bin/test_freetype_source",
@@ -3967,7 +4460,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gawk/test_gawk_source.nim",
     binary: "build/test-bin/test_gawk_source",
@@ -3975,7 +4469,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gcc/test_gcc_source.nim",
     binary: "build/test-bin/test_gcc_source",
@@ -3983,7 +4478,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gdisk/test_gdisk_source.nim",
     binary: "build/test-bin/test_gdisk_source",
@@ -3991,7 +4487,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gdk-pixbuf/test_gdk_pixbuf_source.nim",
     binary: "build/test-bin/test_gdk_pixbuf_source",
@@ -3999,7 +4496,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gdm/test_gdm_source.nim",
     binary: "build/test-bin/test_gdm_source",
@@ -4007,7 +4505,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gettext/test_gettext_source.nim",
     binary: "build/test-bin/test_gettext_source",
@@ -4015,7 +4514,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/glib2/test_glib2_source.nim",
     binary: "build/test-bin/test_glib2_source",
@@ -4023,7 +4523,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/glibc/test_glibc_source.nim",
     binary: "build/test-bin/test_glibc_source",
@@ -4031,7 +4532,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gnome-shell/test_gnome_shell_source.nim",
     binary: "build/test-bin/test_gnome_shell_source",
@@ -4039,7 +4541,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gnutls/test_gnutls_source.nim",
     binary: "build/test-bin/test_gnutls_source",
@@ -4047,7 +4550,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gobject-introspection/test_gobject_introspection_source.nim",
     binary: "build/test-bin/test_gobject_introspection_source",
@@ -4055,7 +4559,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/graphene/test_graphene_source.nim",
     binary: "build/test-bin/test_graphene_source",
@@ -4063,7 +4568,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/grep/test_grep_source.nim",
     binary: "build/test-bin/test_grep_source",
@@ -4071,7 +4577,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/grub/test_grub_source.nim",
     binary: "build/test-bin/test_grub_source",
@@ -4079,7 +4586,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gsettings-desktop-schemas/test_gsettings_desktop_schemas_source.nim",
     binary: "build/test-bin/test_gsettings_desktop_schemas_source",
@@ -4087,7 +4595,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/gtk4/test_gtk4_source.nim",
     binary: "build/test-bin/test_gtk4_source",
@@ -4095,7 +4604,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/harfbuzz/test_harfbuzz_source.nim",
     binary: "build/test-bin/test_harfbuzz_source",
@@ -4103,7 +4613,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/iana-tzdata/test_iana_tzdata_source.nim",
     binary: "build/test-bin/test_iana_tzdata_source",
@@ -4111,7 +4622,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/iproute2/test_iproute2_source.nim",
     binary: "build/test-bin/test_iproute2_source",
@@ -4119,7 +4631,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/iputils/test_iputils_source.nim",
     binary: "build/test-bin/test_iputils_source",
@@ -4127,7 +4640,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/json-c/test_json_c_source.nim",
     binary: "build/test-bin/test_json_c_source",
@@ -4135,7 +4649,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/json-glib/test_json_glib_source.nim",
     binary: "build/test-bin/test_json_glib_source",
@@ -4143,7 +4658,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/karchive/test_karchive_source.nim",
     binary: "build/test-bin/test_karchive_source",
@@ -4151,7 +4667,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kauth/test_kauth_source.nim",
     binary: "build/test-bin/test_kauth_source",
@@ -4159,7 +4676,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kbookmarks/test_kbookmarks_source.nim",
     binary: "build/test-bin/test_kbookmarks_source",
@@ -4167,7 +4685,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kcmutils/test_kcmutils_source.nim",
     binary: "build/test-bin/test_kcmutils_source",
@@ -4175,7 +4694,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kcodecs/test_kcodecs_source.nim",
     binary: "build/test-bin/test_kcodecs_source",
@@ -4183,7 +4703,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kcolorscheme/test_kcolorscheme_source.nim",
     binary: "build/test-bin/test_kcolorscheme_source",
@@ -4191,7 +4712,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kcompletion/test_kcompletion_source.nim",
     binary: "build/test-bin/test_kcompletion_source",
@@ -4199,7 +4721,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kconfig/test_kconfig_source.nim",
     binary: "build/test-bin/test_kconfig_source",
@@ -4207,7 +4730,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kconfigwidgets/test_kconfigwidgets_source.nim",
     binary: "build/test-bin/test_kconfigwidgets_source",
@@ -4215,7 +4739,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kcoreaddons/test_kcoreaddons_source.nim",
     binary: "build/test-bin/test_kcoreaddons_source",
@@ -4223,7 +4748,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kcrash/test_kcrash_source.nim",
     binary: "build/test-bin/test_kcrash_source",
@@ -4231,7 +4757,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kdbusaddons/test_kdbusaddons_source.nim",
     binary: "build/test-bin/test_kdbusaddons_source",
@@ -4239,7 +4766,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kdeclarative/test_kdeclarative_source.nim",
     binary: "build/test-bin/test_kdeclarative_source",
@@ -4247,7 +4775,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kdecoration/test_kdecoration_source.nim",
     binary: "build/test-bin/test_kdecoration_source",
@@ -4255,7 +4784,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kded/test_kded_source.nim",
     binary: "build/test-bin/test_kded_source",
@@ -4263,7 +4793,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kernel/test_kernel_source.nim",
     binary: "build/test-bin/test_kernel_source",
@@ -4271,7 +4802,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kglobalaccel/test_kglobalaccel_source.nim",
     binary: "build/test-bin/test_kglobalaccel_source",
@@ -4279,7 +4811,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kguiaddons/test_kguiaddons_source.nim",
     binary: "build/test-bin/test_kguiaddons_source",
@@ -4287,7 +4820,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ki18n/test_ki18n_source.nim",
     binary: "build/test-bin/test_ki18n_source",
@@ -4295,7 +4829,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kiconthemes/test_kiconthemes_source.nim",
     binary: "build/test-bin/test_kiconthemes_source",
@@ -4303,7 +4838,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kidletime/test_kidletime_source.nim",
     binary: "build/test-bin/test_kidletime_source",
@@ -4311,7 +4847,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kio/test_kio_source.nim",
     binary: "build/test-bin/test_kio_source",
@@ -4319,7 +4856,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kirigami/test_kirigami_source.nim",
     binary: "build/test-bin/test_kirigami_source",
@@ -4327,7 +4865,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kitemmodels/test_kitemmodels_source.nim",
     binary: "build/test-bin/test_kitemmodels_source",
@@ -4335,7 +4874,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kitemviews/test_kitemviews_source.nim",
     binary: "build/test-bin/test_kitemviews_source",
@@ -4343,7 +4883,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kjobwidgets/test_kjobwidgets_source.nim",
     binary: "build/test-bin/test_kjobwidgets_source",
@@ -4351,7 +4892,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kmod/test_kmod_source.nim",
     binary: "build/test-bin/test_kmod_source",
@@ -4359,7 +4901,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/knewstuff/test_knewstuff_source.nim",
     binary: "build/test-bin/test_knewstuff_source",
@@ -4367,7 +4910,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/knotifications/test_knotifications_source.nim",
     binary: "build/test-bin/test_knotifications_source",
@@ -4375,7 +4919,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/knotifyconfig/test_knotifyconfig_source.nim",
     binary: "build/test-bin/test_knotifyconfig_source",
@@ -4383,7 +4928,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kpackage/test_kpackage_source.nim",
     binary: "build/test-bin/test_kpackage_source",
@@ -4391,7 +4937,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kparts/test_kparts_source.nim",
     binary: "build/test-bin/test_kparts_source",
@@ -4399,7 +4946,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kprison/test_kprison_source.nim",
     binary: "build/test-bin/test_kprison_source",
@@ -4407,7 +4955,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/krunner/test_krunner_source.nim",
     binary: "build/test-bin/test_krunner_source",
@@ -4415,7 +4964,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kservice/test_kservice_source.nim",
     binary: "build/test-bin/test_kservice_source",
@@ -4423,7 +4973,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ksolid/test_ksolid_source.nim",
     binary: "build/test-bin/test_ksolid_source",
@@ -4431,7 +4982,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kstatusnotifieritem/test_kstatusnotifieritem_source.nim",
     binary: "build/test-bin/test_kstatusnotifieritem_source",
@@ -4439,7 +4991,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ksvg/test_ksvg_source.nim",
     binary: "build/test-bin/test_ksvg_source",
@@ -4447,7 +5000,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ksysguard/test_ksysguard_source.nim",
     binary: "build/test-bin/test_ksysguard_source",
@@ -4455,7 +5009,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ktexteditor/test_ktexteditor_source.nim",
     binary: "build/test-bin/test_ktexteditor_source",
@@ -4463,7 +5018,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ktextwidgets/test_ktextwidgets_source.nim",
     binary: "build/test-bin/test_ktextwidgets_source",
@@ -4471,7 +5027,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kunitconversion/test_kunitconversion_source.nim",
     binary: "build/test-bin/test_kunitconversion_source",
@@ -4479,7 +5036,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kwallet/test_kwallet_source.nim",
     binary: "build/test-bin/test_kwallet_source",
@@ -4487,7 +5045,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kwayland/test_kwayland_source.nim",
     binary: "build/test-bin/test_kwayland_source",
@@ -4495,7 +5054,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kwidgetsaddons/test_kwidgetsaddons_source.nim",
     binary: "build/test-bin/test_kwidgetsaddons_source",
@@ -4503,7 +5063,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kwin/test_kwin_source.nim",
     binary: "build/test-bin/test_kwin_source",
@@ -4511,7 +5072,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kwindowsystem/test_kwindowsystem_source.nim",
     binary: "build/test-bin/test_kwindowsystem_source",
@@ -4519,7 +5081,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/kxmlgui/test_kxmlgui_source.nim",
     binary: "build/test-bin/test_kxmlgui_source",
@@ -4527,7 +5090,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/less/test_less_source.nim",
     binary: "build/test-bin/test_less_source",
@@ -4535,7 +5099,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libcanberra/test_libcanberra_source.nim",
     binary: "build/test-bin/test_libcanberra_source",
@@ -4543,7 +5108,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libcap-ng/test_libcap_ng_source.nim",
     binary: "build/test-bin/test_libcap_ng_source",
@@ -4551,7 +5117,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libcap/test_libcap_source.nim",
     binary: "build/test-bin/test_libcap_source",
@@ -4559,7 +5126,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libdrm/test_libdrm_source.nim",
     binary: "build/test-bin/test_libdrm_source",
@@ -4567,7 +5135,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libepoxy/test_libepoxy_source.nim",
     binary: "build/test-bin/test_libepoxy_source",
@@ -4575,7 +5144,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libevdev/test_libevdev_source.nim",
     binary: "build/test-bin/test_libevdev_source",
@@ -4583,7 +5153,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libffi/test_libffi_source.nim",
     binary: "build/test-bin/test_libffi_source",
@@ -4591,7 +5162,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libgcrypt/test_libgcrypt_source.nim",
     binary: "build/test-bin/test_libgcrypt_source",
@@ -4599,7 +5171,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libglvnd/test_libglvnd_source.nim",
     binary: "build/test-bin/test_libglvnd_source",
@@ -4607,7 +5180,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libgpg-error/test_libgpg_error_source.nim",
     binary: "build/test-bin/test_libgpg_error_source",
@@ -4615,7 +5189,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libical/test_libical_source.nim",
     binary: "build/test-bin/test_libical_source",
@@ -4623,7 +5198,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libinput/test_libinput_source.nim",
     binary: "build/test-bin/test_libinput_source",
@@ -4631,7 +5207,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libogg/test_libogg_source.nim",
     binary: "build/test-bin/test_libogg_source",
@@ -4639,7 +5216,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libpciaccess/test_libpciaccess_source.nim",
     binary: "build/test-bin/test_libpciaccess_source",
@@ -4647,7 +5225,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libpng/test_libpng_source.nim",
     binary: "build/test-bin/test_libpng_source",
@@ -4655,7 +5234,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libpsl/test_soup_foundations.nim",
     binary: "build/test-bin/test_soup_foundations",
@@ -4663,7 +5243,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libsecret/test_libsecret_source.nim",
     binary: "build/test-bin/test_libsecret_source",
@@ -4671,7 +5252,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libsndfile/test_libsndfile_source.nim",
     binary: "build/test-bin/test_libsndfile_source",
@@ -4679,7 +5261,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libsoup3/test_libsoup3_source.nim",
     binary: "build/test-bin/test_libsoup3_source",
@@ -4687,7 +5270,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libtirpc/test_libtirpc_source.nim",
     binary: "build/test-bin/test_libtirpc_source",
@@ -4695,7 +5279,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libtool/test_libtool_source.nim",
     binary: "build/test-bin/test_libtool_source",
@@ -4703,7 +5288,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libvorbis/test_libvorbis_source.nim",
     binary: "build/test-bin/test_libvorbis_source",
@@ -4711,7 +5297,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libx11/test_libx11_source.nim",
     binary: "build/test-bin/test_libx11_source",
@@ -4719,7 +5306,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxau/test_libxau_source.nim",
     binary: "build/test-bin/test_libxau_source",
@@ -4727,7 +5315,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxcvt/test_libxcvt_source.nim",
     binary: "build/test-bin/test_libxcvt_source",
@@ -4735,7 +5324,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxext/test_libxext_source.nim",
     binary: "build/test-bin/test_libxext_source",
@@ -4743,7 +5333,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxfont2/test_libxfont2_source.nim",
     binary: "build/test-bin/test_libxfont2_source",
@@ -4751,7 +5342,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxkbcommon/test_libxkbcommon_source.nim",
     binary: "build/test-bin/test_libxkbcommon_source",
@@ -4759,7 +5351,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxkbfile/test_libxkbfile_source.nim",
     binary: "build/test-bin/test_libxkbfile_source",
@@ -4767,7 +5360,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxml2/test_libxml2_source.nim",
     binary: "build/test-bin/test_libxml2_source",
@@ -4775,7 +5369,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxrandr/test_libxrandr_source.nim",
     binary: "build/test-bin/test_libxrandr_source",
@@ -4783,7 +5378,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxrender/test_libxrender_source.nim",
     binary: "build/test-bin/test_libxrender_source",
@@ -4791,7 +5387,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/libxshmfence/test_libxshmfence_source.nim",
     binary: "build/test-bin/test_libxshmfence_source",
@@ -4799,7 +5396,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/lvm2/test_lvm2_source.nim",
     binary: "build/test-bin/test_lvm2_source",
@@ -4807,7 +5405,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/make/test_make_source.nim",
     binary: "build/test-bin/test_make_source",
@@ -4815,7 +5414,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/mesa/test_mesa_source.nim",
     binary: "build/test-bin/test_mesa_source",
@@ -4823,7 +5423,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/meson/test_meson_source.nim",
     binary: "build/test-bin/test_meson_source",
@@ -4831,7 +5432,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/musl/test_musl_source.nim",
     binary: "build/test-bin/test_musl_source",
@@ -4839,7 +5441,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/mutter/test_mutter_source.nim",
     binary: "build/test-bin/test_mutter_source",
@@ -4847,7 +5450,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/nano/test_nano_source.nim",
     binary: "build/test-bin/test_nano_source",
@@ -4855,7 +5459,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ncurses/test_ncurses_source.nim",
     binary: "build/test-bin/test_ncurses_source",
@@ -4863,7 +5468,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/nettle/test_nettle_source.nim",
     binary: "build/test-bin/test_nettle_source",
@@ -4871,7 +5477,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/networkmanager/test_networkmanager_source.nim",
     binary: "build/test-bin/test_networkmanager_source",
@@ -4879,7 +5486,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/ninja/test_ninja_source.nim",
     binary: "build/test-bin/test_ninja_source",
@@ -4887,7 +5495,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/nspr/test_nspr_source.nim",
     binary: "build/test-bin/test_nspr_source",
@@ -4895,7 +5504,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/openssl/test_openssl_source.nim",
     binary: "build/test-bin/test_openssl_source",
@@ -4903,7 +5513,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/pam/test_pam_source.nim",
     binary: "build/test-bin/test_pam_source",
@@ -4911,7 +5522,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/pango/test_pango_source.nim",
     binary: "build/test-bin/test_pango_source",
@@ -4919,7 +5531,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/parted/test_parted_source.nim",
     binary: "build/test-bin/test_parted_source",
@@ -4927,7 +5540,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/pipewire/test_pipewire_source.nim",
     binary: "build/test-bin/test_pipewire_source",
@@ -4935,7 +5549,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/pixman/test_pixman_source.nim",
     binary: "build/test-bin/test_pixman_source",
@@ -4943,7 +5558,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/pkgconf/test_pkgconf_source.nim",
     binary: "build/test-bin/test_pkgconf_source",
@@ -4951,7 +5567,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/plasma-activities-stats/test_plasma_activities_stats_source.nim",
     binary: "build/test-bin/test_plasma_activities_stats_source",
@@ -4959,7 +5576,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/plasma-activities/test_plasma_activities_source.nim",
     binary: "build/test-bin/test_plasma_activities_source",
@@ -4967,7 +5585,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/plasma-framework/test_plasma_framework_source.nim",
     binary: "build/test-bin/test_plasma_framework_source",
@@ -4975,7 +5594,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/plasma-wayland-protocols/test_plasma_wayland_protocols_source.nim",
     binary: "build/test-bin/test_plasma_wayland_protocols_source",
@@ -4983,7 +5603,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/plasma-workspace/test_plasma_workspace_source.nim",
     binary: "build/test-bin/test_plasma_workspace_source",
@@ -4991,7 +5612,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/plasma5support/test_plasma5support_source.nim",
     binary: "build/test-bin/test_plasma5support_source",
@@ -4999,7 +5621,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/polkit/test_polkit_source.nim",
     binary: "build/test-bin/test_polkit_source",
@@ -5007,7 +5630,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/popt/test_popt_source.nim",
     binary: "build/test-bin/test_popt_source",
@@ -5015,7 +5639,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/procps/test_procps_source.nim",
     binary: "build/test-bin/test_procps_source",
@@ -5023,7 +5648,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/pulseaudio/test_pulseaudio_source.nim",
     binary: "build/test-bin/test_pulseaudio_source",
@@ -5031,7 +5657,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qcoro6/test_qcoro6_source.nim",
     binary: "build/test-bin/test_qcoro6_source",
@@ -5039,7 +5666,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-base/test_qt6_base_source.nim",
     binary: "build/test-bin/test_qt6_base_source",
@@ -5047,7 +5675,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-declarative/test_qt6_declarative_source.nim",
     binary: "build/test-bin/test_qt6_declarative_source",
@@ -5055,7 +5684,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-multimedia/test_qt6_multimedia_source.nim",
     binary: "build/test-bin/test_qt6_multimedia_source",
@@ -5063,7 +5693,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-positioning/test_qt6_positioning_source.nim",
     binary: "build/test-bin/test_qt6_positioning_source",
@@ -5071,7 +5702,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-quickcontrols2/test_qt6_quickcontrols2_source.nim",
     binary: "build/test-bin/test_qt6_quickcontrols2_source",
@@ -5079,7 +5711,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-shadertools/test_qt6_shadertools_source.nim",
     binary: "build/test-bin/test_qt6_shadertools_source",
@@ -5087,7 +5720,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-speech/test_qt6_speech_source.nim",
     binary: "build/test-bin/test_qt6_speech_source",
@@ -5095,7 +5729,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-svg/test_qt6_svg_source.nim",
     binary: "build/test-bin/test_qt6_svg_source",
@@ -5103,7 +5738,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-tools/test_qt6_tools_source.nim",
     binary: "build/test-bin/test_qt6_tools_source",
@@ -5111,7 +5747,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/qt6-wayland/test_qt6_wayland_source.nim",
     binary: "build/test-bin/test_qt6_wayland_source",
@@ -5119,7 +5756,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/readline/test_readline_source.nim",
     binary: "build/test-bin/test_readline_source",
@@ -5127,7 +5765,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/rsync/test_rsync_source.nim",
     binary: "build/test-bin/test_rsync_source",
@@ -5135,7 +5774,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/sddm/test_sddm_source.nim",
     binary: "build/test-bin/test_sddm_source",
@@ -5143,7 +5783,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/sed/test_sed_source.nim",
     binary: "build/test-bin/test_sed_source",
@@ -5151,7 +5792,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/shadow-utils/test_shadow_utils_source.nim",
     binary: "build/test-bin/test_shadow_utils_source",
@@ -5159,7 +5801,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/sonnet/test_sonnet_source.nim",
     binary: "build/test-bin/test_sonnet_source",
@@ -5167,7 +5810,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/sqlite/test_sqlite_source.nim",
     binary: "build/test-bin/test_sqlite_source",
@@ -5175,7 +5819,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/strace/test_strace_source.nim",
     binary: "build/test-bin/test_strace_source",
@@ -5183,7 +5828,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/sudo/test_sudo_source.nim",
     binary: "build/test-bin/test_sudo_source",
@@ -5191,7 +5837,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/sway/test_sway_source.nim",
     binary: "build/test-bin/test_sway_source",
@@ -5199,7 +5846,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/syntax-highlighting/test_syntax_highlighting_source.nim",
     binary: "build/test-bin/test_syntax_highlighting_source",
@@ -5207,7 +5855,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/systemd/test_systemd_source.nim",
     binary: "build/test-bin/test_systemd_source",
@@ -5215,7 +5864,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/tar/test_tar_source.nim",
     binary: "build/test-bin/test_tar_source",
@@ -5223,7 +5873,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/util-linux/test_util_linux_source.nim",
     binary: "build/test-bin/test_util_linux_source",
@@ -5231,7 +5882,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/util-macros/test_util_macros_source.nim",
     binary: "build/test-bin/test_util_macros_source",
@@ -5239,7 +5891,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/vim/test_vim_source.nim",
     binary: "build/test-bin/test_vim_source",
@@ -5247,7 +5900,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/wayland/test_wayland_source.nim",
     binary: "build/test-bin/test_wayland_source",
@@ -5255,7 +5909,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/wireplumber/test_wireplumber_source.nim",
     binary: "build/test-bin/test_wireplumber_source",
@@ -5263,7 +5918,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/wlroots/test_wlroots_source.nim",
     binary: "build/test-bin/test_wlroots_source",
@@ -5271,7 +5927,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/xkbcomp/test_xkbcomp_source.nim",
     binary: "build/test-bin/test_xkbcomp_source",
@@ -5279,7 +5936,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/xkeyboard-config/test_xkeyboard_config_source.nim",
     binary: "build/test-bin/test_xkeyboard_config_source",
@@ -5287,7 +5945,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/xorg-server/test_xorg_server_source.nim",
     binary: "build/test-bin/test_xorg_server_source",
@@ -5295,7 +5954,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/xorgproto/test_xorgproto_source.nim",
     binary: "build/test-bin/test_xorgproto_source",
@@ -5303,7 +5963,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/xtrans/test_xtrans_source.nim",
     binary: "build/test-bin/test_xtrans_source",
@@ -5311,7 +5972,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/xwayland/test_xwayland_source.nim",
     binary: "build/test-bin/test_xwayland_source",
@@ -5319,7 +5981,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/xz/test_xz_source.nim",
     binary: "build/test-bin/test_xz_source",
@@ -5327,7 +5990,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "recipes/packages/source/zlib/test_zlib_source.nim",
     binary: "build/test-bin/test_zlib_source",
@@ -5335,7 +5999,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/bundles/bundle_repro_solver_pure_unit.nim",
     binary: "build/test-bin/bundle_repro_solver_pure_unit",
@@ -5343,7 +6008,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim",
     binary: "build/test-bin/t_e2e_repro_develop_cmake",
@@ -5351,7 +6017,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim",
     binary: "build/test-bin/t_e2e_codetracer_build_subset_without_tup",
@@ -5359,7 +6026,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/codetracer-subset/t_e2e_codetracer_dev_environment_slice.nim",
     binary: "build/test-bin/t_e2e_codetracer_dev_environment_slice",
@@ -5367,7 +6035,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
     binary: "build/test-bin/t_e2e_codetracer_in_place_project_file",
@@ -5375,7 +6044,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim",
     binary: "build/test-bin/t_e2e_configurable_system_in_dsl",
@@ -5383,7 +6053,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_deactivate_per_shell.nim",
     binary: "build/test-bin/t_e2e_dev_env_deactivate_per_shell",
@@ -5391,7 +6062,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_deactivate_round_trip.nim",
     binary: "build/test-bin/t_e2e_dev_env_deactivate_round_trip",
@@ -5399,7 +6071,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_deactivate_tampered.nim",
     binary: "build/test-bin/t_e2e_dev_env_deactivate_tampered",
@@ -5407,7 +6080,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_edge_cache.nim",
     binary: "build/test-bin/t_e2e_dev_env_edge_cache",
@@ -5415,7 +6089,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_export_bash.nim",
     binary: "build/test-bin/t_e2e_dev_env_export_bash",
@@ -5423,7 +6098,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_export_fish.nim",
     binary: "build/test-bin/t_e2e_dev_env_export_fish",
@@ -5431,7 +6107,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_export_nushell.nim",
     binary: "build/test-bin/t_e2e_dev_env_export_nushell",
@@ -5439,7 +6116,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_export_pwsh.nim",
     binary: "build/test-bin/t_e2e_dev_env_export_pwsh",
@@ -5447,7 +6125,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_export_zsh.nim",
     binary: "build/test-bin/t_e2e_dev_env_export_zsh",
@@ -5455,7 +6134,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_performance_gates.nim",
     binary: "build/test-bin/t_e2e_dev_env_performance_gates",
@@ -5463,7 +6143,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_provider_compile_edge.nim",
     binary: "build/test-bin/t_e2e_dev_env_provider_compile_edge",
@@ -5471,7 +6152,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_develop_overrides_activity.nim",
     binary: "build/test-bin/t_e2e_develop_overrides_activity",
@@ -5479,7 +6161,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_hooks_shell_direnv.nim",
     binary: "build/test-bin/t_e2e_hooks_shell_direnv",
@@ -5487,7 +6170,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_native_shell_hooks.nim",
     binary: "build/test-bin/t_e2e_native_shell_hooks",
@@ -5495,7 +6179,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim",
     binary: "build/test-bin/t_e2e_provider_dev_env_implicit_floor",
@@ -5503,7 +6188,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim",
     binary: "build/test-bin/t_e2e_provider_dev_env_introspection",
@@ -5511,7 +6197,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim",
     binary: "build/test-bin/t_e2e_repro_dev_sessions",
@@ -5519,7 +6206,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_repro_exec_shell.nim",
     binary: "build/test-bin/t_e2e_repro_exec_shell",
@@ -5527,7 +6215,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim",
     binary: "build/test-bin/t_e2e_shell_hook_cd_activate_deactivate",
@@ -5535,7 +6224,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim",
     binary: "build/test-bin/t_e2e_shell_hook_noop_io_bounded",
@@ -5543,7 +6233,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim",
     binary: "build/test-bin/t_e2e_shell_hook_noop_latency",
@@ -5551,7 +6242,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_shell_hook_realistic_workload.nim",
     binary: "build/test-bin/t_e2e_shell_hook_realistic_workload",
@@ -5559,7 +6251,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_shell_hook_templates.nim",
     binary: "build/test-bin/t_e2e_shell_hook_templates",
@@ -5567,7 +6260,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/dotfiles-replacement/t_e2e_dotfiles_replacement_on_real_host.nim",
     binary: "build/test-bin/t_e2e_dotfiles_replacement_on_real_host",
@@ -5575,7 +6269,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/external-packages/t_e2e_local_store_unified_across_adapters.nim",
     binary: "build/test-bin/t_e2e_local_store_unified_across_adapters",
@@ -5583,7 +6278,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/generated-config/t_e2e_generated_config_file_block_macro.nim",
     binary: "build/test-bin/t_e2e_generated_config_file_block_macro",
@@ -5591,7 +6287,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/generated-config/t_e2e_generated_config_file_external_template.nim",
     binary: "build/test-bin/t_e2e_generated_config_file_external_template",
@@ -5599,7 +6296,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/generated-config/t_e2e_generated_config_file_json_value.nim",
     binary: "build/test-bin/t_e2e_generated_config_file_json_value",
@@ -5607,7 +6305,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/generated-config/t_e2e_generated_config_file_managed_block.nim",
     binary: "build/test-bin/t_e2e_generated_config_file_managed_block",
@@ -5615,7 +6314,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/generated-config/t_e2e_managed_block_cache_key_isolation.nim",
     binary: "build/test-bin/t_e2e_managed_block_cache_key_isolation",
@@ -5623,7 +6323,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim",
     binary: "build/test-bin/t_e2e_hcr_direct_patch_debug_unwind_replay",
@@ -5631,7 +6332,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim",
     binary: "build/test-bin/t_e2e_hcr_in_target_link_and_trampoline",
@@ -5639,7 +6341,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
     binary: "build/test-bin/t_e2e_hcr_watch_inference",
@@ -5647,7 +6350,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim",
     binary: "build/test-bin/t_e2e_repro_watch_hcr_multi_target_independent_patches",
@@ -5655,7 +6359,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @["-fpatchable-function-entry=16,0"],
     extraPassL: @["-Wl,-segprot,__HCR,rwx,rwx"],
-    targetOs: soMacosArm64),
+    targetOs: soMacosArm64,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim",
     binary: "build/test-bin/t_e2e_repro_watch_hcr_one_target_agent_inject_failure",
@@ -5663,7 +6368,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @["-fpatchable-function-entry=16,0"],
     extraPassL: @["-Wl,-segprot,__HCR,rwx,rwx"],
-    targetOs: soMacosArm64),
+    targetOs: soMacosArm64,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-apply/t_e2e_repro_home_add_remove_immediate.nim",
     binary: "build/test-bin/t_e2e_repro_home_add_remove_immediate",
@@ -5671,7 +6377,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-apply/t_e2e_repro_home_apply_fresh_install.nim",
     binary: "build/test-bin/t_e2e_repro_home_apply_fresh_install",
@@ -5679,7 +6386,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-apply/t_e2e_repro_home_apply_noop.nim",
     binary: "build/test-bin/t_e2e_repro_home_apply_noop",
@@ -5687,7 +6395,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-apply/t_e2e_repro_home_apply_partial_recovery.nim",
     binary: "build/test-bin/t_e2e_repro_home_apply_partial_recovery",
@@ -5695,7 +6404,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-apply/t_e2e_stow_auto_discovery_and_materialization.nim",
     binary: "build/test-bin/t_e2e_stow_auto_discovery_and_materialization",
@@ -5703,7 +6413,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-apply/t_e2e_stow_suppression_and_warnings.nim",
     binary: "build/test-bin/t_e2e_stow_suppression_and_warnings",
@@ -5711,7 +6422,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-generations/t_integration_activation_manifest_dedup_in_cas.nim",
     binary: "build/test-bin/t_integration_activation_manifest_dedup_in_cas",
@@ -5719,7 +6431,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-generations/t_integration_apply_lock_serializes.nim",
     binary: "build/test-bin/t_integration_apply_lock_serializes",
@@ -5727,7 +6440,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-generations/t_integration_pointer_envelope_and_history_enumeration.nim",
     binary: "build/test-bin/t_integration_pointer_envelope_and_history_enumeration",
@@ -5735,7 +6449,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-intent/t_e2e_repro_home_intent_commands.nim",
     binary: "build/test-bin/t_e2e_repro_home_intent_commands",
@@ -5743,7 +6458,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-intent/t_integration_intent_layer_config_section.nim",
     binary: "build/test-bin/t_integration_intent_layer_config_section",
@@ -5751,7 +6467,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-intent/t_integration_intent_layer_round_trip.nim",
     binary: "build/test-bin/t_integration_intent_layer_round_trip",
@@ -5759,7 +6476,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-resources/t_e2e_home_registry_typed_value_kinds.nim",
     binary: "build/test-bin/t_e2e_home_registry_typed_value_kinds",
@@ -5767,7 +6485,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-resources/t_e2e_home_resource_lifecycle.nim",
     binary: "build/test-bin/t_e2e_home_resource_lifecycle",
@@ -5775,7 +6494,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-resources/t_e2e_home_resource_rollback_preserves_unrelated.nim",
     binary: "build/test-bin/t_e2e_home_resource_rollback_preserves_unrelated",
@@ -5783,7 +6503,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim",
     binary: "build/test-bin/t_e2e_macos_user_default_restart_target",
@@ -5791,7 +6512,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-resources/t_integration_prevent_destroy.nim",
     binary: "build/test-bin/t_integration_prevent_destroy",
@@ -5799,7 +6521,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-resources/t_integration_resource_move.nim",
     binary: "build/test-bin/t_integration_resource_move",
@@ -5807,7 +6530,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim",
     binary: "build/test-bin/t_e2e_repro_home_rollback_round_trip",
@@ -5815,7 +6539,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim",
     binary: "build/test-bin/t_e2e_repro_home_rollback_user_edit_protection",
@@ -5823,7 +6548,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/home-set-get/t_e2e_repro_home_set_triggers_focused_rebuild.nim",
     binary: "build/test-bin/t_e2e_repro_home_set_triggers_focused_rebuild",
@@ -5831,7 +6557,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim",
     binary: "build/test-bin/t_debug_io_monitor_reads_monitor_depfile",
@@ -5839,7 +6566,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim",
     binary: "build/test-bin/t_e2e_windows_launcher_isolation",
@@ -5847,7 +6575,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
     binary: "build/test-bin/t_e2e_local_reprobuild_project_build",
@@ -5855,7 +6584,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim",
     binary: "build/test-bin/t_e2e_m51_dsl_stdlib_file_ops",
@@ -5863,7 +6593,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim",
     binary: "build/test-bin/t_e2e_repro_build_multiple_named_targets",
@@ -5871,7 +6602,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_e2e_repro_build_named_target.nim",
     binary: "build/test-bin/t_e2e_repro_build_named_target",
@@ -5879,7 +6611,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_e2e_repro_run_lists_tasks_and_edges.nim",
     binary: "build/test-bin/t_e2e_repro_run_lists_tasks_and_edges",
@@ -5887,7 +6620,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim",
     binary: "build/test-bin/t_e2e_repro_run_named_run_edge",
@@ -5895,7 +6629,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_e2e_repro_run_qualified_and_ambiguous.nim",
     binary: "build/test-bin/t_e2e_repro_run_qualified_and_ambiguous",
@@ -5903,7 +6638,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_e2e_repro_run_unknown_and_nonrunnable.nim",
     binary: "build/test-bin/t_e2e_repro_run_unknown_and_nonrunnable",
@@ -5911,7 +6647,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim",
     binary: "build/test-bin/t_repro_build_ambiguous_target_diagnostic",
@@ -5919,7 +6656,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
     binary: "build/test-bin/t_repro_build_qualified_target_resolves",
@@ -5927,7 +6665,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_repro_build_target_matching_project_file_stem.nim",
     binary: "build/test-bin/t_repro_build_target_matching_project_file_stem",
@@ -5935,7 +6674,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_repro_build_unknown_target_diagnostic.nim",
     binary: "build/test-bin/t_repro_build_unknown_target_diagnostic",
@@ -5943,7 +6683,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/local-build-engine/t_repro_list_targets_lists_implicit_and_explicit.nim",
     binary: "build/test-bin/t_repro_list_targets_lists_implicit_and_explicit",
@@ -5951,7 +6692,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim",
     binary: "build/test-bin/t_e2e_repro_home_depends_on_topological",
@@ -5959,7 +6701,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m68/t_e2e_repro_home_fs_user_file.nim",
     binary: "build/test-bin/t_e2e_repro_home_fs_user_file",
@@ -5967,7 +6710,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_home_apply_builtin_catalog.nim",
     binary: "build/test-bin/t_e2e_repro_home_apply_builtin_catalog",
@@ -5975,7 +6719,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_home_env_user_path_vm.nim",
     binary: "build/test-bin/t_e2e_repro_home_env_user_path_vm",
@@ -5983,7 +6728,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_home_fs_managed_block_vm.nim",
     binary: "build/test-bin/t_e2e_repro_home_fs_managed_block_vm",
@@ -5991,7 +6737,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_home_fs_user_file_vm.nim",
     binary: "build/test-bin/t_e2e_repro_home_fs_user_file_vm",
@@ -5999,7 +6746,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_home_linux_dconfkey_vm.nim",
     binary: "build/test-bin/t_e2e_repro_home_linux_dconfkey_vm",
@@ -6007,7 +6755,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_home_linux_kdeconfigkey_vm.nim",
     binary: "build/test-bin/t_e2e_repro_home_linux_kdeconfigkey_vm",
@@ -6015,7 +6764,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_home_shell_integration_vm.nim",
     binary: "build/test-bin/t_e2e_repro_home_shell_integration_vm",
@@ -6023,7 +6773,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_home_systemd_user_unit_vm.nim",
     binary: "build/test-bin/t_e2e_repro_home_systemd_user_unit_vm",
@@ -6031,7 +6782,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_depends_on_topological.nim",
     binary: "build/test-bin/t_e2e_repro_infra_depends_on_topological",
@@ -6039,7 +6791,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_env_system_variable.nim",
     binary: "build/test-bin/t_e2e_repro_infra_env_system_variable",
@@ -6047,7 +6800,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_fs_system_file.nim",
     binary: "build/test-bin/t_e2e_repro_infra_fs_system_file",
@@ -6055,7 +6809,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_linux_firewallrule_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_linux_firewallrule_vm",
@@ -6063,7 +6818,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_linux_nixdaemonsetting_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_linux_nixdaemonsetting_vm",
@@ -6071,7 +6827,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_linux_polkitrule_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_linux_polkitrule_vm",
@@ -6079,7 +6836,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_linux_sudoersrule_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_linux_sudoersrule_vm",
@@ -6087,7 +6845,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_linux_sysctl_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_linux_sysctl_vm",
@@ -6095,7 +6854,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_linux_tmpfilesrule_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_linux_tmpfilesrule_vm",
@@ -6103,7 +6863,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_linux_udevrule_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_linux_udevrule_vm",
@@ -6111,7 +6872,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_os_hostname_posix_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_os_hostname_posix_vm",
@@ -6119,7 +6881,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_os_timezone_posix_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_os_timezone_posix_vm",
@@ -6127,7 +6890,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_passwd_group_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_passwd_group_vm",
@@ -6135,7 +6899,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim",
     binary: "build/test-bin/t_e2e_repro_infra_passwd_user_safe_destroy",
@@ -6143,7 +6908,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_plan_apply_convergent.nim",
     binary: "build/test-bin/t_e2e_repro_infra_plan_apply_convergent",
@@ -6151,7 +6917,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_plan_time_external_drift.nim",
     binary: "build/test-bin/t_e2e_repro_infra_plan_time_external_drift",
@@ -6159,7 +6926,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_systemd_system_timer_vm.nim",
     binary: "build/test-bin/t_e2e_repro_infra_systemd_system_timer_vm",
@@ -6167,7 +6935,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_infra_systemd_system_unit.nim",
     binary: "build/test-bin/t_e2e_repro_infra_systemd_system_unit",
@@ -6175,7 +6944,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_repro_system_command_family.nim",
     binary: "build/test-bin/t_e2e_repro_system_command_family",
@@ -6183,7 +6953,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_windows_optional_feature_and_capability.nim",
     binary: "build/test-bin/t_e2e_windows_optional_feature_and_capability",
@@ -6191,7 +6962,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_windows_registry_system_scope.nim",
     binary: "build/test-bin/t_e2e_windows_registry_system_scope",
@@ -6199,7 +6971,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m69/t_e2e_windows_vs_installer.nim",
     binary: "build/test-bin/t_e2e_windows_vs_installer",
@@ -6207,7 +6980,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m71/t_e2e_m71_phase2_partials_resolve.nim",
     binary: "build/test-bin/t_e2e_m71_phase2_partials_resolve",
@@ -6215,7 +6989,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m71/t_e2e_remote_apply_home_profile_phase_e.nim",
     binary: "build/test-bin/t_e2e_remote_apply_home_profile_phase_e",
@@ -6223,7 +6998,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m71/t_integration_remote_apply_activation_bundle_phase_a.nim",
     binary: "build/test-bin/t_integration_remote_apply_activation_bundle_phase_a",
@@ -6231,7 +7007,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m71/t_integration_remote_apply_cross_host_evaluation_phase_b.nim",
     binary: "build/test-bin/t_integration_remote_apply_cross_host_evaluation_phase_b",
@@ -6239,7 +7016,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m71/t_integration_remote_apply_remote_activation_phase_d.nim",
     binary: "build/test-bin/t_integration_remote_apply_remote_activation_phase_d",
@@ -6247,7 +7025,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m71/t_integration_remote_apply_ssh_transfer_phase_c.nim",
     binary: "build/test-bin/t_integration_remote_apply_ssh_transfer_phase_c",
@@ -6255,7 +7034,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m72/t_e2e_apply_plan_dry_run.nim",
     binary: "build/test-bin/t_e2e_apply_plan_dry_run",
@@ -6263,7 +7043,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m72/t_integration_production_package_catalog.nim",
     binary: "build/test-bin/t_integration_production_package_catalog",
@@ -6271,7 +7052,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m72/t_integration_stow_non_destructive_over_existing.nim",
     binary: "build/test-bin/t_integration_stow_non_destructive_over_existing",
@@ -6279,7 +7061,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m73/t_integration_stow_gnu_package_layout.nim",
     binary: "build/test-bin/t_integration_stow_gnu_package_layout",
@@ -6287,7 +7070,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim",
     binary: "build/test-bin/t_integration_scoop_manifest_bin_resolution",
@@ -6295,7 +7079,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim",
     binary: "build/test-bin/t_integration_scoop_probe_gui_and_timeout",
@@ -6303,7 +7088,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
     binary: "build/test-bin/t_integration_stow_byte_identical_target_is_cache_hit",
@@ -6311,7 +7097,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m77/t_integration_scoop_installed_version_survives_bucket_drift.nim",
     binary: "build/test-bin/t_integration_scoop_installed_version_survives_bucket_drift",
@@ -6319,7 +7106,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m78/t_e2e_profile_declared_resources_apply.nim",
     binary: "build/test-bin/t_e2e_profile_declared_resources_apply",
@@ -6327,7 +7115,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim",
     binary: "build/test-bin/t_integration_shell_integration_replan_idempotent",
@@ -6335,7 +7124,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m80/t_integration_plan_classifier_bucket_drift_is_cache_hit.nim",
     binary: "build/test-bin/t_integration_plan_classifier_bucket_drift_is_cache_hit",
@@ -6343,7 +7133,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m81/t_integration_privileged_broker_single_prompt.nim",
     binary: "build/test-bin/t_integration_privileged_broker_single_prompt",
@@ -6351,7 +7142,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
     binary: "build/test-bin/t_e2e_compile_fail_is_hard_error",
@@ -6359,7 +7151,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m83/t_e2e_phase_g_action_edges.nim",
     binary: "build/test-bin/t_e2e_phase_g_action_edges",
@@ -6367,7 +7160,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim",
     binary: "build/test-bin/t_e2e_profile_compile_nim_path_closure",
@@ -6375,7 +7169,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m83/t_e2e_profile_modules.nim",
     binary: "build/test-bin/t_e2e_profile_modules",
@@ -6383,7 +7178,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m83/t_e2e_repro_profile_compile.nim",
     binary: "build/test-bin/t_e2e_repro_profile_compile",
@@ -6391,7 +7187,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
     binary: "build/test-bin/t_e2e_repro_profile_compile_via_action",
@@ -6399,7 +7196,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m9/t_e2e_m9_linux_phase2_partials_resolve.nim",
     binary: "build/test-bin/t_e2e_m9_linux_phase2_partials_resolve",
@@ -6407,7 +7205,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m9_5/t_e2e_m9_5_linux_url_harvest.nim",
     binary: "build/test-bin/t_e2e_m9_5_linux_url_harvest",
@@ -6415,7 +7214,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/m9_5/t_e2e_m9_5_smoke_chain_resolve_gh_linux.nim",
     binary: "build/test-bin/t_e2e_m9_5_smoke_chain_resolve_gh_linux",
@@ -6423,7 +7223,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim",
     binary: "build/test-bin/t_macos_monitor_shim_event_taxonomy",
@@ -6431,7 +7232,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_env_user_path.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_env_user_path",
@@ -6439,7 +7241,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_fs_managed_block.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_fs_managed_block",
@@ -6447,7 +7250,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_fs_user_file.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_fs_user_file",
@@ -6455,7 +7259,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_homebrew_cask.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_homebrew_cask",
@@ -6463,7 +7268,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_homebrew_formula.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_homebrew_formula",
@@ -6471,7 +7277,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_launchd_system_daemon.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_launchd_system_daemon",
@@ -6479,7 +7286,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_launchd_user_agent.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_launchd_user_agent",
@@ -6487,7 +7295,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_macos_system_default.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_macos_system_default",
@@ -6495,7 +7304,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_os_hostname.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_os_hostname",
@@ -6503,7 +7313,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_os_timezone.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_os_timezone",
@@ -6511,7 +7322,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_passwd_group.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_passwd_group",
@@ -6519,7 +7331,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/macos-phase5/t_e2e_macos_phase5_shell_integration.nim",
     binary: "build/test-bin/t_e2e_macos_phase5_shell_integration",
@@ -6527,7 +7340,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/path-only/t_path_only_tool_interfaces.nim",
     binary: "build/test-bin/t_path_only_tool_interfaces",
@@ -6535,7 +7349,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/scoop/t_e2e_scoop_adapter_diagnostics.nim",
     binary: "build/test-bin/t_e2e_scoop_adapter_diagnostics",
@@ -6543,7 +7358,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/scoop/t_e2e_scoop_adapter_realize_and_launch.nim",
     binary: "build/test-bin/t_e2e_scoop_adapter_realize_and_launch",
@@ -6551,7 +7367,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/scoop/t_e2e_scoop_practical_hardening.nim",
     binary: "build/test-bin/t_e2e_scoop_practical_hardening",
@@ -6559,7 +7376,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/sharding/t_e2e_repro_test_shard_balances_wall_time.nim",
     binary: "build/test-bin/t_e2e_repro_test_shard_balances_wall_time",
@@ -6567,7 +7385,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/sharding/t_e2e_repro_test_shard_emit_plan_then_consume.nim",
     binary: "build/test-bin/t_e2e_repro_test_shard_emit_plan_then_consume",
@@ -6575,7 +7394,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/sharding/t_e2e_repro_test_shard_lan_peer_cache_not_implemented.nim",
     binary: "build/test-bin/t_e2e_repro_test_shard_lan_peer_cache_not_implemented",
@@ -6583,7 +7403,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/sharding/t_e2e_repro_test_shard_partition_total_coverage.nim",
     binary: "build/test-bin/t_e2e_repro_test_shard_partition_total_coverage",
@@ -6591,7 +7412,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim",
     binary: "build/test-bin/t_e2e_repro_test_shard_workspace_integration",
@@ -6599,7 +7421,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/t_m54_verified_tarball_profile.nim",
     binary: "build/test-bin/t_m54_verified_tarball_profile",
@@ -6607,7 +7430,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/watch/t_e2e_repro_watch.nim",
     binary: "build/test-bin/t_e2e_repro_watch",
@@ -6615,7 +7439,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim",
     binary: "build/test-bin/t_e2e_repro_watch_multiple_named_targets",
@@ -6623,7 +7448,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/watch/t_repro_watch_infers_tool_provisioning.nim",
     binary: "build/test-bin/t_repro_watch_infers_tool_provisioning",
@@ -6631,7 +7457,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/e2e/watch/t_repro_watch_unknown_target_diagnostic.nim",
     binary: "build/test-bin/t_repro_watch_unknown_target_diagnostic",
@@ -6639,7 +7466,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_action_cache_concurrent_same_edge_converges_atomically.nim",
     binary: "build/test-bin/t_action_cache_concurrent_same_edge_converges_atomically",
@@ -6647,7 +7475,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_action_cache_fingerprint_policies.nim",
     binary: "build/test-bin/t_action_cache_fingerprint_policies",
@@ -6655,7 +7484,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_action_cache_per_edge_multifile_preserves_concurrent_path_sets.nim",
     binary: "build/test-bin/t_action_cache_per_edge_multifile_preserves_concurrent_path_sets",
@@ -6663,7 +7493,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_action_cache_per_edge_no_global_log_no_growth.nim",
     binary: "build/test-bin/t_action_cache_per_edge_no_global_log_no_growth",
@@ -6671,7 +7502,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing.nim",
     binary: "build/test-bin/t_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing",
@@ -6679,7 +7511,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim",
     binary: "build/test-bin/t_add_respects_develop_mode_policy_and_overrides",
@@ -6687,7 +7520,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_apply_if_binds_config_by_workspace_path.nim",
     binary: "build/test-bin/t_apply_if_binds_config_by_workspace_path",
@@ -6695,7 +7529,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim",
     binary: "build/test-bin/t_arm_outside_declared_platforms_is_a_lint_error",
@@ -6703,7 +7538,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b0_develop_mode_uses_local_source.nim",
     binary: "build/test-bin/t_b0_develop_mode_uses_local_source",
@@ -6711,7 +7547,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b0_repro_build_runquota_daemon.nim",
     binary: "build/test-bin/t_b0_repro_build_runquota_daemon",
@@ -6719,7 +7556,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b0_runquota_repro_nim_compiles.nim",
     binary: "build/test-bin/t_b0_runquota_repro_nim_compiles",
@@ -6727,7 +7565,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b1_apps_action_cache_hit.nim",
     binary: "build/test-bin/t_b1_apps_action_cache_hit",
@@ -6735,7 +7574,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b1_repro_build_apps_byte_equivalent.nim",
     binary: "build/test-bin/t_b1_repro_build_apps_byte_equivalent",
@@ -6743,7 +7583,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b1_repro_build_apps_collection.nim",
     binary: "build/test-bin/t_b1_repro_build_apps_collection",
@@ -6751,7 +7592,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b2_helper_invalidation.nim",
     binary: "build/test-bin/t_b2_helper_invalidation",
@@ -6759,7 +7601,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b2_helpers_built_by_engine.nim",
     binary: "build/test-bin/t_b2_helpers_built_by_engine",
@@ -6767,7 +7610,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b3_repro_test_runs_through_engine.nim",
     binary: "build/test-bin/t_b3_repro_test_runs_through_engine",
@@ -6775,7 +7619,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b3_test_execute_edge_cache_hit.nim",
     binary: "build/test-bin/t_b3_test_execute_edge_cache_hit",
@@ -6783,7 +7628,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b3_test_invalidation_rebuilds_repro.nim",
     binary: "build/test-bin/t_b3_test_invalidation_rebuilds_repro",
@@ -6791,7 +7637,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b3_test_template_emits_two_edges.nim",
     binary: "build/test-bin/t_b3_test_template_emits_two_edges",
@@ -6799,7 +7646,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b4_hcr_flags_in_repro_tests.nim",
     binary: "build/test-bin/t_b4_hcr_flags_in_repro_tests",
@@ -6807,7 +7655,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b4_python_tests_in_graph.nim",
     binary: "build/test-bin/t_b4_python_tests_in_graph",
@@ -6815,7 +7664,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b4_repro_test_alias_covers_all.nim",
     binary: "build/test-bin/t_b4_repro_test_alias_covers_all",
@@ -6823,7 +7673,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b5_bootstrap_idempotent.nim",
     binary: "build/test-bin/t_b5_bootstrap_idempotent",
@@ -6831,7 +7682,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b5_full_suite_through_repro_test.nim",
     binary: "build/test-bin/t_b5_full_suite_through_repro_test",
@@ -6839,7 +7691,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_b5_repro_test_replaces_run_tests_sh.nim",
     binary: "build/test-bin/t_b5_repro_test_replaces_run_tests_sh",
@@ -6847,7 +7700,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim",
     binary: "build/test-bin/t_bearssl_source_resolution_rejects_stale_layout",
@@ -6855,7 +7709,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_branch_fork_clones_root_submodules.nim",
     binary: "build/test-bin/t_branch_fork_clones_root_submodules",
@@ -6863,7 +7718,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_branch_fork_inherits_project_set.nim",
     binary: "build/test-bin/t_branch_fork_inherits_project_set",
@@ -6871,7 +7727,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim",
     binary: "build/test-bin/t_branch_forks_new_workspace_on_feature_branch",
@@ -6879,7 +7736,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_build_machine_and_host_target_are_distinct.nim",
     binary: "build/test-bin/t_build_machine_and_host_target_are_distinct",
@@ -6887,7 +7745,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_build_progress_modes.nim",
     binary: "build/test-bin/t_build_progress_modes",
@@ -6895,7 +7754,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_buildtype_drives_compile_flags.nim",
     binary: "build/test-bin/t_buildtype_drives_compile_flags",
@@ -6903,7 +7763,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_buildtype_drives_output_dir.nim",
     binary: "build/test-bin/t_buildtype_drives_output_dir",
@@ -6911,7 +7772,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim",
     binary: "build/test-bin/t_cache_daemon_drains_dedups_persists_and_warms_from_disk",
@@ -6919,7 +7781,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cache_daemon_grows_via_cas_resize_and_survives_crash.nim",
     binary: "build/test-bin/t_cache_daemon_grows_via_cas_resize_and_survives_crash",
@@ -6927,7 +7790,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim",
     binary: "build/test-bin/t_cache_key_separates_v2_and_v3_artifacts",
@@ -6935,7 +7799,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cache_refuses_to_serve_an_unsatisfiable_floor.nim",
     binary: "build/test-bin/t_cache_refuses_to_serve_an_unsatisfiable_floor",
@@ -6943,7 +7808,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cas_restore_outputs_cleans_temp_on_failure.nim",
     binary: "build/test-bin/t_cas_restore_outputs_cleans_temp_on_failure",
@@ -6951,7 +7817,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim",
     binary: "build/test-bin/t_cert_gate_defaults_off_and_advisory_does_not_block",
@@ -6959,7 +7826,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_certificate_policy_required_advisory_off_modes.nim",
     binary: "build/test-bin/t_certificate_policy_required_advisory_off_modes",
@@ -6967,7 +7835,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_certificate_signature_verifies_against_registered_key.nim",
     binary: "build/test-bin/t_certificate_signature_verifies_against_registered_key",
@@ -6975,7 +7844,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_certificates_travel_with_pushed_commit.nim",
     binary: "build/test-bin/t_certificates_travel_with_pushed_commit",
@@ -6983,7 +7853,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim",
     binary: "build/test-bin/t_checkout_path_cannot_escape_the_workspace_root",
@@ -6991,7 +7862,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim",
     binary: "build/test-bin/t_ci_skips_targets_covered_by_valid_certificate_per_platform",
@@ -6999,7 +7871,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cli_repro_lock_explain.nim",
     binary: "build/test-bin/t_cli_repro_lock_explain",
@@ -7007,7 +7880,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim",
     binary: "build/test-bin/t_clone_action_honors_partial_blobless_and_single_branch",
@@ -7015,7 +7889,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim",
     binary: "build/test-bin/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep",
@@ -7023,7 +7898,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_committed_lock_folds_sibling_develop_deps.nim",
     binary: "build/test-bin/t_committed_lock_folds_sibling_develop_deps",
@@ -7031,7 +7907,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim",
     binary: "build/test-bin/t_committed_lock_pins_solved_graph_and_build_consumes_it",
@@ -7039,7 +7916,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_committed_lock_records_canonical_remote_url_when_not_named_origin.nim",
     binary: "build/test-bin/t_committed_lock_records_canonical_remote_url_when_not_named_origin",
@@ -7047,7 +7925,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_compiler_scratch_isolation.nim",
     binary: "build/test-bin/t_compiler_scratch_isolation",
@@ -7055,7 +7934,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_completion_emits_shell_script.nim",
     binary: "build/test-bin/t_completion_emits_shell_script",
@@ -7063,7 +7943,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_concurrent_lock_publishes_retry_without_user_visible_failure.nim",
     binary: "build/test-bin/t_concurrent_lock_publishes_retry_without_user_visible_failure",
@@ -7071,7 +7952,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_concurrent_publish_disjoint_per_backend.nim",
     binary: "build/test-bin/t_concurrent_publish_disjoint_per_backend",
@@ -7079,7 +7961,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_config_layer_determines_tier_not_per_repo_field.nim",
     binary: "build/test-bin/t_config_layer_determines_tier_not_per_repo_field",
@@ -7087,7 +7970,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim",
     binary: "build/test-bin/t_cross_repo_nim_library_src_threaded_onto_consumer_path",
@@ -7095,7 +7979,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cross_targeting_axes_do_not_silently_disagree.nim",
     binary: "build/test-bin/t_cross_targeting_axes_do_not_silently_disagree",
@@ -7103,7 +7988,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim",
     binary: "build/test-bin/t_cross_tier_move_between_layers_errors_loudly",
@@ -7111,7 +7997,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",
     binary: "build/test-bin/t_d1_buildnimunittest_resolves_in_path_mode",
@@ -7119,7 +8006,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_d1_pythonunittest_resolves_in_path_mode.nim",
     binary: "build/test-bin/t_d1_pythonunittest_resolves_in_path_mode",
@@ -7127,7 +8015,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_d2_cross_project_selector_recognised.nim",
     binary: "build/test-bin/t_d2_cross_project_selector_recognised",
@@ -7135,7 +8024,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_d3_ct_test_flake_pin_carries_b4_api.nim",
     binary: "build/test-bin/t_d3_ct_test_flake_pin_carries_b4_api",
@@ -7143,7 +8033,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_d4_evidence_collection_scales_linearly.nim",
     binary: "build/test-bin/t_d4_evidence_collection_scales_linearly",
@@ -7151,7 +8042,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_d5_collection_member_selector.nim",
     binary: "build/test-bin/t_d5_collection_member_selector",
@@ -7159,7 +8051,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_d6_runner_test_timeout.nim",
     binary: "build/test-bin/t_d6_runner_test_timeout",
@@ -7167,7 +8060,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_daemon_accept_loop_survives_probe.nim",
     binary: "build/test-bin/t_daemon_accept_loop_survives_probe",
@@ -7175,7 +8069,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_declared_platforms_change_no_existing_resolution.nim",
     binary: "build/test-bin/t_declared_platforms_change_no_existing_resolution",
@@ -7183,7 +8078,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim",
     binary: "build/test-bin/t_default_projects_auto_layer_on_fresh_workspace",
@@ -7191,7 +8087,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_default_target_floor_is_conservative.nim",
     binary: "build/test-bin/t_default_target_floor_is_conservative",
@@ -7199,7 +8096,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_dependency_report_and_converter_paths.nim",
     binary: "build/test-bin/t_dependency_report_and_converter_paths",
@@ -7207,7 +8105,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_dev_env_allow.nim",
     binary: "build/test-bin/t_dev_env_allow",
@@ -7215,7 +8114,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_dev_env_artifact.nim",
     binary: "build/test-bin/t_dev_env_artifact",
@@ -7223,7 +8123,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_dev_shell_override_guards.nim",
     binary: "build/test-bin/t_dev_shell_override_guards",
@@ -7239,7 +8140,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_all_clones_into_a_second_placement_root.nim",
     binary: "build/test-bin/t_develop_all_clones_into_a_second_placement_root",
@@ -7247,7 +8149,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_all_refuses_to_report_an_absent_checkout.nim",
     binary: "build/test-bin/t_develop_all_refuses_to_report_an_absent_checkout",
@@ -7255,7 +8158,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_all_reset_reconciles_drifted_sibling.nim",
     binary: "build/test-bin/t_develop_all_reset_reconciles_drifted_sibling",
@@ -7263,7 +8167,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_at_rev_walks_to_nearest_locked_ancestor.nim",
     binary: "build/test-bin/t_develop_at_rev_walks_to_nearest_locked_ancestor",
@@ -7271,7 +8176,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_composes_lock_set_without_a_committed_lock.nim",
     binary: "build/test-bin/t_develop_composes_lock_set_without_a_committed_lock",
@@ -7279,7 +8185,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_dependency_modes_walk_a_real_depends_graph.nim",
     binary: "build/test-bin/t_develop_dependency_modes_walk_a_real_depends_graph",
@@ -7287,7 +8194,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_excludes_evidence_only_repos.nim",
     binary: "build/test-bin/t_develop_excludes_evidence_only_repos",
@@ -7295,7 +8203,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_ignores_sha_pinned_manifest_without_a_lock_record.nim",
     binary: "build/test-bin/t_develop_ignores_sha_pinned_manifest_without_a_lock_record",
@@ -7303,7 +8212,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_list_reports_tier_and_backend.nim",
     binary: "build/test-bin/t_develop_list_reports_tier_and_backend",
@@ -7311,7 +8221,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_lock_store_supplies_private_route.nim",
     binary: "build/test-bin/t_develop_lock_store_supplies_private_route",
@@ -7319,7 +8230,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_only_except_refuse_unknown_names.nim",
     binary: "build/test-bin/t_develop_only_except_refuse_unknown_names",
@@ -7327,7 +8239,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_public_only_unchanged.nim",
     binary: "build/test-bin/t_develop_public_only_unchanged",
@@ -7335,7 +8248,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_refuses_cross_backend_revision_conflict.nim",
     binary: "build/test-bin/t_develop_refuses_cross_backend_revision_conflict",
@@ -7343,7 +8257,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_refuses_inexact_revision_and_leaves_no_checkout.nim",
     binary: "build/test-bin/t_develop_refuses_inexact_revision_and_leaves_no_checkout",
@@ -7351,7 +8266,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_refuses_unreachable_team_backend.nim",
     binary: "build/test-bin/t_develop_refuses_unreachable_team_backend",
@@ -7359,7 +8275,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_refuses_unreadable_backend_before_membership_degrades.nim",
     binary: "build/test-bin/t_develop_refuses_unreadable_backend_before_membership_degrades",
@@ -7367,7 +8284,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_refuses_unreadable_backend_of_any_kind.nim",
     binary: "build/test-bin/t_develop_refuses_unreadable_backend_of_any_kind",
@@ -7375,7 +8293,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_selectors_compose_in_fixed_order.nim",
     binary: "build/test-bin/t_develop_selectors_compose_in_fixed_order",
@@ -7383,7 +8302,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_set_is_union_of_all_backends.nim",
     binary: "build/test-bin/t_develop_set_is_union_of_all_backends",
@@ -7391,7 +8311,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim",
     binary: "build/test-bin/t_develop_warns_and_names_omitted_personal_repos",
@@ -7399,7 +8320,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim",
     binary: "build/test-bin/t_docs_hooks_reflect_public_tier_only_server_gate",
@@ -7407,7 +8329,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_e2e_cross_compilation_aarch64.nim",
     binary: "build/test-bin/t_e2e_cross_compilation_aarch64",
@@ -7415,7 +8338,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_e2e_engine_shim_removed.nim",
     binary: "build/test-bin/t_e2e_engine_shim_removed",
@@ -7423,7 +8347,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_e2e_selectable_toolchain_fixture.nim",
     binary: "build/test-bin/t_e2e_selectable_toolchain_fixture",
@@ -7431,7 +8356,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_e2e_variant_feature_flag_drops_tls.nim",
     binary: "build/test-bin/t_e2e_variant_feature_flag_drops_tls",
@@ -7439,7 +8365,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_entrypoints.nim",
     binary: "build/test-bin/t_entrypoints",
@@ -7447,7 +8374,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_enumerated_directory_evidence_producers.nim",
     binary: "build/test-bin/t_enumerated_directory_evidence_producers",
@@ -7455,7 +8383,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_env_inheritance_census_is_reported.nim",
     binary: "build/test-bin/t_env_inheritance_census_is_reported",
@@ -7463,7 +8392,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_every_launch_path_is_monitored.nim",
     binary: "build/test-bin/t_every_launch_path_is_monitored",
@@ -7471,7 +8401,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_evidence_publish_verb_and_lock_flag_on_test_sharding.nim",
     binary: "build/test-bin/t_evidence_publish_verb_and_lock_flag_on_test_sharding",
@@ -7479,7 +8410,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_ext_repro_action_rows.nim",
     binary: "build/test-bin/t_ext_repro_action_rows",
@@ -7487,7 +8419,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_ext_test_execution_rows.nim",
     binary: "build/test-bin/t_ext_test_execution_rows",
@@ -7495,7 +8428,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_extension_type_lifted_and_consumed.nim",
     binary: "build/test-bin/t_extension_type_lifted_and_consumed",
@@ -7503,7 +8437,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_external_cli_store_contract_writes_and_reads.nim",
     binary: "build/test-bin/t_external_cli_store_contract_writes_and_reads",
@@ -7511,7 +8446,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim",
     binary: "build/test-bin/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source",
@@ -7519,7 +8455,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_gate_consumes_published_evidence_for_unclonable_private_repo.nim",
     binary: "build/test-bin/t_gate_consumes_published_evidence_for_unclonable_private_repo",
@@ -7527,7 +8464,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim",
     binary: "build/test-bin/t_gate_refusals_name_offender_and_remedy_command",
@@ -7535,7 +8473,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_health_fix_remediates_safe_issues_only.nim",
     binary: "build/test-bin/t_health_fix_remediates_safe_issues_only",
@@ -7543,7 +8482,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
     binary: "build/test-bin/t_health_reports_each_layer_status_with_remedy",
@@ -7551,7 +8491,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_highest_satisfied_floor_wins.nim",
     binary: "build/test-bin/t_highest_satisfied_floor_wins",
@@ -7559,7 +8500,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim",
     binary: "build/test-bin/t_hook_protocol_v2_mixed_version_fails_closed",
@@ -7567,7 +8509,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim",
     binary: "build/test-bin/t_hooks_ensure_coexists_with_pre_commit_shim",
@@ -7575,7 +8518,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim",
     binary: "build/test-bin/t_hooks_ensure_reconciles_a_git_backed_workspace_root",
@@ -7583,7 +8527,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
     binary: "build/test-bin/t_hooks_noop_outside_initialized_workspace",
@@ -7591,7 +8536,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim",
     binary: "build/test-bin/t_infra_apply_cache_hit_preserves_present_outputs",
@@ -7599,7 +8545,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_build_engine_api_ready_queue.nim",
     binary: "build/test-bin/t_integration_build_engine_api_ready_queue",
@@ -7607,7 +8554,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_build_report_target_resolution_kind.nim",
     binary: "build/test-bin/t_integration_build_report_target_resolution_kind",
@@ -7615,7 +8563,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_cli_variant_flag_drives_solver.nim",
     binary: "build/test-bin/t_integration_cli_variant_flag_drives_solver",
@@ -7623,7 +8572,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_collection_distinct_from_aggregate.nim",
     binary: "build/test-bin/t_integration_collection_distinct_from_aggregate",
@@ -7631,7 +8581,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_configurable_doc_comment_directives.nim",
     binary: "build/test-bin/t_integration_configurable_doc_comment_directives",
@@ -7639,7 +8590,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_configurable_persistent_lookup.nim",
     binary: "build/test-bin/t_integration_configurable_persistent_lookup",
@@ -7647,7 +8599,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_configurable_staged_field_access.nim",
     binary: "build/test-bin/t_integration_configurable_staged_field_access",
@@ -7655,7 +8608,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_configurable_system_basic_resolution.nim",
     binary: "build/test-bin/t_integration_configurable_system_basic_resolution",
@@ -7663,7 +8617,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_configurable_system_incremental_refinalize.nim",
     binary: "build/test-bin/t_integration_configurable_system_incremental_refinalize",
@@ -7671,7 +8626,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_context_default_slots.nim",
     binary: "build/test-bin/t_integration_context_default_slots",
@@ -7679,7 +8635,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_context_variant_driven_slots.nim",
     binary: "build/test-bin/t_integration_context_variant_driven_slots",
@@ -7687,7 +8644,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_cross_compilation_fixture_compiles.nim",
     binary: "build/test-bin/t_integration_cross_compilation_fixture_compiles",
@@ -7695,7 +8653,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_cross_target_aarch64_adapter.nim",
     binary: "build/test-bin/t_integration_cross_target_aarch64_adapter",
@@ -7703,7 +8662,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_cross_target_native.nim",
     binary: "build/test-bin/t_integration_cross_target_native",
@@ -7711,7 +8671,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_cross_target_splice.nim",
     binary: "build/test-bin/t_integration_cross_target_splice",
@@ -7719,7 +8680,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_daemon_nix_and_tarball_realize.nim",
     binary: "build/test-bin/t_integration_daemon_nix_and_tarball_realize",
@@ -7727,7 +8689,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_feature_set_solver_backed.nim",
     binary: "build/test-bin/t_integration_feature_set_solver_backed",
@@ -7735,7 +8698,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_hcr_linkgraph_relocation_classification.nim",
     binary: "build/test-bin/t_integration_hcr_linkgraph_relocation_classification",
@@ -7743,7 +8707,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_hcr_reference_corpus_and_object_inputs.nim",
     binary: "build/test-bin/t_integration_hcr_reference_corpus_and_object_inputs",
@@ -7751,7 +8716,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_launch_plan_binding_strategies.nim",
     binary: "build/test-bin/t_integration_launch_plan_binding_strategies",
@@ -7759,7 +8725,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_local_store_gc.nim",
     binary: "build/test-bin/t_integration_local_store_gc",
@@ -7767,7 +8734,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_local_store_layout_and_atomic_writes.nim",
     binary: "build/test-bin/t_integration_local_store_layout_and_atomic_writes",
@@ -7775,7 +8743,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim",
     binary: "build/test-bin/t_integration_provider_fragment_refresh_and_pruning",
@@ -7783,7 +8752,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_recipe_consumes_interface.nim",
     binary: "build/test-bin/t_integration_recipe_consumes_interface",
@@ -7791,7 +8761,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_reprobuild_sessions_share_runquota.nim",
     binary: "build/test-bin/t_integration_reprobuild_sessions_share_runquota",
@@ -7799,7 +8770,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_scheduler_dependency_gathering_policies.nim",
     binary: "build/test-bin/t_integration_scheduler_dependency_gathering_policies",
@@ -7807,7 +8779,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_solver_chosen_version.nim",
     binary: "build/test-bin/t_integration_solver_chosen_version",
@@ -7815,7 +8788,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_solver_resolves_variants.nim",
     binary: "build/test-bin/t_integration_solver_resolves_variants",
@@ -7823,7 +8797,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_target_export_table_v2_schema.nim",
     binary: "build/test-bin/t_integration_target_export_table_v2_schema",
@@ -7831,7 +8806,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_test_runner_adapter_registered.nim",
     binary: "build/test-bin/t_integration_test_runner_adapter_registered",
@@ -7839,7 +8815,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_test_runner_interface.nim",
     binary: "build/test-bin/t_integration_test_runner_interface",
@@ -7847,7 +8824,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_toolchain_interface.nim",
     binary: "build/test-bin/t_integration_toolchain_interface",
@@ -7855,7 +8833,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_variant_cli_flag.nim",
     binary: "build/test-bin/t_integration_variant_cli_flag",
@@ -7863,7 +8842,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_variant_conditional_uses_static_value.nim",
     binary: "build/test-bin/t_integration_variant_conditional_uses_static_value",
@@ -7871,7 +8851,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_variant_conditioned_uses.nim",
     binary: "build/test-bin/t_integration_variant_conditioned_uses",
@@ -7879,7 +8860,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_variant_declaration_basic.nim",
     binary: "build/test-bin/t_integration_variant_declaration_basic",
@@ -7887,7 +8869,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_variant_override_priorities.nim",
     binary: "build/test-bin/t_integration_variant_override_priorities",
@@ -7895,7 +8878,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integration_variant_value_accessor.nim",
     binary: "build/test-bin/t_integration_variant_value_accessor",
@@ -7903,7 +8887,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integrity_mismatch_surfaces_per_tier.nim",
     binary: "build/test-bin/t_integrity_mismatch_surfaces_per_tier",
@@ -7911,7 +8896,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim",
     binary: "build/test-bin/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash",
@@ -7919,7 +8905,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_is_published_accepts_any_remote_name.nim",
     binary: "build/test-bin/t_is_published_accepts_any_remote_name",
@@ -7927,7 +8914,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_just_test_end_to_end_via_parallel_runner.nim",
     binary: "build/test-bin/t_just_test_end_to_end_via_parallel_runner",
@@ -7935,7 +8923,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_just_test_hot_cache_is_no_op_build.nim",
     binary: "build/test-bin/t_just_test_hot_cache_is_no_op_build",
@@ -7943,7 +8932,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_just_test_via_ct_test_runner.nim",
     binary: "build/test-bin/t_just_test_via_ct_test_runner",
@@ -7951,7 +8941,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim",
     binary: "build/test-bin/t_l3_build_block_public_interface_tagged_in_provider_mode",
@@ -7959,7 +8950,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim",
     binary: "build/test-bin/t_legacy_manifest_without_team_route_warns_and_scaffolds",
@@ -7967,7 +8959,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim",
     binary: "build/test-bin/t_level_and_its_equivalent_feature_set_select_alike",
@@ -7975,7 +8968,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_levelless_catalog_selection_is_unchanged.nim",
     binary: "build/test-bin/t_levelless_catalog_selection_is_unchanged",
@@ -7983,7 +8977,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_library_load_evidence_is_recorded.nim",
     binary: "build/test-bin/t_library_load_evidence_is_recorded",
@@ -7991,7 +8986,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_linked_worktree_pre_push_repository_env.nim",
     binary: "build/test-bin/t_linked_worktree_pre_push_repository_env",
@@ -7999,7 +8995,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m0.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m0",
@@ -8007,7 +9004,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m1.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m1",
@@ -8015,7 +9013,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m10.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m10",
@@ -8023,7 +9022,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m11.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m11",
@@ -8031,7 +9031,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m2.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m2",
@@ -8039,7 +9040,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m3.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m3",
@@ -8047,7 +9049,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m4.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m4",
@@ -8055,7 +9058,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m5.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m5",
@@ -8063,7 +9067,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m6.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m6",
@@ -8071,7 +9076,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m7.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m7",
@@ -8079,7 +9085,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m8.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m8",
@@ -8087,7 +9094,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify.nim",
     binary: "build/test-bin/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify",
@@ -8095,7 +9103,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_coherence_reports_the_diff_advisory_only.nim",
     binary: "build/test-bin/t_lock_coherence_reports_the_diff_advisory_only",
@@ -8103,7 +9112,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_entry_pins_the_resolved_target.nim",
     binary: "build/test-bin/t_lock_entry_pins_the_resolved_target",
@@ -8111,7 +9121,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_failure_remedies_name_a_runnable_command.nim",
     binary: "build/test-bin/t_lock_failure_remedies_name_a_runnable_command",
@@ -8119,7 +9130,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim",
     binary: "build/test-bin/t_lock_file_only_workspace_fully_described_from_lock_not_head",
@@ -8127,7 +9139,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_foreign_coords.nim",
     binary: "build/test-bin/t_lock_foreign_coords",
@@ -8135,7 +9148,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_from_a_v3_host_resolves_on_a_v2_host.nim",
     binary: "build/test-bin/t_lock_from_a_v3_host_resolves_on_a_v2_host",
@@ -8143,7 +9157,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim",
     binary: "build/test-bin/t_lock_publish_recovers_verified_ahead_chain",
@@ -8151,7 +9166,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_refresh_and_validate_without_building.nim",
     binary: "build/test-bin/t_lock_refresh_and_validate_without_building",
@@ -8159,7 +9175,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim",
     binary: "build/test-bin/t_lock_refresh_folds_uses_sibling_producer_deps",
@@ -8167,7 +9184,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim",
     binary: "build/test-bin/t_lock_refresh_reads_solver_inputs_from_compiled_provider",
@@ -8175,7 +9193,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_store_backend_roundtrip_each_backend.nim",
     binary: "build/test-bin/t_lock_store_backend_roundtrip_each_backend",
@@ -8183,7 +9202,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim",
     binary: "build/test-bin/t_lock_store_inside_another_repo_is_not_publishable",
@@ -8191,7 +9211,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim",
     binary: "build/test-bin/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db",
@@ -8199,7 +9220,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_locking_explain_reports_resolved_tier_backend_and_layer.nim",
     binary: "build/test-bin/t_locking_explain_reports_resolved_tier_backend_and_layer",
@@ -8207,7 +9229,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_long_operations_announce_plan_and_emit_live_progress.nim",
     binary: "build/test-bin/t_long_operations_announce_plan_and_emit_live_progress",
@@ -8215,7 +9238,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_m20_second_runner_generic_layer.nim",
     binary: "build/test-bin/t_m20_second_runner_generic_layer",
@@ -8223,15 +9247,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_m21_point_in_time_queries.nim",
     binary: "build/test-bin/t_m21_point_in_time_queries",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_m9r21_4_hardware_e2e.nim",
     binary: "build/test-bin/t_m9r21_4_hardware_e2e",
@@ -8239,7 +9265,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_m9r22b_2_apply_loopback.nim",
     binary: "build/test-bin/t_m9r22b_2_apply_loopback",
@@ -8247,7 +9274,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_macho_runtime_audit.nim",
     binary: "build/test-bin/t_macho_runtime_audit",
@@ -8255,7 +9283,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim",
     binary: "build/test-bin/t_managed_hook_reentry_guard_prevents_recursive_publish",
@@ -8263,7 +9292,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim",
     binary: "build/test-bin/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract",
@@ -8271,7 +9301,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_managed_hooks_stand_down_during_git_operations.nim",
     binary: "build/test-bin/t_managed_hooks_stand_down_during_git_operations",
@@ -8279,7 +9310,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim",
     binary: "build/test-bin/t_manifest_copyfile_linkfile_materialized_after_sync",
@@ -8287,7 +9319,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_manifest_init_rejects_unsigned_or_tampered_manifest.nim",
     binary: "build/test-bin/t_manifest_init_rejects_unsigned_or_tampered_manifest",
@@ -8295,7 +9328,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_manifest_store_ops_routed_through_interface_not_literals.nim",
     binary: "build/test-bin/t_manifest_store_ops_routed_through_interface_not_literals",
@@ -8303,7 +9337,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_manifest_tags_select_repo_subset.nim",
     binary: "build/test-bin/t_manifest_tags_select_repo_subset",
@@ -8311,7 +9346,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_manifests_reports_single_project_workspace.nim",
     binary: "build/test-bin/t_manifests_reports_single_project_workspace",
@@ -8319,7 +9355,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_measurement_flags_cli.nim",
     binary: "build/test-bin/t_measurement_flags_cli",
@@ -8327,7 +9364,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_membership_model_fork_upstream_remote_alignment.nim",
     binary: "build/test-bin/t_membership_model_fork_upstream_remote_alignment",
@@ -8335,7 +9373,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_membership_model_resolves_sets_and_prefixes.nim",
     binary: "build/test-bin/t_membership_model_resolves_sets_and_prefixes",
@@ -8343,7 +9382,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_membership_model_retired_names_fail_as_unknown.nim",
     binary: "build/test-bin/t_membership_model_retired_names_fail_as_unknown",
@@ -8351,7 +9391,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_membership_model_schemas_round_trip.nim",
     binary: "build/test-bin/t_membership_model_schemas_round_trip",
@@ -8359,7 +9400,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_membership_model_sets_cli.nim",
     binary: "build/test-bin/t_membership_model_sets_cli",
@@ -8367,7 +9409,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_membership_model_templates_scaffold_sets.nim",
     binary: "build/test-bin/t_membership_model_templates_scaffold_sets",
@@ -8375,7 +9418,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_membership_repo_push_anchors_no_foreign_lock_record.nim",
     binary: "build/test-bin/t_membership_repo_push_anchors_no_foreign_lock_record",
@@ -8383,7 +9427,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_microarch_lives_in_the_key_not_the_namespace.nim",
     binary: "build/test-bin/t_microarch_lives_in_the_key_not_the_namespace",
@@ -8391,7 +9436,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim",
     binary: "build/test-bin/t_migrate_leaves_a_pinned_checkout_on_its_pin",
@@ -8399,7 +9445,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_migrated_repo_workspace_real_pre_push.nim",
     binary: "build/test-bin/t_migrated_repo_workspace_real_pre_push",
@@ -8407,7 +9454,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_missing_features_are_named_in_the_diagnostic.nim",
     binary: "build/test-bin/t_missing_features_are_named_in_the_diagnostic",
@@ -8415,7 +9463,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim",
     binary: "build/test-bin/t_mixed_public_clean_team_unpublished_refuses",
@@ -8423,7 +9472,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim",
     binary: "build/test-bin/t_mixed_workspace_each_record_in_its_own_backend_only",
@@ -8431,7 +9481,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_monitor_depfile_reader.nim",
     binary: "build/test-bin/t_monitor_depfile_reader",
@@ -8439,7 +9490,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
     binary: "build/test-bin/t_monitor_fault_fails_the_action_not_the_daemon",
@@ -8447,7 +9499,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_monitored_zero_output_edge_input_completeness.nim",
     binary: "build/test-bin/t_monitored_zero_output_edge_input_completeness",
@@ -8455,7 +9508,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim",
     binary: "build/test-bin/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted",
@@ -8463,7 +9517,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_nested_lock_push_capability_security.nim",
     binary: "build/test-bin/t_nested_lock_push_capability_security",
@@ -8471,7 +9526,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim",
     binary: "build/test-bin/t_nested_topology_full_pipeline_without_org_root_repo",
@@ -8479,7 +9535,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_nim_package_path_handling.nim",
     binary: "build/test-bin/t_nim_package_path_handling",
@@ -8487,7 +9544,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_nix_daemon_ipc.nim",
     binary: "build/test-bin/t_nix_daemon_ipc",
@@ -8495,7 +9553,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_nix_daemon_provisioner.nim",
     binary: "build/test-bin/t_nix_daemon_provisioner",
@@ -8503,7 +9562,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_no_runtime_compilation_in_tests.nim",
     binary: "build/test-bin/t_no_runtime_compilation_in_tests",
@@ -8511,7 +9571,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_output_cleanup_executor.nim",
     binary: "build/test-bin/t_output_cleanup_executor",
@@ -8519,7 +9580,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim",
     binary: "build/test-bin/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles",
@@ -8527,7 +9589,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pkgconf_bootstrap_provisioning.nim",
     binary: "build/test-bin/t_pkgconf_bootstrap_provisioning",
@@ -8535,7 +9598,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim",
     binary: "build/test-bin/t_platform_refusal_surfaces_through_realize_and_plan",
@@ -8543,7 +9607,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim",
     binary: "build/test-bin/t_post_commit_cache_push_propagates_objects_to_sibling_workspace",
@@ -8551,7 +9616,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_post_commit_cache_push_runs_opportunistic_gc.nim",
     binary: "build/test-bin/t_post_commit_cache_push_runs_opportunistic_gc",
@@ -8559,7 +9625,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_post_commit_lock_survives_a_repo_local_repro_dir.nim",
     binary: "build/test-bin/t_post_commit_lock_survives_a_repo_local_repro_dir",
@@ -8567,7 +9634,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_post_commit_publishes_evidence_and_excludes_from_cache_push.nim",
     binary: "build/test-bin/t_post_commit_publishes_evidence_and_excludes_from_cache_push",
@@ -8575,7 +9643,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_post_commit_refreshes_lock_and_pushes_cache.nim",
     binary: "build/test-bin/t_post_commit_refreshes_lock_and_pushes_cache",
@@ -8583,7 +9652,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_post_merge_hook_reconciles_local_state.nim",
     binary: "build/test-bin/t_post_merge_hook_reconciles_local_state",
@@ -8591,7 +9661,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim",
     binary: "build/test-bin/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks",
@@ -8599,7 +9670,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_consumes_evidence_and_applies_tier_unreachable_policy.nim",
     binary: "build/test-bin/t_pre_push_consumes_evidence_and_applies_tier_unreachable_policy",
@@ -8607,7 +9679,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_currency_read_routes_per_backend.nim",
     binary: "build/test-bin/t_pre_push_currency_read_routes_per_backend",
@@ -8615,7 +9688,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim",
     binary: "build/test-bin/t_pre_push_gate_checks_only_pushed_repo_dependency_closure",
@@ -8623,7 +9697,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim",
     binary: "build/test-bin/t_pre_push_lock_records_unmaterialized_declared_repo",
@@ -8631,7 +9706,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim",
     binary: "build/test-bin/t_pre_push_membership_repo_scopes_to_touched_fragments",
@@ -8639,7 +9715,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim",
     binary: "build/test-bin/t_pre_push_passes_on_heterogeneous_branches",
@@ -8647,7 +9724,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_protocol_v2_policy_regressions.nim",
     binary: "build/test-bin/t_pre_push_protocol_v2_policy_regressions",
@@ -8655,7 +9733,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_protocol_v2_ref_validation.nim",
     binary: "build/test-bin/t_pre_push_protocol_v2_ref_validation",
@@ -8663,7 +9742,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim",
     binary: "build/test-bin/t_pre_push_public_only_writes_no_manifest_lock",
@@ -8671,7 +9751,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim",
     binary: "build/test-bin/t_pre_push_refuses_on_unreachable_team_backend",
@@ -8679,7 +9760,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim",
     binary: "build/test-bin/t_pre_push_refuses_when_lock_publish_fails",
@@ -8687,7 +9769,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_requires_certificate_coverage_when_project_opts_in.nim",
     binary: "build/test-bin/t_pre_push_requires_certificate_coverage_when_project_opts_in",
@@ -8695,7 +9778,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_rewrite_orphan_gate.nim",
     binary: "build/test-bin/t_pre_push_rewrite_orphan_gate",
@@ -8703,7 +9787,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.nim",
     binary: "build/test-bin/t_pre_push_warns_and_allows_on_unreachable_personal_backend",
@@ -8711,7 +9796,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim",
     binary: "build/test-bin/t_pre_push_writes_the_lock_record_it_demands",
@@ -8719,7 +9805,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers.nim",
     binary: "build/test-bin/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers",
@@ -8727,7 +9814,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim",
     binary: "build/test-bin/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch",
@@ -8735,7 +9823,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim",
     binary: "build/test-bin/t_private_repo_participates_via_evidence_without_source_exposure",
@@ -8743,7 +9832,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_project_dsl_build_action_payload.nim",
     binary: "build/test-bin/t_project_dsl_build_action_payload",
@@ -8751,7 +9841,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_project_extension_adds_edges_to_original_when_present.nim",
     binary: "build/test-bin/t_project_extension_adds_edges_to_original_when_present",
@@ -8759,7 +9850,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace.nim",
     binary: "build/test-bin/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace",
@@ -8767,7 +9859,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_project_extension_target_rehomed_and_toggles_without_force_rebuild.nim",
     binary: "build/test-bin/t_project_extension_target_rehomed_and_toggles_without_force_rebuild",
@@ -8775,7 +9868,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_project_interface_artifact_import_modes.nim",
     binary: "build/test-bin/t_project_interface_artifact_import_modes",
@@ -8783,7 +9877,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_projects_add_writes_and_pushes_manifest.nim",
     binary: "build/test-bin/t_projects_add_writes_and_pushes_manifest",
@@ -8791,7 +9886,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_prompt_cache_is_its_own_file_and_marks_staleness.nim",
     binary: "build/test-bin/t_prompt_cache_is_its_own_file_and_marks_staleness",
@@ -8799,7 +9895,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_protocol_document_survives_suite_body_echo.nim",
     binary: "build/test-bin/t_protocol_document_survives_suite_body_echo",
@@ -8807,7 +9904,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_provider_compile_reporting_distinguishes_compile_from_reuse.nim",
     binary: "build/test-bin/t_provider_compile_reporting_distinguishes_compile_from_reuse",
@@ -8815,7 +9913,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_provider_file_driven_fanout_cleanup.nim",
     binary: "build/test-bin/t_provider_file_driven_fanout_cleanup",
@@ -8823,7 +9922,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_provider_library_c_abi_memory_ownership.nim",
     binary: "build/test-bin/t_provider_library_c_abi_memory_ownership",
@@ -8831,7 +9931,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_provider_library_c_abi_reconcile.nim",
     binary: "build/test-bin/t_provider_library_c_abi_reconcile",
@@ -8839,7 +9940,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim",
     binary: "build/test-bin/t_provider_library_nimrtl_direct_call_no_marshal",
@@ -8847,7 +9949,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_provisioning_contributions.nim",
     binary: "build/test-bin/t_provisioning_contributions",
@@ -8855,7 +9958,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim",
     binary: "build/test-bin/t_public_committed_team_manifest_personal_db_mixed",
@@ -8863,7 +9967,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim",
     binary: "build/test-bin/t_pull_refuses_to_rewind_unpublished_work",
@@ -8871,7 +9976,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_r2_iso_boot.nim",
     binary: "build/test-bin/t_r2_iso_boot",
@@ -8879,7 +9985,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_r9_systemd_boot.nim",
     binary: "build/test-bin/t_r9_systemd_boot",
@@ -8887,7 +9994,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim",
     binary: "build/test-bin/t_recertify_is_noop_when_no_executed_function_changed",
@@ -8895,7 +10003,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim",
     binary: "build/test-bin/t_remote_alignment_never_strips_a_checkouts_remotes",
@@ -8903,7 +10012,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim",
     binary: "build/test-bin/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty",
@@ -8911,7 +10021,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim",
     binary: "build/test-bin/t_repos_add_reuses_remotes_and_inherits_revision",
@@ -8919,7 +10030,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_build_test_aggregate_builds_every_test.nim",
     binary: "build/test-bin/t_repro_build_test_aggregate_builds_every_test",
@@ -8927,7 +10039,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_core_binary_roundtrip.nim",
     binary: "build/test-bin/t_repro_core_binary_roundtrip",
@@ -8935,7 +10048,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_prompt_is_fast_and_silent_outside_workspace.nim",
     binary: "build/test-bin/t_repro_prompt_is_fast_and_silent_outside_workspace",
@@ -8943,7 +10057,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim",
     binary: "build/test-bin/t_repro_push_publishes_dependency_closure_in_topological_order",
@@ -8951,7 +10066,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim",
     binary: "build/test-bin/t_repro_push_real_hooks_publish_outgoing_head_and_closure",
@@ -8959,7 +10075,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim",
     binary: "build/test-bin/t_repro_push_sync_integrates_upstream_then_publishes",
@@ -8967,7 +10084,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_runtime_dlopen_without_library_path.nim",
     binary: "build/test-bin/t_repro_runtime_dlopen_without_library_path",
@@ -8975,7 +10093,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_issues_certificate_by_default_in_clean_state.nim",
     binary: "build/test-bin/t_repro_test_issues_certificate_by_default_in_clean_state",
@@ -8983,7 +10102,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_reports_no_certificate_with_remedy_when_dirty_or_unpushed.nim",
     binary: "build/test-bin/t_repro_test_reports_no_certificate_with_remedy_when_dirty_or_unpushed",
@@ -8991,7 +10111,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_aggregate_exit_code.nim",
     binary: "build/test-bin/t_repro_test_runner_aggregate_exit_code",
@@ -8999,7 +10120,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_catalog_selection.nim",
     binary: "build/test-bin/t_repro_test_runner_catalog_selection",
@@ -9007,7 +10129,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_consumes_result_document.nim",
     binary: "build/test-bin/t_repro_test_runner_consumes_result_document",
@@ -9015,7 +10138,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_repro_test_runner_counts_whole_binary_skips.nim",
+    binary: "build/test-bin/t_repro_test_runner_counts_whole_binary_skips",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_parallel_n_workers.nim",
     binary: "build/test-bin/t_repro_test_runner_parallel_n_workers",
@@ -9023,7 +10156,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_process_group_cleanup.nim",
     binary: "build/test-bin/t_repro_test_runner_process_group_cleanup",
@@ -9031,7 +10165,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_relative_results_git_config.nim",
     binary: "build/test-bin/t_repro_test_runner_relative_results_git_config",
@@ -9039,7 +10174,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_reporting_contract.nim",
     binary: "build/test-bin/t_repro_test_runner_reporting_contract",
@@ -9047,7 +10183,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim",
     binary: "build/test-bin/t_repro_test_runner_suiteless_case_round_trip",
@@ -9055,7 +10192,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_reproos_source_bridge_inventory.nim",
     binary: "build/test-bin/t_reproos_source_bridge_inventory",
@@ -9063,7 +10201,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_required_features_are_a_subset_of_host_features.nim",
     binary: "build/test-bin/t_required_features_are_a_subset_of_host_features",
@@ -9071,7 +10210,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_rp1_provider_compile_edge_materializes.nim",
     binary: "build/test-bin/t_rp1_provider_compile_edge_materializes",
@@ -9079,7 +10219,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_rp2_provider_session_invoke.nim",
     binary: "build/test-bin/t_rp2_provider_session_invoke",
@@ -9087,7 +10228,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_rp3_bind_deps_and_sharing.nim",
     binary: "build/test-bin/t_rp3_bind_deps_and_sharing",
@@ -9095,7 +10237,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim",
     binary: "build/test-bin/t_rp5a_consumer_imports_resource_contract_no_driver",
@@ -9103,7 +10246,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_rp5a_producer_exports_resource_contract_across_workspace.nim",
     binary: "build/test-bin/t_rp5a_producer_exports_resource_contract_across_workspace",
@@ -9111,7 +10255,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_rp5b_resource_driver_via_protocol.nim",
     binary: "build/test-bin/t_rp5b_resource_driver_via_protocol",
@@ -9119,7 +10264,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
     binary: "build/test-bin/t_rp8_lsp_typecheck_and_goto_def",
@@ -9127,7 +10273,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
     binary: "build/test-bin/t_run_consumes_opaque_out_of_tree",
@@ -9135,7 +10282,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
     binary: "build/test-bin/t_run_consumes_session_store_out_of_tree",
@@ -9143,7 +10291,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_run_edge_session_resolver_auto.nim",
     binary: "build/test-bin/t_run_edge_session_resolver_auto",
@@ -9151,7 +10300,26 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_runner_cpu_progress_liveness.nim",
+    binary: "build/test-bin/t_runner_cpu_progress_liveness",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_runner_progress_visibility.nim",
+    binary: "build/test-bin/t_runner_progress_visibility",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
     binary: "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
@@ -9159,7 +10327,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim",
     binary: "build/test-bin/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes",
@@ -9167,7 +10336,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_develop_mode_consumes_sibling_exe_and_lib_from_source.nim",
     binary: "build/test-bin/t_sc_develop_mode_consumes_sibling_exe_and_lib_from_source",
@@ -9175,7 +10345,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_engine_routes_producer_selector_through_override_and_lock.nim",
     binary: "build/test-bin/t_sc_engine_routes_producer_selector_through_override_and_lock",
@@ -9183,7 +10354,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_executable_producer_edge_spliced_and_on_path.nim",
     binary: "build/test-bin/t_sc_executable_producer_edge_spliced_and_on_path",
@@ -9191,7 +10363,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_library_producer_edge_spliced_through_aux_channels.nim",
     binary: "build/test-bin/t_sc_library_producer_edge_spliced_through_aux_channels",
@@ -9199,7 +10372,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_lock_pinned_fetches_and_builds_sibling_from_source.nim",
     binary: "build/test-bin/t_sc_lock_pinned_fetches_and_builds_sibling_from_source",
@@ -9207,7 +10381,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_producer_exports_typed_cli_contract_across_workspace.nim",
     binary: "build/test-bin/t_sc_producer_exports_typed_cli_contract_across_workspace",
@@ -9215,7 +10390,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_producer_source_change_invalidates_consumer.nim",
     binary: "build/test-bin/t_sc_producer_source_change_invalidates_consumer",
@@ -9223,7 +10399,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_typed_cross_project_consumption_both_modes.nim",
     binary: "build/test-bin/t_sc_typed_cross_project_consumption_both_modes",
@@ -9231,7 +10408,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sc_uses_import_resolves_workspace_project_schema.nim",
     binary: "build/test-bin/t_sc_uses_import_resolves_workspace_project_schema",
@@ -9239,7 +10417,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_shared_clone_alternates_skip_redownload.nim",
     binary: "build/test-bin/t_shared_clone_alternates_skip_redownload",
@@ -9247,7 +10426,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim",
     binary: "build/test-bin/t_shared_clone_cache_repacks_and_bounds_growth",
@@ -9255,7 +10435,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim",
     binary: "build/test-bin/t_shared_clone_uses_full_repo_url_for_base_remote",
@@ -9263,7 +10444,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_shm_index_boot_id_unavailable_fails_closed.nim",
     binary: "build/test-bin/t_shm_index_boot_id_unavailable_fails_closed",
@@ -9271,7 +10453,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_shm_index_mpsc_ring_multiproducer_single_consumer.nim",
     binary: "build/test-bin/t_shm_index_mpsc_ring_multiproducer_single_consumer",
@@ -9279,7 +10462,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_shm_index_seqlock_reads_consistent_across_resize.nim",
     binary: "build/test-bin/t_shm_index_seqlock_reads_consistent_across_resize",
@@ -9287,7 +10471,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_shm_oversized_submit_is_reported.nim",
     binary: "build/test-bin/t_shm_oversized_submit_is_reported",
@@ -9295,7 +10480,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_single_platform_entries_declare_platforms.nim",
     binary: "build/test-bin/t_single_platform_entries_declare_platforms",
@@ -9303,7 +10489,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_solved_packages_are_first_class_locked_deps.nim",
     binary: "build/test-bin/t_solved_packages_are_first_class_locked_deps",
@@ -9311,7 +10498,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_spec_example_fixtures_compile.nim",
     binary: "build/test-bin/t_spec_example_fixtures_compile",
@@ -9319,7 +10507,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_spec_example_fixtures_present.nim",
     binary: "build/test-bin/t_spec_example_fixtures_present",
@@ -9327,7 +10516,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_stackable_hooks_extracted_process_tree.nim",
     binary: "build/test-bin/t_stackable_hooks_extracted_process_tree",
@@ -9335,7 +10525,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: true),
   TestSpec(
     source: "tests/integration/t_stats_reads_shared_store.nim",
     binary: "build/test-bin/t_stats_reads_shared_store",
@@ -9343,7 +10534,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_status_health_add_remove_use_unified_resolver.nim",
     binary: "build/test-bin/t_status_health_add_remove_use_unified_resolver",
@@ -9351,7 +10543,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim",
     binary: "build/test-bin/t_store_and_registry_deps_carry_coordinates_and_integrity",
@@ -9359,7 +10552,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_store_daemon_m66_dev.nim",
     binary: "build/test-bin/t_store_daemon_m66_dev",
@@ -9367,7 +10561,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_switch_new_branch_marks_feature_branch.nim",
     binary: "build/test-bin/t_switch_new_branch_marks_feature_branch",
@@ -9375,7 +10570,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_switch_stashes_and_restores_per_repo_wip.nim",
     binary: "build/test-bin/t_switch_stashes_and_restores_per_repo_wip",
@@ -9383,7 +10579,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_check_operate_from_committed_lock_without_manifests.nim",
     binary: "build/test-bin/t_sync_check_operate_from_committed_lock_without_manifests",
@@ -9391,7 +10588,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_clones_commit_pinned_repo.nim",
     binary: "build/test-bin/t_sync_clones_commit_pinned_repo",
@@ -9399,7 +10597,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim",
     binary: "build/test-bin/t_sync_clones_newly_declared_dependency_after_pull",
@@ -9407,7 +10606,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_fast_forwards_feature_branch_from_its_own_upstream.nim",
     binary: "build/test-bin/t_sync_fast_forwards_feature_branch_from_its_own_upstream",
@@ -9415,7 +10615,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_ff_only_per_repo_upstream.nim",
     binary: "build/test-bin/t_sync_ff_only_per_repo_upstream",
@@ -9423,7 +10624,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_honours_branch_and_revision_together.nim",
     binary: "build/test-bin/t_sync_honours_branch_and_revision_together",
@@ -9431,7 +10633,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim",
     binary: "build/test-bin/t_sync_reports_partial_manifest_advance_without_rollback",
@@ -9439,7 +10642,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty.nim",
     binary: "build/test-bin/t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty",
@@ -9447,7 +10651,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim",
     binary: "build/test-bin/t_sync_scoped_to_named_project_touches_only_that_project",
@@ -9455,7 +10660,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim",
     binary: "build/test-bin/t_sync_skips_fetch_when_locked_sha_already_present",
@@ -9463,7 +10669,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_target_triple_drives_the_microarch_host_target.nim",
     binary: "build/test-bin/t_target_triple_drives_the_microarch_host_target",
@@ -9471,7 +10678,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim",
     binary: "build/test-bin/t_team_backend_routed_lock_reads_back_and_is_idempotent",
@@ -9479,7 +10687,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_team_repo_record_only_no_checkout.nim",
     binary: "build/test-bin/t_team_repo_record_only_no_checkout",
@@ -9487,7 +10696,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_test_edge_migration_covers_all_test_files.nim",
     binary: "build/test-bin/t_test_edge_migration_covers_all_test_files",
@@ -9495,7 +10705,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.nim",
     binary: "build/test-bin/t_test_execute_edge_declares_repro_binary_reached_via_helper",
@@ -9503,7 +10714,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_ti1_interface_artifact_edge.nim",
     binary: "build/test-bin/t_ti1_interface_artifact_edge",
@@ -9511,7 +10723,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_ti2_separate_module_producer.nim",
     binary: "build/test-bin/t_ti2_separate_module_producer",
@@ -9519,7 +10732,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim",
     binary: "build/test-bin/t_ti2_thin_interface_consumer_reads_cached_artifact",
@@ -9527,7 +10741,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_ti3_fingerprint_split.nim",
     binary: "build/test-bin/t_ti3_fingerprint_split",
@@ -9535,7 +10750,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim",
     binary: "build/test-bin/t_top_level_sync_pull_shortcuts_match_workspace_forms",
@@ -9543,7 +10759,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim",
     binary: "build/test-bin/t_unavailable_package_does_not_fall_through_to_path",
@@ -9551,7 +10768,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_unavailable_package_fails_with_platform_reason.nim",
     binary: "build/test-bin/t_unavailable_package_fails_with_platform_reason",
@@ -9559,7 +10777,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_unrouted_private_repo_refuses_loudly.nim",
     binary: "build/test-bin/t_unrouted_private_repo_refuses_loudly",
@@ -9567,7 +10786,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_unsatisfiable_floor_does_not_fall_through_to_path.nim",
     binary: "build/test-bin/t_unsatisfiable_floor_does_not_fall_through_to_path",
@@ -9575,7 +10795,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim",
     binary: "build/test-bin/t_unsigned_or_wrong_key_certificate_is_rejected",
@@ -9583,7 +10804,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_v2_artifact_resolves_on_a_v3_host.nim",
     binary: "build/test-bin/t_v2_artifact_resolves_on_a_v3_host",
@@ -9591,7 +10813,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_v3_artifact_refused_on_a_v2_host.nim",
     binary: "build/test-bin/t_v3_artifact_refused_on_a_v2_host",
@@ -9599,7 +10822,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim",
     binary: "build/test-bin/t_vcs_private_metadata_dir_resolves_worktree_safe",
@@ -9607,7 +10831,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_bootstrap_provisions_toolchain_on_windows.nim",
     binary: "build/test-bin/t_workspace_bootstrap_provisions_toolchain_on_windows",
@@ -9615,7 +10840,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults.nim",
     binary: "build/test-bin/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults",
@@ -9623,7 +10849,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_bootstrap_scaffolds_host_files.nim",
     binary: "build/test-bin/t_workspace_bootstrap_scaffolds_host_files",
@@ -9631,7 +10858,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_branch_create_records_metadata.nim",
     binary: "build/test-bin/t_workspace_branch_create_records_metadata",
@@ -9639,7 +10867,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_clone_auto_trusts_per_repo_envrc.nim",
     binary: "build/test-bin/t_workspace_clone_auto_trusts_per_repo_envrc",
@@ -9647,7 +10876,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_definition_projects_repos.nim",
     binary: "build/test-bin/t_workspace_definition_projects_repos",
@@ -9655,7 +10885,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_develop_clones_and_registers_override.nim",
     binary: "build/test-bin/t_workspace_develop_clones_and_registers_override",
@@ -9663,7 +10894,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_develop_overrides_round_trip.nim",
     binary: "build/test-bin/t_workspace_develop_overrides_round_trip",
@@ -9671,7 +10903,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_enable_materializes_added_projects.nim",
     binary: "build/test-bin/t_workspace_enable_materializes_added_projects",
@@ -9679,7 +10912,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_forall_runs_command_in_every_participating_repo.nim",
     binary: "build/test-bin/t_workspace_forall_runs_command_in_every_participating_repo",
@@ -9687,7 +10921,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_git_tool_identity.nim",
     binary: "build/test-bin/t_workspace_git_tool_identity",
@@ -9695,7 +10930,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_hooks_ensure_is_idempotent_across_three_runs.nim",
     binary: "build/test-bin/t_workspace_hooks_ensure_is_idempotent_across_three_runs",
@@ -9703,7 +10939,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_init_bootstraps_manifest_cache_outside_workspace.nim",
     binary: "build/test-bin/t_workspace_init_bootstraps_manifest_cache_outside_workspace",
@@ -9711,7 +10948,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_init_clones_missing_and_reports_existing.nim",
     binary: "build/test-bin/t_workspace_init_clones_missing_and_reports_existing",
@@ -9719,7 +10957,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_init_clones_org_root_repo_and_syncs_into_named_path.nim",
     binary: "build/test-bin/t_workspace_init_clones_org_root_repo_and_syncs_into_named_path",
@@ -9727,7 +10966,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_init_resolves_url_shorthand_and_default_host.nim",
     binary: "build/test-bin/t_workspace_init_resolves_url_shorthand_and_default_host",
@@ -9735,7 +10975,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_list_walks_resolved_repos.nim",
     binary: "build/test-bin/t_workspace_list_walks_resolved_repos",
@@ -9743,7 +10984,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_lock_latest_resolves_via_git_history_per_repo.nim",
     binary: "build/test-bin/t_workspace_lock_latest_resolves_via_git_history_per_repo",
@@ -9751,7 +10993,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_lock_partition_resolves_a_sibling_for_ci.nim",
     binary: "build/test-bin/t_workspace_lock_partition_resolves_a_sibling_for_ci",
@@ -9759,7 +11002,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_lock_round_trips_through_resolver.nim",
     binary: "build/test-bin/t_workspace_lock_round_trips_through_resolver",
@@ -9767,7 +11011,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifest_refresh_after_post_merge.nim",
     binary: "build/test-bin/t_workspace_manifest_refresh_after_post_merge",
@@ -9775,7 +11020,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifest_refresh_skips_when_divergent.nim",
     binary: "build/test-bin/t_workspace_manifest_refresh_skips_when_divergent",
@@ -9783,7 +11029,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifest_refresh_skips_when_locally_dirty.nim",
     binary: "build/test-bin/t_workspace_manifest_refresh_skips_when_locally_dirty",
@@ -9791,7 +11038,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_develop_overrides_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_develop_overrides_round_trip",
@@ -9799,7 +11047,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_enumerates_layers.nim",
     binary: "build/test-bin/t_workspace_manifests_enumerates_layers",
@@ -9807,7 +11056,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_lock_index_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_lock_index_round_trip",
@@ -9815,7 +11065,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_lock_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_lock_round_trip",
@@ -9823,7 +11074,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_private_override_shadows_public.nim",
     binary: "build/test-bin/t_workspace_manifests_private_override_shadows_public",
@@ -9831,7 +11083,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_project_manifest_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_project_manifest_round_trip",
@@ -9839,7 +11092,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_repo_fragment_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_repo_fragment_round_trip",
@@ -9847,7 +11101,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_resolve_collision.nim",
     binary: "build/test-bin/t_workspace_manifests_resolve_collision",
@@ -9855,7 +11110,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_resolve_reprobuild_project.nim",
     binary: "build/test-bin/t_workspace_manifests_resolve_reprobuild_project",
@@ -9863,7 +11119,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_resolve_variant_overrides_revision.nim",
     binary: "build/test-bin/t_workspace_manifests_resolve_variant_overrides_revision",
@@ -9871,7 +11128,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_snapshot_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_snapshot_round_trip",
@@ -9879,7 +11137,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_variant_manifest_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_variant_manifest_round_trip",
@@ -9887,7 +11146,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_workspace_local_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_workspace_local_round_trip",
@@ -9895,7 +11155,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_marker_accepts_committed_lock_only_repo.nim",
     binary: "build/test-bin/t_workspace_marker_accepts_committed_lock_only_repo",
@@ -9903,7 +11164,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_membership_enable_disable.nim",
     binary: "build/test-bin/t_workspace_membership_enable_disable",
@@ -9911,7 +11173,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_metadata_branch_round_trips_through_reader.nim",
     binary: "build/test-bin/t_workspace_metadata_branch_round_trips_through_reader",
@@ -9919,7 +11182,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_metadata_branch_survives_init_and_status.nim",
     binary: "build/test-bin/t_workspace_metadata_branch_survives_init_and_status",
@@ -9927,7 +11191,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_migrate_reconciles_local_state.nim",
     binary: "build/test-bin/t_workspace_migrate_reconciles_local_state",
@@ -9935,7 +11200,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_migrate_refuses_to_endanger_work.nim",
     binary: "build/test-bin/t_workspace_migrate_refuses_to_endanger_work",
@@ -9943,7 +11209,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_override_shadows_upstream_in_resolver.nim",
     binary: "build/test-bin/t_workspace_override_shadows_upstream_in_resolver",
@@ -9951,7 +11218,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim",
     binary: "build/test-bin/t_workspace_post_commit_lock_refresh_is_best_effort",
@@ -9959,7 +11227,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_blocks_lock_with_private_only_refs.nim",
     binary: "build/test-bin/t_workspace_pre_push_blocks_lock_with_private_only_refs",
@@ -9967,7 +11236,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_blocks_on_develop_override_cleanliness.nim",
     binary: "build/test-bin/t_workspace_pre_push_blocks_on_develop_override_cleanliness",
@@ -9975,7 +11245,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_blocks_when_head_unpublished.nim",
     binary: "build/test-bin/t_workspace_pre_push_blocks_when_head_unpublished",
@@ -9983,7 +11254,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_blocks_when_repo_dirty.nim",
     binary: "build/test-bin/t_workspace_pre_push_blocks_when_repo_dirty",
@@ -9991,7 +11263,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_passes_when_clean_and_published_and_locked.nim",
     binary: "build/test-bin/t_workspace_pre_push_passes_when_clean_and_published_and_locked",
@@ -9999,7 +11272,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_refreshes_lock_when_missing.nim",
     binary: "build/test-bin/t_workspace_pre_push_refreshes_lock_when_missing",
@@ -10007,7 +11281,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_private_layer_e2e.nim",
     binary: "build/test-bin/t_workspace_private_layer_e2e",
@@ -10015,7 +11290,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_project_set_conflict_refused.nim",
     binary: "build/test-bin/t_workspace_project_set_conflict_refused",
@@ -10023,7 +11299,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_project_set_unions_repos.nim",
     binary: "build/test-bin/t_workspace_project_set_unions_repos",
@@ -10031,7 +11308,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch.nim",
     binary: "build/test-bin/t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch",
@@ -10039,7 +11317,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_remotes_alignment.nim",
     binary: "build/test-bin/t_workspace_remotes_alignment",
@@ -10047,7 +11326,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim",
     binary: "build/test-bin/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty",
@@ -10055,7 +11335,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim",
     binary: "build/test-bin/t_workspace_routes_repo_sets_to_distinct_backends",
@@ -10063,7 +11344,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_shared_clones_list_and_rewire.nim",
     binary: "build/test-bin/t_workspace_shared_clones_list_and_rewire",
@@ -10071,7 +11353,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_status_shows_active_branch_and_drift.nim",
     binary: "build/test-bin/t_workspace_status_shows_active_branch_and_drift",
@@ -10079,7 +11362,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_switch_switches_all_repos.nim",
     binary: "build/test-bin/t_workspace_switch_switches_all_repos",
@@ -10087,7 +11371,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_sync_fetches_repos_in_parallel.nim",
     binary: "build/test-bin/t_workspace_sync_fetches_repos_in_parallel",
@@ -10095,7 +11380,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_sync_force_push.nim",
     binary: "build/test-bin/t_workspace_sync_force_push",
@@ -10103,7 +11389,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_sync_jobs_network_pool_bounds_concurrency.nim",
     binary: "build/test-bin/t_workspace_sync_jobs_network_pool_bounds_concurrency",
@@ -10111,7 +11398,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_sync_seven_corner_cases.nim",
     binary: "build/test-bin/t_workspace_sync_seven_corner_cases",
@@ -10119,7 +11407,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_clone_cacheable.nim",
     binary: "build/test-bin/t_workspace_vcs_clone_cacheable",
@@ -10127,7 +11416,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_evidence_round_trips_through_build_report.nim",
     binary: "build/test-bin/t_workspace_vcs_evidence_round_trips_through_build_report",
@@ -10135,7 +11425,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_fetch_no_op_when_up_to_date.nim",
     binary: "build/test-bin/t_workspace_vcs_fetch_no_op_when_up_to_date",
@@ -10143,7 +11434,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_hybrid_workspace_clone.nim",
     binary: "build/test-bin/t_workspace_vcs_hybrid_workspace_clone",
@@ -10151,7 +11443,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim",
     binary: "build/test-bin/t_workspace_vcs_switch_preserves_dirty_state",
@@ -10159,7 +11452,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_action_compatibility_key.nim",
     binary: "build/test-bin/t_action_compatibility_key",
@@ -10167,7 +11461,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_capabilities.nim",
     binary: "build/test-bin/t_capabilities",
@@ -10175,7 +11470,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_config_nims_lib_resolution.nim",
     binary: "build/test-bin/t_config_nims_lib_resolution",
@@ -10183,7 +11479,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_configure_build_tree_cleanup.nim",
     binary: "build/test-bin/t_configure_build_tree_cleanup",
@@ -10191,7 +11488,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_cross_repo_runtime_tool_closure.nim",
     binary: "build/test-bin/t_cross_repo_runtime_tool_closure",
@@ -10199,7 +11497,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim",
     binary: "build/test-bin/t_ct_test_nim_unittest_path_mm_pool",
@@ -10207,7 +11506,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_declared_package_deps_from_recipe.nim",
     binary: "build/test-bin/t_declared_package_deps_from_recipe",
@@ -10215,7 +11515,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_fribidi_dev_stub.nim",
     binary: "build/test-bin/t_fribidi_dev_stub",
@@ -10223,7 +11524,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_from_source_realization_platform.nim",
     binary: "build/test-bin/t_from_source_realization_platform",
@@ -10231,7 +11533,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_hcr_agent_coordinator.nim",
     binary: "build/test-bin/t_hcr_agent_coordinator",
@@ -10239,7 +11542,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_hcr_agent_endpoint.nim",
     binary: "build/test-bin/t_hcr_agent_endpoint",
@@ -10247,7 +11551,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_hcr_agent_ipc.nim",
     binary: "build/test-bin/t_hcr_agent_ipc",
@@ -10255,7 +11560,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_hcr_agent_process_target.nim",
     binary: "build/test-bin/t_hcr_agent_process_target",
@@ -10263,7 +11569,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @["-fpatchable-function-entry=16,0"],
     extraPassL: @["-Wl,-segprot,__HCR,rwx,rwx"],
-    targetOs: soMacosArm64),
+    targetOs: soMacosArm64,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_hcr_agent_protocol.nim",
     binary: "build/test-bin/t_hcr_agent_protocol",
@@ -10271,7 +11578,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_hcr_agent_runtime.nim",
     binary: "build/test-bin/t_hcr_agent_runtime",
@@ -10279,7 +11587,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_hcr_watch_inference.nim",
     binary: "build/test-bin/t_hcr_watch_inference",
@@ -10287,7 +11596,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_infra_apply_lock_hung_owner.nim",
     binary: "build/test-bin/t_infra_apply_lock_hung_owner",
@@ -10295,7 +11605,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_library_stage_alias.nim",
     binary: "build/test-bin/t_library_stage_alias",
@@ -10303,7 +11614,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m21_history_fed_scheduling.nim",
     binary: "build/test-bin/t_m21_history_fed_scheduling",
@@ -10311,7 +11623,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9q_from_source_provisioning.nim",
     binary: "build/test-bin/t_m9q_from_source_provisioning",
@@ -10319,7 +11632,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r10a_cycle_break.nim",
     binary: "build/test-bin/t_m9r10a_cycle_break",
@@ -10327,7 +11641,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r10a_exec_name_audit.nim",
     binary: "build/test-bin/t_m9r10a_exec_name_audit",
@@ -10335,7 +11650,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r10b_synthesis_wiring.nim",
     binary: "build/test-bin/t_m9r10b_synthesis_wiring",
@@ -10343,7 +11659,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r11_runquota_daemon_recovery.nim",
     binary: "build/test-bin/t_m9r11_runquota_daemon_recovery",
@@ -10351,7 +11668,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r11_stub_provisioning_widening.nim",
     binary: "build/test-bin/t_m9r11_stub_provisioning_widening",
@@ -10359,7 +11677,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r12_3_runquota_standard_pools.nim",
     binary: "build/test-bin/t_m9r12_3_runquota_standard_pools",
@@ -10367,7 +11686,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r12_4_autotools_emits_fetch.nim",
     binary: "build/test-bin/t_m9r12_4_autotools_emits_fetch",
@@ -10375,7 +11695,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim",
     binary: "build/test-bin/t_m9r12_sh_inline_exec_and_typed_tool_fallback",
@@ -10383,7 +11704,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r13a_provider_compile_sharing.nim",
     binary: "build/test-bin/t_m9r13a_provider_compile_sharing",
@@ -10391,7 +11713,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r13b_1_toolchain_pin.nim",
     binary: "build/test-bin/t_m9r13b_1_toolchain_pin",
@@ -10399,7 +11722,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim",
     binary: "build/test-bin/t_m9r13c_1_runquota_stale_pipe_recovery",
@@ -10407,7 +11731,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r13c_2_shim_lib_resolution.nim",
     binary: "build/test-bin/t_m9r13c_2_shim_lib_resolution",
@@ -10415,7 +11740,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14c_1_autotools_parallel_make.nim",
     binary: "build/test-bin/t_m9r14c_1_autotools_parallel_make",
@@ -10423,7 +11749,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14c_2_binutils_cycle_break.nim",
     binary: "build/test-bin/t_m9r14c_2_binutils_cycle_break",
@@ -10431,7 +11758,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14c_4_inline_exec_path_enrichment.nim",
     binary: "build/test-bin/t_m9r14c_4_inline_exec_path_enrichment",
@@ -10439,7 +11767,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14c_5_autotools_stage_copy.nim",
     binary: "build/test-bin/t_m9r14c_5_autotools_stage_copy",
@@ -10447,7 +11776,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14d_1_library_use_kind_resolution.nim",
     binary: "build/test-bin/t_m9r14d_1_library_use_kind_resolution",
@@ -10455,7 +11785,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14d_2_no_file_urls.nim",
     binary: "build/test-bin/t_m9r14d_2_no_file_urls",
@@ -10463,7 +11794,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14d_3_meson_package_autoimports.nim",
     binary: "build/test-bin/t_m9r14d_3_meson_package_autoimports",
@@ -10471,7 +11803,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14d_6_meson_options_no_d_prefix.nim",
     binary: "build/test-bin/t_m9r14d_6_meson_options_no_d_prefix",
@@ -10479,7 +11812,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14d_7_meson_package_stage_copy.nim",
     binary: "build/test-bin/t_m9r14d_7_meson_package_stage_copy",
@@ -10487,7 +11821,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14e_1_resolver_pkg_config_paths.nim",
     binary: "build/test-bin/t_m9r14e_1_resolver_pkg_config_paths",
@@ -10495,7 +11830,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14e_2_install_tree_mirror.nim",
     binary: "build/test-bin/t_m9r14e_2_install_tree_mirror",
@@ -10503,7 +11839,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14e_3_action_env_threading.nim",
     binary: "build/test-bin/t_m9r14e_3_action_env_threading",
@@ -10511,7 +11848,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14f_1_transitive_lib_dirs.nim",
     binary: "build/test-bin/t_m9r14f_1_transitive_lib_dirs",
@@ -10519,7 +11857,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14f_2_rpath_patching.nim",
     binary: "build/test-bin/t_m9r14f_2_rpath_patching",
@@ -10527,7 +11866,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r14h_1_auto_recurse_idempotency.nim",
     binary: "build/test-bin/t_m9r14h_1_auto_recurse_idempotency",
@@ -10535,7 +11875,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15c_1_io_monitor_fragment_log_perf.nim",
     binary: "build/test-bin/t_m9r15c_1_io_monitor_fragment_log_perf",
@@ -10543,7 +11884,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15d_1_libegl_headers_stub.nim",
     binary: "build/test-bin/t_m9r15d_1_libegl_headers_stub",
@@ -10551,7 +11893,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15d_2_python3_with_modules_stub.nim",
     binary: "build/test-bin/t_m9r15d_2_python3_with_modules_stub",
@@ -10559,7 +11902,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15f_1_io_monitor_batched_writes.nim",
     binary: "build/test-bin/t_m9r15f_1_io_monitor_batched_writes",
@@ -10567,7 +11911,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15i_1_cmake_qt6_component_dirs.nim",
     binary: "build/test-bin/t_m9r15i_1_cmake_qt6_component_dirs",
@@ -10575,7 +11920,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15o_1_qt6_transitive_cmake_deps.nim",
     binary: "build/test-bin/t_m9r15o_1_qt6_transitive_cmake_deps",
@@ -10583,7 +11929,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15p_0_qt6_transitive_auto_inject.nim",
     binary: "build/test-bin/t_m9r15p_0_qt6_transitive_auto_inject",
@@ -10591,7 +11938,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15p_1_6_share_only_lib_cmake.nim",
     binary: "build/test-bin/t_m9r15p_1_6_share_only_lib_cmake",
@@ -10599,7 +11947,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15q_2_from_source_custom_registry_population.nim",
     binary: "build/test-bin/t_m9r15q_2_from_source_custom_registry_population",
@@ -10607,7 +11956,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15q_3_kf6_umbrella_config.nim",
     binary: "build/test-bin/t_m9r15q_3_kf6_umbrella_config",
@@ -10615,7 +11965,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15q_4_x11_stubs.nim",
     binary: "build/test-bin/t_m9r15q_4_x11_stubs",
@@ -10623,7 +11974,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim",
     binary: "build/test-bin/t_m9r15q_5_rpath_nix_stub_deps",
@@ -10631,7 +11983,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r15q_9_plasma_stubs.nim",
     binary: "build/test-bin/t_m9r15q_9_plasma_stubs",
@@ -10639,7 +11992,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r1_deps_package_level.nim",
     binary: "build/test-bin/t_m9r1_deps_package_level",
@@ -10647,7 +12001,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r20_1_system_macro_basic.nim",
     binary: "build/test-bin/t_m9r20_1_system_macro_basic",
@@ -10655,7 +12010,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r20_2_activity_macro_system_scope.nim",
     binary: "build/test-bin/t_m9r20_2_activity_macro_system_scope",
@@ -10663,7 +12019,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r20_3_hardware_macro_basic.nim",
     binary: "build/test-bin/t_m9r20_3_hardware_macro_basic",
@@ -10671,7 +12028,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r20_4_reproos_desktop_via_system_macro.nim",
     binary: "build/test-bin/t_m9r20_4_reproos_desktop_via_system_macro",
@@ -10679,7 +12037,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r20_5_installer_output_parses.nim",
     binary: "build/test-bin/t_m9r20_5_installer_output_parses",
@@ -10687,7 +12046,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r21_1_stable_system_id.nim",
     binary: "build/test-bin/t_m9r21_1_stable_system_id",
@@ -10695,7 +12055,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r21_2_probe_driver.nim",
     binary: "build/test-bin/t_m9r21_2_probe_driver",
@@ -10703,7 +12064,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r21_3_probe_command.nim",
     binary: "build/test-bin/t_m9r21_3_probe_command",
@@ -10711,7 +12073,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r22_1_disko_btrfs_subvols.nim",
     binary: "build/test-bin/t_m9r22_1_disko_btrfs_subvols",
@@ -10719,7 +12082,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r22_2_disko_macro_emit.nim",
     binary: "build/test-bin/t_m9r22_2_disko_macro_emit",
@@ -10727,7 +12091,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r22_3_repro_disk_plan.nim",
     binary: "build/test-bin/t_m9r22_3_repro_disk_plan",
@@ -10735,7 +12100,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r22b_1_disk_tools.nim",
     binary: "build/test-bin/t_m9r22b_1_disk_tools",
@@ -10743,7 +12109,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r22b_3_apply_cli.nim",
     binary: "build/test-bin/t_m9r22b_3_apply_cli",
@@ -10751,7 +12118,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r22b_4_mount_cli.nim",
     binary: "build/test-bin/t_m9r22b_4_mount_cli",
@@ -10759,7 +12127,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r23_1_installer_state_install_sequence.nim",
     binary: "build/test-bin/t_m9r23_1_installer_state_install_sequence",
@@ -10767,7 +12136,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r2_typed_cli_surfaces.nim",
     binary: "build/test-bin/t_m9r2_typed_cli_surfaces",
@@ -10775,7 +12145,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r2b_typed_value_layer.nim",
     binary: "build/test-bin/t_m9r2b_typed_value_layer",
@@ -10783,7 +12154,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r2c_artifact_slot_typed.nim",
     binary: "build/test-bin/t_m9r2c_artifact_slot_typed",
@@ -10791,7 +12163,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r30_transitive_rpath_propagation.nim",
     binary: "build/test-bin/t_m9r30_transitive_rpath_propagation",
@@ -10799,7 +12172,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r33_2_qt6_module_path_walker.nim",
     binary: "build/test-bin/t_m9r33_2_qt6_module_path_walker",
@@ -10807,7 +12181,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim",
     binary: "build/test-bin/t_m9r34_recipe_edit_invalidates_local_cache",
@@ -10815,7 +12190,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r3_library_api_block.nim",
     binary: "build/test-bin/t_m9r3_library_api_block",
@@ -10823,7 +12199,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r40_1_probe_clean_env.nim",
     binary: "build/test-bin/t_m9r40_1_probe_clean_env",
@@ -10831,7 +12208,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: true),
   TestSpec(
     source: "tests/unit/t_m9r42_1_disk_diag_hook.nim",
     binary: "build/test-bin/t_m9r42_1_disk_diag_hook",
@@ -10839,7 +12217,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r4_library_api_exports.nim",
     binary: "build/test-bin/t_m9r4_library_api_exports",
@@ -10847,7 +12226,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r5a_recipe_sweep_smoke.nim",
     binary: "build/test-bin/t_m9r5a_recipe_sweep_smoke",
@@ -10855,7 +12235,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r5b_recipe_options_sweep.nim",
     binary: "build/test-bin/t_m9r5b_recipe_options_sweep",
@@ -10863,7 +12244,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r6_1_convention_minimal_emission.nim",
     binary: "build/test-bin/t_m9r6_1_convention_minimal_emission",
@@ -10871,7 +12253,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim",
     binary: "build/test-bin/t_m9r6_convention_narrowing_default_synthesis",
@@ -10879,7 +12262,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r76_install_mirror_resolver.nim",
     binary: "build/test-bin/t_m9r76_install_mirror_resolver",
@@ -10887,7 +12271,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r77_cas_cli.nim",
     binary: "build/test-bin/t_m9r77_cas_cli",
@@ -10895,7 +12280,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r77_hashed_mirror_wiring.nim",
     binary: "build/test-bin/t_m9r77_hashed_mirror_wiring",
@@ -10903,7 +12289,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r79_constructors_compile.nim",
     binary: "build/test-bin/t_m9r79_constructors_compile",
@@ -10911,7 +12298,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r7_target_triple_cache_namespacing.nim",
     binary: "build/test-bin/t_m9r7_target_triple_cache_namespacing",
@@ -10919,7 +12307,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r81_dep_root_env_vars.nim",
     binary: "build/test-bin/t_m9r81_dep_root_env_vars",
@@ -10927,7 +12316,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r82_action_cache_cas_migration.nim",
     binary: "build/test-bin/t_m9r82_action_cache_cas_migration",
@@ -10935,7 +12325,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
     binary: "build/test-bin/t_m9r83_install_mirror_action_shapes",
@@ -10943,7 +12334,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r83_install_mirror_publish.nim",
     binary: "build/test-bin/t_m9r83_install_mirror_publish",
@@ -10951,7 +12343,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r8_dispatcher_gate.nim",
     binary: "build/test-bin/t_m9r8_dispatcher_gate",
@@ -10959,7 +12352,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_m9r9_auto_recurse.nim",
     binary: "build/test-bin/t_m9r9_auto_recurse",
@@ -10967,7 +12361,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_measurement_axes.nim",
     binary: "build/test-bin/t_measurement_axes",
@@ -10975,7 +12370,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_nix_propagated_store_paths.nim",
     binary: "build/test-bin/t_nix_propagated_store_paths",
@@ -10983,7 +12379,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_run_consumes.nim",
     binary: "build/test-bin/t_run_consumes",
@@ -10991,7 +12388,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_runquota_grant_wait_unresponsive.nim",
     binary: "build/test-bin/t_runquota_grant_wait_unresponsive",
@@ -10999,7 +12397,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_runquota_grant_wait_wedged_connected.nim",
     binary: "build/test-bin/t_runquota_grant_wait_wedged_connected",
@@ -11007,7 +12406,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling.nim",
     binary: "build/test-bin/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling",
@@ -11015,7 +12415,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_rx_runquotad_forwards_custom_pools.nim",
     binary: "build/test-bin/t_rx_runquotad_forwards_custom_pools",
@@ -11023,7 +12424,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_shared_mime_info_dev_stub.nim",
     binary: "build/test-bin/t_shared_mime_info_dev_stub",
@@ -11031,7 +12433,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_test_execution_extension_is_framework_neutral.nim",
     binary: "build/test-bin/t_test_execution_extension_is_framework_neutral",
@@ -11039,7 +12442,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_trusted_declared_inputs_policy_guards.nim",
+    binary: "build/test-bin/t_trusted_declared_inputs_policy_guards",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",
@@ -11047,7 +12460,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_windows_system_hash_mode.nim",
     binary: "build/test-bin/t_windows_system_hash_mode",
@@ -11055,7 +12469,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/unit/t_workspace_root_for_repo_managed_worktree.nim",
     binary: "build/test-bin/t_workspace_root_for_repo_managed_worktree",
@@ -11063,7 +12478,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tools/catalog-harvester/tests/test_gh_releases_source.nim",
     binary: "build/test-bin/test_gh_releases_source",
@@ -11071,7 +12487,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tools/catalog-harvester/tests/test_harvester_app_name_validation.nim",
     binary: "build/test-bin/test_harvester_app_name_validation",
@@ -11079,7 +12496,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tools/catalog-harvester/tests/test_harvester_history.nim",
     binary: "build/test-bin/test_harvester_history",
@@ -11087,7 +12505,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tools/catalog-harvester/tests/test_harvester_history_walk.nim",
     binary: "build/test-bin/test_harvester_history_walk",
@@ -11095,7 +12514,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tools/catalog-harvester/tests/test_harvester_idempotent.nim",
     binary: "build/test-bin/test_harvester_idempotent",
@@ -11103,7 +12523,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tools/catalog-harvester/tests/test_harvester_verify.nim",
     binary: "build/test-bin/test_harvester_verify",
@@ -11111,7 +12532,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tools/catalog-harvester/tests/test_manifest_parser.nim",
     binary: "build/test-bin/test_manifest_parser",
@@ -11119,7 +12541,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny),
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tools/catalog-harvester/tests/test_msys2_source.nim",
     binary: "build/test-bin/test_msys2_source",
@@ -11127,7 +12550,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
-    targetOs: soAny)
+    targetOs: soAny,
+    selfInterposes: false)
 ]
 
 ## Bootstrap-And-Self-Build B4: Python tests discovered

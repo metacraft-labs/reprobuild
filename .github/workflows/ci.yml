@@ -118,6 +118,12 @@ jobs:
       # always reaches a verdict is `suite-case-counts.yml`.
       - name: Suite case-count baseline
         run: dev-exec bash scripts/check_suite_case_counts.sh
+      # The vacuous-case gate, for the same reason and at the same point:
+      # a source scan that answers in seconds, so it is asked before the
+      # multi-minute `nim check` sweep and its failure annotation names
+      # this step rather than a lint log. `just lint` runs it too.
+      - name: No test case asserts only `check true`
+        run: dev-exec python3 scripts/check_vacuous_test_cases.py
       - name: just lint
         run: dev-exec just lint
       - name: Upload logs

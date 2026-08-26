@@ -26,7 +26,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + Debian
 ##     source pool URL + repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -35,6 +35,12 @@ import repro_project_dsl
 # ``libinputSource`` at module init time.
 import ./repro
 
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
+
 const ExpectedUrl =
   "http://deb.debian.org/debian/pool/main/libi/libinput/libinput_1.28.1.orig.tar.gz"
 
@@ -42,12 +48,12 @@ const ExpectedHash =
   "a13f8c9a7d93df3c85c66afd135f0296701d8d32f911991b7aa4273fdd6a42a3"
 
 const ExpectedMesonOptions = @[
-  "-Ddocumentation=false",
-  "-Ddebug-gui=false",
-  "-Dtests=false",
-  "-Dlibwacom=false",
-  "-Dudev-dir=/lib/udev",
-  "--buildtype=release",
+  "documentation=false",
+  "debug-gui=false",
+  "tests=false",
+  "libwacom=false",
+  "udev-dir=/lib/udev",
+  "c_args=-Wno-redundant-decls",
 ]
 
 suite "libinputSource — from-source recipe smoke test":
@@ -76,9 +82,25 @@ suite "libinputSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "mesonOptions registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``meson_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("libinputSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedMesonOptions
+    check buildBlockConstructors("libinputSource") == @["meson_package"]
   test "mesonOptions does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the cmake channel would
+    # surface as a ``cmake_package(...)`` call here.
+    check "cmake_package" notin buildBlockConstructors("libinputSource")
   test "artifacts register one library plus one executable":
     # M3 artifact registry: ``libinput`` must be tagged ``dakLibrary``
     # while ``libinputBin`` must be tagged ``dakExecutable``. The
