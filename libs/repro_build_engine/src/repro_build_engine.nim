@@ -733,6 +733,17 @@ type
     ## is a behaviour change that will break real edges — so this counts
     ## the population first and changes nothing about it.
     ##
+    ## PER VARIABLE, "OVERLAY" MEANS LAST-WRITE-WINS, NOT MERGE. A
+    ## variable the action declares REPLACES the inherited value; only a
+    ## variable it does not declare is inherited. For `PATH` specifically
+    ## that is spelled out in `prependPathDirsToArgvEnv` below, whose
+    ## `getEnv("PATH")` fallback is reached only when no `PATH` entry is
+    ## present. A blanket "declared entries overlay the environment, they
+    ## do not replace it" reading of this census is what let three
+    ## lowering sites emit `PATH=` — an empty `PATH` the action really
+    ## ran with — for 1372 of 2753 edges. `emptyPathActions` below is the
+    ## number that would have said so.
+    ##
     ## This is deliberately a CENSUS and not a warning. PR #99's shm drop
     ## was invisible for the same reason: nobody had put a number on it.
     ## A number is what makes the next decision arguable.
@@ -758,6 +769,25 @@ type
       ## `totalActions` is 1391, and a report that called the first
       ## number "inheriting" would have said the channel was closed
       ## when it is open for every edge.
+    hermeticPathActions*: int
+      ## Actions whose `PATH` is composed only of solved-graph tool
+      ## directories and is keyed BY VALUE — the edges for which a
+      ## prepended shadowing directory on the caller's `$PATH` is
+      ## unreachable rather than merely uninvalidating.
+    inheritedPathActions*: int
+      ## Actions whose `PATH` still carries the caller's, declared
+      ## PASSTHROUGH so the name is in the key and the value is not.
+      ## These are the edges that declare no tool refs; for them the host
+      ## `$PATH` remains an unkeyed input.
+    emptyPathActions*: int
+      ## THE ONE NUMBER THAT MUST BE ZERO. Actions carrying `PATH=` with
+      ## an empty value, i.e. actions that run with no `PATH` at all
+      ## because their declaration replaced the inherited one with
+      ## nothing. Not a portability question and not a key question — a
+      ## `findExe` inside such an action returns `""`, so a test that
+      ## probes for its tools skips itself into a green, cacheable pass.
+      ## Gated at zero by
+      ## `libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim`.
 
   BuildRunResult* = object
     results*: seq[ActionResult]
@@ -3836,6 +3866,55 @@ when defined(windows):
       return -1
     indices[signaled]
 
+type
+  ActionPathDeclaration* = enum
+    ## How one lowered action declared its ``PATH``, read back off the
+    ## ``BuildAction`` rather than off the lowering that produced it.
+    ##
+    ## Reading it back is the point. The lowering's own opinion is not
+    ## evidence — three sites held the opinion "an empty prefix falls
+    ## through to inheritance" while emitting an entry that did the
+    ## opposite. This classifies the ARTIFACT, so a census over it says
+    ## what the actions carry.
+    apdAbsent
+      ## No ``PATH`` entry and no ``PATH`` passthrough name. The launcher
+      ## falls back to ``getEnv("PATH")`` (see ``prependPathDirsToArgvEnv``
+      ## below), so the action inherits — silently, with nothing in the
+      ## key recording that it did.
+    apdInherited
+      ## ``PATH`` is named in ``envPassthrough``: the value is the
+      ## caller's, the name is keyed, the value is not.
+    apdHermetic
+      ## A non-empty ``PATH`` value that is NOT passthrough — composed
+      ## from solved-graph tool directories and keyed by value.
+    apdEmpty
+      ## ``PATH=`` with an empty value. The action runs with no ``PATH``.
+      ## Must never occur; see ``EnvironmentInheritanceCensus.emptyPathActions``.
+
+proc classifyActionPath*(action: BuildAction): ActionPathDeclaration =
+  ## Classify ``action``'s ``PATH`` declaration. Shared by the engine's
+  ## own census and by ``repro graph --view=env`` so the build header and
+  ## the graph instrument can never disagree about the same graph.
+  var pathValue = ""
+  var pathSeen = false
+  for entry in action.env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    if cmpIgnoreCase(entry[0 ..< eq], "PATH") == 0:
+      # Last-write-wins, matching ``prependPathDirsToArgvEnv``.
+      pathValue = entry[eq + 1 .. ^1]
+      pathSeen = true
+  var passthrough = false
+  for name in action.envPassthrough:
+    if cmpIgnoreCase(name, "PATH") == 0:
+      passthrough = true
+  if pathSeen and pathValue.len == 0:
+    return apdEmpty
+  if not pathSeen:
+    return if passthrough: apdInherited else: apdAbsent
+  if passthrough: apdInherited else: apdHermetic
+
 proc prependPathDirsToArgvEnv(env: seq[string];
                               binDirs: openArray[string]): seq[string] =
   ## Walk an argv-style ``KEY=VALUE`` env list, collapse any
@@ -3844,6 +3923,42 @@ proc prependPathDirsToArgvEnv(env: seq[string];
   ## spawn path (which carries env as ``seq[string]`` rather than a
   ## ``StringTableRef``) so the same M9.N Batch B behaviour applies
   ## to the daemon-backed launch as well as the bypass launch.
+  ##
+  ## ## AN ``action.env`` ``PATH`` REPLACES; IT DOES NOT MERGE
+  ##
+  ## The tail this proc appends after ``binDirs`` is ``pathValue`` — the
+  ## value the ACTION declared — whenever the action declared one, and
+  ## ``getEnv("PATH")`` only when it did not (the ``if pathSeen`` at the
+  ## bottom of the body). So:
+  ##
+  ##   * no ``PATH`` entry  -> the caller's ``$PATH`` is the tail;
+  ##   * ``PATH=<dirs>``    -> ``<dirs>`` is the tail, the caller's is gone;
+  ##   * ``PATH=``          -> the tail is EMPTY, and the child runs with
+  ##                           ``PATH=`` (or just ``binDirs``) — it does
+  ##                           NOT fall through to the caller's.
+  ##
+  ## The third row is worth stating because a lowering comment once
+  ## asserted the opposite ("the launcher layers ``action.env`` OVER the
+  ## inherited environment rather than replacing it") and emitted an
+  ## empty ``PATH`` on 1372 of this repository's 2753 process edges on
+  ## the strength of it. ``repro_cli_support.actionPathDecision`` is the
+  ## single place that can no longer produce that value.
+  ##
+  ## ## THE FIRST ROW IS NOW MOSTLY UNREACHABLE FROM THE LOWERING SITES
+  ##
+  ## The ``else: getEnv("PATH")`` fallback below is still correct and
+  ## still exercised — by any action that neither declares ``PATH`` nor
+  ## names it passthrough — but it is NOT how a lowered non-declaring
+  ## edge gets its ``PATH`` any more. ``actionPathDecision``'s inherited
+  ## branch names ``PATH`` in ``envPassthrough``, and ``launchChildEnv``
+  ## resolves value-less passthrough names out of the host BEFORE this
+  ## proc sees the list (the ``if action.envPassthrough.len > 0`` block
+  ## near the end of ``launchChildEnv``). By the time an inherited edge
+  ## reaches here the list already carries ``PATH=<host value>``, so
+  ## ``pathSeen`` is true and row two is what runs. Same bytes, same
+  ## launch-time read; different proc. Recorded because a comment in
+  ## this file citing a mechanism that no longer fires is exactly how
+  ## the empty-``PATH`` defect above shipped.
   let sep =
     when defined(windows): ";"
     else: ":"
@@ -4672,7 +4787,11 @@ proc launchChildEnv(action: BuildAction;
   ## unmanaged, outer measures the whole tree" model.
   ##
   ## The RunQuota process launcher layers these entries over the inherited
-  ## environment, so ``PATH`` and other host values survive. The value
+  ## environment, so a host value the action does not itself declare
+  ## survives. A value it DOES declare replaces the inherited one — for
+  ## ``PATH`` that is spelled out in ``prependPathDirsToArgvEnv``, and it
+  ## is why an edge that declares no tools must still be given a ``PATH``
+  ## it can use rather than an empty one. The value here
   ## is constant, so it does not perturb the action-cache fingerprint, and is
   ## inert for the ~99% of actions (plain ``nim c`` compiles) whose children
   ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
@@ -6651,6 +6770,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       inc runResult.environmentInheritance.passthroughActions
     if censusAction.env.len == 0 and censusAction.envPassthrough.len == 0:
       inc runResult.environmentInheritance.undeclaredActions
+    case classifyActionPath(censusAction)
+    of apdHermetic: inc runResult.environmentInheritance.hermeticPathActions
+    of apdInherited: inc runResult.environmentInheritance.inheritedPathActions
+    of apdEmpty: inc runResult.environmentInheritance.emptyPathActions
+    of apdAbsent: discard
   let validateStart = statStart()
   validateGraph(buildGraph)
   finishStat("repro graph validate", validateStart)

@@ -89,7 +89,12 @@
 ## actions.** The practical cost is smaller than it sounds — those keys
 ## are already 100% host-dependent through `pathSearchList` in
 ## `profileFingerprintFor`, so they do not survive a host change either
-## way — but it is a wipe, and (4) is not evidence against it. What (4)
+## way — but it is a wipe, and (4) is not evidence against it. (That
+## remaining host-dependency is now gone: `profileFingerprintFor` keys
+## on the resolved executable's content digest instead of the search
+## list — see
+## `tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim`.
+## Landing THAT was a second total wipe.) What (4)
 ## does buy is stated and tested in its reachable half: built-in
 ## (non-forking) actions cannot declare an environment at all, so their
 ## records survive.
@@ -420,6 +425,16 @@ suite "the environment key rendering is canonical and host-independent":
     let declaration = ["PATH=/tool/bin"]
     let passthrough = ["PATH", PassthroughVar]
 
+    # RESTORE THE PROCESS `PATH` AFTERWARDS. This case sets it to two
+    # fictional values on purpose, and it used to leave the second one
+    # in place — so every case declared after it ran with
+    # `PATH=/completely/different:/host/c:/host/d`, `findExe` returned
+    # `""` for everything, and any later case needing a real `sh` had to
+    # skip. Case 12 below launches a real child through the real engine,
+    # which is only possible once this stops leaking.
+    let hostPath = getEnv("PATH")
+    defer: putEnv("PATH", hostPath)
+
     putEnv("PATH", "/host/a:/host/b")
     putEnv(PassthroughVar, "one")
     let underHostA = keyedOnActionEnvironment(base, declaration, passthrough)
@@ -467,59 +482,311 @@ suite "the environment key rendering is canonical and host-independent":
       checkpoint("banned call: " & banned)
       check not body.contains(banned)
 
-  test "10. every site that composes a host PATH declares it passthrough":
-    # THE SWEEP MADE STRUCTURAL. A review found a FOURTH lowering site
-    # (`cmakeRegenerationBuildAction`) that built
-    # `"PATH=" & wrapperPath & PathSep & getEnv("PATH")` by hand and
-    # passed no `envPassthrough`, so the verbatim host PATH entered that
-    # cacheable edge's key BY VALUE — precisely the defect the
-    # passthrough class exists to prevent, created by the change that
-    # introduced the class. It sits ~1000 lines from the other three and
-    # this repository's graph contains no CMake-driven project, so no
-    # measurement could have caught it; only reading every site could,
-    # and reading every site is what a person does once and then stops
-    # doing.
+  test "10. every lowering site routes its PATH through ONE decision":
+    # THE SWEEP MADE STRUCTURAL. A review once found a FOURTH lowering
+    # site (`cmakeRegenerationBuildAction`) that built
+    # `"PATH=" & wrapperPath & PathSep & getEnv("PATH")` by hand, ~1000
+    # lines from the other three, and this repository's graph contains no
+    # CMake-driven project, so no measurement could have caught it. Only
+    # reading every site could, and reading every site is what a person
+    # does once and then stops doing.
     #
-    # So the pairing is checked instead of remembered. Two rules:
+    # WHAT THE RULE NOW IS, AND WHY IT CHANGED TWICE.
     #
-    #   (a) nothing may build a `PATH=` entry for an action's env by
-    #       hand — it must go through `actionPathEntry`, which is where
-    #       the ambient read and its justification live; and
-    #   (b) every `actionPathEntry` call site must declare the
-    #       passthrough within a few lines of the call.
+    # v1: "every `actionPathEntry` call site must declare PATH
+    # passthrough" — right while `actionPathEntry` appended
+    # `getEnv("PATH")`, because a host value must never be keyed.
     #
-    # A fifth site added tomorrow fails this test rather than silently
-    # keying a host value.
+    # v2 inverted it to "no site may declare PATH passthrough", because
+    # the host tail was removed and the value became graph-derived. That
+    # inversion was correct about the hermetic edges and silent about
+    # the rest: it said nothing about WHETHER the entry is emitted, so
+    # three sites began emitting `PATH=` for every edge that resolved
+    # no tools. MEASURED: 1372 of 2753 process actions on this
+    # repository's `test` graph, every `reprobuild.test_execute.*` edge.
+    # `PATH=` REPLACES the inherited value (see
+    # `prependPathDirsToArgvEnv`), so those actions ran with no PATH,
+    # and `t_workspace_root_for_repo_managed_worktree` skipped itself
+    # into `asSucceeded exit=0` and then `cdHit`.
+    #
+    # v3, below, is about the DECISION rather than about either of its
+    # outcomes: emitting and classifying are one choice, so they live in
+    # one place and every site must go through it. Five rules:
+    #
+    #   (a) nothing may build a `PATH=` entry by hand — it must go
+    #       through `actionPathEntry`;
+    #   (b) `actionPathEntry`'s own body must not read the ambient
+    #       environment, which is what makes a hermetic value keyable;
+    #   (c) `actionPathEntry` may be called ONLY from `actionPathDecision`
+    #       (the decision) and `actionPathEnvEntry` (the test-facing
+    #       composition helper) — never from a lowering site, because a
+    #       lowering site that calls it directly is a site that has
+    #       decided to emit unconditionally;
+    #   (d) every `actionPathDecision` call site must consume BOTH halves
+    #       of the answer — a site that takes `.env` and drops
+    #       `.passthrough` re-creates the un-keyed-inheritance defect,
+    #       and one that takes `.passthrough` and drops `.env` produces
+    #       an action with no PATH entry at all; and
+    #   (e) the ambient read may live in exactly one proc,
+    #       `actionInheritedPathValue`, so the hermetic branch cannot
+    #       reach it; and
+    #   (f) every site must pass an `edgeDeclaresTools` argument that
+    #       either READS THE EDGE'S DECLARATION (`toolIdentityRefs`) or
+    #       is the literal `false`, and the literal is allowed only in
+    #       `cmakeRegenerationBuildAction`.
+    #
+    # A fifth lowering site added tomorrow fails (c), (d) or (f) rather
+    # than silently handing the caller's shell control of what the
+    # action executes, or silently handing it nothing.
+    #
+    # WHY (f) EXISTS, MEASURED. Rules (a)-(e) pin how the decision is
+    # SPELLED and what `actionPathDecision` does GIVEN its argument.
+    # None of them, and none of the unit cases in
+    # `t_tool_profile_keys_on_resolution_not_search_path.nim`, pins what
+    # the call sites PASS. Mutating the general typed-tool site to
+    # `edgeDeclaresTools = actionPathPrefix.len > 0` — precisely the
+    # naive "restore the `len > 0` guard" fix the branch rejected — left
+    # EVERY suite green: this file 12/12, the toolpath unit suite 19/19,
+    # the census 4/4, the execute-edge integration gate 2/2 and the
+    # pythonUnittest path-mode gate 2/2. A real build of
+    # `.#test#test_package_root_anchor` nevertheless went from
+    # `asSucceeded` to `asFailed: AssertionError: no `nim` on PATH`,
+    # because that edge's prefix is non-empty (its own `python3`) while
+    # its declaration set is empty. The empty-`PATH` counter in case 11
+    # structurally cannot see it — `PATH=<python3>/bin` is not empty, it
+    # is hermetic, keyed and unusable — which is the branch's own
+    # argument for why an emptiness test is insufficient, and was true
+    # of its own gates until this rule and the third case in
+    # `tests/integration/t_execute_edge_gives_tests_a_usable_path.nim`
+    # were added.
+    #
+    # THE `false` CARVE-OUT IS ONE SITE WIDE, and named rather than
+    # counted, because a bare `false` at the typed-tool site would be
+    # the OPPOSITE mutation: every edge inherits, no edge is hermetic,
+    # and the whole point of `7823baae8` is gone with nothing failing.
+    # `cmakeRegenerationBuildAction` is the one site that legitimately
+    # declares nothing: it re-runs a CMake CONFIGURE, whose tool closure
+    # is whatever the consumer's `CMakeLists.txt` probes by bare name
+    # (`execute_process(COMMAND uname ...)`, uncached `find_program`,
+    # and the fork's own `FindProgram("repro")`), and which is therefore
+    # not enumerable from the lowering site. See the comment there for
+    # the end-to-end measurement of what a hermetic `PATH` did to it.
     let source = currentSourcePath().parentDir.parentDir.parentDir /
       "repro_cli_support" / "src" / "repro_cli_support.nim"
     check fileExists(source)
-    let lines = readFile(source).splitLines()
+    let text = readFile(source)
+    let lines = text.splitLines()
+
+    proc enclosingProc(index: int): string =
+      ## Name of the `proc` a line belongs to, by scanning backwards for
+      ## the nearest column-0 `proc` declaration.
+      var i = index
+      while i >= 0:
+        let line = lines[i]
+        if line.startsWith("proc "):
+          var name = line[5 .. ^1]
+          for stop in ["*", "(", ":", " "]:
+            let cut = name.find(stop)
+            if cut >= 0:
+              name = name[0 ..< cut]
+          return name
+        dec i
+      ""
 
     var handRolled: seq[string] = @[]
-    var callSites: seq[int] = @[]
+    var entryCallers: seq[string] = @[]
+    var decisionSites: seq[int] = @[]
     for i, line in lines:
+      let stripped = line.strip()
+      if stripped.startsWith("#") or stripped.startsWith("##"):
+        continue
       if line.contains(".add(\"PATH=") or line.contains("= \"PATH=\" &"):
-        handRolled.add($(i + 1) & ": " & line.strip())
+        handRolled.add($(i + 1) & ": " & stripped)
       if line.contains("actionPathEntry(") and
           not line.contains("proc actionPathEntry"):
-        callSites.add(i)
+        entryCallers.add(enclosingProc(i))
+      if line.contains("actionPathDecision(") and
+          not line.contains("proc actionPathDecision"):
+        decisionSites.add(i)
+
+    # (a)
     checkpoint("hand-rolled PATH entries: " & $handRolled)
     check handRolled.len == 0
 
-    # The call sites must exist at all — a scan that found nothing would
-    # pass rule (b) vacuously.
-    checkpoint("actionPathEntry call sites: " & $callSites.len)
-    check callSites.len >= 4
+    # (c) — and the scan must have found call sites at all, or (a) and
+    # (c) would both pass vacuously.
+    checkpoint("actionPathEntry callers: " & $entryCallers)
+    check entryCallers.len >= 2
+    for caller in entryCallers:
+      check caller in ["actionPathDecision", "actionPathEnvEntry"]
 
-    for site in callSites:
-      var declared = false
-      for probe in max(site - 6, 0) .. min(site + 6, lines.high):
-        if lines[probe].contains("ActionPathPassthrough") or
-            lines[probe].contains("envPassthrough.add(\"PATH\")"):
-          declared = true
-      checkpoint("call site line " & $(site + 1) & ": " &
-        lines[site].strip() & " -> declared=" & $declared)
-      check declared
+    # (d) — the four lowering sites. Each binds the answer to a name and
+    # must use both halves of it.
+    checkpoint("actionPathDecision call sites: " & $decisionSites.len)
+    check decisionSites.len >= 4
+    for site in decisionSites:
+      let line = lines[site].strip()
+      check line.startsWith("let ")
+      let name = line[4 ..< line.find(" =")]
+      checkpoint("decision site line " & $(site + 1) & " binds " & name)
+      var usesEnv = false
+      var usesPassthrough = false
+      for probe in site .. min(site + 20, lines.high):
+        if lines[probe].strip().startsWith("#"):
+          continue
+        if lines[probe].contains(name & ".env"):
+          usesEnv = true
+        if lines[probe].contains(name & ".passthrough"):
+          usesPassthrough = true
+      check usesEnv
+      check usesPassthrough
+
+    # (f) — WHAT each site passes, not merely that it consumes the
+    # answer. The argument text is read out of the call itself, which
+    # spans two lines at all four sites.
+    var declarationArgs: seq[string] = @[]
+    for site in decisionSites:
+      var callText = ""
+      for probe in site .. min(site + 6, lines.high):
+        callText.add(lines[probe].strip() & " ")
+        if lines[probe].contains(")"):
+          break
+      const Marker = "edgeDeclaresTools = "
+      let at = callText.find(Marker)
+      # Fail-closed: a site that passes the argument positionally, or
+      # spells it without the surrounding spaces, is a site this scan
+      # cannot read, and an unreadable site is not a passing one.
+      checkpoint("decision site line " & $(site + 1) & " call: " & callText)
+      check at >= 0
+      if at >= 0:
+        var arg = callText[at + Marker.len .. ^1]
+        let close = arg.find(')')
+        if close >= 0:
+          arg = arg[0 ..< close]
+        arg = arg.strip()
+        declarationArgs.add(arg)
+        checkpoint("  edgeDeclaresTools = " & arg &
+          "  (in " & enclosingProc(site) & ")")
+        check arg.contains("toolIdentityRefs") or
+          (arg == "false" and
+            enclosingProc(site) == "cmakeRegenerationBuildAction")
+    check declarationArgs.len == decisionSites.len
+    # And the declaring form must be the MAJORITY arrangement, or the
+    # carve-out above has quietly become the rule.
+    var declaringSites = 0
+    for arg in declarationArgs:
+      if arg.contains("toolIdentityRefs"):
+        inc declaringSites
+    checkpoint("sites keyed on the edge's own refs: " & $declaringSites)
+    check declaringSites >= decisionSites.len - 1
+
+    proc bodyOf(name: string): string =
+      let start = text.find("\nproc " & name)
+      check start >= 0
+      let stop = text.find("\nproc ", start + 1)
+      check stop > start
+      # Comment lines are stripped before the scan for the same reason
+      # as test 8: the doc comments DISCUSS the ambient read, and a scan
+      # that could not tell an explanation from a call would force the
+      # rationale out of the source to stay green.
+      for line in text[start ..< stop].splitLines():
+        if line.strip().startsWith("#"):
+          continue
+        result.add(line & "\n")
+
+    # (b)
+    let entryBody = bodyOf("actionPathEntry")
+    checkpoint("actionPathEntry body:\n" & entryBody)
+    check entryBody.contains("actionPathPrefix")
+    for banned in ["getEnv", "existsEnv", "envPairs", "getAllEnv"]:
+      checkpoint("banned call in actionPathEntry: " & banned)
+      check not entryBody.contains(banned)
+
+    # (e) — the decision itself must not read the environment either.
+    # The read belongs to `actionInheritedPathValue`, which only the
+    # inherited branch calls; a `getEnv` in `actionPathDecision` would
+    # mean the hermetic branch could reach one too.
+    let decisionBody = bodyOf("actionPathDecision")
+    checkpoint("actionPathDecision body:\n" & decisionBody)
+    check decisionBody.contains("edgeDeclaresTools")
+    for banned in ["getEnv", "existsEnv", "envPairs", "getAllEnv"]:
+      checkpoint("banned call in actionPathDecision: " & banned)
+      check not decisionBody.contains(banned)
+    let inheritedBody = bodyOf("actionInheritedPathValue")
+    checkpoint("actionInheritedPathValue body:\n" & inheritedBody)
+    check inheritedBody.contains("getEnv")
+
+  test "11. an emitted PATH is never the empty string":
+    # THE GATE THE BRANCH WAS MISSING. Test 10 is structural; this one
+    # is behavioural, and it is the one that fails when the emission
+    # decision is wrong regardless of how the code is arranged.
+    #
+    # `classifyActionPath` reads a lowered action back and names its
+    # PATH declaration. `apdEmpty` is the defect class, split out from
+    # "declares a variable" — which is how the build header reported
+    # 1372 empty-PATH edges as ordinary declaring actions for the life
+    # of the defect.
+    proc probe(env, passthrough: openArray[string]): ActionPathDeclaration =
+      classifyActionPath(action("probe", ["/bin/true"],
+        governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+        env = env, envPassthrough = passthrough))
+
+    check probe(["PATH=/a/bin"], []) == apdHermetic
+    check probe(["PATH=/a/bin"], ["PATH"]) == apdInherited
+    check probe([], ["PATH"]) == apdInherited
+    check probe([], []) == apdAbsent
+    check probe(["PATH="], []) == apdEmpty
+    # Last-write-wins, matching `prependPathDirsToArgvEnv`: a later
+    # empty entry is the value the child gets, so it is the one that
+    # decides the class.
+    check probe(["PATH=/a/bin", "PATH="], []) == apdEmpty
+    check probe(["PATH=", "PATH=/a/bin"], []) == apdHermetic
+    # Case-insensitive, for the same reason the launcher is.
+    check probe(["Path="], []) == apdEmpty
+
+  test "12. an empty PATH is not a portability question — the child sees it":
+    # END TO END, through the real launcher, because the whole defect
+    # was a disagreement about what the launcher does with an emitted
+    # `PATH=`. A comment at the lowering site said the entry "does not
+    # get a hermetic empty one — it inherits the caller's, because the
+    # launcher layers `action.env` OVER the inherited environment rather
+    # than replacing it". This runs the launcher and asks it.
+    let sh = shPath()
+    check sh.len > 0
+
+    proc pathSeenBy(env: openArray[string]): string =
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let edge = action("path/probe",
+        [sh, "-c", "printf '%s' \"${PATH-<unset>}\" > out/seen.txt"],
+        cwd = f.workRoot,
+        inputs = [],
+        outputs = ["out/seen.txt"],
+        cacheable = false,
+        weakFingerprint = weak("path/probe"),
+        env = env,
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      let res = runBuild(graph([edge]), warmConfig(f.cacheRoot))
+      check res.byId("path/probe").status == asSucceeded
+      readFile(f.workRoot / "out" / "seen.txt")
+
+    # No declaration: the caller's `$PATH` reaches the child. This is
+    # the reading the D1 comment generalised from, and it is true HERE.
+    let inherited = pathSeenBy([])
+    checkpoint("no PATH entry -> child saw " & $inherited.len & " bytes")
+    check inherited.len > 0
+
+    # A declaration REPLACES it. The child does not see the caller's.
+    let replaced = pathSeenBy(["PATH=/nonexistent-repro-probe-dir"])
+    checkpoint("PATH=<dir> -> child saw: " & replaced)
+    check replaced.contains("/nonexistent-repro-probe-dir")
+    check replaced != inherited
+
+    # And an EMPTY declaration replaces it with nothing. Not a
+    # fall-through, not a no-op: the child runs with no PATH.
+    let emptied = pathSeenBy(["PATH="])
+    checkpoint("PATH= -> child saw: " & $emptied.len & " bytes: " & emptied)
+    check emptied.len == 0
 
   test "9. the rendering distinguishes the two classes explicitly":
     # A cache key that cannot be explained cannot be debugged. The

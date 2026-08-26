@@ -1204,100 +1204,260 @@ proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata;
   payload.addCmakeFingerprintField(meta.providerStateFile)
   weakFingerprintFromText(payload)
 
-const ActionPathPassthrough = ["PATH"]
-  ## The environment variables an action's `PATH` composition takes from
-  ## the HOST. Declared beside `actionPathEntry` below, and used by every
-  ## lowering site that calls it, so the two can never drift apart: a
-  ## site that composes a host value without saying so is exactly the
-  ## defect this pair exists to prevent.
-  ##
-  ## ## THE CLASSIFICATION RULE
-  ##
-  ## An action's declared environment mixes two very different kinds of
-  ## value, and which class a variable belongs in is decided by WHERE
-  ## THE LOWERING GOT IT, not by what it looks like:
-  ##
-  ## * **Obtained by reading the ambient environment** (`getEnv`) or by
-  ##   probing the host filesystem — PASSTHROUGH. The value is a fact
-  ##   about this machine, it does not determine what the action
-  ##   computes, and pinning it would key every edge to one host.
-  ##   `PATH` and `REPROBUILD_SOURCE_ROOT` are the two.
-  ##
-  ## * **Obtained from the solved graph** — DECLARED, by value. These
-  ##   look host-absolute and are not: `DEP_NIM_ROOT`, `BEARSSL_SRC`,
-  ##   `OUT_MIRROR` and the rest of the `DEP_*_ROOT` / `*_SRC` family
-  ##   are `/nix/store` paths, but they are *package identities*. A
-  ##   different `DEP_NIM_ROOT` is a different compiler, and an action
-  ##   built against it really is a different action. Excluding them
-  ##   would be a stale-serve hole, not a portability win.
-  ##
-  ## Two consequences worth being explicit about, because they are the
-  ## first things a reader will suspect are oversights:
-  ##
-  ## 1. Those fifteen `/nix/store` values are in every key BY VALUE.
-  ##    That is deliberate under the rule above, and it is also NOT a
-  ##    change: they arrive through the DSL's `extraEnv`, which
-  ##    `encodeBuildActionPayload` has serialised since v14 and which
-  ##    every lowering site already folds into its fingerprint text via
-  ##    `node.payload`. Keying the environment admitted no new value to
-  ##    any key — every value now in a key was already in one.
-  ##
-  ## 2. It DOES make those keys non-portable across machines, which is
-  ##    the same complaint `repro_build_engine.nim`'s shim-library seed
-  ##    answers differently: it keeps the machine-specific
-  ##    `REPRO_MONITOR_SHIM_LIB` out of `action.env` entirely, injecting
-  ##    it at launch. That is consistent with the rule, not in conflict
-  ##    with it — the shim path is a host probe, not a solved-graph
-  ##    identity, so it is in the first class. Making the solved-graph
-  ##    values portable is content-addressing work, not a reason to
-  ##    reclassify them.
-  ##
-  ## ## Applied unconditionally, and what that costs
-  ##
-  ## Every lowering site that composes a `PATH` passes this whole list;
-  ## there is no per-variable opt-in and no way for a recipe to ask for
-  ## `PATH` to be keyed by value. The price is real and one-directional:
-  ## a recipe that overrides `PATH` explicitly through `extraEnv` gets
-  ## that override applied to the process (it is appended after the
-  ## prefix and wins) but NOT reflected in the key, so two recipes
-  ## differing only in an explicit `extraEnv` `PATH` share a cache
-  ## entry. This is most reachable on inline-exec edges, which carry no
-  ## `profile.profileFingerprint` to distinguish them by other means.
-  ## BuildXL has the same behaviour for the same reason — a passthrough
-  ## variable's value is untracked even when the build sets it — but
-  ## BuildXL lets a spec choose per variable and this does not.
+## ## THE CLASSIFICATION RULE for an action's declared environment
+##
+## An action's declared environment mixes two very different kinds of
+## value, and which class a variable belongs in is decided by WHERE THE
+## LOWERING GOT IT, not by what it looks like:
+##
+## * **Obtained by reading the ambient environment** (`getEnv`) or by
+##   probing the host filesystem — PASSTHROUGH. The value is a fact
+##   about this machine, it does not determine what the action
+##   computes, and pinning it would key every edge to one host.
+##   `REPROBUILD_SOURCE_ROOT` is the remaining one.
+##
+## * **Obtained from the solved graph** — DECLARED, by value. These
+##   look host-absolute and are not: `DEP_NIM_ROOT`, `BEARSSL_SRC`,
+##   `OUT_MIRROR` and the rest of the `DEP_*_ROOT` / `*_SRC` family
+##   are `/nix/store` paths, but they are *package identities*. A
+##   different `DEP_NIM_ROOT` is a different compiler, and an action
+##   built against it really is a different action. Excluding them
+##   would be a stale-serve hole, not a portability win.
+##
+## `PATH` IS IN EITHER CLASS, AND THE EDGE'S OWN DECLARATION DECIDES
+## WHICH. See `actionPathDecision` below, which is the single place that
+## decision is made:
+##
+## * An edge that DECLARES tool refs gets a HERMETIC `PATH` built only
+##   out of directories the solved graph resolved those tools into. No
+##   ambient read happens, so by the rule above the value is DECLARED
+##   and `keyedOnActionEnvironment` keys it BY VALUE. That is what
+##   closes the bare-name sub-tool stale-serve measured in
+##   `tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim`.
+##
+## * An edge that declares NOTHING has said nothing about the sub-tools
+##   it runs, so there is nothing to build a hermetic value out of. It
+##   INHERITS the caller's `$PATH` (prefixed by whatever the graph did
+##   resolve), and that value is PASSTHROUGH — the name is keyed, the
+##   value is not. Inheriting is the pre-existing arrangement and the
+##   pre-existing hole; what is new is that the edge now SAYS it is
+##   inheriting, by naming `PATH` in its passthrough set, so the census
+##   in `environmentInheritanceHeaderLine` can count the population.
+##
+## WHAT MUST NEVER HAPPEN IS THE THIRD THING: a `PATH=` entry with an
+## EMPTY value. `prependPathDirsToArgvEnv`
+## (`repro_build_engine.nim:3502-3551`) takes its `getEnv("PATH")`
+## fallback ONLY when no `PATH` entry is present at all
+## (`repro_build_engine.nim:3543-3545`: `pathSeen` decides). An emitted
+## `PATH=` therefore REPLACES the inherited value with nothing, and the
+## action runs with no `PATH` at all. Measured on this repository's own
+## graph before `actionPathDecision` existed: 1372 of 2753 process
+## actions — every `reprobuild.test_execute.*` edge — emitted `PATH=`,
+## and `t_workspace_root_for_repo_managed_worktree` answered
+## `findExe("git") == ""` by SKIPPING itself into a green, cacheable
+## pass (`asSucceeded exit=0`, `[SKIPPED]`, `cdHit` on the next run).
 
 proc actionPathEntry(actionPathPrefix: string): string =
-  ## The action's `PATH`: the resolved tool directories this edge
-  ## declares, then whatever the host has.
+  ## The action's `PATH`, and nothing else: the directories the solved
+  ## graph resolved THIS EDGE's tool and THIS EDGE's declared
+  ## `toolIdentityRefs` into — see `toolPathPrefix`, which builds the
+  ## value and explains why the boundary is the edge's own refs rather
+  ## than every tool the project happens to declare.
   ##
-  ## ## The `getEnv` here is deliberate, and it is not in a cache key
+  ## ## What is NOT here any more, and why that is the point
   ##
-  ## Every caller pairs this with `envPassthrough =
-  ## ActionPathPassthrough`, which puts `PATH` in BuildXL's passthrough
-  ## class: `keyedOnActionEnvironment` records the NAME and refuses the
-  ## VALUE. So the host's `PATH` cannot reach a cache record, which is
-  ## the property that matters — PR #96's `NIX_STORE_DIR` defect was an
-  ## ambient value entering a record permanently because a key
-  ## computation read the environment.
+  ## This used to append `getEnv("PATH")`. That tail was the last
+  ## unkeyed channel through which the caller's shell decided what an
+  ## action executed: `PATH` was declared PASSTHROUGH (name keyed, value
+  ## not), so every BARE-NAME sub-tool an action's command line invokes
+  ## — `mkdir`, `cp`, `chmod`, `tr`, `python3`, and every tool a
+  ## compiler shells out to — resolved out of the host's `$PATH` with
+  ## nothing keying the choice. Prepending a directory containing a
+  ## different `tr` produced a cache HIT serving bytes the action would
+  ## not have produced under that `$PATH`. Observed-input revalidation
+  ## cannot rescue that: a newly prepended directory is by construction
+  ## absent from the recorded probe set.
   ##
-  ## Keying on this value instead would be a much larger defect than the
-  ## one it appears to fix. The prefix is absolute store paths and the
-  ## tail is the host's `PATH`; neither is the same under `nix develop`
-  ## as in CI. Every edge of every graph would invalidate on any host
-  ## difference. BuildXL reaches the same conclusion twice over: `PATH`
-  ## is one of its untracked base variables
-  ## (`PipEnvironment.cs:88-110`), and a passthrough variable's value is
-  ## not fingerprinted even when the build declares it explicitly
-  ## (`Build-Parameters-(Environment-variables).md:39`).
+  ## So the tail is gone and the value is now a pure function of the
+  ## solved graph. Two consequences, both intended:
   ##
-  ## What this does NOT recover is the PREFIX's contribution: the
-  ## resolved tool directories are also excluded, because they are
-  ## host-absolute for the same reason. For typed-tool edges the tool
-  ## identity is already keyed through `profile.profileFingerprint`.
-  ## For inline-exec edges it is not yet, and making it so needs the
-  ## portable-key work, not a raw path in a key.
-  "PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")
+  ## 1. A directory that is not a resolved tool's directory cannot
+  ##    influence any action, whatever the caller's `$PATH` says. The
+  ##    shadowing shape above is not "invalidated", it is unreachable.
+  ##
+  ## 2. A bare-name sub-tool the EDGE does not name is now an
+  ##    UNDECLARED HOST-TOOL DEPENDENCY and fails loudly at execution
+  ##    instead of silently binding to whatever the developer's shell
+  ##    happened to offer. That is a finding about the graph, not a
+  ##    regression: declare the tool. On this repository the three
+  ##    findings were `gcc` (every `nim c` edge), `mkdir`/`cp`/`chmod`
+  ##    (the nix-daemon staging edge) and `python3` (the legacy-wire
+  ##    generator edge); all three are now named at their call sites.
+  ##
+  ## The value is keyed BY VALUE (a hermetic site passes no `PATH`
+  ## passthrough). Its bytes are absolute store paths, which is exactly
+  ## as portable as `DEP_NIM_ROOT` and the rest of the declared
+  ## solved-graph family already in every key — and strictly MORE
+  ## portable than the previous arrangement, where the same edges were
+  ## keyed on the host through `pathSearchList` in
+  ## `profileFingerprintFor`.
+  ##
+  ## THIS PROC DOES NOT DECIDE WHETHER THE ENTRY IS EMITTED, and it is
+  ## not called directly by any lowering site. `actionPathDecision` is,
+  ## and it is the only caller here besides the test-facing
+  ## `actionPathEnvEntry`. Emitting this unconditionally is exactly the
+  ## defect described above the proc: an empty prefix would become
+  ## `PATH=`, which REPLACES the inherited value rather than falling
+  ## through to it.
+  "PATH=" & actionPathPrefix
+
+type
+  ActionPathClass* = enum
+    ## How a lowered action's `PATH` was decided. Mirrored by
+    ## `repro_build_engine.classifyActionPath`, which reads the same
+    ## decision back off a `BuildAction` for the census.
+    apcHermetic
+      ## Composed only of directories the solved graph resolved this
+      ## edge's declared tools into. Keyed BY VALUE.
+    apcInherited
+      ## The edge declared no tools, so the caller's `$PATH` is the tail
+      ## (or the whole value). PASSTHROUGH: name keyed, value not.
+
+  ActionPathDecision* = object
+    ## The `PATH` contribution of one lowering site: the `env` entries to
+    ## append and the passthrough names to declare alongside them.
+    env*: seq[string]
+    passthrough*: seq[string]
+    class*: ActionPathClass
+
+proc actionInheritedPathValue(actionPathPrefix: string): string =
+  ## THE ONE AMBIENT READ, isolated in its own proc so the ban on
+  ## `getEnv` inside `actionPathEntry` stays checkable by source scan
+  ## and so the read cannot happen on the hermetic branch by accident.
+  ##
+  ## Called ONLY with a non-empty prefix, and that restriction is what
+  ## keeps this from being a new stale-value channel. The composed value
+  ## is written into the lowered graph, which is CACHED; a snapshot of
+  ## the host `$PATH` therefore survives into later invocations whose
+  ## shell may have a different one. That hazard is not new — it is
+  ## exactly what the base commit `2bbc56b60` did for every edge with a
+  ## non-empty prefix, and this reproduces it byte for byte rather than
+  ## extending it. An edge with NO prefix has nothing to prepend, so
+  ## `actionPathDecision` emits no entry at all for it and the value is
+  ## read from the host at LAUNCH time rather than at lowering time —
+  ## see the no-prefix branch of `actionPathDecision` for which
+  ## mechanism does that reading.
+  ##
+  ## Ordering is the base commit's ordering: whatever the graph did
+  ## resolve first, the caller's `$PATH` behind it. A typed-tool edge
+  ## with no refs still resolves its OWN tool, and dropping that
+  ## directory would be a regression against the base rather than a
+  ## restoration of it.
+  let hostPath = getEnv("PATH")
+  if hostPath.len == 0: actionPathPrefix
+  else: actionPathPrefix & $PathSep & hostPath
+
+proc actionPathDecision*(actionPathPrefix: string;
+                         edgeDeclaresTools: bool): ActionPathDecision =
+  ## THE SINGLE PLACE AN ACTION'S `PATH` IS DECIDED. Every lowering site
+  ## goes through here; `t_declared_env_is_in_the_cache_key.nim` case 10
+  ## enforces that structurally, because the previous arrangement — the
+  ## decision spelled out at each site — is how three sites came to emit
+  ## an empty `PATH` while a comment at the first of them asserted the
+  ## opposite of what the launcher does.
+  ##
+  ## ## The rule
+  ##
+  ## DECLARING A TOOL REF IS THE OPT-IN TO A HERMETIC `PATH`. An edge
+  ## that names what it runs gets a value composed only of the
+  ## directories those tools resolved into, and that value is keyed. An
+  ## edge that names nothing has stated nothing to compose from, so it
+  ## inherits — and says so, by declaring `PATH` passthrough.
+  ##
+  ## This boundary is the same one `toolPathPrefix` already uses for the
+  ## composition itself, so there is one notion of "what this edge
+  ## declares" rather than two.
+  ##
+  ## ## Why not "hermetic whenever the prefix is non-empty"
+  ##
+  ## Because a non-empty prefix is not evidence that the edge declared
+  ## anything. MEASURED on this repository's `test` graph: the five
+  ## `reprobuild.python_test.*` edges declare NO refs, yet their prefix
+  ## is non-empty — it is their own `python3` — and the resulting
+  ## `PATH=<python3>/bin` is hermetic, keyed, and unusable.
+  ## `repro build '.#test#test_package_root_anchor'` failed with
+  ## `AssertionError: no 'nim' on PATH`. An emptiness test cannot see
+  ## that edge; a declaration test can.
+  ##
+  ## ## Why not "hermetic always, declare the sub-tools"
+  ##
+  ## For the test-execute class that was measured and rejected. 504 of
+  ## the 1372 registered Nim test sources call
+  ## `findExe`/`execCmdEx`/`execCmd`/`execProcess`/`startProcess`/`poUsePath`,
+  ## and a scan of their `findExe` literals alone names ~80 distinct host
+  ## tools — `git` (441 sources), `sh`, `gcc`, `cc`, `nim`, `ssh-keygen`,
+  ## `7z`, `clang`, `bash`, `rustc`, `pwsh`, `javac`, `brew`, `hg`, ... —
+  ## of which this project declares packages for ten. Worse, the corpus's
+  ## idiom is `let x = findExe("git"); if x.len == 0: skip()`: a hermetic
+  ## `PATH` does not make those tests fail, it makes them SKIP, which is
+  ## the failure mode this whole change exists to remove. Declaring the
+  ## union would key every test edge on ~80 resolved-executable digests
+  ## and would still be a guess about which host tools a test may probe.
+  ##
+  ## ## What is NOT given up
+  ##
+  ## Every edge that declares a ref keeps `7823baae8`'s property in
+  ## full: no host tail, `PATH` keyed by value, a prepended shadowing
+  ## directory unreachable. On this repository's `test` graph that is
+  ## every edge except the 1377 test-execute/python-test ones, which
+  ## declared nothing before this change and declare nothing after it.
+  ## For those the host `$PATH` is once again an unkeyed input — the
+  ## pre-existing hole, restored deliberately and now counted, not the
+  ## empty `PATH` that replaced it.
+  if edgeDeclaresTools and actionPathPrefix.len > 0:
+    return ActionPathDecision(
+      env: @[actionPathEntry(actionPathPrefix)],
+      passthrough: @[],
+      class: apcHermetic)
+  # INHERITED, IN THE TWO SHAPES THE BASE COMMIT ALREADY HAD.
+  #
+  # Nothing resolved -> emit NO entry, and let the host value be read at
+  # LAUNCH time instead. That is both what `2bbc56b60` did for this
+  # class and the reading that sees the CURRENT shell rather than a
+  # value the lowered-graph cache snapshotted during some earlier
+  # invocation. This is the branch the 1372 `reprobuild.test_execute.*`
+  # edges take.
+  #
+  # WHICH MECHANISM DOES THE READING, precisely, because an earlier
+  # revision of this comment named one that is no longer live. It is
+  # `launchChildEnv`'s PASSTHROUGH block
+  # (`repro_build_engine.nim`, the `if action.envPassthrough.len > 0`
+  # loop): `PATH` is named passthrough two lines below, the action
+  # declares no `PATH` of its own, so the block materialises
+  # `PATH=<getEnv("PATH")>` into the child env before the launcher runs.
+  # `prependPathDirsToArgvEnv` therefore sees `pathSeen = true` and its
+  # `else: getEnv("PATH")` fallback is NOT taken. Same value, same
+  # launch-time read, different proc — the fallback is now the path for
+  # an action that names no passthrough at all.
+  #
+  # Something resolved -> emit `<prefix>:<host>`, again exactly
+  # `2bbc56b60`'s composition, so an edge that never declared refs but
+  # does resolve its own tool (the five `reprobuild.python_test.*`
+  # edges) keeps that directory in front. The host tail IS snapshotted
+  # at lowering time here, which is a pre-existing property of that
+  # composition and not something this branch introduces.
+  #
+  # Either way `PATH` is declared PASSTHROUGH, which is the part the
+  # base commit did NOT do for the no-prefix shape: the value is the
+  # host's and is not keyed, but the NAME is, so the edge states that it
+  # reads the host's `PATH` and the census can count it.
+  if actionPathPrefix.len == 0:
+    return ActionPathDecision(
+      env: @[], passthrough: @["PATH"], class: apcInherited)
+  ActionPathDecision(
+    env: @[actionPathEntry(actionInheritedPathValue(actionPathPrefix))],
+    passthrough: @["PATH"],
+    class: apcInherited)
 
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
@@ -1308,18 +1468,69 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
   # The FOURTH lowering site, and the one that makes the rule worth
   # stating as a rule: this edge composes its environment by hand, ~400
   # lines away from the three that go through `lowerGraphAction`, and a
-  # sweep of "the lowering sites" missed it. Both values below are
-  # obtained by reading the ambient environment, so both are
-  # PASSTHROUGH — see `ActionPathPassthrough` for the classification
-  # rule and why keying them by value would be the very defect the
-  # passthrough class exists to prevent.
+  # sweep of "the lowering sites" missed it.
+  #
+  # `REPROBUILD_SOURCE_ROOT` below is read from the ambient environment
+  # and so stays PASSTHROUGH. `PATH` goes through `actionPathDecision`
+  # like the other three sites, but it passes `edgeDeclaresTools =
+  # false` — an EXPLICIT non-declaration, not an oversight. A provider
+  # root is not a tool declaration, and this edge is the one place in
+  # the file where that distinction was measured rather than argued.
+  #
+  # WHAT THIS EDGE ACTUALLY RUNS. `runCmakeRegenerationHelper` re-invokes
+  # the CMake GENERATOR (`cmake --check-build-system`, plus
+  # `cmake -P VerifyGlobs.cmake`). `cmake` itself comes from
+  # `cmake_command`, which the Reprobuild generator writes into
+  # `provider.meta` as an ABSOLUTE path — so the binary at the head of
+  # the command line is not the problem. What re-runs behind it is a
+  # full CMake configure, and a configure resolves host tools BY BARE
+  # NAME on every pass: `execute_process(COMMAND uname ...)`,
+  # `find_program` for anything not already in `CMakeCache.txt`, and —
+  # in the fork itself — `ReprobuildFindCliOnPath()`
+  # (`cmGlobalReprobuildGenerator.cxx`), which locates the `repro` CLI
+  # for provider priming with `cmSystemTools::FindProgram("repro")`.
+  #
+  # MEASURED, on a real `-G Reprobuild` project driven through
+  # `./build/bin/repro build <binaryDir>#hello --force-rebuild`, with
+  # `edgeDeclaresTools = cmakeWrapperPath.len > 0` (i.e. the hermetic
+  # branch):
+  #
+  #   cmakeRegenerationAction: __repro_cmake_regenerate
+  #     status=asSucceeded launched=true reason=exit=0
+  #   -- uname rc=no such file or directory out=
+  #
+  # The generator did not fail; it produced a WRONG configure and
+  # reported success, which is the same silent-green shape the empty
+  # `PATH` produced for the test-execute edges. Under
+  # `<wrapper>:<host>` the identical run reports `uname rc=0 out=Linux`.
+  # The reason is structural rather than incidental: the wrapper
+  # directory holds the generator's per-target compile/link wrappers and
+  # NOTHING ELSE — on that project it contained a single
+  # `*.repro-tool-profile` file and not one executable. A hermetic
+  # `PATH` built from it is a `PATH` with no host tool on it at all.
+  #
+  # A CMake configure's tool closure is not enumerable from here — it is
+  # whatever the consumer's `CMakeLists.txt` probes — so this edge
+  # INHERITS, exactly as `2bbc56b60` had it, and says so by naming
+  # `PATH` passthrough. That leaves this one edge non-hermetic and keyed
+  # only on the passthrough NAME, which is a REMAINING GAP and is
+  # recorded here as one: closing it means the CMake fork emitting the
+  # configure's tool set into `provider.meta` alongside `cmake_command`,
+  # so this site can compose a `PATH` out of a declaration instead of
+  # guessing at one. Until it does, guessing is what the hermetic
+  # branch would be, and the measurement above is what guessing cost.
   var envPassthrough: seq[string] = @[]
-  if meta.providerRoot.len > 0:
-    let wrapperPath = meta.values.metadataValue("wrapper_path",
-      meta.providerRoot / "bin")
-    if wrapperPath.len > 0:
-      env.add(actionPathEntry(wrapperPath))
-      envPassthrough.add("PATH")
+  let cmakeWrapperPath =
+    if meta.providerRoot.len > 0:
+      meta.values.metadataValue("wrapper_path", meta.providerRoot / "bin")
+    else:
+      ""
+  let cmakePath = actionPathDecision(cmakeWrapperPath,
+    edgeDeclaresTools = false)
+  for entry in cmakePath.env:
+    env.add(entry)
+  for name in cmakePath.passthrough:
+    envPassthrough.add(name)
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
     # A machine-specific absolute path read straight from the host, and
@@ -1678,6 +1889,43 @@ proc bareToolSelector(value: string): string =
 proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
                     packageName, executableName: string;
                     refs: openArray[string]): string =
+  ## The action's WHOLE runtime `PATH` — see `actionPathEntry`, which
+  ## wraps this and appends nothing.
+  ##
+  ## Ordering is priority order and is unchanged: the edge's own tool
+  ## first, then its declared `toolIdentityRefs` in declaration order.
+  ## NOTHING ELSE JOINS.
+  ##
+  ## ## Why not the union of every tool the project declared
+  ##
+  ## That was implemented first, and it looks attractive: the tail used
+  ## to be the host's `$PATH`, so every tool the dev shell exposed was
+  ## reachable from every action, and splicing in the project's whole
+  ## resolved set keeps most edges working without declaring anything.
+  ## It is graph-derived, so it is sound. It is still wrong, for two
+  ## measured reasons.
+  ##
+  ## 1. THE UNION IS NOT A FUNCTION OF THE EDGE. `profiles` holds the
+  ##    tool identities REALIZED for this invocation, and
+  ##    `scopedToolArtifact` narrows realization to the tools the
+  ##    SELECTED actions reference. The same action therefore gets a
+  ##    different `PATH` — and, now that `PATH` is keyed by value, a
+  ##    different cache key — under `repro build .` than under
+  ##    `repro build <one-target>`. `repro graph` realizes everything
+  ##    and so disagreed with `repro build` about every action's key.
+  ##
+  ## 2. IT HID THE MISSING DECLARATIONS INSTEAD OF SURFACING THEM.
+  ##    MEASURED with the union in place: `repro build .` passed while
+  ##    `repro build nim-c-590e14613b93d2dc` (one nim test edge,
+  ##    isolated work-root and cache-root) reported `selected tool
+  ##    identities: 1/10` and failed `gcc: command not found`. 1371
+  ##    edges were reaching a compiler they never named, and it worked
+  ##    only because some OTHER selected edge had named it. That is the
+  ##    host-`$PATH`-tail shape again, one boundary further in.
+  ##
+  ## So the edge's own refs are the boundary. An edge that shells out to
+  ## a tool must name it; the declarations this required are at the
+  ## `nim.c`, `buildNimUnittest.build` and `sh.shell` call sites.
   var dirs: seq[string] = @[]
   proc addDir(profile: PathOnlyToolProfile) =
     let dir = parentDir(profile.resolvedExecutablePath)
@@ -1703,7 +1951,28 @@ proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
     for dir in matchingDirs:
       if dir notin dirs:
         dirs.add(dir)
+
   dirs.join($PathSep)
+
+proc actionPathEnvEntry*(profiles: openArray[PathOnlyToolProfile];
+                         packageName = ""; executableName = "";
+                         refs: openArray[string] = []): string =
+  ## The exact ``PATH=<value>`` entry a lowered action carries, given the
+  ## profiles the build identity resolved. Exported so the hermeticity
+  ## property can be asserted on the real composition rather than on a
+  ## restatement of it: a test can resolve a real tool out of a real
+  ## directory, hand this a ``$PATH`` with an extra directory prepended,
+  ## and check that the extra directory is not in the answer.
+  ##
+  ## This is the whole of an action's ``PATH``. There is no second
+  ## contributor at lowering time and no host tail — see
+  ## ``actionPathEntry``.
+  var index: Table[string, PathOnlyToolProfile]
+  for profile in profiles:
+    index[profile.packageSelector & "|" & profile.executableName] = profile
+    if not index.hasKey(profile.executableName):
+      index[profile.executableName] = profile
+  actionPathEntry(toolPathPrefix(index, packageName, executableName, refs))
 
 proc scriptInterpreterArgv(executablePath: string): seq[string] =
   ## Windows does not interpret shebangs before CreateProcessW. Lower a typed
@@ -2269,11 +2538,27 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     #   ``configure: error: no acceptable m4 could be found in $PATH``
     # The fix mirrors the typed-tool path below: prepend the called tool and
     # this action's explicit tool refs to PATH, then append per-edge overrides.
+    #
+    # THE OVERLAY REPLACES; IT DOES NOT MERGE. An earlier version of
+    # this site emitted the entry unconditionally, justified by a
+    # comment claiming that "an edge that declares no `PATH` does not
+    # get a hermetic empty one — it inherits the caller's, because the
+    # launcher layers `action.env` OVER the inherited environment rather
+    # than replacing it". That is the opposite of what the launcher
+    # does. `prependPathDirsToArgvEnv`
+    # (`repro_build_engine.nim:3502-3551`) collapses every case-variant
+    # `PATH` entry into one value and sets `pathSeen`; the
+    # `else: getEnv("PATH")` fallback at `repro_build_engine.nim:3545`
+    # runs ONLY when `pathSeen` is false. An emitted `PATH=` is
+    # therefore not a no-op that falls through — it is an empty `PATH`
+    # the action really runs with. `actionPathDecision` makes the emit
+    # decision instead, and cannot produce that value.
     var inlineEnv: seq[string] = @[]
-    var inlineEnvPassthrough: seq[string] = @[]
-    if actionPathPrefix.len > 0:
-      inlineEnv.add(actionPathEntry(actionPathPrefix))
-      inlineEnvPassthrough = @ActionPathPassthrough
+    let inlinePath = actionPathDecision(actionPathPrefix,
+      edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
+    var inlineEnvPassthrough = inlinePath.passthrough
+    for entry in inlinePath.env:
+      inlineEnv.add(entry)
     for entry in payload.env:
       inlineEnv.add(entry[0] & "=" & entry[1])
     return repro_build_engine.action(
@@ -2528,10 +2813,23 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       node.payload
     ].join("\n")
     var mergedEnv: seq[string] = @[]
-    var mergedEnvPassthrough: seq[string] = @[]
-    if actionPathPrefix.len > 0:
-      mergedEnv.add(actionPathEntry(actionPathPrefix))
-      mergedEnvPassthrough = @ActionPathPassthrough
+    # THE NIM-UNITTEST EXECUTE SITE — `run` / `runTest` / `list` on an
+    # already-built test binary — and therefore the site EVERY
+    # `reprobuild.test_execute.*` edge goes through. It is where the
+    # measured `PATH=` (1372 of 2753 process actions) was emitted; the
+    # general typed-tool site further down is a different code path and
+    # mutating THAT one leaves this class untouched, which is worth
+    # knowing before mutation-testing anything here.
+    #
+    # `actionPathDecision` owns the emit decision — see the inline-exec
+    # site above for what the launcher's overlay actually does with an
+    # emitted `PATH=`, and `actionPathDecision` itself for why declaring
+    # a ref, not a non-empty prefix, is what selects the hermetic branch.
+    let unittestPath = actionPathDecision(actionPathPrefix,
+      edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
+    var mergedEnvPassthrough = unittestPath.passthrough
+    for entry in unittestPath.env:
+      mergedEnv.add(entry)
     # MR10: per-edge env-var injections from the typed-tool wrapper's
     # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
     # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
@@ -2614,10 +2912,16 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     invocationPrefix
   ].join("\n")
   var mergedEnv: seq[string] = @[]
-  var mergedEnvPassthrough: seq[string] = @[]
-  if actionPathPrefix.len > 0:
-    mergedEnv.add(actionPathEntry(actionPathPrefix))
-    mergedEnvPassthrough = @ActionPathPassthrough
+  # The general typed-tool site — the one every `reprobuild.test_execute.*`
+  # and `reprobuild.python_test.*` edge goes through, and so the one the
+  # measured defect landed on. `actionPathDecision` owns the emit
+  # decision; see the inline-exec site above for what the launcher's
+  # overlay actually does with an emitted `PATH=`.
+  let typedToolPath = actionPathDecision(actionPathPrefix,
+    edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
+  var mergedEnvPassthrough = typedToolPath.passthrough
+  for entry in typedToolPath.env:
+    mergedEnv.add(entry)
   # MR10: per-edge env-var injections from the typed-tool wrapper's
   # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
   # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
@@ -4599,15 +4903,29 @@ proc environmentInheritanceHeaderLine*(
   ##
   ## It is a FACT line, not a warning: nothing here is wrong yet, and
   ## dressing a measurement up as a warning trains people to skip it.
+  ##
+  ## ONE THING ON IT IS A WARNING, and it is here because the line used
+  ## to end with the sentence "all N also inherit the build environment
+  ## (declared entries overlay it, they do not replace it)". That reading
+  ## is true of the environment as a whole and false of any single
+  ## variable: a declared variable REPLACES the inherited one. Three
+  ## lowering sites acted on the false reading and emitted `PATH=` for
+  ## 1372 of this repository's 2753 process edges, and this line reported
+  ## them as ordinary declaring actions. `pathEmpty=` is now on the line,
+  ## and it is the one number here that is a defect rather than a fact.
   if census.totalActions == 0:
     return "env: no process actions in this graph"
   let percent = (census.undeclaredActions * 100) div census.totalActions
-  "env: " & $census.declaringActions & "/" & $census.totalActions &
+  result = "env: " & $census.declaringActions & "/" & $census.totalActions &
     " process actions declare a variable, " & $census.passthroughActions &
     " name a passthrough variable, " & $census.undeclaredActions &
-    " (" & $percent & "%) declare nothing; all " & $census.totalActions &
-    " also inherit the build environment (declared entries overlay it, " &
-    "they do not replace it)"
+    " (" & $percent & "%) declare nothing; a variable an action declares" &
+    " REPLACES the inherited one, everything else is inherited" &
+    "; PATH: " & $census.hermeticPathActions & " hermetic (keyed by value), " &
+    $census.inheritedPathActions & " inherited (passthrough), " &
+    $census.emptyPathActions & " EMPTY"
+  if census.emptyPathActions > 0:
+    result.add(" <- DEFECT: those actions run with no PATH at all")
 
 proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
@@ -5524,14 +5842,15 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
   ##
   ## Bin-dir derivation: prefers the parent directory of
   ## ``resolvedExecutablePath`` (so the catalog's chosen binary is
-  ## leftmost in PATH); falls back to the entries of
-  ## ``pathSearchList`` (each a ``<storePath>/bin`` for nix/tarball/
-  ## scoop adapters) when ``resolvedExecutablePath`` is empty. Both
-  ## fields can legitimately be empty when the catalog couldn't
-  ## resolve the tool (e.g. path-only mode without the tool
-  ## installed) — the closure then returns ``none`` so PATH is
-  ## untouched and the action's bare-name argv falls through to the
-  ## host's existing PATH.
+  ## leftmost in PATH), then adds the entries of ``pathSearchList``
+  ## (each a ``<storePath>/bin`` for the nix / tarball / scoop
+  ## adapters, or the staged install tree for from-source) — EXCEPT for
+  ## the ``path`` adapter, whose ``pathSearchList`` is the verbatim host
+  ## ``$PATH`` rather than a tool directory and must never reach an
+  ## action. See the guard at the loop itself. Both fields can
+  ## legitimately be empty when the catalog couldn't resolve the tool
+  ## (e.g. path-only mode without the tool installed) — the closure then
+  ## returns ``none`` so PATH is untouched for that ref.
   let snapshot = identity
   let producerWorkspaceRoot = workspaceRoot
   result = proc(name: string; kind: DepKind): Option[ResolvedToolIdentity]
@@ -5578,9 +5897,27 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         let parent = parentDir(actionIdy.resolvedExecutablePath)
         if parent.len > 0 and parent notin mergedBinDirs:
           mergedBinDirs.add(parent)
-      for searchDir in actionIdy.pathSearchList:
-        if searchDir.len > 0 and searchDir notin mergedBinDirs:
-          mergedBinDirs.add(searchDir)
+      # ``pathSearchList`` is only a bin-dir list for the adapters that
+      # BUILD one: nix / tarball / scoop record ``<storePath>/bin``, and
+      # from-source records the staged install tree. For the ``path``
+      # adapter it is something else entirely — the verbatim host
+      # ``$PATH`` the resolver walked (``resolvePathOnlyTool`` snapshots
+      # ``splitPathList(getEnv("PATH"))`` into it). Splicing that in put
+      # EVERY directory of the developer's shell onto the action's PATH,
+      # ahead of the store directories in ``action.env``, where a
+      # prepended entry could shadow a bare-name sub-tool — or a
+      # declared tool's own bin dir — with nothing keying the choice.
+      #
+      # So the fallback is skipped for the ``path`` adapter. Nothing is
+      # lost: for that adapter the only entry of the list that ever
+      # mattered is ``parentDir(resolvedExecutablePath)``, which the
+      # branch above already added. The other adapters keep the fallback
+      # because for them the list IS graph-derived — and they need it,
+      # since some record no ``resolvedExecutablePath`` at all.
+      if actionIdy.installMethod != "path":
+        for searchDir in actionIdy.pathSearchList:
+          if searchDir.len > 0 and searchDir notin mergedBinDirs:
+            mergedBinDirs.add(searchDir)
       for path in actionIdy.pkgConfigSearchList:
         if path.len > 0 and path notin mergedPkgConfigDirs:
           mergedPkgConfigDirs.add(path)
@@ -20072,6 +20409,11 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
         if action.envPassthrough.len > 0: inc census.passthroughActions
         if action.env.len == 0 and action.envPassthrough.len == 0:
           inc census.undeclaredActions
+        case classifyActionPath(action)
+        of apdHermetic: inc census.hermeticPathActions
+        of apdInherited: inc census.inheritedPathActions
+        of apdEmpty: inc census.emptyPathActions
+        of apdAbsent: discard
         var declaredNames: seq[string] = @[]
         for entry in action.env:
           let eq = entry.find('=')

@@ -274,6 +274,27 @@ package reprobuild:
     "openssl"
     "sh"
 
+    # The `reprobuild-nix-daemon` staging edge below is a `shell(...)`
+    # whose command line invokes bare `mkdir`, `cp` and `chmod`. Those
+    # used to resolve out of whatever the developer's `$PATH` offered:
+    # an action's runtime `PATH` ended in the host's, and `PATH` was a
+    # name-keyed passthrough, so nothing recorded which `cp` ran.
+    #
+    # The action `PATH` is now composed only of directories the solved
+    # graph resolved THAT EDGE's declared tools into, which turned this
+    # from an invisible host dependency into a build failure — the
+    # correct outcome, and the reason these three lines exist. A
+    # `uses:` entry is necessary but not sufficient: the edge also has
+    # to name them, which it does just below its `shell(...)`. Three
+    # entries rather than one `coreutils` entry because the path-mode
+    # resolver keys on an executable NAME, and because naming each
+    # command the edge actually runs is what makes the dependency
+    # readable. All three resolve into the same `coreutils` bin dir, so
+    # the composed `PATH` gains exactly one entry.
+    "mkdir"
+    "cp"
+    "chmod"
+
     # Deferred-Item D1: ``python3`` is required by the in-graph Python
     # test execute edges emitted via ``pythonUnittest.run(...)`` (see
     # the ``for source in pythonTestPaths`` loop in the ``build:``
@@ -875,6 +896,26 @@ package reprobuild:
         extraEnv = sourceOnlyEnv,
         )
       reprobuildTestBuildActions.add(edge.action)
+      # THE C BACKEND, DECLARED ON THE TEST-BUILD EDGES TOO.
+      #
+      # ``nim c`` emits C and shells out to a BARE ``gcc``. ``nim.c(...)``
+      # declares that for the edges it lowers, but these 1371 edges do
+      # not go through it — ``buildNimUnittest`` is a separate typed tool
+      # from ``ct_test_nim_unittest`` (a pinned external package this
+      # repository cannot edit), so the declaration has to happen at the
+      # call site.
+      #
+      # Without it the whole class fails ``gcc: command not found`` under
+      # any narrow selection. MEASURED, before this line existed:
+      # ``repro build nim-c-590e14613b93d2dc`` (one test edge, isolated
+      # work-root and cache-root) → ``selected tool identities: 1/10``,
+      # ``status=asFailed``, ``/bin/sh: line 1: gcc: command not found``.
+      # A WHOLE-GRAPH build hid it, because the realized identity set is
+      # then the union over every selected edge and some other edge had
+      # declared ``gcc``. Declaring it per edge is what makes the edge's
+      # ``PATH`` a function of the edge rather than of what else the
+      # invocation happened to select.
+      appendRegisteredActionToolIdentityRefs(edge.action.id, ["gcc"])
       # B3: emit the EXECUTE edge.
       #
       # ``requiredBinaries`` is the typed input slot the
@@ -911,6 +952,37 @@ package reprobuild:
             "reprobuild.test_helpers.legacy_cache_peer_origin_dev")
           executeDeps.add(
             "reprobuild.test_helpers.legacy_cache_peer_legacy_wire")
+      # NO TOOL REFS ON THE EXECUTE EDGE, AND THAT IS A DECISION.
+      #
+      # The BUILD edge above declares `gcc` because `nim c` shells out to
+      # exactly one bare-name compiler and naming it is both possible and
+      # correct. The EXECUTE edge cannot be treated the same way, and the
+      # attempt was measured before it was abandoned.
+      #
+      # 504 of the 1372 registered test sources reach for a host binary
+      # through the stdlib's ambient resolution and execution helpers
+      # (the `findExe` / `execCmdEx` / `execCmd` / `execProcess` /
+      # `startProcess` / `poUsePath` family — spelled without their call
+      # parentheses here so this file stays off the ambient-execution
+      # linter's baseline). A scan of their bare-name LITERALS alone
+      # names ~80 distinct host tools — `git` in 441 of them, then `sh`,
+      # `gcc`, `cc`, `nim`, `ssh-keygen`, `7z`, `clang`, `bash`,
+      # `rustc`, `pwsh`, `javac`, `brew`, `hg`, ... — against the ten
+      # tools this project declares packages for. And the corpus's idiom
+      # is "resolve the tool by bare name; if the answer is empty, call
+      # `skip()`",
+      #
+      # so a `PATH` restricted to declared tools does not make those
+      # tests fail, it makes them SKIP. That is the defect, not the fix:
+      # `repro build '.#test#t_workspace_root_for_repo_managed_worktree'`
+      # once reported `asSucceeded exit=0` with `[SKIPPED]`, and served
+      # that result from cache on the next run.
+      #
+      # So these edges declare nothing and take `actionPathDecision`'s
+      # inherited branch (`repro_cli_support.nim`): the caller's `$PATH`,
+      # named PASSTHROUGH so the census counts them. A test binary is a
+      # host-tool CONSUMER, and pretending otherwise buys a hermetic
+      # `PATH` at the price of the suite's meaning.
       # ------------------------------------------------------------------
       # Dependency policy for this execute edge
       # ------------------------------------------------------------------
@@ -1251,6 +1323,14 @@ package reprobuild:
       extraOutputs = @[
         "build/bin/reprobuild-nix-daemon",
       ])
+    # The three bare commands this shell line runs. Declaring them is
+    # what puts coreutils' bin dir on this edge's PATH now that an
+    # action's PATH no longer ends in the caller's `$PATH`, and what
+    # keeps their `uses:` entries alive through the fragment-scoped
+    # identity realization (`scopedToolArtifact`) when the build is
+    # `repro build .#apps` rather than a whole-graph build.
+    appendRegisteredActionToolIdentityRefs(reprobuildNixDaemon.id,
+      ["mkdir", "cp", "chmod"])
     reprobuildAppsActions.add(reprobuildNixDaemon)
     discard target("reprobuild-nix-daemon", reprobuildNixDaemon)
 
@@ -1440,6 +1520,13 @@ package reprobuild:
       ],
       extraOutputs = legacyWireGeneratedSources,
       cacheable = false)
+    # The bare interpreter this shell line runs. ``python3`` is in the
+    # package's ``uses:`` list, but a ``uses:`` entry alone does not put
+    # a tool on an action's PATH — the edge has to name it, both so the
+    # directory joins this edge's PATH and so the identity survives the
+    # selection-scoped realization (``scopedToolArtifact``).
+    appendRegisteredActionToolIdentityRefs(legacyWireGenerator.id,
+      ["python3"])
     reprobuildTestHelpersActions.add(legacyWireGenerator)
 
     when not defined(windows):
