@@ -8,11 +8,17 @@
 ## termination. RunQuota imposes no deadlines — it cannot observe one — so a
 ## deadline is a fact this client holds alone: if `finishOutcome` does not say
 ## it, the store can never learn it. It used to not say it. `timedOut` was
-## computed by the process backend and then collapsed into
-## `leaseFinishCancelled`, and because the kill SIGNAL travels in its own
-## field, the daemon's mapping resolved that finish through its signal test
-## and wrote `signalled` — true, and useless to a reader asking why the work
+## computed by the process backend and then collapsed into a plain cancel,
+## and because the kill SIGNAL travelled in its own independent wire field,
+## the daemon's mapping resolved that finish through its signal test and
+## wrote `signalled` — true, and useless to a reader asking why the work
 ## stopped. `timeout` was a word the schema knew and no client could write.
+##
+## SINCE `LeaseFinish`, A CONCLUSION AND ITS EVIDENCE TRAVEL AS ONE VALUE, so
+## there is no separate signal field for a mapping to be rescued by. Arms (2)
+## and (3) below are both kills delivered by a signal, and each has to be
+## NAMED correctly by `finishOutcome` or its row is wrong — which is what
+## makes this file the gate on that mapping rather than a description of it.
 ##
 ## ## NO MOCKS, AND NOTHING IN THIS FILE WRITES A ROW
 ##
@@ -183,6 +189,15 @@ suite "a finish outcome reaches the spine as the word it deserves":
       # (2) A CANCEL THE CHILD HONOURS. `cancelAndWait` SIGTERMs the group;
       #     this child does not trap it, so it dies well inside the grace
       #     period and the completion carries `cancelled` WITHOUT `timedOut`.
+      #
+      #     THIS ARM IS WHY `finishOutcome` NAMES THIS A CRASH. The child
+      #     dies OF the SIGTERM, so the completion carries `signaled` too;
+      #     the old code called the finish `leaseFinishCancelled` and put
+      #     the signal in a separate wire field, which the daemon's mapping
+      #     read first and recorded as `signalled`. `cancelled()` has no
+      #     field to carry a signal in now, so a mapping that still said
+      #     `cancelled` here would land this row on `refused`, and this
+      #     assertion is what catches it.
       block:
         var running = session.startWithRunQuota(
           leasedRequest("spine_cancelled"), shellCommand("sleep 30"))
@@ -196,7 +211,7 @@ suite "a finish outcome reaches the spine as the word it deserves":
       # (3) A CANCEL THE CHILD IGNORES. `trap "" TERM` makes SIGTERM a no-op,
       #     so `cancelAndWait`'s three-second deadline expires, the backend
       #     escalates to SIGKILL and reports `timedOut`. Before the fix this
-      #     produced `leaseFinishCancelled` and the daemon's signal test wrote
+      #     produced a plain cancel and the daemon's signal test wrote
       #     `signalled` — the same word as arm (2), from a different cause.
       block:
         var running = session.startWithRunQuota(
