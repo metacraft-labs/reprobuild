@@ -274,6 +274,27 @@ package reprobuild:
     "openssl"
     "sh"
 
+    # The `reprobuild-nix-daemon` staging edge below is a `shell(...)`
+    # whose command line invokes bare `mkdir`, `cp` and `chmod`. Those
+    # used to resolve out of whatever the developer's `$PATH` offered:
+    # an action's runtime `PATH` ended in the host's, and `PATH` was a
+    # name-keyed passthrough, so nothing recorded which `cp` ran.
+    #
+    # The action `PATH` is now composed only of directories the solved
+    # graph resolved THAT EDGE's declared tools into, which turned this
+    # from an invisible host dependency into a build failure — the
+    # correct outcome, and the reason these three lines exist. A
+    # `uses:` entry is necessary but not sufficient: the edge also has
+    # to name them, which it does just below its `shell(...)`. Three
+    # entries rather than one `coreutils` entry because the path-mode
+    # resolver keys on an executable NAME, and because naming each
+    # command the edge actually runs is what makes the dependency
+    # readable. All three resolve into the same `coreutils` bin dir, so
+    # the composed `PATH` gains exactly one entry.
+    "mkdir"
+    "cp"
+    "chmod"
+
     # Deferred-Item D1: ``python3`` is required by the in-graph Python
     # test execute edges emitted via ``pythonUnittest.run(...)`` (see
     # the ``for source in pythonTestPaths`` loop in the ``build:``
@@ -875,6 +896,26 @@ package reprobuild:
         extraEnv = sourceOnlyEnv,
         )
       reprobuildTestBuildActions.add(edge.action)
+      # THE C BACKEND, DECLARED ON THE TEST-BUILD EDGES TOO.
+      #
+      # ``nim c`` emits C and shells out to a BARE ``gcc``. ``nim.c(...)``
+      # declares that for the edges it lowers, but these 1371 edges do
+      # not go through it — ``buildNimUnittest`` is a separate typed tool
+      # from ``ct_test_nim_unittest`` (a pinned external package this
+      # repository cannot edit), so the declaration has to happen at the
+      # call site.
+      #
+      # Without it the whole class fails ``gcc: command not found`` under
+      # any narrow selection. MEASURED, before this line existed:
+      # ``repro build nim-c-590e14613b93d2dc`` (one test edge, isolated
+      # work-root and cache-root) → ``selected tool identities: 1/10``,
+      # ``status=asFailed``, ``/bin/sh: line 1: gcc: command not found``.
+      # A WHOLE-GRAPH build hid it, because the realized identity set is
+      # then the union over every selected edge and some other edge had
+      # declared ``gcc``. Declaring it per edge is what makes the edge's
+      # ``PATH`` a function of the edge rather than of what else the
+      # invocation happened to select.
+      appendRegisteredActionToolIdentityRefs(edge.action.id, ["gcc"])
       # B3: emit the EXECUTE edge.
       #
       # ``requiredBinaries`` is the typed input slot the
@@ -1171,6 +1212,14 @@ package reprobuild:
       extraOutputs = @[
         "build/bin/reprobuild-nix-daemon",
       ])
+    # The three bare commands this shell line runs. Declaring them is
+    # what puts coreutils' bin dir on this edge's PATH now that an
+    # action's PATH no longer ends in the caller's `$PATH`, and what
+    # keeps their `uses:` entries alive through the fragment-scoped
+    # identity realization (`scopedToolArtifact`) when the build is
+    # `repro build .#apps` rather than a whole-graph build.
+    appendRegisteredActionToolIdentityRefs(reprobuildNixDaemon.id,
+      ["mkdir", "cp", "chmod"])
     reprobuildAppsActions.add(reprobuildNixDaemon)
     discard target("reprobuild-nix-daemon", reprobuildNixDaemon)
 
@@ -1360,6 +1409,13 @@ package reprobuild:
       ],
       extraOutputs = legacyWireGeneratedSources,
       cacheable = false)
+    # The bare interpreter this shell line runs. ``python3`` is in the
+    # package's ``uses:`` list, but a ``uses:`` entry alone does not put
+    # a tool on an action's PATH — the edge has to name it, both so the
+    # directory joins this edge's PATH and so the identity survives the
+    # selection-scoped realization (``scopedToolArtifact``).
+    appendRegisteredActionToolIdentityRefs(legacyWireGenerator.id,
+      ["python3"])
     reprobuildTestHelpersActions.add(legacyWireGenerator)
 
     when not defined(windows):

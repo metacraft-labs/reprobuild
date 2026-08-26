@@ -1376,7 +1376,7 @@ tests/unit/t_runquota_grant_wait_wedged_connected.nim	nim	2
 tests/unit/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling.nim	nim	4
 tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	5
 tests/unit/t_shared_mime_info_dev_stub.nim	nim	1
-tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	9
+tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	12
 tests/unit/t_version.nim	nim	2
 tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1

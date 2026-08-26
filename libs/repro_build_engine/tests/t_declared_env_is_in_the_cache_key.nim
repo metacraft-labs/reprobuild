@@ -472,33 +472,42 @@ suite "the environment key rendering is canonical and host-independent":
       checkpoint("banned call: " & banned)
       check not body.contains(banned)
 
-  test "10. every site that composes a host PATH declares it passthrough":
-    # THE SWEEP MADE STRUCTURAL. A review found a FOURTH lowering site
-    # (`cmakeRegenerationBuildAction`) that built
-    # `"PATH=" & wrapperPath & PathSep & getEnv("PATH")` by hand and
-    # passed no `envPassthrough`, so the verbatim host PATH entered that
-    # cacheable edge's key BY VALUE — precisely the defect the
-    # passthrough class exists to prevent, created by the change that
-    # introduced the class. It sits ~1000 lines from the other three and
-    # this repository's graph contains no CMake-driven project, so no
-    # measurement could have caught it; only reading every site could,
-    # and reading every site is what a person does once and then stops
-    # doing.
+  test "10. no site composes an action PATH out of the host environment":
+    # THE SWEEP MADE STRUCTURAL. A review once found a FOURTH lowering
+    # site (`cmakeRegenerationBuildAction`) that built
+    # `"PATH=" & wrapperPath & PathSep & getEnv("PATH")` by hand, ~1000
+    # lines from the other three, and this repository's graph contains no
+    # CMake-driven project, so no measurement could have caught it. Only
+    # reading every site could, and reading every site is what a person
+    # does once and then stops doing.
     #
-    # So the pairing is checked instead of remembered. Two rules:
+    # WHAT THE RULE NOW IS, AND WHY IT INVERTED. It used to be "every
+    # `actionPathEntry` call site must declare PATH passthrough", because
+    # `actionPathEntry` appended `getEnv("PATH")` and a host value must
+    # never be keyed. That tail is gone: an action's PATH is composed
+    # only of directories the solved graph resolved a declared tool into.
+    # The value is therefore a solved-graph value like `DEP_NIM_ROOT`,
+    # it is DECLARED and keyed by value, and a site that put it back in
+    # the passthrough class would silently un-key it — which is the
+    # sub-tool stale-serve this inversion exists to keep closed.
+    #
+    # Three rules:
     #
     #   (a) nothing may build a `PATH=` entry for an action's env by
-    #       hand — it must go through `actionPathEntry`, which is where
-    #       the ambient read and its justification live; and
-    #   (b) every `actionPathEntry` call site must declare the
-    #       passthrough within a few lines of the call.
+    #       hand — it must go through `actionPathEntry`, the single
+    #       place the composition and its justification live;
+    #   (b) `actionPathEntry`'s own body must not read the ambient
+    #       environment, which is what makes its result graph-derived
+    #       and therefore keyable; and
+    #   (c) no `actionPathEntry` call site may declare PATH passthrough.
     #
     # A fifth site added tomorrow fails this test rather than silently
-    # keying a host value.
+    # handing the caller's shell control of what the action executes.
     let source = currentSourcePath().parentDir.parentDir.parentDir /
       "repro_cli_support" / "src" / "repro_cli_support.nim"
     check fileExists(source)
-    let lines = readFile(source).splitLines()
+    let text = readFile(source)
+    let lines = text.splitLines()
 
     var handRolled: seq[string] = @[]
     var callSites: seq[int] = @[]
@@ -512,19 +521,55 @@ suite "the environment key rendering is canonical and host-independent":
     check handRolled.len == 0
 
     # The call sites must exist at all — a scan that found nothing would
-    # pass rule (b) vacuously.
+    # pass rules (a) and (c) vacuously.
     checkpoint("actionPathEntry call sites: " & $callSites.len)
     check callSites.len >= 4
 
+    # (b) The composition itself. Comment lines are stripped before the
+    # scan for the same reason as test 8: the doc comment on
+    # `actionPathEntry` DISCUSSES the ambient read it no longer performs,
+    # and a scan that could not tell an explanation from a call would
+    # force the rationale out of the source to stay green.
+    let procStart = text.find("\nproc actionPathEntry")
+    check procStart >= 0
+    let procStop = text.find("\nproc ", procStart + 1)
+    check procStop > procStart
+    var body = ""
+    for line in text[procStart ..< procStop].splitLines():
+      if line.strip().startsWith("#"):
+        continue
+      body.add(line & "\n")
+    checkpoint("actionPathEntry body:\n" & body)
+    # The scan must have found code, not an empty slice.
+    check body.contains("actionPathPrefix")
+    for banned in ["getEnv", "existsEnv", "envPairs", "getAllEnv"]:
+      checkpoint("banned call in actionPathEntry: " & banned)
+      check not body.contains(banned)
+
+    # (c) No site may reinstate the passthrough classification.
+    #
+    # The predicate is "mentions a passthrough AND mentions `"PATH"`",
+    # not a list of exact spellings, and that is not fussiness. The
+    # first version of this rule looked for the literal
+    # `envPassthrough.add("PATH")`, which is what the cmake site
+    # happens to write — and MISSED `inlineEnvPassthrough.add("PATH")`
+    # at the inline-exec site, because the camelCased variable name
+    # capitalises the `E`. Mutation-testing the rule is what found
+    # that; the rule as written would have passed while the defect it
+    # exists to catch was present in the tree.
     for site in callSites:
-      var declared = false
+      var passthroughDeclared = false
       for probe in max(site - 6, 0) .. min(site + 6, lines.high):
-        if lines[probe].contains("ActionPathPassthrough") or
-            lines[probe].contains("envPassthrough.add(\"PATH\")"):
-          declared = true
+        let probeLine = lines[probe]
+        if probeLine.strip().startsWith("#"):
+          continue
+        if probeLine.contains("ActionPathPassthrough") or
+            (probeLine.contains("assthrough") and
+             probeLine.contains("\"PATH\"")):
+          passthroughDeclared = true
       checkpoint("call site line " & $(site + 1) & ": " &
-        lines[site].strip() & " -> declared=" & $declared)
-      check declared
+        lines[site].strip() & " -> passthrough=" & $passthroughDeclared)
+      check not passthroughDeclared
 
   test "9. the rendering distinguishes the two classes explicitly":
     # A cache key that cannot be explained cannot be debugged. The

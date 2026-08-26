@@ -28,22 +28,64 @@
 ## it with a strictly better signal for that job.
 ##
 ## It is NOT true, however, that the search list was keying nothing at
-## all. ``pathSearchList`` is also threaded onto every typed-tool
-## action's RUNTIME ``PATH`` (``repro_cli_support.nim`` splices it into
-## ``mergedBinDirs``, which ``actionPathEntry`` turns into the action's
-## ``PATH`` value), and ``PATH`` is a deliberate name-keyed PASSTHROUGH
-## (``ActionPathPassthrough``) whose VALUE is never keyed. So
-## ``profileFingerprint``'s copy of the search list was the only thing
-## putting the host ``$PATH`` into any cache key. After this change the
-## action's effective ``PATH`` — and therefore the resolution of every
-## BARE-NAME sub-tool the action's command line invokes (``mkdir``,
-## ``cp``, ``tr``, ``python3`` …) — is unkeyed.
+## all. ``pathSearchList`` was ALSO threaded onto every typed-tool
+## action's RUNTIME ``PATH``, and ``PATH`` was a deliberate name-keyed
+## PASSTHROUGH whose VALUE was never keyed. So ``profileFingerprint``'s
+## copy of the search list was, for a while, the only thing putting the
+## host ``$PATH`` into any cache key, and removing it left the
+## resolution of every BARE-NAME sub-tool an action's command line
+## invokes (``mkdir``, ``cp``, ``tr``, ``python3`` …) unkeyed. That was
+## a measured stale-serve hole:
 ##
-## That is a real, measured stale-serve hole, not a theoretical one. See
-## the "known gap" test below for the shape, the measurement, and why
-## observed-input revalidation does not close it. Eliminating host-``$PATH``
-## over-invalidation is the trade this change makes; leaving runtime
-## sub-tool resolution unkeyed is what it pays.
+##   T   prepend a dir that shadows bare ``tr``   cdHit,  out="HELLO"
+##   T'  same ``$PATH``, ``--force-rebuild``      cdMiss, out="SHADOWED"
+##
+## The debt is now paid rather than merely recorded. The action's
+## runtime ``PATH`` no longer inherits the host's at all: it is composed
+## only of the directories the solved graph resolved THIS EDGE's tool
+## and THIS EDGE's declared ``toolIdentityRefs`` into
+## (``toolPathPrefix`` / ``actionPathEntry``, asserted below through
+## ``actionPathEnvEntry``), and because that value is now graph-derived
+## it is DECLARED rather than passthrough and is keyed by value. A
+## prepended directory that shadows a sub-tool is therefore not merely
+## "not invalidated" — it is not on the action's ``PATH`` at all.
+##
+## Re-measured on the same 1399-action graph after the fix, same
+## instrument (``repro graph --view=actions --format=json``), isolated
+## work-root and cache-root per run:
+##
+##   control    same $PATH, different work-root+cache   0 / 1399 moved
+##   treatment  ONE NONEXISTENT dir appended at END     0 / 1399 moved
+##   treatment  an EXISTING dir prepended that shadows
+##              nothing any edge invokes                0 / 1399 moved
+##
+## and on the one-action ``tr`` project, with the sub-tool DECLARED as a
+## ref (so the shadow is reachable at all), what used to be row T:
+##
+##   prepend a dir shadowing NOTHING       cdHit,  not executed, "HELLO"
+##   prepend a dir holding a fake ``tr``   cdMiss, RE-EXECUTED,  "SHADOWED"
+##   same $PATH, ``--force-rebuild``       cdMiss, executed,     "SHADOWED"
+##
+## The last two now agree, which is the whole point: the cached answer
+## is the answer the action would produce.
+##
+## The cost is that a bare-name sub-tool the EDGE does not name is an
+## UNDECLARED HOST-TOOL DEPENDENCY and now fails loudly at execution.
+## Enumerated on this repository's own 1399-action graph, all three
+## found by running the edge rather than by reading:
+##
+##   * ``gcc`` — 1397 ``nim c`` edges shell out to a bare C compiler.
+##     26 declared it (the ``nim.c`` wrapper); the other 1371 come from
+##     ``buildNimUnittest.build`` and did not.
+##   * ``mkdir`` / ``cp`` / ``chmod`` — the ``reprobuild-nix-daemon``
+##     staging ``shell(...)`` edge.
+##   * ``python3`` — the ``generate_legacy_cache_peer_wire``
+##     ``shell(...)`` edge. ``python3`` was in the package's ``uses:``
+##     list, which is NOT a declaration for this purpose: a ``uses:``
+##     entry says the project may need the tool, a ref says this edge
+##     runs it.
+##
+## Each is now named at its call site.
 ##
 ## ## Why dropping it ALONE would be a worse defect
 ##
@@ -75,8 +117,10 @@
 ## fixture tool is a genuine executable shell script that the resolver
 ## actually spawns for its ``--version`` probe.
 
-import std/[os, tempfiles, unittest]
+import std/[options, os, strutils, tempfiles, unittest]
 
+import repro_build_engine
+import repro_cli_support
 import repro_interface_artifacts
 import repro_tool_profiles
 
@@ -334,60 +378,57 @@ suite "tool_profile_keys_on_resolution_not_search_path":
     check shadowed.resolvedExecutableDigest != baseline.resolvedExecutableDigest
     check shadowed.profileFingerprint != baseline.profileFingerprint
 
-  test "a prepended EXISTING directory that shadows only UNDECLARED sub-tools does not move the fingerprint":
-    # KNOWN GAP — this test pins current behaviour and documents it as a
-    # hole, not as a property worth having.
+  test "a prepended EXISTING directory that shadows only UNDECLARED sub-tools cannot reach the action at all":
+    # THE GAP THIS FILE USED TO DOCUMENT, NOW CLOSED — and closed in the
+    # stronger of the two available ways.
     #
     # The prepended directory is real, is FIRST, and holds a real
     # executable. It just isn't the DECLARED tool, so the resolver never
-    # looks for it and the profile key cannot see it. Meanwhile that same
-    # directory does reach the action: ``pathSearchList`` is spliced into
-    # the action's runtime ``PATH`` by ``repro_cli_support.nim``, and
-    # ``PATH`` is a name-keyed passthrough whose value is never
-    # fingerprinted. So a bare-name sub-tool the action's command line
-    # invokes resolves out of this directory at execution time with
-    # nothing keying that choice.
+    # looks for it and the profile key cannot see it. That much is
+    # unchanged, and it is correct: where the resolver looked is not
+    # what it found.
     #
-    # MEASURED END TO END on a one-action project whose ``sh -c`` command
-    # invokes bare ``tr``, same work-root and cache-root across runs:
+    # What changed is the OTHER half. That directory used to reach the
+    # action anyway — ``pathSearchList`` was spliced into the action's
+    # runtime ``PATH``, and ``PATH`` was a name-keyed passthrough whose
+    # value was never fingerprinted — so a bare-name sub-tool the
+    # action's command line invokes resolved out of it at execution time
+    # with nothing keying the choice. MEASURED, on a one-action project
+    # whose ``sh -c`` command invokes bare ``tr``, same work-root and
+    # cache-root across runs:
     #
-    #   run 1  unchanged PATH                         cdMiss, executed, out="HELLO"
-    #   run 2  unchanged PATH                         cdHit,  not executed, out="HELLO"
-    #   run 3  prepend dir shadowing NOTHING          cdHit,  not executed, out="HELLO"
-    #   run 4  prepend dir containing a fake ``tr``   cdHit,  not executed, out="HELLO"
-    #   run 5  same PATH as run 4, --force-rebuild    executed,             out="SHADOWED"
+    #   1  unchanged PATH                         cdMiss, executed,     "HELLO"
+    #   2  unchanged PATH                         cdHit,  not executed, "HELLO"
+    #   3  prepend dir shadowing NOTHING          cdHit,  not executed, "HELLO"
+    #   T  prepend dir containing a fake ``tr``   cdHit,  not executed, "HELLO"
+    #   T' same PATH as T, --force-rebuild        cdMiss, executed,     "SHADOWED"
     #
-    # Run 4 served bytes that the action, run for real under that exact
-    # ``$PATH``, would not have produced. Run 3 is the control that says
-    # a prepend which shadows nothing must not invalidate — and does not.
+    # Row T served bytes the action, run for real under that exact
+    # ``$PATH``, would not have produced. Row 3 is the control: a
+    # prepend that shadows nothing must not invalidate, and does not.
     #
-    # BuildXL-style observed-input revalidation does not rescue run 4,
-    # and the reason is worth stating precisely because revalidation is
-    # NOT broken — it is simply blind to this particular change.
+    # Observed-input revalidation could not rescue row T, and the reason
+    # is worth keeping because revalidation is NOT broken — it is blind
+    # to this one change. The monitor does record the shell's ``$PATH``
+    # walk as ``path-probe`` records and does revalidate them; a
+    # directory a previous execution actually walked is covered.
+    # Row T ADDS a directory, which no prior execution probed, so there
+    # is no observation to re-check. The probes that were recorded name
+    # the real coreutils under ``/nix/store``, which ``cacheInputPaths``
+    # drops as the action's own ``toolInputRoots``.
     #
-    # The monitor does record the shell's ``$PATH`` walk, as ``path-probe``
-    # records with ``prAbsent`` / ``prExistingOther`` results, and those
-    # do get revalidated. Measured on the same project with the extra
-    # directory ON ``$PATH`` for the recording run:
+    # The fix is not "invalidate on row T". It is that row T's directory
+    # is no longer on the action's ``PATH``: ``actionPathEntry`` composes
+    # the value out of resolved tool directories only, with no host tail,
+    # so the shadow cannot influence the action whether or not the key
+    # moves. That is the second of the two sound outcomes and the better
+    # one — the first (re-execute) still leaves the host deciding what
+    # runs.
     #
-    #   A  dir on PATH but EMPTY, forced execution   executed, out="HELLO"
-    #   B  same PATH, dir now holds a fake ``tr``    cdMiss, RE-EXECUTED,
-    #                                                out="SHADOWED2"
-    #
-    # So a directory that a previous execution actually walked is
-    # covered. What run 4 does is different: it ADDS a directory to
-    # ``$PATH``, and no prior execution ever probed it, so there is no
-    # recorded observation to re-check. The probes that were recorded in
-    # run 1 name the real coreutils under ``/nix/store`` — and those are
-    # dropped anyway, because ``cacheInputPaths`` filters out everything
-    # under the action's own ``toolInputRoots``. Revalidation can only
-    # re-check paths a previous execution observed; a newly prepended
-    # directory is by construction not one of them.
-    #
-    # Closing this needs the action's runtime ``PATH`` to stop inheriting
-    # the host's — i.e. a hermetic action ``PATH`` built only from
-    # resolved tool directories — or the sub-tool set to be declared and
-    # resolved like first-class tools. Both are larger than this change.
+    # THE FINGERPRINT ASSERTION BELOW IS THEREFORE STILL "DOES NOT MOVE",
+    # and that is now a property rather than a gap: nothing about the
+    # resolution changed, so nothing about the key should. The assertion
+    # that carries the fix is the ``actionPathEnvEntry`` pair after it.
     let scratch = createTempDir("repro-toolpath-shadow-subtool-", "")
     defer: removeDir(scratch)
 
@@ -409,11 +450,152 @@ suite "tool_profile_keys_on_resolution_not_search_path":
     check widened.resolvedExecutablePath == baseline.resolvedExecutablePath
     check widened.resolvedExecutableDigest == baseline.resolvedExecutableDigest
 
-    # The search list DID change, and the new entry is the one that will
-    # win any bare-name lookup the action performs at runtime. Without
-    # these two the assertion below would be vacuous.
+    # The search list DID change, and under the old composition its new
+    # entry was the one that won every bare-name lookup the action
+    # performed at runtime. Without these two, both assertions below
+    # would be vacuous — a resolver that had stopped recording the
+    # caller's ``$PATH`` would satisfy them for the wrong reason.
     check widened.pathSearchList != baseline.pathSearchList
     check widened.pathSearchList[0] == shadowDir
 
-    # Current behaviour, pinned: the key does not move. That is the gap.
+    # Where the resolver looked is not a key input. Unchanged, and right.
     check widened.profileFingerprint == baseline.profileFingerprint
+
+    # THE HALF THAT CLOSES THE HOLE. The action's whole runtime ``PATH``,
+    # composed from the same widened profile, contains the directory the
+    # declared tool was resolved out of and NOTHING ELSE — in particular
+    # not the prepended shadow directory, and not any other entry of the
+    # caller's ``$PATH``.
+    let entry = actionPathEnvEntry(@[widened],
+      packageName = FixtureToolName, executableName = FixtureToolName)
+    checkpoint("composed action PATH entry: " & entry)
+    check entry == "PATH=" & binDir
+    check not entry.contains(shadowDir)
+
+    # ... and the same holds for the un-widened resolution, so the two
+    # differ in nothing: the caller's ``$PATH`` is not a term in the
+    # composition at all.
+    check actionPathEnvEntry(@[baseline],
+      packageName = FixtureToolName, executableName = FixtureToolName) == entry
+
+  test "the composed action PATH is a function of the resolved tools alone":
+    # The non-vacuity guard for the pair above, in the direction that
+    # matters: the composition is not simply constant. A tool resolved
+    # out of a DIFFERENT directory must produce a different ``PATH``, and
+    # a second declared tool must contribute its own directory. Without
+    # this, an ``actionPathEnvEntry`` that returned a fixed string would
+    # satisfy every assertion above.
+    let scratch = createTempDir("repro-toolpath-compose-", "")
+    defer: removeDir(scratch)
+
+    let binA = scratch / "a" / "bin"
+    let binB = scratch / "b" / "bin"
+    writeFixtureTool(binA, "BEHAVIOUR-A")
+    writeFixtureTool(binB, "BEHAVIOUR-B")
+
+    let a = resolvePathOnlyTool(fixtureUseDef(), pathValue = binA)
+    let b = resolvePathOnlyTool(fixtureUseDef(), pathValue = binB)
+    check actionPathEnvEntry(@[a], packageName = FixtureToolName,
+      executableName = FixtureToolName) !=
+      actionPathEnvEntry(@[b], packageName = FixtureToolName,
+        executableName = FixtureToolName)
+
+    # A SECOND RESOLVED TOOL JOINS ONLY WHEN THE EDGE NAMES IT.
+    #
+    # This pair is the boundary of the whole change, so it is asserted in
+    # both directions. The permissive alternative — splice in every tool
+    # the project resolved, named or not — was implemented, measured, and
+    # removed: `profiles` holds the identities REALIZED for the
+    # invocation, and `scopedToolArtifact` narrows realization to what the
+    # SELECTED actions reference, so a union would make an action's PATH
+    # (and now its cache key) depend on what else the invocation
+    # selected. It also hid the missing declarations: a whole-graph build
+    # passed while `repro build <one nim test edge>` failed with
+    # `gcc: command not found`.
+    let subBin = scratch / "sub" / "bin"
+    writeExecutable(subBin, FixtureSubToolName, "echo SUB")
+    let subUse = InterfaceToolUse(
+      rawConstraint: FixtureSubToolName,
+      packageSelector: FixtureSubToolName,
+      executableName: FixtureSubToolName)
+    let sub = resolvePathOnlyTool(subUse, pathValue = subBin)
+
+    # Resolved but UNNAMED: absent.
+    let unnamed = actionPathEnvEntry(@[a, sub], packageName = FixtureToolName,
+      executableName = FixtureToolName)
+    checkpoint("resolved-but-unnamed PATH entry: " & unnamed)
+    check unnamed == "PATH=" & binA
+    check not unnamed.contains(subBin)
+
+    # NAMED as a ref: present, after the edge's own tool.
+    let named = actionPathEnvEntry(@[a, sub], packageName = FixtureToolName,
+      executableName = FixtureToolName, refs = [FixtureSubToolName])
+    checkpoint("named-ref PATH entry: " & named)
+    check named == "PATH=" & binA & $PathSep & subBin
+
+suite "the fork-time PATH overlay excludes the host search list":
+  # ``actionPathEntry`` composes what the LOWERING writes into
+  # ``action.env``. It is not the only contributor to what the child
+  # process finally sees: at fork time the engine walks each action's
+  # ``toolIdentityRefs`` through ``mkToolIdentityResolver``'s closure and
+  # PREPENDS the resolved ``binDirs`` to that value. A hermetic
+  # ``action.env`` with a leaky overlay would be no hermeticity at all —
+  # and the overlay was the leakier of the two, because it put the host
+  # directories AHEAD of the store ones rather than behind them.
+
+  proc pathAdapterIdentity(resolved, hostA, hostB: string):
+      PathOnlyBuildIdentity =
+    PathOnlyBuildIdentity(actionIdentities: @[
+      ToolActionIdentity(
+        installMethod: "path",
+        packageSelector: FixtureToolName,
+        executableName: FixtureToolName,
+        resolvedExecutablePath: resolved,
+        # What ``resolvePathOnlyTool`` records for this adapter: the
+        # caller's whole ``$PATH``, not a list of tool directories.
+        pathSearchList: @[hostA, hostB])])
+
+  test "a path-adapter identity contributes only its resolved directory":
+    let scratch = createTempDir("repro-toolpath-overlay-path-", "")
+    defer: removeDir(scratch)
+
+    let binDir = scratch / "bin"
+    writeFixtureTool(binDir, "BEHAVIOUR-A")
+    let hostA = scratch / "host-a"
+    let hostB = scratch / "host-b"
+    createDir(hostA)
+    createDir(hostB)
+
+    let resolver = mkToolIdentityResolver(
+      pathAdapterIdentity(binDir / FixtureToolName, hostA, hostB))
+    let resolved = resolver(FixtureToolName, dkBuild)
+    check resolved.isSome
+    checkpoint("binDirs: " & $resolved.get().binDirs)
+    check resolved.get().binDirs == @[binDir]
+    check hostA notin resolved.get().binDirs
+    check hostB notin resolved.get().binDirs
+
+  test "a nix-adapter identity still contributes its whole search list":
+    # The non-vacuity guard. The fallback is not dead code: for every
+    # adapter that BUILDS a search list out of realized store paths, the
+    # list is graph-derived and is exactly what belongs on the action's
+    # PATH. A fix that dropped it unconditionally would pass the case
+    # above and silently strip the store bin dirs of every nix, tarball,
+    # scoop and from-source tool.
+    let scratch = createTempDir("repro-toolpath-overlay-nix-", "")
+    defer: removeDir(scratch)
+
+    let storeBin = scratch / "store" / "bin"
+    let extraBin = scratch / "store-extra" / "bin"
+    createDir(storeBin)
+    createDir(extraBin)
+
+    var identity = pathAdapterIdentity(storeBin / FixtureToolName,
+      storeBin, extraBin)
+    identity.actionIdentities[0].installMethod = "nix"
+
+    let resolver = mkToolIdentityResolver(identity)
+    let resolved = resolver(FixtureToolName, dkBuild)
+    check resolved.isSome
+    checkpoint("binDirs: " & $resolved.get().binDirs)
+    check resolved.get().binDirs == @[storeBin, extraBin]

@@ -477,6 +477,34 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     # The OpenSSL profile supplies the platform-specific library directories;
     # the linker arguments above intentionally contain no host paths.
     appendRegisteredActionToolIdentityRefs(result.id, ["openssl"])
+  # THE C BACKEND IS A SUB-TOOL, AND IT HAS TO SAY SO.
+  #
+  # ``nim c`` does not emit machine code. It emits C and then shells out
+  # -- via ``/bin/sh -c`` -- to a BARE ``gcc`` (or whatever ``--cc:``
+  # selects). That sub-tool was invisible to the graph: the edge named
+  # only ``nim``, and the compiler was found because an action's runtime
+  # ``PATH`` ended in the caller's ``$PATH``. Now that it does not, an
+  # undeclared sub-tool simply is not on the ``PATH``, and this edge
+  # fails with ``gcc: command not found``.
+  #
+  # Naming it here is the declaration, and it does two things, both
+  # needed. It puts the resolved compiler's directory on this edge's
+  # ``PATH``; and it keeps the compiler's ``uses:`` entry alive through
+  # ``scopedToolArtifact``, which realizes only the tool identities the
+  # SELECTED actions reference -- so a fragment build such as
+  # ``repro build .#apps`` still resolves it.
+  #
+  # This covers the edges ``nim.c(...)`` lowers -- 26 of this
+  # repository's 1397 nim edges. The other 1371 go through
+  # ``buildNimUnittest.build``, a typed tool from a pinned external
+  # package, and declare the same ref at their call site in
+  # ``repro.nim``.
+  #
+  # An unmatched ref is inert: the resolver returns ``none`` for a name
+  # no ``uses:`` entry declares, so a recipe that does not declare its C
+  # compiler is left exactly as it was.
+  let backendCompiler = if cc.len > 0: cc else: "gcc"
+  appendRegisteredActionToolIdentityRefs(result.id, [backendCompiler])
   maybeTagPublicInterface(result, publish, publishAs)
 
 # ---------------------------------------------------------------------------
