@@ -38,31 +38,31 @@ const reproBinary = "./build/bin/repro"
 const prepareOnlyProducerRepro = """
 import repro_project_dsl
 
-package mesonSource:
+package ninjaSource:
   build:
     let materialize = buildAction(
-      id = "meson-source.materialize",
+      id = "ninja-source.materialize",
       call = inlineExecCall(@[
         "sh", "-c",
-        "mkdir -p .repro/output/meson && " &
-          "printf '#!/bin/sh\\necho synthetic-meson\\n' > " &
-          ".repro/output/meson/meson && " &
-          "chmod +x .repro/output/meson/meson"
+        "mkdir -p .repro/output/ninja && " &
+          "printf '#!/bin/sh\\necho synthetic-ninja\\n' > " &
+          ".repro/output/ninja/ninja && " &
+          "chmod +x .repro/output/ninja/ninja"
       ]),
-      outputs = @[".repro/output/meson/meson"],
+      outputs = @[".repro/output/ninja/ninja"],
       cacheable = false)
-    defaultTarget(target("meson", [materialize]))
+    defaultTarget(target("ninja", [materialize]))
 """
 
 const prepareOnlyConsumerRepro = """
 import repro_project_dsl
-import repro_dsl_stdlib/packages/meson
+import repro_dsl_stdlib/packages/ninja
 
 package consumer:
   defaultToolProvisioning "from-source"
 
   uses:
-    "meson"
+    "ninja"
 
   build:
     let consumerAction = buildAction(
@@ -72,7 +72,7 @@ package consumer:
       ]),
       outputs = @["build/consumer-ran.txt"],
       cacheable = false,
-      toolIdentityRefs = @["meson"])
+      toolIdentityRefs = @["ninja"])
     defaultTarget(target("consumer", [consumerAction]))
 """
 
@@ -163,7 +163,7 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
       let scratch = createTempDir("repro-m9r9-prepare-", "")
       defer: removeDir(scratch)
       let catalogRoot = scratch / "catalog"
-      let producerRoot = catalogRoot / "meson"
+      let producerRoot = catalogRoot / "ninja"
       let consumerRoot = scratch / "consumer"
       let cacheRoot = scratch / "action-cache"
       createDir(catalogRoot)
@@ -188,7 +188,7 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
           delEnv("REPROBUILD_NO_RUNQUOTA")
 
       let producerArtifact =
-        producerRoot / ".repro" / "output" / "meson" / "meson"
+        producerRoot / ".repro" / "output" / "ninja" / "ninja"
       let consumerMarker = consumerRoot / "build" / "consumer-ran.txt"
       check not fileExists(producerArtifact)
       check not fileExists(consumerMarker)
@@ -519,6 +519,15 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
     # or let runaway recursion go unbounded.
     check FromSourceMaxRecursionDepth >= 8
     check FromSourceMaxRecursionDepth <= 256
+
+  test "test_m9r9_self_hosting_build_drivers_are_not_bootstrap_floor":
+    # Ninja and CMake now have source recipes that terminate on the seeded
+    # compiler/scripting floor. Pre-seeding either name silently bypasses
+    # those recipes and leaves later graph-only processes without artifacts.
+    check "ninja" notin BootstrapCycleBreakTools
+    check "cmake" notin BootstrapCycleBreakTools
+    check "gcc" in BootstrapCycleBreakTools
+    check "python3" in BootstrapCycleBreakTools
 
   test "test_m9r9_resolved_recipes_cache_is_addressable":
     # The per-process resolution cache must be reachable from outside

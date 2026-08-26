@@ -3883,20 +3883,11 @@ const BootstrapCycleBreakTools* = @[
   "libtool", "libtoolize",
   "m4",
   "perl",
-  # The remaining scripting/build drivers lack a source realization that can
-  # terminate its own dependency chain. Meson is deliberately absent: its
-  # custom recipe publishes a complete install mirror and can be auto-recursed.
-  "ninja", "python3", "python", "pkg-config", "pkgconf",
-  # M9.R.14g.5 — cmake bootstrap floor. cmake's from-source recipe
-  # transitively pulls gcc and (per M9.R.10a) trips the gcc cycle break
-  # too late — by then the sub-build worker has already failed because
-  # the gcc tool use has no stdlib provisioning channel declared on the
-  # CMake source recipe's lifted nativeBuildDeps. Routing cmake itself
-  # through stdlib (nix on Linux/macOS, tarball on Windows) terminates
-  # the recursion at the first edge. Same shape as meson/ninja above:
-  # cmake is a build-system driver, not a leaf C/C++ artifact a recipe
-  # needs to ship.
-  "cmake",
+  # Scripting drivers without a self-hosting source realization remain on the
+  # bootstrap floor. Meson, Ninja, and CMake are deliberately absent: their
+  # source recipes terminate on the seeded compiler/scripting floor and
+  # publish complete install mirrors that can be auto-recursed.
+  "python3", "python", "pkg-config", "pkgconf",
 ]
   ## Exported so tests + the dispatcher init code can audit + seed the
   ## list without re-declaring it.

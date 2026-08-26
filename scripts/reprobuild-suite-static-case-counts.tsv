@@ -1381,7 +1381,7 @@ tests/unit/t_m9r82_action_cache_cas_migration.nim	nim	8
 tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	3
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
-tests/unit/t_m9r9_auto_recurse.nim	nim	15
+tests/unit/t_m9r9_auto_recurse.nim	nim	16
 tests/unit/t_measurement_axes.nim	nim	14
 tests/unit/t_nix_propagated_store_paths.nim	nim	2
 tests/unit/t_run_consumes.nim	nim	3
