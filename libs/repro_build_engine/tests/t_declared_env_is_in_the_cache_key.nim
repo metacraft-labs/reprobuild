@@ -529,11 +529,48 @@ suite "the environment key rendering is canonical and host-independent":
     #       an action with no PATH entry at all; and
     #   (e) the ambient read may live in exactly one proc,
     #       `actionInheritedPathValue`, so the hermetic branch cannot
-    #       reach it.
+    #       reach it; and
+    #   (f) every site must pass an `edgeDeclaresTools` argument that
+    #       either READS THE EDGE'S DECLARATION (`toolIdentityRefs`) or
+    #       is the literal `false`, and the literal is allowed only in
+    #       `cmakeRegenerationBuildAction`.
     #
-    # A fifth lowering site added tomorrow fails (c) or (d) rather than
-    # silently handing the caller's shell control of what the action
-    # executes, or silently handing it nothing.
+    # A fifth lowering site added tomorrow fails (c), (d) or (f) rather
+    # than silently handing the caller's shell control of what the
+    # action executes, or silently handing it nothing.
+    #
+    # WHY (f) EXISTS, MEASURED. Rules (a)-(e) pin how the decision is
+    # SPELLED and what `actionPathDecision` does GIVEN its argument.
+    # None of them, and none of the unit cases in
+    # `t_tool_profile_keys_on_resolution_not_search_path.nim`, pins what
+    # the call sites PASS. Mutating the general typed-tool site to
+    # `edgeDeclaresTools = actionPathPrefix.len > 0` — precisely the
+    # naive "restore the `len > 0` guard" fix the branch rejected — left
+    # EVERY suite green: this file 12/12, the toolpath unit suite 19/19,
+    # the census 4/4, the execute-edge integration gate 2/2 and the
+    # pythonUnittest path-mode gate 2/2. A real build of
+    # `.#test#test_package_root_anchor` nevertheless went from
+    # `asSucceeded` to `asFailed: AssertionError: no `nim` on PATH`,
+    # because that edge's prefix is non-empty (its own `python3`) while
+    # its declaration set is empty. The empty-`PATH` counter in case 11
+    # structurally cannot see it — `PATH=<python3>/bin` is not empty, it
+    # is hermetic, keyed and unusable — which is the branch's own
+    # argument for why an emptiness test is insufficient, and was true
+    # of its own gates until this rule and the third case in
+    # `tests/integration/t_execute_edge_gives_tests_a_usable_path.nim`
+    # were added.
+    #
+    # THE `false` CARVE-OUT IS ONE SITE WIDE, and named rather than
+    # counted, because a bare `false` at the typed-tool site would be
+    # the OPPOSITE mutation: every edge inherits, no edge is hermetic,
+    # and the whole point of `7823baae8` is gone with nothing failing.
+    # `cmakeRegenerationBuildAction` is the one site that legitimately
+    # declares nothing: it re-runs a CMake CONFIGURE, whose tool closure
+    # is whatever the consumer's `CMakeLists.txt` probes by bare name
+    # (`execute_process(COMMAND uname ...)`, uncached `find_program`,
+    # and the fork's own `FindProgram("repro")`), and which is therefore
+    # not enumerable from the lowering site. See the comment there for
+    # the end-to-end measurement of what a hermetic `PATH` did to it.
     let source = currentSourcePath().parentDir.parentDir.parentDir /
       "repro_cli_support" / "src" / "repro_cli_support.nim"
     check fileExists(source)
@@ -603,6 +640,45 @@ suite "the environment key rendering is canonical and host-independent":
           usesPassthrough = true
       check usesEnv
       check usesPassthrough
+
+    # (f) — WHAT each site passes, not merely that it consumes the
+    # answer. The argument text is read out of the call itself, which
+    # spans two lines at all four sites.
+    var declarationArgs: seq[string] = @[]
+    for site in decisionSites:
+      var callText = ""
+      for probe in site .. min(site + 6, lines.high):
+        callText.add(lines[probe].strip() & " ")
+        if lines[probe].contains(")"):
+          break
+      const Marker = "edgeDeclaresTools = "
+      let at = callText.find(Marker)
+      # Fail-closed: a site that passes the argument positionally, or
+      # spells it without the surrounding spaces, is a site this scan
+      # cannot read, and an unreadable site is not a passing one.
+      checkpoint("decision site line " & $(site + 1) & " call: " & callText)
+      check at >= 0
+      if at >= 0:
+        var arg = callText[at + Marker.len .. ^1]
+        let close = arg.find(')')
+        if close >= 0:
+          arg = arg[0 ..< close]
+        arg = arg.strip()
+        declarationArgs.add(arg)
+        checkpoint("  edgeDeclaresTools = " & arg &
+          "  (in " & enclosingProc(site) & ")")
+        check arg.contains("toolIdentityRefs") or
+          (arg == "false" and
+            enclosingProc(site) == "cmakeRegenerationBuildAction")
+    check declarationArgs.len == decisionSites.len
+    # And the declaring form must be the MAJORITY arrangement, or the
+    # carve-out above has quietly become the rule.
+    var declaringSites = 0
+    for arg in declarationArgs:
+      if arg.contains("toolIdentityRefs"):
+        inc declaringSites
+    checkpoint("sites keyed on the edge's own refs: " & $declaringSites)
+    check declaringSites >= decisionSites.len - 1
 
     proc bodyOf(name: string): string =
       let start = text.find("\nproc " & name)

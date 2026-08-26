@@ -36,6 +36,15 @@
 ## PATH-dependent test binary is launched by the engine rather than by
 ## the shell.
 ##
+## The third case drives `tests/unit/test_package_root_anchor.py` the
+## same way, through the OTHER edge class — a `reprobuild.python_test.*`
+## edge, which declares no tool refs but does resolve a non-empty
+## `actionPathPrefix` (its own `python3`). That combination is what
+## separates "declaring a ref selects the hermetic branch" from "a
+## non-empty prefix selects it", and it is the only case in the suite
+## that fails when a lowering site passes the wrong `edgeDeclaresTools`.
+## See `PythonTarget` below.
+##
 ## `--force-rebuild` is not belt and braces. The defect's signature
 ## outcome is a CACHED green: without forcing execution, a stale record
 ## from a run made while the defect was present would be served, the
@@ -67,6 +76,38 @@ const TargetTest = "t_test_execute_edge_receives_a_usable_path"
   ## `tests/unit/t_test_execute_edge_receives_a_usable_path.nim`.
 
 const ExecuteActionId = "reprobuild.test_execute." & TargetTest
+
+const PythonTarget = "test_package_root_anchor"
+  ## The PYTHON-test half of the gate, and a different edge CLASS.
+  ##
+  ## `t_test_execute_edge_receives_a_usable_path` above goes through the
+  ## nim-unittest execute site and resolves NO tool directories, so its
+  ## `actionPathPrefix` is empty. `tests/unit/test_package_root_anchor.py`
+  ## goes through the general typed-tool site and DOES resolve one — its
+  ## own `python3` — while still declaring no `toolIdentityRefs`. Its
+  ## prefix is therefore non-empty and its declaration set is empty, and
+  ## that combination is the only one that separates the rule this branch
+  ## implements ("declaring a ref selects the hermetic branch") from the
+  ## rule it rejected ("a non-empty prefix selects it").
+  ##
+  ## WHY A SECOND EDGE WAS NEEDED AT ALL. Mutating the general typed-tool
+  ## site to `edgeDeclaresTools = actionPathPrefix.len > 0` — precisely
+  ## the naive fix — left EVERY suite on this branch green: the case
+  ## above 2/2, the toolpath unit suite 19/19, the census 4/4, the
+  ## declared-env suite 12/12 and the pythonUnittest path-mode suite 2/2.
+  ## The unit cases pin what `actionPathDecision` does GIVEN its
+  ## argument; nothing pinned what the four call sites PASS. The empty-
+  ## `PATH` counter structurally cannot see it either, because the
+  ## resulting `PATH=<python3>/bin` is not empty — it is hermetic, keyed,
+  ## and unusable. Under that mutation this edge fails with
+  ## `AssertionError: no `nim` on PATH`.
+  ##
+  ## The fixture is a deliberate choice as well: `nim_binary()` in
+  ## `test_package_root_anchor.py` raises rather than skipping, and says
+  ## why in the message. A PATH-dependent python test that skipped would
+  ## reproduce the green-no-op this whole file exists to end.
+
+const PythonActionId = "reprobuild.python_test." & PythonTarget
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -100,6 +141,28 @@ proc lineWith(output, needle: string): string =
     if line.contains(needle):
       return line
   ""
+
+proc censusCount(envLine, label: string): int =
+  ## The number in front of `label` on `environmentInheritanceHeaderLine`'s
+  ## `PATH:` section, or -1 when the label is absent.
+  ##
+  ## `rfind`, and the labels passed in are the FULL parenthesised ones
+  ## (`" hermetic (keyed by value)"`, `" inherited (passthrough)"`),
+  ## because the prose earlier on the same line already contains the bare
+  ## words "inherited" twice. Reading a count out of the prose instead of
+  ## out of the census would be the same class of mistake as the gate
+  ## this case exists to replace.
+  result = -1
+  let at = envLine.rfind(label)
+  if at < 0:
+    return
+  var i = at - 1
+  var digits = ""
+  while i >= 0 and envLine[i].isDigit:
+    digits = $envLine[i] & digits
+    dec i
+  if digits.len > 0:
+    result = parseInt(digits)
 
 suite "a real execute edge gives a test binary a usable PATH":
 
@@ -238,3 +301,109 @@ suite "a real execute edge gives a test binary a usable PATH":
         check "[SKIPPED]" notin stdoutText
         check "[FAILED]" notin stdoutText
         check stdoutText.contains("[OK]")
+
+  test "engine: a python-test edge with a non-empty prefix still gets a usable PATH":
+    ## THE CASE THAT PINS WHAT THE CALL SITES PASS, not what
+    ## `actionPathDecision` does once called. See `PythonTarget` above
+    ## for the measurement that made it necessary: the naive
+    ## `edgeDeclaresTools = actionPathPrefix.len > 0` mutation of the
+    ## general typed-tool site leaves every other gate on this branch
+    ## green, and fails here.
+    ##
+    ## The isolated per-run roots are load-bearing for the same reason
+    ## as the case above, and more sharply: `--force-rebuild` re-runs the
+    ## ACTION but not the LOWERING, and on shared roots the lowered graph
+    ## is served from cache (`loweredGraphCache: hit`), so a mutated
+    ## lowering never executes and the gate reports green about a
+    ## previous run's decision.
+    let repoRoot = findRepoRoot()
+    let reproBin = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
+    if not fileExists(reproBin):
+      checkpoint("skipped — " & reproBin &
+        " is missing; run `just build` first")
+      skip()
+    else:
+      # The fixture must fail loudly rather than skip when `PATH` is
+      # unusable, or this case measures nothing. `test_package_root_anchor`
+      # raises `AssertionError: no `nim` on PATH`; a future edit that
+      # turned that into `self.skipTest(...)` would make the engine arm
+      # below vacuous in exactly the way the empty-`PATH` defect was.
+      let pyFixture = repoRoot / "tests" / "unit" / (PythonTarget & ".py")
+      check fileExists(pyFixture)
+      let pySource = readFile(pyFixture)
+      check pySource.contains("no `nim` on PATH")
+      check "skipTest" notin pySource
+      check readFile(repoRoot / "repro_tests.nim").contains(
+        "tests/unit/" & PythonTarget & ".py")
+
+      discard requireRunQuotaDaemonBin(repoRoot)
+      let scratch = createTempDir("repro-d1-python-path-", "")
+      defer: removeDir(scratch)
+      let reportPath = scratch / "report.json"
+      let args = @[
+        reproBin.quoteShell, "build", ".#test#" & PythonTarget,
+        "--tool-provisioning=path", "--daemon=off", "--no-runquota",
+        "--force-rebuild",
+        "--work-root=" & (scratch / "work").quoteShell,
+        "--action-cache-root=" & (scratch / "cache").quoteShell,
+        "--write-report=" & reportPath.quoteShell,
+        "--log=actions", "--progress=quiet"]
+      let cmd = args.join(" ")
+      checkpoint("running: " & cmd)
+      let (output, exitCode) = runWithRunquotaOnPath(cmd, repoRoot)
+      if exitCode != 0:
+        checkpoint(output)
+      check exitCode == 0
+
+      let envLine = lineWith(output, "env: ")
+      checkpoint("build header env line: " & envLine)
+      check envLine.contains("PATH:")
+      check envLine.contains("0 EMPTY")
+      check "DEFECT" notin envLine
+
+      # The edge declares no refs, so it must be reported INHERITED. A
+      # hermetic classification here IS the mutation: the value would be
+      # `<python3>/bin` alone, which is non-empty, keyed, and unusable —
+      # the shape no empty-`PATH` counter can see. Counted rather than
+      # matched as a fixed string so the case survives the selector's
+      # graph gaining an edge, which would otherwise turn a correct
+      # lowering into a red gate.
+      let hermetic = censusCount(envLine, " hermetic (keyed by value)")
+      let inherited = censusCount(envLine, " inherited (passthrough)")
+      checkpoint("PATH census: hermetic=" & $hermetic &
+        " inherited=" & $inherited)
+      check hermetic == 0
+      check inherited >= 1
+
+      check fileExists(reportPath)
+      let report = parseFile(reportPath)
+      var pyAction: JsonNode = nil
+      let actions = report{"actions"}
+      if not actions.isNil and actions.kind == JArray:
+        for candidate in actions:
+          if candidate{"id"}.getStr() == PythonActionId:
+            pyAction = candidate
+            break
+
+      if pyAction.isNil:
+        checkpoint("no " & PythonActionId & " in the build report; the " &
+          "python-test edge did not run through the engine")
+        checkpoint(output)
+        check not pyAction.isNil
+      else:
+        let status = pyAction{"status"}.getStr()
+        let stdoutText = pyAction{"stdout"}.getStr()
+        let stderrText = pyAction{"stderr"}.getStr()
+        checkpoint(PythonActionId & " status=" & status &
+          " cacheDecision=" & pyAction{"cacheDecision"}.getStr() &
+          " launched=" & $pyAction{"launched"}.getBool())
+        checkpoint("--- action stdout ---\n" & stdoutText)
+        if stderrText.len > 0:
+          checkpoint("--- action stderr ---\n" & stderrText)
+        check pyAction{"launched"}.getBool()
+        check status == "asSucceeded"
+        # The failure the mutation produces, named so a future reader
+        # recognises it on sight rather than reading it as a host
+        # problem.
+        check "no `nim` on PATH" notin stdoutText
+        check "no `nim` on PATH" notin stderrText

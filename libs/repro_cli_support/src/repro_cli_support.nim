@@ -1343,8 +1343,10 @@ proc actionInheritedPathValue(actionPathPrefix: string): string =
   ## exactly what the base commit `2bbc56b60` did for every edge with a
   ## non-empty prefix, and this reproduces it byte for byte rather than
   ## extending it. An edge with NO prefix has nothing to prepend, so
-  ## `actionPathDecision` emits no entry at all for it and the launcher's
-  ## own live `getEnv("PATH")` fallback supplies the value at fork time.
+  ## `actionPathDecision` emits no entry at all for it and the value is
+  ## read from the host at LAUNCH time rather than at lowering time —
+  ## see the no-prefix branch of `actionPathDecision` for which
+  ## mechanism does that reading.
   ##
   ## Ordering is the base commit's ordering: whatever the graph did
   ## resolve first, the caller's `$PATH` behind it. A typed-tool edge
@@ -1419,13 +1421,24 @@ proc actionPathDecision*(actionPathPrefix: string;
       class: apcHermetic)
   # INHERITED, IN THE TWO SHAPES THE BASE COMMIT ALREADY HAD.
   #
-  # Nothing resolved -> emit NO entry. The launcher's own
-  # `getEnv("PATH")` fallback then supplies the value at fork time
-  # (`prependPathDirsToArgvEnv`, `repro_build_engine.nim:3543-3545`),
-  # which is both what `2bbc56b60` did for this class and the one that
-  # reads the CURRENT shell rather than a value the lowered-graph cache
-  # snapshotted during some earlier invocation. This is the branch the
-  # 1372 `reprobuild.test_execute.*` edges take.
+  # Nothing resolved -> emit NO entry, and let the host value be read at
+  # LAUNCH time instead. That is both what `2bbc56b60` did for this
+  # class and the reading that sees the CURRENT shell rather than a
+  # value the lowered-graph cache snapshotted during some earlier
+  # invocation. This is the branch the 1372 `reprobuild.test_execute.*`
+  # edges take.
+  #
+  # WHICH MECHANISM DOES THE READING, precisely, because an earlier
+  # revision of this comment named one that is no longer live. It is
+  # `launchChildEnv`'s PASSTHROUGH block
+  # (`repro_build_engine.nim`, the `if action.envPassthrough.len > 0`
+  # loop): `PATH` is named passthrough two lines below, the action
+  # declares no `PATH` of its own, so the block materialises
+  # `PATH=<getEnv("PATH")>` into the child env before the launcher runs.
+  # `prependPathDirsToArgvEnv` therefore sees `pathSeen = true` and its
+  # `else: getEnv("PATH")` fallback is NOT taken. Same value, same
+  # launch-time read, different proc — the fallback is now the path for
+  # an action that names no passthrough at all.
   #
   # Something resolved -> emit `<prefix>:<host>`, again exactly
   # `2bbc56b60`'s composition, so an edge that never declared refs but
@@ -1459,11 +1472,53 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
   #
   # `REPROBUILD_SOURCE_ROOT` below is read from the ambient environment
   # and so stays PASSTHROUGH. `PATH` goes through `actionPathDecision`
-  # like the other three sites: a provider root IS a declaration (the
-  # wrapper directory is graph-derived), so this edge takes the hermetic
-  # branch and its `PATH` is keyed by value; with no provider root there
-  # is nothing declared and the decision falls to inheritance rather
-  # than to an empty `PATH`.
+  # like the other three sites, but it passes `edgeDeclaresTools =
+  # false` — an EXPLICIT non-declaration, not an oversight. A provider
+  # root is not a tool declaration, and this edge is the one place in
+  # the file where that distinction was measured rather than argued.
+  #
+  # WHAT THIS EDGE ACTUALLY RUNS. `runCmakeRegenerationHelper` re-invokes
+  # the CMake GENERATOR (`cmake --check-build-system`, plus
+  # `cmake -P VerifyGlobs.cmake`). `cmake` itself comes from
+  # `cmake_command`, which the Reprobuild generator writes into
+  # `provider.meta` as an ABSOLUTE path — so the binary at the head of
+  # the command line is not the problem. What re-runs behind it is a
+  # full CMake configure, and a configure resolves host tools BY BARE
+  # NAME on every pass: `execute_process(COMMAND uname ...)`,
+  # `find_program` for anything not already in `CMakeCache.txt`, and —
+  # in the fork itself — `ReprobuildFindCliOnPath()`
+  # (`cmGlobalReprobuildGenerator.cxx`), which locates the `repro` CLI
+  # for provider priming with `cmSystemTools::FindProgram("repro")`.
+  #
+  # MEASURED, on a real `-G Reprobuild` project driven through
+  # `./build/bin/repro build <binaryDir>#hello --force-rebuild`, with
+  # `edgeDeclaresTools = cmakeWrapperPath.len > 0` (i.e. the hermetic
+  # branch):
+  #
+  #   cmakeRegenerationAction: __repro_cmake_regenerate
+  #     status=asSucceeded launched=true reason=exit=0
+  #   -- uname rc=no such file or directory out=
+  #
+  # The generator did not fail; it produced a WRONG configure and
+  # reported success, which is the same silent-green shape the empty
+  # `PATH` produced for the test-execute edges. Under
+  # `<wrapper>:<host>` the identical run reports `uname rc=0 out=Linux`.
+  # The reason is structural rather than incidental: the wrapper
+  # directory holds the generator's per-target compile/link wrappers and
+  # NOTHING ELSE — on that project it contained a single
+  # `*.repro-tool-profile` file and not one executable. A hermetic
+  # `PATH` built from it is a `PATH` with no host tool on it at all.
+  #
+  # A CMake configure's tool closure is not enumerable from here — it is
+  # whatever the consumer's `CMakeLists.txt` probes — so this edge
+  # INHERITS, exactly as `2bbc56b60` had it, and says so by naming
+  # `PATH` passthrough. That leaves this one edge non-hermetic and keyed
+  # only on the passthrough NAME, which is a REMAINING GAP and is
+  # recorded here as one: closing it means the CMake fork emitting the
+  # configure's tool set into `provider.meta` alongside `cmake_command`,
+  # so this site can compose a `PATH` out of a declaration instead of
+  # guessing at one. Until it does, guessing is what the hermetic
+  # branch would be, and the measurement above is what guessing cost.
   var envPassthrough: seq[string] = @[]
   let cmakeWrapperPath =
     if meta.providerRoot.len > 0:
@@ -1471,7 +1526,7 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     else:
       ""
   let cmakePath = actionPathDecision(cmakeWrapperPath,
-    edgeDeclaresTools = cmakeWrapperPath.len > 0)
+    edgeDeclaresTools = false)
   for entry in cmakePath.env:
     env.add(entry)
   for name in cmakePath.passthrough:

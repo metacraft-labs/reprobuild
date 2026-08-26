@@ -3606,6 +3606,22 @@ proc prependPathDirsToArgvEnv(env: seq[string];
   ## empty ``PATH`` on 1372 of this repository's 2753 process edges on
   ## the strength of it. ``repro_cli_support.actionPathDecision`` is the
   ## single place that can no longer produce that value.
+  ##
+  ## ## THE FIRST ROW IS NOW MOSTLY UNREACHABLE FROM THE LOWERING SITES
+  ##
+  ## The ``else: getEnv("PATH")`` fallback below is still correct and
+  ## still exercised — by any action that neither declares ``PATH`` nor
+  ## names it passthrough — but it is NOT how a lowered non-declaring
+  ## edge gets its ``PATH`` any more. ``actionPathDecision``'s inherited
+  ## branch names ``PATH`` in ``envPassthrough``, and ``launchChildEnv``
+  ## resolves value-less passthrough names out of the host BEFORE this
+  ## proc sees the list (the ``if action.envPassthrough.len > 0`` block
+  ## near the end of ``launchChildEnv``). By the time an inherited edge
+  ## reaches here the list already carries ``PATH=<host value>``, so
+  ## ``pathSeen`` is true and row two is what runs. Same bytes, same
+  ## launch-time read; different proc. Recorded because a comment in
+  ## this file citing a mechanism that no longer fires is exactly how
+  ## the empty-``PATH`` defect above shipped.
   let sep =
     when defined(windows): ";"
     else: ":"
