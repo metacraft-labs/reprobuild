@@ -80,6 +80,7 @@
 ## `resolve-sibling-rev.sh` is on disk.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl
 
 const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
@@ -89,12 +90,35 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   let res = execCmdEx(command, workingDir = cwd)
   (code: res.exitCode, output: res.output)
 
+proc runStdout(command: string; cwd = ""):
+    tuple[code: int; output: string] =
+  ## Run ``command`` capturing STDOUT ONLY; stderr stays on the test's own
+  ## stderr, where the run log still records it.
+  ##
+  ## The caller parses the captured text, and the solver writes clingo
+  ## ``info:`` notes to stderr, so the merge ``execCmdEx`` performs by
+  ## default would corrupt the parse. The previous spelling appended a
+  ## literal ``2>/dev/null`` to the command string — a SHELL redirect, and
+  ## ``execCmdEx`` runs no shell (``poEvalCommand`` hands the string to
+  ## ``CreateProcessW`` on Windows), so the token reached ``repro`` as an
+  ## argument. Dropping ``poStdErrToStdOut`` expresses the intent through
+  ## the API instead.
+  let res = execCmdEx(command, options = {poUsePath, poEvalCommand},
+                      workingDir = cwd)
+  (code: res.exitCode, output: res.output)
+
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc initGitRepo(gitBin, path: string) =
@@ -124,7 +148,7 @@ proc seedGitOrigin(gitBin, originPath, workPath, marker: string): string =
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
@@ -257,7 +281,7 @@ suite "HL-2 — the routed manifest partition lock resolves a sibling for CI":
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
-        projectToml("file://" & coreOrigin, "file://" & libOrigin))
+        projectToml(fileUrl(coreOrigin), fileUrl(libOrigin)))
       writeFile(manifestsRoot / "repos" / "core.toml",
         repoFragment("core", "core-origin"))
       writeFile(manifestsRoot / "repos" / "lib.toml",
@@ -346,13 +370,25 @@ suite "HL-2 — the routed manifest partition lock resolves a sibling for CI":
         # stderr carries the resolver's diagnostics; stdout carries ONLY the
         # revision, which is what `clone-siblings` consumes. Keep them apart so
         # the assertion is on the answer, not on the commentary.
-        let resolvedCmd = q(resolver) & " --repo core --sibling lib" &
+        # Invoked THROUGH ``sh``: the resolver is a ``#!/usr/bin/env bash``
+        # script, and off POSIX a script is not something
+        # ``CreateProcessW`` can launch — ``execCmdEx`` raised an OSError
+        # that killed the whole binary before leg (6) ran. Git ships an
+        # ``sh`` on every supported host, and running a script through it
+        # is correct on POSIX too.
+        let shBin = findExe("sh")
+        doAssert shBin.len > 0, "no `sh` on PATH to run " & resolver
+        let resolvedCmd = q(shBin) & " " & q(resolver) &
+          " --repo core --sibling lib" &
           " --manifest-dir " & q(manifestsRoot) &
           " --sha " & q(coreSha) &
           " --repo-dir " & q(ws / "core") &
           " --prefer-project mix --no-walk"
         let diagnosed = run(resolvedCmd)
-        let resolved = run(resolvedCmd & " 2>/dev/null")
+        # STDOUT only (see ``runStdout``): stdout carries the revision,
+        # stderr the commentary. The ``2>/dev/null`` this replaces was a
+        # shell redirect in a command string no shell parses.
+        let resolved = runStdout(resolvedCmd)
         if resolved.code != 0:
           checkpoint("resolve-sibling-rev output:\n" & diagnosed.output)
         check resolved.code == 0

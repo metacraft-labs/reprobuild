@@ -30,6 +30,7 @@
 ## or repro unbuilt.
 
 import std/[os, osproc, strutils, unittest]
+from repro_test_support import tomlBasicString
 
 const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
@@ -95,7 +96,13 @@ suite "MO-8: committed lock carries coordinates + self-describing integrity":
       # ---- (2) the dep carries coordinates. ----
       check "deps = [" in lockBody
       check ("revision = \"" & headSha & "\"") in lockBody
-      check ("url = \"" & originUrl & "\"") in lockBody
+      # ``tomlBasicString``: reprobuild's lock writer ESCAPES what it emits
+      # (``repro_lock.tomlEscape``), so on Windows the recorded coordinate is
+      # ``url = "C:\\...\\origin.git"``. Asserting the UNESCAPED spelling was
+      # an assertion bug, not a product one — on POSIX the two coincide, which
+      # is why it went unseen. Escaping here rather than weakening the check
+      # keeps it exact: a lock recording the wrong URL, or ``""``, still fails.
+      check ("url = \"" & tomlBasicString(originUrl) & "\"") in lockBody
       check "ref = \"main\"" in lockBody
       check "path = \".\"" in lockBody
 

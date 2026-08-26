@@ -62,6 +62,7 @@
 ## ``REPROBUILD_*_CONFIG`` overrides. Skip: ``git`` missing or repro unbuilt.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl
 
 const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
@@ -72,11 +73,17 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc initGitRepo(gitBin, path: string) =
@@ -100,7 +107,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
@@ -152,7 +159,7 @@ suite "develop --all: a placement key carries the target, not just the node":
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
-        projectToml("file://" & teamOrigin))
+        projectToml(fileUrl(teamOrigin)))
       writeFile(manifestsRoot / "repos" / "team-lib.toml",
         repoFragment("team-lib", "team-origin"))
       initGitRepo(gitBin, manifestsRoot)

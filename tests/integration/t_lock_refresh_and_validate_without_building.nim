@@ -95,8 +95,14 @@ suite "MO-1: lock refresh and validate without building":
       # Tamper the pinned version to one that no longer matches a fresh
       # solve of the inputs.
       writeFile(lockPath, readFile(lockPath).replace("2.2.0", "9.9.9"))
+      # No ``2>&1``: ``execCmdEx`` already merges stderr (``poStdErrToStdOut``
+      # is in its default option set) and it does NOT run a shell, so the
+      # redirect only ever reached argv as a literal token. On Windows that
+      # made ``repro lock validate`` refuse with "at most one <projectDir>
+      # positional accepted" — exit 2, the same code the real condition
+      # produces, so the exit-code check below passed for the wrong reason.
       let (tamperOut, tamperRc) = execCmdEx(reproBinary &
-        " lock validate " & quoteShell(projectDir) & " 2>&1")
+        " lock validate " & quoteShell(projectDir))
       check tamperRc == 2
       check "INVALID" in tamperOut or "tampered" in tamperOut or
             "stale" in tamperOut
@@ -112,9 +118,15 @@ suite "MO-1: lock refresh and validate without building":
 
       writeFile(projectDir / "repro.lock",
         "schema = \"totally.wrong.schema\"\n")
-      let (_, badRc) = execCmdEx(reproBinary &
-        " lock validate " & quoteShell(projectDir) & " 2>&1")
+      let (badOut, badRc) = execCmdEx(reproBinary &
+        " lock validate " & quoteShell(projectDir))
       check badRc == 2
+      # Exit 2 alone does not distinguish "refused the malformed lock" from
+      # "refused the command line" — `repro lock validate` answers 2 for an
+      # argv error too, which is exactly how the stray ``2>&1`` token above
+      # kept this case green while testing nothing. Pin the diagnostic.
+      check "malformed lock" in badOut
+      check "totally.wrong.schema" in badOut
 
   test "refresh updates the lock in place when inputs change":
     if not fileExists(reproBinary):

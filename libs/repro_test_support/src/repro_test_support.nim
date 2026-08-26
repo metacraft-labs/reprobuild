@@ -480,6 +480,41 @@ proc fileUrl*(path: string): string =
   else:
     "file://" & path
 
+proc tomlBasicString*(value: string): string =
+  ## ``value`` spelled as the BODY of a TOML basic string (``"..."``).
+  ##
+  ## The sibling of ``fileUrl`` for values that are NOT URLs: a native
+  ## filesystem path written into a fixture manifest (``program = "..."``,
+  ## ``local_path = "..."``), or an expected value asserted against TOML that
+  ## reprobuild itself wrote.
+  ##
+  ## On POSIX this is the identity for every path a test produces, which is
+  ## exactly why the omission is invisible there. On Windows a path is
+  ## ``C:\Users\...`` and a lone ``\`` is not legal inside a basic string —
+  ## ``\U`` starts an 8-hex-digit Unicode escape, ``\b`` / ``\t`` / ``\n`` are
+  ## control escapes, and anything else is a hard parse error which the
+  ## toml-serialization library reports with an EMPTY message.
+  ##
+  ## Matches what reprobuild's own writers emit (``repro_lock.tomlEscape``,
+  ## ``develop_overrides.tomlEscape``, ``workspace_branch.tomlEscape``), so it
+  ## is equally the right spelling for an assertion of the form
+  ## ``check ("url = \"" & tomlBasicString(u) & "\"") in lockBody``.
+  ##
+  ## The alternative the reader's own diagnostic offers — a TOML LITERAL
+  ## string ``'...'`` — is not used here because a literal string cannot
+  ## express a value containing ``'`` and gives no escape hatch.
+  result = newStringOfCap(value.len + 8)
+  for ch in value:
+    case ch
+    of '\\': result.add("\\\\")
+    of '"': result.add("\\\"")
+    of '\n': result.add("\\n")
+    of '\r': result.add("\\r")
+    of '\t': result.add("\\t")
+    of '\b': result.add("\\b")
+    of '\f': result.add("\\f")
+    else: result.add(ch)
+
 proc daemonSocketEndpoint*(name: string): string =
   ## Portable per-test endpoint name. AF_UNIX socket paths are picked
   ## under ``/tmp`` on POSIX; on Windows the equivalent name lives in

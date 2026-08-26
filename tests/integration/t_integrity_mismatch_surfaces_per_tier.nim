@@ -56,6 +56,7 @@
 ## env overrides. Skip: ``git`` missing or ``./build/bin/repro`` absent.
 
 import std/[base64, json, os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl, tomlBasicString
 
 import repro_workspace_manifests
 
@@ -68,11 +69,17 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc initGitRepo(gitBin, path: string) =
@@ -96,13 +103,24 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"HL-4 Tester\"")
 
-proc writeStubCli(path: string) =
+proc writeStubCli(path: string): string =
+  ## Returns the path the ``[locking] route`` must name as ``program``.
+  ##
+  ## The external-cli backend launches ``program`` DIRECTLY
+  ## (``repro_lock_store.startProcess(s.program, ...)``), which is the
+  ## right contract — "program" means a program. Off POSIX a ``#!``
+  ## script is not one: Windows answers "%1 is not a valid Win32
+  ## application". So the fixture keeps ONE copy of the stub logic and,
+  ## on Windows only, writes a ``.cmd`` launcher beside it that hands the
+  ## script to ``sh`` with the arguments and stdin untouched. Git and
+  ## msys2 both ship an ``sh`` on this host; the absolute path is baked in
+  ## so the launcher does not depend on the child's PATH.
   writeFile(path, """#!/usr/bin/env bash
 set -euo pipefail
 db="${DB_DIR:?DB_DIR unset}"
@@ -126,6 +144,18 @@ echo "unknown op: $op" >&2
 exit 1
 """)
   inclFilePermissions(path, {fpUserExec, fpGroupExec, fpOthersExec})
+  when defined(windows):
+    let shBin = findExe("sh")
+    doAssert shBin.len > 0, "no `sh` on PATH to launch the stub CLI"
+    let launcher = path.changeFileExt("cmd")
+    writeFile(launcher,
+      "@echo off\r\n" &
+      "\"" & shBin.replace('\\', '/') & "\" \"" &
+        path.replace('\\', '/') & "\" %*\r\n" &
+      "exit /b %ERRORLEVEL%\r\n")
+    launcher
+  else:
+    path
 
 proc projectToml(coreUrl, secretUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
@@ -177,7 +207,7 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
-        projectToml("file://" & coreOrigin, "file://" & secretOrigin))
+        projectToml(fileUrl(coreOrigin), fileUrl(secretOrigin)))
       writeFile(manifestsRoot / "repos" / "core.toml",
         repoFragment("core", "core-origin"))
       writeFile(manifestsRoot / "repos" / "secret.toml",
@@ -193,7 +223,7 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
       let db = scratch / "personal-db"
       createDir(db)
       let stub = scratch / "personal-store.sh"
-      writeStubCli(stub)
+      let stubProgram = writeStubCli(stub)
       putEnv("DB_DIR", db)
       defer: delEnv("DB_DIR")
 
@@ -206,7 +236,8 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
         "{ visibility = \"team\", backend = \"git-checkout\", " &
         "path = \"manifests-team\", repos = [\"core\"] }, " &
         "{ visibility = \"personal\", backend = \"external-cli\", " &
-        "program = \"" & stub & "\", repos = [\"secret\"] }]\n")
+        "program = \"" & tomlBasicString(stubProgram) &
+        "\", repos = [\"secret\"] }]\n")
 
       putEnv("REPROBUILD_SYSTEM_CONFIG", scratch / "no-system.toml")
       putEnv("REPROBUILD_USER_CONFIG", scratch / "no-user.toml")
@@ -265,7 +296,13 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
       let reportTeam = readReport(ws)
       check reportTeam["exitCode"].getInt() == 2
       let teamFail = integrityMismatch(reportTeam)
-      check teamFail != nil
+      # `doAssert`, not `check`: `unittest.check` NEVER raises, so a nil
+      # node here walked straight into the `["remediation"]` subscript
+      # below and SIGSEGV'd the binary — which is worse than a red case,
+      # because it also takes every case after it down with it.
+      doAssert teamFail != nil,
+        "no locked-integrity-mismatch failure in the team-tamper report:\n" &
+          reportTeam.pretty()
       # tier + backend named in BOTH the remediation and the evidence.
       check teamFail["remediation"].getStr().contains("tier=team")
       check teamFail["remediation"].getStr().contains("git-checkout")
@@ -284,21 +321,41 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
 
       # ==== CASE C — TAMPER the PERSONAL backend record → REFUSE (personal) ===
       # The external-cli DB stores each key's base64 of the FRAMED store record
-      # (``encodeRecord``). ``latestLock(mix, secret)`` reads the ``latest/...``
-      # key → the DB file ``latest_mix_secret``. Decode it, swap the pinned
-      # ``secret`` HEAD for a bogus SHA whose commit object is ABSENT from the
-      # ``secret`` checkout, and re-encode — WITHOUT touching secret's HEAD. Only
-      # a per-tier integrity check that reads the PERSONAL backend and recomputes
-      # at the coordinates can catch this. Personal-tier integrity mismatch
-      # REFUSES (a corruption/tamper, distinct from HL-3's unreachable backend
-      # which WARNS for personal).
+      # (``encodeRecord``). Decode every record that pins ``secret``'s HEAD,
+      # swap it for a bogus SHA whose commit object is ABSENT from the
+      # ``secret`` checkout, and re-encode — WITHOUT touching secret's HEAD.
+      # Only a per-tier integrity check that reads the PERSONAL backend and
+      # recomputes at the coordinates can catch this. Personal-tier integrity
+      # mismatch REFUSES (a corruption/tamper, distinct from HL-3's
+      # unreachable backend, which WARNS for personal).
+      #
+      # EVERY record, not just ``latest_mix_secret``: the reader
+      # (``lockedShaFromStore``) consults the PROJECT-latest record
+      # ``latest-any/<project>`` — the DB file ``latest-any_mix`` — in
+      # preference to the per-repo ``latest/<project>/<repo>`` key, and only
+      # falls back to the latter. Tampering the per-repo key alone therefore
+      # left the value the gate actually reads intact, and the case could not
+      # refuse whatever the gate did. Sweeping the DB keeps the tamper honest
+      # (it is still a backend-record corruption, never a change to the
+      # checkout) and independent of which key the reader prefers.
       let latestFile = db / "latest_mix_secret"
       check fileExists(latestFile)
-      let framed = base64.decode(readFile(latestFile).strip())
-      check framed.contains(secretSha)
-      let tamperedFramed = framed.replace(secretSha, bogusSha)
-      check tamperedFramed != framed
-      writeFile(latestFile, base64.encode(tamperedFramed))
+      check base64.decode(readFile(latestFile).strip()).contains(secretSha)
+      var tamperedRecords = 0
+      for kind, entry in walkDir(db):
+        if kind != pcFile: continue
+        let raw = readFile(entry).strip()
+        if raw.len == 0: continue
+        var framed = ""
+        try:
+          framed = base64.decode(raw)
+        except CatchableError:
+          continue
+        if secretSha notin framed: continue
+        writeFile(entry, base64.encode(framed.replace(secretSha, bogusSha)))
+        inc tamperedRecords
+      # Both the project-latest record and the per-repo one pin `secret`.
+      check tamperedRecords >= 2
 
       let gatePersonal = gate("secret")
       checkpoint("personal-tamper gate output: " & gatePersonal.output)
@@ -306,7 +363,13 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
       let reportPersonal = readReport(ws)
       check reportPersonal["exitCode"].getInt() == 2
       let personalFail = integrityMismatch(reportPersonal)
-      check personalFail != nil
+      # `doAssert`, not `check`: `unittest.check` NEVER raises, so a nil
+      # node here walked straight into the `["remediation"]` subscript
+      # below and SIGSEGV'd the binary — which is worse than a red case,
+      # because it also takes every case after it down with it.
+      doAssert personalFail != nil,
+        "no locked-integrity-mismatch failure in the personal-tamper report:\n" &
+          reportPersonal.pretty()
       check personalFail["remediation"].getStr().contains("tier=personal")
       check personalFail["remediation"].getStr().contains("external-cli")
       check personalFail["evidence"].getStr().contains("tier=personal")

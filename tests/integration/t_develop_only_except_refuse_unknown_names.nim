@@ -76,6 +76,7 @@
 ## layer 4 is silenced. Skip: ``git`` missing or ``repro`` unbuilt.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl
 
 const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
@@ -86,11 +87,17 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc initGitRepo(gitBin, path: string) =
@@ -158,7 +165,7 @@ suite "DS-7: exact-name selectors refuse a name that matches nothing":
       var remoteBlock = ""
       for name in repos:
         remoteBlock.add("[[remote]]\nname = \"" & name & "-origin\"\n" &
-          "fetch = \"file://" & scratch / ("origin-" & name & ".git") &
+          "fetch = \"" & fileUrl(scratch / ("origin-" & name & ".git")) &
           "\"\n\n")
 
       writeFile(manifestsRoot / "repos" / "lib-core.toml",
@@ -189,7 +196,7 @@ suite "DS-7: exact-name selectors refuse a name that matches nothing":
 
       for name in repos:
         discard requireGit(q(gitBin) & " clone " &
-          q("file://" & scratch / ("origin-" & name & ".git")) & " " &
+          q(fileUrl(scratch / ("origin-" & name & ".git"))) & " " &
           q(ws / name))
 
       createDir(ws / ".repro")

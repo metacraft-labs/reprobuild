@@ -46,6 +46,7 @@
 ## or repro unbuilt.
 
 import std/[os, osproc, strutils, unittest]
+from repro_test_support import fileUrl, tomlBasicString
 
 const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
@@ -66,14 +67,28 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
 proc git(gitBin, repo, rest: string): tuple[code: int; output: string] =
   run(q(gitBin) & " -C " & q(repo) & " " & rest)
 
+proc mustRun(res: tuple[code: int; output: string]; what: string) =
+  ## `doAssert`, not `check`: the callers below are HELPERS, outside any
+  ## `test` body, where `unittest.check` cannot see the `testStatusIMPL`
+  ## the `test` template injects — it prints "Check failed" and the case
+  ## still reports `[OK]`. `doAssert` raises an `AssertionDefect`, which
+  ## the `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
+  doAssert res.code == 0,
+    what & " failed (exit " & $res.code & "):\n" & res.output
+
 proc initPublishedRepo(gitBin, scratch, name: string):
     tuple[origin, work: string] =
   let origin = scratch / (name & ".git")
   let work = scratch / name
-  check git(gitBin, "", "init --bare -b main " & q(origin)).code == 0
-  check run(q(gitBin) & " clone " & q(origin) & " " & q(work)).code == 0
-  check git(gitBin, work, "config user.email t@example.invalid").code == 0
-  check git(gitBin, work, "config user.name Tester").code == 0
+  mustRun(git(gitBin, "", "init --bare -b main " & q(origin)),
+    "git init --bare " & origin)
+  mustRun(run(q(gitBin) & " clone " & q(origin) & " " & q(work)),
+    "git clone " & origin)
+  mustRun(git(gitBin, work, "config user.email t@example.invalid"),
+    "git config user.email in " & work)
+  mustRun(git(gitBin, work, "config user.name Tester"),
+    "git config user.name in " & work)
   (origin: origin, work: work)
 
 proc depInline(name, path, url, sha, depends: string): string =
@@ -113,7 +128,8 @@ suite "L1: repro develop --all verifies what it reports":
       check git(gitBin, repo, "add README.md").code == 0
       check git(gitBin, repo, "commit -m seed").code == 0
       let appSha = git(gitBin, repo, "rev-parse HEAD").output.strip()
-      let rootDep = depInline("app", ".", host.origin, "", "liba").replace(
+      let rootDep = depInline(
+        "app", ".", fileUrl(host.origin), "", "liba").replace(
         "revision = \"\"", "revision = \"" & appSha & "\"")
       writeFile(repo / "repro.lock",
         "schema = \"reprobuild.solved-graph-lock.v2\"\n\n" &
@@ -124,7 +140,7 @@ suite "L1: repro develop --all verifies what it reports":
         "variants = []\n" &
         "packages = []\n" &
         "deps = [" & rootDep & ", " &
-        depInline("liba", "liba", libOrigin, lockedSha, "") & "]\n")
+        depInline("liba", "liba", fileUrl(libOrigin), lockedSha, "") & "]\n")
 
       let deps = scratch / "deps"
       createDir(deps)
@@ -139,7 +155,12 @@ suite "L1: repro develop --all verifies what it reports":
       check git(gitBin, placed, "rev-parse HEAD").output.strip() == lockedSha
       let ovPath = repo / ".repro" / "develop-overrides.toml"
       check fileExists(ovPath)
-      check ("local_path = \"" & placed & "\"") in readFile(ovPath)
+      # ``develop-overrides.toml`` is written by reprobuild, whose
+      # ``develop_overrides.tomlEscape`` doubles a backslash — so the
+      # expected spelling of a Windows path is the ESCAPED one. Asserting
+      # the raw form was an assertion bug; on POSIX the two coincide.
+      check ("local_path = \"" & tomlBasicString(placed) &
+        "\"") in readFile(ovPath)
 
       # ---- (2) Delete the checkout; the override record survives. This is
       #      the CI runner that was cleaned between jobs. The command has

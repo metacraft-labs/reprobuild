@@ -26,6 +26,7 @@
 ## or repro unbuilt.
 
 import std/[os, osproc, strutils, unittest]
+from repro_test_support import tomlBasicString
 
 const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
@@ -97,5 +98,11 @@ suite "RX Phase-F: committed lock records canonical remote url (not origin)":
 
       # ---- (2) the dep records the CANONICAL (metacraft-labs) url, NOT "". ----
       # Falsifiable: origin-only resolution records ``url = ""`` and this fails.
-      check ("url = \"" & canonUrl & "\"") in lockBody
+      # ``tomlBasicString``: reprobuild's lock writer ESCAPES what it emits
+      # (``repro_lock.tomlEscape``), so on Windows the recorded coordinate is
+      # ``url = "C:\\...\\origin.git"``. Asserting the UNESCAPED spelling was
+      # an assertion bug, not a product one — on POSIX the two coincide, which
+      # is why it went unseen. Escaping here rather than weakening the check
+      # keeps it exact: a lock recording the wrong URL, or ``""``, still fails.
+      check ("url = \"" & tomlBasicString(canonUrl) & "\"") in lockBody
       check "url = \"\"" notin lockBody

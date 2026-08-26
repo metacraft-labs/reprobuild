@@ -18,6 +18,20 @@ const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 proc writeFixture(path: string; content: string) =
   writeFile(path, content)
 
+proc runStdoutOnly(command: string): tuple[output: string; exitCode: int] =
+  ## Run ``command`` capturing STDOUT ONLY, leaving stderr on the test's own
+  ## stderr where it stays visible in the run log.
+  ##
+  ## The ``--json`` cases below parse the captured text, and the solver writes
+  ## clingo ``info:`` notes to stderr, so the merge ``execCmdEx`` performs by
+  ## default would make the JSON unparseable. The previous spelling appended a
+  ## literal ``2>/dev/null`` to the command string, which is a SHELL redirect —
+  ## and ``execCmdEx`` runs no shell (``poEvalCommand`` hands the string to
+  ## ``CreateProcessW`` on Windows), so the token reached ``repro`` as an
+  ## argument and it refused with "at most one variant positional accepted".
+  ## Dropping ``poStdErrToStdOut`` expresses the same intent through the API.
+  execCmdEx(command, options = {poUsePath, poEvalCommand})
+
 suite "Spec-Implementation M2e: repro lock explain":
 
   test "explain a satisfied variant — text output":
@@ -60,9 +74,8 @@ default: gcc
 set: clang
 """)
       defer: removeFile(fixturePath)
-      let (output, exitCode) = execCmdEx(reproBinary &
-        " lock explain compiler --fixture " & fixturePath &
-        " --json 2>/dev/null")
+      let (output, exitCode) = runStdoutOnly(reproBinary &
+        " lock explain compiler --fixture " & fixturePath & " --json")
 
       check exitCode == 0
       # 1. Output is valid JSON.
@@ -105,9 +118,8 @@ values: on
 force: on
 """)
       defer: removeFile(fixturePath)
-      let (output, exitCode) = execCmdEx(reproBinary &
-        " lock explain a --fixture " & fixturePath &
-        " --json 2>/dev/null")
+      let (output, exitCode) = runStdoutOnly(reproBinary &
+        " lock explain a --fixture " & fixturePath & " --json")
 
       # 1. Exit code 3 — unsat (CLI contract).
       check exitCode == 3

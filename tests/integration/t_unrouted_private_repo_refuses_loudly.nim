@@ -40,6 +40,7 @@
 ## ``git`` missing or ``./build/bin/repro`` absent.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl, tomlBasicString
 
 const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
@@ -50,11 +51,17 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc gitConfig(gitBin, repo: string) =
@@ -77,7 +84,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   gitConfig(gitBin, targetPath)
 
 proc publicProjectToml(pubUrl: string): string =
@@ -138,7 +145,7 @@ suite "HL-7 — unrouted private repo refuses loudly":
       createDir(publicLayer / "projects")
       createDir(publicLayer / "repos")
       writeFile(publicLayer / "projects" / "mix.toml",
-        publicProjectToml("file://" & pubOrigin))
+        publicProjectToml(fileUrl(pubOrigin)))
       # ``pub`` depends on the private ``secret`` — bringing it into the pushed
       # repo's dependency-closure scope so the routed CURRENCY read (not only the
       # lock refresh) also encounters the unrouted private repo and refuses.
@@ -149,7 +156,7 @@ suite "HL-7 — unrouted private repo refuses loudly":
       createDir(privateLayer / "projects")
       createDir(privateLayer / "repos")
       writeFile(privateLayer / "projects" / "mix.toml",
-        privateProjectToml("file://" & secretOrigin))
+        privateProjectToml(fileUrl(secretOrigin)))
       writeFile(privateLayer / "repos" / "secret.toml",
         repoFragment("secret", "secret-origin"))
 
@@ -167,10 +174,10 @@ suite "HL-7 — unrouted private repo refuses loudly":
         "schema = \"reprobuild.workspace.local.v1\"\n\n" &
         "[workspace]\nproject = \"mix\"\nbranch = \"main\"\n\n" &
         "[[manifest]]\n" &
-        "local_path = \"" & publicLayer & "\"\n" &
+        "local_path = \"" & tomlBasicString(publicLayer) & "\"\n" &
         "visibility = \"public\"\nbranch = \"main\"\n\n" &
         "[[manifest]]\n" &
-        "local_path = \"" & privateLayer & "\"\n" &
+        "local_path = \"" & tomlBasicString(privateLayer) & "\"\n" &
         "visibility = \"private\"\nbranch = \"main\"\n")
 
       # ---- the [locking] route covers ONLY the public repo -------------

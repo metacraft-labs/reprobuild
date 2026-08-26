@@ -9,7 +9,14 @@
 import std/[json, os, osproc, streams, strutils, tables]
 
 const
-  ReproBinRelative* = "build/bin/repro"
+  # The executable extension has to be resolved HERE, not at the use site:
+  # this constant is both the sentinel `repoRoot` walks up looking for and
+  # the binary `reproBin` returns. Spelled without `.exe` it made the two
+  # fail together on Windows — `fileExists` was false at every level, so the
+  # walk ran to the DRIVE ROOT and the assertion then reported
+  # `repro binary missing at M:\build\bin\repro`, naming a path that was
+  # wrong in two independent ways.
+  ReproBinRelative* = "build/bin/" & addFileExt("repro", ExeExt)
 
 proc repoRoot*(): string =
   ## The reprobuild repo root, irrespective of the test's working
@@ -20,7 +27,7 @@ proc repoRoot*(): string =
   if env.len > 0 and dirExists(env):
     return env
   result = getCurrentDir()
-  # Walk up until we find ``build/bin/repro`` or a sentinel.
+  # Walk up until we find the repro binary or a sentinel.
   for _ in 0 .. 6:
     if fileExists(result / ReproBinRelative):
       return result

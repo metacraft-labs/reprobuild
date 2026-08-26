@@ -41,6 +41,7 @@
 ## missing or repro unbuilt.
 
 import std/[algorithm, json, os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl
 
 const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
 
@@ -51,11 +52,17 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc seedGitOrigin(gitBin, originPath, workPath: string): string =
@@ -111,9 +118,9 @@ suite "DS-1: a public-only workspace is unchanged by the lock-set composer":
       let appSha = seedGitOrigin(gitBin, appOrigin, scratch / "seed-app")
 
       let lockBody = committedLock(
-        depInline("app", ".", "file://" & appOrigin, appSha, "liba,libb") &
-        ", " & depInline("liba", "liba", "file://" & libaOrigin, libaSha, "") &
-        ", " & depInline("libb", "libb", "file://" & libbOrigin, libbSha, ""))
+        depInline("app", ".", fileUrl(appOrigin), appSha, "liba,libb") &
+        ", " & depInline("liba", "liba", fileUrl(libaOrigin), libaSha, "") &
+        ", " & depInline("libb", "libb", fileUrl(libbOrigin), libbSha, ""))
 
       putEnv("REPROBUILD_SYSTEM_CONFIG", scratch / "no-system.toml")
       putEnv("REPROBUILD_USER_CONFIG", scratch / "no-user.toml")
@@ -196,10 +203,10 @@ suite "DS-1: a public-only workspace is unchanged by the lock-set composer":
       # not a narrower answer, it is a false one — the exact failure mode the
       # exact-name loudness rule exists to produce truthfully.
       let taggedLock = committedLock(
-        depInline("app", ".", "file://" & appOrigin, appSha, "liba,libb") &
-        ", " & depInline("liba", "liba", "file://" & libaOrigin, libaSha, "",
+        depInline("app", ".", fileUrl(appOrigin), appSha, "liba,libb") &
+        ", " & depInline("liba", "liba", fileUrl(libaOrigin), libaSha, "",
                          tags = "libs") &
-        ", " & depInline("libb", "libb", "file://" & libbOrigin, libbSha, "",
+        ", " & depInline("libb", "libb", fileUrl(libbOrigin), libbSha, "",
                          tags = "tools"))
       let ws4 = scratch / "ws-tags"
       createDir(ws4)
