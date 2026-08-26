@@ -7454,6 +7454,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_execute_edge_gives_tests_a_usable_path.nim",
+    binary: "build/test-bin/t_execute_edge_gives_tests_a_usable_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_ext_repro_action_rows.nim",
     binary: "build/test-bin/t_ext_repro_action_rows",
     defines: @[],
@@ -10878,14 +10886,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim",
-    binary: "build/test-bin/t_tool_profile_keys_on_resolution_not_search_path",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
     source: "tests/unit/t_m9r9_auto_recurse.nim",
     binary: "build/test-bin/t_m9r9_auto_recurse",
     defines: @[],
@@ -10952,6 +10952,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_shared_mime_info_dev_stub.nim",
     binary: "build/test-bin/t_shared_mime_info_dev_stub",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_test_execute_edge_receives_a_usable_path.nim",
+    binary: "build/test-bin/t_test_execute_edge_receives_a_usable_path",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim",
+    binary: "build/test-bin/t_tool_profile_keys_on_resolution_not_search_path",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

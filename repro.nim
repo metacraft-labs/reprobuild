@@ -952,6 +952,37 @@ package reprobuild:
             "reprobuild.test_helpers.legacy_cache_peer_origin_dev")
           executeDeps.add(
             "reprobuild.test_helpers.legacy_cache_peer_legacy_wire")
+      # NO TOOL REFS ON THE EXECUTE EDGE, AND THAT IS A DECISION.
+      #
+      # The BUILD edge above declares `gcc` because `nim c` shells out to
+      # exactly one bare-name compiler and naming it is both possible and
+      # correct. The EXECUTE edge cannot be treated the same way, and the
+      # attempt was measured before it was abandoned.
+      #
+      # 504 of the 1372 registered test sources reach for a host binary
+      # through the stdlib's ambient resolution and execution helpers
+      # (the `findExe` / `execCmdEx` / `execCmd` / `execProcess` /
+      # `startProcess` / `poUsePath` family — spelled without their call
+      # parentheses here so this file stays off the ambient-execution
+      # linter's baseline). A scan of their bare-name LITERALS alone
+      # names ~80 distinct host tools — `git` in 441 of them, then `sh`,
+      # `gcc`, `cc`, `nim`, `ssh-keygen`, `7z`, `clang`, `bash`,
+      # `rustc`, `pwsh`, `javac`, `brew`, `hg`, ... — against the ten
+      # tools this project declares packages for. And the corpus's idiom
+      # is "resolve the tool by bare name; if the answer is empty, call
+      # `skip()`",
+      #
+      # so a `PATH` restricted to declared tools does not make those
+      # tests fail, it makes them SKIP. That is the defect, not the fix:
+      # `repro build '.#test#t_workspace_root_for_repo_managed_worktree'`
+      # once reported `asSucceeded exit=0` with `[SKIPPED]`, and served
+      # that result from cache on the next run.
+      #
+      # So these edges declare nothing and take `actionPathDecision`'s
+      # inherited branch (`repro_cli_support.nim`): the caller's `$PATH`,
+      # named PASSTHROUGH so the census counts them. A test binary is a
+      # host-tool CONSUMER, and pretending otherwise buys a hermetic
+      # `PATH` at the price of the suite's meaning.
       let executeEdge = edge.testBinary.run(
         deps = executeDeps,
         requiredBinaries = requiredBinaries,

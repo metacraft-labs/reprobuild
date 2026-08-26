@@ -18,6 +18,18 @@
 ## nothing anywhere records that it did. That is a real channel, it is
 ## currently silent, and closing it will break edges.
 ##
+## PER VARIABLE, HOWEVER, "OVERLAY" MEANS REPLACE. A variable the action
+## declares wins over the inherited one; only a variable it does not
+## declare is inherited. The header line used to end with "declared
+## entries overlay it, they do not replace it", and that sentence — true
+## of the environment as a whole, false of any single variable — was
+## quoted at three lowering sites as the justification for emitting
+## `PATH=` on every edge that resolved no tools. 1372 of 2753 process
+## actions on this repository's `test` graph carried it, and this census
+## counted them as ordinary declaring actions. The line now reports the
+## PATH classes separately, and `emptyPathActions` is the one number
+## here that is a defect rather than a fact.
+##
 ## So it is measured before it is touched. This file exists to make sure
 ## the measurement is a measurement:
 ##
@@ -168,8 +180,14 @@ suite "the undeclared-environment population is measured":
     # own graph looks like (0 declare nothing, 1391 inherit).
     check heavyLine.contains("200")
     for line in [heavyLine, lightLine]:
-      check line.contains("inherit the build environment")
-      check line.contains("overlay")
+      # THE SENTENCE THAT MUST NOT COME BACK. The line used to end
+      # "declared entries overlay it, they do not replace it". Per
+      # variable that is false, and it was quoted as the justification
+      # for emitting an empty `PATH` on 1372 edges. What the line says
+      # now is the true version.
+      check not line.contains("they do not replace it")
+      check line.contains("REPLACES the inherited one")
+      check line.contains("everything else is inherited")
 
     # An empty graph says so rather than dividing by zero.
     let empty = environmentInheritanceHeaderLine(
@@ -178,9 +196,107 @@ suite "the undeclared-environment population is measured":
     check empty.len > 0
     check not empty.contains("%")
 
-    # It is a FACT line, not a warning. A measurement dressed as a
-    # warning is a measurement people learn to skip, and nothing here is
-    # wrong yet — stage 2 changes no behaviour.
+    # It is a FACT line, not a warning where nothing is wrong. A
+    # measurement dressed as a warning is a measurement people learn to
+    # skip. The ONE exception is a non-zero empty-PATH count, which is
+    # not a measurement of a design choice but a report of a broken
+    # graph; the case below pins that it is called out and that a clean
+    # census is not.
     for line in [heavyLine, lightLine, empty]:
       check not line.toLowerAscii.contains("warning")
       check not line.toLowerAscii.contains("error")
+
+  test "the header line reports the PATH classes, and names the defect":
+    # THE GATE THAT WOULD HAVE CAUGHT D1. The three PATH classes are
+    # reported separately because they mean three different things, and
+    # one of them is never acceptable:
+    #
+    #   hermetic  — composed from solved-graph tool dirs, keyed by value
+    #   inherited — the caller's `$PATH`, declared passthrough
+    #   EMPTY     — `PATH=`, i.e. the action runs with no PATH at all
+    #
+    # Folded into "declares a variable", as they were, an empty PATH is
+    # indistinguishable from a good one on the build header.
+    let clean = environmentInheritanceHeaderLine(
+      EnvironmentInheritanceCensus(
+        totalActions: 100, declaringActions: 100,
+        hermeticPathActions: 60, inheritedPathActions: 40))
+    checkpoint("clean: " & clean)
+    check clean.contains("60 hermetic")
+    check clean.contains("40 inherited")
+    check clean.contains("0 EMPTY")
+    check not clean.contains("DEFECT")
+
+    # And the numbers must be the census's, not constants.
+    let other = environmentInheritanceHeaderLine(
+      EnvironmentInheritanceCensus(
+        totalActions: 100, declaringActions: 100,
+        hermeticPathActions: 11, inheritedPathActions: 89))
+    checkpoint("other: " & other)
+    check other != clean
+    check other.contains("11 hermetic")
+    check other.contains("89 inherited")
+
+    # A non-zero empty count is the one thing on this line that is
+    # reported as a defect rather than as a fact.
+    let broken = environmentInheritanceHeaderLine(
+      EnvironmentInheritanceCensus(
+        totalActions: 2753, declaringActions: 2753,
+        hermeticPathActions: 1381, emptyPathActions: 1372))
+    checkpoint("broken: " & broken)
+    check broken.contains("1372 EMPTY")
+    check broken.contains("DEFECT")
+    check broken != clean
+
+  test "the census classifies a real graph's PATH declarations":
+    # The counters, taken over a real `runBuild` rather than constructed
+    # by hand, so a classifier that disagreed with the engine would show
+    # up here.
+    let sh = shPath()
+    if sh.len == 0:
+      skip()
+    else:
+      let root = createTempDir("repro-env-census-path-", "")
+      defer: removeDir(root)
+      let workRoot = root / "work"
+      createDir(workRoot / "out")
+
+      proc edge(id: string; env: openArray[string] = [];
+                passthrough: openArray[string] = []): BuildAction =
+        action(id,
+          [sh, "-c", "printf 'ok\\n' > out/" & id & ".txt"],
+          cwd = workRoot,
+          outputs = ["out/" & id & ".txt"],
+          cacheable = false,
+          weakFingerprint = weak("path-" & id),
+          env = env,
+          envPassthrough = passthrough,
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+      # Counts chosen distinct so no permutation of the three reads as
+      # the identity, the same non-vacuity rule the case above uses.
+      let g = graph([
+        edge("hermetic1", env = ["PATH=/tool/bin"]),
+        edge("hermetic2", env = ["PATH=/tool/bin:/other/bin"]),
+        edge("hermetic3", env = ["PATH=/third/bin"]),
+        edge("inherited1", env = ["PATH=/tool/bin:/host/bin"],
+             passthrough = ["PATH"]),
+        edge("inherited2", passthrough = ["PATH"]),
+        edge("empty1", env = ["PATH="]),
+        edge("silent", env = ["FOO=1"])])
+
+      var config = defaultBuildEngineConfig(root / "cache")
+      config.bypassRunQuota = true
+      config.maxParallelism = 2'u32
+      let census = runBuild(g, config).environmentInheritance
+      checkpoint("PATH census: hermetic=" & $census.hermeticPathActions &
+        " inherited=" & $census.inheritedPathActions &
+        " empty=" & $census.emptyPathActions)
+      check census.hermeticPathActions == 3
+      check census.inheritedPathActions == 2
+      check census.emptyPathActions == 1
+      # `silent` declares a variable but says nothing about PATH, so it
+      # is in none of the three.
+      check census.hermeticPathActions + census.inheritedPathActions +
+        census.emptyPathActions == census.totalActions - 1
+

@@ -40,15 +40,38 @@
 ##   T   prepend a dir that shadows bare ``tr``   cdHit,  out="HELLO"
 ##   T'  same ``$PATH``, ``--force-rebuild``      cdMiss, out="SHADOWED"
 ##
-## The debt is now paid rather than merely recorded. The action's
-## runtime ``PATH`` no longer inherits the host's at all: it is composed
-## only of the directories the solved graph resolved THIS EDGE's tool
-## and THIS EDGE's declared ``toolIdentityRefs`` into
-## (``toolPathPrefix`` / ``actionPathEntry``, asserted below through
-## ``actionPathEnvEntry``), and because that value is now graph-derived
-## it is DECLARED rather than passthrough and is keyed by value. A
-## prepended directory that shadows a sub-tool is therefore not merely
-## "not invalidated" — it is not on the action's ``PATH`` at all.
+## The debt is now paid rather than merely recorded, FOR EVERY EDGE THAT
+## DECLARES WHAT IT RUNS. Such an edge's runtime ``PATH`` does not
+## inherit the host's at all: it is composed only of the directories the
+## solved graph resolved THIS EDGE's tool and THIS EDGE's declared
+## ``toolIdentityRefs`` into (``toolPathPrefix`` / ``actionPathEntry``,
+## asserted below through ``actionPathEnvEntry``), and because that value
+## is graph-derived it is DECLARED rather than passthrough and is keyed
+## by value. A prepended directory that shadows a sub-tool is therefore
+## not merely "not invalidated" — it is not on the action's ``PATH``
+## at all.
+##
+## ## THE BOUNDARY IS THE DECLARATION, AND IT HAS TO BE
+##
+## An edge that declares NO tool refs takes the other branch of
+## ``actionPathDecision``: it inherits the caller's ``$PATH`` and says so
+## by naming ``PATH`` passthrough. For a while it did neither — it was
+## given ``PATH=`` — and the measurement is in the suite at the bottom of
+## this file. The two ends of that:
+##
+##   1372/2753 process edges on this repository's ``test`` graph carried
+##   ``PATH=`` (empty), all of them ``reprobuild.test_execute.*``;
+##   ``repro build '.#test#t_workspace_root_for_repo_managed_worktree'``
+##   answered ``findExe("git") == ""`` by SKIPPING and reporting
+##   ``asSucceeded exit=0``, then ``cdHit`` on the next run.
+##
+## Making those edges hermetic instead was measured and rejected: 504 of
+## the 1372 registered Nim test sources call
+## ``findExe``/``execCmdEx``/``execCmd``/``execProcess``/``startProcess``/``poUsePath``,
+## naming ~80 distinct host tools in ``findExe`` literals alone (``git``
+## in 441 of them), against ten declared tool packages — and the corpus's
+## idiom is ``if findExe(x).len == 0: skip()``, so a hermetic ``PATH``
+## converts those tests to silent skips rather than to loud failures.
 ##
 ## Re-measured on the same 1399-action graph after the fix, same
 ## instrument (``repro graph --view=actions --format=json``), isolated
@@ -599,3 +622,200 @@ suite "the fork-time PATH overlay excludes the host search list":
     check resolved.isSome
     checkpoint("binDirs: " & $resolved.get().binDirs)
     check resolved.get().binDirs == @[storeBin, extraBin]
+
+suite "an action's PATH is a decision, and it is never the empty string":
+  ## THE GATE THAT WAS MISSING WHEN `PATH=` SHIPPED.
+  ##
+  ## Reverting `actionPathDecision` to the unconditional
+  ## `env.add(actionPathEntry(prefix))` that preceded it left every case
+  ## in this file and in
+  ## `libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim`
+  ## green — 12/12 and 10/10 — while 1372 of 2753 process edges carried
+  ## an empty `PATH`. Nothing in the test surface could see the
+  ## difference, because every case asserted the COMPOSITION
+  ## (`actionPathEnvEntry`) and none asserted the EMISSION. These do.
+  ##
+  ## Each case below is mutation-tested against the real module; the
+  ## mutations and their outcomes are recorded in the commit message.
+
+  proc fixtureDir(scratch: string): string =
+    let binDir = scratch / "bin"
+    writeFixtureTool(binDir, "BEHAVIOUR-A")
+    binDir
+
+  test "a declaring edge gets a hermetic PATH, keyed by value":
+    let scratch = createTempDir("repro-toolpath-decide-hermetic-", "")
+    defer: removeDir(scratch)
+    let binDir = fixtureDir(scratch)
+
+    let decision = actionPathDecision(binDir, edgeDeclaresTools = true)
+    checkpoint("env: " & $decision.env &
+      " passthrough: " & $decision.passthrough)
+    check decision.class == apcHermetic
+    check decision.env == @["PATH=" & binDir]
+    # Keyed BY VALUE: no passthrough name, so
+    # `keyedOnActionEnvironment` records `PATH=<value>` rather than the
+    # bare name. This is the half `7823baae8` bought and the half that
+    # must survive the D1 fix.
+    check decision.passthrough.len == 0
+    # ... and the host's `$PATH` is not a term in it. The dev shell that
+    # runs this test has a long `$PATH`; none of it may appear.
+    for entry in getEnv("PATH").split($PathSep):
+      if entry.len == 0 or entry == binDir:
+        continue
+      check not decision.env[0].contains(entry)
+
+  test "a non-declaring edge with nothing resolved emits NO PATH entry":
+    # The branch the 1372 `reprobuild.test_execute.*` edges take, and
+    # the one D1 broke. Before `actionPathDecision` these got `PATH=` —
+    # which, per `prependPathDirsToArgvEnv`, REPLACES the inherited
+    # value rather than falling through to it. The fix is not to emit
+    # the host value here but to emit NOTHING, so the launcher's own
+    # `getEnv("PATH")` fallback reads the CURRENT shell rather than
+    # whatever the lowered-graph cache snapshotted on some earlier run.
+    let decision = actionPathDecision("", edgeDeclaresTools = false)
+    checkpoint("env: " & $decision.env &
+      " passthrough: " & $decision.passthrough)
+    check decision.class == apcInherited
+    check decision.env.len == 0
+    # Emitting nothing is what the base commit did too. What is new is
+    # this: the name is in the key even though the value is not, so the
+    # edge SAYS it reads the host's `PATH` and a graph census can count
+    # the population instead of guessing at it.
+    check decision.passthrough == @["PATH"]
+
+  test "a non-declaring edge keeps the directories the graph DID resolve":
+    # Regression guard against "fix D1 by inheriting only". At the base
+    # commit a no-ref typed-tool edge got `<its own tool's dir>:<host>`;
+    # dropping the prefix would be a new defect wearing the fix's
+    # clothes. MEASURED shape this protects: the five
+    # `reprobuild.python_test.*` edges, whose prefix is their own
+    # `python3` and whose sub-tools (`nim`, `bash`, `git`) are the
+    # host's.
+    let scratch = createTempDir("repro-toolpath-decide-prefix-", "")
+    defer: removeDir(scratch)
+    let binDir = fixtureDir(scratch)
+
+    let decision = actionPathDecision(binDir, edgeDeclaresTools = false)
+    checkpoint("env: " & $decision.env)
+    check decision.class == apcInherited
+    check decision.env == @["PATH=" & binDir & $PathSep & getEnv("PATH")]
+    check decision.passthrough == @["PATH"]
+
+  test "NO input to actionPathDecision produces an empty PATH value":
+    # THE INVARIANT, stated over the whole input space rather than over
+    # the two cases above. `PATH=` is not a portability question or a
+    # key question: `findExe` inside such an action returns `""`, so a
+    # test that probes for its tools skips itself into a green,
+    # cacheable pass.
+    let scratch = createTempDir("repro-toolpath-decide-never-empty-", "")
+    defer: removeDir(scratch)
+    let binDir = fixtureDir(scratch)
+
+    for prefix in ["", binDir, binDir & $PathSep & (scratch / "second")]:
+      for declares in [false, true]:
+        let decision = actionPathDecision(prefix, edgeDeclaresTools = declares)
+        checkpoint("prefix=" & prefix & " declares=" & $declares &
+          " -> " & $decision.env & " / " & $decision.passthrough)
+        for entry in decision.env:
+          check entry != "PATH="
+          check not entry.startsWith("PATH=" & $PathSep)
+        # When no entry is emitted the edge must still declare that it
+        # is inheriting, so the omission is not silent either.
+        if decision.env.len == 0:
+          check decision.passthrough == @["PATH"]
+
+    # And the empty-prefix inherited shape emits nothing rather than the
+    # host value, so no host `$PATH` snapshot is written into the
+    # lowered graph for the 1372 edges that take it.
+    let noPrefix = actionPathDecision("", edgeDeclaresTools = false)
+    check noPrefix.env.len == 0
+    check noPrefix.passthrough == @["PATH"]
+
+  test "the classifier reads the decision back off a real BuildAction":
+    # The census instrument. `classifyActionPath` is what the engine's
+    # `EnvironmentInheritanceCensus` and `repro graph --view=env` both
+    # call, so what it says about an action is what the build header
+    # reports about the graph. It classifies the ARTIFACT, not the
+    # lowering's opinion of the artifact — the distinction that matters,
+    # because the lowering's opinion was written down and was wrong.
+    proc probe(env, passthrough: openArray[string]): ActionPathDeclaration =
+      classifyActionPath(action("probe", ["/bin/true"],
+        governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+        env = env, envPassthrough = passthrough))
+
+    check probe(["PATH=/a/bin"], []) == apdHermetic
+    check probe(["PATH=/a/bin"], ["PATH"]) == apdInherited
+    check probe([], ["PATH"]) == apdInherited
+    check probe([], []) == apdAbsent
+    # The defect, named as its own class rather than folded into
+    # "declares a variable" — which is how the build header reported
+    # 1372 empty-PATH edges as ordinary declaring actions.
+    check probe(["PATH="], []) == apdEmpty
+    check probe(["PATH="], ["PATH"]) == apdEmpty
+    # Last-write-wins, matching `prependPathDirsToArgvEnv`: a later
+    # empty entry is the value the child gets.
+    check probe(["PATH=/a/bin", "PATH="], []) == apdEmpty
+
+  test "the build header names an empty PATH as a defect, not as a fact":
+    # `environmentInheritanceHeaderLine` is the line every `repro build`
+    # prints. Before this, it said "all N also inherit the build
+    # environment (declared entries overlay it, they do not replace it)"
+    # — which is true of the environment as a whole, false of any single
+    # variable, and was the sentence the D1 comment cited.
+    var census: EnvironmentInheritanceCensus
+    census.totalActions = 10
+    census.declaringActions = 10
+    census.hermeticPathActions = 7
+    census.inheritedPathActions = 3
+    let clean = environmentInheritanceHeaderLine(census)
+    checkpoint(clean)
+    check "0 EMPTY" in clean
+    check "DEFECT" notin clean
+    # The false universal claim must not come back.
+    check "they do not replace it" notin clean
+
+    census.hermeticPathActions = 6
+    census.emptyPathActions = 1
+    let dirty = environmentInheritanceHeaderLine(census)
+    checkpoint(dirty)
+    check "1 EMPTY" in dirty
+    check "DEFECT" in dirty
+
+  test "the hermetic branch is what keeps the shadow unreachable":
+    # Ties the emission decision back to the property this branch
+    # exists for. The same widened profile that the sub-tool-shadow case
+    # above feeds to `actionPathEnvEntry` is fed here to the decision
+    # the LOWERING makes, in both directions:
+    #
+    #   declares a ref  -> hermetic, the shadow directory is absent
+    #   declares nothing -> inherited, the shadow directory is present
+    #
+    # The second row is not a regression being hidden; it is the
+    # boundary being stated. An edge that names nothing cannot be given
+    # a hermetic PATH without guessing what it runs, and guessing is
+    # what turns 504 host-probing test binaries into silent skips.
+    let scratch = createTempDir("repro-toolpath-decide-shadow-", "")
+    defer: removeDir(scratch)
+    let binDir = fixtureDir(scratch)
+    let shadowDir = scratch / "shadow-bin"
+    writeExecutable(shadowDir, FixtureSubToolName, "echo SHADOWED")
+
+    let widened = resolvePathOnlyTool(fixtureUseDef(),
+      pathValue = shadowDir & $PathSep & binDir)
+    check widened.resolvedExecutablePath == binDir / FixtureToolName
+
+    let hermetic = actionPathDecision(binDir, edgeDeclaresTools = true)
+    check hermetic.env == @["PATH=" & binDir]
+    check not hermetic.env[0].contains(shadowDir)
+
+    # Non-vacuity: the shadow directory IS reachable on the other
+    # branch, so the assertion above is about the branch and not about
+    # a shadow directory that could never have appeared anywhere.
+    let savedPath = getEnv("PATH")
+    putEnv("PATH", shadowDir & $PathSep & savedPath)
+    defer: putEnv("PATH", savedPath)
+    let inherited = actionPathDecision(binDir, edgeDeclaresTools = false)
+    checkpoint("inherited: " & $inherited.env)
+    check inherited.env[0].contains(shadowDir)
+    check inherited.passthrough == @["PATH"]
