@@ -539,7 +539,7 @@ suite "M18 repro stats reads the shared store":
       let socketRoot = getTempDir() / ("rq-m18c-" & $getCurrentProcessId())
       removeDir(socketRoot)
       createDir(socketRoot)
-      let socketPath = rendezvousDir(socketRoot) / "d.sock"
+      let socketPath = runquotaRendezvousDir(socketRoot) / "d.sock"
       let stateDir = socketRoot / "state"
       createDir(stateDir)
       var daemon = startRunQuotaDaemon(socketPath, stateDir / "host-id")
