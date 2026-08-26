@@ -49,6 +49,18 @@
 ## umask so the assertion cannot pass by accident on a machine whose
 ## default already happens to be 0022.
 ##
+## HM-6 ADDS A SEVENTH PROPERTY, and it is the inverse of the other three:
+##
+##   7. hosting is OFF in every shipped configuration.
+##
+## It is here rather than in a file of its own because this is where the
+## hosted path's properties already live, and because the three cases above
+## are the reason it is needed: they all REQUEST hosting, so between them
+## and `t_every_launch_path_is_monitored` — which requests it for all four
+## launch paths deliberately, to keep the negative half of its oracle
+## honest — the whole suite would stay green if the shipped default were
+## reversed. See the case for what that would cost.
+##
 ## NO MOCKS. The engine's own ``ActionResult`` and the filesystem are the
 ## oracles.
 
@@ -265,3 +277,124 @@ when defined(linux) or defined(macosx):
       check "NOTHING-ON-STDIN" in res.stdout
       check "PLANTED-STDIN-LINE" notin res.stdout
       check res.status == asSucceeded
+
+    test "in-process hosting is off in every shipped configuration":
+      ## In-Process-Monitor-Hosting HM-6. The three cases above all ASK for
+      ## hosting, because they are about it. Nothing anywhere asserted that
+      ## the shipped default does not.
+      ##
+      ## WHY THAT MATTERS ENOUGH TO BE ITS OWN CASE. HM-6 measured hosting
+      ## against the CLI wrapper on a real parallel build: indistinguishable
+      ## at the default parallelism (median ratio 1.013 against a +-4%
+      ## within-arm spread, reproduced independently at 0.988 against a
+      ## wider one) and measurably SLOWER on cheap actions — 1.5-2.4x on one
+      ## machine, 1.1-1.9x on a more loaded one, always in that direction.
+      ## So the
+      ## default is a decision, not an accident — and it is a decision no
+      ## test could see being reversed. `t_every_launch_path_is_monitored`
+      ## sets the field TRUE for all four launch paths on purpose, so it
+      ## stays green either way; production takes L3/L3b, which cannot host
+      ## at all, so it would not notice; and what WOULD change is every
+      ## `--no-runquota` build and every nested test build in the suite,
+      ## which would silently start paying the cheap-action cost and would
+      ## acquire a stdout/stderr capture whose PEAK is unbounded (the hosted
+      ## path redirects descriptors 1 and 2 into files nothing truncates
+      ## until the action ends, where RunQuota's backend bounds capture in
+      ## memory as it drains). A one-word diff, no failing test, no
+      ## diagnostic.
+      ##
+      ## Two independent halves, because they fail differently:
+      ##
+      ## MUTATION TARGET A — add `hostMonitorInProcess: true` to
+      ## `defaultBuildEngineConfig`, or give the field a `= true` default in
+      ## `BuildEngineConfig`: the first two checks redden.
+      ## MUTATION TARGET B — set the field at any construction site in any
+      ## shipped source under `libs/` or `apps/` (for instance
+      ## `repro_profile_compile/edge.nim`, which is on the bypass path and so
+      ## is the one where it would actually take effect): the last check
+      ## reddens and names the file.
+      check not defaultBuildEngineConfig(getCurrentDir() / "build" /
+        "test-tmp" / "hm6-default").hostMonitorInProcess
+      # And not merely because `defaultBuildEngineConfig` omits it: a bare
+      # object must be off too, since most construction sites in the tree
+      # build one field-by-field rather than starting from the default.
+      check not BuildEngineConfig(cacheRoot: "unused").hostMonitorInProcess
+
+      # No shipped construction site enables it. This is a source scan and it
+      # RAISES rather than passing when it cannot read what it is scanning —
+      # a scan that silently found nothing is exactly how a coverage gate
+      # reports a green run it did not do.
+      #
+      # THE SCAN COVERS EVERY SHIPPED SOURCE, not just the CLI. An earlier
+      # version read `repro_cli_support.nim` plus `apps/` only, and adding
+      # `hostMonitorInProcess: true` to
+      # `repro_profile_compile/edge.nim`'s `BuildEngineConfig(` — a shipped
+      # construction site that already sets `bypassRunQuota: true`, i.e. the
+      # ONE launch path that can host — reddened nothing. A config no test
+      # covers, on the only path where the field has any effect, is exactly
+      # the silent flip this case exists to refuse.
+      const Field = "hostMonitorInProcess"
+      # The module that DECLARES the field names it in its own type, in three
+      # comments and in the hosting decision, so it cannot be scanned for a
+      # bare mention. It needs no scanning: the only config it constructs is
+      # `defaultBuildEngineConfig`, and the first check above pins that one at
+      # RUNTIME, which is stronger than a source match.
+      let fieldOwner = getCurrentDir() / "libs" / "repro_build_engine" /
+        "src" / "repro_build_engine.nim"
+      var enablingSites: seq[string] = @[]
+      var scanned = 0
+      let cliSource = getCurrentDir() / "libs" / "repro_cli_support" / "src" /
+        "repro_cli_support.nim"
+      if not fileExists(cliSource):
+        raise newException(IOError,
+          "cannot scan " & cliSource & " for " & Field &
+          ": this case must run from the repository root")
+      if not fileExists(fieldOwner):
+        raise newException(IOError,
+          "cannot resolve the field's declaring module at " & fieldOwner &
+          ": this case must run from the repository root")
+      var sources: seq[string] = @[]
+      for root in ["libs", "apps"]:
+        for path in walkDirRec(getCurrentDir() / root):
+          if not path.endsWith(".nim"): continue
+          # A test may legitimately ask for hosting; three of them do, and the
+          # three cases above are among them.
+          if ("/tests/" in path) or sameFile(path, fieldOwner): continue
+          sources.add path
+      for path in sources:
+        inc scanned
+        for line in readFile(path).splitLines():
+          if Field in line:
+            enablingSites.add path.extractFilename & ": " & line.strip()
+      # NOT VACUOUS, and `scanned > 1` is not enough to say so: a walk that
+      # went to the wrong tree, or an exclusion rule that grew until it
+      # excluded everything, still scans hundreds of files and still reports a
+      # pass. So name the sources that MUST have been read — the CLI, and the
+      # two shipped libraries outside it that build a `BuildEngineConfig`
+      # field by field, one of which sets `bypassRunQuota: true`.
+      var missed: seq[string] = @[]
+      for required in [cliSource,
+                       getCurrentDir() / "libs" / "repro_profile_compile" /
+                         "src" / "repro_profile_compile" / "edge.nim",
+                       getCurrentDir() / "libs" / "repro_dev_env_engine" /
+                         "src" / "repro_dev_env_engine.nim"]:
+        var seen = false
+        for path in sources:
+          if sameFile(path, required):
+            seen = true
+            break
+        if not seen:
+          missed.add required
+      if missed.len > 0:
+        echo "the ", Field, " scan did not reach:\n  ", missed.join("\n  ")
+      check missed.len == 0
+      check scanned > 1
+      if enablingSites.len > 0:
+        echo "a shipped construction site names ", Field, ":\n  ",
+          enablingSites.join("\n  "),
+          "\n  HM-6 measured hosting as no faster at the default ",
+          "parallelism on a real build, and consistently slower on cheap ",
+          "actions, and it is ",
+          "reachable on the bypass path only. Enabling it in the product ",
+          "needs the HM-6 verdict revisited, not a config edit."
+      check enablingSites.len == 0

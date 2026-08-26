@@ -74,7 +74,7 @@ libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim	nim	12
 libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim	nim	5
 libs/repro_build_engine/tests/test_no_progress_diagnostic.nim	nim	1
 libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	9
-libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	7
+libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	8
