@@ -142,3 +142,74 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
     var seen: EvidenceSeenSets
     let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
     check status == mesUnknownScopeLoss
+
+  test "benign raw-syscall loss alone yields Level 0 and keeps the path set":
+    ## The `t_zero_output_edge_is_cacheable` execute edge's real RMDF
+    ## contains 13 `libc raw syscall unsupported nr=436` records and
+    ## nothing else. Before the benign-syscall allowlist those records
+    ## folded to Level 2 and the edge never published a cache record, so
+    ## it re-executed on every build forever. Folding them must now yield
+    ## Level 0 with the recorded reads intact.
+    resetTmp()
+    let rmdfPath = TmpDir / "benign-syscall.rdep"
+
+    let read1 = MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+      osPid: 1, threadId: 1, path: "/a.h", detail: "")
+    # The ``run=<id>`` stamp is what `stampRunId` appends to every Linux
+    # record; these details are the shape a real RMDF carries, not a
+    # simplified one. See the classifier suite's "the detail shape a REAL
+    # RMDF carries" case for why that distinction is load-bearing.
+    let closeRange = MonitorRecord(kind: mrEventLoss,
+      observationKind: moEventLoss,
+      osPid: 1, threadId: 1,
+      detail: "libc raw syscall unsupported nr=436 run=1787695082.5534084")
+    let getPid = MonitorRecord(kind: mrEventLoss,
+      observationKind: moEventLoss,
+      osPid: 1, threadId: 1,
+      detail: "libc raw syscall unsupported nr=39 run=1787695082.5534084")
+
+    let encoded = encodeCanonical(@[read1, closeRange, getPid])
+    writeFile(rmdfPath, cast[string](encoded))
+
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
+    when defined(linux) and defined(amd64):
+      check status == mesComplete
+    check evidence.monitorReads.len == 1
+
+  test "benign raw syscall does not rescue an RMDF that also lost a subtree":
+    ## THE NEGATIVE CONTROL, at the fold level.
+    ##
+    ## `t_monitor_fault_fails_the_action_not_the_daemon`'s execute edge
+    ## carries BOTH 3 benign `nr=436` records AND 2 genuine
+    ## unmonitored-subtree records. The subtree loss is a real Level 2
+    ## blind spot and must keep the whole session fail-closed: the
+    ## benign-syscall allowlist must not soften it.
+    ##
+    ## This is the gate that `worseMonitorStatus` provides inside the
+    ## fold. The classifier-level suite cannot fail if that fold rule is
+    ## inverted (verified by mutation); this test can.
+    resetTmp()
+    let rmdfPath = TmpDir / "benign-plus-subtree.rdep"
+
+    let closeRange = MonitorRecord(kind: mrEventLoss,
+      observationKind: moEventLoss,
+      osPid: 1, threadId: 1,
+      detail: "libc raw syscall unsupported nr=436 run=1787695082.5534084")
+    let subtreeLoss = MonitorRecord(kind: mrEventLoss,
+      observationKind: moEventLoss,
+      osPid: 0, threadId: 0,
+      detail: "unmonitored subtree/peer (un-injectable spawn child, " &
+        "SETEXEC into a hardened image, or IPC connect to an out-of-tree " &
+        "breakaway daemon)")
+
+    # Both record orders, so the result cannot depend on which record the
+    # fold happens to see last.
+    for records in [@[closeRange, subtreeLoss], @[subtreeLoss, closeRange]]:
+      let encoded = encodeCanonical(records)
+      writeFile(rmdfPath, cast[string](encoded))
+      var evidence: PathSetEvidence
+      var seen: EvidenceSeenSets
+      check foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen) ==
+        mesUnknownScopeLoss

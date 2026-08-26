@@ -129,6 +129,70 @@ framework layer stays distinguishable where it should be: a query for
 - With no daemon the window reads `unavailable` rather than empty, and the
   exit code stays 0: a missing daemon is not an error.
 
+## `stats last-pass` and `stats new-failures` answer point-in-time questions
+
+```sh
+repro_test_runner stats last-pass "suite::case" --json
+repro_test_runner stats new-failures --json
+```
+
+`last-pass` reports the most recent PASSING execution of one test: its
+timestamp, the revision it ran at, and the host it ran on. It has three
+answers, not two — "never ran here", "ran here and never passed", and "passed
+at T" — because the first two are different problems and a reader who cannot
+tell them apart reads a mistyped test name as a broken test. A test whose
+runner recorded no revision reports `unknown`, never an empty string.
+
+`new-failures` partitions the current failures into **new** (there is a passing
+execution in the window) and **long-standing** (there is not), which is the
+difference between a regression worth bisecting and a test that was already
+red.
+
+**It reports the partition per host as well as pooled, and names where the two
+disagree.** A test that passes on every machine but one is a host problem, not
+a regression — but pooled across hosts it looks exactly like a regression,
+because the window does contain a pass. The `disagreements` array lists every
+test whose pooled verdict differs from a host's, with which kind:
+
+- `age-differs` — pooled says `new`, the host that is actually failing it says
+  `long-standing` (or the reverse).
+- `not-failing-everywhere` — pooled says the test is currently failing; on at
+  least one host its most recent execution passed.
+
+Reading only the pooled column is what the array exists to stop.
+
+## Adaptive timeouts and duration sharding read the same rows
+
+Both are off unless asked for, and both fall back rather than guess.
+
+```sh
+repro_test_runner --adaptive-timeout --test-timeout=60 --bin-dir=...
+repro_test_runner --partition=slice:1/4 --shard-strategy=duration --bin-dir=...
+```
+
+`--adaptive-timeout` derives each case's timeout from the store:
+`max(minimum, metric x multiplier)`, capped at `--test-timeout`. Defaults are
+metric `p99`, multiplier `3.0`, minimum `5s`, window `20` executions per test;
+each is overridable (`--adaptive-timeout-metric`, `-multiplier`, `-minimum`,
+`-runs`). **A case the store has never seen keeps `--test-timeout`** — the
+runner's own configured default — rather than a value derived from nothing.
+The fallback is keyed on the SAMPLE COUNT, not on the metric: a test that has
+always run in under a millisecond has a metric of zero and real history, and
+must not be treated as unknown.
+
+`--shard-strategy=duration` bin-packs `--partition` by estimated wall-clock
+time (greedy: longest first, into the lightest shard) instead of by case count.
+**When no case in the run has duration history it falls back to `count` and
+says so** — the run summary records `appliedStrategy` alongside
+`requestedStrategy` and a `fellBack` flag, because a count split wearing the
+name `duration` is indistinguishable from a real bin-pack in the case set
+alone.
+
+Both read through the same query interface every `stats` subcommand uses; there
+is no second store and no second reader. With no daemon reachable the runner
+says so on stderr, uses its configured defaults, and runs — a missing daemon is
+not an error.
+
 **`termination` is what separates an OOM kill from an assertion failure.** Both
 are non-zero exits and an exit status cannot tell them apart, which matters
 most under a parallel runner: an OOM correlates with how much else was running,

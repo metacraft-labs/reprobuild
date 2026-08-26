@@ -66,8 +66,8 @@ libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	1
 libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim	nim	2
 libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim	nim	1
 libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim	nim	5
-libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim	nim	8
-libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	4
+libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim	nim	14
+libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	6
 libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	8
 libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim	nim	9
 libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim	nim	12
@@ -1033,6 +1033,7 @@ tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_d
 tests/integration/t_locking_explain_reports_resolved_tier_backend_and_layer.nim	nim	1
 tests/integration/t_long_operations_announce_plan_and_emit_live_progress.nim	nim	1
 tests/integration/t_m20_second_runner_generic_layer.nim	nim	3
+tests/integration/t_m21_point_in_time_queries.nim	nim	2
 tests/integration/t_m9r21_4_hardware_e2e.nim	nim	3
 tests/integration/t_m9r22b_2_apply_loopback.nim	nim	5
 tests/integration/t_macho_runtime_audit.nim	nim	15
@@ -1194,6 +1195,7 @@ tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
 tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim	nim	1
 tests/integration/t_team_repo_record_only_no_checkout.nim	nim	1
 tests/integration/t_test_edge_migration_covers_all_test_files.nim	nim	1
+tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.nim	nim	4
 tests/integration/t_ti1_interface_artifact_edge.nim	nim	4
 tests/integration/t_ti2_separate_module_producer.nim	nim	2
 tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	nim	1
@@ -1295,6 +1297,7 @@ tests/unit/t_hcr_agent_runtime.nim	nim	4
 tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_library_stage_alias.nim	nim	3
+tests/unit/t_m21_history_fed_scheduling.nim	nim	22
 tests/unit/t_m9q_from_source_provisioning.nim	nim	9
 tests/unit/t_m9r10a_cycle_break.nim	nim	7
 tests/unit/t_m9r10a_exec_name_audit.nim	nim	5

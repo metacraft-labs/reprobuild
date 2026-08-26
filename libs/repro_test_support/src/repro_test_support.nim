@@ -734,6 +734,31 @@ proc ctInterposeSrcPath*(repoRoot: string): string =
 
 type MissingTestFixtureError* = object of CatchableError
 
+proc reproBinaryPath*(repoRoot: string): string =
+  ## Absolute path to the graph-built ``repro`` CLI inside ``repoRoot``,
+  ## produced by build-graph edge ``reprobuild.apps.repro``. Every helper
+  ## in this module that needs the CLI goes through here.
+  ##
+  ## That funnel is load-bearing, not tidiness.
+  ## ``scripts/repro_binary_reachability.nim`` decides which tests get
+  ## ``build/bin/repro`` declared as a typed input on their EXECUTE edge,
+  ## and it SEEDS on a source spelling the binary's location — this one.
+  ## Taint then propagates along symbol references, so a test that only
+  ## calls ``prepareMonitorTools`` still gets the dependency, and a
+  ## rebuild of the CLI invalidates it instead of the engine serving the
+  ## test as up to date against a stale binary.
+  ##
+  ## Consequence for anyone adding a helper here: resolve the CLI through
+  ## this proc and the analysis follows you for free. Assemble the path
+  ## some other way and every test calling your helper silently loses its
+  ## dependency on the binary.
+  ##
+  ## Spelled componentwise rather than by joining a ``"build/bin/repro"``
+  ## const so the result carries the host path separator — callers compare
+  ## this against paths they built the same way, and on Windows the two
+  ## spellings are not equal.
+  repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
+
 proc requireBinary*(path, edgeName: string): string {.discardable.} =
   ## Test-Fixtures-In-Build-Graph: assert that a graph-built fixture binary
   ## already exists, instead of compiling it at test runtime. Returns ``path``
@@ -783,7 +808,7 @@ proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
   discard tempRoot
   discard cacheKey
   result.monitorCliPath = requireBinary(
-    repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    reproBinaryPath(repoRoot),
     "reprobuild.apps.repro")
   result.monitorCliArgs = ioMonitorCliArgs
   result.shim = requireBinary(monitorShimPath(repoRoot),

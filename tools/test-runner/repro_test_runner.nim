@@ -276,6 +276,14 @@ type
       ## yields the bare ``testname``, which that binary's ``--run``
       ## matcher rejects with "test not found" (exit 1, reported FAIL).
       ## Empty for whole-binary cases, which take no ``--run``.
+    timeoutSec: int
+      ## RunQuota-Observation-Store M21 / §17.4: this case's ADAPTIVE
+      ## timeout, computed from the shared store before the run starts.
+      ##
+      ## Zero means "no per-case value", and the run-wide
+      ## ``--test-timeout`` applies — which is what every case carries
+      ## with ``--adaptive-timeout`` off, so an unconfigured run behaves
+      ## exactly as it did before this field existed.
     meta: CatalogEntry
       ## The case's ``--list-json`` row, retained whole. See
       ## ``CatalogEntry`` for the retention rule and for which of its
@@ -3577,12 +3585,17 @@ proc workerLoop(args: WorkerArgs) =
     # exception escaping the per-case drivers is the harness failing,
     # not the case.
     try:
+      # THE PER-CASE VALUE WINS WHEN THERE IS ONE. ``tc.timeoutSec`` is
+      # zero unless §17.4's adaptive computation put something there, so
+      # this reduces to ``args.testTimeoutSec`` on every ordinary run.
+      let caseTimeoutSec =
+        if tc.timeoutSec > 0: tc.timeoutSec else: args.testTimeoutSec
       if tc.protocolAware:
         res = runOneProtocol(tc, args.resultsDir, args.baseEnv[],
-          args.testTimeoutSec, args.history, args.memoryLimitBytes)
+          caseTimeoutSec, args.history, args.memoryLimitBytes)
       else:
         res = runWholeBinary(tc, args.resultsDir, args.baseEnv[],
-          args.testTimeoutSec, args.history, args.memoryLimitBytes)
+          caseTimeoutSec, args.history, args.memoryLimitBytes)
     except CatchableError as e:
       res = TestResult(
         testCase: tc,
@@ -3615,7 +3628,8 @@ proc countStatusDisagreements(results: seq[TestResult]): int =
 proc writeSummary(summaryPath: string; results: seq[TestResult];
                   wallTimeMs: int; threadsUsed: int;
                   selection: SelectionDecision; deselectedCases: int;
-                  historyCaptured: bool; historyUncaptured: int) =
+                  historyCaptured: bool; historyUncaptured: int;
+                  scheduling: JsonNode = nil) =
   var total = results.len
   var passed = 0
   var failed = 0
@@ -3761,6 +3775,19 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
   if selection.reason.len > 0:
     sel["fell_back_because"] = %selection.reason
   summary["selection"] = sel
+  # M21: what the shared store did to this run's schedule, and — where it
+  # did nothing — WHY. A shard that fell back from ``duration`` to
+  # ``count`` and a shard that was asked for ``count`` produce the same
+  # case set; only this record tells them apart, and the difference is
+  # whether the split was informed by anything.
+  #
+  # ABSENT WHEN NEITHER FEATURE WAS ASKED FOR, rather than present and
+  # empty: a reader finding no ``scheduling`` key knows nothing was
+  # scheduled from history, which is not the same as a plan that read the
+  # store and found nothing.
+  if scheduling != nil and scheduling.kind == JObject and
+      scheduling.len > 0:
+    summary["scheduling"] = scheduling
   doc["summary"] = summary
   doc["tests"] = arr
   ensureDir(parentDir(summaryPath))
@@ -3800,6 +3827,23 @@ type
       ## preferable to perturbing the work being observed" — and the
       ## decision about whether RunQuota should also SCHEDULE this
       ## runner belongs to a later milestone, not to a reporter.
+    adaptiveTimeout: bool
+      ## RunQuota-Observation-Store M21 / §17.4 ``adaptive-timeout``.
+      ## OFF by default: a per-test timeout derived from history changes
+      ## when a test is killed, and turning that on for every existing
+      ## caller without being asked would be a scheduling change smuggled
+      ## in with a query.
+    adaptiveMetric: string
+    adaptiveMultiplier: float
+    adaptiveMinimumSec: int
+    adaptiveRuns: int
+    partitionIndex: int
+      ## ``--partition=slice:I/N``, 1-based. Zero means "no partition",
+      ## which is the default and runs every case.
+    partitionCount: int
+    shardStrategy: string
+      ## ``--shard-strategy=count|duration`` (§17.5). Only meaningful
+      ## with ``--partition``.
     memoryLimitMb: int
       ## ``--test-memory-limit-mb=N`` (env ``REPRO_TEST_MEMORY_LIMIT_MB``),
       ## 0 = off and the default. The resident size a test's whole
@@ -3833,6 +3877,21 @@ proc parseArgs(): RunnerOpts =
   result.catalogReadPath = ""
   result.historyEnabled = getEnv("REPRO_TEST_NO_RUNQUOTA_HISTORY", "") notin
     ["1", "true", "yes"]
+  # §17.4's own defaults, taken from the specification's example profile
+  # rather than restated: metric p99, multiplier 3.0, minimum 5s, runs 20.
+  # ``fallback`` is NOT a separate knob here — the runner already has one
+  # ("the profile's global timeout", i.e. ``--test-timeout``) and adding a
+  # second default would mean a test with no history could time out at a
+  # value the caller never set.
+  let defaults = defaultAdaptiveTimeoutConfig()
+  result.adaptiveTimeout = false
+  result.adaptiveMetric = $defaults.metric
+  result.adaptiveMultiplier = defaults.multiplier
+  result.adaptiveMinimumSec = defaults.minimumMs div 1000
+  result.adaptiveRuns = defaults.runs
+  result.partitionIndex = 0
+  result.partitionCount = 0
+  result.shardStrategy = $ssCount
   result.memoryLimitMb = 0
   let memoryLimitEnv = getEnv("REPRO_TEST_MEMORY_LIMIT_MB", "")
   if memoryLimitEnv.len > 0:
@@ -3874,6 +3933,67 @@ proc parseArgs(): RunnerOpts =
           result.testTimeoutSec = 0
       of "no-runquota-history": result.historyEnabled = false
       of "runquota-history": result.historyEnabled = true
+      of "adaptive-timeout": result.adaptiveTimeout = true
+      of "adaptive-timeout-metric":
+        if p.val notin ["mean", "median", "p90", "p99"]:
+          stderr.writeLine "repro_test_runner: --adaptive-timeout-metric " &
+            "must be one of mean, median, p90, p99"
+          quit(2)
+        result.adaptiveMetric = p.val
+      of "adaptive-timeout-multiplier":
+        try:
+          result.adaptiveMultiplier = parseFloat(p.val)
+        except ValueError:
+          stderr.writeLine "repro_test_runner: " &
+            "--adaptive-timeout-multiplier requires a number"
+          quit(2)
+        if result.adaptiveMultiplier <= 0.0:
+          stderr.writeLine "repro_test_runner: " &
+            "--adaptive-timeout-multiplier must be positive"
+          quit(2)
+      of "adaptive-timeout-minimum":
+        try:
+          result.adaptiveMinimumSec = parseInt(p.val)
+        except ValueError:
+          stderr.writeLine "repro_test_runner: --adaptive-timeout-minimum " &
+            "requires an integer (seconds)"
+          quit(2)
+        if result.adaptiveMinimumSec < 0:
+          result.adaptiveMinimumSec = 0
+      of "adaptive-timeout-runs":
+        try:
+          result.adaptiveRuns = parseInt(p.val)
+        except ValueError:
+          stderr.writeLine "repro_test_runner: --adaptive-timeout-runs " &
+            "requires an integer"
+          quit(2)
+        if result.adaptiveRuns < 0:
+          result.adaptiveRuns = 0
+      of "partition":
+        # §17.5's own spelling: ``--partition slice:1/4``.
+        let value = p.val
+        let body =
+          if value.startsWith("slice:"): value["slice:".len .. ^1] else: ""
+        let parts = body.split('/')
+        var ok = parts.len == 2
+        if ok:
+          try:
+            result.partitionIndex = parseInt(parts[0])
+            result.partitionCount = parseInt(parts[1])
+          except ValueError:
+            ok = false
+        if not ok or result.partitionCount < 1 or
+            result.partitionIndex < 1 or
+            result.partitionIndex > result.partitionCount:
+          stderr.writeLine "repro_test_runner: --partition requires " &
+            "slice:I/N with 1 <= I <= N"
+          quit(2)
+      of "shard-strategy":
+        if p.val notin ["count", "duration"]:
+          stderr.writeLine "repro_test_runner: --shard-strategy must be " &
+            "count or duration"
+          quit(2)
+        result.shardStrategy = p.val
       of "test-memory-limit-mb":
         try:
           result.memoryLimitMb = parseInt(p.val)
@@ -3922,6 +4042,32 @@ proc parseArgs(): RunnerOpts =
           "the RunQuota memory reservation;"
         echo "                      a test that crosses it is killed and " &
           "recorded as oom_killed (0=off)"
+        echo "  --adaptive-timeout  derive each case's timeout from the " &
+          "shared observation store"
+        echo "                      (metric x multiplier, floored at the " &
+          "minimum, capped at --test-timeout);"
+        echo "                      a case with no history keeps " &
+          "--test-timeout rather than a derived one"
+        echo "  --adaptive-timeout-metric=mean|median|p90|p99   (default p99)"
+        echo "  --adaptive-timeout-multiplier=F                 (default 3.0)"
+        echo "  --adaptive-timeout-minimum=N                    (seconds, " &
+          "default 5)"
+        echo "  --adaptive-timeout-runs=N                       (per-test " &
+          "window, default 20; 0=all)"
+        echo "  --partition=slice:I/N"
+        echo "                      run only shard I of N"
+        echo "  --shard-strategy=count|duration"
+        echo "                      how --partition splits: equal case " &
+          "count, or equal estimated"
+        echo "                      time from the shared store; duration " &
+          "falls back to count when"
+        echo "                      no case in this run has history"
+        echo ""
+        echo "stats subcommands (query the shared observation store, no " &
+          "test run):"
+        echo "  stats flaky | duration | new-failures [--runs N] [--json] " &
+          "[--scope=host]"
+        echo "  stats last-pass TEST_ID [--json] [--scope=host]"
         quit(0)
       else:
         stderr.writeLine "repro_test_runner: unknown option --" & p.key
@@ -4080,6 +4226,61 @@ proc ensureWorkspaceSourceEnv(repoRoot: string) =
     if bearssl.len > 0:
       putEnv("BEARSSL_SRC", bearssl)
 
+# ---------------------------------------------------------------------------
+# M21: the revision a run is of.
+#
+# **IT LIVES HERE AND NOT IN ``ct_test_history``, AND THE REASON IS A
+# REPOSITORY RULE RATHER THAN TASTE.** ``scripts/check_ambient_execution.sh``
+# is a ratchet over ``libs/``, ``apps/`` and ``repro.nim``: a library that
+# acquires a ``findExe``/``execCmdEx``-class call resolves an arbitrary host
+# binary through ambient PATH and records nothing, which
+# ``Package-Model.md`` §"Executables, Libraries, And Package Collections"
+# forbids outside a declared execution profile. Shelling out to ``git`` from
+# ``ct_test_history`` put a new offender on that list.
+#
+# It also contradicted the library's own contract: ``open`` documents the
+# revision as "THE CALLER'S TO RESOLVE" and takes it as two parameters. A
+# library that says the caller resolves it and then ships the resolver is
+# answering the question twice. The runner is the caller, it already spawns
+# processes for a living, and ``tools/`` is outside the ratchet's scan for
+# exactly that reason.
+# ---------------------------------------------------------------------------
+
+proc gitRevisionOf*(directory: string): tuple[commit, branch: string] =
+  ## The revision ``directory`` is checked out at, or empty strings.
+  ##
+  ## TOTAL, AND EMPTY IS A REAL ANSWER. A directory that is not a working
+  ## copy, a host with no ``git``, a repository with no commit yet: all
+  ## three answer "" and the caller writes SQL NULL. Inventing a
+  ## placeholder here would make ``last-pass`` report a revision that no
+  ## execution ever ran at, which is worse than reporting none.
+  ##
+  ## ``stderr`` IS FOLDED INTO THE CAPTURE rather than left to the
+  ## console: the ordinary "not a git repository" case is not an error
+  ## worth telling a test-runner user about, and OS-4's rule that a
+  ## degraded capture is not an error is the same rule one level down.
+  for probe in [(command: "rev-parse HEAD", slot: 0),
+                (command: "rev-parse --abbrev-ref HEAD", slot: 1)]:
+    let command = probe.command
+    let slot = probe.slot
+    var text = ""
+    var code = 1
+    try:
+      let answer = execCmdEx("git " & command,
+        options = {poStdErrToStdOut, poUsePath}, workingDir = directory)
+      text = answer.output.strip()
+      code = answer.exitCode
+    except CatchableError:
+      code = 1
+    if code != 0 or text.len == 0 or '\n' in text:
+      continue
+    if slot == 0: result.commit = text else: result.branch = text
+  # A detached HEAD answers ``HEAD`` to ``--abbrev-ref``, which is the
+  # NAME OF NO BRANCH. Stored as absent rather than as a branch called
+  # "HEAD", which is a name a reader would take literally.
+  if result.branch == "HEAD":
+    result.branch = ""
+
 proc main() =
   let opts = parseArgs()
   let cwd = getCurrentDir()
@@ -4207,6 +4408,132 @@ proc main() =
         opts.catalogWritePath & " (" & e.msg & ")"
       quit(2)
 
+  # ---- M21: history-fed scheduling (§17.4, §17.5) ------------------------
+  #
+  # BOTH READ THE SHARED OBSERVATION STORE THROUGH ``repro_test_stats``,
+  # which is the same reader ``stats flaky`` / ``duration`` / ``last-pass``
+  # / ``new-failures`` use. §17.3 §"How these read": the query interface
+  # "serves the runner's *adaptive timeouts* (§17.4) and RunQuota's own
+  # admission estimates — the same rows at a different aggregation." A
+  # scheduler with its own store would be a second thing to keep correct,
+  # and a second thing that could disagree with what the queries report.
+  #
+  # NEITHER READS AT ALL UNLESS ASKED. With no ``--adaptive-timeout`` and
+  # no ``--partition`` the block below issues no query, so an ordinary run
+  # neither depends on a daemon nor pays for one.
+  var scheduling = newJObject()
+  block historyFedScheduling:
+    let wantsTimeouts = opts.adaptiveTimeout
+    let wantsDurationShards = opts.partitionCount > 1 and
+      opts.shardStrategy == $ssDuration
+    if not wantsTimeouts and not wantsDurationShards and
+        opts.partitionCount == 0:
+      break historyFedScheduling
+
+    var historyRows: seq[GenericTestRow] = @[]
+    var historyAnswered = false
+    if wantsTimeouts or wantsDurationShards:
+      let read = readSchedulingHistory()
+      historyRows = read.rows
+      historyAnswered = read.answered
+      if not historyAnswered:
+        # OS-4: a missing daemon is not an error. It IS a fact about the
+        # plan, so it is stated rather than swallowed — the alternative is
+        # a run whose timeouts silently came from nowhere.
+        stderr.writeLine "repro_test_runner: no runquotad answered; " &
+          "history-fed scheduling falls back to its configured defaults"
+    scheduling["historyAvailable"] = %historyAnswered
+    scheduling["historyRows"] = %historyRows.len
+
+    if opts.partitionCount > 1:
+      var testIds: seq[string] = @[]
+      for tc in queue.items:
+        testIds.add(tc.qualifiedName)
+      let requested =
+        if opts.shardStrategy == $ssDuration: ssDuration else: ssCount
+      let estimates =
+        if wantsDurationShards: durationEstimates(historyRows)
+        else: initTable[string, int]()
+      let plan = planShards(testIds, estimates, opts.partitionCount, requested)
+      var kept: seq[TestCase] = @[]
+      for i, tc in queue.items:
+        if plan.assignment[i] == opts.partitionIndex - 1:
+          kept.add(tc)
+      scheduling["shard"] = %*{
+        "index": opts.partitionIndex,
+        "count": opts.partitionCount,
+        "requestedStrategy": $plan.requested,
+        "appliedStrategy": $plan.applied,
+        "fellBack": plan.fellBack,
+        "reason": plan.reason,
+        "casesWithHistory": plan.withHistory,
+        "casesWithoutHistory": plan.withoutHistory,
+        "casesBefore": queue.items.len,
+        "casesAfter": kept.len,
+        "shardEstimateMs": plan.shardEstimateMs
+      }
+      stderr.writeLine "repro_test_runner: partition slice:" &
+        $opts.partitionIndex & "/" & $opts.partitionCount & " (" &
+        $plan.applied & (if plan.fellBack: ", fell back from " &
+          $plan.requested else: "") & ") selected " & $kept.len & " of " &
+        $queue.items.len & " cases"
+      queue.items = kept
+      totalCases = kept.len
+
+    if wantsTimeouts:
+      var config = defaultAdaptiveTimeoutConfig()
+      config.enabled = true
+      config.metric = parseEnum[TimeoutMetric](opts.adaptiveMetric)
+      config.multiplier = opts.adaptiveMultiplier
+      config.minimumMs = opts.adaptiveMinimumSec * 1000
+      config.runs = opts.adaptiveRuns
+      # THE FALLBACK IS THE RUNNER'S OWN GLOBAL TIMEOUT, not a second
+      # default invented here. §17.4 step 3 ("If a test has no history
+      # ... the ``fallback`` timeout is used") and step 5 (the cap) both
+      # resolve to ``--test-timeout``, so a case with no history is
+      # timed exactly as it would have been without this flag.
+      config.fallbackMs = opts.testTimeoutSec * 1000
+      config.globalTimeoutMs = opts.testTimeoutSec * 1000
+      var testIds: seq[string] = @[]
+      for tc in queue.items:
+        testIds.add(tc.qualifiedName)
+      let answers = adaptiveTimeouts(historyRows, testIds, config)
+      var fromHistory = 0
+      var fromFallback = 0
+      var cases = newJArray()
+      for i in 0 ..< queue.items.len:
+        let answer = answers[i]
+        # ZERO IS NOT WRITTEN BACK. ``timeoutSec == 0`` already means "no
+        # per-case value" in ``TestCase``, so a computed zero — which is
+        # what a fallback of ``--test-timeout=0`` produces — must leave
+        # the field alone rather than round-trip through a sentinel.
+        let seconds = answer.timeoutMs div 1000
+        if seconds > 0:
+          queue.items[i].timeoutSec = seconds
+        if answer.source == tsFallback: inc fromFallback
+        else: inc fromHistory
+        cases.add(%*{
+          "testId": answer.testId,
+          "timeoutSec": seconds,
+          "source": $answer.source,
+          "samples": answer.samples,
+          "metricMs": answer.metricMs
+        })
+      scheduling["adaptiveTimeout"] = %*{
+        "enabled": true,
+        "metric": $config.metric,
+        "multiplier": config.multiplier,
+        "minimumSec": opts.adaptiveMinimumSec,
+        "runs": config.runs,
+        "fallbackSec": opts.testTimeoutSec,
+        "fromHistory": fromHistory,
+        "fromFallback": fromFallback,
+        "cases": cases
+      }
+      stderr.writeLine "repro_test_runner: adaptive timeouts — " &
+        $fromHistory & " from history, " & $fromFallback &
+        " from the configured fallback"
+
   stderr.writeLine "repro_test_runner: " & $protocolBinaries &
     " protocol-aware, " & $opaqueBinaries & " whole-binary, " &
     $totalCases & " test cases, " & $opts.threads & " threads"
@@ -4330,7 +4657,17 @@ proc main() =
   var history: HistoryReporter
   var historyPtr: ptr HistoryReporter = nil
   if opts.historyEnabled:
-    if open(addr history):
+    # M21: the REVISION this run is of, resolved ONCE here and recorded
+    # against every execution, so ``stats last-pass`` can answer "did it
+    # work before my change" and not only "did it work before now".
+    #
+    # RESOLVED FROM THE RUNNER'S OWN WORKING DIRECTORY, which is the
+    # checkout the tests were built from. A tree that is not a working
+    # copy answers empty, no row is written, and ``last-pass`` reports
+    # the revision as unknown — never as a fabricated one.
+    let revision = gitRevisionOf(cwd)
+    if open(addr history, gitCommit = revision.commit,
+            gitBranch = revision.branch):
       historyPtr = addr history
 
   let wallT0 = epochTime()
@@ -4350,12 +4687,14 @@ proc main() =
       discard progressActive.fetchAdd(1, moRelaxed)
       var res: TestResult
       try:
+        let caseTimeoutSec =
+          if tc.timeoutSec > 0: tc.timeoutSec else: opts.testTimeoutSec
         if tc.protocolAware:
           res = runOneProtocol(tc, opts.resultsDir, baseEnv,
-            opts.testTimeoutSec, historyPtr, memoryLimitBytes)
+            caseTimeoutSec, historyPtr, memoryLimitBytes)
         else:
           res = runWholeBinary(tc, opts.resultsDir, baseEnv,
-            opts.testTimeoutSec, historyPtr, memoryLimitBytes)
+            caseTimeoutSec, historyPtr, memoryLimitBytes)
       except CatchableError as e:
         res = TestResult(
           testCase: tc,
@@ -4423,7 +4762,8 @@ proc main() =
   historyPtr.close()
 
   writeSummary(opts.summaryPath, results, wallMs, nThreads,
-    selection, deselectedCases, historyCaptured, historyUncaptured)
+    selection, deselectedCases, historyCaptured, historyUncaptured,
+    scheduling)
 
   var passed = 0
   var failed = 0
@@ -4506,14 +4846,31 @@ block statsDispatch:
     break statsDispatch
   var asJson = false
   var hostScope = false
+  var target = ""
+  var runs = 0
   for arg in statsParams[2 .. ^1]:
+    if arg.startsWith("--runs="):
+      try:
+        runs = parseInt(arg["--runs=".len .. ^1])
+      except ValueError:
+        stderr.writeLine "repro_test_runner stats: --runs needs an integer"
+        quit(2)
+      if runs < 0: runs = 0
+      continue
     case arg
     of "--json", "--output-format=json": asJson = true
     of "--scope=host": hostScope = true
     else:
-      stderr.writeLine "repro_test_runner stats: unknown argument " & arg
-      quit(2)
-  let answer = runTestStatsQuery(statsParams[1], asJson, hostScope)
+      # A BARE WORD IS THE SUBJECT, NOT A TYPO TO IGNORE. ``stats
+      # last-pass`` takes a test id, and silently discarding it would
+      # have the query answer about a different test than the caller
+      # named — which is worse than refusing.
+      if arg.startsWith("-") or target.len > 0:
+        stderr.writeLine "repro_test_runner stats: unknown argument " & arg
+        quit(2)
+      target = arg
+  let answer = runTestStatsQuery(statsParams[1], asJson, hostScope,
+    target = target, runs = runs)
   stdout.write(answer.text)
   quit(answer.exitCode)
 
