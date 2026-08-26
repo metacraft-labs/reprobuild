@@ -179,13 +179,34 @@ suite "Deferred-D4: collectEvidence aggregation scales linearly":
     check "foldMonitorDepFileEvidence(action.monitorDepfile" in collectBody
     check "action.cwd, result.evidence, seen" in collectBody
 
-    let foldStart = src.find("proc foldMonitorDepFileEvidence*(")
+    # In-Process-Monitor-Hosting HM-5 split the RMDF DECODE from the FOLD:
+    # ``foldOneMonitorRecord`` is now the single implementation of the folding
+    # rules and both sources go through it — the ``.rdep`` bytes on the
+    # wrapped launch paths (``foldMonitorDepFileEvidence``) and the in-memory
+    # records on the hosted one (``foldMonitorRecordsEvidence``). The hot body
+    # this case is about is therefore the shared one, and the two delegations
+    # are pinned below so a future edit cannot re-grow a second copy of the
+    # rules with its own ``addUnique`` shape.
+    check "foldOneMonitorRecord(record, cwd, evidence, seen, result)" in src
+    let foldStart = src.find("proc foldOneMonitorRecord(")
     check foldStart >= 0
     let foldBodyStart = src.find('\n', foldStart) + 1
     let foldEnd = src.find("\nproc ", foldBodyStart)
     let foldBody =
       if foldEnd < 0: src.substr(foldBodyStart)
       else: src.substr(foldBodyStart, foldEnd - 1)
+
+    # The records-based entry point must DELEGATE rather than reimplement.
+    let recordsStart = src.find("proc foldMonitorRecordsEvidence*(")
+    check recordsStart >= 0
+    let recordsBodyStart = src.find('\n', recordsStart) + 1
+    let recordsEnd = src.find("\nproc ", recordsBodyStart)
+    let recordsBody =
+      if recordsEnd < 0: src.substr(recordsBodyStart)
+      else: src.substr(recordsBodyStart, recordsEnd - 1)
+    check "foldOneMonitorRecord(record, cwd, evidence, seen, result)" in
+      recordsBody
+    check not ("monitorReads.addUnique(path)" in recordsBody)
 
     # The legacy shape on the evidence fields would be e.g.
     # ``evidence.monitorReads.addUnique(path)``. The new shape is

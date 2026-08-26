@@ -71,6 +71,7 @@ libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	6
 libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	8
 libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim	nim	9
 libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim	nim	12
+libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim	nim	5
 libs/repro_build_engine/tests/test_no_progress_diagnostic.nim	nim	1
 libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	9
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	7

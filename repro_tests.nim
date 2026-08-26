@@ -539,6 +539,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim",
+    binary: "build/test-bin/test_monitor_depfile_flush_is_async_and_atomic",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim",
     binary: "build/test-bin/test_m9r72_monitor_loss_classifier",
     defines: @[],

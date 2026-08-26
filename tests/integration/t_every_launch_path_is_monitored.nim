@@ -672,7 +672,20 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "finishCompleted", "cancelAndWait", "openRunQuotaSession",
                "close", "maxOfferBatchSize", "pollRunQuotaGrants",
                "cancelQueued", "defaultRunQuotaWindowsPipePath",
-               "probeWindowsPipeOwner", "terminateStalePipeOwner"]),
+               "probeWindowsPipeOwner", "terminateStalePipeOwner",
+               # The per-execution extension surface, which travels over the
+               # session socket the engine is already holding and starts
+               # nothing: four cell constructors, the schema declaration and
+               # the row write (all six are `session.session.…` calls into the
+               # RunQuota client), plus one timeout accessor. Classified here
+               # because this audit is what NAMED them — they were added with
+               # the extension-row work and this table was not updated, so the
+               # case reported all seven and refused to pass until each was
+               # decided. That is the audit doing its job on a change inside
+               # this repository rather than on an upstream bump.
+               "extNull", "extText", "extInt", "extReal",
+               "declareRunQuotaExtension", "recordRunQuotaExtensionRow",
+               "denialDeadlockTimeoutMs"]),
     # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
     # names and the engine called none of them; the decomposed host API
     # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS
