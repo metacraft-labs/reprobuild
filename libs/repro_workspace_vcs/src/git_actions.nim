@@ -370,6 +370,104 @@ proc absoluteRepoPath(payload: GitVcsPayload; cwd: string): string =
   else:
     payload.repoPath
 
+type
+  Containment = enum
+    ## Where a computed target sits relative to the workspace root. The
+    ## outcomes are kept apart because the CALLERS answer them differently and
+    ## owe different remedies — collapsing them into one boolean is how the
+    ## first shape of this guard produced
+    ## `target 'X' is not beneath the workspace root 'X'`: the same path
+    ## twice, joined by a phrase that is true but unreadable, with no remedy.
+    ## It is also how that shape refused a SIBLING, which is the develop
+    ## plane's documented default placement.
+    cmBeneath              ## Strictly inside. The repo's own tree.
+    cmIsWorkspaceRoot      ## The target IS the workspace root itself.
+    cmContainsWorkspaceRoot  ## The target is an ANCESTOR of the workspace.
+    cmDisjoint             ## Outside, and not an ancestor — a sibling.
+    cmUnresolvable         ## No workspace root, or a path that will not
+                           ## resolve.
+
+proc containmentInWorkspaceRoot(target, cwd, what: string):
+    tuple[verdict: Containment; root, victim, fact: string] =
+  ## Locate `target` relative to the workspace root (`cwd`) and state the
+  ## finding as a FACT — offender named, no remedy. The remedy belongs to the
+  ## caller, because "what to do instead" differs per executor and a shared
+  ## one would be wrong at every site (RA-28 /
+  ## Interactive-UX-And-Progress.md Principle 2 requires both halves, and a
+  ## generic remedy is a missing one).
+  ##
+  ## One definition of the QUESTION, asked by every executor in this file that
+  ## does something irreversible to the directory it computed. Two
+  ## independently-written copies of "is this contained?" is how one of them
+  ## ends up narrower than the other, and the narrower one is always the one
+  ## in front of the destructive call.
+  ##
+  ## Why `.` in particular reaches here: it is how a workspace declares its
+  ## ROOT repo, so `declaredCheckoutPathRejection` admits it at the schema
+  ## boundary and a payload carrying `repoPath = "."` is legitimate all the
+  ## way down. Nothing upstream refuses it. `absoluteRepoPath` then turns it
+  ## into the workspace root, and every caller of this proc is a place where
+  ## acting on that blindly would be catastrophic.
+  ##
+  ## WHAT THIS PROC DOES NOT PROVE — two OPEN residuals, both written up in
+  ## full at `repro_workspace_manifests/reader.nim`'s
+  ## `lockedCheckoutPathRejection`, and both belonging to the same follow-up
+  ## design pass rather than to a spot fix here:
+  ##
+  ##   * W5-R1 — `absolutePath(...).normalizedPath` is a LEXICAL fold. It does
+  ##     not resolve reparse points, so a directory junction or symlink whose
+  ##     target IS the workspace root reads as a disjoint sibling and is
+  ##     cleared for deletion. Reproduced end to end on `repro develop --all
+  ##     --reset`, exit 0, workspace destroyed.
+  ##   * W5-R2 — the `==` and `startsWith` compares below are byte-wise, so
+  ##     two spellings of the same directory that differ only in case compare
+  ##     unequal on a case-insensitive filesystem. Latent: every caller today
+  ##     derives `target` and `cwd` from the same bytes.
+  if cwd.len == 0:
+    return (cmUnresolvable, "", target,
+      "there is no workspace root to locate the " & what & " target '" &
+      target & "' within")
+  let root = try: absolutePath(cwd).normalizedPath
+             except CatchableError:
+               return (cmUnresolvable, "", target,
+                 "the workspace root '" & cwd & "' cannot be resolved")
+  let victim = try: absolutePath(target).normalizedPath
+               except CatchableError:
+                 return (cmUnresolvable, root, target,
+                   "the " & what & " target '" & target &
+                   "' cannot be resolved")
+  if victim == root:
+    return (cmIsWorkspaceRoot, root, victim,
+      "the " & what & " target IS the workspace root itself (" & root & ")")
+  if victim.len > root.len and victim.startsWith(root & $DirSep):
+    return (cmBeneath, root, victim, "")
+  if root.len > victim.len and root.startsWith(victim & $DirSep):
+    return (cmContainsWorkspaceRoot, root, victim,
+      "the " & what & " target '" & victim & "' CONTAINS the workspace root " &
+      "'" & root & "'")
+  # Disjoint — a SIBLING of the workspace, and NOT an error here. This file's
+  # executors serve two planes with different placement rules, and only one of
+  # them forbids siblings:
+  #
+  #   * the MANIFEST/sync plane places every checkout beneath the workspace
+  #     root, and `checkoutPathEscapeRejection` refuses `..` at the reader —
+  #     so no manifest-derived payload can be disjoint in the first place, and
+  #     a rule repeated here would be redundant;
+  #   * the DEVELOP/lock plane's DEFAULT placement is the sibling topology one
+  #     level above the workspace root (`../<name>`, CLI/develop.md §"Checkout
+  #     Placement"), and `developAllTargetPath` honours a lock `path` that
+  #     names one. Refusing siblings here breaks that outright: measured, a
+  #     `repro develop --all` of a node locked at `path = "../sib"` failed
+  #     with `force-reset-target-not-contained` and left the checkout at the
+  #     branch tip.
+  #
+  # So the executors ask only what is catastrophic on BOTH planes — the root
+  # itself and its ancestors — and the plane-specific rule is enforced where
+  # the plane is known (the manifest reader, and
+  # `developPlacementRejection`, which additionally bounds a develop
+  # placement to the documented one-level-above scope).
+  (cmDisjoint, root, victim, "")
+
 proc removeCloneTargetSafely(target, cwd: string): tuple[ok: bool;
     diagnostic: string] =
   ## Delete a clone target, but only after proving it is one.
@@ -378,25 +476,54 @@ proc removeCloneTargetSafely(target, cwd: string): tuple[ok: bool;
   ## manifest-supplied checkout path, and the cleanup paths run on the failure
   ## branches — a half-written clone, a checkout that died mid-filter — which
   ## are exactly the branches nobody exercises by hand. A checkout path of `.`
-  ## makes that argument the workspace root and a `..` makes it a sibling, so
-  ## the recovery step becomes the incident.
+  ## makes that argument the workspace root and a `../..` makes it a directory
+  ## the workspace lives inside, so the recovery step becomes the incident.
   ##
-  ## The manifest reader now refuses those shapes outright, which is the real
-  ## fix; this is the belt to that pair of braces. It costs one string compare
-  ## on a path that is about to be deleted recursively, and it holds for
-  ## payloads that never came from a manifest at all — a lock-derived record,
-  ## a synthesized action, a future caller. Refusing to delete is always
-  ## survivable here: the worst outcome is a directory left behind and a
-  ## diagnostic, against an unbounded recursive delete.
-  if cwd.len == 0:
-    return (false, "no workspace root to contain the delete within")
-  let root = try: absolutePath(cwd).normalizedPath
-             except CatchableError: return (false, "unresolvable workspace root")
-  let victim = try: absolutePath(target).normalizedPath
-               except CatchableError: return (false, "unresolvable clone target")
-  if victim.len <= root.len or not victim.startsWith(root & $DirSep):
-    return (false, "clone target '" & victim &
-      "' is not beneath the workspace root '" & root & "'")
+  ## For the ESCAPING shapes (absolute, empty, and `..` in a MANIFEST) the
+  ## manifest reader refuses outright and this is the belt to that pair of
+  ## braces. For `.` it
+  ## is not the belt, it is the buckle: `.` is how a workspace declares its
+  ## ROOT repo, so `declaredCheckoutPathRejection` admits it at the schema
+  ## boundary and a payload carrying `repoPath = "."` reaches this file
+  ## legitimately. Nothing upstream of here refuses it, so the containment
+  ## proof below is the only thing between that payload and a recursive delete
+  ## of the workspace root.
+  ##
+  ## It costs one string compare on a path that is about to be deleted
+  ## recursively, and it holds for payloads that never came from a manifest at
+  ## all — a lock-derived record, a synthesized action, a future caller.
+  ## Refusing to delete is always survivable here: the worst outcome is a
+  ## directory left behind and a diagnostic, against an unbounded recursive
+  ## delete.
+  let contained = containmentInWorkspaceRoot(target, cwd, "clone")
+  if contained.verdict in {cmIsWorkspaceRoot, cmContainsWorkspaceRoot,
+                           cmUnresolvable}:
+    # RA-28: the fact, then the remedy. A clone target that is the workspace
+    # (or holds it) means the DECLARATION is wrong, not the disk — nothing
+    # here can be repaired by retrying, so the remedy points at the
+    # declaration.
+    # RA-28 wants the remedy to name a FILE, not a concept. This proc is
+    # handed a computed directory and a workspace root and nothing else — no
+    # repo name, no fragment path — so it cannot name the one offending
+    # fragment. It can name the two files a checkout path is declared in, and
+    # the key in each, which is the difference between "fix the declaration"
+    # and knowing where to type. Which manifest directory is live is a
+    # `dirExists` question (`manifestsRoot`'s rule, not importable here
+    # without a dependency edge onto the TOML reader), so it is asked.
+    let manifestDir =
+      if dirExists(cwd / "repos"): cwd / "repos"
+      else: cwd / ".repro" / "manifests" / "repos"
+    return (false, "refusing to clean up the clone: " & contained.fact &
+      ", so deleting it would destroy the workspace itself. The " &
+      "half-finished clone is left in place. Remedy: fix the declared " &
+      "checkout path for this repo — a manifest `path` (key `repo.path` in " &
+      (manifestDir / "<repo>.toml") & "; `repro workspace repos list` prints " &
+      "which repo declares which path) must name a directory beneath the " &
+      "workspace root, and a lock `path` (key `deps[].path` in " &
+      (cwd / "repro.lock") & ", regenerated by `repro lock refresh`) may " &
+      "name a sibling but never the workspace or an ancestor of it — then " &
+      "re-run `repro sync`.")
+  let victim = contained.victim
   if not dirExists(victim):
     return (true, "")
   try:
@@ -1133,6 +1260,58 @@ proc executeForceReset(payload: GitVcsPayload;
   ## object store (the fetch phase / shared bare guarantees this for a
   ## divergent tree, since the locked commit is reachable).
   let target = absoluteRepoPath(payload, cwd)
+  # `git clean -ffdx` is a recursive delete, and it is bounded by the repo's
+  # tree — which is only a bound at all while that tree is the repo's OWN.
+  # Given `repoPath = "."` the line above computes the WORKSPACE ROOT, and
+  # then `clean -ffdx` removes every untracked and ignored entry under it:
+  # `projects/`, `repos/`, `.repro/`, and — because a sibling checkout is
+  # just an untracked directory from the root repo's point of view — EVERY
+  # OTHER REPO'S WORKING TREE IN THE WORKSPACE. Measured, not argued: a
+  # `repro sync --force-sync --force` against a workspace whose root repo is
+  # declared at `.` deleted the workspace's manifests and a second repo's
+  # entire checkout.
+  #
+  # `.` reaches here legitimately — it is how a workspace declares its root
+  # repo, and `declaredCheckoutPathRejection` admits it at the schema
+  # boundary on purpose — so the verdict below is the only thing in the way,
+  # exactly as it is for `removeCloneTargetSafely` two hundred lines up.
+  #
+  # WHAT TO DO ABOUT IT IS NOT "REFUSE". The two halves of a force-reset are
+  # not equally dangerous, and only one of them is out of bounds:
+  #
+  #   * `git reset --hard <sha>` is bounded by git's TRACKED set. On the
+  #     workspace root that is the root repo's own files and nothing else —
+  #     a sibling checkout, `.repro/` and the manifests are untracked from
+  #     the root repo's point of view, so the reset cannot reach them. This
+  #     half is exactly as safe on the root repo as on any other.
+  #   * `git clean -ffdx` is bounded by the DIRECTORY, which on the root repo
+  #     is the whole workspace. This half, and only this half, is the hazard.
+  #
+  # So the root repo gets the reset and not the clean, and the run says so.
+  # An `-e <pattern>` exclusion list was considered and rejected: the sync
+  # planner holds the declared checkout paths of the project being synced,
+  # NOT of every project in the workspace, so an exclusion list built from it
+  # would still delete a currently-disabled project's checkouts — a guard
+  # that exists and does not hold, which is the failure mode this whole
+  # change is about. Skipping the clean has no such edge: it deletes nothing.
+  #
+  # A target that CONTAINS the workspace root is different in kind and is
+  # refused: unlike the root case there is no half of the operation that is in
+  # bounds, since `reset --hard` would be reverting a repo the workspace lives
+  # inside. A merely DISJOINT target — a sibling — is NOT refused: it is the
+  # develop plane's documented default placement (see
+  # `containmentInWorkspaceRoot`), and refusing it broke `repro develop --all`
+  # for every node locked at `path = "../name"`.
+  let contained = containmentInWorkspaceRoot(target, cwd, "force-reset")
+  if contained.verdict in {cmContainsWorkspaceRoot, cmUnresolvable}:
+    return failed("force-reset-target-not-contained",
+      "refusing to force-reset: " & contained.fact &
+      ", and `git reset --hard` + `git clean -ffdx` there would overwrite " &
+      "and delete the workspace from the outside. Nothing was changed. " &
+      "Remedy: fix the declared checkout path for this repo — it may name a " &
+      "directory beneath the workspace root or a sibling of it, never an " &
+      "ancestor — then re-run `repro sync --force-sync`.")
+  let targetIsWorkspaceRoot = contained.verdict == cmIsWorkspaceRoot
   if not dirExists(target / ".git"):
     return failed("force-reset-target-missing",
       "force-reset target is not a git working tree: " & target)
@@ -1145,17 +1324,40 @@ proc executeForceReset(payload: GitVcsPayload;
     return failed("force-reset-failed",
       "git reset --hard " & payload.revision & " exited " &
         $resetRes.exitCode & ": " & resetRes.output.trimmed)
-  # Remove untracked and ignored leftovers so the overwrite is complete.
-  let cleanRes = runGit(payload, ["-C", target, "clean", "-ffdx"])
-  if cleanRes.exitCode != 0:
-    return failed("force-reset-clean-failed",
-      "git clean -ffdx exited " & $cleanRes.exitCode & ": " &
-        cleanRes.output.trimmed)
+  # Remove untracked and ignored leftovers so the overwrite is complete —
+  # unless the "repo's tree" is the whole workspace, in which case those
+  # leftovers are the other repos. See the reasoning above the containment
+  # verdict.
+  var notice = ""
+  if targetIsWorkspaceRoot:
+    notice = "force-reset of the workspace root repo reset its TRACKED " &
+      "files to " & payload.revision & " but did NOT run `git clean -ffdx`: " &
+      "the target is the workspace root (" & contained.root & "), where " &
+      "every sibling checkout, `.repro/` and the workspace manifests are " &
+      "untracked, and the clean would have deleted all of them. Untracked " &
+      "and ignored files were left in place. Remedy: list what the clean " &
+      "would have taken with `git -C " & contained.root &
+      " clean -ndx` and remove only what you mean to."
+  else:
+    let cleanRes = runGit(payload, ["-C", target, "clean", "-ffdx"])
+    if cleanRes.exitCode != 0:
+      return failed("force-reset-clean-failed",
+        "git clean -ffdx exited " & $cleanRes.exitCode & ": " &
+          cleanRes.output.trimmed)
   let headRes = resolveHeadSha(payload, target)
   if not headRes.ok:
     return failed("force-reset-head-probe-failed", headRes.diagnostic)
   let receipt = renderForceResetReceipt(payload, headRes.sha)
   writeReceipt(receiptPath, receipt)
+  if notice.len > 0:
+    # A SUCCESS that did less than the verb's name promises has to say so on
+    # the row the operator reads, not only in a log. `reason` marks the row as
+    # carrying a notice; `stderr` is the human-facing text, the same pairing
+    # `failed` uses.
+    var partial = succeeded()
+    partial.reason = "force-reset-workspace-root-clean-skipped"
+    partial.stderr = notice
+    return partial
   succeeded()
 
 proc executeForcePushRebase(payload: GitVcsPayload;

@@ -6657,7 +6657,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     source: "tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim",
     binary: "build/test-bin/t_checkout_path_cannot_escape_the_workspace_root",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),

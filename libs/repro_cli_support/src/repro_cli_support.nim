@@ -15130,6 +15130,201 @@ proc committedLockPath*(projectDir: string): string =
 proc solverInputsPath*(projectDir: string): string =
   projectDir / SolverInputsFileName
 
+# ---------------------------------------------------------------------------
+# The LOCK PLANE's checkout-path boundary (W5).
+#
+# The manifest plane got a boundary in `readRepoFragment` and four delete
+# sites that ask for themselves. The lock plane had NEITHER, and both planes
+# feed the same deletes — so a committed `repro.lock` carrying
+# `path = "./."` walked straight through `parseLockedDependencies` (which
+# validates nothing about `path`), past `isRootLockedDep` (a literal
+# `== "."` compare, which `./.` is not), into `developAllTargetPath` (whose
+# exemption is the same literal), and out at `repro develop --all --reset`'s
+# `removeDir`, which deleted the workspace root — `.git` included, with the
+# run then printing a REFUSAL from a later, correctly-guarded cleanup while
+# the tree was already gone.
+#
+# WHY THE BOUNDARY IS HERE rather than in `repro_lock`. `parseLockedDependencies`
+# is a byte-level (de)serializer with no notion of a workspace root, and
+# `repro_lock` cannot see `repro_workspace_manifests`' checkout-path
+# vocabulary without a new dependency edge onto the TOML reader. Re-deriving
+# the rule there is the failure this whole guard is about — two independent
+# definitions of "degenerate path", one of which ends up narrower, and it is
+# always the narrower one standing in front of the delete. So the rule stays
+# in ONE place (`lockedCheckoutPathRejection`, beside the manifest-plane
+# questions it must not be confused with) and is asked HERE, in
+# `parseWorkspaceLockedDeps`, at the funnel through which lock bytes become
+# `LockedDep`s.
+#
+# HOW COMPLETE THE FUNNEL IS, stated as the CURRENT state of this file so the
+# check it invites actually succeeds, because that is the whole value of the
+# claim. Grep `repro_cli_support.nim` for `parseLockedDependencies` and the
+# call sites are TWO: inside `parseWorkspaceLockedDeps` just below, which IS
+# the boundary, and `runReproLockValidate`'s round-trip re-parse. Grep for
+# `parseWorkspaceLockedDeps` and the call sites are SIX — every reader in this
+# module that consumes the parsed deps.
+#
+# `runReproLockValidate`'s re-parse is left on the bare parser on purpose. It
+# re-parses `serializeLockedDependencies(ld)` where `ld` came out of
+# `parseWorkspaceLockedDeps` moments earlier and has already been validated,
+# and it only string-compares the re-serialization against the original to
+# prove the round trip is stable. Routing it through the boundary would
+# validate the same bytes twice and, worse, would make a round-trip-stability
+# check able to fail for a reason that is not a round-trip failure.
+#
+# (Before this change all seven were bare calls on `parseLockedDependencies`.
+# The six that consume the parsed deps are the ones that moved; that is the
+# delta, not the present state.)
+#
+# No PRODUCT code outside this module consumes `parseLockedDependencies` —
+# that is the property that makes the funnel hold, and it is the one worth
+# asserting. (`repro_lock`'s own round-trip tests call it, and so do
+# `tests/integration/t_lock_foreign_coords.nim` and
+# `t_solved_packages_are_first_class_locked_deps.nim`; all three assert the
+# byte format rather than hand the result to a consumer, so they are outside
+# the property, not exceptions to it.)
+# ---------------------------------------------------------------------------
+
+type
+  LockedCheckoutPathError* = object of CatchableError
+    ## A lock records a checkout path — or a dependency NAME used as a
+    ## directory segment — that no consumer may be handed.
+    ##
+    ## A distinct type, not a `SolvedGraphLockParseError`, and the distinction
+    ## is load-bearing: several readers deliberately SWALLOW a parse failure
+    ## and fall back to an empty lock ("a lock we cannot parse is not a
+    ## coherence question"). That fallback is right for a truncated file and
+    ## wrong for a reader that is about to hand the parsed deps to a delete —
+    ## a lock that parses perfectly and names the workspace root as a checkout
+    ## to delete must not degrade into silence.
+    ##
+    ## WHAT THAT DOES AND DOES NOT MEAN, site by site, because "everyone
+    ## re-raises it" would be false and a reader can check this list against
+    ## the six `parseWorkspaceLockedDeps` call sites in this module:
+    ##
+    ##   * `resolveProducerBinding` — no handler at all; it propagates.
+    ##   * `populateLockedDeps` — catches `LockedCheckoutPathError` FIRST and
+    ##     re-raises it, then falls back to an empty dep set on any other
+    ##     `CatchableError`. THIS is the site the distinct type exists for: it
+    ##     is the source that feeds `repro develop --all --reset`'s
+    ##     `removeDir`, so an empty dep set here would trade an unbounded
+    ##     delete for a silent no-op.
+    ##   * `gatewayVerifyPublicLock` — catches `CatchableError` and turns it
+    ##     into a push REFUSAL, discriminating on `err of
+    ##     LockedCheckoutPathError` only to pick the wording. Escalated, not
+    ##     swallowed.
+    ##   * `runReproLockValidate` — catches it and records `err.msg` as a
+    ##     reported problem, because saying what is wrong with a lock is what
+    ##     that verb is for.
+    ##   * `lockedDepsForWorkspace` and `collectLockCoherence` DO swallow it,
+    ##     under a blanket `except CatchableError`, and that is correct at
+    ##     both — neither creates nor deletes anything derived from `dep.path`.
+    ##     The first reads the OLD lock purely as a carry-forward source and
+    ##     then overwrites the document; the second keys claims by the path
+    ##     and compares them. A lock they cannot use contributes nothing,
+    ##     which is the whole remedy either one needs.
+    ##
+    ## So the invariant is not "no site swallows it". It is that no site
+    ## swallows it on a route to a delete.
+
+proc raiseLockedCheckoutPath(origin, detail: string) {.noreturn.} =
+  raise newException(LockedCheckoutPathError,
+    "lock " & origin & " " & detail)
+
+proc validateLockedDeps*(deps: seq[LockedDep]; origin: string) =
+  ## Ask the lock-plane question of every dependency a lock supplies, and name
+  ## the offender and the remedy when the answer is no (RA-28 /
+  ## Interactive-UX-And-Progress.md Principle 2).
+  ##
+  ## THREE fields, because three of them steer a delete:
+  ##
+  ##   * `path` — `<workspaceRoot> / path` is the checkout directory, and
+  ##     `repro develop --all --reset` removes it before re-cloning.
+  ##   * `name` — `lockPinnedProducerCacheRoot(ws) / name / <revision>` is the
+  ##     lock-pinned producer cache directory, and that is a `removeDir`
+  ##     target too. It is asked the TRAVERSAL question only: a name is not a
+  ##     checkout path, so `.` and "" are not meaningful there, but a `..`
+  ##     segment steers the delete out of the cache exactly as it would out of
+  ##     the workspace.
+  ##   * `coordinates.revision` — the ADJACENT segment of that same
+  ##     expression, from the same lock, reaching the same `removeDir`. Asked
+  ##     the same traversal question for the same reason, and it had been
+  ##     missed on the first pass purely because the eye lands on `name`.
+  ##     Measured before it was guarded: `revision = "../../../../victim"`
+  ##     joined to `C:\Users\<u>\AppData\Local\Temp\victim`, because
+  ##     `extendedPath` calls `normalizedPath(absolutePath(...))` and Windows
+  ##     collapses the `..` before the `\\?\` prefix goes on — so the extended
+  ##     prefix confers no protection whatsoever. Nothing else asks: neither
+  ##     `parseLockedDependencies` (no format check at all) nor
+  ##     `isExactLockedRevision` (which guards the DEVELOP plane, not this
+  ##     one). And the delete at `fetchLockPinnedProducer` fires BEFORE the
+  ##     fetch, so a bogus revision that could never resolve to a commit does
+  ##     not save the directory it names.
+  ##
+  ## `coordinates.url` is deliberately NOT asked a path question here, and the
+  ## reasoning is worth recording because it looks like an omission. It IS a
+  ## delete-steering string: `urlSlug` turns it into a cache-relative
+  ## directory and three cleanup paths `removeDir` the result on a clone
+  ## failure (`shared_clones.nim`'s `refreshSharedBare` and
+  ## `ensureManifestCache`, and `git_actions.nim`'s `refresh-bare` executor).
+  ## But a path rule is the WRONG rule for it, twice over. A `..` segment is
+  ## legal in a REMOTE path — it names something on the server and may never
+  ## become a local directory at all — so refusing it at the lock boundary
+  ## would refuse a legitimate remote. And the lock is not the only source:
+  ## the manifest plane's `repo.remote` reaches exactly the same slug through
+  ## `cloneUrlFor`, and never passes through this proc, so a rule here would
+  ## cover one of the two producers and leave the other open — the "guard that
+  ## exists and does not hold" failure this whole change is about. The rule
+  ## therefore lives where the URL BECOMES a path, in `sanitizeSlugSegment`,
+  ## which is total, covers every caller and every plane at once, and is the
+  ## one place that can be correct about it. See the note there.
+  for dep in deps:
+    let pathRejection = lockedCheckoutPathRejection(dep.path)
+    if pathRejection.len > 0:
+      raiseLockedCheckoutPath(origin,
+        "records dependency '" & dep.name & "' at checkout path '" &
+        dep.path & "', which " & pathRejection)
+    let nameRejection = pathTraversalRejection(dep.name)
+    if nameRejection.len > 0:
+      raiseLockedCheckoutPath(origin,
+        "records the dependency name '" & dep.name & "', which " &
+        nameRejection & "; the name is used as a cache directory segment " &
+        "that is deleted and recreated — regenerate the lock with " &
+        "`repro lock refresh`")
+    # `Coordinates` is a variant object: `revision` exists only on the `ckVcs`
+    # branch, and reading it on any other branch is a `FieldDefect`. The kind
+    # check is a language requirement here, not a narrowing of the guard —
+    # `ckVcs` is the only branch that carries a revision, and the only one
+    # `fetchLockPinnedProducer` builds a cache directory for.
+    if dep.coordinates.kind == ckVcs:
+      let revisionRejection = pathTraversalRejection(dep.coordinates.revision)
+      if revisionRejection.len > 0:
+        raiseLockedCheckoutPath(origin,
+          "records dependency '" & dep.name & "' at revision '" &
+          dep.coordinates.revision & "', which " & revisionRejection &
+          "; the revision is used as a cache directory segment that is " &
+          "deleted and recreated — regenerate the lock with " &
+          "`repro lock refresh`")
+
+proc parseWorkspaceLockedDeps*(content, origin: string): LockedDependencies =
+  ## `parseLockedDependencies` plus the lock-plane boundary. THE entry point
+  ## for turning committed-lock bytes into `LockedDep`s a consumer will act
+  ## on. Six call sites in this module come through here; the only other place
+  ## the bare parser is still named is `runReproLockValidate`'s round-trip
+  ## re-parse, which consumes nothing (see the block comment above). The bare
+  ## parser is also called from three TEST files — `repro_lock`'s own
+  ## round-trip suite, `t_lock_foreign_coords` and
+  ## `t_solved_packages_are_first_class_locked_deps` — each asserting the byte
+  ## format rather than consuming the result. The property that holds, and the
+  ## one this boundary rests on, is narrower than "nobody else calls it": no
+  ## PRODUCT code outside `repro_cli_support` consumes it.
+  ##
+  ## `origin` names the artifact for the diagnostic — a path for a file on
+  ## disk, or a description for a blob (a pushed lock read out of a bare repo
+  ## has no path).
+  result = parseLockedDependencies(content)
+  validateLockedDeps(result.deps, origin)
+
 proc devEnvProducerEdgesPossible*(projectRoot: string): bool =
   ## W2 — see the forward declaration. ``declaresProducerEdge`` accepts exactly
   ## two ``ProducerBinding`` kinds, ``pbkDevelopOverride`` and
@@ -15294,7 +15489,7 @@ proc resolveProducerBinding*(selector: string;
   let lockP = committedLockPath(workspaceRoot)
   let lock =
     if fileExists(extendedPath(lockP)):
-      parseLockedDependencies(readFile(extendedPath(lockP)))
+      parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
     else:
       LockedDependencies()
   var overrides =
@@ -16323,8 +16518,11 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   var existingDeps: seq[LockedDep] = @[]
   let existingLockP = committedLockPath(root)
   if fileExists(extendedPath(existingLockP)):
-    try: existingDeps = parseLockedDependencies(
-      readFile(extendedPath(existingLockP))).deps
+    # A carry-forward source only: a lock we cannot read (or that carries a
+    # path no consumer may be handed) simply contributes nothing, and the
+    # rewrite that follows replaces it with a well-formed document.
+    try: existingDeps = parseWorkspaceLockedDeps(
+      readFile(extendedPath(existingLockP)), existingLockP).deps
     except CatchableError: discard
   # Sibling deps: the develop-mode discovery set FIRST, then the recipe's
   # ``uses:`` producer siblings folded in (deduped by path and name).
@@ -22185,6 +22383,79 @@ proc developAllTargetPath(node: LockedDep; workspaceRoot, intoDir: string):
     return os.normalizedPath(absolutePath(workspaceRoot / node.path))
   os.normalizedPath(parentDir(absolutePath(workspaceRoot)) / seg)
 
+proc developPlacementRejection(absTarget, workspaceRoot, intoDir: string):
+    string =
+  ## Why `absTarget` may not be created and destroyed as a develop checkout,
+  ## or "" when it may. Asked ONCE per node, before the placement is reported
+  ## or acted on, and again in front of this driver's discard.
+  ##
+  ## The belt to `lockedCheckoutPathRejection`'s pair of braces, and worth its
+  ## lines for the reason `removeCloneTargetSafely` gives for the same shape:
+  ## it holds for targets that never came from a lock at all —
+  ## `--into=<dir>` is operator-supplied, and a future caller composing a
+  ## placement by hand gets the same proof for free.
+  ##
+  ## The rule is NOT "beneath the workspace root". The develop plane's default
+  ## placement is the SIBLING topology ONE LEVEL ABOVE the workspace root
+  ## (`../<name>`, CLI/develop.md §"Checkout Placement"), and
+  ## `developAllTargetPath` honours a lock `path` that already names one, so
+  ## containment would refuse the documented default. The rule is the
+  ## placement SCOPE the same section defines, plus the two shapes that are
+  ## catastrophic in any scope:
+  ##
+  ##   * the workspace root itself, and any ancestor of it — a develop
+  ##     checkout is a peer of the workspace or lives inside it, never the
+  ##     thing the workspace lives inside;
+  ##   * anything outside the placement scope — `<intoDir>` when `--into` was
+  ##     given, else the workspace root and its parent. This is what keeps a
+  ##     lock from steering a checkout (and, under `--reset`, a `removeDir`)
+  ##     to an arbitrary directory: `../sib` is a sibling and is honoured,
+  ##     `../../../Users` is not a sibling of anything and is refused.
+  ##
+  ## WHAT IT DOES NOT PROVE — the same two OPEN residuals
+  ## `containmentInWorkspaceRoot` carries, written up in full at
+  ## `repro_workspace_manifests/reader.nim`'s `lockedCheckoutPathRejection`:
+  ## W5-R1, `normalizedPath(absolutePath(...))` is a lexical fold that does not
+  ## resolve reparse points, so a junction/symlink sibling whose target IS the
+  ## workspace root passes the scope test and is deleted under `--reset` at
+  ## exit 0 (reproduced); and W5-R2, the compares below are byte-wise and so
+  ## miss a case-different spelling of the same directory on a
+  ## case-insensitive filesystem (latent). Both want
+  ## one canonicalization decision applied at all five deleting consumers, not
+  ## a spot fix here.
+  let root =
+    try: os.normalizedPath(absolutePath(workspaceRoot))
+    except CatchableError: return "the workspace root cannot be resolved"
+  let target =
+    try: os.normalizedPath(absolutePath(absTarget))
+    except CatchableError: return "the checkout target cannot be resolved"
+  if target == root:
+    return "the checkout target '" & target & "' IS the workspace root; " &
+      "a lock records the workspace root repo as `.` and it is never placed " &
+      "into develop mode — regenerate the lock with `repro lock refresh`"
+  if root.len > target.len and root.startsWith(target & $DirSep):
+    return "the checkout target '" & target & "' CONTAINS the workspace " &
+      "root '" & root & "'; a develop checkout may be a sibling of the " &
+      "workspace but never an ancestor of it — regenerate the lock with " &
+      "`repro lock refresh`"
+  var scopes: seq[string]
+  if intoDir.len > 0:
+    scopes.add(try: os.normalizedPath(absolutePath(intoDir))
+               except CatchableError: return "`--into` cannot be resolved")
+  else:
+    scopes.add(root)
+    scopes.add(parentDir(root))
+  for scope in scopes:
+    if scope.len > 0 and target.len > scope.len and
+        target.startsWith(scope & $DirSep):
+      return ""
+  "the checkout target '" & target & "' is outside the develop placement " &
+    "scope (" & scopes.join(", ") & "); a locked `path` may name a " &
+    "directory beneath the workspace root or a SIBLING of it (`../name`), " &
+    "and `--into=DIR` places checkouts under DIR — regenerate the lock with " &
+    "`repro lock refresh`, or pass `--into=DIR` to place this checkout " &
+    "deliberately"
+
 proc gitHeadShaOf(gitBinary, repoDir: string): string =
   ## Best-effort ``git rev-parse HEAD`` for adopt/idempotent detection. Returns
   ## "" when the directory is not a resolvable git checkout.
@@ -22231,7 +22502,8 @@ proc isExactLockedRevision*(value: string): bool =
 
 proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
                                node: LockedDep;
-                               identity: GitToolIdentity):
+                               identity: GitToolIdentity;
+                               intoDir: string):
     tuple[ok: bool; diagnostic: string] =
   ## Clone ``node`` from its locked VCS coordinates into ``absTarget`` and
   ## reset the checkout to the EXACT locked ``revision`` SHA. Two chained
@@ -22347,7 +22619,12 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
     ##
     ## The caller either created ``absTarget`` in this call (the fresh-clone
     ## path) or deliberately removed a pre-existing one first (the ``--reset``
-    ## path), so in both cases nothing that predates this call is destroyed.
+    ## path), so in both cases nothing that predates this call is destroyed —
+    ## PROVIDED ``absTarget`` is the node's own tree, which is exactly what
+    ## `developPlacementRejection` establishes and what nothing in this
+    ## driver used to ask.
+    if developPlacementRejection(absTarget, workspaceRoot, intoDir).len > 0:
+      return
     try:
       if dirExists(absTarget): removeDir(absTarget)
     except CatchableError:
@@ -22780,6 +23057,23 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     let absTarget = developAllTargetPath(node, root, args.intoDir)
     outcome.path = absTarget
 
+    # The placement question, asked ONCE and BEFORE anything is created,
+    # removed or reported — so `--list`, `--dry-run` and a real run all give
+    # the same answer. They did not: `--list` and `--dry-run` both ANNOUNCED
+    # the workspace root as this node's target, and the real run then deleted
+    # it, which is the worst possible ordering of a preview and its
+    # consequence.
+    let placementRejection =
+      developPlacementRejection(absTarget, root, args.intoDir)
+    if placementRejection.len > 0:
+      outcome.mode = "refused"
+      outcome.ok = false
+      outcome.diagnostic = "refusing to place '" & node.name & "': " &
+        placementRejection & ". Nothing was placed for this node."
+      outcomes.add(outcome)
+      anyFailure = true
+      continue
+
     # Reuse / adopt an existing suitable checkout over cloning a duplicate.
     let prior = findOverride(overrides, node.name)
     if prior.isSome and os.normalizedPath(absolutePath(prior.get().local_path)) ==
@@ -22824,7 +23118,8 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
         # what the prior checkout contained (shallow, dirty, or diverged).
         removeDir(absTarget)
         let resetRes =
-          cloneNodeAtLockedRevision(root, absTarget, node, identity)
+          cloneNodeAtLockedRevision(root, absTarget, node, identity,
+            args.intoDir)
         if not resetRes.ok:
           outcome.mode = "error"
           outcome.ok = false
@@ -22856,7 +23151,8 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       outcome.ok = true
     else:
       # Clone fresh at the locked revision.
-      let cloneRes = cloneNodeAtLockedRevision(root, absTarget, node, identity)
+      let cloneRes = cloneNodeAtLockedRevision(
+        root, absTarget, node, identity, args.intoDir)
       if not cloneRes.ok:
         outcome.mode = "error"
         outcome.ok = false
@@ -27528,10 +27824,13 @@ proc collectLockCoherence*(identity: GitToolIdentity;
       continue
     var parsed: LockedDependencies
     try:
-      parsed = parseLockedDependencies(readFile(extendedPath(lockPath)))
+      parsed = parseWorkspaceLockedDeps(
+        readFile(extendedPath(lockPath)), lockPath)
     except CatchableError:
       # A lock we cannot parse is not a coherence question; the lock verbs
-      # already report malformed locks loudly.
+      # already report malformed locks loudly. Nothing here is deleted or
+      # created from `dep.path` — the claims are keyed by it and compared —
+      # so dropping an unusable lock's claims is the whole remedy needed.
       continue
     for dep in parsed.deps:
       if dep.coordinates.kind != ckVcs: continue
@@ -29092,7 +29391,15 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
     if not fileExists(extendedPath(lockP)):
       return LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[])
     try:
-      return parseLockedDependencies(readFile(extendedPath(lockP)))
+      return parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+    except LockedCheckoutPathError:
+      # NOT the "fall back cleanly" case. The document parsed; what it says is
+      # that a dependency's checkout directory is the workspace root (or an
+      # ancestor of it), and this is the source that feeds `repro develop
+      # --all --reset`'s `removeDir`. Degrading that to an empty dep set would
+      # trade an unbounded delete for a silent no-op and a misleading "the
+      # lock set is empty" further down. Fail loud, at the reader.
+      raise
     except CatchableError:
       return LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[])
   of lskManifestRepo, lskExternalStore:
@@ -30949,8 +31256,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       if outcome.status in {asSucceeded, asCacheHit, asUpToDate}:
         # RA-23: a successful NEW-repo clone is named distinctly (``cloned``)
         # from an updated existing checkout (``succeeded``).
+        #
+        # A SUCCESS may still carry a notice. `executeForceReset` on the
+        # workspace root repo resets the tracked set and deliberately skips
+        # `git clean -ffdx` (the clean's bound is the directory, and on the
+        # root repo that directory is the whole workspace), so it succeeds
+        # having done less than "force-sync overwrote" implies. An executor
+        # signals that by setting `reason` on an `asSucceeded` result; the
+        # text in `stderr` is carried onto the row so the operator reads it
+        # where they read the outcome, not in a log.
+        let notice = if outcome.reason.len > 0: outcome.stderr else: ""
         checkoutStatus[repoIdx] =
-          (if isClone: ("cloned", "") else: ("succeeded", ""))
+          (if isClone: ("cloned", notice) else: ("succeeded", notice))
         # RA-27 per-repo live progress: emit motion as each repo finishes.
         if emitProgress:
           stderr.writeLine("workspace sync: [" &
@@ -31058,7 +31375,25 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     let actionTag =
       if wasForceReset: "force_reset" else: syncActionTag(decision.action)
     let message =
-      if wasForceReset:
+      if wasForceReset and status == "failed":
+        # The overwrite line is a claim about what HAPPENED, so it may only be
+        # printed when it did. A force-reset can be REFUSED by the executor —
+        # `executeForceReset` locates its target relative to the workspace
+        # root first, and a target OUTSIDE the workspace is refused outright —
+        # and reporting "force-sync overwrote '<path>'" on that row would
+        # describe a destructive act that was deliberately not performed.
+        # Defer to the executor's diagnostic, which names the offender and the
+        # remedy.
+        "force-sync did NOT overwrite '" & decision.path & "': " & diagnostic
+      elif wasForceReset and diagnostic.len > 0:
+        # Succeeded, but PARTIALLY: the workspace root repo's tracked set was
+        # reset and the `git clean -ffdx` half was skipped on purpose. Saying
+        # only "overwrote" here would be the report over-claiming in the one
+        # direction that matters — an operator who believes the tree is
+        # byte-identical to a fresh checkout when untracked files survive.
+        "force-sync PARTIALLY overwrote '" & decision.path & "' to " &
+          forceResetTarget.getOrDefault(repoIdx) & ": " & diagnostic
+      elif wasForceReset:
         "force-sync overwrote '" & decision.path & "' to " &
           forceResetTarget.getOrDefault(repoIdx)
       else: decision.message
@@ -38044,14 +38379,22 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
       continue  # no public lock in this push — nothing to gate (boundary).
     var ld: LockedDependencies
     try:
-      ld = parseLockedDependencies(lockBlob)
+      ld = parseWorkspaceLockedDeps(lockBlob,
+        "blob " & committedLockPathInTree & "@" & u.newSha)
     except CatchableError as err:
       # A malformed committed lock about to become the public boundary is
       # itself refusal-worthy — a public-only cloner could not consume it.
+      # So is a lock that parses but records a checkout path no consumer may
+      # be handed: publishing it would hand every future cloner a document
+      # whose `repro develop --all --reset` deletes their workspace root, and
+      # the gateway is the last place that sees it before it becomes theirs.
       result.accepted = false
+      let unusable =
+        if err of LockedCheckoutPathError: " is not usable"
+        else: " does not parse"
       result.diagnostic = u.refName &
         ": lock_references_private_repo/lock-parse-failed: the pushed " &
-        committedLockPathInTree & " does not parse (" & err.msg & ")"
+        committedLockPathInTree & unusable & " (" & err.msg & ")"
       return
     # (a) private-ref check — the committed public lock must reference ONLY
     # public-tier repos. ``visibility`` "" (default) or "public" is fine; any
@@ -46253,6 +46596,63 @@ proc reachableExcluding(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep != excluded and dep notin result:
           pending.add(dep)
 
+proc undeletableCheckoutDiagnostic(repo: ResolvedRepo; rejection: string;
+                                   projectFile, workspaceRoot: string): string =
+  ## The RA-28 shape of a `repro remove` refusal
+  ## (Interactive-UX-And-Progress.md Principle 2): NAME the offender and NAME
+  ## a copy-pasteable remedy.
+  ##
+  ## Both halves were missing from the first shape of this guard, which said
+  ## only "refusing to remove the declared checkout path '.' — it must name a
+  ## directory beneath the workspace root, not the workspace root itself".
+  ## That names a value, not a repo; it never says the value belongs to
+  ## `ws-root`; and it leaves an operator who genuinely wants the root repo
+  ## out of the project with nowhere to go. The remedy is real and specific:
+  ## the DECLARATION can be dropped without touching the tree, by removing the
+  ## fragment's line from the project's `includes` — which is exactly what
+  ## `repro remove` would have done, minus the delete it must not perform.
+  ##
+  ## And that is a COMMAND, not an editing instruction. `repro workspace repos
+  ## remove <fragment>` drops the include edge from every membership that
+  ## declares the fragment and states, in its own final line, that "any
+  ## existing checkout was left on disk" — precisely the half of `repro
+  ## remove` that is in bounds here. A remedy the operator has to perform by
+  ## hand in a TOML array is a remedy that gets performed wrongly (RA-28 /
+  ## Interactive-UX-And-Progress.md Principle 2 asks for a copy-pasteable
+  ## one), and this is one of the two that were not.
+  ##
+  ## The verb reads `manifestRepoRootFor(workspaceRoot)`, which is the
+  ## workspace root itself — so it can only reach a fragment at
+  ## `<workspaceRoot>/repos/<stem>.toml`. A workspace whose membership lives
+  ## in a materialized manifest CHECKOUT (`.repro/manifests/…`, from `init
+  ## --manifest-url`) is out of the verb's reach, and for that layout the
+  ## remedy falls back to naming the exact file, the exact key, and the exact
+  ## entry — never "edit the manifest".
+  let fragmentStem = repo.fragmentPath.splitFile.name
+  let nativeFragment =
+    repo.fragmentPath.len > 0 and
+    os.normalizedPath(absolutePath(repo.fragmentPath)) ==
+      os.normalizedPath(
+        absolutePath(workspaceRoot / "repos" / (fragmentStem & ".toml")))
+  let remedy =
+    if nativeFragment:
+      "Remedy: to drop the declaration WITHOUT deleting the tree, run " &
+        "`repro workspace repos remove " & fragmentStem &
+        "` (it edits the membership declaration only and leaves the " &
+        "checkout on disk), then `repro sync`."
+    else:
+      "Remedy: to drop the declaration WITHOUT deleting the tree, delete " &
+        "the entry \"repos/" & fragmentStem & ".toml\" from the " &
+        "`includes` array in " & projectFile & ", then run `repro sync`. " &
+        "(`repro workspace repos remove` would do this for you, but it " &
+        "edits " & (workspaceRoot / "projects") & " and cannot reach a " &
+        "manifest checkout at " & parentDir(repo.fragmentPath) & ".)"
+  "refusing to remove '" & repo.name & "': its declared checkout path '" &
+    repo.path & "' " & rejection & ", so " &
+    (workspaceRoot / repo.path) & " IS the workspace root and removing it " &
+    "would delete the workspace itself. Nothing was removed for this repo. " &
+    remedy
+
 proc executeRemove(parsed: RemoveArgs): RemoveReport =
   result.workspaceRoot = parsed.workspaceRoot
   result.target = parsed.target
@@ -46275,6 +46675,41 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
     return
 
   let target = resolved.repos[matchIdx]
+
+  # `repro remove` ends in a `removeDir(<workspaceRoot> / repo.path)`, so it is
+  # a delete site and owes the OWN-TREE question — `checkoutPathRejection`,
+  # the same proc `runWorkspaceDisableCommand` asks immediately in front of
+  # its own `removeDir`. It is not the schema boundary's question: the reader
+  # asks `declaredCheckoutPathRejection`, which admits `path = "."` because
+  # that is how a workspace declares its ROOT repo. A value the model needs to
+  # be declarable is not a directory this command may delete —
+  # `<workspaceRoot> / "."` IS the workspace root.
+  #
+  # The root reaches this command by two different routes, and they do not get
+  # the same answer:
+  #
+  #   * NAMED as the target (`repro remove ws-root`, or `repro remove .` —
+  #     the lookup above matches on `repo.name` OR `repo.path`). Refuse the
+  #     REQUEST, here, before anything is mutated. A GC that silently skipped
+  #     the delete would still drop the target's `includes` edge and still
+  #     print a per-repo line, so the operator would be told a repo was
+  #     removed while its tree stayed: the declaration and the disk
+  #     disagreeing is exactly the state this command exists to prevent.
+  #     There is no partial execution of "remove the workspace root" that is
+  #     correct, so the whole verb refuses and nothing is touched.
+  #   * SWEPT IN as an unreachable member of some OTHER target's `depends`
+  #     closure. There the operator asked for something else and the rest of
+  #     the GC is legitimate, so only the root's own delete is skipped — see
+  #     the per-entry `rejection` on the plan below.
+  let targetRejection = checkoutPathRejection(target.path.strip())
+  if targetRejection.len > 0:
+    result.exitCode = 1
+    result.declarationChanged = false
+    result.repos.add(RemoveRepoEntry(
+      name: target.name, path: target.path, effect: "refused",
+      diagnostic: undeletableCheckoutDiagnostic(target, targetRejection,
+        resolved.projectFile, parsed.workspaceRoot)))
+    return
 
   # RA-22 reachability GC. The removed dependency is the target. The set of
   # checkouts considered for collection (the CANDIDATE set) is the target
@@ -46348,10 +46783,27 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
     repo: ResolvedRepo
     dirty: bool
     dirtyDiag: string
+    rejection: string  ## Non-empty when this entry's tree may not be deleted.
   var plan: seq[GcEntry]
   var anyDirty = false
+  var refusedRemovals = 0
   for repo in gcRepos:
-    let repoPath = parsed.workspaceRoot / repo.path
+    let normalized = repo.path.strip()
+    # The own-tree question, per GC entry. The NAMED target was already
+    # refused above; this is the other route in — the workspace root sitting
+    # in some other target's ``depends`` closure, unreachable from a
+    # surviving root, and so swept into the GC set without anyone naming it.
+    # The delete is skipped, not the command: the operator asked to remove
+    # something else and that removal is legitimate.
+    let rejection = checkoutPathRejection(normalized)
+    if rejection.len > 0:
+      inc refusedRemovals
+      # No dirty probe: nothing is going to be deleted, so there is no work
+      # to discard, and a DIRTY classification here would raise the RA-9
+      # confirmation prompt over a removal that is not going to happen.
+      plan.add(GcEntry(repo: repo, rejection: rejection))
+      continue
+    let repoPath = parsed.workspaceRoot / normalized
     var dirty = false
     var dirtyDiag = ""
     if dirExists(repoPath / ".git"):
@@ -46365,22 +46817,32 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
     if dirty: anyDirty = true
     plan.add(GcEntry(repo: repo, dirty: dirty, dirtyDiag: dirtyDiag))
 
-  # Preview the per-repo effect BEFORE mutating anything.
+  # Preview the per-repo effect BEFORE mutating anything. A refusal is
+  # previewed as a refusal: a preview that promised a removal the run then
+  # declines is the preview being wrong, which is the one thing a preview
+  # cannot be.
   let effectVerb = if parsed.dryRun: "would remove" else: "remove"
-  stderr.writeLine("repro remove will " & effectVerb & " " & $plan.len &
+  stderr.writeLine("repro remove will " & effectVerb & " " &
+    $(plan.len - refusedRemovals) &
     " repo(s) from project '" & resolved.projectName & "':")
   for p in plan:
     stderr.writeLine("  " & p.repo.path & " (name=" & p.repo.name & ")" &
-      (if p.dirty: " [DIRTY — uncommitted changes WILL BE DISCARDED]"
+      (if p.rejection.len > 0: " [REFUSED — " & p.rejection & "]"
+       elif p.dirty: " [DIRTY — uncommitted changes WILL BE DISCARDED]"
        else: " [clean]"))
 
   if parsed.dryRun:
     for p in plan:
       var entry = RemoveRepoEntry(name: p.repo.name, path: p.repo.path,
-        dirty: p.dirty, effect: "would_remove")
-      if p.dirty: entry.diagnostic = p.dirtyDiag
+        dirty: p.dirty,
+        effect: if p.rejection.len > 0: "refused" else: "would_remove")
+      if p.rejection.len > 0:
+        entry.diagnostic = undeletableCheckoutDiagnostic(p.repo, p.rejection,
+          resolved.projectFile, parsed.workspaceRoot)
+      elif p.dirty:
+        entry.diagnostic = p.dirtyDiag
       result.repos.add(entry)
-    result.exitCode = 0
+    result.exitCode = if refusedRemovals > 0: 1 else: 0
     return
 
   # RA-9 confirmation: a DIRTY removal in the GC set needs the destructive
@@ -46389,7 +46851,8 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   # the operator answers once for the destructive batch.
   if anyDirty:
     let decision = confirmDestructive(
-      prompt = "Remove " & $plan.len & " repo(s) and DISCARD uncommitted " &
+      prompt = "Remove " & $(plan.len - refusedRemovals) &
+        " repo(s) and DISCARD uncommitted " &
         "changes? [y/N] ",
       autoYes = parsed.force,
       isTty = isatty(stdin),
@@ -46402,8 +46865,14 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
         var entry = RemoveRepoEntry(name: p.repo.name, path: p.repo.path,
           dirty: p.dirty)
         entry.effect =
-          if decision == ddRefusedNonTty: "refused" else: "declined"
-        if p.dirty: entry.diagnostic = p.dirtyDiag
+          if p.rejection.len > 0: "refused"
+          elif decision == ddRefusedNonTty: "refused"
+          else: "declined"
+        if p.rejection.len > 0:
+          entry.diagnostic = undeletableCheckoutDiagnostic(p.repo, p.rejection,
+            resolved.projectFile, parsed.workspaceRoot)
+        elif p.dirty:
+          entry.diagnostic = p.dirtyDiag
         result.repos.add(entry)
       result.exitCode = 2
       result.declarationChanged = false
@@ -46417,13 +46886,25 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   let changed = dropFragmentInclude(resolved.projectFile, target.fragmentPath)
   result.declarationChanged = changed
   for p in plan:
-    let repoPath = parsed.workspaceRoot / p.repo.path
+    if p.rejection.len > 0:
+      # Answered by `checkoutPathRejection` when the plan was built — this is
+      # the workspace root (or another value that is not the repo's own tree)
+      # swept in through a `depends` closure. Skip THIS delete and say so;
+      # the rest of the GC stands.
+      result.repos.add(RemoveRepoEntry(
+        name: p.repo.name, path: p.repo.path, effect: "refused",
+        diagnostic: undeletableCheckoutDiagnostic(p.repo, p.rejection,
+          resolved.projectFile, parsed.workspaceRoot)))
+      continue
+    let repoPath = parsed.workspaceRoot / p.repo.path.strip()
     if dirExists(repoPath):
       removeDir(repoPath)
     var entry = RemoveRepoEntry(name: p.repo.name, path: p.repo.path,
       dirty: p.dirty, effect: "removed")
     result.repos.add(entry)
-  result.exitCode = 0
+  # A refused removal means the run did NOT do what it previewed, so it must
+  # not exit 0 — the same convention `repro workspace disable` follows.
+  result.exitCode = if refusedRemovals > 0: 1 else: 0
 
 proc renderRemoveTextLines*(report: RemoveReport): seq[string] =
   for entry in report.repos:
@@ -46431,7 +46912,11 @@ proc renderRemoveTextLines*(report: RemoveReport): seq[string] =
     if entry.diagnostic.len > 0:
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
-  if report.exitCode == 0 and report.declarationChanged:
+  # Reported on `declarationChanged` alone, not on a zero exit: a run that
+  # refused ONE checkout still dropped the target's include, and the operator
+  # has to be told which of the two halves happened. Every path that does not
+  # touch the project file sets `declarationChanged = false` explicitly.
+  if report.declarationChanged:
     result.add("repro remove: dropped '" & report.target &
       "' from project '" & report.project & "'")
 
@@ -49899,7 +50384,14 @@ proc runReproLockValidate(rest: openArray[string]): int =
   block integrity:
     var ld: LockedDependencies
     try:
-      ld = parseLockedDependencies(readFile(extendedPath(lockP)))
+      ld = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+    except LockedCheckoutPathError as err:
+      # `repro lock validate` exists to REPORT what is wrong with a lock, so
+      # this is the one reader that must not treat an unusable path as a
+      # reason to stop looking. Recorded as a problem, with the message the
+      # boundary composed (offender + remedy) carried through verbatim.
+      problems.add(err.msg)
+      break integrity
     except CatchableError:
       break integrity
     let once = serializeLockedDependencies(ld)
@@ -51716,18 +52208,36 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
     # it. Manifest data is not trusted with that: refuse the individual removal
     # and say so, rather than resolving the path and hoping.
     #
-    # The manifest reader now refuses those shapes at the schema boundary, so
-    # this is a second line rather than the only one — but it asks the SAME
-    # question, via `checkoutPathRejection`, instead of keeping a private copy
-    # of the rule. Two independently-written definitions of "degenerate path"
-    # is how one of them ends up narrower than the other, and the narrower one
-    # is always the one in front of the `removeDir`.
+    # `checkoutPathRejection` is the OWN-TREE question — "may a consumer
+    # create or delete this directory as the repo's own tree?" — and this is
+    # the site it exists for. It is deliberately NOT the schema boundary's
+    # question: `readRepoFragment` asks `declaredCheckoutPathRejection`, which
+    # admits `path = "."` because that is how a workspace declares its ROOT
+    # repo. A declaration the model needs is not a directory this loop may
+    # delete, and the workspace root is exactly that: `<workspaceRoot> / "."`
+    # is the workspace root, so `.` is refused HERE, in front of the
+    # `removeDir`, where refusing it actually protects something. Asking the
+    # shared proc rather than keeping a private copy is still the point —
+    # two independently-written definitions of "degenerate path" is how one
+    # of them ends up narrower than the other, and the narrower one is always
+    # the one in front of the `removeDir`.
     let normalized = path.strip()
     let rejection = checkoutPathRejection(normalized)
     if rejection.len > 0:
       inc removalFailures
+      # RA-28: name the offender AND the remedy. The value alone is not the
+      # offender — `.` says nothing about which repo declared it or what
+      # survives — and an operator told only that a removal was refused has
+      # nowhere to go. The project IS disabled either way; what is left behind
+      # is one tree, and the remedy is the command that shows what that tree
+      # holds before anyone deletes it by hand.
       stderr.writeLine("repro workspace disable: refusing to remove the " &
-        "declared checkout path '" & path & "' — it " & rejection)
+        "declared checkout path '" & path & "' — it " & rejection & ", so " &
+        (workspaceRoot / normalized) & " IS the workspace root and removing " &
+        "it would delete the workspace itself. The project is still " &
+        "disabled; this one checkout is left in place. Remedy: inspect it " &
+        "with `git -C " & workspaceRoot & " status` and remove only what you " &
+        "mean to — reprobuild will not delete the directory it is running in.")
       continue
     let dir = workspaceRoot / normalized
     if not dirExists(dir):

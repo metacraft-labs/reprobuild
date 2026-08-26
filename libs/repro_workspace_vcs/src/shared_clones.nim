@@ -175,16 +175,104 @@ proc defaultManifestCacheRoot*(private = false): string =
 # ---- URL → slug ------------------------------------------------------------
 
 proc sanitizeSlugSegment(segment: string): string =
-  ## Keep a path segment to a portable, collision-resistant character set:
-  ## ASCII alnum plus ``-._``; everything else (``:``, ``@``, spaces, …)
-  ## becomes ``_``. This is deterministic and reversible-enough for a
-  ## cache slug; it is NOT meant to round-trip back to the URL.
+  ## Keep a path segment to a portable character set: ASCII alnum plus
+  ## ``-._``; everything else (``:``, ``@``, spaces, …) becomes ``_``. This is
+  ## deterministic; it is NOT injective and NOT meant to round-trip back to
+  ## the URL.
+  ##
+  ## SAYING THAT PLAINLY, because this doc used to call the set
+  ## "collision-resistant" and it is not. The mapping is many-to-one by
+  ## construction: ``a:b``, ``a_b`` and ``a@b`` are three distinct segments
+  ## that all slug to ``a_b``, and that predates any of this. The W5 rule
+  ## below adds more of the same — ``..`` and ``__`` both become ``__``, ``.``
+  ## and ``_`` both become ``_`` — so ``https://h/../victim.git`` and
+  ## ``https://h/__/victim.git`` share one cache directory (measured). What
+  ## the slug has to be is STABLE (the same URL always maps to the same
+  ## directory, so a cache hit is a cache hit) and CONTAINED (it never points
+  ## outside the cache root). Injectivity is not a property it has ever had,
+  ## and what a collision costs differs by consumer:
+  ##
+  ##   * ``sharedBarePath`` — harmless. The shared bare is an OBJECT POOL,
+  ##     wired in through ``objects/info/alternates``; the real clone still
+  ##     fetches from its own remote and simply finds fewer of its objects
+  ##     already present. A collision costs a redundant fetch.
+  ##   * ``manifestCachePath`` — a shared CHECKOUT that is read directly, so
+  ##     two colliding manifest URLs would share one working tree. That is a
+  ##     wrong-content outcome rather than a slow one, and it is pre-existing
+  ##     (``a:b``/``a_b`` collided before W5); see the note there.
+  ##
+  ## Neither is a CONTAINMENT question, which is what this proc is being
+  ## changed for, and widening the character set to reduce collisions is a
+  ## separate decision with a cache-invalidation cost — every slug that moves
+  ## orphans the bare clone already on disk under the old name.
+  ##
+  ## W5 — AND NO SEGMENT MAY BE A TRAVERSAL. The ``-._`` set kept ``..``
+  ## verbatim, so a URL path segment of ``..`` survived into the slug and
+  ## steered every path built from it out of the cache root. Measured through
+  ## the real ``urlSlug`` + ``sharedBarePath``, against a cache root of
+  ## ``C:\Users\<u>\AppData\Local\Temp\w5cache`` — and note the escape is
+  ## complete before any ``extendedPath`` is involved, because ``os./``
+  ## already folds the ``..`` away:
+  ##
+  ##   https://h/../../../victim.git -> C:\Users\<u>\AppData\Local\victim.git
+  ##   git@h:../../victim.git        -> C:\Users\<u>\AppData\Local\Temp\victim.git
+  ##
+  ## Three cleanup paths ``removeDir`` that computed directory when the clone
+  ## into it FAILS — ``refreshSharedBare`` and ``ensureManifestCache`` below,
+  ## and ``git_actions.nim``'s ``refresh-bare`` executor — which is the "the
+  ## recovery step becomes the incident" shape again: the delete happens on
+  ## the failure branch, so a URL that cannot be cloned at all is not a URL
+  ## that is harmless. Measured end to end on ``d0c6ad8f``, and asserted by
+  ## ``t_a_hostile_fetch_url_deletes_a_real_directory_before_this_rule``: an
+  ## existing victim directory at the computed path is what MAKES the clone
+  ## fail ("destination path already exists and is not an empty directory"),
+  ## and the cleanup then deletes it.
+  ##
+  ## WHY THE RULE IS HERE and not at the lock boundary that validates the
+  ## other delete-steering lock fields. Two reasons, and they are the same
+  ## two:
+  ##
+  ##   * The URL is not a path, and ``..`` in a REMOTE path is legal — it
+  ##     names something on the server and need never become a local
+  ##     directory. Refusing it upstream would refuse a legitimate remote to
+  ##     protect a local join that is this proc's job to make safe.
+  ##   * The URL arrives from TWO independent producers — a lock's
+  ##     ``dep.coordinates.url`` and a manifest's ``repo.remote`` (via
+  ##     ``cloneUrlFor``) — and only the first passes through
+  ##     ``validateLockedDeps``. A rule there would cover one and leave the
+  ##     other open. This proc is the single funnel both producers cross, and
+  ##     it is total: it returns a segment for every input rather than
+  ##     rejecting some, so there is no route around it and no caller left to
+  ##     remember a check.
+  ##
+  ## The rule: after sanitization, a segment made of NOTHING BUT ``.`` is not
+  ## a name, it is navigation — ``.`` (self), ``..`` (parent), and ``...``
+  ## and beyond, which Win32 strips trailing dots from and can therefore
+  ## collapse INTO ``..``. Each such dot becomes ``_``, so ``..`` slugs to
+  ## ``__`` and stays one inert segment. Any segment containing a single
+  ## alphanumeric, ``-`` or ``_`` is already inert (``a..b``, ``..z`` and
+  ## ``_..`` are ordinary directory names) and is left exactly as it was, so
+  ## no slug for a real remote moves.
+  ##
+  ## Rewriting to ``_`` rather than to a reserved spelling is what MAKES this
+  ## many-to-one: ``..`` now shares a slug with a literal ``__`` segment, and
+  ## ``.`` with ``_``. That is a deliberate choice of the collision (which
+  ## costs at worst a shared cache directory, see above) over a wider
+  ## character set (which would move existing slugs and orphan every bare
+  ## clone on disk). It is a widening of a pre-existing many-to-one mapping,
+  ## not a new property.
   result = newStringOfCap(segment.len)
+  var dotsOnly = segment.len > 0
   for ch in segment:
     if ch.isAlphaNumeric or ch in {'-', '.', '_'}:
       result.add(ch)
+      if ch != '.': dotsOnly = false
     else:
       result.add('_')
+      dotsOnly = false
+  if dotsOnly:
+    for i in 0 ..< result.len:
+      result[i] = '_'
 
 proc normalizeFetchUrl(url: string): string =
   ## Normalize an upstream fetch URL so trivially-different spellings of
@@ -264,7 +352,33 @@ proc manifestCachePath*(cacheRoot, manifestUrl: string): string =
   ## Absolute path of the cached manifest-repo checkout for
   ## ``manifestUrl`` under the bootstrap manifest cache ``cacheRoot``
   ## (RA-11). Keyed by source URL (its slug) so workspaces bootstrapped
-  ## from different manifest URLs never collide.
+  ## from different manifest URLs are kept apart.
+  ##
+  ## "Never collide" is what this said, and it is too strong: ``urlSlug`` is
+  ## not injective (see ``sanitizeSlugSegment``), so two manifest URLs
+  ## differing only in punctuation — ``a:b`` / ``a_b`` / ``a@b``, and since W5
+  ## also ``..`` / ``__`` — share one cached checkout, and the second caller
+  ## gets a tree fetched from the first caller's origin. Pre-existing and not
+  ## changed here; recorded so the guarantee is not read as stronger than it
+  ## is.
+  ##
+  ## AND THAT IS A TRACKED ITEM, not just a caveat, because of what the branch
+  ## above it does. ``ensureManifestCache`` takes ``looksLikeGitDir(target)``
+  ## as "this cache entry is mine": it fetches from the checkout's OWN
+  ## ``origin`` and returns ``ok = true``. So the first URL to reach a slug
+  ## OWNS it, and every colliding URL afterwards is served that origin's tree
+  ## without a single check that the remote matches what was asked for. The
+  ## consumer is the composer/resolver reading ``projects/*.toml``, i.e. the
+  ## document that decides which repos a workspace clones and from where — so
+  ## the outcome is wrong content at the point where content becomes trust,
+  ## and it PERSISTS: one bootstrap from a hostile spelling poisons every
+  ## later bootstrap of the legitimate URL on that host. Contrast
+  ## ``sharedBarePath``, where a collision costs a redundant fetch and nothing
+  ## else. The remedy is not a wider character set (which moves every existing
+  ## slug); it is for this cache to record the URL it was cloned for and
+  ## refuse — or re-key — when the recorded URL is not the one being asked
+  ## for. Tracked as W8-R3 in
+  ## ``Windows-Cacheable-Builds-Session-Residuals.milestones.org``.
   cacheRoot / urlSlug(manifestUrl)
 
 # ---- git plumbing ----------------------------------------------------------

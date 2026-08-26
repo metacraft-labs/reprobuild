@@ -116,32 +116,41 @@ template requireNonEmpty(path, expectedSchema, keyPath, value: untyped) =
 
 # ---- repos/<repo>.toml -----------------------------------------------------
 
-proc checkoutPathRejection*(value: string): string =
-  ## Why `value` is not usable as a checkout path, or "" when it is fine.
+const workspaceRootCheckoutPath* = "."
+  ## The one spelling of "this repo IS the workspace root".
   ##
-  ## A checkout path is a plain directory BENEATH the workspace root, and that
-  ## has to be a schema rule rather than each consumer's private caution. The
-  ## reason is what the value is eventually handed to: the paths declared here
-  ## become `<workspaceRoot> / <path>` at every clone, sync, remove and
-  ## reconcile site, and several of those legitimately delete the directory
-  ## they compute — a half-finished clone is cleaned up by removing its target,
-  ## which is correct exactly as long as the target is the repo's own tree.
-  ## Given `path = "."` that same line computes the WORKSPACE ROOT, and given
-  ## `path = "../x"` it computes a sibling; `..` inside a longer path is the
-  ## same escape with more steps. So a degenerate value here is not a bad
-  ## checkout, it is an unbounded delete somewhere else on the disk.
+  ## The workspace root repo is a first-class member of the model, not an
+  ## absence from it: it is what keys a commit-addressed lock backend
+  ## (CLI/develop.md §"Which record, for a commit-addressed backend"), it is
+  ## what the develop-manageable set is defined as the union *minus*
+  ## (§"Composing the lock set"), and it is the only repo that can carry the
+  ## root's own `depends` edges. Reprobuild writes this exact value into the
+  ## locks it emits (`LockedDep.path = "."`) and every consumer recognizes it
+  ## with a literal `== "."` compare — `isRootLockedDep`, the root-repo lookup
+  ## in `composeDevelopLockSet`, the integrity walk, the lock-claim keying.
   ##
-  ## `repro workspace disable` already refused these immediately before its own
-  ## `removeDir`, and that is the wrong altitude: it protects one call site and
-  ## silently leaves every other one exposed, which is precisely how a guard
-  ## that exists still fails to hold. Refusing at the schema boundary makes the
-  ## degenerate value unrepresentable, so no consumer has to remember.
+  ## Because those compares are EXACT, the spelling is load-bearing rather
+  ## than cosmetic: `./.` denotes the same directory but is not `.`, so it
+  ## would be read as an ordinary sibling checkout whose target happens to be
+  ## the workspace root — the very confusion the guard below exists to
+  ## prevent. One meaning, one spelling.
+
+proc pathTraversalRejection*(value: string): string =
+  ## Why `value` may not be joined onto a directory this process owns, or ""
+  ## when it may.
   ##
-  ## Nested paths stay legal — `a/b/c` is a normal declaration, and one repo
-  ## checked out underneath another's tree is an existing, supported layout.
-  ## Only escaping and self-referential shapes are refused.
-  if value.len == 0:
-    return "must not be empty"
+  ## The narrowest of the questions in this file, and the only one that is not
+  ## about checkout paths specifically: it asks whether the string can steer
+  ## the join OUT of the directory it is appended to. Anything used as a path
+  ## segment against a location reprobuild creates or deletes owes this — a
+  ## declared checkout path, and also a lock-supplied `name` used as a cache
+  ## directory (`<producerCacheRoot> / dep.name / <revision>`, which ends in a
+  ## `removeDir`).
+  ##
+  ## Deliberately says nothing about `.` or emptiness: those are *meaningful*
+  ## in some planes (the workspace root repo is declared `path = "."`, a lock
+  ## records it as `"."` or `""`) and answering them here would force every
+  ## caller to take an answer it does not want.
   if isAbsolute(value):
     return "must be relative to the workspace root, not absolute"
   # Windows drive-relative (`C:foo`) is neither absolute nor safely relative:
@@ -149,26 +158,362 @@ proc checkoutPathRejection*(value: string): string =
   # this code does not control.
   if value.len >= 2 and value[1] == ':':
     return "must not be drive-relative"
-  var segments: seq[string]
   for raw in value.split({'/', '\\'}):
-    let segment = raw.strip()
-    if segment.len == 0:
-      continue
-    segments.add(segment)
-  if segments.len == 0:
-    return "must name a directory"
-  for segment in segments:
-    if segment == "..":
+    if raw.strip() == "..":
       return "must not contain a `..` segment (it would escape the " &
         "workspace root)"
+  ""
+
+proc checkoutPathEscapeRejection(value: string): string =
+  ## The rules BOTH manifest-plane questions below share: why `value` is not a
+  ## plain workspace-relative directory reference at all, or "" when it is one.
+  ##
+  ## Every consumer turns a declared checkout path into
+  ## `<workspaceRoot> / <path>`, so an absolute path, a Windows drive-relative
+  ## path, or one containing `..` names a location the workspace does not own.
+  ## None of those is ever legitimate in a MANIFEST declaration. (The LOCK
+  ## plane answers `..` differently — see `lockedCheckoutPathRejection` — and
+  ## that difference is the whole reason these are separate procs.)
+  if value.len == 0:
+    return "must not be empty"
+  let traversal = pathTraversalRejection(value)
+  if traversal.len > 0:
+    return traversal
   var meaningful = 0
-  for segment in segments:
-    if segment != ".":
+  for raw in value.split({'/', '\\'}):
+    if raw.strip().len > 0:
       inc meaningful
   if meaningful == 0:
+    return "must name a directory"
+  ""
+
+proc resolvesToWorkspaceRoot(value: string): bool =
+  ## True when `value` is made only of `.` segments, so
+  ## `<workspaceRoot> / <value>` IS the workspace root.
+  var meaningful = 0
+  for raw in value.split({'/', '\\'}):
+    let segment = raw.strip()
+    if segment.len > 0 and segment != ".":
+      inc meaningful
+  meaningful == 0
+
+proc checkoutPathRejection*(value: string): string =
+  ## Why `value` is not usable as a directory a consumer may CREATE or DELETE
+  ## as a repo's OWN TREE, or "" when it is fine.
+  ##
+  ## This is the question standing in front of a `removeDir`. Several
+  ## consumers legitimately delete the directory they compute — a
+  ## half-finished clone is cleaned up by removing its target, a checkout that
+  ## dies mid-filter is discarded the same way, disabling a project removes
+  ## the trees only it declared — and that is correct exactly as long as the
+  ## computed directory is the repo's own tree. Given `.` the identical line
+  ## computes the WORKSPACE ROOT and given `../x` a sibling, so a degenerate
+  ## value here is not a bad checkout, it is an unbounded delete somewhere
+  ## else on the disk, arriving through the recovery paths, which are the ones
+  ## nobody exercises by hand.
+  ##
+  ## Nested paths stay legal — `a/b/c` is a normal declaration, and one repo
+  ## checked out underneath another's tree is an existing, supported layout.
+  let escape = checkoutPathEscapeRejection(value)
+  if escape.len > 0:
+    return escape
+  if resolvesToWorkspaceRoot(value):
     return "must name a directory beneath the workspace root, not the " &
       "workspace root itself"
   ""
+
+proc declaredCheckoutPathRejection*(value: string): string =
+  ## Why `value` is not usable as a DECLARED checkout path in a manifest, or
+  ## "" when it is fine. This is the schema boundary, and it is deliberately
+  ## NOT the same question as `checkoutPathRejection` above.
+  ##
+  ## `1c005c6f` made the reader ask the own-tree question, which refused
+  ## `path = "."` — and `.` is the one value a workspace uses to declare its
+  ## ROOT repo, the only carrier of the root's direct `depends` edges. The
+  ## effect was a rule the system broke against itself: reprobuild SYNTHESIZES
+  ## `path: "."` into the locks it writes (`committedLockDerivedProject`,
+  ## `populateLockedDeps`), `readLock` accepts it, `composeDevelopLockSet`
+  ## looks a manifest-resolved repo at `"."` up by name to key commit-
+  ## addressed backends, and `repro develop` carries a bespoke diagnostic for
+  ## being asked to develop it — while `readRepoFragment` refused to read it.
+  ## A value the writer emits and the reader rejects is the defect, so the
+  ## reader asks the declaration question and the delete sites keep asking the
+  ## own-tree one.
+  ##
+  ## Moving the question does NOT make it optional, and it is worth being
+  ## exact about why, because getting this wrong is how the exemption turns
+  ## into an incident. Refusing `.` here was load-bearing for any delete site
+  ## that asked nothing of its own — and there was one: `executeRemove`'s
+  ## RA-22 GC ran a bare `removeDir(<workspaceRoot> / repo.path)`, so this
+  ## reader was the only thing standing between a declared root repo and a
+  ## recursive delete of the workspace. Relaxing the boundary without adding
+  ## the guard there made `repro remove` destroy the workspace root and exit
+  ## 0. The rule is therefore: every consumer that DELETES a computed checkout
+  ## path asks for itself, and the manifest plane has four such consumers —
+  ##
+  ##   * `executeClone`'s half-clone cleanup, via `removeCloneTargetSafely`,
+  ##     which proves containment beneath the workspace root independently of
+  ##     where the payload came from (and so covers synthesized payloads that
+  ##     never passed through this reader at all);
+  ##   * `runWorkspaceDisableCommand`, immediately before its own `removeDir`;
+  ##   * `executeRemove`, both for the NAMED target (the request is refused)
+  ##     and for the root swept into the GC set through a `depends` closure
+  ##     (that one delete is skipped);
+  ##   * `executeForceReset`, whose `git clean -ffdx` is a recursive delete
+  ##     bounded by the target tree — a bound only while that tree is the
+  ##     repo's own.
+  ##
+  ## THE LOCK PLANE IS NOT COVERED BY ANY OF THAT, and an earlier shape of
+  ## this comment claimed otherwise. It asserted that `repro develop`'s
+  ## placement deletes were safe because "`developCheckoutDir` remaps `.` to a
+  ## sibling". There is no `developCheckoutDir`; the proc is
+  ## `developAllTargetPath`, its remap keys on the literal string `"."`, and
+  ## the lock reader feeding it validated nothing — so a committed
+  ## `repro.lock` declaring `path = "./."` produced a develop target equal to
+  ## the workspace root and `repro develop --all --reset` deleted it, `.git`
+  ## included. That is why the lock plane now has a boundary of its own:
+  ## `lockedCheckoutPathRejection` below, asked where lock bytes become
+  ## `LockedDep`s. It is a DIFFERENT question again, because the develop
+  ## plane's default topology is a SIBLING (`../<name>`), so "beneath the
+  ## workspace root" is not its invariant.
+  ##
+  ## The behavioural delta of this change, stated exactly: `readRepoFragment`
+  ## no longer raises for `.`; `./.` and `.//.` still raise but with a
+  ## DIFFERENT diagnostic (the "one spelling" message below, not the own-tree
+  ## message), because they are refused for being an unrecognized spelling of
+  ## the root rather than for naming the root; and every other value is
+  ## unchanged in both acceptance and wording.
+  if value == workspaceRootCheckoutPath:
+    return ""
+  let escape = checkoutPathEscapeRejection(value)
+  if escape.len > 0:
+    return escape
+  if resolvesToWorkspaceRoot(value):
+    # `./.`, `.//.`, `. / .` — every other spelling that names the workspace
+    # root. No consumer's `== "."` compare recognizes any of them, so they
+    # would be read as an ordinary sibling repo whose tree happens to BE the
+    # workspace root. See `workspaceRootCheckoutPath`.
+    return "resolves to the workspace root; the workspace root repo is " &
+      "declared as exactly `" & workspaceRootCheckoutPath & "`"
+  ""
+
+proc lockedCheckoutPathRejection*(value: string): string =
+  ## Why `value` is not usable as a checkout path recorded in a LOCK, or ""
+  ## when it is. The lock plane's boundary — the third question, and the one
+  ## that was missing.
+  ##
+  ## ## Why the lock plane cannot reuse the manifest plane's rule
+  ##
+  ## A manifest checkout path is a directory beneath the workspace root, full
+  ## stop. A LOCK-recorded checkout path is not: `repro develop`'s DEFAULT
+  ## placement is the sibling topology one level ABOVE the workspace root
+  ## (`../<name>`, CLI/develop.md §"Checkout Placement"), and
+  ## `developAllTargetPath` honours a lock `path` that already names such a
+  ## location — `../sib` is intentional and documented. So "beneath the
+  ## workspace root" is not this plane's invariant, and importing
+  ## `checkoutPathRejection` here would refuse a supported layout.
+  ##
+  ## ## What IS invariant on both planes
+  ##
+  ## Every consumer computes `<workspaceRoot> / <path>`, and several of them
+  ## then DELETE it. The property that must hold is therefore not containment
+  ## but this: the computed directory must be one the workspace does not
+  ## already occupy — the workspace root itself, or an ancestor of it.
+  ##
+  ## THIS PROC DECIDES THAT LEXICALLY, AND THE SCOPE OF "LEXICALLY" IS THE
+  ## WHOLE OF WHAT IT PROMISES. It reads the string, folds `.` away, cancels
+  ## each `..` against the segment in front of it, and answers from the
+  ## residue. It touches no filesystem, so it is total, cheap and cannot fail
+  ## open on an I/O error — and it is BLIND to everything about the value
+  ## that is not in the string.
+  ##
+  ## ITS VERDICT IS NOT THE SAME ON EVERY PLATFORM, which is worth stating
+  ## rather than assuming. The folding below is pure string work and does
+  ## behave identically everywhere; the `isAbsolute` gate in FRONT of it does
+  ## not, because `std/os`' `isAbsolute` is `when doslikeFileSystem`
+  ## (`lib/std/private/ospaths2.nim`: `path[0] in {'/', '\\'}` or a drive
+  ## letter on Windows, `path[0] == '/'` on POSIX). So one proc body, two
+  ## answers, measured on the two spellings where it matters:
+  ##
+  ##   `\foo`         Windows: REFUSED (absolute)   POSIX: ACCEPTED
+  ##   `\\srv\share`  Windows: REFUSED (UNC)        POSIX: ACCEPTED
+  ##
+  ## That split is correct — a leading `\` names a root on Windows and is an
+  ## ordinary filename character on POSIX — but it means "the lock plane
+  ## refuses this" is a PER-PLATFORM statement. On POSIX neither value
+  ## escapes: the folding below splits on `\` on EVERY platform, so both fold
+  ## to ordinary relative residue (`foo`, `srv/share`) beneath the workspace
+  ## root, and there is nothing left to refuse.
+  ##
+  ## Two lexical shapes are what the folding catches:
+  ##
+  ##   * COLLAPSE TO THE ROOT. `./.`, `./`, `a/..`, `.//.` all normalize to
+  ##     the workspace root. `isRootLockedDep` recognizes the root by a
+  ##     literal `path == "."` (or empty) compare, so none of these is read as
+  ##     the root: they enter the develop set as ordinary dependencies whose
+  ##     checkout directory happens to BE the workspace root. `repro develop
+  ##     --all --reset` then runs `removeDir` on it. Measured: a workspace
+  ##     holding `.git`, `PRECIOUS.txt`, `repro.lock` and `src/` was reduced
+  ##     to an empty directory, `.git` included, by one committed lock line.
+  ##   * COLLAPSE TO AN ANCESTOR. `..`, `../..`, `../sib/..` normalize to a
+  ##     directory that CONTAINS the workspace. A sibling is a peer and is
+  ##     fine; the parent is not a peer, it is the thing the workspace lives
+  ##     inside, and deleting it takes the workspace with it.
+  ##
+  ## `../sib` is neither, and stays accepted — that is the constraint this
+  ## rule was written around, not an exception carved out of it.
+  ##
+  ## An earlier shape of this comment said these were "two lexical shapes …
+  ## and nothing else does", and a later one said the counter-example was
+  ## "one `mklink /J` away". BOTH OVERSTATED IT, and the second one in the
+  ## more misleading direction: no junction is needed.
+  ##
+  ## THE RULE IS A CHECK ON THE SPELLING IN ISOLATION. Look at the signature
+  ## — `(value: string)`. It is never handed the workspace root, and in
+  ## particular never handed the root's own BASENAME, so a value that
+  ## descends back into the root by naming it is outside what this proc can
+  ## see. With a workspace root of `…\parent\ws`:
+  ##
+  ##   lockedCheckoutPathRejection("../ws")  ->  ""  (accepted)
+  ##   normalizedPath(absolutePath(root / "../ws"))  ==  the workspace root
+  ##
+  ## and the same holds for `../ws/.`, `../../parent/ws`, and every other
+  ## spelling that goes up and comes back down. The folding cannot decide
+  ## these, because deciding them needs a second string this proc does not
+  ## have.
+  ##
+  ## So the claim, stated at the size it actually is: a value this proc
+  ## accepts is a well-formed relative path whose OWN SEGMENTS do not fold to
+  ## the root or to an ancestor. It is not proven to RESOLVE anywhere in
+  ## particular — not when the route back in is spelled out (`../ws`), and
+  ## not when a reparse point supplies it (W5-R1 below).
+  ##
+  ## `../ws` is not a live incident, and WHY it is not is the part that
+  ## matters here: `developPlacementRejection` catches it downstream, on
+  ## `normalizedPath(absolutePath(...))` values rather than on the spelling,
+  ## so `repro develop --all --reset` exits 1 and deletes nothing. That guard
+  ## is one of the five W8 proposes to rework. The containment for this shape
+  ## therefore lives entirely inside the code W8 will touch, which is the
+  ## reason to record it here rather than to file it as harmless.
+  ##
+  ## ## RESIDUAL W5-R1 — reparse points defeat any lexical rule (OPEN, W8)
+  ##
+  ## `../sib` is accepted by design: a sibling is a peer of the workspace and
+  ## the develop plane's documented default placement. If `sib` is a
+  ## DIRECTORY JUNCTION (or a symlink) whose target is the workspace itself,
+  ## that accepted-by-design value resolves to the workspace root anyway, and
+  ## no amount of string folding can tell. Reproduced:
+  ##
+  ##   mkdir …\w5junc1\workspace   # git repo + PRECIOUS.txt + src\ + repro.lock
+  ##   mklink /J …\w5junc1\sib …\w5junc1\workspace
+  ##   # repro.lock: deps = [{ …, path = "../sib", … }]
+  ##   repro develop --all --reset --workspace-root=…\w5junc1\workspace
+  ##   # EXIT=0 — and it REPORTS SUCCESS. The workspace is reduced to `.repro`:
+  ##   # `.git`, `PRECIOUS.txt`, `src\` and `repro.lock` are gone.
+  ##
+  ## The exit code is the sharpest part. This is not a guard that refuses too
+  ## little; it is an irreversible delete that reports having done the right
+  ## thing. `d0c6ad8f` (pristine, before the lock-plane boundary existed)
+  ## behaves IDENTICALLY, so the route is pre-existing in kind and this
+  ## boundary neither opened it nor closed it.
+  ##
+  ## THE FIX IS NOT HERE and is deliberately not attempted in W5. A lexical
+  ## predicate cannot resolve a reparse point without a filesystem call, and a
+  ## filesystem call inside a pure string rule makes it fallible, TOCTOU-prone
+  ## and platform-divergent. The fix belongs at the FIVE consumers that
+  ## actually delete — each already asks a containment/placement question of
+  ## its own, and each would ask it of the RESOLVED target, with a stated
+  ## policy for what to do when resolution fails, which must be "refuse", not
+  ## "proceed".
+  ##
+  ## AND THE RESOLUTION PRIMITIVE IS NOT `expandFilename`. An earlier shape of
+  ## this note named it; measured on this host, against the very junction
+  ## above, it does not resolve one:
+  ##
+  ##   expandFilename(…\sib)        -> …\sib          (unchanged)
+  ##   expandFilename(…\workspace)  -> …\workspace
+  ##   expandSymlink(…\sib)         -> …\sib          (also unchanged)
+  ##   symlinkExists(…\sib)         -> true           (the reparse point IS
+  ##                                                   detectable)
+  ##
+  ## So `expandFilename` would have bought W8 exactly nothing: it makes the
+  ## path absolute and folds it, which is what `absolutePath` +
+  ## `normalizedPath` already do. Resolving a junction needs
+  ## `GetFinalPathNameByHandle` on a handle opened with
+  ## `FILE_FLAG_BACKUP_SEMANTICS` (which returns the target, in `\\?\` form
+  ## that must then be stripped), or an explicit reparse-tag probe
+  ## (`FSCTL_GET_REPARSE_POINT`, or the cheap `symlinkExists` screen above)
+  ## followed by a refusal. Either is a real Win32 call and a real policy
+  ## decision, which is the second reason this is W8's and not a line here.
+  ## Those five consumers are `containmentInWorkspaceRoot` (`git_actions.nim`,
+  ## serving
+  ## `removeCloneTargetSafely` and `executeForceReset`),
+  ## `developPlacementRejection`, `executeRemove` and
+  ## `runWorkspaceDisableCommand` (all `repro_cli_support.nim`). It is a
+  ## design pass of its own and is tracked as MILESTONE W8 in
+  ## `Windows-Cacheable-Builds-Session-Residuals.milestones.org`, together
+  ## with W5-R2 below — one canonicalization decision, applied at all five,
+  ## rather than five spot fixes.
+  ##
+  ## ## RESIDUAL W5-R2 — those same comparisons are byte-wise (OPEN, latent, W8)
+  ##
+  ## Same class, same design pass. `containmentInWorkspaceRoot` and
+  ## `developPlacementRejection` both compare `normalizedPath(absolutePath(x))`
+  ## values with `==` and `startsWith`. On a case-insensitive filesystem
+  ## `C:\…\W5CASE\ws` and `C:\…\w5case\ws` are the SAME directory and compare
+  ## UNEQUAL, which downgrades `cmIsWorkspaceRoot` to "beneath"/"disjoint" and
+  ## lets the delete through. Not currently reachable — every caller derives
+  ## both sides from the same `cwd` bytes — so it is a latent rather than a
+  ## live defect. It is recorded here because whatever canonicalization W5-R1
+  ## introduces is the thing both sides must then be compared under, and
+  ## fixing one without the other would just move the blind spot. Reproduced
+  ## as a comparison rather than as an incident, because there is no incident
+  ## to reproduce: `normalizedPath(absolutePath("C:\\…\\W5CASE\\ws"))` and the
+  ## same call on `"C:\\…\\w5case\\ws"` name one directory on this filesystem
+  ## and return two unequal strings. What makes it latent is the CALLERS, not
+  ## the comparison — every one of them takes both sides from one `cwd`, so
+  ## the two spellings never meet.
+  ##
+  ## The two CANONICAL root spellings pass: `"."` (what reprobuild writes) and
+  ## `""` (what a lock that omits the key parses to). Both are what
+  ## `isRootLockedDep` matches, so both are correctly excluded from the
+  ## develop set by the model rather than by this guard.
+  if value.len == 0 or value == workspaceRootCheckoutPath:
+    return ""
+  # Absolute and drive-relative are wrong here for the same reason they are
+  # wrong in a manifest: the path is joined onto the workspace root, and these
+  # two spellings discard it. `..` is NOT checked here — on this plane it is
+  # only sometimes wrong, and which times is decided below on the RESOLVED
+  # shape rather than on the presence of the segment.
+  if isAbsolute(value):
+    return "must be relative to the workspace root, not absolute — " &
+      "regenerate the lock with `repro lock refresh`"
+  if value.len >= 2 and value[1] == ':':
+    return "must not be drive-relative — regenerate the lock with " &
+      "`repro lock refresh`"
+  # Lexical normalization: fold `.` away, cancel a `..` against the segment in
+  # front of it, and count the `..`s that escape past the workspace root.
+  var stack: seq[string]
+  var ascents = 0
+  for raw in value.split({'/', '\\'}):
+    let segment = raw.strip()
+    if segment.len == 0 or segment == ".":
+      continue
+    if segment == "..":
+      if stack.len > 0: discard stack.pop()
+      else: inc ascents
+    else:
+      stack.add(segment)
+  if stack.len > 0:
+    return ""
+  if ascents == 0:
+    return "resolves to the workspace root; a lock records the workspace " &
+      "root repo as exactly `" & workspaceRootCheckoutPath & "`, and every " &
+      "consumer recognizes it by that exact spelling — regenerate the lock " &
+      "with `repro lock refresh`"
+  "resolves to a directory that CONTAINS the workspace root; a locked " &
+    "checkout path may name a sibling (`../name`) but never an ancestor — " &
+    "regenerate the lock with `repro lock refresh`"
 
 proc readRepoFragment*(path: string): RepoFragment =
   let content = slurpManifest(path, schemaRepoFragmentV1)
@@ -176,7 +521,7 @@ proc readRepoFragment*(path: string): RepoFragment =
   result = decodeStrict(path, content, schemaRepoFragmentV1, RepoFragment)
   requireNonEmpty(path, schemaRepoFragmentV1, "repo.name", result.repo.name)
   requireNonEmpty(path, schemaRepoFragmentV1, "repo.path", result.repo.path)
-  let rejection = checkoutPathRejection(result.repo.path)
+  let rejection = declaredCheckoutPathRejection(result.repo.path)
   if rejection.len > 0:
     raiseManifestError(path, "repo.path", schemaRepoFragmentV1,
       schemaRepoFragmentV1,
@@ -281,6 +626,20 @@ proc readLock*(path: string): Lock =
       raiseManifestError(path, "repo[" & $i & "].path",
         schemaLockV1, schemaLockV1,
         "required key `repo[].path` is missing or empty")
+    # Same question the repo fragment is asked, and for the same reason: a
+    # `reprobuild.workspace.lock.v1` record mirrors a MANIFEST repo, so its
+    # checkout is a directory beneath the workspace root and `.` is the root
+    # repo declaring itself. Asked here because the record is a machine-
+    # written artifact that no human reviews, which is the population a
+    # degenerate value actually arrives from. Before this the lock reader
+    # validated non-emptiness only, so `./.` — a path the fragment reader
+    # refuses — round-tripped through a lock untouched.
+    let pathRejection = declaredCheckoutPathRejection(r.path)
+    if pathRejection.len > 0:
+      raiseManifestError(path, "repo[" & $i & "].path",
+        schemaLockV1, schemaLockV1,
+        "checkout path '" & r.path & "' " & pathRejection &
+        " — regenerate the lock with `repro workspace lock`")
     if r.remote.len == 0:
       raiseManifestError(path, "repo[" & $i & "].remote",
         schemaLockV1, schemaLockV1,

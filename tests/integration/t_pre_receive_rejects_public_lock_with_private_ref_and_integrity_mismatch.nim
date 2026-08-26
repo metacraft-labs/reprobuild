@@ -18,6 +18,29 @@
 ##       longer matches the received commit object) is REJECTED
 ##       (``locked-integrity-mismatch``), again ``--no-verify``-proof.
 ##
+## W5 adds a THIRD refusal to the same gate, in a case of its own below:
+##
+##   (c) A committed ``repro.lock`` that parses PERFECTLY but records a
+##       checkout path no consumer may be handed (``./.``, ``../..``) is
+##       REJECTED, and distinguishably so — the gate says the lock "is not
+##       usable", not that it "does not parse". That branch is the ``except``
+##       arm of ``gatewayVerifyPublicLock``'s ``parseWorkspaceLockedDeps``
+##       call, which W5 taught to tell a truncated lock apart from a
+##       well-formed hostile one, and which until now was verified by reading
+##       the code and by nothing else.
+##
+##       (c) calls ``gatewayVerifyPublicLock`` DIRECTLY rather than pushing
+##       through the hook, and the reason is recorded in full on the case:
+##       (a) and (b) DO NOT CURRENTLY PASS, on Windows or on Linux, and on
+##       Windows they fail identically in a pristine ``d0c6ad8f`` worktree, so
+##       it is nothing W5 did. The hooks run — ``post-receive`` forwards — but the
+##       lock gate accepts, so the HL-5 gate is presently a no-op through the
+##       hook. That is a pre-existing defect reported alongside W5 and not
+##       fixed by it; a new case in (a)/(b)'s shape would simply have been a
+##       third red case for a reason unrelated to what it asserts. (c) keeps
+##       the real bare repo, the real pushed commit and the real lock bytes,
+##       and gives up only the claim that the hook reaches the proc.
+##
 ## Baseline: a CLEAN public lock (a single public dep whose integrity is the
 ## real object id of the pushed commit) is ACCEPTED — so the two rejections are
 ## caused by the private ref / tamper, not by the gate refusing every lock.
@@ -46,11 +69,15 @@ proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `quit`: this is a HELPER, outside any `test` body. `quit`
+  ## takes the whole binary down mid-suite, so the case that failed is never
+  ## REPORTED as failed and every case after it silently does not run —
+  ## indistinguishable, in a log, from a suite that is shorter than it looks.
+  ## `doAssert` raises, and the `test` template's own `except Exception`
+  ## attributes it to the case it happened in, from any call depth.
   let res = runCmd(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc repoRoot(): string =
@@ -226,3 +253,156 @@ suite "HL-5 — pre-receive rejects public lock with private ref + " &
         check "locked-integrity-mismatch" in push.output
         check ("REJECTED" in push.output or "rejected" in push.output)
         check not upstreamHas(gitBin, fx.upstreamBare, tamperRev)
+
+  test "t_pre_receive_rejects_a_pushed_lock_whose_checkout_path_is_unusable":
+    ## W5 — the gate's THIRD refusal, and the one route into it that had never
+    ## been executed by anything.
+    ##
+    ## ``gatewayVerifyPublicLock`` reads the pushed ``repro.lock`` through
+    ## ``parseWorkspaceLockedDeps``, which since W5 raises
+    ## ``LockedCheckoutPathError`` for a checkout path that resolves to the
+    ## workspace root or to an ancestor of it. The ``except CatchableError``
+    ## around that call is OLDER than W5 — it was written for a TRUNCATED lock,
+    ## whose right answer is also "refuse" — and W5's change to it is one
+    ## ternary that makes the diagnostic say WHICH of the two happened. A
+    ## swallow site is exactly the shape that reads correct and behaves
+    ## otherwise, and this one was signed off on a code read while
+    ## ``populateLockedDeps`` and ``repro lock validate`` were both checked
+    ## behaviourally. This case closes that gap.
+    ##
+    ## Why the gateway earns a case rather than resting on the reader's. Every
+    ## other W5 case protects the machine that already HOLDS the bad lock. This
+    ## is the last point at which such a lock is still one author's problem:
+    ## past it the document is every future cloner's, and what it does to them
+    ## is a ``repro develop --all --reset`` that deletes their workspace root
+    ## and reports success.
+    ##
+    ## WHY THIS CASE CALLS THE GATE DIRECTLY instead of pushing through the
+    ## real ``pre-receive`` hook the way the case above does. Because the case
+    ## above does not currently work, and neither would this one. Measured:
+    ##
+    ##   * Windows, working tree: (a) private-ref push SUCCEEDS (exit 0), the
+    ##     upstream receives the bad commit, the gateway prints nothing.
+    ##   * Windows, a pristine ``d0c6ad8f`` worktree: byte-for-byte the same
+    ##     assertions fail the same way, so it is nothing W5 did.
+    ##   * Linux (WSL, same tree): identical. So it is not platform-specific
+    ##     either — an earlier draft of this comment said "Windows" and was
+    ##     wrong; the Linux run is what caught it.
+    ##
+    ## The gate is not being SKIPPED, which is the part worth recording. The
+    ## ``post-receive`` hook fires and forwards the commit to the upstream, so
+    ## the managed hooks do run and ``pre-receive`` did return 0 — the gate was
+    ## ASKED and answered "accept". ``gatewayReadPushedLock`` turns every git
+    ## error into ``""`` and ``gatewayVerifyPublicLock`` reads ``""`` as
+    ## "no public lock in this push — nothing to gate", so whatever stops the
+    ## pre-receive child from reading ``<commit>:repro.lock`` out of the
+    ## receiving bare (receive-pack quarantines the incoming objects until the
+    ## refs are updated, which is the obvious suspect and is NOT confirmed
+    ## here), the gate fails OPEN rather than loudly. That is a pre-existing
+    ## product defect of its own size — the whole HL-5 public-tier lock gate is
+    ## a no-op through the hook — and it is reported alongside W5, not fixed by
+    ## it. Writing the new case in the hook's shape would have added a third
+    ## case that is red for a reason that has nothing to do with what it
+    ## asserts.
+    ##
+    ## Calling ``gatewayVerifyPublicLock`` directly costs the hook plumbing and
+    ## keeps everything the case is actually about: real git objects in a real
+    ## bare repo, the real committed lock bytes read out of a real pushed
+    ## commit, the real ref-update record the hook parses from its stdin, and
+    ## the real verdict. What it does not prove is that the hook reaches this
+    ## proc with objects it can read — and on today's evidence nothing proves
+    ## that, which is the finding rather than this case's omission.
+    ##
+    ## Falsifiability, and each negative fails differently. Make
+    ## ``parseWorkspaceLockedDeps`` accept these paths (or route this call site
+    ## around the boundary) and ``accepted`` stays true and the verdict
+    ## assertions trip. Collapse the ternary back to one wording and only the
+    ## "does not parse" assertion trips — that is the assertion pinning W5's
+    ## half of this branch rather than the pre-existing half.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("hl5-lockpath-", "")
+      defer: removeDir(scratch)
+      let bare = scratch / "gateway.git"
+      let workPath = scratch / "work"
+      discard requireGit(q(gitBin) & " init --bare -b main " & q(bare))
+      discard requireGit(q(gitBin) & " init -b main " & q(workPath))
+      discard requireGit(q(gitBin) & " -C " & q(workPath) &
+        " config user.email tester@example.invalid")
+      discard requireGit(q(gitBin) & " -C " & q(workPath) &
+        " config user.name \"HL5 Tester\"")
+      writeFile(workPath / "README.md", "HL-5 lock-path fixture\n")
+      discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
+      discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m seed")
+      let objFmt = requireGit(q(gitBin) & " -C " & q(workPath) &
+        " rev-parse --show-object-format").strip()
+
+      var revsSeen: seq[string] = @[]
+      proc verdictFor(lockContent: string): GatewayVerifyResult =
+        ## Commit `lockContent`, land the commit in the bare the gate reads
+        ## from, and ask the gate the question the hook would have asked —
+        ## same proc, same argument shape, same objects.
+        ##
+        ## The distinctness `doAssert` is not decoration. Every verdict below
+        ## is attributed to the commit this returns, so two commits landing on
+        ## one sha would silently ask about the WRONG lock and report a PASS
+        ## for it. Chained parents make a collision impossible here; asserting
+        ## it costs one compare and removes the need for the reader to work
+        ## that out. `doAssert`, not `check`: this is a helper outside the
+        ## `test` body, where `unittest.fail` degrades to `setProgramResult 1`
+        ## and the case still prints `[OK]`.
+        let rev = commitLock(gitBin, workPath, lockContent)
+        doAssert rev notin revsSeen,
+          "fixture collision: commit sha " & rev & " reused"
+        revsSeen.add(rev)
+        discard requireGit(q(gitBin) & " -C " & q(workPath) &
+          " push --quiet " & q(bare) & " +HEAD:refs/heads/main")
+        gatewayVerifyPublicLock(gitBin, bare, @[GatewayRefUpdate(
+          oldSha: "0000000000000000000000000000000000000000",
+          newSha: rev, refName: "refs/heads/main")])
+
+      # The baseline first: a lock identical in every field except the checkout
+      # path is ACCEPTED. Without it, a gate that refused everything handed to
+      # it would satisfy every refusal below.
+      let seedRev = headSha(gitBin, workPath)
+      let cleanVerdict = verdictFor(
+        publicLock("self", ".", seedRev, gitObjectMultihash(objFmt, seedRev)))
+      checkpoint("(c) clean verdict: accepted=" & $cleanVerdict.accepted &
+        " diagnostic=" & cleanVerdict.diagnostic)
+      check cleanVerdict.accepted
+      check cleanVerdict.diagnostic.len == 0
+
+      # One spelling of each shape the lock boundary knows about: a path that
+      # collapses to the workspace ROOT, and one that collapses to an ANCESTOR
+      # of it. Both parse perfectly; neither is a lock any cloner may act on.
+      for badPath in ["./.", "../.."]:
+        let rev = headSha(gitBin, workPath)
+        let verdict = verdictFor(
+          publicLock("self", badPath, rev, gitObjectMultihash(objFmt, rev)))
+        checkpoint("(c) path='" & badPath & "' verdict: accepted=" &
+          $verdict.accepted & " diagnostic=" & verdict.diagnostic)
+
+        check not verdict.accepted
+        # The ref, so a multi-branch push says which branch; the offending
+        # VALUE, so an operator holding a many-dep lock knows which line to
+        # look at; and the remedy, which for a machine-written document is the
+        # command that rewrites it.
+        check "refs/heads/main" in verdict.diagnostic
+        check badPath in verdict.diagnostic
+        check "repro lock refresh" in verdict.diagnostic
+        # And W5's half of the branch: this lock PARSED. Saying it "does not
+        # parse" would send the author looking for a truncated file.
+        check "is not usable" in verdict.diagnostic
+        check "does not parse" notin verdict.diagnostic
+
+      # The constraint, asserted last: the gate did not learn to refuse
+      # everything on the way. An ordinary lock still passes afterwards.
+      let afterRev = headSha(gitBin, workPath)
+      let afterVerdict = verdictFor(
+        publicLock("self", ".", afterRev, gitObjectMultihash(objFmt, afterRev)))
+      checkpoint("(c) post-refusal verdict: accepted=" &
+        $afterVerdict.accepted & " diagnostic=" & afterVerdict.diagnostic)
+      check afterVerdict.accepted
+      check afterVerdict.diagnostic.len == 0
