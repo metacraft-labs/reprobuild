@@ -18079,6 +18079,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       "typed tool provisioning is required for uses declarations; refusing " &
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
+  if effectiveMode == tpmFromSource:
+    # Graph inspection often runs in a fresh process after prepare-only. It
+    # must retain the execution path's stdlib-provisioned bootstrap floor or
+    # unresolved bootstrap siblings are incorrectly treated as source misses.
+    seedBootstrapCycleBreakTools()
   result.toolProvisioning = effectiveMode
 
   var identity = PathOnlyBuildIdentity(

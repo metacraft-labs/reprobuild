@@ -76,6 +76,28 @@ package consumer:
     defaultTarget(target("consumer", [consumerAction]))
 """
 
+const graphBootstrapConsumerRepro = """
+import repro_project_dsl
+import repro_dsl_stdlib/packages/autoconf
+
+package consumer:
+  defaultToolProvisioning "from-source"
+
+  uses:
+    "autoconf"
+
+  build:
+    let consumerAction = buildAction(
+      id = "consumer.inspect",
+      call = inlineExecCall(@[
+        "sh", "-c", "mkdir -p build && printf ran > build/consumer-ran.txt"
+      ]),
+      outputs = @["build/consumer-ran.txt"],
+      cacheable = false,
+      toolIdentityRefs = @["autoconf"])
+    defaultTarget(target("consumer", [consumerAction]))
+"""
+
 proc q(value: string): string = quoteShell(value)
 
 proc run(command, cwd: string): tuple[code: int; output: string] =
@@ -209,6 +231,50 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
       let graphed = run(graphCmd, consumerRoot)
       checkpoint(graphed.output)
       check graphed.code == 0
+
+  test "test_m9r9_graph_seeds_bootstrap_floor_in_fresh_process":
+    if not fileExists(reproBinary):
+      checkpoint("missing " & reproBinary & "; run `repro build` first")
+      fail()
+    else:
+      let reproAbs = absolutePath(reproBinary)
+      let scratch = createTempDir("repro-m9r9-graph-bootstrap-", "")
+      defer: removeDir(scratch)
+      let catalogRoot = scratch / "catalog"
+      let consumerRoot = scratch / "consumer"
+      let cacheRoot = scratch / "action-cache"
+      createDir(catalogRoot)
+      createDir(consumerRoot)
+      createDir(cacheRoot)
+      makeRecipeFile(catalogRoot, "autoconf")
+      writeFile(consumerRoot / "repro.nim", graphBootstrapConsumerRepro)
+
+      let savedSourceRoot = getEnv(FromSourceRootEnvVar)
+      let savedNoRunquota = getEnv("REPROBUILD_NO_RUNQUOTA")
+      putEnv(FromSourceRootEnvVar, catalogRoot)
+      putEnv("REPROBUILD_NO_RUNQUOTA", "1")
+      defer:
+        if savedSourceRoot.len > 0:
+          putEnv(FromSourceRootEnvVar, savedSourceRoot)
+        else:
+          delEnv(FromSourceRootEnvVar)
+        if savedNoRunquota.len > 0:
+          putEnv("REPROBUILD_NO_RUNQUOTA", savedNoRunquota)
+        else:
+          delEnv("REPROBUILD_NO_RUNQUOTA")
+
+      let sourceArtifact = catalogRoot / "autoconf" / ".repro" / "output" /
+        "autoconf" / "autoconf"
+      check not fileExists(sourceArtifact)
+
+      let graphCmd = q(reproAbs) & " graph" &
+        " --tool-provisioning=from-source --format=json" &
+        " --action-cache-root=" & q(cacheRoot)
+      let graphed = run(graphCmd, consumerRoot)
+      checkpoint(graphed.output)
+      check graphed.code == 0
+      check graphed.output.contains("\"actions\"")
+      check not fileExists(sourceArtifact)
 
   test "test_m9r9_dry_run_planned_recipe_synthesizes_profile":
     # A dry-run auto-recurse sub-build intentionally does not materialize
