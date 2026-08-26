@@ -1071,10 +1071,10 @@ test "incomplete name" and:
             # to the streaming-publication change rather than an opaque bump.
             "libs/repro_binary_cache_client/tests/"
             "test_publish_in_process.nim": 7,
-            # 7, not 6: the rebuilt binary and independent static baseline
+            # 8, not 6: the rebuilt binary and independent static baseline
             # both include the carried-environment regression now present on
             # the reconciled upstream tree.
-            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 7,
+            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 8,
             "libs/repro_resources/tests/"
             "t_attr_missing_interface_diagnostic.nim": 1,
             "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,

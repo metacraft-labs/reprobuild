@@ -14184,12 +14184,11 @@ proc findRunQuotaDaemonBin*(): string =
   result = ""
 
 const
-  ## Explicit env-var whitelist forwarded from the user-facing CLI invocation
-  ## across the daemon protocol into the daemon-hosted build executor. These are
-  ## process-control / lookup-control variables that must follow the user, not
-  ## the persistent daemon: the daemon may have been launched by launchd (macOS)
-  ## or systemd-user (Linux) at login, so it does not naturally see the user's
-  ## current shell environment.
+  ## Compatibility inventory of operational variables historically forwarded
+  ## from the user-facing CLI into the daemon-hosted build executor. Request
+  ## forwarding now preserves the complete caller environment so arbitrary
+  ## action ``envPassthrough`` declarations work under the daemon too, but this
+  ## exported list remains useful to callers auditing the well-known controls.
   DaemonExplicitForwardedEnvVars* = [
     "PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
     "RUNQUOTA_SOCKET", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
@@ -14374,39 +14373,24 @@ const
   ]
 
 proc daemonCarriedEnvironment*(): seq[string] =
-  ## Snapshot of the user-facing CLI process environment forwarded to the
-  ## daemon-hosted build/watch executor. The daemon installs each entry via
-  ## ``putEnv`` before running the build session, so subsequent child actions
-  ## (rustc, cargo, clang, ld via cc-wrapper, ...) inherit the user's
-  ## toolchain configuration even when the daemon itself was launched without
-  ## that configuration (e.g. by launchd/systemd at login).
+  ## Snapshot the user-facing CLI environment for the daemon-hosted build/watch
+  ## executor. Direct builds evaluate providers and resolve action
+  ## ``envPassthrough`` values against this environment; daemon builds must be
+  ## byte-for-byte equivalent even when a project declares an arbitrary name
+  ## that reprobuild could not know in advance.
   ##
-  ## The set is intentionally union-of-three:
-  ##  * explicit operational whitelist (PATH/HOME/RUNQUOTA_SOCKET/...);
-  ##  * well-known Nix cc-wrapper + loader variables;
-  ##  * host-triple-suffixed Nix variables matched by prefix (so we do not
-  ##    have to bake the host triple into source).
-  ##
-  ## All values are read live from the current process environment; nothing
-  ## is hardcoded. On non-Nix hosts the Nix entries simply contribute zero
-  ## additional values because none are set.
+  ## The request worker installs this snapshot only for the duration of one
+  ## session and restores its prior environment afterwards. The build engine
+  ## still filters each action down to its declared passthrough set. The wire
+  ## sanitizer removes the test runner's private ownership marker before any
+  ## request is encoded.
   var seen = initHashSet[string]()
   for key, value in envPairs():
     if key.len == 0 or seen.contains(key):
       continue
-    var matched = false
-    if key in DaemonExplicitForwardedEnvVars:
-      matched = true
-    elif key in DaemonNixToolchainEnvVars:
-      matched = true
-    else:
-      for prefix in DaemonNixToolchainEnvPrefixes:
-        if key.startsWith(prefix):
-          matched = true
-          break
-    if matched:
-      seen.incl(key)
-      result.add(key & "=" & value)
+    seen.incl(key)
+    result.add(key & "=" & value)
+  result = sanitizeUserDaemonRequestEnvironment(result)
 
 const StandardRunquotadPoolCaps* = [
   ("compile", 8'u32),
