@@ -8251,7 +8251,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           reportPersistence = reportPersistence,
           logMode = logMode,
           diagnosticsPath = "",
-          prepareOnly = prepareOnly,
+          # Preparing the requested consumer still has to materialize source
+          # tools. Otherwise the parent records the recipe as resolved while
+          # its executable remains absent, and a later graph load fails.
+          prepareOnly = false,
           dryRun = dryRun,
           forceRebuild = forceRebuild,
           publishCacheHits = publishCacheHits,

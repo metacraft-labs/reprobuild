@@ -1,6 +1,6 @@
 ## DSL-port M9.R.9 — auto-recurse + stdlib fall-through tests.
 ##
-## Pins the M9.R.9 surface in three layers:
+## Pins the M9.R.9 surface in four layers:
 ##
 ##   1. ``tryResolveFromSourceTool`` returns a discriminated outcome
 ##      (``rrResolved`` / ``rrNeedsBuild`` / ``rrSiblingMissing``) so
@@ -18,17 +18,69 @@
 ##      module-level state in ``repro_cli_support``. We exercise them
 ##      directly here by manipulating the guard state — a full
 ##      end-to-end auto-recurse test would require synthesising a real
-##      recipe + driving a sub-build, which the test framework already
-##      covers via the live smoke (Gap A wayland / meson chains).
+##      recipe + driving a sub-build.
+##
+##   4. A black-box synthetic consumer drives that real sub-build under
+##      ``--prepare-only``. The source producer must be materialized while
+##      the requested consumer action remains unexecuted.
 ##
 ## The unit-test fixtures use ``createTempDir`` so nothing in the
 ## production ``recipes/packages/source/`` checkout is touched.
 
-import std/[os, sets, strutils, tempfiles, unittest]
+import std/[os, osproc, sets, strutils, tempfiles, unittest]
 
 import repro_cli_support
 import repro_tool_profiles
 import repro_interface_artifacts
+
+const reproBinary = "./build/bin/repro"
+
+const prepareOnlyProducerRepro = """
+import repro_project_dsl
+
+package mesonSource:
+  build:
+    let materialize = buildAction(
+      id = "meson-source.materialize",
+      call = inlineExecCall(@[
+        "sh", "-c",
+        "mkdir -p .repro/output/meson && " &
+          "printf '#!/bin/sh\\necho synthetic-meson\\n' > " &
+          ".repro/output/meson/meson && " &
+          "chmod +x .repro/output/meson/meson"
+      ]),
+      outputs = @[".repro/output/meson/meson"],
+      cacheable = false)
+    defaultTarget(target("meson", [materialize]))
+"""
+
+const prepareOnlyConsumerRepro = """
+import repro_project_dsl
+import repro_dsl_stdlib/packages/meson
+
+package consumer:
+  defaultToolProvisioning "from-source"
+
+  uses:
+    "meson"
+
+  build:
+    let consumerAction = buildAction(
+      id = "consumer.run",
+      call = inlineExecCall(@[
+        "sh", "-c", "mkdir -p build && printf ran > build/consumer-ran.txt"
+      ]),
+      outputs = @["build/consumer-ran.txt"],
+      cacheable = false,
+      toolIdentityRefs = @["meson"])
+    defaultTarget(target("consumer", [consumerAction]))
+"""
+
+proc q(value: string): string = quoteShell(value)
+
+proc run(command, cwd: string): tuple[code: int; output: string] =
+  let res = execCmdEx(command, workingDir = cwd)
+  (code: res.exitCode, output: res.output)
 
 proc makeRecipeFile(root, name: string) =
   let recipeDir = root / name
@@ -97,6 +149,66 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
     check outcome.recipeDir == scratch / "fake-tool"
     check outcome.expectedArtifact.contains("fake-tool")
     check outcome.expectedArtifact.contains(".repro")
+
+  test "test_m9r9_prepare_only_materializes_source_producer":
+    let shBin = findExe("sh")
+    if shBin.len == 0:
+      checkpoint("skipped - sh is unavailable")
+      skip()
+    elif not fileExists(reproBinary):
+      checkpoint("missing " & reproBinary & "; run `repro build` first")
+      fail()
+    else:
+      let reproAbs = absolutePath(reproBinary)
+      let scratch = createTempDir("repro-m9r9-prepare-", "")
+      defer: removeDir(scratch)
+      let catalogRoot = scratch / "catalog"
+      let producerRoot = catalogRoot / "meson"
+      let consumerRoot = scratch / "consumer"
+      let cacheRoot = scratch / "action-cache"
+      createDir(catalogRoot)
+      createDir(producerRoot)
+      createDir(consumerRoot)
+      createDir(cacheRoot)
+      writeFile(producerRoot / "repro.nim", prepareOnlyProducerRepro)
+      writeFile(consumerRoot / "repro.nim", prepareOnlyConsumerRepro)
+
+      let savedSourceRoot = getEnv(FromSourceRootEnvVar)
+      let savedNoRunquota = getEnv("REPROBUILD_NO_RUNQUOTA")
+      putEnv(FromSourceRootEnvVar, catalogRoot)
+      putEnv("REPROBUILD_NO_RUNQUOTA", "1")
+      defer:
+        if savedSourceRoot.len > 0:
+          putEnv(FromSourceRootEnvVar, savedSourceRoot)
+        else:
+          delEnv(FromSourceRootEnvVar)
+        if savedNoRunquota.len > 0:
+          putEnv("REPROBUILD_NO_RUNQUOTA", savedNoRunquota)
+        else:
+          delEnv("REPROBUILD_NO_RUNQUOTA")
+
+      let producerArtifact =
+        producerRoot / ".repro" / "output" / "meson" / "meson"
+      let consumerMarker = consumerRoot / "build" / "consumer-ran.txt"
+      check not fileExists(producerArtifact)
+      check not fileExists(consumerMarker)
+
+      let prepareCmd = q(reproAbs) & " build --prepare-only" &
+        " --daemon=off --tool-provisioning=from-source" &
+        " --progress=quiet --log=quiet --measure=none" &
+        " --action-cache-root=" & q(cacheRoot)
+      let prepared = run(prepareCmd, consumerRoot)
+      checkpoint(prepared.output)
+      check prepared.code == 0
+      check fileExists(producerArtifact)
+      check not fileExists(consumerMarker)
+
+      let graphCmd = q(reproAbs) & " graph" &
+        " --tool-provisioning=from-source --format=json" &
+        " --action-cache-root=" & q(cacheRoot)
+      let graphed = run(graphCmd, consumerRoot)
+      checkpoint(graphed.output)
+      check graphed.code == 0
 
   test "test_m9r9_dry_run_planned_recipe_synthesizes_profile":
     # A dry-run auto-recurse sub-build intentionally does not materialize

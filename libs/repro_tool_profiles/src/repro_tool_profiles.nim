@@ -4755,17 +4755,10 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   if name.len == 0:
     raise newException(OSError,
       "tool-resolution failed: from-source mode requires a non-empty " &
-      "executableName on the tool use (package \"" &
-      useDef.packageSelector & "\")")
+        "executableName on the tool use (package \"" &
+        useDef.packageSelector & "\")")
   let recipeDir = m9r14fResolveRecipeDir(useDef, root)
   let recipeManifest = recipeDir / "repro.nim"
-  try:
-    let msg = "[RESOLVER] tryResolveFromSourceTool: name=" & name & " root=" & root & " manifest=" & recipeManifest & " exists=" & $fileExists(extendedPath(recipeManifest)) & "\n"
-    let f = open("/tmp/resolver-debug.txt", fmAppend)
-    f.write(msg)
-    f.close()
-  except:
-    discard
   if not fileExists(extendedPath(recipeManifest)):
     return FromSourceResolveResult(kind: rrSiblingMissing,
       attemptedRecipeManifest: recipeManifest,
