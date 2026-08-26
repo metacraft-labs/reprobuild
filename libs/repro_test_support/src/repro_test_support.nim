@@ -31,7 +31,14 @@
 
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
-from repro_core/paths import extendedPath
+from repro_core/paths import extendedPath, runquotaEndpointPath
+
+# Narrow, named import: ``runquota_ipc`` is RunQuota's own endpoint-trust
+# module, and ``runquotaRendezvousDir`` below delegates the "where may a
+# socket live" rule to it rather than keeping a second copy of the mode.
+# Named symbols only — a wildcard import would drag ``connect``/``close``
+# over ``std/net`` spellings a test file may also be using.
+from runquota_ipc import ensureEndpointDir, unixEndpoint
 
 when defined(windows):
   import std/winlean
@@ -491,16 +498,59 @@ proc daemonSocketEndpoint*(name: string): string =
 
 proc runquotaSocketEndpoint*(name: string): string =
   ## Per-test ``runquotad --socket`` argument that always lands on the
-  ## right transport: a Unix-socket path under ``/tmp`` on POSIX, a
-  ## Named-Pipe name in the kernel namespace on Windows. ``runquotad``
-  ## auto-maps a ``.sock``-shaped argument to a deterministic
-  ## ``\\.\pipe\runquota-<token>`` on Windows, but tests still need
-  ## to thread the SAME string into ``RUNQUOTA_SOCKET`` so the client
-  ## connects to the same instance.
-  when defined(windows):
-    r"\\.\pipe\runquotad-" & name.replace('\\', '_').replace('/', '_')
+  ## right transport: a Unix socket inside a private per-test directory
+  ## on POSIX, a Named-Pipe name in the kernel namespace on Windows.
+  ## Tests thread the SAME string into ``RUNQUOTA_SOCKET`` so the client
+  ## connects to the instance the test started.
+  ##
+  ## The rule about WHERE that socket may live is
+  ## ``repro_core/paths.runquotaEndpointPath`` and is shared with the
+  ## product's own daemon spawn, because a test that binds somewhere the
+  ## shipped code would not is a test of something nobody runs.
+  runquotaEndpointPath(name)
+
+proc runquotaRendezvousDir*(root: string): string =
+  ## THE one place a test that owns a scratch tree decides where a
+  ## locally spawned ``runquotad`` may bind. Returns the directory; the
+  ## caller appends its own socket file name.
+  ##
+  ## WHY A DIRECTORY OF ITS OWN, AND NOT ``root`` ITSELF. The socket's
+  ## PARENT DIRECTORY is the rendezvous point RunQuota verifies — the
+  ## daemon before it binds and every client before it connects — and it
+  ## must be owned by the configured owner and never group- or
+  ## world-writable. A socket dropped straight into ``getTempDir()`` fails
+  ## both halves: ``/tmp`` is root-owned ``1777``, so ``runquotad`` exits
+  ## with ``runquota endpoint directory /tmp: refusing a path owned by uid
+  ## 0 with mode 1777`` before it ever prints its listening line. That
+  ## refusal is right — a rendezvous any local user can write is one any
+  ## local user can REPLACE — so this is a path change, never a flag that
+  ## turns the check off.
+  ##
+  ## THE MODE IS NOT WRITTEN DOWN HERE, and that is the point of routing
+  ## through ``runquota_ipc.ensureEndpointDir`` instead of a local
+  ## ``createDir`` + ``setFilePermissions(0700)``. The required mode is a
+  ## FUNCTION OF THE HOST: ``rendezvousPolicy()`` yields ``0700``/owner-only
+  ## on a host with no ``runquota`` group, and ``0750`` group-gated on a
+  ## host that has one. Four copies of this helper had ``0700`` hard-coded
+  ## and were silently correct only in the first case; on a provisioned
+  ## host they would have created a directory the daemon then refuses for
+  ## the OPPOSITE reason (``refusing mode 0700, required 0750``). Asking
+  ## RunQuota to provision and verify its own rendezvous keeps the test on
+  ## exactly the rule the product enforces, with no second copy of it.
+  ##
+  ## ``ensureEndpointDir`` VERIFIES as well as creates, and raises
+  ## ``EndpointTrustError`` carrying the refusal text when it cannot. A
+  ## caller must let that propagate: a fixture that cannot get a
+  ## trustworthy rendezvous has not "skipped", it has failed to set up.
+  result = root / "ep"
+  when defined(posix):
+    ensureEndpointDir(unixEndpoint(result / "runquota.sock"))
   else:
-    "/tmp" / (name & ".sock")
+    # Windows: named pipes live in the kernel object namespace and carry
+    # their own ACL, so there is no directory to own and no mode to
+    # widen. The directory is still created because callers put other
+    # per-daemon scratch beside the endpoint.
+    createDir(result)
 
 proc runquotaEndpointReachable*(endpoint: string): bool =
   ## Polled readiness check used by ``ensureRunQuotaDaemon`` helpers
@@ -734,6 +784,31 @@ proc ctInterposeSrcPath*(repoRoot: string): string =
 
 type MissingTestFixtureError* = object of CatchableError
 
+proc reproBinaryPath*(repoRoot: string): string =
+  ## Absolute path to the graph-built ``repro`` CLI inside ``repoRoot``,
+  ## produced by build-graph edge ``reprobuild.apps.repro``. Every helper
+  ## in this module that needs the CLI goes through here.
+  ##
+  ## That funnel is load-bearing, not tidiness.
+  ## ``scripts/repro_binary_reachability.nim`` decides which tests get
+  ## ``build/bin/repro`` declared as a typed input on their EXECUTE edge,
+  ## and it SEEDS on a source spelling the binary's location — this one.
+  ## Taint then propagates along symbol references, so a test that only
+  ## calls ``prepareMonitorTools`` still gets the dependency, and a
+  ## rebuild of the CLI invalidates it instead of the engine serving the
+  ## test as up to date against a stale binary.
+  ##
+  ## Consequence for anyone adding a helper here: resolve the CLI through
+  ## this proc and the analysis follows you for free. Assemble the path
+  ## some other way and every test calling your helper silently loses its
+  ## dependency on the binary.
+  ##
+  ## Spelled componentwise rather than by joining a ``"build/bin/repro"``
+  ## const so the result carries the host path separator — callers compare
+  ## this against paths they built the same way, and on Windows the two
+  ## spellings are not equal.
+  repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
+
 proc requireBinary*(path, edgeName: string): string {.discardable.} =
   ## Test-Fixtures-In-Build-Graph: assert that a graph-built fixture binary
   ## already exists, instead of compiling it at test runtime. Returns ``path``
@@ -783,7 +858,7 @@ proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
   discard tempRoot
   discard cacheKey
   result.monitorCliPath = requireBinary(
-    repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    reproBinaryPath(repoRoot),
     "reprobuild.apps.repro")
   result.monitorCliArgs = ioMonitorCliArgs
   result.shim = requireBinary(monitorShimPath(repoRoot),

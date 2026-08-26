@@ -29,7 +29,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -37,6 +37,12 @@ import repro_project_dsl
 # fetch spec + cmake flags + library + executable artifacts under
 # ``plasmaWorkspaceSource`` at module init time.
 import ./repro
+
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
 
 const ExpectedUrl =
   # M9.R.15f.5 drive-by — the recipe long since switched to the
@@ -47,9 +53,12 @@ const ExpectedHash =
   "b82511e46f62e1b8f60b969c828c8d8d32fc7928401a70cc28c29f85f46c412f"
 
 const ExpectedCmakeFlags = @[
-  "-DBUILD_TESTING=OFF",
-  "-DKWIN_BUILD_X11=OFF",
-  "-DCMAKE_BUILD_TYPE=Release",
+  "BUILD_TESTING=OFF",
+  "KWIN_BUILD_X11=OFF",
+  "WITH_X11=OFF",
+  "GLIBC_LOCALE_GEN=OFF",
+  "CMAKE_BUILD_TYPE=Release",
+  "CMAKE_AUTOGEN_PARALLEL=1",
 ]
 
 suite "plasmaWorkspaceSource — from-source recipe smoke test":
@@ -78,11 +87,31 @@ suite "plasmaWorkspaceSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "cmakeFlags registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``cmake_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("plasmaWorkspaceSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedCmakeFlags
+    check buildBlockConstructors("plasmaWorkspaceSource") == @["cmake_package"]
   test "cmakeFlags does not leak into the meson channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the meson channel would
+    # surface as a ``meson_package(...)`` call here.
+    check "meson_package" notin buildBlockConstructors("plasmaWorkspaceSource")
   test "cmakeFlags does not leak into the configure channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the configure channel would
+    # surface as a ``autotools_package(...)`` call here.
+    check "autotools_package" notin buildBlockConstructors("plasmaWorkspaceSource")
   test "artifacts register an executable + a library with correct kinds":
     # M3 artifact registry: ``plasmashell`` is tagged ``dakExecutable``
     # while ``libkworkspace6`` is tagged ``dakLibrary``. The

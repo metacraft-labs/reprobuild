@@ -30,7 +30,7 @@
 ##     verbatim commands recorded in declaration order under the
 ##     ``cmake`` artifact.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -38,6 +38,12 @@ import repro_project_dsl
 # fetch spec + three executable artifacts + three shell actions
 # under ``cmakeSource`` at module init time.
 import ./repro
+
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
 
 const ExpectedUrl =
   "https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2.tar.gz"
@@ -72,13 +78,22 @@ suite "cmakeSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "no flags registered on the configure channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # This recipe bootstraps through raw ``shell`` actions rather
+    # than a Layer-1 package constructor, so it contributes no
+    # options to any channel. Pre-M9.R.6.1 this asserted the
+    # per-channel flag registry was empty; the post-retirement
+    # equivalent is that the ``build:`` block calls no
+    # options-bearing constructor at all.
+    check buildBlockConstructors("cmakeSource").len == 0
+    check registeredShellActions("cmakeSource").len > 0
+    check "autotools_package" notin buildBlockConstructors("cmakeSource")
   test "no flags registered on the meson channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    check "meson_package" notin buildBlockConstructors("cmakeSource")
   test "no flags registered on the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    check "cmake_package" notin buildBlockConstructors("cmakeSource")
   test "no flags registered on the make channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    check not buildBlockPassesArgument("cmakeSource", "makeVars")
+    check not buildBlockPassesArgument("cmakeSource", "installMakeVars")
   test "artifacts register three executables all tagged dakExecutable":
     # M3 artifact registry: cmake + ctest + cpack are all tagged
     # ``dakExecutable``. cmake's bootstrap-build-install pipeline

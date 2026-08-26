@@ -68,7 +68,11 @@ when not defined(windows):
   suite "M68 gate 4: e2e_home_resource_rollback_preserves_unrelated":
     test "platform N/A":
       echo "[platform N/A] t_e2e_home_resource_rollback_preserves_unrelated: requires Windows HKCU Environment PATH"
-      check true
+      # The `[platform N/A]` marker above IS this case's statement: it is the
+      # repository's structured, greppable declaration that the coverage does
+      # not apply to this host. A `check true` beside it added nothing and
+      # taught the shape that an assertion which cannot fail is acceptable
+      # filler, so it is gone.
 else:
   suite "M68 gate 4: e2e_home_resource_rollback_preserves_unrelated":
     test "rollback subtracts only Reprobuild contributions; user entries survive":

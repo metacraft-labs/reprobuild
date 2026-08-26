@@ -22,7 +22,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -31,6 +31,12 @@ import repro_project_dsl
 # ``waylandSource`` at module init time.
 import ./repro
 
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
+
 const ExpectedUrl =
   "https://gitlab.freedesktop.org/wayland/wayland/-/releases/1.25.0/downloads/wayland-1.25.0.tar.xz"
 
@@ -38,12 +44,11 @@ const ExpectedHash =
   "c065f040afdff3177680600f249727e41a1afc22fccf27222f15f5306faa1f03"
 
 const ExpectedMesonOptions = @[
-  "-Ddocumentation=false",
-  "-Ddtd_validation=false",
-  "-Dlibraries=true",
-  "-Dscanner=true",
-  "-Dtests=false",
-  "--buildtype=release",
+  "documentation=false",
+  "dtd_validation=false",
+  "libraries=true",
+  "scanner=true",
+  "tests=false",
 ]
 
 suite "waylandSource — from-source recipe smoke test":
@@ -72,9 +77,25 @@ suite "waylandSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "mesonOptions registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``meson_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("waylandSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedMesonOptions
+    check buildBlockConstructors("waylandSource") == @["meson_package"]
   test "mesonOptions does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the cmake channel would
+    # surface as a ``cmake_package(...)`` call here.
+    check "cmake_package" notin buildBlockConstructors("waylandSource")
   test "artifacts register three libraries plus one executable":
     # M3 artifact registry: ``libwaylandClient``, ``libwaylandServer``,
     # ``libwaylandCursor`` must all be tagged ``dakLibrary`` while

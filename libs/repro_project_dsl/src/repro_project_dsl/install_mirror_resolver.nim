@@ -6,6 +6,7 @@
 import std/[algorithm, os, strutils]
 
 import blake3
+import repro_platform
 # Only the pure path-arithmetic half of the local store. This module is in
 # the import closure of every profile compile (via ``repro_project_dsl``),
 # and a profile compile's ``--path`` set deliberately excludes the store
@@ -62,6 +63,12 @@ proc resolveCasStoreRoot*(): string =
 proc realizationInfoPath*(recipesRoot, depName: string): string =
   (recipesRoot / depName / ".repro" / "output" / RealizationInfoFileName)
     .replace("\\", "/")
+
+proc currentRealizationPlatformTag*(): string =
+  ## Stable producer identity for mutable source-package mirrors. This is the
+  ## machine that produced the realization, not a package-manager namespace.
+  let host = currentHost()
+  host.os.toLowerAscii() & "-" & host.cpu.toLowerAscii()
 
 proc toForwardSlash(value: string): string =
   result = value
@@ -121,7 +128,8 @@ proc writeRealizationInfoFile*(recipesRoot, depName, version,
   if rel.len == 0 or rel != canonicalRel:
     return
   let path = realizationInfoPath(recipesRoot, depName)
-  let payload = "version=" & version & "\n" &
+  let payload = "platform=" & currentRealizationPlatformTag() & "\n" &
+                "version=" & version & "\n" &
                 "realization-hash=" & realizationHashHex & "\n" &
                 "store-relative-path=" & rel & "\n"
   if fileExists(path):
@@ -136,6 +144,7 @@ proc writeRealizationInfoFile*(recipesRoot, depName, version,
 
 type
   RealizationInfo* = object
+    platformTag*: string
     version*: string
     realizationHashHex*: string
     storeRelativePath*: string
@@ -161,7 +170,9 @@ proc readRealizationInfoFile*(recipesRoot, depName: string): RealizationInfo =
       continue
     let key = line[0 ..< eqIdx].strip()
     let value = line[eqIdx + 1 .. ^1].strip()
-    if key == "version":
+    if key == "platform":
+      result.platformTag = value.toLowerAscii()
+    elif key == "version":
       result.version = value
     elif key == "realization-hash" and isValidRealizationHashHex(value):
       result.realizationHashHex = value
@@ -179,11 +190,23 @@ proc hashedDepMirrorRoot*(recipesRoot, depName: string): string =
   if recipesRoot.len == 0 or depName.len == 0:
     return ""
   let info = readRealizationInfoFile(recipesRoot, depName)
-  if info.version.len == 0 or info.realizationHashHex.len == 0 or
+  if info.platformTag != currentRealizationPlatformTag() or
+      info.version.len == 0 or info.realizationHashHex.len == 0 or
       info.storeRelativePath.len == 0:
     return ""
   let storeRoot = resolveCasStoreRoot().replace("\\", "/")
   storeRoot & "/" & info.storeRelativePath
+
+proc realizationInfoMatchesCurrentPlatform*(recipeDir: string): bool =
+  ## A missing sidecar is the pre-install compatibility case used by staged
+  ## artifacts. Once a producer writes the sidecar, it must identify this
+  ## process's OS and CPU; empty legacy sidecars are deliberately stale.
+  let path = recipeDir / ".repro" / "output" / RealizationInfoFileName
+  if not fileExists(path):
+    return true
+  let info = readRealizationInfoFile(parentDir(recipeDir),
+    extractFilename(recipeDir))
+  info.platformTag == currentRealizationPlatformTag()
 
 proc packageInstallMirrorRoot*(recipesRoot, depName: string): string =
   if depName.len == 0 or recipesRoot.len == 0:
@@ -280,6 +303,10 @@ proc emitInstallMirrorStorePublish*(recipesRoot, depName, version,
   result.add(" >/dev/null; ;; *) mkdir -p ")
   result.add(shellDoubleQuote(sidecarParent))
   result.add("; : > ")
+  result.add(shellDoubleQuote(sidecarPath))
+  result.add("; printf '%s\\n' 'platform=")
+  result.add(currentRealizationPlatformTag())
+  result.add("' > ")
   result.add(shellDoubleQuote(sidecarPath))
   result.add("; ;; esac; ")
 

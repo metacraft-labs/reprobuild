@@ -201,4 +201,8 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
     test "non_linux_host_documents_runtime_skip":
       # The patchelf E2E test runs only on Linux. The structural
       # script-emit tests above pin the contract on every platform.
-      check true
+      # Emit the repository's structured ``[platform N/A]`` marker rather
+      # than a bare ``check true``: the marker is counted as unrun
+      # coverage, an [OK] from an assertion that cannot fail is not.
+      echo "[platform N/A] t_m9r14f_2_rpath_patching: " &
+        "the patchelf runtime gate requires Linux"

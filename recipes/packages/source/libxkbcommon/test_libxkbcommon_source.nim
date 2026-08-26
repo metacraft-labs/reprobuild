@@ -22,7 +22,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -31,6 +31,12 @@ import repro_project_dsl
 # ``libxkbcommonSource`` at module init time.
 import ./repro
 
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
+
 const ExpectedUrl =
   "https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-1.13.2.tar.gz"
 
@@ -38,11 +44,13 @@ const ExpectedHash =
   "acc4d5f7c3cbba5f9f8d08d8bdbeede84ecede46792f47929aa9321873385528"
 
 const ExpectedMesonOptions = @[
-  "-Denable-docs=false",
-  "-Denable-x11=false",
-  "-Denable-wayland=true",
-  "-Denable-tools=true",
-  "--buildtype=release",
+  "enable-docs=false",
+  "enable-x11=true",
+  "enable-wayland=true",
+  "enable-tools=true",
+  "libdir=lib",
+  "xkb-config-unversioned-extensions-path=/etc/xkb",
+  "xkb-config-versioned-extensions-path=/etc/xkb",
 ]
 
 suite "libxkbcommonSource — from-source recipe smoke test":
@@ -72,9 +80,25 @@ suite "libxkbcommonSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "mesonOptions registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``meson_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("libxkbcommonSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedMesonOptions
+    check buildBlockConstructors("libxkbcommonSource") == @["meson_package"]
   test "mesonOptions does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the cmake channel would
+    # surface as a ``cmake_package(...)`` call here.
+    check "cmake_package" notin buildBlockConstructors("libxkbcommonSource")
   test "artifacts register one library plus one executable":
     # M3 artifact registry: ``libxkbcommon`` must be tagged
     # ``dakLibrary`` while ``xkbcli`` must be tagged ``dakExecutable``.

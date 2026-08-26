@@ -97,9 +97,18 @@ else:
 suite "Project-DSL cross-project binding guard":
 
   test "the package macro compiles with non-module-resolvable bindings":
-    # Reaching this test at all means the file compiled — i.e. the macro no
-    # longer emits a ``typeof(<rhs>)`` storage var that can't be typed.
-    check true
+    # ``check true`` used to stand in for "reaching this test at all means the
+    # file compiled". An assertion that cannot fail records nothing, and the
+    # compile it claimed to witness was already enforced by the compiler
+    # before the binary existed. The property worth pinning is the guard's
+    # SELECTIVITY over the three shapes this file mixes: storage for the one
+    # binding whose RHS resolves at module scope, and for neither of the two
+    # that do not. A regression that dropped the ``when compiles(typeof(rhs))``
+    # guard fails to compile; one that made it unconditional exposes all
+    # three; one that made it never fire exposes none. Only the middle column
+    # here is correct, and only this assertion can tell them apart.
+    check [directExposed, localTemplateExposed, siblingRefExposed] ==
+      [true, false, false]
 
   test "a module-resolvable binding stays exposed as a cross-project edge":
     check directExposed
@@ -115,5 +124,12 @@ suite "Project-DSL cross-project binding guard":
 
   test "the prelude namespace for the producer is still constructible":
     let b = PackageBuild["crossGuard"]()
-    discard b
-    check true
+    # ``discard b`` + ``check true`` asserted nothing about ``b`` — a
+    # constructor that silently produced an unusable namespace would have
+    # passed. The namespace exists to carry the package's exposed build
+    # bindings, so assert that: the accessor for the module-resolvable
+    # binding is reachable through the receiver, and the two the guard
+    # withheld are not.
+    check compiles(b.directEdge)
+    check not compiles(b.localTemplateEdge)
+    check not compiles(b.siblingRefEdge)

@@ -572,6 +572,38 @@ type
     bdpDefault
     bdpAutomaticMonitor
     bdpMakeDepfile
+    bdpTrustedDeclaredInputs
+      ## HAZARDOUS, DISCOURAGED, LAST RESORT. The edge's inputs are exactly
+      ## what the recipe author wrote inline. The engine does NO monitoring
+      ## and NO result processing for the edge and verifies nothing.
+      ##
+      ## Reach for the two sound options FIRST — both keep caching:
+      ##
+      ## 1. ``makeDepfilePolicy`` where the action emits its own make-format
+      ##    depfile.
+      ## 2. ``makeDepfilePolicy`` pointing at a depfile produced by ANOTHER
+      ##    edge in the graph, ordered before this one. The engine resolves a
+      ##    report path against the action's cwd and reads it after the
+      ##    action runs; it does NOT require the file to be this action's own
+      ##    output. So a runtime step that compiles something can be lifted
+      ##    into its own edge, and this edge can consume that edge's depfile
+      ##    as real evidence.
+      ##
+      ## Only when neither is possible — the action cannot be monitored AND
+      ## nothing in the graph produces a depfile describing its inputs — is
+      ## this policy appropriate. Today that means an action performing
+      ## ``LD_PRELOAD`` interposition itself, which the monitor's own
+      ## interposer cannot observe without the two livelocking.
+      ##
+      ## THE HAZARD: a list that is wrong, or that goes stale when a
+      ## dependency moves, will NOT invalidate the cache. The edge keeps
+      ## serving a result built from inputs that have since changed —
+      ## silently, indefinitely, until a human edits the list. Every use is a
+      ## standing maintenance obligation on whoever wrote it.
+      ##
+      ## Owner-authorized 2026-08-21 for the self-interposing-test case, with
+      ## the explicit instruction that its use stay discouraged.
+
     # NOTE: there is intentionally NO ``bdpDeclaredOnly``. A recipe-facing
     # "declared-only" policy (track only statically declared inputs, no
     # runtime monitoring, mark the action complete/cacheable anyway) is an
@@ -594,6 +626,14 @@ type
       ## ``depfile: string`` field has been removed; recipes that need
       ## one depfile pass a one-element ``depfiles`` seq.
     ignoredInputPrefixes*: seq[string]
+    trustedInputs*: seq[string]
+      ## ``bdpTrustedDeclaredInputs`` only: the author-written input list.
+      ## Never populated for any other kind.
+    trustedReason*: string
+      ## ``bdpTrustedDeclaredInputs`` only: why this edge cannot be
+      ## monitored. Required, non-empty, and surfaced in the build report so
+      ## "trusted, not verified" is visible in output rather than
+      ## discoverable only by reading the recipe.
 
   ActionCacheFingerprintPolicy* = enum
     acfpTimestamp

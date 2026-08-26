@@ -160,7 +160,8 @@ proc startRunQuota(repoRoot: string): tuple[process: owned(Process);
   let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
   if not fileExists(daemonBin):
     raise newException(OSError, "missing runquotad; run scripts/run-m23-benchmark.sh")
-  let socketPath = "/tmp/repro-m23-rq-" & $getCurrentProcessId() & ".sock"
+  let socketPath = runquotaEndpointPath(
+    "repro-m23-rq-" & $getCurrentProcessId())
   if pathExists(socketPath):
     removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [

@@ -11,7 +11,7 @@
 ## import only ``agent`` + a lightweight recording hook, while the
 ## production path imports THIS.
 
-import std/os
+import std/[os, strutils]
 
 import repro_elevation
 import repro_infra
@@ -81,9 +81,33 @@ proc mkRunInfraApplyHook*(stateDir: string;
 
         # Compile the manifest's profile the way the CLI does, when a resolver
         # was injected. `resolvedActions` is only consulted below.
+        #
+        # A manifest with NO profile text is not a profile that failed to
+        # compile — it is a manifest that declares no live state, and the
+        # build-action half below still has work to do. There is nothing to
+        # hand a Nim compiler, so do not: the resolver stages the text as
+        # `manifest_profile.nim`, and an EMPTY module compiles to a binary
+        # that prints nothing, at which point the JSON->RBPI bridge parses ""
+        # and the tick dies with the bridge's parser error
+        #
+        #   repro __repro-compile-profile: failed to encode RBPI envelope
+        #   from compiled profile output: input(1, 0) Error: { expected
+        #
+        # — a diagnostic that names neither the manifest nor the real cause.
+        # This is a REGRESSION the resolver introduced: before it existed the
+        # hook passed `m.profileText` straight to `runInfraApply`, which
+        # parses "" as zero resources and applies cleanly. Skipping the
+        # resolver on blank text restores exactly that, and changes nothing
+        # for a manifest that carries a real profile.
+        #
+        # Note this shape is not exotic: reprobuild's own M5 gate
+        # `t_repro_deploy_agent_converges_from_signed_manifest` uses
+        # `profileText: ""` with build actions. It stayed green only because
+        # it constructs the hook WITHOUT a resolver, so the production
+        # wiring in `repro_cli_support/deploy_agent.nim` never met this case.
         var applyText = m.profileText
         var resolvedActions: seq[ProfileBuildAction] = @[]
-        if capturedResolver != nil:
+        if capturedResolver != nil and m.profileText.strip().len > 0:
           if not capturedResolver(m.profileText, applyText, resolvedActions):
             return (ok: false,
               message: "profile did not compile; see the diagnostic above")

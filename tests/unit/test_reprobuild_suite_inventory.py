@@ -1071,10 +1071,10 @@ test "incomplete name" and:
             # to the streaming-publication change rather than an opaque bump.
             "libs/repro_binary_cache_client/tests/"
             "test_publish_in_process.nim": 7,
-            # 7, not 6: the rebuilt binary and independent static baseline
+            # 8, not 6: the rebuilt binary and independent static baseline
             # both include the carried-environment regression now present on
             # the reconciled upstream tree.
-            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 7,
+            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 8,
             "libs/repro_resources/tests/"
             "t_attr_missing_interface_diagnostic.nim": 1,
             "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,
@@ -3052,17 +3052,38 @@ test "incomplete name" and:
             )
             self.assertEqual(reusable.returncode, 0)
 
-    def test_default_test_build_parallelism_scales_with_host_capacity(self):
+    # -----------------------------------------------------------------
+    # Parallelism policy (scripts/test_parallelism.sh)
+    # -----------------------------------------------------------------
+    #
+    # The helper is a pure function of (cores, available memory,
+    # CI-or-not), so it is tested by calling it — real bash, real
+    # arithmetic, no stub. Every number below is the POLICY, asserted as
+    # an exact table rather than an inequality: a cap nobody can name is
+    # a cap nobody can review, and the previous version of this file was
+    # throttling a 32-core workstation to the profile of the smallest CI
+    # runner precisely because no test said what the numbers were for.
+
+    def _parallelism(self, func, *args):
         helper = REPO_ROOT / "scripts" / "test_parallelism.sh"
         bash = subprocess.check_output(
             ["bash", "-c", "command -v bash"], text=True
         ).strip()
-        # The table is the whole of what makes each cap deliberate, so it is
-        # re-derived when the helper's shape changes rather than relaxed into
-        # an inequality. Raising the ceiling to 16 at 32 cores moves exactly
-        # the two rows at or above that size; every row below 32 is unchanged,
-        # which is the check that the new ceiling left the small-host
-        # behaviour — and the cores/2 fraction under it — alone.
+        script = 'set -euo pipefail; source "$1"; shift; "$0" "$@"'
+        output = subprocess.check_output(
+            [bash, "-c", script, func, str(helper), *[str(a) for a in args]],
+            text=True,
+        )
+        return int(output.strip())
+
+    def test_build_parallelism_keeps_the_conservative_ladder_when_unverifiable(
+        self,
+    ):
+        # No memory figure means the host's capacity was not measured, and
+        # an unmeasured host must not be handed a larger share. This is the
+        # behaviour every host had before the budget existed, and it is
+        # what CI and Windows still get; it is pinned here so a future
+        # change to the memory-aware path cannot quietly move it.
         cases = {
             "invalid": 1,
             "0": 1,
@@ -3078,18 +3099,171 @@ test "incomplete name" and:
         }
         for cores, expected in cases.items():
             with self.subTest(cores=cores):
-                output = subprocess.check_output(
-                    [
-                        bash,
-                        "-c",
-                        'source "$1"; reprobuild_default_test_build_parallelism "$2"',
-                        "parallelism-test",
-                        str(helper),
-                        cores,
-                    ],
-                    text=True,
+                self.assertEqual(
+                    self._parallelism(
+                        "reprobuild_default_test_build_parallelism", cores
+                    ),
+                    expected,
                 )
-                self.assertEqual(int(output.strip()), expected)
+
+    def test_build_parallelism_uses_real_host_capacity_off_ci(self):
+        # (cores, available MiB) -> workers, on a developer host.
+        #
+        # The 32-core row is the load-bearing one. At 143 GiB available the
+        # memory term does not bind, so the budget is three quarters of the
+        # machine: 24 workers — the configuration measured at 1h25m for all
+        # 1182 test-build actions, against 4h00m and an INCOMPLETE build at
+        # the old ceiling of 8. The constraint the old cap named was memory
+        # and it never once consulted memory.
+        cases = {
+            (32, 143000): 24,
+            (64, 512000): 48,
+            (16, 65536): 12,
+            (8, 65536): 6,
+            (4, 8192): 3,
+            # Memory binds, not cores: a 32-core host with 8 GiB free gets
+            # four workers, well UNDER the conservative ladder's 16. Keeping
+            # small hosts safe is the same rule, not an exception to it.
+            (32, 8192): 4,
+            (32, 2048): 1,
+            # Never zero, whatever the inputs.
+            (1, 512): 1,
+        }
+        for (cores, mem_mb), expected in cases.items():
+            with self.subTest(cores=cores, mem_mb=mem_mb):
+                self.assertEqual(
+                    self._parallelism(
+                        "reprobuild_default_test_build_parallelism",
+                        cores,
+                        mem_mb,
+                        "local",
+                    ),
+                    expected,
+                )
+
+    def test_ci_keeps_the_conservative_ladder_even_with_memory(self):
+        # `nproc` on the shared bare-metal CI host reports the whole machine
+        # while a dozen runner instances contend for it, so a host-derived
+        # budget overstates one job's share by an order of magnitude. Under
+        # CI the ladder applies no matter how much memory is free; CI that
+        # wants more sets REPROBUILD_MAX_PARALLELISM explicitly.
+        for cores, mem_mb, expected in [
+            (32, 143000, 16),
+            (24, 143000, 8),
+            (8, 65536, 4),
+        ]:
+            with self.subTest(cores=cores):
+                self.assertEqual(
+                    self._parallelism(
+                        "reprobuild_default_test_build_parallelism",
+                        cores,
+                        mem_mb,
+                        "ci",
+                    ),
+                    expected,
+                )
+
+    def test_test_threads_default_is_never_one_on_a_capable_host(self):
+        # The execution-phase default used to be a literal 1, justified by
+        # nested builds. Measured: 293 of 1183 cases in 3h57m at one worker
+        # (~16h implied) versus 1183/1183 in ~3h25m at eight. Eight is also
+        # the ceiling, because eight is the largest full-suite execution
+        # ever measured — above it there is no evidence, only the runner's
+        # record of false failures at sixteen.
+        for cores, mem_mb, expected in [
+            (32, 143000, 8),
+            (64, 512000, 8),
+            (16, 65536, 4),
+            (8, 65536, 2),
+            (4, 8192, 1),
+            (1, 512, 1),
+        ]:
+            with self.subTest(cores=cores):
+                self.assertEqual(
+                    self._parallelism(
+                        "reprobuild_default_test_threads", cores, mem_mb, "local"
+                    ),
+                    expected,
+                )
+
+    def test_execution_phase_respects_a_combined_budget(self):
+        # The nested-build concern behind the old single-threaded default is
+        # real: concurrency in the execution phase is test workers TIMES the
+        # workers each nested `repro build` may use. The answer is to split
+        # one budget, not to surrender the machine. Assert the product never
+        # exceeds the budget, for every shape of host.
+        for cores, mem_mb, mode in [
+            (32, 143000, "local"),
+            (64, 512000, "local"),
+            (16, 65536, "local"),
+            (8, 65536, "local"),
+            (4, 8192, "local"),
+            (4, 4096, "local"),
+            (2, 8192, "local"),
+            (1, 512, "local"),
+            (32, 8192, "local"),
+            (32, 143000, "ci"),
+            (8, 65536, "ci"),
+        ]:
+            with self.subTest(cores=cores, mem_mb=mem_mb, mode=mode):
+                budget = self._parallelism(
+                    "reprobuild_worker_budget", cores, mem_mb, mode
+                )
+                threads = self._parallelism(
+                    "reprobuild_default_test_threads", cores, mem_mb, mode
+                )
+                nested = self._parallelism(
+                    "reprobuild_default_nested_build_parallelism",
+                    cores,
+                    mem_mb,
+                    mode,
+                )
+                self.assertGreaterEqual(threads, 1)
+                self.assertGreaterEqual(nested, 1)
+                self.assertLessEqual(threads * nested, budget)
+
+    def test_available_memory_probe_reports_a_usable_number(self):
+        # The policy is only host-aware if the host can actually be probed.
+        # On Linux and macOS this must return a positive MiB figure; the
+        # empty answer is reserved for platforms with neither /proc/meminfo
+        # nor sysctl, where the conservative ladder takes over.
+        helper = REPO_ROOT / "scripts" / "test_parallelism.sh"
+        bash = subprocess.check_output(
+            ["bash", "-c", "command -v bash"], text=True
+        ).strip()
+        output = subprocess.check_output(
+            [
+                bash,
+                "-c",
+                'source "$1"; reprobuild_available_memory_mb',
+                "parallelism-test",
+                str(helper),
+            ],
+            text=True,
+        ).strip()
+        if sys.platform.startswith(("linux", "darwin")):
+            self.assertTrue(
+                output.isdigit() and int(output) > 0,
+                f"expected a positive MiB figure on {sys.platform}, got {output!r}",
+            )
+
+    def test_run_tests_sh_passes_host_capacity_into_both_phases(self):
+        # The policy is worthless if the caller does not use it. Assert the
+        # wiring rather than only the pure function: run_tests.sh must feed
+        # measured memory into the build-phase default, must derive the
+        # runner's worker count from the same helper instead of the literal
+        # `1` it used to hardcode, and must hand nested builds their share.
+        text = (REPO_ROOT / "scripts" / "run_tests.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("reprobuild_available_memory_mb", text)
+        self.assertIn("reprobuild_default_test_threads", text)
+        self.assertIn("reprobuild_default_nested_build_parallelism", text)
+        self.assertIn('--threads=${REPROBUILD_TEST_THREADS}', text)
+        self.assertNotIn("--threads=${REPROBUILD_TEST_THREADS:-1}", text)
+        # An operator who pins the build parallelism means it for the whole
+        # run, so the execution phase must not overwrite an explicit value.
+        self.assertIn("repro_parallelism_is_default", text)
 
     # -----------------------------------------------------------------
     # Catalog enumeration gates

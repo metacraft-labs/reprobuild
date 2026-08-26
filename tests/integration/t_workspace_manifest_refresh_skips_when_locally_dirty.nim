@@ -230,10 +230,33 @@ suite "M19a — post-merge manifest auto-refresh (skips dirty layer)":
         q(layerCheckoutPath) & " rev-parse HEAD").strip()
       check postRefreshSha == preRefreshSha
 
-      # Exactly one ``skipped_dirty`` line in the cache log.
+      # The cache log carries two independent subsystems, both written by
+      # this one hook run: the manifest-layer refresh, and the local-state
+      # reconciliation that ``7700b54e`` added. "A dirty skip is quiet" is a
+      # statement about the FIRST of them, so partition first and then assert
+      # each half exhaustively. Widening the count to ``>= 1`` would buy the
+      # same green while making the test blind to a second manifest line —
+      # which is the one thing it exists to catch.
       let logBody = readCacheLog(cacheHome)
-      let lines = logBody.splitLines().filterIt(it.len > 0)
-      check lines.len == 1
-      check lines[0].contains("skipped_dirty")
-      check lines[0].contains("post-merge")
-      check lines[0].contains(layerUrl)
+      checkpoint("manifest-refresh log:\n" & logBody)
+      let allLines = logBody.splitLines().filterIt(it.len > 0)
+      let manifestLines = allLines.filterIt(not it.contains(" local-state "))
+      let localStateLines = allLines.filterIt(it.contains(" local-state "))
+
+      check manifestLines.len == 1
+      if manifestLines.len == 1:
+        check manifestLines[0].contains("skipped_dirty")
+        check manifestLines[0].contains("post-merge")
+        check manifestLines[0].contains(layerUrl)
+
+      # The other half is not noise to be filtered away and forgotten. The
+      # same hook run reconciles the participating checkout against the
+      # manifest, and this fixture's manifest declares an ``origin`` the clone
+      # was not made from — so exactly one retarget is owed, and it is pinned
+      # here. A reconciler that grew a second voice, or lost this one, fails
+      # on this line rather than quietly widening what "quiet" means.
+      check localStateLines.len == 1
+      if localStateLines.len == 1:
+        check localStateLines[0].contains("lib-a: remote 'origin' retargeted")
+        check localStateLines[0].contains(
+          "https://example.invalid/dummy/lib-a")

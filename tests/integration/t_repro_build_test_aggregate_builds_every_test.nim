@@ -27,10 +27,10 @@
 ##      ``repro build test --dry-run --write-report`` and assert the
 ##      resulting ``build-report.json`` enumerates ≥ N test-edge
 ##      actions (action ids matching the ``ct_test_nim_unittest``
-##      typed-tool prefix). When the engine surface is missing — e.g.,
-##      no built ``./build/bin/repro``, tool provisioning unavailable
-##      outside a ``nix develop`` shell — we record the engine call as
-##      a soft check and still pass the structural assertion.
+##      typed-tool prefix). The one environment precondition — a built
+##      ``./build/bin/repro`` — is checked BEFORE the engine is invoked
+##      and names exactly what is missing; the engine's own outcome is
+##      asserted, never classified from its diagnostic text.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
@@ -102,12 +102,21 @@ suite "t_repro_build_test_aggregate_builds_every_test":
     # schedules every test-binary compilation in one pass.
     check hasCollect
 
-  test "repro build test --dry-run enumerates every declared edge (soft)":
-    ## Soft engine round-trip: skipped when the environment can't
-    ## host an in-tree ``repro build`` invocation (e.g. running
-    ## outside ``nix develop`` so tool provisioning fails). The
-    ## structural assertion in the previous test is the load-bearing
-    ## check; this one exercises the engine seam when it's reachable.
+  test "repro build test --dry-run enumerates every declared edge":
+    ## Engine round-trip. The only precondition is checked BEFORE the
+    ## engine runs: ``./build/bin/repro`` has to exist. What the engine
+    ## then does is asserted.
+    ##
+    ## No failure classifier. This case used to run its non-zero exit
+    ## past a needle list (``tool-resolution failed`` / ``typed tool
+    ## provisioning is required`` / ``does not declare provisioning``)
+    ## and reclassify the failure as a skip on a match. Those are the
+    ## engine's ORDINARY failure diagnostics, not environment reports:
+    ## a real tool-resolution regression is phrased exactly the same way
+    ## as a host that cannot provision one, so the predicate could not
+    ## tell them apart and silently absorbed both. The environment cause
+    ## it was written for — running outside the dev shell — is not in
+    ## play for a suite that is itself built and executed by that shell.
     let repoRoot = findRepoRoot()
     let declaredCount = countDeclaredTestSpecs(repoRoot)
     let reproBin = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
@@ -142,20 +151,7 @@ suite "t_repro_build_test_aggregate_builds_every_test":
       checkpoint("repro build test --dry-run exit=" & $exitCode)
       if exitCode != 0:
         checkpoint(output)
-        # Tool provisioning failures (running outside ``nix develop``,
-        # missing daemons) surface as exit=1 BEFORE the engine
-        # reaches the action-graph layer this test wants to inspect.
-        # Treat that as a skip rather than a fail so the test stays
-        # green in environments that can't host the full engine.
-        let provisioningFailure =
-          output.contains("tool-resolution failed") or
-          output.contains("typed tool provisioning is required") or
-          output.contains("does not declare provisioning")
-        if provisioningFailure:
-          checkpoint("skipped — tool provisioning unavailable")
-          skip()
-        else:
-          check exitCode == 0
+        check exitCode == 0
       else:
         let reportPath = findReport(workRoot, repoRoot)
         checkpoint("build report: " & reportPath)

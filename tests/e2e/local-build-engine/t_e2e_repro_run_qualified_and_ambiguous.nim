@@ -28,7 +28,8 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = "/tmp/repro-n1-ambig-rq-" & $getCurrentProcessId() & ".sock"
+  let socketPath = runquotaSocketEndpoint(
+    "repro-n1-ambig-rq-" & $getCurrentProcessId())
   if fileExists(socketPath):
     removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [

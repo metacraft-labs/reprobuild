@@ -36,12 +36,16 @@
 ##
 ## The three-way launch decision is taken at ``:6251-6257``.
 ##
-##   L1  BYPASS RUNQUOTA — monitored
+##   L1  BYPASS RUNQUOTA — monitored, and HOSTED IN-PROCESS
 ##       when ``launchBypassesRunQuota()`` (:5349): ``config.bypassRunQuota``,
 ##       ``REPROBUILD_NO_RUNQUOTA``, or ``fallbackToRunQuotaBypass`` with an
 ##       unreachable daemon. No lease.
-##       spawn: ``startBypassRunQuotaProcess`` (:3981) -> ``startDirect``
-##       (:3997), in the engine process.
+##       spawn: ``startMonitorHost`` -> io-mon's ``startMonitor``, in the
+##       engine process, with no ``repro internal io monitor`` child in
+##       between (In-Process-Monitor-Hosting HM-4). The pre-HM-4 form —
+##       ``startBypassRunQuotaProcess`` -> ``startDirect`` — is still the
+##       code path when the monitor is not hosted (Windows, or an action
+##       with no monitor policy), and is still pinned below.
 ##       backend label ``runquota-bypass``.
 ##
 ##   L2  RUNQUOTA HELPER PROCESS — monitored
@@ -95,13 +99,46 @@
 ## monitored paths" is a decision on the record rather than an omission.
 ##
 ##
+## WHO HOSTS THE MONITOR (In-Process-Monitor-Hosting HM-4)
+## ------------------------------------------------------
+## "Monitored" and "hosted in-process" are two different properties and
+## this file now checks both, because they came apart in HM-4.
+##
+##   * L1 is HOSTED IN-PROCESS. The engine calls io-mon's decomposed host
+##     API (``startMonitor`` / ``pollMonitor`` / ``finishMonitor``)
+##     directly and the monitored root is its own child.
+##   * L2, L3 and L3b are MONITORED BY THE CLI WRAPPER, still. Not an
+##     oversight and not a fallback — io-mon OWNS the spawn (DH-4: "spawn
+##     supplied by the caller is not delivered and should not be
+##     expected"), so a path can host the monitor only if the ENGINE is
+##     the process that spawns. L2's argv is spawned by a separate
+##     ``repro __repro-runquota-helper`` process, two deep. L3 and L3b are
+##     spawned inside ``offerWithRunQuotaBatch`` /
+##     ``startGrantedWithRunQuota``, which spawn the child themselves as
+##     part of binding it to the granted lease; hosting there needs a
+##     RunQuota lease that can ADOPT an already-spawned child, which is a
+##     change to the RunQuota adapter and not to the engine.
+##
+## That split is exactly why ``evidence is identical across launch
+## paths`` matters more after HM-4 than before it: it is now comparing
+## TWO HOSTING MECHANISMS against each other on the same fixture, not
+## four call sites into one mechanism. ``checkTookLaunchPath`` also pins
+## which mechanism each case used, by looking for the per-action stdio
+## capture files that only the in-process host writes — so a regression
+## in either direction (L1 quietly falling back to the wrapper, or a
+## wrapper path quietly acquiring a host) reddens.
+##
+##
 ## THE TWO SEAMS
 ## -------------
 ## Four launch paths do not need four monitor wirings, because they share
 ## both halves of the wiring:
 ##
-##   * ARGV — the monitor wrapper is prepended in exactly ONE proc,
-##     ``monitoredAction`` (:2734), called from exactly ONE site (:6144).
+##   * ARGV — the monitor decision is taken in exactly ONE proc,
+##     ``monitoredAction``, called from exactly ONE site. Since HM-4 that
+##     proc either prepends the CLI wrapper or reports
+##     ``hostInProcess = true``; either way it is the only place an action
+##     acquires (or fails to acquire) a monitor.
 ##   * ARGV+ENV CONTRACT — all four paths obtain their ``ReproCommandSpec``
 ##     from exactly ONE proc, ``preparedRunQuotaCommand`` (:3953), whose
 ##     own doc-comment says it exists to "Build one argv/env contract for
@@ -280,8 +317,8 @@
 ## dependency evidence the engine actually produced, not a call
 ## assertion.
 
-import std/[algorithm, compilesettings, os, osproc, sequtils, sets, strutils,
-            tables, tempfiles, unittest]
+import std/[algorithm, compilesettings, os, osproc, sequtils, sets, streams,
+            strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_core
@@ -401,10 +438,20 @@ type EngineSourceFile = object
 ## and no rewrite-warning template there either, so the compile-time linter
 ## does not see them at all — which is the other half of why they needed a
 ## row here.
-const SpawnPrimitives: array[40, tuple[name: string; expected: int;
+const SpawnPrimitives: array[43, tuple[name: string; expected: int;
                                        why: string]] = [
   ("startProcess", 3,
     "post-build converter, the L2 RunQuota helper, the nix daemon"),
+  # In-Process-Monitor-Hosting HM-4. ``startMonitor`` is a REAL spawn — it is
+  # io-mon's only spawn site for a monitored tree — so the engine hosting the
+  # monitor is a launch path in its own right and is pinned like any other.
+  # ``pollMonitor`` and ``finishMonitor`` are on the list for the same reason
+  # ``commandSpec`` is: on the Windows arm the spawn is DEFERRED into them
+  # (``runWithMonitorShim`` spawns and waits in one call), so a call to either
+  # can put a child on the road even though neither does so on POSIX.
+  ("startMonitor", 1, "HM-4: L1 hosts io-mon in-process"),
+  ("pollMonitor", 1, "HM-4: advances a hosted monitor; SPAWNS on Windows"),
+  ("finishMonitor", 1, "HM-4: consumes a hosted monitor; SPAWNS on Windows"),
   ("uncontrolledStartProcess", 0, "the escape hatch; unused by the engine"),
   ("startDirect", 1, "L1 bypass-runquota"),
   ("offerWithRunQuotaBatch", 1, "L3 inline-runquota"),
@@ -475,7 +522,8 @@ const CommandSpecConstructions = 1
 const SpawnNameTails = ["startprocess", "startdirect", "execcmdex",
                         "execprocess", "execshellcmd", "findexe",
                         "execcmd", "execprocesses", "launchprocess",
-                        "commandspec", "runmonitored"]
+                        "commandspec", "runmonitored",
+                        "startmonitor", "pollmonitor", "finishmonitor"]
 
 ## THE CAPABILITY GATE, and the reason the rows above are not the whole
 ## answer. Counting names is only ever as complete as the list of names.
@@ -624,12 +672,40 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "finishCompleted", "cancelAndWait", "openRunQuotaSession",
                "close", "maxOfferBatchSize", "pollRunQuotaGrants",
                "cancelQueued", "defaultRunQuotaWindowsPipePath",
-               "probeWindowsPipeOwner", "terminateStalePipeOwner"]),
+               "probeWindowsPipeOwner", "terminateStalePipeOwner",
+               # The per-execution extension surface, which travels over the
+               # session socket the engine is already holding and starts
+               # nothing: four cell constructors, the schema declaration and
+               # the row write (all six are `session.session.…` calls into the
+               # RunQuota client), plus one timeout accessor. Classified here
+               # because this audit is what NAMED them — they were added with
+               # the extension-row work and this table was not updated, so the
+               # case reported all seven and refused to pass until each was
+               # decided. That is the audit doing its job on a change inside
+               # this repository rather than on an upstream bump.
+               "extNull", "extText", "extInt", "extReal",
+               "declareRunQuotaExtension", "recordRunQuotaExtensionRow",
+               "denialDeadlockTimeoutMs"]),
+    # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
+    # names and the engine called none of them; the decomposed host API
+    # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS
+    # WHAT REPORTED THEM — bumping reprobuild's io-mon pin turned the case red
+    # with all seven named, before a line of engine code had changed. That is
+    # the audit doing its job on an UPSTREAM change, which is the case it was
+    # written for and had not yet been exercised on.
+    #
+    # ``pollMonitor`` and ``finishMonitor`` are classified as spawning
+    # deliberately, even though on POSIX neither starts anything: the Windows
+    # arm defers the spawn into them, so "can this put a child on the road"
+    # is true of both on at least one platform, and the classification has to
+    # be the union rather than this machine's answer.
     CapabilitySurface(key: "io_mon", audit: caFullSurface,
       sourceRel: "io_mon/fs_snoop.nim",
-      spawning: @["runMonitored", "runFsSnoopCli"],
+      spawning: @["runMonitored", "runFsSnoopCli", "startMonitor",
+                  "pollMonitor", "finishMonitor"],
       inert: @["appendLauncherEventLoss", "findShimLibrary", "completeness",
-               "records"]),
+               "records", "monitorLifecycleCounts", "live", "hasExited",
+               "rootPid"]),
     # The escape hatches, and the rewrite templates that warn about the
     # stdlib names. The templates are pattern rewrites, but they are also
     # ordinary exported templates that can be called by name, so they are
@@ -660,11 +736,24 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # `SYNCHRONIZE`, `MAXIMUM_WAIT_OBJECTS` and `WOHandleArray` are a type
     # and constants rather than routines, so they appear in
     # `allowedSymbols` and in neither classification list.
+    # ``Mode`` / ``umask`` / ``dup`` / ``dup2`` / ``close`` are HM-4's
+    # in-process spawn context (``beginMonitorSpawnContext``): io-mon spawns
+    # with ``poParentStreams``, so the monitored child inherits the ENGINE's
+    # descriptors 1 and 2 and the engine's file-creation mask, and both have
+    # to be set across the spawn now that no wrapper shell is doing it. None
+    # of the five starts a child; ``Mode`` is a type and so appears only in
+    # ``allowedSymbols``.
+    #
+    # This row is the gate working rather than the gate being widened: the
+    # five were REFUSED on the first run after the engine change, each named
+    # individually, and each had to be classified before the suite would go
+    # green again.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRel: "posix/posix.nim",
       spawning: @[],
-      inert: @["kill", "setpgid"],
-      allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid"]),
+      inert: @["kill", "setpgid", "umask", "dup", "dup2", "close"],
+      allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
+                        "Mode", "umask", "dup", "dup2", "close"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRel: "windows/winlean.nim",
       spawning: @[],
@@ -1048,26 +1137,63 @@ type DaemonHandle = object
   socket: string
   started: bool
 
-proc startRunQuotaDaemon(repoRoot: string; cpuMilli: int): DaemonHandle =
+proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
+                         cpuMilli: int): DaemonHandle =
   ## Real runquotad over a real unix socket. ``cpuMilli`` is the whole
   ## host budget: L3b needs it small enough that two concurrent actions
   ## cannot both be granted at once.
+  ##
+  ## THE SOCKET GETS A RENDEZVOUS DIRECTORY OF ITS OWN, provisioned by
+  ## ``runquotaRendezvousDir`` — which is RunQuota's own rule, not a copy
+  ## of it. This used to be a bare ``getTempDir()/repro-hm4-rq-<pid>.sock``,
+  ## and once RunQuota started verifying the socket's PARENT directory
+  ## that placed the rendezvous in root-owned ``1777`` ``/tmp``: the
+  ## daemon refused with ``runquota endpoint directory /tmp: refusing a
+  ## path owned by uid 0 with mode 1777`` and exited before listening.
+  ## Every case needing a daemon — L2, L3, L3b, and the cross-path
+  ## identity comparison — then reported ``[SKIPPED]`` and the file
+  ## reported a clean run while the NEGATIVE half of the hosting oracle
+  ## (L2/L3/L3b must NOT host in-process) had not executed at all. That
+  ## is the failure mode this file exists to prevent, one level up, so
+  ## the fixture must not be able to produce it again: see the
+  ## "every enumerated launch path actually executed" case.
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = getTempDir() / ("repro-hm4-rq-" & $getCurrentProcessId() &
-    ".sock")
+  let socketPath = runquotaRendezvousDir(endpointRoot) / "runquota.sock"
   removeFile(socketPath)
+  # ``poStdErrToStdOut`` so a refusal — which runquotad writes and then
+  # exits on — is CAPTURABLE rather than lost to an inherited terminal.
+  # The failure path below is the only reader; runquotad is quiet after
+  # its startup lines, which is the same assumption the other
+  # daemon-spawning tests in this suite make.
   let daemon = startProcess(daemonBin, args = [
     "--socket", socketPath,
     "--cpu-milli", $cpuMilli,
     "--memory-bytes", "17179869184"
-  ], options = {poUsePath})
+  ], options = {poUsePath, poStdErrToStdOut})
+  var died = false
   for _ in 0 ..< 400:
     if statExists(socketPath):
       putEnv("RUNQUOTA_SOCKET", socketPath)
       return DaemonHandle(process: daemon, socket: socketPath, started: true)
+    # A REFUSAL EXITS; it does not hang. Noticing that here turns a
+    # ten-second silent timeout into an immediate, quotable diagnosis.
+    if not daemon.running:
+      died = true
+      break
     sleep(25)
-  daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear: " & socketPath)
+  if not died:
+    daemon.terminate()
+  discard daemon.waitForExit()
+  var output = ""
+  try:
+    output = daemon.outputStream.readAll().strip()
+  except CatchableError:
+    discard
+  daemon.close()
+  raise newException(OSError,
+    "runquotad did not bind " & socketPath &
+    (if died: " (it exited first)" else: " (timed out)") &
+    (if output.len > 0: "; it said: " & output else: "; it said nothing"))
 
 proc stop(handle: var DaemonHandle) =
   if not handle.started: return
@@ -1091,7 +1217,24 @@ proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
     monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
     maxParallelism: 2'u32,
     stdoutLimit: 256 * 1024,
-    stderrLimit: 256 * 1024)
+    stderrLimit: 256 * 1024,
+    # In-process hosting is OPT-IN and off in production (see
+    # ``BuildEngineConfig.hostMonitorInProcess``). It is requested here for
+    # EVERY launch path, not only for L1, and that is what keeps the negative
+    # half of the oracle honest: with the switch on across the board, the only
+    # thing deciding who hosts is the engine's own hosting decision. A change
+    # that let L2/L3/L3b host would show up as a ``.host.stdout`` under their
+    # cache roots rather than being masked by a config they never set.
+    #
+    # NOT "whether the ENGINE spawns", which is the tempting shorthand and is
+    # WRONG: L3/L3b spawn inside the engine process too, from
+    # ``offerWithRunQuotaBatch`` / the grant poller, and those sites never
+    # consult ``plan.hostInProcess``. Relaxing the hosting decision to cover
+    # them strips the CLI wrapper without starting a host, so they run
+    # unmonitored while the negative oracle here stays green — it is the
+    # POSITIVE monitoring oracle (``checkMonitoredEvidence``) that catches
+    # that one. Both halves are load-bearing, and they catch different paths.
+    hostMonitorInProcess: true)
   case lp.kind
   of lpBypassRunQuota:
     result.bypassRunQuota = true
@@ -1171,6 +1314,27 @@ proc evidenceShape(res: ActionResult;
     render("diagnostics", ev.diagnostics)
   ].join("\n")
 
+proc shapeList(shape, field: string): seq[string] =
+  ## The entries of one ``<field>=[a b c]`` line of an ``evidenceShape``.
+  ## Reading the field back out is what lets the non-vacuity pin below say
+  ## something about EVERY entry rather than about one exact rendering.
+  for line in shape.splitLines():
+    if line.startsWith(field & "=[") and line.endsWith("]"):
+      let inner = line[(field.len + 2) ..< line.high]
+      if inner.len == 0:
+        return @[]
+      return inner.split(' ')
+  @[]
+
+proc looksLikeSharedObject(path: string): bool =
+  ## A dynamic object the loader maps into the monitored child. Matched on
+  ## the NAME rather than on a store prefix, because the prefix is a fact
+  ## about this host and the suffix is a fact about the file:
+  ## ``libc.so.6`` and ``ld-linux-x86-64.so.2`` carry a version after the
+  ## extension, so ``endsWith(".so")`` alone would miss both.
+  path.endsWith(".so") or path.contains(".so.") or path.endsWith(".dylib") or
+    path.contains(".dylib.") or path.toLowerAscii().endsWith(".dll")
+
 proc caseSubstitutions(tempRoot, caseDir, workRoot, marker,
                        outPath: string): seq[(string, string)] =
   ## Longest and most specific first — the absolute forms have to be
@@ -1199,12 +1363,33 @@ proc helperResultFilesWritten(cacheRoot: string): int =
     if kind == pcFile and path.endsWith(".json"):
       inc result
 
+proc inProcessHostCaptureFiles(cacheRoot: string): int =
+  ## In-Process-Monitor-Hosting HM-4. The in-process host redirects the
+  ## monitored child's descriptors 1 and 2 into
+  ## ``<cacheRoot>/actions/<stem>.host.stdout`` / ``.host.stderr`` across the
+  ## spawn, because io-mon spawns with ``poParentStreams`` and the child would
+  ## otherwise inherit the ENGINE's terminal. Nothing else in the engine writes
+  ## a ``.host.stdout``, so their presence is a runtime witness that this
+  ## action was hosted IN-PROCESS rather than by a ``repro internal io
+  ## monitor`` child — which no field of ``ActionResult`` reports, because the
+  ## whole point is that the two are indistinguishable downstream.
+  let dir = cacheRoot / "actions"
+  if not dirExists(dir): return 0
+  for kind, path in walkDir(dir):
+    if kind == pcFile and path.endsWith(".host.stdout"):
+      inc result
+
 ## ---------------------------------------------------------------------
 ## Path-identity oracle: prove the case really took the launch path it
 ## is named for, instead of quietly degrading to another one and passing
 ## for the wrong reason. ``runQuotaBackend`` alone cannot do this — on a
 ## granted lease it carries the runquota PROCESS backend name
 ## (``posix-fork-exec-poll``), not the engine's path label.
+##
+## Since HM-4 it also pins WHICH HOSTING MECHANISM ran, in both
+## directions: L1 must be hosted in-process, and L2/L3/L3b must not be.
+## Without the negative half, "every path hosts in-process" and "no path
+## does" would both satisfy a check written only for L1.
 ## ---------------------------------------------------------------------
 template checkTookLaunchPath(lp: LaunchPath; run: BuildRunResult;
                              res: ActionResult; cacheRoot: string) =
@@ -1214,14 +1399,22 @@ template checkTookLaunchPath(lp: LaunchPath; run: BuildRunResult;
     check res.runQuotaBackend == "runquota-bypass"
     check res.leaseId == 0'u64
     check helperResultFilesWritten(cacheRoot) == 0
+    if inProcessHostCaptureFiles(cacheRoot) == 0:
+      echo "[", lp.name, "] no in-process host stdio capture under ",
+        cacheRoot / "actions",
+        ": this action was monitored by a `repro internal io monitor` child,",
+        " not by the engine. HM-4 regressed on L1."
+    check inProcessHostCaptureFiles(cacheRoot) > 0
   of lpRunQuotaHelper:
     check not run.runQuotaBypassed
     check res.leaseId != 0'u64
     check helperResultFilesWritten(cacheRoot) > 0
+    check inProcessHostCaptureFiles(cacheRoot) == 0
   of lpInlineRunQuota, lpInlineRunQuotaQueued:
     check not run.runQuotaBypassed
     check res.leaseId != 0'u64
     check helperResultFilesWritten(cacheRoot) == 0
+    check inProcessHostCaptureFiles(cacheRoot) == 0
 
 ## ---------------------------------------------------------------------
 ## The shared oracle: this action's dependency evidence proves the child
@@ -1272,15 +1465,30 @@ suite "every_launch_path_is_monitored":
     ## without this file being revisited.
     let src = readFile(getCurrentDir() / EngineSource)
 
-    # SEAM 1 (argv): the monitor wrapper is prepended in exactly one
-    # proc, called from exactly one site.
+    # SEAM 1 (argv): the monitor decision is taken in exactly one proc,
+    # called from exactly one site. Since HM-4 that proc also decides WHO
+    # hosts, which is why the call now carries the extra argument.
     check countOccurrences(src, "proc monitoredAction(") == 1
     check countOccurrences(src,
-      "monitoredAction(action, config, cacheRoot)") == 1
+      "monitoredAction(action, config, cacheRoot,") == 1
 
-    # SEAM 2 (argv+env contract): one definition + three uses, one per
-    # non-deferred launch path. L3b reuses L3's spec.
-    check countOccurrences(src, "preparedRunQuotaCommand(") == 4
+    # SEAM 2 (argv+env contract): one definition + FOUR uses. Three are the
+    # non-deferred launch paths (L3b reuses L3's spec); the fourth is the
+    # in-process host, which takes the same contract with the shell umask
+    # wrapper switched off — see ``preparedRunQuotaCommand``'s doc-comment
+    # for why that wrapper cannot survive into a monitored tree.
+    check countOccurrences(src, "preparedRunQuotaCommand(") == 5
+
+    # SEAM 3 (HM-4, hosting): the engine becomes io-mon's host in exactly
+    # one proc, called from exactly one site, and the three decomposed
+    # lifecycle calls appear exactly once each. A launch path that acquired
+    # its own host — or L1 losing the one it has — moves one of these.
+    check countOccurrences(src, "proc startMonitorHost(") == 1
+    check countOccurrences(src,
+      "startMonitorHost(monitorHosts, plan.action, config,") == 1
+    check countOccurrences(src, "startMonitor(monitorHostRequest(") == 1
+    check countOccurrences(src, "pollMonitor(pool.handles[slot])") == 1
+    check countOccurrences(src, "finishMonitor(move(pool.handles[slot]))") == 1
 
     # Every spawn site NAMED IN THE TABLE really exists in the engine —
     # so a row cannot describe a path that was deleted or renamed.
@@ -1805,9 +2013,15 @@ suite "every_launch_path_is_monitored":
     var daemon: DaemonHandle
     var runQuotaError = ""
     try:
-      daemon = startRunQuotaDaemon(repoRoot, cpuMilli = 1000)
+      daemon = startRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = 1000)
     except CatchableError as err:
       runQuotaError = err.msg
+
+    ## Which enumerated paths this run actually EXECUTED, as opposed to
+    ## reported something about. Written by the case bodies below and
+    ## asserted by its own case afterwards — see that case for why a
+    ## count is not a formality here.
+    var executedPaths = initHashSet[LaunchPathKind]()
 
     ## The monitored launch paths, parameterised over the enumeration.
     ## Looping over ``EnumeratedLaunchPaths`` rather than hand-copying a
@@ -1818,10 +2032,26 @@ suite "every_launch_path_is_monitored":
       let lp = launchPath
       test "monitored evidence is complete via " & lp.name:
         if lp.needsRunQuota and runQuotaError.len > 0:
-          # Named, not quietly omitted.
-          echo "[fixture N/A] ", lp.name,
-            " needs a real runquota/runquotad: ", runQuotaError
-          skip()
+          # A FAILURE, NOT A SKIP, and the distinction is the whole point.
+          #
+          # This used to `skip()`. runquotad is not an optional extra
+          # here: `requireRunQuotaDaemonBin` already RAISES when the
+          # binary is absent, `just test` builds it, and this file's
+          # header commits to "a real runquotad over a real unix socket".
+          # So every reason this branch can be reached is a BROKEN
+          # FIXTURE — a wrong socket location, a stale binary, a refused
+          # rendezvous — and a broken fixture that reports [SKIPPED]
+          # reports a green run for the four cases that carry the
+          # negative half of the hosting oracle. That happened: a socket
+          # in world-writable /tmp made L2/L3/L3b and the identity
+          # comparison skip, and the file reported 6 OK / 0 FAILED with
+          # the oracle's negative direction unexecuted.
+          echo "[", lp.name, "] the RunQuota fixture did not come up: ",
+            runQuotaError,
+            "\n  This case cannot run without it, and a launch path that ",
+            "does not run is a launch path this gate is not covering. ",
+            "Fix the fixture; do not skip the case."
+          check runQuotaError.len == 0
         else:
           let caseDir = tempRoot / ("case-" & $ord(lp.kind))
           let workRoot = caseDir / "work"
@@ -1878,6 +2108,54 @@ suite "every_launch_path_is_monitored":
               res.evidenceShape(caseSubstitutions(tempRoot, caseDir,
                 workRoot, marker, workRoot / "out.txt")))
 
+          # RECORDED LAST, AND THE POSITION IS THE ASSERTION. Recording it
+          # on ENTRY would only prove the body STARTED: a case that
+          # returned early, or whose exception a ``try`` swallowed, would
+          # still count itself, run ZERO of the checks above, and report
+          # ``[OK]`` — the vacuous-case shape, wearing this case's
+          # approval. Both were tried against the entry-recording version
+          # and both passed it. Recorded here, after the last assertion,
+          # the set means "this path ran to the end of its checks", which
+          # is the property the case below claims.
+          executedPaths.incl lp.kind
+
+    test "every enumerated launch path actually executed":
+      ## THE SKIP COUNT IS PART OF THE RESULT, so it is asserted rather
+      ## than read off a summary line nobody checks.
+      ##
+      ## This file's whole value is the RUNTIME hosting oracle, and half
+      ## of that oracle is NEGATIVE: L1 must be hosted in-process and
+      ## L2/L3/L3b must NOT be, which is what proves hosting did not
+      ## silently spread beyond the one path that can have it. The
+      ## negative half lives entirely in the three cases that need a real
+      ## runquotad. A fixture problem that made exactly those three (plus
+      ## the identity comparison) report ``[SKIPPED]`` therefore removed
+      ## the negative half of the oracle while the file still reported
+      ## ``0 FAILED`` — which is indistinguishable, in any CI summary or
+      ## any commit message, from the property having been checked.
+      ##
+      ## So the coverage itself is an assertion. The case bodies record
+      ## the paths they really ran; this case requires that set to be the
+      ## whole enumeration. A future skip, an early ``return``, a
+      ## swallowed exception, or a row quietly dropped from the loop all
+      ## redden HERE with the missing paths named, even if every case
+      ## that did run passed.
+      var missing: seq[string] = @[]
+      for lp in EnumeratedLaunchPaths:
+        if lp.kind notin executedPaths:
+          missing.add lp.name
+      if missing.len > 0:
+        echo "these enumerated launch paths did not execute: ",
+          missing.join(", "),
+          "\n  A launch path that does not run is a launch path this ",
+          "gate is not covering, and the cases that need a real ",
+          "runquotad are the ones carrying the NEGATIVE half of the ",
+          "hosting oracle (L2/L3/L3b must not host in-process).",
+          "\n  RunQuota fixture status: ",
+          (if runQuotaError.len > 0: runQuotaError else: "started")
+      check missing.len == 0
+      check executedPaths.len == EnumeratedLaunchPaths.len
+
     test "evidence is identical across launch paths":
       ## ``evidence_is_identical_across_launch_paths``.
       ##
@@ -1895,9 +2173,14 @@ suite "every_launch_path_is_monitored":
       ## is hosted has to reproduce this exact shape, and that is only a
       ## usable comparison if the shape was recorded before the change.
       if runQuotaError.len > 0:
-        echo "[fixture N/A] cross-path evidence identity needs a real ",
-          "runquota/runquotad for L2/L3/L3b: ", runQuotaError
-        skip()
+        # Not a skip, for the reason spelled out on the per-path cases:
+        # this comparison is the only place the two HOSTING MECHANISMS
+        # are checked against each other, and it cannot be made from L1
+        # alone. Without L2/L3/L3b there is nothing to compare, and
+        # "nothing to compare" is a failed fixture, not a pass.
+        echo "cross-path evidence identity needs a real runquotad for ",
+          "L2/L3/L3b, and the fixture did not come up: ", runQuotaError
+        check runQuotaError.len == 0
       else:
         # Five actions across the four paths, all recorded.
         check recordedEvidence.len == 5
@@ -1905,14 +2188,56 @@ suite "every_launch_path_is_monitored":
         if recordedEvidence.len > 0:
           # NOT VACUOUS. Identical-but-empty would satisfy the
           # comparison below while proving nothing, so the shared shape
-          # is pinned: exactly the marker was read, and there are no
-          # diagnostics.
+          # is pinned: the fixture's own read is there, nothing else that
+          # is not a mapped library is, and there are no diagnostics.
+          #
+          # THIS PIN WAS STALE, AND THE SKIP IS WHY NOBODY SAW IT. It
+          # read ``monitorReads=[<marker>]`` — an EXACT set — which was
+          # true when it was written (2026-08-23, 4ea1e0bb) and stopped
+          # being true one day later: 6d8c883b (PR #98, 2026-08-24) began
+          # folding ``mrLibraryLoad`` records into ``monitorReads``
+          # deliberately, with its own rationale recorded at the fold
+          # ("a library the dynamic loader MAPPED into the action …
+          # folding them into ``monitorReads`` is that contract's
+          # consumer half"). From that commit the shared shape carries
+          # the six C-runtime objects the loader maps into the monitored
+          # child, and this assertion could not hold — but the case it
+          # lives in was SKIPPING for want of a runquotad, so it never
+          # ran and the staleness was invisible.
+          #
+          # MEASURED, NOT ASSUMED, that this is the evidence contract and
+          # not an io-mon regression: driving the same fixture through
+          # ``repro internal io monitor`` under the newly built shim and
+          # under the PREVIOUS one (``librepro_monitor_shim.so.old``)
+          # produced the identical six ``library-load`` records both
+          # times. ``ldd`` on the fixture also shows it links only libc
+          # and ld-linux, so libdl/libm/libpthread/librt are mapped on
+          # the shim's behalf — which is exactly what a "libraries this
+          # action ran against" dependency is.
+          #
+          # So the pin is re-derived rather than deleted, and it is not
+          # weaker: every read must be either the fixture's marker or a
+          # shared object, and the marker must be present. An empty read
+          # set fails it, a read set that lost the marker fails it, and a
+          # stray file that is neither fails it. What it no longer does
+          # is pin the exact list of DSOs a particular host maps.
           let shape = recordedEvidence[0].shape
-          if not shape.contains("\nmonitorReads=[<marker>]\n"):
+          let reads = shapeList(shape, "monitorReads")
+          if "<marker>" notin reads:
             echo "[", recordedEvidence[0].label,
-              "] the shared evidence shape does not read exactly the ",
-              "marker:\n", shape
-          check shape.contains("\nmonitorReads=[<marker>]\n")
+              "] the shared evidence shape does not read the marker:\n",
+              shape
+          check "<marker>" in reads
+          var unexplained: seq[string] = @[]
+          for entry in reads:
+            if entry != "<marker>" and not looksLikeSharedObject(entry):
+              unexplained.add entry
+          if unexplained.len > 0:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape reads paths that are neither ",
+              "the fixture's marker nor a mapped shared object: ",
+              unexplained.join(" "), "\n", shape
+          check unexplained.len == 0
           check shape.contains("\nmonitorWrites=[<out>]\n")
           check shape.contains("\ndiagnostics=[]")
 
@@ -1929,4 +2254,7 @@ suite "every_launch_path_is_monitored":
     test "teardown":
       daemon.stop()
       removeDir(tempRoot)
-      check true
+      # ``check true`` could not fail, so a teardown that silently left the
+      # daemon running or the scratch tree on disk still reported [OK].
+      # Assert the post-state the teardown exists to produce.
+      check not dirExists(tempRoot)

@@ -61,7 +61,11 @@ when not defined(windows):
   suite "M63 gate 1: e2e_repro_home_apply_fresh_install":
     test "platform N/A":
       echo "[platform N/A] t_e2e_repro_home_apply_fresh_install: requires Windows and a real Scoop install"
-      check true
+      # The `[platform N/A]` marker above IS this case's statement: it is the
+      # repository's structured, greppable declaration that the coverage does
+      # not apply to this host. A `check true` beside it added nothing and
+      # taught the shape that an assertion which cannot fail is acceptable
+      # filler, so it is gone.
 else:
   suite "M63 gate 1: e2e_repro_home_apply_fresh_install":
     test "fresh apply realizes a Scoop package end-to-end":

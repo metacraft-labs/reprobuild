@@ -12,7 +12,8 @@
     hashes — `nim.nim` carries `scoopApp(main/nim)` plus a windows `tarball`
     entry with a sha256 and a `lockIdentity`; `gcc_winlibs.nim` carries a
     `PlatformBinary(poWindows, ...)` for the WinLibs mingw archive. Those
-    entries are strictly better than this script: pinned, hashed, lockable.
+    entries remain the authority once a `repro` exists: they are lockable,
+    which this script is not.
 
     But executing them requires a working `repro`, and `just bootstrap`
     exists precisely for the case where there is not one. So the cold start
@@ -20,14 +21,19 @@
     to be plain PowerShell. Everything after it should go through the
     catalog.
 
+    What the cold start does NOT get to skip is pinning. Both steps name a
+    version and a sha256 in `toolchain-versions.env`, fetch from a fixed URL
+    and verify the archive before extracting it — the same contract the flake
+    devShell gives Linux/macOS. A step that "finds" a tool on the host instead
+    is not a bootstrap, it is a coin flip.
+
     Provenance: `toolchain-utils.ps1`, `ensure-nim.ps1` and `ensure-gcc.ps1`
     beside this file were moved here from the `repo-workspaces` framework
     (an archived tool superseded by `repro ws`), which reprobuild's
-    `env.ps1` used to require as a sibling checkout. They are byte-identical
-    copies; the three helpers below (`Get-ReproToolchainInstallRoot`,
-    `Add-PathEntry`, `Test-CompilerOnPath`) lived in that framework's
-    `env.ps1` rather than in its `windows/` directory, so they are restated
-    here.
+    `env.ps1` used to require as a sibling checkout. The two helpers below
+    (`Get-ReproToolchainInstallRoot`, `Add-PathEntry`) lived in that
+    framework's `env.ps1` rather than in its `windows/` directory, so they are
+    restated here.
 
     Deliberately NOT carried over: the framework's gh / gpg / python3 /
     git-repo steps. None is needed to build `repro`, and the gpg step
@@ -83,24 +89,6 @@ function Add-PathEntry {
   [Environment]::SetEnvironmentVariable("PATH", "$resolved;$current", "Process")
 }
 
-function Test-CompilerOnPath {
-  ## A stale gcc is worse than none: it shadows real ones and produces
-  ## cryptic failures. FPC ships gcc 2.95 in its `i386-Win32` dir, which
-  ## chokes on modern headers with "Invalid argument". Require a sane major
-  ## version; otherwise report false so Ensure-Gcc installs WinLibs and
-  ## PATH-prepends it ahead of the stale one.
-  $minMajor = 5
-  $cmd = Get-Command "gcc" -ErrorAction SilentlyContinue
-  if ($null -eq $cmd) { return $false }
-  try {
-    $verLine = & $cmd.Source --version 2>&1 | Select-Object -First 1
-    if ("$verLine" -match '([0-9]+)\.[0-9]+') {
-      return ([int]$Matches[1] -ge $minMajor)
-    }
-  } catch {}
-  return $false
-}
-
 function Invoke-ReproToolchainBootstrap {
   ## Ensure nim + gcc exist and are on PATH. Idempotent: both ensure steps
   ## no-op when the pinned version is already installed.
@@ -129,14 +117,28 @@ function Invoke-ReproToolchainBootstrap {
     }
   }
 
-  # gcc — `nim c` needs a C compiler. Skip when a sane one is already on
-  # PATH (MSYS2, a system mingw, ...); provision WinLibs otherwise.
-  if ($doSync -and (Test-BootstrapStepEnabled "GCC") -and -not (Test-CompilerOnPath)) {
-    try {
-      Ensure-Gcc -Root $installRoot -Toolchain $toolchain
-    } catch {
-      Write-Warning "reprobuild bootstrap: gcc provisioning failed: $($_.Exception.Message)"
-    }
+  # gcc — `nim c` shells out to a C compiler for every module it emits, so
+  # this is a hard dependency of the whole build rather than a convenience.
+  #
+  # Two things here used to be wrong, and together they produced an
+  # environment that reported itself ready with no compiler in it:
+  #
+  #   * The step was skipped whenever ANY sane gcc was already on PATH. That
+  #     made the build depend on whatever the host happened to carry — the
+  #     opposite of a pin, and how a pinned GCC_VERSION came to sit over a
+  #     differently-versioned compiler. The pinned toolchain is now always
+  #     provisioned and always PATH-prepended (which also puts it ahead of a
+  #     stale gcc such as the 2.95 that FPC ships in its i386-Win32 dir);
+  #     WINDOWS_DIY_SKIP_GCC=1 remains for hosts that deliberately supply
+  #     their own.
+  #   * A failure was downgraded to a warning. The next error then came out of
+  #     `nim c` as `Requested command not found: 'gcc.exe ...'`, which names
+  #     neither the environment nor the missing pin. Fatal now, for the reason
+  #     clingo and nim-bearssl are fatal in env.ps1: a build that proceeds past
+  #     this point cannot succeed, and every message it prints afterwards
+  #     points somewhere else.
+  if ($doSync -and (Test-BootstrapStepEnabled "GCC")) {
+    Ensure-Gcc -Root $installRoot -Arch $arch -Toolchain $toolchain | Out-Null
   }
 
   $nimVersion = $toolchain["NIM_VERSION"]

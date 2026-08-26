@@ -19,7 +19,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -28,6 +28,12 @@ import repro_project_dsl
 # at module init time.
 import ./repro
 
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
+
 const ExpectedUrl =
   "https://download.kde.org/stable/frameworks/6.10/ki18n-6.10.0.tar.xz"
 
@@ -35,10 +41,11 @@ const ExpectedHash =
   "2f59f093f8ce340ab46c556b35c2ead2b96dfeb2ff0024c553ac8c53e9b8a11a"
 
 const ExpectedCmakeFlags = @[
-  "-DBUILD_TESTING=OFF",
-  "-DBUILD_QCH=OFF",
-  "-DBUILD_PYTHON_BINDINGS=OFF",
-  "-DCMAKE_BUILD_TYPE=Release",
+  "BUILD_TESTING=OFF",
+  "BUILD_QCH=OFF",
+  "BUILD_PYTHON_BINDINGS=OFF",
+  "CMAKE_BUILD_TYPE=Release",
+  "BUILD_WITH_QML=ON",
 ]
 
 suite "ki18nSource — from-source recipe smoke test":
@@ -67,11 +74,31 @@ suite "ki18nSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "cmakeFlags registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``cmake_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("ki18nSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedCmakeFlags
+    check buildBlockConstructors("ki18nSource") == @["cmake_package"]
   test "cmakeFlags does not leak into the meson channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the meson channel would
+    # surface as a ``meson_package(...)`` call here.
+    check "meson_package" notin buildBlockConstructors("ki18nSource")
   test "cmakeFlags does not leak into the configure channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the configure channel would
+    # surface as a ``autotools_package(...)`` call here.
+    check "autotools_package" notin buildBlockConstructors("ki18nSource")
   test "artifacts register a single library":
     # M3 artifact registry: ``libKF6I18n`` is the only artifact and
     # must be tagged ``dakLibrary``. ki18n's CMake build emits one

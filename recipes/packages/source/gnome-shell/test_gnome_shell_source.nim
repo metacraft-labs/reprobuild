@@ -24,7 +24,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -33,6 +33,12 @@ import repro_project_dsl
 # ``gnomeShellSource`` at module init time.
 import ./repro
 
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
+
 const ExpectedUrl =
   "https://download.gnome.org/sources/gnome-shell/47/gnome-shell-47.10.tar.xz"
 
@@ -40,14 +46,15 @@ const ExpectedHash =
   "5174d25bb05d35f3612498efc33a1de533fc4e0f39e3eb377fd09591c94a10e6"
 
 const ExpectedMesonOptions = @[
-  "-Dgtk_doc=false",
-  "-Dtests=false",
-  "-Dman=false",
-  "-Dnetworkmanager=false",
-  "-Dsystemd=false",
-  "-Dextensions_app=false",
-  "-Dextensions_tool=false",
-  "--buildtype=release",
+  "gtk_doc=false",
+  "tests=false",
+  "man=false",
+  "camera_monitor=false",
+  "networkmanager=false",
+  "portal_helper=false",
+  "systemd=false",
+  "extensions_app=false",
+  "extensions_tool=false",
 ]
 
 suite "gnomeShellSource — from-source recipe smoke test":
@@ -76,11 +83,31 @@ suite "gnomeShellSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "mesonOptions registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``meson_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("gnomeShellSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedMesonOptions
+    check buildBlockConstructors("gnomeShellSource") == @["meson_package"]
   test "mesonOptions does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the cmake channel would
+    # surface as a ``cmake_package(...)`` call here.
+    check "cmake_package" notin buildBlockConstructors("gnomeShellSource")
   test "mesonOptions does not leak into the configure channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the configure channel would
+    # surface as a ``autotools_package(...)`` call here.
+    check "autotools_package" notin buildBlockConstructors("gnomeShellSource")
   test "artifacts register an executable + a library with correct kinds":
     # M3 artifact registry: ``gnomeShell`` is tagged ``dakExecutable``
     # while ``libGnomeShell`` is tagged ``dakLibrary``. The unique

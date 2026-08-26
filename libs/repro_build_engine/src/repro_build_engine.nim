@@ -15,7 +15,15 @@ when defined(windows):
     MAXIMUM_WAIT_OBJECTS, WOHandleArray, openProcess, closeHandle,
     waitForMultipleObjects
 elif defined(posix):
-  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid
+  # ``Mode`` / ``umask`` / ``dup`` / ``dup2`` / ``close`` are the
+  # In-Process-Monitor-Hosting HM-4 spawn context and nothing else. io-mon
+  # spawns with ``poParentStreams``, so a monitored child inherits THIS
+  # process's descriptors 1 and 2, and the canonical 0022 file-creation mask
+  # used to arrive through the ``/bin/sh -c 'umask 022 && …'`` wrapper the
+  # monitor CLI ran under. Both are re-established across the spawn instead —
+  # see ``beginMonitorSpawnContext``. None of the five starts a child.
+  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
+    dup, dup2, close
 
 import repro_core
 import repro_depfile
@@ -39,6 +47,13 @@ import repro_runquota
 # library — so the engine can build a row without the row's definition
 # reaching back into the engine.
 import repro_build_engine/action_extension
+
+# In-Process-Monitor-Hosting HM-5 — the asynchronous, atomic depfile
+# publication. A leaf module by construction: it takes two paths and an action
+# id, imports nothing that can start a child, and shares no GC'd structure with
+# the scheduler. Read its header before changing anything here that touches
+# ``depTempPath`` / ``depDestPath``.
+import repro_build_engine/monitor_flush
 export action_extension
 
 # M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
@@ -481,6 +496,15 @@ type
     # launches child processes directly under leases instead of spawning a
     # `repro __repro-runquota-helper` process for every action.
     inlineRunQuota*: bool
+    # OPT-IN, and OFF by default because measurement says so. When true, the
+    # engine hosts io-mon's consumer itself on the launch paths it spawns
+    # (today only the RunQuota-bypass path) instead of putting a
+    # ``repro internal io monitor`` process in between. The mechanism works and
+    # is exercised by the suite; what does not hold is the LATENCY case for
+    # turning it on by default. See the "who hosts the monitor" block below
+    # ``preparedRunQuotaCommand`` for the numbers and for what would have to
+    # change before this becomes the default.
+    hostMonitorInProcess*: bool
     dryRun*: bool
     progressCallback*: BuildProgressCallback
     cancelCallback*: BuildCancelCallback
@@ -1067,6 +1091,12 @@ type
     rpkInlineRunQuotaPending
     rpkInlineRunQuota
     rpkInlineRunQuotaFailed
+    rpkMonitorHost
+      ## In-Process-Monitor-Hosting HM-4. The engine is io-mon's HOST for this
+      ## action: there is no ``repro internal io monitor`` child in between,
+      ## and the monitored tree's root is a direct child of this process. The
+      ## handle that owns it lives in the scheduler's ``MonitorHostPool`` at
+      ## ``monitorSlot`` — see that type for why it is not a field here.
 
   RunningAction = object
     id: string
@@ -1080,6 +1110,15 @@ type
     queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
     inlineFailure: ActionResult
     resultPath: string
+    monitorSlot: int
+      ## HM-4. Index into the scheduler's ``MonitorHostPool`` for an
+      ## ``rpkMonitorHost`` entry; ``-1`` for every other kind. An INDEX and
+      ## not the ``MonitorHandle`` itself: a handle is non-copyable by
+      ## construction (IoMon-Decomposed-Host-API DH-2 makes "two owners of one
+      ## consumer" unrepresentable), and embedding one here would propagate
+      ## that to ``RunningAction`` and to the scheduler's ``seq`` of them —
+      ## where ``var item = running[i]`` and ``running.delete(i)`` are both
+      ## copies.
     when defined(posix):
       processGroupPid: int
     when defined(windows):
@@ -2459,6 +2498,172 @@ proc monitorProfileEvidenceComplete(detail: string): bool =
     if pair.len == 2 and pair[0] == "evidenceComplete":
       return pair[1] == "true"
 
+proc benignRawSyscallLoss*(detail: string): bool =
+  ## Recognise the io-mon "raw syscall unsupported" event-loss class and say
+  ## whether the syscall in question provably cannot affect the observed-input
+  ## set.
+  ##
+  ## io-mon's Linux preload shim intercepts the libc ``syscall(2)`` wrapper and
+  ## decodes inline ``SYSCALL`` traps out of its ring buffer. Numbers it can
+  ## model are handled by ``classifyRawFileSyscall``; everything else falls
+  ## through to ``recordRawSyscallClassification``, which emits
+  ##
+  ##     "libc raw syscall unsupported nr=<N> run=<id>"    (libc wrapper route)
+  ##     "inline raw syscall unsupported nr=<N> run=<id>"  (inline-trap route)
+  ##
+  ## (io-mon ``src/io_mon/shim/linux_preload.nim``, ``rawSyscallSourceName`` +
+  ## ``recordRawSyscallClassification``, then ``stampRunId`` on the way out of
+  ## ``emitRecord``.) Beyond the syscall NUMBER and the run stamp the detail
+  ## carries nothing — no arguments, no fds, no paths.
+  ##
+  ## Such a record means "the shim saw a syscall it does not model", which is
+  ## only a correctness problem when the syscall in question could open, read,
+  ## write, probe, rename or otherwise name a file. For a small set of numbers
+  ## that is decidable from the number alone, so the record carries no lost
+  ## filesystem information and the depfile is still Level 0 (complete).
+  ##
+  ## **This is an allowlist, not an inversion of the default.** Any number not
+  ## enumerated below keeps falling through to
+  ## ``classifyEventLossDetail``'s fail-closed ``mesUnknownScopeLoss``.
+  ##
+  ## SYSCALL NUMBERS ARE ARCHITECTURE-SPECIFIC AND THE DETAIL STRING CARRIES NO
+  ## ARCHITECTURE TAG. This is load-bearing, not pedantry: on the asm-generic
+  ## table used by aarch64/riscv64/loongarch64, nr=39 is ``umount2`` — a
+  ## filesystem-namespace mutation — where on x86_64 it is ``getpid``. The
+  ## table below is therefore selected by the architecture this engine is
+  ## COMPILED for, which is the architecture of the shim that produced the
+  ## RMDF (RMDFs live in the local ``build-engine-cache/monitor-depfiles`` and
+  ## are never fetched cross-arch from the shared action cache). Architectures
+  ## without a verified table get an empty allowlist and keep failing closed.
+  ##
+  ## Per-entry justification — each number verified against the kernel uapi
+  ## headers (``asm/unistd_64.h`` for x86_64, ``asm-generic/unistd.h`` for
+  ## arm64), NOT from memory:
+  ##
+  ##   * ``getpid`` (x86_64 nr=39, arm64 nr=172) — takes no arguments, touches
+  ##     no descriptor and names no path; it copies the caller's pid out of the
+  ##     kernel and returns. It cannot introduce a filesystem dependency and it
+  ##     cannot hide one, because it mutates no shim state at all.
+  ##
+  ##   * ``close_range`` (x86_64 and arm64 nr=436) — closes a range of
+  ##     descriptors. Closing a descriptor cannot open, read, write or probe a
+  ##     path, so no new dependency can be introduced and no content can be
+  ##     consumed through it.
+  ##
+  ##     RESIDUAL, stated rather than waved through: the shim DOES keep fd→path
+  ##     state (``updateFdPath`` / ``removeFdPath`` / ``pathForFd`` in
+  ##     ``linux_preload.nim``), and a bulk close it does not observe leaves
+  ##     stale entries for the closed fds. The consequences of that staleness
+  ##     are bounded:
+  ##       - an fd number reused by a monitored ``open``/``openat`` is repaired,
+  ##         because ``recordOpen`` → ``updateFdPath`` overwrites the entry;
+  ##       - an fd number reused by an UNmonitored raw open already emits its
+  ##         own unsupported-nr event-loss and so still fails closed here;
+  ##       - an fd number reused by a non-path descriptor (socket/pipe/eventfd/
+  ##         dup) makes a later read on it attribute to the STALE path, which
+  ##         adds a spurious input — the over-approximating, cache-conservative
+  ##         direction.
+  ##     The one under-approximating corner is an fd that is simultaneously
+  ##     marked inherited-at-shim-init AND carries a stale in-tree path AND is
+  ##     reused by an opaque descriptor, which would suppress the
+  ##     ``recordExternalContent`` Level 2 signal in ``classifyEmptyFdRead``.
+  ##
+  ##     That corner is NOT closed by leaving nr=436 fail-closed, which is why
+  ##     the allowlist entry is still the right call: the shim has no
+  ##     ``close_range`` handling of ANY kind — no libc-symbol hook and no raw
+  ##     classifier arm (verified against the pinned io-mon revision this build
+  ##     links). A program calling glibc's ``close_range()`` SYMBOL produces the
+  ##     identical fd→path staleness and NO event-loss record at all, so the
+  ##     session stays cacheable today. The nr=436 record therefore covers only
+  ##     the minority ``syscall(2)`` route; as a soundness gate it is not
+  ##     exhaustive, and all it actually buys is permanent cache loss for the
+  ##     callers that happen to use the wrapper. The durable fix is an io-mon
+  ##     ``of LinuxSysCloseRange:`` arm that calls ``removeFdPath`` over the
+  ##     range plus a ``close_range`` symbol hook; io-mon is a pinned flake
+  ##     input here and cannot be changed from this repo. This is recorded as a
+  ##     known residual in
+  ##     ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``.
+  ##
+  ## Deliberately NOT allowlisted, having been considered individually:
+  ##   * ``io_uring_setup``/``io_uring_enter`` (x86_64 nr=425/426) — SQEs can
+  ##     carry real opens and reads, so the number alone does not decide it.
+  ##     io-mon makes its own documented tradeoff for these at the shim layer;
+  ##     the engine does not re-endorse it.
+  ##   * ``gettid`` (x86_64 nr=186) — provably benign by the same argument as
+  ##     ``getpid``, but the pinned io-mon already classifies it at the shim so
+  ##     it never reaches this classifier. Left out for lack of evidence that
+  ##     any RMDF carries it.
+  when defined(linux) and defined(amd64):
+    const BenignRawSyscallNumbers: seq[int64] = @[
+      39'i64,    # getpid      — asm/unistd_64.h
+      436'i64,   # close_range — asm/unistd_64.h
+    ]
+  elif defined(linux) and defined(arm64):
+    const BenignRawSyscallNumbers: seq[int64] = @[
+      172'i64,   # getpid      — asm-generic/unistd.h
+      436'i64,   # close_range — asm-generic/unistd.h
+    ]
+  else:
+    const BenignRawSyscallNumbers: seq[int64] = @[]
+  const RawSyscallUnsupportedPrefixes = [
+    "libc raw syscall unsupported nr=",
+    "inline raw syscall unsupported nr=",
+  ]
+  # THE NUMBER IS NOT THE END OF THE STRING. Every record the Linux shim
+  # emits passes through ``stampRunId`` (io-mon ``linux_preload.nim``),
+  # which appends a whitespace-separated ``run=<id>`` token to ``detail``.
+  # A real RMDF therefore carries
+  #
+  #     "libc raw syscall unsupported nr=436 run=1787695082.5534084"
+  #
+  # not "…nr=436". A first cut of this classifier required the remainder
+  # after the prefix to be a bare decimal and so matched nothing a real
+  # build ever produces: every synthetic unit test passed and the edge it
+  # was written to rescue kept re-executing. Parse the remainder as
+  # whitespace-separated FIELDS — field 0 is the syscall number, and each
+  # remaining field must be a stamping token named below.
+  #
+  # The trailing-token list is an allowlist for the same reason the number
+  # table is. A token this classifier has not reasoned about could carry
+  # meaning, so an unrecognised one fails closed. The cost of a future
+  # io-mon stamp landing here is cache loss, not unsoundness — and that is
+  # the direction this whole classifier is required to err in.
+  const BenignTrailingTokenPrefixes = [
+    "run=",   # linux_preload.nim `stampRunId` / macos_interpose.nim
+  ]
+  for prefix in RawSyscallUnsupportedPrefixes:
+    if not detail.startsWith(prefix):
+      continue
+    let fields = detail[prefix.len .. ^1].splitWhitespace()
+    if fields.len == 0:
+      # "nr=" with nothing after it.
+      return false
+    for i in 1 ..< fields.len:
+      var recognised = false
+      for tokenPrefix in BenignTrailingTokenPrefixes:
+        # ``len > tokenPrefix.len`` rejects a valueless "run=", which is
+        # not a shape the stamper produces.
+        if fields[i].startsWith(tokenPrefix) and fields[i].len > tokenPrefix.len:
+          recognised = true
+          break
+      if not recognised:
+        return false
+    # Require a bare unsigned decimal, which is the only shape io-mon's
+    # ``$number`` produces. ``parseInt`` alone is not enough: it accepts a
+    # leading '+' or '-', so "nr=+436" would otherwise reach the allowlist.
+    # A detail shape this classifier has not reasoned about fails closed.
+    for ch in fields[0]:
+      if ch notin {'0' .. '9'}:
+        return false
+    var number: int64
+    try:
+      # Rejects any value too large for ``int``; fails closed.
+      number = int64(parseInt(fields[0]))
+    except ValueError:
+      return false
+    return number in BenignRawSyscallNumbers
+  false
+
 proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
   ##
@@ -2487,6 +2692,15 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ##   * "duplicate identity token in fragment record" — writer.nim:2034 /
   ##     :2068. A shim identity token appeared twice, so record-ordering
   ##     integrity is compromised. Level 2.
+  ##
+  ##   * "libc raw syscall unsupported nr=<N>" / "inline raw syscall
+  ##     unsupported nr=<N>" — linux_preload.nim
+  ##     ``recordRawSyscallClassification``. The shim saw a raw syscall it
+  ##     does not model. For the small, individually-justified set of
+  ##     numbers in ``benignRawSyscallLoss`` the number alone proves the
+  ##     call cannot name a path or move content, so the record represents
+  ##     no lost filesystem information: Level 0. Every other number stays
+  ##     Level 2 via the fail-closed default below.
   ##
   ## Every other unknown detail defaults to mesUnknownScopeLoss to fail
   ## closed conservatively — the spec's R3 general rule for ambiguous
@@ -2536,6 +2750,21 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
     return mesUnknownScopeLoss
   if detail.startsWith(BreakawayReportPrefix):
     return mesUnknownScopeLoss
+  # Benign raw-syscall class (Level 0). What makes this arm unable to downgrade
+  # a recognised loss class is that the two prefixes it matches are disjoint
+  # from every prefix above — not its position, which is defensive only. (No
+  # prefix in the const block above is a prefix of "libc raw syscall
+  # unsupported nr=" or "inline raw syscall unsupported nr=", nor the reverse,
+  # so the dispatch order over this chain is not observable.)
+  #
+  # The property that actually keeps a mixed RMDF fail-closed lives one level
+  # up, in ``foldMonitorDepFileEvidence``'s ``worseMonitorStatus`` fold, and is
+  # pinned by ``test_m9r72_phaseD_end_to_end.nim``'s "benign raw syscall does
+  # not rescue an RMDF that also lost a subtree". THIS suite cannot see that
+  # property: inverting the fold leaves every classifier check green
+  # (mutation-verified) while the phase-D case fails.
+  if benignRawSyscallLoss(detail):
+    return mesComplete
   # Unknown detail — fail closed conservatively.
   mesUnknownScopeLoss
 
@@ -2547,6 +2776,129 @@ proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
 proc raiseMonitorDecodeError(kind: MonitorDepFileReaderErrorKind;
                              message: string) {.noreturn.} =
   raiseMonitorDepFileReaderError(kind, message)
+
+proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
+                          evidence: var PathSetEvidence;
+                          seen: var EvidenceSeenSets;
+                          status: var MonitorEvidenceStatus) =
+  ## Fold ONE decoded RMDF record into the engine's path-set evidence.
+  ##
+  ## THE ONE IMPLEMENTATION OF THE FOLDING RULES, deliberately. Since HM-5
+  ## there are two SOURCES of records — the ``.rdep`` bytes on the wrapped
+  ## launch paths, and the records ``finishMonitor`` already returned in
+  ## memory on the hosted one — and the whole premise of hosting is that
+  ## nothing downstream can tell the two apart. Two copies of the rules would
+  ## be two chances for them to disagree about what the same observation
+  ## means, silently, in the dependency set. So the decode and the fold are
+  ## separated here and the fold is shared.
+
+  if record.kind == mrEventLoss or record.observationKind == moEventLoss:
+    # M9.R.72.3 — classify the loss instead of collapsing to a bool.
+    # ``classifyEventLossDetail`` maps io-mon's detail strings to Level
+    # 1 (known scope) or Level 2 (unknown scope); ``worseMonitorStatus``
+    # keeps the worst observed level across the whole depfile so the
+    # caller can decide session cache-skip vs hard-fail conservatively.
+    let recordStatus = classifyEventLossDetail(record.detail)
+    status = worseMonitorStatus(status, recordStatus)
+  elif record.kind == mrBackendProfile and
+      not monitorProfileEvidenceComplete(record.detail):
+    status = worseMonitorStatus(status, mesUnknownScopeLoss)
+
+  let materialized = materialPath(cwd, record.path)
+  if materialized.isVolatileMonitorPath():
+    return
+  case record.kind
+  of mrFileRead:
+    evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+  of mrLibraryLoad:
+    # A library the dynamic loader MAPPED into the action. This is a
+    # content dependency and nothing else: change the file, change what
+    # the action computes.
+    #
+    # It needs its own arm because it cannot arrive as an `mrFileRead`.
+    # `ld.so` resolves `DT_NEEDED` entries with its own internal open,
+    # before the preloaded shim's hooks exist, so a dependent DSO
+    # passes through no interposed `open` at all — io-mon emits it from
+    # the loaded-object enumeration instead, and the `else: discard`
+    # below swallowed every one. Measured on `env true`, a process that
+    # touches no file of its own: 18 `mrLibraryLoad` records covering
+    # 14 distinct PATHS and 9 distinct SONAMEs, `mesComplete`, and
+    # `monitorReads: 0`. The three counts differ for two separate
+    # reasons and both are worth knowing: four sonames are emitted
+    # twice under the identical path (duplicate records, deduped by
+    # `addUnique`), and five appear under two DIFFERENT store paths
+    # because `env` exec'd a second image linked against a different
+    # glibc. So the fold contributes 14 inputs here, not 18 and not 9.
+    #
+    # io-mon sets `observationKind = moFileRead` on these deliberately
+    # so every consumer keying on the observation kind treats them as
+    # content reads (io-mon `types.nim:36`); folding them into
+    # `monitorReads` is that contract's consumer half.
+    #
+    # WHAT ABOUT THE SHIM'S OWN LOAD CLOSURE? io-mon excludes the shim
+    # library itself (`shim/linux_preload.nim`, so that "upgrading
+    # io-mon would not invalidate every cached action") but not the
+    # libraries the shim's own `DT_NEEDED` pulls in, so it is fair to
+    # ask whether this fold now puts the monitor's libc into every
+    # action's key. Measured, and the answer is no in the case that
+    # matters, for a reason worth writing down: the loader maps ONE
+    # object per soname, so when the action has its own libc the shim
+    # binds to THAT one and adds nothing. On the real
+    # `reprobuild.test_execute.t_smoke_ct_test_interface` edge the six
+    # recorded libraries are all under the TEST BINARY's glibc
+    # (`…-glibc-2.42-51` reached via its own RPATH), none under the
+    # shim's separate glibc store path. The shim's closure shows up
+    # alone only when the action has no closure of its own — measured
+    # on a `-nostdlib` binary, where those six ARE the shim's.
+    #
+    # So DO NOT "fix" this by dropping the shim's closure by path. In
+    # the common case there is nothing there to drop, and on any host
+    # where repro and the toolchain resolve to the SAME glibc store
+    # path such a filter would drop the action's genuine libc — which
+    # is this defect, for the single most consequential library there
+    # is. The sound fix is attribution, not filtering: record whether a
+    # loaded object is reachable from the MAIN IMAGE's `DT_NEEDED`
+    # closure and let the consumer drop only the unreachable ones. That
+    # belongs in io-mon, which is the only side that can see the
+    # dependency graph. Until it exists, an action whose recorded libc
+    # is the shim's rather than its own pays a spurious cross-host
+    # cache MISS — an efficiency cost in the fail-closed direction, not
+    # a stale hit.
+    #
+    # UNCONDITIONALLY, with no allowlist for immutable package stores.
+    # Sandbox-And-Monitoring.md §"Open Design Questions" left "how much
+    # library-load information is required for correctness" open; the
+    # answer taken here is "all of it", because an allowlist is exactly
+    # what kept this invisible — on NixOS every loaded DSO is a store
+    # path, so exempting store paths would leave the fix asserting
+    # nothing while a host with a mutable `/usr/lib` still served stale
+    # results. Cost: one `lstat` per loaded DSO on the warm path.
+    # `cacheInputPaths` still drops the ones under the action's own
+    # tool roots, and `isVolatileMonitorPath` above still drops
+    # `/run`-resident driver libraries.
+    evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+  of mrFileOpen:
+    case record.observationKind
+    of moFileRead, moFileOpen:
+      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+    of moFileWrite:
+      evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+    else:
+      discard
+  of mrFileWrite:
+    evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+  of mrPathProbe:
+    evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+  of mrDirectoryEnumerate:
+    # Stays in `monitorProbes` (every existing consumer keeps its set) AND
+    # is recorded separately, because membership, not existence, is what
+    # an enumeration depends on. See `monitorDirectoryEnumerations`.
+    evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+    evidence.monitorDirectoryEnumerations.addUnique(
+      seen.monitorDirectoryEnumerations, materialized)
+  else:
+    discard
+
 
 proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
@@ -2625,119 +2977,47 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
     inc expectedSeq
     inc decodedCount
 
-    if record.kind == mrEventLoss or record.observationKind == moEventLoss:
-      # M9.R.72.3 — classify the loss instead of collapsing to a bool.
-      # ``classifyEventLossDetail`` maps io-mon's detail strings to Level
-      # 1 (known scope) or Level 2 (unknown scope); ``worseMonitorStatus``
-      # keeps the worst observed level across the whole depfile so the
-      # caller can decide session cache-skip vs hard-fail conservatively.
-      let recordStatus = classifyEventLossDetail(record.detail)
-      result = worseMonitorStatus(result, recordStatus)
-    elif record.kind == mrBackendProfile and
-        not monitorProfileEvidenceComplete(record.detail):
-      result = worseMonitorStatus(result, mesUnknownScopeLoss)
-
-    let materialized = materialPath(cwd, record.path)
-    if materialized.isVolatileMonitorPath():
-      framePos = payloadPos + length
-      continue
-    case record.kind
-    of mrFileRead:
-      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
-    of mrLibraryLoad:
-      # A library the dynamic loader MAPPED into the action. This is a
-      # content dependency and nothing else: change the file, change what
-      # the action computes.
-      #
-      # It needs its own arm because it cannot arrive as an `mrFileRead`.
-      # `ld.so` resolves `DT_NEEDED` entries with its own internal open,
-      # before the preloaded shim's hooks exist, so a dependent DSO
-      # passes through no interposed `open` at all — io-mon emits it from
-      # the loaded-object enumeration instead, and the `else: discard`
-      # below swallowed every one. Measured on `env true`, a process that
-      # touches no file of its own: 18 `mrLibraryLoad` records covering
-      # 14 distinct PATHS and 9 distinct SONAMEs, `mesComplete`, and
-      # `monitorReads: 0`. The three counts differ for two separate
-      # reasons and both are worth knowing: four sonames are emitted
-      # twice under the identical path (duplicate records, deduped by
-      # `addUnique`), and five appear under two DIFFERENT store paths
-      # because `env` exec'd a second image linked against a different
-      # glibc. So the fold contributes 14 inputs here, not 18 and not 9.
-      #
-      # io-mon sets `observationKind = moFileRead` on these deliberately
-      # so every consumer keying on the observation kind treats them as
-      # content reads (io-mon `types.nim:36`); folding them into
-      # `monitorReads` is that contract's consumer half.
-      #
-      # WHAT ABOUT THE SHIM'S OWN LOAD CLOSURE? io-mon excludes the shim
-      # library itself (`shim/linux_preload.nim`, so that "upgrading
-      # io-mon would not invalidate every cached action") but not the
-      # libraries the shim's own `DT_NEEDED` pulls in, so it is fair to
-      # ask whether this fold now puts the monitor's libc into every
-      # action's key. Measured, and the answer is no in the case that
-      # matters, for a reason worth writing down: the loader maps ONE
-      # object per soname, so when the action has its own libc the shim
-      # binds to THAT one and adds nothing. On the real
-      # `reprobuild.test_execute.t_smoke_ct_test_interface` edge the six
-      # recorded libraries are all under the TEST BINARY's glibc
-      # (`…-glibc-2.42-51` reached via its own RPATH), none under the
-      # shim's separate glibc store path. The shim's closure shows up
-      # alone only when the action has no closure of its own — measured
-      # on a `-nostdlib` binary, where those six ARE the shim's.
-      #
-      # So DO NOT "fix" this by dropping the shim's closure by path. In
-      # the common case there is nothing there to drop, and on any host
-      # where repro and the toolchain resolve to the SAME glibc store
-      # path such a filter would drop the action's genuine libc — which
-      # is this defect, for the single most consequential library there
-      # is. The sound fix is attribution, not filtering: record whether a
-      # loaded object is reachable from the MAIN IMAGE's `DT_NEEDED`
-      # closure and let the consumer drop only the unreachable ones. That
-      # belongs in io-mon, which is the only side that can see the
-      # dependency graph. Until it exists, an action whose recorded libc
-      # is the shim's rather than its own pays a spurious cross-host
-      # cache MISS — an efficiency cost in the fail-closed direction, not
-      # a stale hit.
-      #
-      # UNCONDITIONALLY, with no allowlist for immutable package stores.
-      # Sandbox-And-Monitoring.md §"Open Design Questions" left "how much
-      # library-load information is required for correctness" open; the
-      # answer taken here is "all of it", because an allowlist is exactly
-      # what kept this invisible — on NixOS every loaded DSO is a store
-      # path, so exempting store paths would leave the fix asserting
-      # nothing while a host with a mutable `/usr/lib` still served stale
-      # results. Cost: one `lstat` per loaded DSO on the warm path.
-      # `cacheInputPaths` still drops the ones under the action's own
-      # tool roots, and `isVolatileMonitorPath` above still drops
-      # `/run`-resident driver libraries.
-      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
-    of mrFileOpen:
-      case record.observationKind
-      of moFileRead, moFileOpen:
-        evidence.monitorReads.addUnique(seen.monitorReads, materialized)
-      of moFileWrite:
-        evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
-      else:
-        discard
-    of mrFileWrite:
-      evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
-    of mrPathProbe:
-      evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
-    of mrDirectoryEnumerate:
-      # Stays in `monitorProbes` (every existing consumer keeps its set) AND
-      # is recorded separately, because membership, not existence, is what
-      # an enumeration depends on. See `monitorDirectoryEnumerations`.
-      evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
-      evidence.monitorDirectoryEnumerations.addUnique(
-        seen.monitorDirectoryEnumerations, materialized)
-    else:
-      discard
-
+    foldOneMonitorRecord(record, cwd, evidence, seen, result)
     framePos = payloadPos + length
 
   if decodedCount != headerCount:
     raiseMonitorDecodeError(mrSemanticValidationFailed,
       "RMDF frame count mismatch")
+
+proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
+                                 cwd: string;
+                                 evidence: var PathSetEvidence;
+                                 seen: var EvidenceSeenSets):
+                                 MonitorEvidenceStatus =
+  ## In-Process-Monitor-Hosting HM-5 — the same fold, over records the engine
+  ## ALREADY HAS instead of over a file it has to read back.
+  ##
+  ## WHY THIS EXISTS, and it corrects the milestone's own premise. HM-5 is
+  ## written on the claim that the ``.rdep`` is "a write-only artefact from the
+  ## engine's perspective", evidenced by ``readMonitorDepFile`` having zero call
+  ## sites. That is true of ``readMonitorDepFile`` and false of the file: the
+  ## engine re-reads and re-decodes the ``.rdep`` on every monitored action
+  ## through ``foldMonitorDepFileEvidence`` above, which is a hand-rolled RMDF
+  ## reader written precisely so the depfile object is not retained. So the
+  ## flush could not have been made asynchronous on its own — a build that
+  ## renamed the file into place behind the scheduler would have raced its own
+  ## evidence collection and failed with ``mrMissingFile``.
+  ##
+  ## On the hosted path ``finishMonitor`` already returns the canonical,
+  ## ordered records (``MonitorDepFile.records``, produced by
+  ## ``depFileFromOwnedRecords`` from the very seq ``writeCanonicalInPlace``
+  ## just wrote), so folding from them is FREE and the read-back is pure waste.
+  ## Measured on this machine, a real ``nim c`` action's depfile — 97 217
+  ## records, 18 MB — costs ~193 ms to read and decode, per action, on the
+  ## scheduler's serial path. A trivial action's 140-record depfile costs
+  ## ~0.4 ms.
+  ##
+  ## The records are borrowed, not retained: the caller drops them as soon as
+  ## this returns, so the engine's "path sets + completeness, never a retained
+  ## depfile" rule is unchanged.
+  result = mesComplete
+  for record in records:
+    foldOneMonitorRecord(record, cwd, evidence, seen, result)
 
 proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
                 pathSet: DependencyPathSet; recognized: bool) =
@@ -2771,7 +3051,19 @@ proc collectConvertedEvidence(action: BuildAction;
                               evidence: var PathSetEvidence;
                               seen: var EvidenceSeenSets): bool
 
-proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
+proc collectEvidence(action: BuildAction; strict: bool;
+                     hostedRecords: ptr seq[MonitorRecord] = nil):
+                     EvidenceCollection =
+  ## ``hostedRecords`` (HM-5) is the in-memory record set for an action the
+  ## engine hosted the monitor for. When it is non-nil the monitor evidence is
+  ## folded from it and the ``.rdep`` is NOT read back — which is what lets the
+  ## file be published asynchronously, behind this call. It is a ``ptr`` rather
+  ## than an ``openArray`` because the parameter has to be OPTIONAL: every
+  ## other caller is a launch path with no records in hand, and a default is
+  ## what keeps this one seam from spreading to all four of them. The pointee
+  ## is a scheduler local that outlives the call, and the engine has no worker
+  ## threads (see ``beginMonitorSpawnContext``), so there is no aliasing
+  ## question here.
   result.publishable = true
   result.evidence.declaredInputs = action.inputs
   result.evidence.declaredOutputs = action.outputs
@@ -2894,8 +3186,18 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
     # `plan.diagnostic` into `asFailed`. That is the FAIL arm, not the
     # non-cacheable arm; do not describe it as the latter.
     try:
-      let status = foldMonitorDepFileEvidence(action.monitorDepfile,
-        action.cwd, result.evidence, seen)
+      # HM-5 — two SOURCES, one set of folding rules (``foldOneMonitorRecord``).
+      # The hosted arm never touches the filesystem, so the ``.rdep`` may still
+      # be in flight behind this call; the wrapped arm is byte-for-byte what it
+      # always was, because on that path the engine has no records — a separate
+      # ``repro internal io monitor`` process produced them.
+      let status =
+        if hostedRecords != nil:
+          foldMonitorRecordsEvidence(hostedRecords[], action.cwd,
+            result.evidence, seen)
+        else:
+          foldMonitorDepFileEvidence(action.monitorDepfile,
+            action.cwd, result.evidence, seen)
       result.monitorStatus = worseMonitorStatus(result.monitorStatus, status)
       case status
       of mesComplete:
@@ -3329,8 +3631,29 @@ proc dependencyEvidencePath*(cacheRoot, actionId: string): string =
     (sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId) & ".rbar")
 
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
-                     cacheRoot: string): tuple[action: BuildAction;
-                                               diagnostic: string] =
+                     cacheRoot: string;
+                     hostInProcess: bool): tuple[action: BuildAction;
+                                                 diagnostic: string;
+                                                 hostInProcess: bool] =
+  ## SEAM 1 of two (the other is ``preparedRunQuotaCommand``): everything that
+  ## decides whether an action is monitored, and how, happens here.
+  ##
+  ## In-Process-Monitor-Hosting HM-4 — ``hostInProcess`` says the launch site
+  ## about to run this action is one the ENGINE spawns, so the engine can be
+  ## io-mon's host itself. When it is true the argv is left ALONE and only the
+  ## evidence path is selected; when it is false the historical
+  ## ``<repro> internal io monitor --depfile <f> -- <argv>`` wrapper is
+  ## prepended and a second ``repro`` process does the hosting.
+  ##
+  ## The caller decides, not this proc, because "which launch path" is not
+  ## knowable from an action: see the launch decision in ``runBuild``, which
+  ## is now taken BEFORE the monitor plan for exactly this reason.
+  ##
+  ## Both forms select the SAME depfile path and both produce the SAME
+  ## evidence — ``finishMonitor`` writes the canonical RMDF that
+  ## ``foldMonitorDepFileEvidence`` reads, byte for byte what the CLI wrote
+  ## (IoMon-Decomposed-Host-API DH-4), so nothing downstream of
+  ## ``action.monitorDepfile`` can tell the two apart.
   result.action = action
   if action.dependencyPolicy.kind notin MonitorPolicyKinds:
     return
@@ -3384,8 +3707,22 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
     let depfile = cacheRoot / "monitor-depfiles" /
       (sanitizeActionId(action.id) & ".rdep")
     result.action.monitorDepfile = depfile
-    result.action.argv = @[monitorCli] & config.monitorCliArgs &
-      @["--depfile", depfile, "--"] & action.argv
+    if hostInProcess:
+      # HM-4 — the ENGINE is the host. The argv stays exactly what the recipe
+      # wrote, because io-mon spawns it directly; the wrapper below exists
+      # only to put a hosting process in between, and there no longer is one.
+      # ``monitorCliPath`` is still what gates monitoring on/off (an
+      # unconfigured driver still means "no monitor is wired"), so this branch
+      # changes WHO hosts and nothing about WHETHER an action is monitored —
+      # PROVIDED the launch site the caller had in mind actually hosts.
+      # Stripping the wrapper is half of a two-part handshake, and this proc
+      # cannot check the other half; the caller's decision is what guarantees
+      # it. See the hosting decision in ``runBuild`` for which launch sites
+      # honour ``hostInProcess`` and which silently would not.
+      result.hostInProcess = true
+    else:
+      result.action.argv = @[monitorCli] & config.monitorCliArgs &
+        @["--depfile", depfile, "--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
     # ``launchChildEnv`` (NOT here on ``result.action.env``). The seed
     # MUST NOT enter the action's fingerprint — the absolute path of
@@ -4474,7 +4811,24 @@ proc launchChildEnv(action: BuildAction;
   # An explicit ``action.env`` override wins because the action env is
   # appended after the seed and the process launcher's overlay is
   # last-write-wins.
-  let shimLib = findShimLibrary()
+  #
+  # NOT SEEDED for ``dgTrustedDeclaredInputs``. Suppressing the monitor WRAP is
+  # not sufficient on its own to keep an action shim-free: io-mon's preload
+  # runtime propagates itself to child processes by prepending the library
+  # named in ``REPRO_MONITOR_SHIM_LIB`` to their ``LD_PRELOAD``. An action that
+  # builds its own interposer from that same runtime therefore re-injects OUR
+  # shim into its children even though the engine never wrapped it — which is
+  # exactly how a self-interposing test ends up with two interposers again and
+  # livelocks.
+  #
+  # Measured: with the wrap suppressed but the seed still present, the
+  # stackable-hooks fixture came up with
+  # ``LD_PRELOAD=<monitor shim>:<test shim>`` and spun at 92% CPU. The two
+  # must be gated together — a policy that says "do not monitor this action"
+  # has to also mean "do not hand this action the means to monitor itself".
+  let shimLib =
+    if action.dependencyPolicy.kind == dgTrustedDeclaredInputs: ""
+    else: findShimLibrary()
   if shimLib.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)
   # macOS monitoring needs NO env seed: the io-mon shim always runs BOTH
@@ -4676,10 +5030,20 @@ proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
     for entry in argv: result.add(entry)
 
 proc preparedRunQuotaCommand(action: BuildAction;
-                             config: BuildEngineConfig): ReproCommandSpec =
+                             config: BuildEngineConfig;
+                             shellUmaskWrap = true): ReproCommandSpec =
   ## Build one argv/env contract for direct, helper, and inline launches.
   ## Sharing this prevents bypass execution from drifting away from normal
   ## RunQuota execution as tool-path and compiler flags evolve.
+  ##
+  ## In-Process-Monitor-Hosting HM-4 — ``shellUmaskWrap = false`` is the
+  ## in-process host's form. The 0022 mask still applies; it is set around the
+  ## spawn (``beginMonitorSpawnContext``) instead of by a wrapping
+  ## ``/bin/sh -c 'umask 022 && …'``. That matters for EVIDENCE and not for
+  ## tidiness: with the engine hosting, a wrapper shell would itself be inside
+  ## the monitored tree, and its own reads and probes would land in the
+  ## action's dependency set — where today the shell sits outside the monitor,
+  ## one process above it.
   when defined(macosx):
     if action.monitorDepfile.len > 0 and resolveNonSipShell().len == 0:
       raiseEngine("SIP-safe monitored launch requires a non-SIP shell; " &
@@ -4697,11 +5061,647 @@ proc preparedRunQuotaCommand(action: BuildAction;
     includePaths.systemDirs)
   let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
   ReproCommandSpec(
-    argv: umaskWrappedArgv(deferred.argv),
+    argv: (if shellUmaskWrap: umaskWrappedArgv(deferred.argv)
+           else: deferred.argv),
     cwd: action.cwd,
     env: deferred.env,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
+
+# ---------------------------------------------------------------------------
+# In-Process-Monitor-Hosting HM-4 — the engine hosts io-mon's consumer itself.
+#
+# WHAT THIS IS. A monitored action is normally launched as
+# ``<repro> internal io monitor --depfile <f> -- <argv>``: the engine spawns a
+# SECOND ``repro`` process whose only job is to be io-mon's host, and that
+# process spawns the real command. When ``BuildEngineConfig.hostMonitorInProcess``
+# is set, the launch paths the engine spawns skip that: the engine drives
+# io-mon's decomposed host API directly (``startMonitor`` -> ``pollMonitor`` ->
+# ``finishMonitor``, IoMon-Decomposed-Host-API DH-2) and the monitored tree's
+# root is a direct child of the engine.
+#
+# IT IS OFF BY DEFAULT, on measurement, and the measurement is at the bottom of
+# this block. Everything below describes what happens when it is ON.
+#
+# WHICH PATHS, AND WHY NOT ALL FOUR. io-mon OWNS the spawn — DH-4 says plainly
+# that "spawn supplied by the caller is not delivered and should not be
+# expected", because a host that owned the spawn would be back to the §4.1
+# hand-rolled-host hazard the whole decomposition exists to close. So a launch
+# path can host the monitor only if the ENGINE is the process that spawns:
+#
+#   * L1 bypass — the engine spawns. HOSTED.
+#   * L2 RunQuota helper — the engine spawns ``repro
+#     __repro-runquota-helper …`` and THAT process spawns the action, two
+#     processes deep. There is no spawn here to hand to io-mon, so this path
+#     keeps the CLI wrapper. ``repro internal io monitor`` is therefore still
+#     a PRODUCTION path and not only a debugging entry point.
+#   * L3 / L3b inline RunQuota — the engine spawns, but not directly:
+#     ``offerWithRunQuotaBatch`` and ``startGrantedWithRunQuota`` spawn the
+#     child THEMSELVES as part of binding it to the granted lease
+#     (``lease.markRunning(childProcessId, processGroupId, …)``). Hosting
+#     there needs a RunQuota lease that can adopt a child the caller already
+#     spawned, which is a change to the RunQuota adapter's contract and not to
+#     this file. They keep the CLI wrapper for now.
+#
+# A path that keeps the wrapper is NOT degraded — it is monitored exactly as
+# it was, by the same io-mon code, and ``evidence is identical across launch
+# paths`` in tests/integration/t_every_launch_path_is_monitored.nim is what
+# holds the two forms to the same evidence.
+#
+# WHEN THE SCHEDULER FINISHES A MONITOR: on the poll pass that first observes
+# the root's exit, for EVERY monitor that has exited, not only the one the
+# scheduler goes on to reap. This is a deliberate choice with an evidence
+# consequence, measured by DH-4 (item 3 of its landing record): the §4.1
+# detached-descendant grace window OPENS when ``finishMonitor`` runs, so a
+# monitor left sitting in the queue grades a descendant that dies in the
+# interval ``mcComplete`` where the reference (batch) form grades it
+# ``mcIncomplete`` — on identical inputs, with nothing wrong. Finishing on the
+# observing pass pins the window's opening to root-exit DETECTION, so it is
+# one poll interval (~1 ms) after the real exit and does not vary with how
+# many other actions happen to be in flight. What it costs: a monitor whose
+# descendants are still alive blocks this loop for the grace window (500 ms by
+# default) where the spawned form blocked a separate process. That
+# serialisation is real, and it is the price of the evidence agreeing with the
+# reference rather than with the scheduler's queue depth.
+#
+# AND THIS IS WHY ``BuildEngineConfig.hostMonitorInProcess`` DEFAULTS TO FALSE.
+# The case for hosting is latency: one process spawn per monitored action
+# removed. That spawn IS removed and it IS worth something — but the monitor's
+# end-of-action work moves with it, out of N concurrent monitor processes and
+# into this one loop, where it is paid SERIALLY. Which of the two dominates is
+# a question about the workload, and it was measured rather than argued.
+#
+# Linux, 32 cores, ~850 live processes, hosted and wrapped arms compiled from
+# the same source and run INTERLEAVED so machine drift cancels. Milliseconds
+# per action, 3-5 samples per cell, spread shown:
+#
+#   40 trivial actions           hosted        wrapped
+#     parallelism 1              26-46         58-64      hosting ~2x FASTER
+#     parallelism 4              15-27         18-24      a wash
+#
+#   120 trivial actions          hosted        wrapped
+#     parallelism 8 (default)    14-18         6-11       hosting ~2x SLOWER
+#     parallelism 16             11-26         5-10       hosting ~2-3x SLOWER
+#     parallelism 32             13-26         4-11       hosting ~2-3x SLOWER
+#
+#   80 actions, parallelism 8, per-action work varied:
+#     ~0 ms of work              15-33         8-13       hosting ~2-3x SLOWER
+#     ~100 ms of work            26-35         21-23      hosting ~20% slower
+#     ~500 ms of work            76-82         72-81      indistinguishable
+#
+# The mechanism is arithmetic. `startMonitor` is cheap; `finishMonitor` costs
+# ~14 ms per action here, and a hosted build pays it one action at a time —
+# 120 actions x ~14 ms is the ~1.7 s the parallelism-8 row shows, and it does
+# not improve with more parallelism because nothing about it is parallel. The
+# wrapped form pays the same ~14 ms inside N concurrent processes. So hosting
+# wins whenever there is nothing to overlap (parallelism 1), and loses whenever
+# an action is cheaper than `parallelism x 14 ms` of real work.
+#
+# The absolute numbers belong to one machine at one moment and are NOT a
+# specification; the SHAPE is the finding, and the shape is that the default
+# parallelism is 8 and typical actions are cheaper than ~112 ms of work.
+#
+# WHAT WOULD CHANGE THE ANSWER: `finishMonitor` leaving the scheduler's serial
+# path. Its cost is already down an order of magnitude from where this
+# milestone started — the io-mon revision pinned in flake.nix cut the §4.1
+# descendant sweep from ~105 ms to ~6 ms, which is what turned a hard ceiling
+# of 5-6 actions/second into the ~70/second measured above. That was enough to
+# make hosting viable and not enough to make it preferable. An async flush, or
+# a finish that does not block the poll loop, is the remaining item; re-measure
+# at the parallelism the build actually uses before flipping the default.
+#
+# ---------------------------------------------------------------------------
+# In-Process-Monitor-Hosting HM-5 — the depfile flush, and WHAT IT COULD AND
+# COULD NOT MOVE.
+#
+# HM-5 asks for the `.rdep` to be written asynchronously and atomically so the
+# scheduler can hand an action's evidence onward before the file lands. Both
+# halves of its premise turned out to be wrong about this code, and both
+# corrections are load-bearing:
+#
+# 1. "THE `.rdep` IS A WRITE-ONLY ARTEFACT." It is not. `readMonitorDepFile`
+#    genuinely has zero call sites, but the engine reads the file anyway,
+#    through `foldMonitorDepFileEvidence` — a hand-rolled RMDF reader written
+#    so the depfile OBJECT is not retained. Evidence collection therefore had a
+#    hard dependency on the file existing by the time the action was reaped, and
+#    an async flush alone would have raced it into `mrMissingFile`. The fix is
+#    `foldMonitorRecordsEvidence`: on the hosted path the engine folds the
+#    records `finishMonitor` already returned and never reads the file.
+#
+# 2. "THE FLUSH IS THE ENGINE'S TO MOVE." It is not. io-mon owns the canonical
+#    write inside `finishMonitor` (`collectMonitorEvidence` -> `mergeFragments`
+#    -> `writeCanonicalInPlace`) and exposes no way to obtain the records
+#    without it. What the engine can decide is WHERE that write goes and WHEN
+#    it becomes the published depfile — so io-mon is pointed at a scratch
+#    sibling of the destination and the flush worker publishes it with a
+#    rename.
+#
+# MEASURED (this machine, io-mon 30e5499, under load; absolute numbers are not
+# a specification, the ratios are the finding). Per monitored action:
+#
+#   depfile size            encode+write   of which real I/O   read-back+decode
+#   97 217 records / 18 MB  ~584 ms        ~114 ms             ~193 ms
+#      140 records / 25 KB  ~1.1 ms        negligible          ~0.4 ms
+#
+# The 97k-record row is a real `nim c` provider compile out of this repo's own
+# cache; the 140-record row is a trivial monitored action, which is the regime
+# HM-4's enable/disable measurement ran in.
+#
+# SO WHAT HM-5 CHANGES, exactly:
+#   * the ~193 ms decode leaves the serial path entirely (correction 1);
+#   * the publication leaves it (this milestone's mechanism);
+#   * the ~584 ms encode+write DOES NOT, because it is io-mon's.
+#
+# AND WHAT IT DOES NOT CHANGE: HM-4's verdict. In HM-4's regime the whole
+# encode+write is ~1.1 ms of a ~14 ms `finishMonitor`, i.e. under a tenth, and
+# the decode is ~0.4 ms. Removing all of it still leaves ~12 ms paid serially
+# per action, so hosting is still slower than the wrapper at parallelism 8.
+# `hostMonitorInProcess` stays FALSE by default.
+#
+# THAT WAS ALSO MEASURED END TO END rather than only argued from the parts: 60
+# trivial actions at parallelism 8, hosted and wrapped arms interleaved, three
+# rounds, before and after this milestone. The HOSTED/WRAPPED RATIO is the
+# figure to read — the machine was at load average ~67 throughout (other work
+# on the same host), so the absolute numbers move by 2x between rounds while
+# the ratio does not. Before: 1.74, 1.25, 2.04. After: 2.08, 1.29, 1.54.
+# Indistinguishable. Re-measure on a quiet machine before HM-6 concludes
+# anything from the absolute numbers; the ratio is what carries.
+#
+# WHAT WOULD ACTUALLY MOVE THE NUMBER, for whoever takes HM-6: one field on
+# io-mon's `FsSnoopRequest` — "produce the evidence but do not write the file".
+# `writeCanonicalInPlace` is two `encodeFrame` passes over every record and it
+# is four fifths of the write; skipping it, with the engine already folding
+# from records and publishing asynchronously, would take a real action's
+# serial wrap-up from ~780 ms to the merge alone. That is an io-mon change, so
+# it is named here rather than worked around: pointing io-mon at `/dev/null`
+# and re-encoding on the flush worker was measured and rejected — it saves the
+# ~114 ms of I/O and spends ~470 ms of duplicated CPU per action to do it.
+# ---------------------------------------------------------------------------
+
+const InProcessMonitorHostSupported* = defined(linux) or defined(macosx)
+  ## Windows is deliberately excluded. ``pollMonitor`` BLOCKS on that arm
+  ## (DH-2: ``runWithMonitorShim`` spawns and waits in one call, so the first
+  ## poll performs the whole run), and an N-way poll loop over blocking polls
+  ## executes serially — hosting in-process there would turn a parallel build
+  ## into a sequential one. The wrapper stays on Windows until
+  ## nim-stackable-hooks grows a non-blocking spawn.
+
+type
+  MonitorHostRecord = object
+    ## Per-slot bookkeeping for one hosted monitor. Everything here is plain
+    ## data; the ``MonitorHandle`` itself lives in a parallel ``seq`` because
+    ## it is non-copyable and this record is not.
+    inUse: bool
+    finished: bool
+    handleLive: bool
+      ## This slot's ``MonitorHandle`` still owns a consumer and a monitored
+      ## tree — i.e. it has NOT been moved into ``finishMonitor`` and has not
+      ## been dropped.
+      ##
+      ## Tracked separately from ``finished`` because the two come apart on
+      ## the failure paths: ``pollMonitor`` raising marks the slot finished
+      ## WITHOUT consuming the handle, and so does ``rootPid`` raising after a
+      ## successful ``startMonitor``. Keying teardown off ``finished`` would
+      ## then free a slot whose handle is still live, and the next action to
+      ## recycle that slot would assign over it — running io-mon's drop
+      ## teardown, which WAITS for a monitored root nobody has killed. That is
+      ## a build that stops making progress, so the invariant "a slot is only
+      ## released once its handle is dead" is maintained explicitly here.
+    failure: string
+    exitCode: int
+    rootPid: int
+    stdoutPath: string
+    stderrPath: string
+    depTempPath: string
+      ## HM-5 — where io-mon was told to write this action's canonical RMDF: a
+      ## scratch sibling of ``depDestPath``, never the destination itself and
+      ## never ``getTempDir()``. See ``monitorFlushTempPath``.
+    depDestPath: string
+      ## ``action.monitorDepfile`` — the published path. Nothing writes it
+      ## directly on this path; the flush worker renames ``depTempPath`` onto
+      ## it, which is the only way it ever appears or changes.
+    records: seq[MonitorRecord]
+      ## The canonical records ``finishMonitor`` returned, held only until the
+      ## scheduler has folded them into evidence and dropped them. This is the
+      ## engine's evidence source on the hosted path — see
+      ## ``foldMonitorRecordsEvidence`` for why the file cannot be.
+
+  MonitorHostPool = object
+    ## The scheduler's in-flight monitors.
+    ##
+    ## A ``seq[MonitorHandle]`` is legal and a copy out of one is not: DH-2
+    ## makes ``=copy`` a compile error so that "two owners of one consumer"
+    ## cannot be written down, and that propagates through ``seq``. Every
+    ## access below therefore either indexes in place or ``move``s out. Slots
+    ## are recycled but NEVER deleted — ``seq.delete`` shifts elements by
+    ## assignment, which is exactly the copy the type refuses.
+    handles: seq[MonitorHandle]
+    records: seq[MonitorHostRecord]
+    flushNonce: int
+      ## HM-5 — uniquifies the scratch file each action's depfile is written
+      ## to. A slot index would not: slots are RECYCLED, and a recycled slot
+      ## can be handed to the next action while the previous action's
+      ## publication is still in flight, which is exactly the overlap this
+      ## milestone exists to create.
+
+proc allocMonitorHostSlot(pool: var MonitorHostPool): int =
+  for i in 0 ..< pool.records.len:
+    if not pool.records[i].inUse:
+      pool.records[i] = MonitorHostRecord(inUse: true)
+      return i
+  pool.handles.add(MonitorHandle())
+  pool.records.add(MonitorHostRecord(inUse: true))
+  pool.records.len - 1
+
+proc monitorHostRequest(action: BuildAction;
+                        command: ReproCommandSpec;
+                        depFilePath: string): FsSnoopRequest =
+  ## Project the ONE argv+env contract every launch path shares onto io-mon's
+  ## request. Both sides layer over the hosting process's own environment
+  ## (``ReproCommandSpec.env`` through RunQuota's process backend,
+  ## ``FsSnoopRequest.env`` through io-mon's ``childEnv``), so the monitored
+  ## child sees the same variables it saw when a second ``repro`` process was
+  ## in between — which is what makes the two hosting forms comparable at all.
+  ##
+  ## ``depFilePath`` is the caller's, not ``action.monitorDepfile``. Since HM-5
+  ## the hosted path hands io-mon a SCRATCH sibling of the real depfile and
+  ## publishes it with a rename, so io-mon's write — which it owns, and which
+  ## no request field can switch off — never lands on the path anything else
+  ## reads. Passing it explicitly is what keeps that decision at the one call
+  ## site that makes it, instead of leaving a second proc quietly able to
+  ## write the destination in place.
+  result = FsSnoopRequest(
+    command: command.argv,
+    depFilePath: depFilePath,
+    cwd: command.cwd,
+    streamMode: fsoNone,
+    passthroughChildStdout: true,
+    passthroughChildStderr: true)
+  for entry in command.env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    result.env.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+
+when defined(posix):
+  type MonitorSpawnContext = object
+    savedIn: cint
+    savedOut: cint
+    savedErr: cint
+    nullFile: File
+    outFile: File
+    errFile: File
+    savedMask: Mode
+    active: bool
+
+  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
+    ## Re-establish, across io-mon's spawn, the three things the retired
+    ## ``/bin/sh -c 'umask 022 && <repro> internal io monitor …'`` wrapper and
+    ## RunQuota's process backend used to provide for free.
+    ##
+    ## STDIO. io-mon spawns with ``poParentStreams``, so the monitored child
+    ## inherits THIS process's descriptors 0, 1 and 2 — for the engine, the
+    ## user's terminal, not a per-action capture. Pointing 1 and 2 at two
+    ## per-action files across the spawn gives the engine back separate
+    ## ``stdout`` and ``stderr``, and does it WITHOUT the monitored tree
+    ## opening anything: the child inherits descriptors that are already open,
+    ## so no ``open`` of a log path enters its dependency evidence. (A shell
+    ## redirect inside the monitored command would have put both log paths
+    ## into ``monitorWrites`` — which is why this is done here and not there.)
+    ##
+    ## STDIN, and it is descriptor 0 that makes this a correctness fix rather
+    ## than a capture convenience. EVERY other launch path gives the child
+    ## ``/dev/null`` on descriptor 0 — RunQuota's POSIX backend opens it
+    ## explicitly before ``execvp`` (``runquota_process.nim``), so an action
+    ## that reads stdin sees immediate EOF. ``poParentStreams`` hands the child
+    ## the ENGINE's stdin instead, which in a normal ``repro build`` is the
+    ## user's terminal: a monitored action that reads stdin would block the
+    ## build waiting for a keystroke, or worse, eat one. Redirecting it here
+    ## makes the hosted path answer EOF like every other path.
+    ##
+    ## UMASK. ``umaskWrappedArgv`` (M9.R.36.3) pins every spawned tool to the
+    ## canonical 0022 mask by wrapping the argv in a shell. A hosted action has
+    ## no wrapper shell to carry it, and monitoring one would add the shell's
+    ## own reads to the action's evidence, so the mask is set here and restored
+    ## immediately; a child inherits it across ``fork``.
+    ##
+    ## SAFE BECAUSE THE SCHEDULER IS SINGLE-THREADED. The engine runs N
+    ## concurrent child PROCESSES from one poll loop, not N threads
+    ## (``createThread`` has zero occurrences in this library), so nothing else
+    ## can observe the window between this call and ``endMonitorSpawnContext``.
+    ## If the engine ever grows worker threads, this is the first thing that
+    ## breaks, and it breaks by interleaving one action's output into
+    ## another's.
+    flushFile(stdout)
+    flushFile(stderr)
+    result.savedIn = dup(cint(0))
+    result.savedOut = dup(cint(1))
+    result.savedErr = dup(cint(2))
+    if result.savedIn < 0 or result.savedOut < 0 or result.savedErr < 0:
+      if result.savedIn >= 0: discard close(result.savedIn)
+      if result.savedOut >= 0: discard close(result.savedOut)
+      if result.savedErr >= 0: discard close(result.savedErr)
+      raiseEngine("in-process monitor host: cannot duplicate stdio")
+
+    proc closeSaved(ctx: MonitorSpawnContext) =
+      discard close(ctx.savedIn)
+      discard close(ctx.savedOut)
+      discard close(ctx.savedErr)
+
+    if not open(result.nullFile, "/dev/null", fmRead):
+      closeSaved(result)
+      raiseEngine("in-process monitor host: cannot open /dev/null")
+    if not open(result.outFile, outPath, fmWrite):
+      close(result.nullFile)
+      closeSaved(result)
+      raiseEngine("in-process monitor host: cannot open stdout capture " &
+        outPath)
+    if not open(result.errFile, errPath, fmWrite):
+      close(result.nullFile)
+      close(result.outFile)
+      closeSaved(result)
+      raiseEngine("in-process monitor host: cannot open stderr capture " &
+        errPath)
+    discard dup2(cint(getFileHandle(result.nullFile)), cint(0))
+    discard dup2(cint(getFileHandle(result.outFile)), cint(1))
+    discard dup2(cint(getFileHandle(result.errFile)), cint(2))
+    result.savedMask = umask(Mode(0o022))
+    result.active = true
+
+  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
+    if not ctx.active:
+      return
+    ctx.active = false
+    discard umask(ctx.savedMask)
+    flushFile(stdout)
+    flushFile(stderr)
+    discard dup2(ctx.savedIn, cint(0))
+    discard dup2(ctx.savedOut, cint(1))
+    discard dup2(ctx.savedErr, cint(2))
+    discard close(ctx.savedIn)
+    discard close(ctx.savedOut)
+    discard close(ctx.savedErr)
+    close(ctx.nullFile)
+    close(ctx.outFile)
+    close(ctx.errFile)
+else:
+  type MonitorSpawnContext = object
+    active: bool
+
+  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
+    discard outPath
+    discard errPath
+
+  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
+    discard ctx
+
+proc monitorHostStdioStem(actionId: string): string =
+  sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId)
+
+proc releaseMonitorHostSlot(pool: var MonitorHostPool; slot: int) =
+  ## Return one slot to the pool, killing and dropping its monitor first if the
+  ## handle is still live.
+  ##
+  ## THE ONLY WAY A SLOT IS FREED. Every caller goes through here so the pool's
+  ## one invariant — a recyclable slot's handle is dead — cannot be broken by
+  ## adding another exit path. The root is killed BEFORE the handle is dropped
+  ## because dropping runs io-mon's teardown, which waits for the monitored
+  ## root before releasing the consumer (IoMon-Decomposed-Host-API DH-2): that
+  ## ordering is what makes an orphaned producer unrepresentable, and it is
+  ## also what would otherwise let a still-running child hold the build open
+  ## for as long as it liked.
+  if slot < 0 or slot >= pool.records.len: return
+  if pool.records[slot].handleLive:
+    when defined(posix):
+      let pid = pool.records[slot].rootPid
+      if pid > 0:
+        when defined(linux):
+          signalDescendants(pid, SIGKILL)
+        discard kill(Pid(pid), SIGKILL)
+    block:
+      let handle = move(pool.handles[slot])
+      discard handle.live
+  pool.records[slot] = MonitorHostRecord()
+
+proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
+                      config: BuildEngineConfig; cacheRoot: string): int =
+  ## Bring io-mon's consumer up and launch the monitored tree, returning the
+  ## pool slot that owns both. Raises like any other launch primitive; the
+  ## caller turns a raise into the same ``process launch failed`` result the
+  ## other paths produce.
+  let command = preparedRunQuotaCommand(action, config, shellUmaskWrap = false)
+  if command.argv.len == 0:
+    raiseEngine("in-process monitor host: action has empty argv: " & action.id)
+  let logDir = bypassActionLogDir(cacheRoot)
+  createDir(extendedPath(logDir))
+  let stem = monitorHostStdioStem(action.id)
+  let outPath = logDir / (stem & ".host.stdout")
+  let errPath = logDir / (stem & ".host.stderr")
+  # HM-5 — io-mon writes HERE, and the scheduler publishes it with a rename.
+  # ``createDir`` on the depfile's own directory is what makes the sibling
+  # placement work on the first action of a build; io-mon's own
+  # ``ensureParentDir`` would create it too, but only once it is about to
+  # write, and the temp path is decided before that.
+  inc pool.flushNonce
+  let depDest = action.monitorDepfile
+  let depTemp = monitorFlushTempPath(depDest, pool.flushNonce)
+  if depDest.len > 0:
+    createDir(extendedPath(depDest.parentDir))
+  var ctx = beginMonitorSpawnContext(outPath, errPath)
+  var slot = -1
+  try:
+    slot = allocMonitorHostSlot(pool)
+    pool.records[slot].stdoutPath = outPath
+    pool.records[slot].stderrPath = errPath
+    pool.records[slot].depTempPath = depTemp
+    pool.records[slot].depDestPath = depDest
+    pool.handles[slot] = startMonitor(monitorHostRequest(action, command,
+      depTemp))
+    pool.records[slot].handleLive = true
+    pool.records[slot].rootPid = int(rootPid(pool.handles[slot]))
+  except CatchableError:
+    if slot >= 0:
+      # Never release a slot whose handle is still live — see
+      # ``MonitorHostRecord.handleLive``. ``startMonitor`` may have succeeded
+      # and a later statement raised.
+      releaseMonitorHostSlot(pool, slot)
+    raise
+  finally:
+    endMonitorSpawnContext(ctx)
+  slot
+
+proc completeMonitorHost(pool: var MonitorHostPool; slot: int) =
+  ## Consume the handle and record the outcome. ``finishMonitor`` waits for the
+  ## root itself when it has not exited — exactly what ``runMonitored`` relies
+  ## on — so there is no spin here.
+  if slot < 0 or slot >= pool.records.len: return
+  if not pool.records[slot].inUse or pool.records[slot].finished: return
+  # ``finishMonitor`` consumes the handle whether it returns or raises, so the
+  # slot stops owning one the moment the ``move`` is evaluated.
+  pool.records[slot].handleLive = false
+  try:
+    var outcome = finishMonitor(move(pool.handles[slot]))
+    pool.records[slot].exitCode = outcome.exitCode
+    # HM-5 — take the canonical records ``finishMonitor`` already built. This
+    # is a MOVE, not a decode and not a copy: ``depFileFromOwnedRecords`` owns
+    # the very seq ``writeCanonicalInPlace`` just emitted, so the engine's
+    # evidence source costs nothing here and the ``.rdep`` stops being read
+    # back at all. ``outcome`` dies at the end of this statement list, so
+    # nothing retains the ``MonitorDepFile`` object — the rule
+    # ``foldMonitorDepFileEvidence``'s doc-comment states is unchanged.
+    pool.records[slot].records = move(outcome.depFile.records)
+  except CatchableError as err:
+    # A monitor fault must fail ONE action, never the host — see
+    # tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim,
+    # which states that as a property of the engine precisely so it keeps its
+    # meaning now that the process boundary is gone.
+    pool.records[slot].failure = "io-monitor host failed: " & err.msg
+  pool.records[slot].finished = true
+
+proc settleMonitorHost(pool: var MonitorHostPool; slot: int): bool =
+  ## Advance one hosted monitor without blocking, and FINISH it the moment its
+  ## root has exited. See the header for why finishing is not deferred to the
+  ## point where the scheduler reaps the action.
+  if slot < 0 or slot >= pool.records.len: return false
+  if not pool.records[slot].inUse: return false
+  if pool.records[slot].finished: return true
+  var exited = false
+  try:
+    exited = pollMonitor(pool.handles[slot])
+  except CatchableError as err:
+    pool.records[slot].failure = "io-monitor poll failed: " & err.msg
+    pool.records[slot].finished = true
+    return true
+  if not exited:
+    return false
+  completeMonitorHost(pool, slot)
+  true
+
+proc readCapturedStdio(path: string; limit: int): string =
+  ## Read back one of the in-process host's stdio captures, applying the same
+  ## HEAD truncation RunQuota's process backend applies while draining a pipe
+  ## (``runquota_process.appendBounded`` keeps the first ``limit`` bytes), and
+  ## then REWRITE the file at that size.
+  ##
+  ## The rewrite is not tidiness. RunQuota's capture is bounded in MEMORY while
+  ## the child runs — everything past the limit is drained and dropped — but a
+  ## redirected descriptor has no such bound, so an action that writes gigabytes
+  ## writes gigabytes into the cache root. Truncating on read bounds what
+  ## SURVIVES the action to ``limit``; what it cannot bound is the peak, and
+  ## that difference is a real one against the spawned form. A ``cacheRoot`` on
+  ## a small filesystem plus a runaway monitored action is the shape to watch.
+  if path.len == 0 or not fileExists(extendedPath(path)):
+    return ""
+  try:
+    result = readFile(extendedPath(path))
+  except CatchableError:
+    return ""
+  if limit > 0 and result.len > limit:
+    result = result[0 ..< limit]
+    try:
+      writeFile(extendedPath(path), result)
+    except CatchableError:
+      discard
+
+proc finishMonitorHostAction(pool: var MonitorHostPool; id: string; slot: int;
+                             config: BuildEngineConfig;
+                             cacheRoot: string;
+                             hostedRecords: var seq[MonitorRecord]):
+                             ActionResult =
+  ## Turn a hosted monitor into the same ``ActionResult`` shape the direct
+  ## RunQuota-bypass launch produces, including the historical per-action log
+  ## files diagnostics and focused engine tests read.
+  ##
+  ## HM-5 — this is the seam where the action's outcome and its evidence go
+  ## FORWARD and the ``.rdep`` goes SIDEWAYS. ``hostedRecords`` is moved out to
+  ## the caller (a scheduler local it drops as soon as evidence is collected)
+  ## and the publication is queued on the flush worker, so by the time this
+  ## returns the scheduler owns everything it needs and the file has not
+  ## necessarily landed.
+  completeMonitorHost(pool, slot)
+  hostedRecords = @[]
+  result = ActionResult(
+    id: id,
+    launched: true,
+    runQuotaBackend: "runquota-bypass")
+  if slot < 0 or slot >= pool.records.len:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = "in-process monitor host: no slot for " & id
+    return
+  # MOVE, never copy: a real ``nim c`` action's record set is ~97 000 records /
+  # 18 MB, and ``let record = pool.records[slot]`` used to copy the whole
+  # ``MonitorHostRecord``. Taking the records out first keeps that copy cheap
+  # again and leaves the slot's own seq empty for ``releaseMonitorHostSlot``.
+  hostedRecords = move(pool.records[slot].records)
+  let record = pool.records[slot]
+  # The flush is queued BEFORE the slot is released and before the caller
+  # collects evidence. The job owns copies of both paths, so recycling this
+  # slot into the next action — which the release below makes possible
+  # immediately — cannot disturb a publication still in flight.
+  #
+  # NOT queued when the monitor itself faulted: ``finishMonitor`` raised, so
+  # there is no canonical depfile at the scratch path to publish and queuing
+  # one would report a flush failure for a fault that has already failed the
+  # action on its own terms. The scratch file, if the fault left one, is
+  # removed here rather than left to accumulate in the depfile directory.
+  if record.depDestPath.len > 0 and record.failure.len == 0:
+    enqueueMonitorFlush(MonitorFlushJob(
+      actionId: id,
+      tempPath: record.depTempPath,
+      destPath: record.depDestPath))
+  elif record.depTempPath.len > 0:
+    try:
+      removeFile(extendedPath(record.depTempPath))
+    except CatchableError:
+      discard
+  # ``completeMonitorHost`` above normally leaves the handle dead, but not when
+  # ``settleMonitorHost`` already marked the slot finished on a POLL failure —
+  # that path never consumed it. ``releaseMonitorHostSlot`` is what closes that
+  # gap; going through it is why this is not a bare record reset.
+  releaseMonitorHostSlot(pool, slot)
+  let capturedOut = readCapturedStdio(record.stdoutPath, config.stdoutLimit)
+  let capturedErr = readCapturedStdio(record.stderrPath, config.stderrLimit)
+  try:
+    writeFile(extendedPath(bypassActionStdoutLogPath(cacheRoot, id)),
+      capturedOut)
+  except CatchableError:
+    discard
+  try:
+    writeFile(extendedPath(bypassActionStderrLogPath(cacheRoot, id)),
+      capturedErr)
+  except CatchableError:
+    discard
+  result.stdout = stripMonitorBanner(capturedOut)
+  result.stderr = stripMonitorBanner(capturedErr)
+  if record.failure.len > 0:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = [result.stderr, record.failure].join("\n").strip()
+  else:
+    result.exitCode = record.exitCode
+    result.status = if record.exitCode == 0: asSucceeded else: asFailed
+
+proc abandonMonitorHost(pool: var MonitorHostPool; slot: int) =
+  ## Tear a hosted monitor down on cancellation or shutdown. Kills the
+  ## monitored root and drops the handle — see ``releaseMonitorHostSlot``,
+  ## which owns that ordering and is the only place a slot is freed. This
+  ## exists as a named call site so the scheduler's shutdown path reads the
+  ## same as its helper-path neighbour, ``terminateRunningAction``.
+  ##
+  ## HM-5 — an abandoned action never reaches ``finishMonitorHostAction``, so
+  ## its scratch depfile was never queued for publication and nothing else will
+  ## ever look at it. Remove it here; a cancelled build must not leave the
+  ## depfile directory growing dot-files nobody collects.
+  if slot < 0 or slot >= pool.records.len: return
+  if not pool.records[slot].inUse: return
+  let temp = pool.records[slot].depTempPath
+  if temp.len > 0:
+    try:
+      removeFile(extendedPath(temp))
+    except CatchableError:
+      discard
+  releaseMonitorHostSlot(pool, slot)
 
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig):
@@ -6214,6 +7214,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     cmp(idToIndex[a], idToIndex[b])
 
   var running: seq[RunningAction] = @[]
+  # In-Process-Monitor-Hosting HM-4 — the in-flight io-mon consumers this
+  # build hosts itself. A build-scoped local rather than a module global: the
+  # pool owns live consumers and live monitored trees, and its teardown is the
+  # ``finally`` below, so its lifetime has to be exactly this build's.
+  var monitorHosts = MonitorHostPool()
+  # HM-5 — every depfile publication that came back FAILED, by action id.
+  # Consulted before an action's cache entry is published and reported again at
+  # the end of the build for the publications that had not finished by then.
+  var monitorFlushFailures = initTable[string, string]()
   var launchedSucceeded = initHashSet[string]()
   var runQuotaDaemonReachable: Option[bool]
 
@@ -6377,7 +7386,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## entries, so cap its timeout while one is active.
     for item in running:
       if item.processKind in {rpkInlineRunQuota, rpkInlineRunQuotaPending,
-                              rpkInlineRunQuotaFailed, rpkBypassProcess}:
+                              rpkInlineRunQuotaFailed, rpkBypassProcess,
+                              rpkMonitorHost}:
         return true
     false
 
@@ -7070,8 +8080,60 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           launchedAny = true
           continue
 
+        # In-Process-Monitor-Hosting HM-4 — the launch decision is taken HERE,
+        # before the monitor is planned, because only a path the ENGINE spawns
+        # can host io-mon in-process and the monitor plan is what records that
+        # choice. It used to sit just above the spawn, ~130 lines below.
+        #
+        # Guarded on ``bakProcess`` so nothing changes for a built-in action:
+        # ``tryEnsureInlineRunQuotaSession`` opens a real session, and a
+        # built-in never launches anything that would use one. The two
+        # variables are consumed unchanged at the spawn site; only the point
+        # at which they are computed moved.
+        var bypassRunQuota = false
+        var inlineRunQuota = false
+        if action.kind == bakProcess:
+          if config.inlineRunQuota and not effectiveBypassRunQuota:
+            inlineRunQuota = tryEnsureInlineRunQuotaSession()
+            bypassRunQuota = not inlineRunQuota
+          else:
+            bypassRunQuota = launchBypassesRunQuota()
+        # ``bypassRunQuota`` IS A SAFETY CONJUNCT, NOT A SCOPE NOTE. Read
+        # this before widening it.
+        #
+        # Saying "hosted" here does two independent things: it tells
+        # ``monitoredAction`` to leave the argv ALONE (no
+        # ``repro internal io monitor`` wrapper), and it tells the launch
+        # site below to start an in-process host instead. Only the bypass
+        # and helper launch sites consult ``plan.hostInProcess`` at all.
+        # The INLINE RunQuota sites do not: an inline launch is staged into
+        # ``stagedInlineLaunches`` and ``continue``s before that branch is
+        # ever reached, and the batch flush / grant poller spawn the child
+        # themselves as part of binding it to a lease.
+        #
+        # So dropping ``bypassRunQuota`` from this conjunction does not
+        # merely "enable hosting on more paths". An inline action would
+        # lose the wrapper AND get no host: it would run completely
+        # UNMONITORED, produce no RMDF, and be graded as if the monitor had
+        # simply found nothing — no error, no diagnostic, nothing in the
+        # build report. That was measured, not reasoned: with the conjunct
+        # removed, the inline actions in
+        # ``tests/integration/t_every_launch_path_is_monitored.nim`` come
+        # back with an EMPTY read set and "RMDF file does not exist".
+        #
+        # Hosting an inline action therefore requires the inline spawn
+        # sites to consult ``plan.hostInProcess`` first — which in turn
+        # needs a lease that can adopt an already-spawned child, and costs
+        # RunQuota the per-action resource accounting it measures by owning
+        # the spawn. Until that exists, this conjunct is what keeps a
+        # hosted plan and a hosting launch site from drifting apart.
+        let hostMonitorInProcess = InProcessMonitorHostSupported and
+          config.hostMonitorInProcess and
+          action.kind == bakProcess and bypassRunQuota
+
         let monitorPlanStart = statStart()
-        let plan = monitoredAction(action, config, cacheRoot)
+        let plan = monitoredAction(action, config, cacheRoot,
+          hostMonitorInProcess)
         finishStat("repro monitor plan", monitorPlanStart)
         if plan.diagnostic.len > 0:
           statuses[id] = asFailed
@@ -7198,13 +8260,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         poolRunning[poolName] = used + units
         inc launchSeq
         let resultPath = runQuotaResultRoot / ($launchSeq & ".json")
-        var bypassRunQuota = false
-        var inlineRunQuota = false
-        if config.inlineRunQuota and not effectiveBypassRunQuota:
-          inlineRunQuota = tryEnsureInlineRunQuotaSession()
-          bypassRunQuota = not inlineRunQuota
-        else:
-          bypassRunQuota = launchBypassesRunQuota()
+        # ``bypassRunQuota`` / ``inlineRunQuota`` were decided above the
+        # monitor plan (HM-4). Their consumption is unchanged.
         # RA-13: record that this run launched at least one action with no
         # RunQuota lease so the build header + run report can surface the
         # unsafe-for-concurrent state (it never makes concurrent cross-
@@ -7219,6 +8276,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # already supports batched candidate decisions, so this turns
           # an O(N) chain of synchronous round-trips at parallel=N into
           # a single round-trip per wave.
+          #
+          # NOTE THE ``continue``: this path leaves before the launch
+          # branch below, so it NEVER consults ``plan.hostInProcess``. It
+          # is correct today only because the hosting decision above
+          # requires ``bypassRunQuota``, so an inline action's plan is
+          # never hosted. If that conjunct is ever relaxed, this staging
+          # has to learn about hosting in the same change — otherwise the
+          # action arrives here with an unwrapped argv and no host, and
+          # runs unmonitored without saying so.
           stagedInlineLaunches.add(StagedInlineLaunch(
             id: id,
             pool: poolName,
@@ -7231,14 +8297,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let launchStart = statStart()
         var process: Process
         var directProcess: ReproDirectRunningProcess
+        var monitorSlot = -1
         var processKind =
-          if bypassRunQuota: rpkBypassProcess
+          if plan.hostInProcess: rpkMonitorHost
+          elif bypassRunQuota: rpkBypassProcess
           else: rpkHelperProcess
         let startEvent = "launched"
         let startDetail = "pool=" & poolName
         var launchFailure = ""
         try:
-          if bypassRunQuota:
+          if plan.hostInProcess:
+            # HM-4 — the engine IS io-mon's host for this action. Reached only
+            # when the monitor plan said so, which it only does for a launch
+            # path the engine spawns.
+            monitorSlot = startMonitorHost(monitorHosts, plan.action, config,
+              cacheRoot)
+          elif bypassRunQuota:
             directProcess = startBypassRunQuotaProcess(plan.action, config)
           else:
             process = startRunQuotaProcess(plan.action, config, resultPath)
@@ -7278,10 +8352,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           processKind: processKind,
           process: process,
           directProcess: directProcess,
-          resultPath: resultPath
+          resultPath: resultPath,
+          monitorSlot: monitorSlot
         )
         when defined(posix):
-          if not bypassRunQuota:
+          if not bypassRunQuota and not plan.hostInProcess:
             runningAction.processGroupPid = assignProcessGroup(process)
         running.add(runningAction)
         runResult.trace(id, startEvent, startDetail)
@@ -7366,7 +8441,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               processKind: processKind,
               runQuotaProcess: runQuotaProcess,
               queuedRunQuotaProcess: queuedRunQuotaProcess,
-              resultPath: staged.resultPath
+              resultPath: staged.resultPath,
+              monitorSlot: -1
             ))
             runResult.trace(staged.id, startEvent, startDetail)
             emitProgress(bpkActionStarted, staged.id)
@@ -7438,6 +8514,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           nextGrantPoll = epochTime() + 0.025
           if runIndex >= 0:
             break
+        # In-Process-Monitor-Hosting HM-4 — settle EVERY hosted monitor whose
+        # root has exited before choosing which action to reap, and settle
+        # them in their own pass so the choice cannot skip any.
+        #
+        # This is the timing decision the milestone asks to be made
+        # deliberately. ``settleMonitorHost`` runs ``finishMonitor`` as soon as
+        # ``pollMonitor`` answers true, and the §4.1 detached-descendant grace
+        # window opens at that call (DH-4). Doing it inside the selection loop
+        # below would leave every monitor after the first one in the pass
+        # unfinished until the scheduler got round to it, so a descendant that
+        # died in between would be graded ``mcComplete`` here and
+        # ``mcIncomplete`` by the reference form — a divergence produced by
+        # queue depth rather than by anything about the action.
+        for j in 0 ..< running.len:
+          if running[j].processKind == rpkMonitorHost:
+            discard settleMonitorHost(monitorHosts, running[j].monitorSlot)
         # Cheap inline-only checks first: queued/failed inline-runquota
         # entries are not handle-based and the OS won't wake us for them.
         # Inline-RunQuota processes do their own pipe / handle wait in
@@ -7446,6 +8538,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           case running[j].processKind
           of rpkInlineRunQuotaPending:
             discard
+          of rpkMonitorHost:
+            if monitorHosts.records[running[j].monitorSlot].finished:
+              runIndex = j
+              break
           of rpkInlineRunQuota:
             if running[j].runQuotaProcess.pollCompletion():
               runIndex = j
@@ -7492,6 +8588,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       finishStat("repro process wait", waitStart)
       var runningItem = running[runIndex]
       let finishStart = statStart()
+      # HM-5 — the hosted path's evidence, in memory, for exactly one
+      # iteration. Declared here and re-assigned per action so it is dropped
+      # (and its ~18 MB for a real provider compile freed) as soon as
+      # ``collectEvidence`` below has folded it.
+      var hostedMonitorRecords: seq[MonitorRecord] = @[]
       let finished =
         case runningItem.processKind
         of rpkInlineRunQuotaPending:
@@ -7504,6 +8605,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runningItem.runQuotaProcess)
         of rpkInlineRunQuotaFailed:
           runningItem.inlineFailure
+        of rpkMonitorHost:
+          finishMonitorHostAction(
+            monitorHosts,
+            runningItem.id,
+            runningItem.monitorSlot,
+            config,
+            cacheRoot,
+            hostedMonitorRecords)
         of rpkBypassProcess:
           finishBypassRunQuotaProcess(
             runningItem.id,
@@ -7569,8 +8678,47 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           continue
         let evidenceStart = statStart()
-        let evidence = collectEvidence(action, strict = true)
+        var evidence =
+          if runningItem.processKind == rpkMonitorHost:
+            # HM-5 — fold from the records the host already has. The ``.rdep``
+            # for this action may not exist yet; that is the point.
+            collectEvidence(action, strict = true,
+              hostedRecords = addr hostedMonitorRecords)
+          else:
+            collectEvidence(action, strict = true)
+        hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
+        # HM-5 — a publication that FAILED means this action's ``.rdep`` never
+        # landed. Nothing is wrong with the action or its evidence, which came
+        # from memory; what is missing is the artefact ``repro why`` and CI
+        # read for the cache entry about to be published. So the entry is not
+        # published and the next build MISSES and re-runs — the same "fail
+        # toward a re-execution" direction IM-3's missing-create case takes.
+        #
+        # A CACHEABLE hosted action WAITS for its own publication here, and
+        # that is the one place this milestone gives its asynchrony back on
+        # purpose. A non-blocking drain makes the conservative direction a
+        # RACE between a rename and this wrap-up — measured going both ways
+        # while mutation-checking, which is how it was found — and a
+        # conservative direction that holds "usually" is not one. What is
+        # waited for is a ``rename`` on a file io-mon finished writing before
+        # the action was reaped, after evidence collection and the converters
+        # have already run; see ``awaitMonitorFlush``. Everything else — every
+        # non-cacheable action, and every action's next edges up to this point
+        # — still proceeds without waiting.
+        let flushOutcomes =
+          if runningItem.processKind == rpkMonitorHost and action.cacheable:
+            awaitMonitorFlush(finished.id)
+          else:
+            drainMonitorFlushOutcomes()
+        for outcome in flushOutcomes:
+          if outcome.error.len == 0: continue
+          monitorFlushFailures[outcome.actionId] = outcome.error
+        if monitorFlushFailures.hasKey(finished.id):
+          evidence.disableCacheHits = true
+          evidence.evidence.diagnostics.add(
+            "monitor depfile flush failed; action-cache publish skipped so " &
+            "the next build re-executes: " & monitorFlushFailures[finished.id])
         runResult.results[idx].evidence = evidence.evidence
         if not evidence.publishable:
           runResult.results[idx].status = asFailed
@@ -7642,6 +8790,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           discard item.runQuotaProcess.cancelAndWait()
       of rpkInlineRunQuotaFailed:
         discard
+      of rpkMonitorHost:
+        # HM-4 — kill the monitored root, then let the handle go. Dropping it
+        # reaps the root before releasing the consumer, so no producer is ever
+        # left publishing into a released set (LF-2); killing first is what
+        # keeps that reap from blocking shutdown indefinitely.
+        abandonMonitorHost(monitorHosts, item.monitorSlot)
       of rpkBypassProcess:
         if item.directProcess.active and not item.directProcess.completed:
           discard item.directProcess.cancelAndWait()
@@ -7651,6 +8805,28 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if inlineRunQuotaSessionOpen:
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       inlineRunQuotaSession.close()
+    # HM-5 — the build does not end while a depfile publication is still in
+    # flight. Not for correctness of the build (the evidence was folded from
+    # memory and every cacheable action already waited for its own
+    # publication before publishing); for the ARTEFACT. A process that exited
+    # with a rename queued would leave a dot-prefixed scratch file next to a
+    # depfile that never appeared, and the next build would find neither.
+    #
+    # What can still be learned only HERE is narrow and is named rather than
+    # rounded up: a NON-cacheable action's failure, which withholds nothing
+    # because there was no entry to withhold, and a cacheable action whose
+    # ``awaitMonitorFlush`` hit its 30-second guard — a filesystem that has
+    # stopped answering, where the build has larger problems than a missing
+    # debugging artefact.
+    for outcome in awaitMonitorFlushes():
+      if outcome.error.len == 0: continue
+      monitorFlushFailures[outcome.actionId] = outcome.error
+      let lateIdx = idToIndex.getOrDefault(outcome.actionId, -1)
+      if lateIdx >= 0 and lateIdx < runResult.results.len:
+        runResult.results[lateIdx].evidence.diagnostics.add(
+          "monitor depfile flush failed after the action-cache entry was " &
+          "published: " & outcome.error)
+      runResult.trace(outcome.actionId, "monitor-flush-failed", outcome.error)
   finishStat("repro scheduler total", totalStart)
   finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats

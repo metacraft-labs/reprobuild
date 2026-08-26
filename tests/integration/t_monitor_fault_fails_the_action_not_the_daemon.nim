@@ -237,4 +237,6 @@ suite "monitor_fault_fails_the_action_not_the_daemon":
 
     test "teardown":
       removeDir(tempRoot)
-      check true
+      # ``check true`` could not fail, so a removeDir that silently left the
+      # scratch tree behind still reported [OK]. Assert the post-state.
+      check not dirExists(tempRoot)

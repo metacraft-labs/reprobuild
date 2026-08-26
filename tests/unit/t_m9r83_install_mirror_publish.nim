@@ -141,6 +141,7 @@ suite "M9.R.83 install-mirror store publication":
       check row.row.realizedPath == published.storeRelativePath
 
       let info = readRealizationInfoFile(recipesRoot, "tiny")
+      check info.platformTag == currentRealizationPlatformTag()
       check info.version == "1.0.0"
       check info.realizationHashHex == published.realizationHashHex
       check info.storeRelativePath == published.storeRelativePath
@@ -216,7 +217,7 @@ suite "M9.R.83 install-mirror store publication":
     check info.storeRelativePath == ""
     check hashedDepMirrorRoot(recipesRoot, "tiny") == ""
 
-  test "empty legacy sidecar is not hashed resolver metadata":
+  test "empty legacy sidecar is stale producer metadata":
     let scratch = createTempDir("m9r83-empty-sidecar-", "")
     defer: removeScratch(scratch)
     let recipesRoot = scratch / "recipes"
@@ -225,6 +226,7 @@ suite "M9.R.83 install-mirror store publication":
     writeFile(sidecar, "")
 
     let info = readRealizationInfoFile(recipesRoot, "tiny")
+    check info.platformTag.len == 0
     check info.version.len == 0
     check info.realizationHashHex.len == 0
     check info.storeRelativePath.len == 0
@@ -265,8 +267,8 @@ suite "M9.R.83 install-mirror store publication":
     check "REPRO_INSTALL_MIRROR_MODE" in snippet
     check "hashed-with-legacy-fallback" in snippet
     check "--source \"/recipes/pkg/.repro/output/install\"" in snippet
-    check "*) mkdir -p \"/recipes/pkg/.repro/output\"; : > \"" &
-      sidecar & "\"; ;; esac" in snippet
+    check "platform=" & currentRealizationPlatformTag() in snippet
+    check sidecar in snippet
 
   test "emitted default legacy snippet satisfies sidecar output only":
     let scratch = createTempDir("m9r84-legacy-sidecar-", "")
@@ -286,8 +288,9 @@ suite "M9.R.83 install-mirror store publication":
       checkpoint run.output
 
     check fileExists(sidecar)
-    check getFileSize(sidecar) == 0
+    check getFileSize(sidecar) > 0
     let info = readRealizationInfoFile(recipesRoot, "legacy-tiny")
+    check info.platformTag == currentRealizationPlatformTag()
     check info.version == ""
     check info.realizationHashHex == ""
     check info.storeRelativePath == ""

@@ -179,6 +179,28 @@ for libName in [
   "ct_test_interface",
   "ct_test_nim_unittest",
   "ct_test_unittest_parallel",
+  # RunQuota-Observation-Store M19: the ``HistoryReporter`` write path.
+  # It is NOT part of the three above and must not be: those are linked
+  # into test binaries and into ``repro.nim``'s DSL, while this one
+  # links the RunQuota client. Only ``tools/test-runner`` imports it.
+  "ct_test_history",
+  # RunQuota-Observation-Store M20: the SECOND write path into the same
+  # generic table, and the query that reads both runners' rows.
+  #
+  # ``repro_generic_test_recorder`` is deliberately not a mode of
+  # ``ct_test_history``: that library declares ``ext_codetracer_test``
+  # unconditionally and takes a ``CodetracerTestFacts``, so reusing it
+  # would have made the second runner declare a framework it is not. Only
+  # ``tools/tap-test-runner`` imports it.
+  #
+  # ``repro_test_stats`` is likewise NOT hosted inside
+  # ``ct_test_history``: putting the framework-neutral query inside
+  # CodeTracer's reporter would make every other runner's statistics
+  # reachable only by linking CodeTracer's write path — the capture OS-8
+  # forbids, by the back door. ``tools/test-runner`` and
+  # ``tools/tap-test-runner`` both read through it.
+  "repro_generic_test_recorder",
+  "repro_test_stats",
   "repro_core",
   "repro_platform",
   "repro_diagnostics",

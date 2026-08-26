@@ -64,7 +64,28 @@
       # io-mon no longer imports at all. fs_snoop.nim / writer.nim now
       # ``import shm_gset`` + ``shm_gset/transport``, so this pin requires the
       # nim-shm-gset-src input below and its SHM_GSET_SRC wiring.
-      url = "github:metacraft-labs/io-mon/3a7c15cd037dabc4c5dd7f3fe327334ffdaca4b9";
+      #
+      # In-Process-Monitor-Hosting HM-4 — bumped to the IoMon-Decomposed-Host-API
+      # DH-4 tip. The engine hosts io-mon's consumer IN-PROCESS now, and the
+      # decomposed lifecycle it calls (``startMonitor`` / ``pollMonitor`` /
+      # ``finishMonitor``, plus ``FsSnoopRequest.env`` / ``.cwd``) does not exist
+      # at all in the previous pin: at ``3a7c15cd`` ``fs_snoop`` exports only
+      # ``findShimLibrary`` / ``completeness`` / ``records`` / ``runMonitored`` /
+      # ``runFsSnoopCli``, and ``FsSnoopRequest`` has neither ``env`` nor ``cwd``.
+      # THIS PIN IS THE PREREQUISITE, not a refresh — io-mon's source having the
+      # API is not the same thing as reprobuild's BUILD having it. Note that a
+      # developer shell entered through ``.envrc`` sets NIX_FLAKE_OVERRIDE_AUTO=1
+      # and therefore resolves ``IO_MON_SRC`` from a ``../io-mon`` sibling when one
+      # exists; this pin is what the sandboxed package build and the override-free
+      # CI jobs use, and it is the revision the two must agree on.
+      #
+      # Bumped again to the sweep-cost fix: ``finishMonitor``'s §4.1 descendant
+      # sweep no longer walks all of /proc per call (~105 ms → ~6 ms), which is
+      # what makes in-process hosting a throughput WIN rather than a regression,
+      # and the same commit closes a false-complete hole in which an ``opendir`` /
+      # ``readdir`` fault during the sweep was silently reported as "no
+      # descendants" instead of as an incomplete observation.
+      url = "github:metacraft-labs/io-mon/30e54993547363efa46a646556b32c5f2dc930fd";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -568,6 +589,36 @@
                   ]
                 }:$PATH
                 exec ${pkgs.bash}/bin/bash scripts/check_suite_case_counts.sh
+              ''}";
+              language = "system";
+              pass_filenames = false;
+              always_run = true;
+            };
+            # The vacuous-case gate, at the same PUSH boundary and for the
+            # same reasons as the case-count baseline above.
+            #
+            # A test case whose only assertion is `check true` reports [OK]
+            # and increments the pass count, so it is invisible to every
+            # downstream signal -- the suite, the summary, the coverage
+            # numbers. It is strictly worse than a skip, which this repo
+            # already refuses, because a skip is at least counted. Running
+            # the suite cannot find one; only a source scan can, and this
+            # one costs seconds.
+            hooks.vacuous-test-cases = {
+              enable = true;
+              name = "no test case asserts only `check true`";
+              stages = [ "pre-push" ];
+              entry = "${pkgs.writeShellScript "reprobuild-check-vacuous-test-cases" ''
+                export PATH=${
+                  pkgs.lib.makeBinPath [
+                    pkgs.bash
+                    pkgs.coreutils
+                    pkgs.git
+                    pkgs.gnugrep
+                    pkgs.python3
+                  ]
+                }:$PATH
+                exec ${pkgs.python3}/bin/python3 scripts/check_vacuous_test_cases.py
               ''}";
               language = "system";
               pass_filenames = false;
@@ -1278,8 +1329,51 @@
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
+            # Read by RUNQUOTA'S ``config.nims``, not by ours.
+            #
+            # ``RUNQUOTA_SRC`` above serves the compile reprobuild does itself,
+            # which reaches only runquota's client-side libraries. But several
+            # entry points in this shell build runquota's DAEMON, in runquota's
+            # own checkout, with runquota's own build files:
+            # ``scripts/run-m23-benchmark.sh`` and ``scripts/run_tests.sh`` both
+            # run ``just build`` there when ``build/bin/runquotad`` is absent,
+            # and the Justfile's runquota-facing integration recipes do the same.
+            # That build compiles ``runquota_stats_table``, which imports
+            # ``shm_lease/anchor``, and runquota's ``config.nims`` resolves it
+            # from this variable (falling back to a ``../nim-shm-lease``
+            # sibling, which no CI layout of ours provides). Without it the
+            # daemon build stops at ``cannot open file: shm_lease/anchor`` and
+            # takes the benchmark suite down with it.
+            #
+            # THE VALUE IS RUNQUOTA'S OWN PIN, reached through its flake rather
+            # than restated here, for the same reason ``runquotaTools`` delegates
+            # to ``runquota-src.packages.<system>.default``: a second pin of the
+            # same dependency is a second thing to bump, and the two would
+            # eventually disagree about which revision runquota builds against.
+            # Nothing here needs updating when runquota moves its pin.
+            SHM_LEASE_SRC = "${runquota-src.inputs.nim-shm-lease}/src";
             SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
+            # Same contract as SQLITE_PREFIX/XXHASH_PREFIX above, and the same
+            # value the installed wrapper already `--set-default`s: it is how
+            # `reproLibPathFlags` (libs/repro_interface_artifacts) finds the
+            # clingo lib dir for the `-L` + `-Wl,-rpath` it puts on the
+            # interface-extract / provider compile.
+            #
+            # It was the ONLY one of that family missing from this shell, and
+            # LD_LIBRARY_PATH above does not stand in for it: on darwin dyld
+            # ignores LD_LIBRARY_PATH entirely, and `repro_solver` names its
+            # dynlib `@rpath/libclingo.dylib` precisely so LC_RPATH is what
+            # resolves the module-init dlopen. Without the rpath the extract
+            # runner reprobuild compiles for a project aborts before `main`
+            # with `could not load: @rpath/libclingo.dylib`, failing every
+            # build that extracts an interface — `t_ext_repro_action_rows`
+            # (M17) and `t_stats_reads_shared_store` (M18) among them, which
+            # left two milestone gates unrunnable in the sanctioned shell.
+            # The store-wide `*-clingo-*` scan in `nixPrefix` is a last-resort
+            # fallback for hosts with no prefix at all; it is not a substitute
+            # for naming the clingo this shell actually provides.
+            CLINGO_PREFIX = pkgs.clingo;
             packages = [
               runquotaTools
               # ``ct-test`` — CodeTracer's cross-language test driver. On PATH

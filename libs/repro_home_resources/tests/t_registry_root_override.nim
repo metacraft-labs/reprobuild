@@ -96,7 +96,13 @@ suite "registry root override (REPRO_REGISTRY_ROOT)":
   test "deleting an absent value is a no-op (no raise)":
     deleteRegistryValue("Environment", "NeverWritten")
     deleteRegistryValue("NeverCreated\\Subkey", "Anything")
-    check true # no exception thrown
+    # ``check true`` used to stand in for "no exception thrown", but an
+    # assertion that cannot fail cannot tell "did not raise" from "was never
+    # called" -- and it reports [OK] either way. Assert the observable
+    # post-state instead: the absent value is still absent, and deleting from
+    # a key that does not exist did not conjure it.
+    check not readRegistryValue("Environment", "NeverWritten").present
+    check not readRegistryValue("NeverCreated\\Subkey", "Anything").present
 
   test "writes under the override never touch a sibling hive":
     let other = createTempDir("repro-reg-other-", "")
