@@ -228,7 +228,7 @@ jobs:
             runquota-src=../runquota
             io-mon-src=../io-mon
             nim-shm-queue-src=../nim-shm-queue
-            stackable-hooks-src=../nim-stackable-hooks
+            nim-stackable-hooks-src=../nim-stackable-hooks
             reprobuild-test-adapters-src=../reprobuild-test-adapters
 
       # Clone status-im/nim-bearssl manually on Windows (since it belongs to a

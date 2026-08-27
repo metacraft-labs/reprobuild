@@ -139,7 +139,30 @@
     # like bearssl-src — it must be supplied as a source input; the dev shell
     # resolves it from the sibling checkout, but the sandboxed package build has
     # no sibling and otherwise fails with "cannot open file: stackable_hooks/…".
-    stackable-hooks-src = {
+    #
+    # THE INPUT NAME IS LOAD-BEARING, and it is why this was called
+    # ``stackable-hooks-src`` until 2026-08-26 and is not any more. `.envrc`
+    # sets ``NIX_FLAKE_OVERRIDE_AUTO=1`` with
+    # ``NIX_FLAKE_OVERRIDE_AUTO_STRIP_SUFFIXES=-src``: the auto arm strips the
+    # suffix off each input name and overrides the input when a sibling
+    # DIRECTORY OF THAT EXACT NAME exists. ``stackable-hooks-src`` stripped to
+    # ``stackable-hooks``; the checkout is ``../nim-stackable-hooks``, so the
+    # auto arm matched nothing and this was the ONLY sibling-backed input in
+    # the flake still resolving to its lock pin while every other one tracked
+    # the working tree. The pin then sat 30 commits behind the sibling, across
+    # ``6a53408`` ("Windows injector: an explicit child environment"), which
+    # added ``runWithMonitorShim``'s ``env`` parameter and
+    # ``WindowsInjectionResult.rootPid`` / ``.monitoringSkipped`` /
+    # ``.skipReason`` — all four read by io-mon's Windows arm
+    # (``fs_snoop.nim`` ~1439 and ~1965). So reprobuild's Windows arm compiled
+    # io-mon against a stackable_hooks that did not have the fields io-mon
+    # names, and nothing said so: ``scripts/check_dev_shell_env.sh``
+    # reconciled only inputs that WERE overridden, which is precisely the set
+    # this one was missing from. That blind spot is now closed by the
+    # sibling-vs-override check in that script, but the name is the fix —
+    # match the directory convention every other input follows and the auto
+    # arm reaches it without anyone having to remember.
+    nim-stackable-hooks-src = {
       # Pinned to the rev that carries ``platform/linux_preload`` (and the rest
       # of io-mon's stackable surface); the older lock lacked it, so
       # io-mon's ``linux_preload_runtime.nim`` failed with "cannot open file:
@@ -158,7 +181,16 @@
       # the store pin — not the sibling — is what ``just build`` (and CI)
       # actually compiles the shim from; the old pin therefore produced a
       # crashing shim even though the local sibling was already hardened.
-      url = "github:metacraft-labs/nim-stackable-hooks/30f69b6ca69c7f06c9a9946b77a85a09f6e3881d";
+      #
+      # Bumped from 30f69b6 to the ``dev`` tip 41ab1b9. The override reaching
+      # the sibling does NOT make this pin cosmetic: the sandboxed package
+      # build, the override-free ``lint`` / ``nix-build`` CI jobs and any
+      # non-workspace consumer resolve the source from here and from nowhere
+      # else, so the pin and the sibling have to agree or the two builds are
+      # different builds. 41ab1b9 is the revision that carries the explicit
+      # Windows child environment (``6a53408``) io-mon's ``fs_snoop`` Windows
+      # arm compiles against; 30f69b6 predates it.
+      url = "github:metacraft-labs/nim-stackable-hooks/41ab1b987aba67e8bcc34a5945ac33e17b6418ed";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -337,7 +369,7 @@
       git-hooks,
       nimcrypto-src,
       bearssl-src,
-      stackable-hooks-src,
+      nim-stackable-hooks-src,
       reprobuild-ct-test-runner-src,
       reprobuild-test-adapters-src,
       codetracer-native-recorder,
@@ -545,7 +577,7 @@
                 export BLAKE3_PREFIX=${blake3Prefix}
                 export NIMCRYPTO_SRC=${nimcrypto-src}
                 export BEARSSL_SRC=${bearssl-src}
-                export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
+                export STACKABLE_HOOKS_SRC=${nim-stackable-hooks-src}/src
                 export CODETRACER_TRACE_FORMAT_NIM_SRC=${codeTracerTraceFormatNimSrc}
                 export IO_MON_SRC=${io-mon-src}/src
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
@@ -685,7 +717,7 @@
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
-            STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            STACKABLE_HOOKS_SRC = "${nim-stackable-hooks-src}/src";
             CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
@@ -816,7 +848,7 @@
                   --set-default BLAKE3_PREFIX ${blake3Prefix} \
                   --set-default NIMCRYPTO_SRC ${nimcrypto-src} \
                   --set-default BEARSSL_SRC ${bearssl-src} \
-                  --set-default STACKABLE_HOOKS_SRC ${stackable-hooks-src}/src \
+                  --set-default STACKABLE_HOOKS_SRC ${nim-stackable-hooks-src}/src \
                   --set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \
                   --set-default IO_MON_SRC ${io-mon-src}/src \
                   --set-default SHM_GSET_SRC ${nim-shm-gset-src}/src \
@@ -953,7 +985,7 @@
                 BLAKE3_PREFIX|${blake3Prefix}
                 NIMCRYPTO_SRC|${nimcrypto-src}
                 BEARSSL_SRC|${bearssl-src}
-                STACKABLE_HOOKS_SRC|${stackable-hooks-src}/src
+                STACKABLE_HOOKS_SRC|${nim-stackable-hooks-src}/src
                 CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}
                 IO_MON_SRC|${io-mon-src}/src
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
@@ -1158,7 +1190,7 @@
                                       ${reprobuildSource} \
                                       ${nimcrypto-src} \
                                       ${bearssl-src} \
-                                      ${stackable-hooks-src} \
+                                      ${nim-stackable-hooks-src} \
                                       ${ct-trace-format-src} \
                                       ${io-mon-src} \
                                       ${nim-shm-gset-src} \
@@ -1319,7 +1351,7 @@
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
-            STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            STACKABLE_HOOKS_SRC = "${nim-stackable-hooks-src}/src";
             CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";

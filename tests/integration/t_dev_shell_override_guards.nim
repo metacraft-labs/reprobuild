@@ -1,6 +1,6 @@
 ## Dev-shell honesty guards — `scripts/lib/dev_shell_overrides.sh`.
 ##
-## Two defects, one shape: a mechanism that looks authoritative while being
+## Three defects, one shape: a mechanism that looks authoritative while being
 ## ignored, so the shell a developer is standing in is built from something
 ## other than what `.envrc` says.
 ##
@@ -21,6 +21,18 @@
 ##      stale while direnv reported "using cached dev shell", which failed
 ##      `just lint` for everyone with a spurious `undeclared identifier:
 ##      'ExtensionCellWire'`.
+##
+##   3. The auto arm resolves a sibling by the STRIPPED INPUT NAME, so an
+##      input whose name does not match its repository's directory is silently
+##      never overridden at all — and defect 2's fingerprint reconciles only
+##      the inputs that WERE overridden, so it cannot see one that never was.
+##      `stackable-hooks-src` (repository `nim-stackable-hooks`) was the one
+##      such input in this flake: it kept building from a lock pin 30 commits
+##      behind, across the commit that added `WindowsInjectionResult.rootPid`
+##      / `.monitoringSkipped` / `.skipReason` and `runWithMonitorShim`'s
+##      `env` — all four read by io-mon's Windows arm — while every other
+##      sibling-backed input tracked its working tree and every guard here
+##      stayed green.
 ##
 ## What is exercised here is the real library, driven by `bash`, against real
 ## `git` checkouts on the real filesystem — no process, git, or filesystem
@@ -711,3 +723,111 @@ suite "dev-shell override guards":
       check stale.output.contains("runquota-src")
       check stale.output.contains("built from sources that have since moved")
       check stale.output.contains("direnv reload")
+
+  test "t_dev_shell_lint_gate_fails_when_the_auto_arm_cannot_reach_a_sibling":
+    ## Defect 3, and the one the two checks above were structurally unable to
+    ## see. The auto arm strips `-src` off an input name and overrides the
+    ## input when a sibling DIRECTORY OF THAT NAME exists — so an input called
+    ## `stackable-hooks-src` whose repository is `nim-stackable-hooks` matches
+    ## nothing, is never overridden, and therefore never appears in the
+    ## fingerprint the drift check reconciles. It sat 30 commits behind its
+    ## sibling while every neighbouring input tracked its working tree, across
+    ## the commit that added the `WindowsInjectionResult` fields io-mon's
+    ## Windows arm reads, and `just lint` was green throughout.
+    ##
+    ## The three assertions are the three states that must be distinguishable:
+    ## a name that matches (accepted), a name that does not while the
+    ## repository IS checked out beside us (refused, by input name), and a
+    ## matching name whose sibling is not a flake so the plugin will not take
+    ## it either (refused, for the other reason).
+    if findExe("bash").len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-devshell-reach-", "")
+      defer: removeDirEventually(scratch)
+      let root = scratch / "repo"
+      createDir(root / "scripts" / "lib")
+      copyFile(libPath(), root / "scripts" / "lib" / "dev_shell_overrides.sh")
+      copyFile(checkScript(), root / "scripts" / "check_dev_shell_env.sh")
+      copyFile(repoRoot() / ".envrc", root / ".envrc")
+
+      # The sibling is named after the REPOSITORY, which is the whole point.
+      createDir(scratch / "nim-widget")
+      writeFile(scratch / "nim-widget" / "flake.nix", "{ outputs = _: { }; }\n")
+
+      proc writeFlake(inputName: string) =
+        writeFile(root / "flake.nix",
+          "{\n  inputs = {\n    " & inputName & " = {\n" &
+          "      url = \"github:metacraft-labs/nim-widget/deadbeef\";\n" &
+          "      flake = false;\n    };\n  };\n" &
+          "  outputs = _: { };\n}\n")
+
+      let bash = findExe("bash")
+      proc gate(): CmdResult =
+        runShell(shellCommand(@[bash,
+          root / "scripts" / "check_dev_shell_env.sh"]), cwd = root)
+
+      # 1. Input named after the repository: the arm reaches `../nim-widget`.
+      writeFlake("nim-widget-src")
+      let reachable = gate()
+      checkpoint("reachable:\n" & reachable.output)
+      check reachable.code == 0
+      check reachable.output.contains("1 flake input(s) examined")
+      check reachable.output.contains("0 unreached")
+
+      # 2. The defect verbatim: the input strips to a directory that is not
+      #    there, while the repository's checkout sits beside it unreached.
+      writeFlake("widget-src")
+      let unreachable = gate()
+      checkpoint("unreachable:\n" & unreachable.output)
+      check unreachable.code != 0
+      check unreachable.output.contains("'widget-src' is pinned")
+      check unreachable.output.contains("nim-widget")
+      check unreachable.output.contains("rename the input to 'nim-widget-src'")
+      # The remedy points at the declaration FILE, which is deliberately not
+      # copied into this tree: the exceptions describe one flake, and a list
+      # compiled into the script would excuse inputs a synthetic tree never
+      # had. Case 1 above is what says the absent file is not a blanket pass.
+      check unreachable.output.contains("dev-shell-pinned-siblings.tsv")
+
+      # 3. Names agree, but the sibling is not a flake, so the plugin emits no
+      #    --override-input for it. Same outcome — a pinned input beside a
+      #    moving checkout — reported as the different cause it is.
+      removeFile(scratch / "nim-widget" / "flake.nix")
+      writeFlake("nim-widget-src")
+      let unflakeable = gate()
+      checkpoint("unflakeable:\n" & unflakeable.output)
+      check unflakeable.code != 0
+      check unflakeable.output.contains("has no flake.nix")
+      check unflakeable.output.contains("nim-widget-src")
+
+      # 4. The declaration file is the gate's own escape hatch, so it has to
+      #    cost something to use. A row that names an input and a kind but no
+      #    REASON is a suppression wearing a declaration's clothes: it turns
+      #    the check off for that input and leaves nobody to ask why. Checked
+      #    here because it is the one way to make this gate pass while the
+      #    defect it names is still present — and it did, until this assertion.
+      let declFile = root / "scripts" / "dev-shell-pinned-siblings.tsv"
+      writeFlake("widget-src")
+      writeFile(declFile, "widget-src\tunreachable\n")
+      let noReason = gate()
+      checkpoint("declared without a reason:\n" & noReason.output)
+      check noReason.code != 0
+      check noReason.output.contains("gives no reason")
+
+      # A kind the check does not recognise cannot match a finding either, so
+      # it excuses nothing while looking like it does.
+      writeFile(declFile, "widget-src\tunknown-kind\tbecause I said so\n")
+      let badKind = gate()
+      checkpoint("declared with an unknown kind:\n" & badKind.output)
+      check badKind.code != 0
+      check badKind.output.contains("neither 'unreachable' nor 'unflakeable'")
+
+      # And a complete row is accepted — otherwise the two refusals above
+      # would be satisfied by a file that can never be written correctly.
+      writeFile(declFile,
+        "widget-src\tunreachable\tthe sibling is pinned on purpose here\n")
+      let declared = gate()
+      checkpoint("declared properly:\n" & declared.output)
+      check declared.code == 0
+      check declared.output.contains("1 unreached (1 declared, 0 NOT declared)")

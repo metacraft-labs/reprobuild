@@ -1,0 +1,40 @@
+# Flake inputs whose sibling checkout the auto-override arm provably cannot
+# reach, and which are deliberately left that way for now.
+#
+# Read by scripts/check_dev_shell_env.sh (check 3). Columns:
+#
+#   <input name>	<kind>	<why it is not being fixed>
+#
+# where <kind> is one of the two ways the arm misses a sibling:
+#
+#   unreachable — the sibling exists under the REPOSITORY's name, but the
+#                 input name does not strip to it, so `.envrc`'s auto arm is
+#                 looking for a directory that does not exist. Fixable here,
+#                 today, by renaming the input.
+#   unflakeable — the names agree and the sibling exists, but it has no
+#                 `flake.nix`, which the plugin requires before it will emit
+#                 an `--override-input`. Not fixable here.
+#
+# An entry is a STATEMENT WITH A NAME ON IT, not a suppression. Check 3 fails
+# on a finding with no entry AND on an entry that no longer describes a
+# finding, so neither a new instance nor a stale excuse can sit here quietly.
+# A missing file is not an empty file: with no entries at all, every finding is
+# undeclared and the gate refuses.
+#
+# All three columns are required, and the check refuses a row without a reason
+# or with a kind it does not recognise. That is not pedantry about format: a
+# two-column row parsed fine and silenced its finding outright, which is the
+# one way to make this gate pass while the defect it reports is still there.
+#
+# The defect this whole check exists for was `stackable-hooks-src`: input name
+# stripping to `stackable-hooks` while the checkout is `../nim-stackable-hooks`,
+# so it alone kept building from a lock pin 30 commits behind the working tree
+# every other input tracked — across the commit that added the
+# `WindowsInjectionResult` fields io-mon's Windows arm reads. It is fixed by
+# renaming, which is why it is not in this file.
+
+nim-shm-queue-src	unflakeable	../nim-shm-queue has no flake.nix, and the plugin refuses a sibling that is not a flake. Not fixable here; it needs a flake.nix in nim-shm-queue. reprobuild reaches shm_queue only through io_mon's --path, so the pinned source is what both the dev shell and CI compile.
+nim-results-src	unflakeable	../nim-results has no flake.nix. Note the two spellings: the input strips to `nim-results`, which IS the directory, while the repository is metacraft-labs/nim-result. The arm resolves by directory, so the names are fine here — the missing flake.nix is what stops it.
+nim-stew-src	unflakeable	../nim-stew has no flake.nix. Upstream (status-im) repository, pinned deliberately; reprobuild consumes it only as a --path source for the Nim compile.
+reprobuild-test-adapters-src	unflakeable	../reprobuild-test-adapters has no flake.nix. `.github/workflows/release.yml` overrides this input to the sibling BY HAND for exactly that reason; the dev shell cannot, so the pin is what it builds from. Fixing it means adding a flake.nix to reprobuild-test-adapters.
+ct-trace-format-src	unreachable	SECOND LIVE INSTANCE of the stackable-hooks defect, found by this check on the day it was added and deliberately not fixed in the same change. The input strips to `ct-trace-format`; the repository is `codetracer-trace-format-nim`, and it IS checked out beside us WITH a flake.nix, so renaming the input to `codetracer-trace-format-nim-src` would immediately switch reprobuild's trace-format source from the pin to the working tree. That is not a refresh: the sibling sits on a branch from which the pinned bc7c5d25 is not even reachable, so the rename changes WHAT is compiled. It wants its own change, with its own build and its own gates.
