@@ -982,6 +982,7 @@ tests/integration/t_m9r21_4_hardware_e2e.nim	nim	3
 tests/integration/t_m9r22b_2_apply_loopback.nim	nim	5
 tests/integration/t_macho_runtime_audit.nim	nim	15
 tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim	nim	1
+tests/integration/t_manifest_cache_serves_only_the_url_it_was_cloned_for.nim	nim	4
 tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim	nim	1
 tests/integration/t_manifest_init_rejects_unsigned_or_tampered_manifest.nim	nim	1
 tests/integration/t_manifest_store_ops_routed_through_interface_not_literals.nim	nim	1

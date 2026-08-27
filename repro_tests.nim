@@ -7806,6 +7806,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_manifest_cache_serves_only_the_url_it_was_cloned_for.nim",
+    binary: "build/test-bin/t_manifest_cache_serves_only_the_url_it_was_cloned_for",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim",
     binary: "build/test-bin/t_manifest_copyfile_linkfile_materialized_after_sync",
     defines: @[],

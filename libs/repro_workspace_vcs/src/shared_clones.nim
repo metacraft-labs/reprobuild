@@ -39,6 +39,23 @@ const
     ## git reads to discover additional read-only object pools.
 
 type
+  ManifestCacheEntryStatus* = enum
+    ## What a directory sitting at a manifest-cache path turned out to BE,
+    ## once asked. W8-R3: the whole defect was that this question had exactly
+    ## two answers — ``looksLikeGitDir`` true or false — and "a git dir that
+    ## belongs to someone else", "a git dir that cannot say who it belongs
+    ## to" and "a git dir that is mine" were all the same answer. Each is now
+    ## its own value, and in particular ABSENCE (``mceAbsent``, recoverable by
+    ## cloning) and FAILURE TO READ (``mceUnreadable`` / ``mceNoOrigin``,
+    ## which must refuse) are never folded together — that collapse is the
+    ## root defect this campaign keeps finding.
+    mceUnknown        ## not asked; the zero value for results from other procs
+    mceAbsent         ## nothing that looks like a git dir is there
+    mceMatches        ## a git dir whose ``origin`` IS the requested repository
+    mceForeign        ## a git dir whose ``origin`` is a DIFFERENT repository
+    mceNoOrigin       ## a git dir with no ``origin`` remote configured at all
+    mceUnreadable     ## the local config could not be read (not a repo, …)
+
   SharedCloneResult* = object
     ## Outcome of a best-effort shared-clone / alternates operation. The
     ## caller inspects ``ok`` to decide whether to fall back to a plain
@@ -47,6 +64,12 @@ type
     ok*: bool
     sharedBarePath*: string
     diagnostic*: string
+    manifestEntry*: ManifestCacheEntryStatus
+      ## W8-R3 — set only by ``ensureManifestCache``: which of the states
+      ## above the cache entry it settled on was in. Carried as a VALUE and
+      ## not merely spelled into ``diagnostic`` so a caller can tell a refusal
+      ## caused by an unreadable entry from one caused by a foreign entry
+      ## without parsing prose. ``mceUnknown`` on every other proc's result.
 
 # ---- cache-root resolution -------------------------------------------------
 
@@ -288,6 +311,73 @@ proc normalizeFetchUrl(url: string): string =
   if result.toLowerAscii.endsWith(".git"):
     result.setLen(result.len - 4)
 
+type
+  RemoteUrlParts = object
+    ## The decomposition of a fetch URL that BOTH ``urlSlug`` and
+    ## ``canonicalRemoteIdentity`` are built from. Factored out so the two
+    ## cannot disagree about *what* the host and the path are: the slug folds
+    ## these fields through ``sanitizeSlugSegment``, the identity does not, and
+    ## that single difference is the whole of W8-R3's fix.
+    scheme: string
+      ## Lowercased URL scheme, or "" for scp-like / bare-local spellings.
+    host: string
+      ## Authority with userinfo and port removed; ``_local_`` for a path.
+    port: string
+      ## Explicit port as spelled, or "" when the URL carries none.
+    path: string
+      ## Everything after the authority, with the trailing ``/`` and ``.git``
+      ## already trimmed by ``normalizeFetchUrl``.
+
+proc decomposeRemoteUrl(url: string): RemoteUrlParts =
+  ## Split a fetch URL into scheme / host / port / path. This is exactly the
+  ## parse ``urlSlug`` has always done, lifted out verbatim so a second
+  ## consumer can reuse it; the only addition is that the port is RETAINED
+  ## rather than dropped on the floor.
+  ##
+  ## Known limitation, pre-existing and deliberately not changed here: a
+  ## bracketed IPv6 authority (``[::1]:22``) is split at its FIRST colon, so
+  ## ``host`` is ``[`` and ``port`` is the remainder. That is wrong as a parse
+  ## but it is DETERMINISTIC, so every spelling of one IPv6 URL still
+  ## decomposes identically and both consumers stay self-consistent.
+  let normalized = normalizeFetchUrl(url)
+  if normalized.contains("://"):
+    # scheme://[user@]host[:port]/path
+    let sep = normalized.find("://")
+    result.scheme = normalized[0 ..< sep].toLowerAscii
+    let afterScheme = normalized[sep + 3 .. ^1]
+    let firstSlash = afterScheme.find('/')
+    var authority = ""
+    if firstSlash < 0:
+      authority = afterScheme
+      result.path = ""
+    else:
+      authority = afterScheme[0 ..< firstSlash]
+      result.path = afterScheme[firstSlash + 1 .. ^1]
+    # strip user@ and :port from the authority
+    let at = authority.find('@')
+    if at >= 0: authority = authority[at + 1 .. ^1]
+    let colon = authority.find(':')
+    if colon >= 0:
+      result.port = authority[colon + 1 .. ^1]
+      authority = authority[0 ..< colon]
+    result.host = authority
+    if result.host.len == 0:
+      # file:///abs/path → empty authority; treat as a local path.
+      result.host = "_local_"
+  elif normalized.contains('@') and normalized.contains(':') and
+      not normalized.startsWith('/'):
+    # scp-like syntax: [user@]host:path — the text after the colon is a
+    # PATH, never a port, so ``port`` stays empty.
+    let at = normalized.find('@')
+    let rest = if at >= 0: normalized[at + 1 .. ^1] else: normalized
+    let colon = rest.find(':')
+    result.host = rest[0 ..< colon]
+    result.path = rest[colon + 1 .. ^1]
+  else:
+    # bare local path
+    result.host = "_local_"
+    result.path = normalized
+
 proc urlSlug*(url: string): string =
   ## Map a fetch URL to a stable, filesystem-safe relative slug of the
   ## form ``<host>/<path-segments>.git``. Works for ``https://``,
@@ -298,50 +388,114 @@ proc urlSlug*(url: string): string =
   ##   ``git@github.com:org/repo.git``     → ``github.com/org/repo.git``
   ##   ``file:///tmp/origin-lib-a.git``    → ``_local_/tmp/origin-lib-a.git``
   ##   ``/tmp/origin-lib-a.git``           → ``_local_/tmp/origin-lib-a.git``
-  let normalized = normalizeFetchUrl(url)
-  var host = ""
-  var path = ""
-
-  if normalized.contains("://"):
-    # scheme://[user@]host[:port]/path
-    let afterScheme = normalized[normalized.find("://") + 3 .. ^1]
-    let firstSlash = afterScheme.find('/')
-    if firstSlash < 0:
-      host = afterScheme
-      path = ""
-    else:
-      host = afterScheme[0 ..< firstSlash]
-      path = afterScheme[firstSlash + 1 .. ^1]
-    # strip user@ and :port from the authority
-    let at = host.find('@')
-    if at >= 0: host = host[at + 1 .. ^1]
-    let colon = host.find(':')
-    if colon >= 0: host = host[0 ..< colon]
-    if host.len == 0:
-      # file:///abs/path → empty authority; treat as a local path.
-      host = "_local_"
-  elif normalized.contains('@') and normalized.contains(':') and
-      not normalized.startsWith('/'):
-    # scp-like syntax: [user@]host:path
-    let at = normalized.find('@')
-    let rest = if at >= 0: normalized[at + 1 .. ^1] else: normalized
-    let colon = rest.find(':')
-    host = rest[0 ..< colon]
-    path = rest[colon + 1 .. ^1]
-  else:
-    # bare local path
-    host = "_local_"
-    path = normalized
-
+  let parts = decomposeRemoteUrl(url)
   var segments: seq[string]
-  if host.len > 0:
-    segments.add(sanitizeSlugSegment(host))
-  for raw in path.split('/'):
+  if parts.host.len > 0:
+    segments.add(sanitizeSlugSegment(parts.host))
+  for raw in parts.path.split('/'):
     if raw.len == 0: continue
     segments.add(sanitizeSlugSegment(raw))
   if segments.len == 0:
     segments.add("_empty_")
   result = segments.join("/") & ".git"
+
+proc defaultPortForScheme(scheme: string): string =
+  ## The port a scheme implies when the URL does not spell one. Used only to
+  ## decide whether an EXPLICIT port is redundant; an unknown scheme has no
+  ## default, so its explicit port is always significant.
+  case scheme
+  of "https": "443"
+  of "http": "80"
+  of "ssh": "22"
+  of "git": "9418"
+  else: ""
+
+proc canonicalRemoteIdentity*(url: string): string =
+  ## The identity of the REPOSITORY a fetch URL names, as a comparable
+  ## string. Two URLs denote the same repository iff their identities are
+  ## equal.
+  ##
+  ## This is ``urlSlug``'s decomposition WITHOUT ``sanitizeSlugSegment``. That
+  ## is the whole point: the slug is a filesystem NAME and is many-to-one by
+  ## construction (``a:b``, ``a_b`` and ``a@b`` share one directory, and since
+  ## W5 so do ``..`` and ``__``); the identity is an ANSWER TO "is this entry
+  ## mine", and folding characters there is what let the first URL to reach a
+  ## slug own it. Nothing here is lossy, so the collisions the slug has do not
+  ## reach the check that guards the slug's contents.
+  ##
+  ## WHAT IT DELIBERATELY TREATS AS EQUAL, and why each is safe:
+  ##
+  ##   * **The scheme.** ``https://h/o/r``, ``ssh://h/o/r`` and
+  ##     ``git@h:o/r`` all have identity ``h/o/r``. It is the equivalence the
+  ##     cache key was BUILT on: ``urlSlug`` never reads the scheme at all, so
+  ##     its own documented examples map the https and scp spellings of one
+  ##     GitHub repo to one slug. An identity that required scheme equality
+  ##     would be FINER than the key it guards in that dimension, so a
+  ##     workspace that bootstrapped over https and later over ssh would
+  ##     re-key and clone a second, permanent copy of the same repository.
+  ##     Stated exactly, because it is the one fold that is a judgement and
+  ##     not a derivation: scheme equality is not free of risk, it is
+  ##     PRE-EXISTING risk. Two different servers really could answer
+  ##     ``https://h/o/r`` and ``git://h/o/r``, and this rule would call them
+  ##     one repository — but so does the slug, so they already shared one
+  ##     directory before this fix and separating them here would not stop
+  ##     them sharing a slug. Every OTHER equivalence below is one the slug
+  ##     also makes, or one where the identity is COARSER than the slug (host
+  ##     case), which costs a second entry and can never mis-serve. So the
+  ##     identity is a strict refinement of the key everywhere it can be one:
+  ##     it adds no co-tenancy the key did not already have.
+  ##   * **A trailing ``.git`` and a trailing ``/``** — already folded by
+  ##     ``normalizeFetchUrl``, so ``…/r``, ``…/r.git`` and ``…/r.git/`` are
+  ##     one repository.
+  ##   * **Userinfo.** ``https://alice@h/o/r`` and ``https://h/o/r`` are the
+  ##     same repository fetched with different credentials. Whose credentials
+  ##     they are is not a property of the repository.
+  ##   * **Host case.** DNS is case-insensitive, so ``H/o/r`` == ``h/o/r``.
+  ##   * **A redundant default port.** ``https://h:443/o/r`` == ``https://h/o/r``.
+  ##   * **Empty path segments.** ``h//o///r`` == ``h/o/r``, matching the slug.
+  ##
+  ## WHAT IT DELIBERATELY DOES **NOT** TREAT AS EQUAL:
+  ##
+  ##   * **Punctuation in the path.** ``h/a:b/r``, ``h/a_b/r`` and ``h/a@b/r``
+  ##     are three repositories that share one slug. Separating them is the
+  ##     defect being fixed; anything looser reopens it.
+  ##   * **``..`` versus ``__``.** Same reason.
+  ##   * **Path case.** ``h/O/r`` != ``h/o/r``. Some forges fold path case and
+  ##     some servers do not, and we cannot tell which from the URL. Folding
+  ##     would be a guess in the unsafe direction; not folding costs at worst
+  ##     one extra cache entry. (For a ``_local_`` path on a case-insensitive
+  ##     filesystem this means two spellings of ONE local repo get two cache
+  ##     entries — churn, never wrong content. That is W8-R2's question and it
+  ##     is not answered here.)
+  ##   * **A non-default port.** ``h:8443`` is a different endpoint than ``h``.
+  ##   * **Anything about the on-disk tree.** Identity is about the URL only.
+  let parts = decomposeRemoteUrl(url)
+  var authority = parts.host.toLowerAscii
+  if parts.port.len > 0 and parts.port != defaultPortForScheme(parts.scheme):
+    authority.add(":")
+    authority.add(parts.port)
+  var segments: seq[string]
+  for raw in parts.path.split('/'):
+    if raw.len == 0: continue
+    segments.add(raw)
+  authority & "/" & segments.join("/")
+
+proc identityDigestHex(identity: string): string =
+  ## FNV-1a 64 over a canonical identity, as 16 lowercase hex digits. Used
+  ## ONLY to name a disambiguated cache directory.
+  ##
+  ## A non-cryptographic hash is adequate *here* and the reason is structural,
+  ## not an appeal to unlikelihood: the directory it names is still subjected
+  ## to the same identity check as every other. A forged digest collision
+  ## therefore buys an attacker a REFUSAL, not a hit — the failure mode of a
+  ## bad digest is churn, and wrong content is unreachable through it. Chosen
+  ## over ``std/sha1`` so this module gains no dependency and no deprecation
+  ## warning for a value that never leaves the filesystem.
+  var h = 0xcbf29ce484222325'u64
+  for ch in identity:
+    h = h xor uint64(ord(ch))
+    h = h * 0x100000001b3'u64
+  toHex(h, 16).toLowerAscii
 
 proc sharedBarePath*(cacheRoot, fetchUrl: string): string =
   ## Absolute path of the shared bare clone for ``fetchUrl`` under
@@ -377,9 +531,44 @@ proc manifestCachePath*(cacheRoot, manifestUrl: string): string =
   ## else. The remedy is not a wider character set (which moves every existing
   ## slug); it is for this cache to record the URL it was cloned for and
   ## refuse — or re-key — when the recorded URL is not the one being asked
-  ## for. Tracked as W8-R3 in
-  ## ``Windows-Cacheable-Builds-Session-Residuals.milestones.org``.
+  ## for.
+  ##
+  ## W8-R3 — THAT IS NOW DONE, and this proc is deliberately UNCHANGED by it.
+  ## The slug stays many-to-one (making it injective would move every entry on
+  ## disk and orphan every clone already cached); what changed is that
+  ## ``ensureManifestCache`` no longer takes arrival at this path as proof of
+  ## ownership. It reads the entry's own ``origin`` and compares
+  ## ``canonicalRemoteIdentity`` before serving it, so a colliding URL is
+  ## detected here rather than served the incumbent's tree, and is re-keyed to
+  ## ``disambiguatedManifestCachePath``. See ``inspectManifestCacheEntry``.
   cacheRoot / urlSlug(manifestUrl)
+
+proc disambiguatedManifestCachePath*(cacheRoot, manifestUrl: string): string =
+  ## The SECOND path ``ensureManifestCache`` tries when the primary
+  ## ``manifestCachePath`` is already owned by a different repository: the
+  ## same slug with the URL's canonical identity digest appended.
+  ##
+  ## Why re-key rather than refuse or evict. A mismatch has two possible
+  ## causes and they want opposite things — a benign slug collision wants a
+  ## working outcome, an attack wants a refusal — and it is not decidable from
+  ## the mismatch alone which one it is. Re-keying satisfies both without
+  ## choosing: the legitimate URL gets its own directory and bootstraps
+  ## normally, and the hostile entry is never served to it, because the harm
+  ## was always "served content from the wrong remote" and never "the wrong
+  ## remote has a directory". Eviction (re-clone in place) would satisfy
+  ## correctness too but at the price of DELETING a cache entry we have just
+  ## proven belongs to someone else, and of two alternating URLs re-cloning
+  ## each other forever. Refusal alone would leave the legitimate URL with no
+  ## way to bootstrap at all, permanently, since nothing evicts the incumbent.
+  ##
+  ## The digest is over the identity, not the URL, so every spelling this
+  ## module calls equal lands on ONE re-keyed directory. The result stays
+  ## inside ``cacheRoot`` (a hex suffix introduces no separator and no
+  ## traversal). A re-keyed path that itself collides with some third URL's
+  ## entry is caught by the same identity check and REFUSED, so the walk is
+  ## two entries deep and terminates.
+  cacheRoot / (urlSlug(manifestUrl) & "-" &
+    identityDigestHex(canonicalRemoteIdentity(manifestUrl)))
 
 # ---- git plumbing ----------------------------------------------------------
 
@@ -441,6 +630,168 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
 
 # ---- bootstrap manifest cache population (RA-11) ---------------------------
 
+type
+  ManifestCacheEntry* = object
+    ## What ``inspectManifestCacheEntry`` found at one cache path.
+    status*: ManifestCacheEntryStatus
+    path*: string
+    observedUrl*: string
+      ## The ``origin`` URL the entry actually carries — populated for
+      ## ``mceMatches`` and ``mceForeign``, "" otherwise.
+    detail*: string
+      ## Git's own message, populated for ``mceUnreadable``.
+
+proc inspectManifestCacheEntry*(gitBin, entryPath, manifestUrl: string):
+    ManifestCacheEntry =
+  ## Ask a manifest-cache directory whether it is the checkout of
+  ## ``manifestUrl``, and never guess.
+  ##
+  ## W8-R3. The predicate this replaces was ``looksLikeGitDir(entryPath)``,
+  ## which answers "is there a git object store here" and was being read as
+  ## "is this entry mine". Those are different questions and ``urlSlug`` is
+  ## many-to-one, so the first URL to reach a slug owned it and every
+  ## colliding URL afterwards was served the incumbent's tree — a
+  ## wrong-content outcome at the point content becomes trust (the
+  ## composer/resolver reads ``projects/*.toml`` straight out of this
+  ## directory) that PERSISTS across every later bootstrap.
+  ##
+  ## WHAT IT COMPARES AGAINST, and why that and not a stamp file. The entry's
+  ## own ``origin`` remote is the record ``git clone`` already keeps, so this
+  ## works on the entries ALREADY ON DISK; a new stamp file would make every
+  ## pre-existing entry unverifiable and force a mass re-clone. It is also no
+  ## weaker: forging either one requires write access to the cache directory,
+  ## and an attacker with that can write the content directly and skip the
+  ## metadata entirely.
+  ##
+  ## ``config --local`` rather than plain ``config``, for two reasons. It
+  ## makes "not a repository" (exit 128) DISTINGUISHABLE from "no origin
+  ## configured" (exit 1, empty output) — plain ``config --get`` returns exit
+  ## 1 for both because it happily searches global/system scope outside a
+  ## repository (measured). And it confines the answer to the repository
+  ## itself, so an ambient ``remote.origin.url`` in the user's global config
+  ## can never supply an identity for a directory that does not have one.
+  ##
+  ## A directory that is not a git dir at all is ``mceAbsent``, NOT a
+  ## failure. That is the pre-existing clone-and-recover path — the clone
+  ## fails on a non-empty destination and the failure branch removes it —
+  ## and ``t_a_hostile_fetch_url_deletes_a_real_directory_before_this_rule``
+  ## asserts exactly that behaviour. Identity is only answerable of something
+  ## that claims to be a repository, so only those are asked.
+  result.path = entryPath
+  if not looksLikeGitDir(entryPath):
+    result.status = mceAbsent
+    return
+  let res = runGit(gitBin,
+    ["-C", entryPath, "config", "--local", "--get", "remote.origin.url"])
+  # ``runGit`` merges stderr into stdout, so a git advisory (``warning:`` /
+  # ``hint:`` on a host with an odd global config) would otherwise be read AS
+  # the URL and turn every entry foreign. Take the first line that is a value
+  # rather than a diagnostic; git prints exactly one value line for
+  # ``--get``.
+  var observed = ""
+  for line in res.output.splitLines:
+    let trimmed = line.strip()
+    if trimmed.len == 0:
+      continue
+    if trimmed.startsWith("warning:") or trimmed.startsWith("hint:") or
+        trimmed.startsWith("fatal:") or trimmed.startsWith("error:"):
+      continue
+    observed = trimmed
+    break
+  if res.code != 0:
+    # Exit 1 with no value line is git's "key not present"; anything else is
+    # a genuine read failure (not a repository, corrupt config, …).
+    result.status = if res.code == 1 and observed.len == 0: mceNoOrigin
+                    else: mceUnreadable
+    result.detail = res.output.strip()
+    return
+  if observed.len == 0:
+    result.status = mceNoOrigin
+    return
+  result.observedUrl = observed
+  result.status =
+    if canonicalRemoteIdentity(observed) == canonicalRemoteIdentity(manifestUrl):
+      mceMatches
+    else:
+      mceForeign
+
+proc refreshManifestCacheEntry(gitBin, target: string): SharedCloneResult =
+  ## Fetch-if-present, then fast-forward the checked-out branch so the cached
+  ## manifest reflects upstream. Best-effort: a fetch failure leaves the
+  ## existing checkout usable — which is sound precisely BECAUSE the caller
+  ## has already established the entry is the requested repository. Serving a
+  ## stale tree from the right remote is a freshness question; serving a tree
+  ## from the wrong remote is not.
+  let fetched = runGit(gitBin, ["-C", target, "fetch", "--quiet",
+    "--prune", "origin"])
+  if fetched.code != 0:
+    return SharedCloneResult(ok: true, sharedBarePath: target,
+      manifestEntry: mceMatches,
+      diagnostic: "manifest cache fetch failed (using existing checkout): " &
+        fetched.output.strip())
+  let curRes = runGit(gitBin,
+    ["-C", target, "rev-parse", "--abbrev-ref", "HEAD"])
+  let cur = if curRes.code == 0: curRes.output.strip() else: ""
+  if cur.len > 0 and cur != "HEAD":
+    discard runGit(gitBin, ["-C", target, "merge", "--ff-only", "--quiet",
+      "refs/remotes/origin/" & cur])
+  SharedCloneResult(ok: true, sharedBarePath: target,
+    manifestEntry: mceMatches)
+
+proc cloneManifestCacheEntry(gitBin, target, manifestUrl, branch: string):
+    SharedCloneResult =
+  ## Clone-if-missing into ``target``.
+  let parent = target.splitPath.head
+  if parent.len > 0:
+    try:
+      createDir(parent)
+    except OSError as e:
+      return SharedCloneResult(ok: false, sharedBarePath: target,
+        manifestEntry: mceAbsent,
+        diagnostic: "could not create manifest cache parent " & parent &
+          ": " & e.msg)
+  var cloneArgs = @["clone", "--quiet"]
+  if branch.len > 0:
+    cloneArgs.add(["--single-branch", "--branch", branch])
+  cloneArgs.add([manifestUrl, target])
+  let res = runGit(gitBin, cloneArgs)
+  if res.code != 0:
+    if dirExists(target):
+      try: removeDir(target)
+      except OSError: discard
+    return SharedCloneResult(ok: false, sharedBarePath: target,
+      manifestEntry: mceAbsent,
+      diagnostic: "git clone of manifest repo into cache failed (" &
+        $res.code & "): " & res.output.strip())
+  SharedCloneResult(ok: true, sharedBarePath: target, manifestEntry: mceAbsent)
+
+proc unverifiableManifestCacheRefusal(entry: ManifestCacheEntry;
+                                      manifestUrl: string): SharedCloneResult =
+  ## Refuse an entry whose identity could not be ESTABLISHED (as opposed to
+  ## established and found foreign, which re-keys). Fail closed: the entry is
+  ## neither served nor deleted, and the reason names which of the two
+  ## unreadable states it was.
+  ##
+  ## Not deleting matters as much as not serving. The clone path's recovery
+  ## step is a ``removeDir`` of the destination, so falling THROUGH to it —
+  ## rather than returning here — would turn "I cannot verify this directory"
+  ## into "I deleted this directory", the recovery-becomes-the-incident shape
+  ## this cache has already produced once.
+  let why =
+    case entry.status
+    of mceNoOrigin:
+      "it is a git repository with NO `origin` remote, so there is nothing " &
+        "to check the requested URL against"
+    else:
+      "its local git config could not be read" &
+        (if entry.detail.len > 0: " (" & entry.detail & ")" else: "")
+  SharedCloneResult(ok: false, sharedBarePath: entry.path,
+    manifestEntry: entry.status,
+    diagnostic: "refusing to use the manifest cache entry at '" & entry.path &
+      "' for '" & manifestUrl & "': " & why & ". A cache entry that cannot " &
+      "prove which repository it holds is not usable as one; remove the " &
+      "directory to let it be re-cloned.")
+
 proc ensureManifestCache*(gitBin, cacheRoot, manifestUrl: string;
                           branch = ""): SharedCloneResult =
   ## Clone-if-missing / fetch-and-fast-forward-if-present the manifest
@@ -454,46 +805,57 @@ proc ensureManifestCache*(gitBin, cacheRoot, manifestUrl: string;
   ## this materialises a checked-out manifest tree because the manifest
   ## reader walks real files. The clone uses ``--single-branch`` on the
   ## requested ``branch`` when one is given.
-  let target = manifestCachePath(cacheRoot, manifestUrl)
-  if looksLikeGitDir(target):
-    # fetch-if-present, then fast-forward the checked-out branch so the
-    # cached manifest reflects upstream. Best-effort: a fetch failure
-    # leaves the existing (possibly stale) checkout usable.
-    let fetched = runGit(gitBin, ["-C", target, "fetch", "--quiet",
-      "--prune", "origin"])
-    if fetched.code != 0:
-      return SharedCloneResult(ok: true, sharedBarePath: target,
-        diagnostic: "manifest cache fetch failed (using existing checkout): " &
-          fetched.output.strip())
-    let curRes = runGit(gitBin,
-      ["-C", target, "rev-parse", "--abbrev-ref", "HEAD"])
-    let cur = if curRes.code == 0: curRes.output.strip() else: ""
-    if cur.len > 0 and cur != "HEAD":
-      discard runGit(gitBin, ["-C", target, "merge", "--ff-only", "--quiet",
-        "refs/remotes/origin/" & cur])
-    return SharedCloneResult(ok: true, sharedBarePath: target)
+  ##
+  ## W8-R3 — AN ENTRY IS USED ONLY IF IT PROVES IT IS THE REQUESTED ONE.
+  ## Presence at ``manifestCachePath`` is not ownership: the slug is
+  ## many-to-one, so this walks at most two candidate paths and asks each
+  ## ``inspectManifestCacheEntry``:
+  ##
+  ##   primary ``manifestCachePath``
+  ##     mceMatches   → fetch + fast-forward it (the ordinary cache hit)
+  ##     mceAbsent    → clone into it (the ordinary cold cache)
+  ##     mceForeign   → a slug collision; try the re-keyed path below
+  ##     mceNoOrigin
+  ##     mceUnreadable→ REFUSE, without deleting anything
+  ##
+  ##   ``disambiguatedManifestCachePath``
+  ##     mceMatches   → fetch + fast-forward it
+  ##     mceAbsent    → clone into it
+  ##     anything else→ REFUSE
+  ##
+  ## The walk cannot recurse further, so a pathological third collision ends
+  ## in a refusal rather than a search.
+  let primary = manifestCachePath(cacheRoot, manifestUrl)
+  let entry = inspectManifestCacheEntry(gitBin, primary, manifestUrl)
+  case entry.status
+  of mceMatches:
+    return refreshManifestCacheEntry(gitBin, primary)
+  of mceAbsent:
+    return cloneManifestCacheEntry(gitBin, primary, manifestUrl, branch)
+  of mceNoOrigin, mceUnreadable, mceUnknown:
+    return unverifiableManifestCacheRefusal(entry, manifestUrl)
+  of mceForeign:
+    discard
 
-  let parent = target.splitPath.head
-  if parent.len > 0:
-    try:
-      createDir(parent)
-    except OSError as e:
-      return SharedCloneResult(ok: false, sharedBarePath: target,
-        diagnostic: "could not create manifest cache parent " & parent &
-          ": " & e.msg)
-  var cloneArgs = @["clone", "--quiet"]
-  if branch.len > 0:
-    cloneArgs.add(["--single-branch", "--branch", branch])
-  cloneArgs.add([manifestUrl, target])
-  let res = runGit(gitBin, cloneArgs)
-  if res.code != 0:
-    if dirExists(target):
-      try: removeDir(target)
-      except OSError: discard
-    return SharedCloneResult(ok: false, sharedBarePath: target,
-      diagnostic: "git clone of manifest repo into cache failed (" &
-        $res.code & "): " & res.output.strip())
-  SharedCloneResult(ok: true, sharedBarePath: target)
+  # The primary slug is owned by a DIFFERENT repository. Re-key onto the
+  # identity-digest path and ask the same question there; the incumbent is
+  # left untouched, because it is a legitimate cache entry for its own URL.
+  let rekeyed = disambiguatedManifestCachePath(cacheRoot, manifestUrl)
+  let alt = inspectManifestCacheEntry(gitBin, rekeyed, manifestUrl)
+  case alt.status
+  of mceMatches:
+    refreshManifestCacheEntry(gitBin, rekeyed)
+  of mceAbsent:
+    cloneManifestCacheEntry(gitBin, rekeyed, manifestUrl, branch)
+  of mceForeign:
+    SharedCloneResult(ok: false, sharedBarePath: rekeyed,
+      manifestEntry: mceForeign,
+      diagnostic: "refusing to use the manifest cache for '" & manifestUrl &
+        "': the slug path '" & primary & "' holds '" & entry.observedUrl &
+        "' and the re-keyed path '" & rekeyed & "' holds '" &
+        alt.observedUrl & "', so neither is this URL's entry.")
+  else:
+    unverifiableManifestCacheRefusal(alt, manifestUrl)
 
 # ---- alternates wiring -----------------------------------------------------
 
