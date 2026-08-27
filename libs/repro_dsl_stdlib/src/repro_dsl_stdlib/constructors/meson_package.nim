@@ -304,7 +304,7 @@ proc meson_package*(srcDir: string;
       # invalidate this cleanup edge on every warm build.
       dependencyPolicy = automaticMonitorPolicy(@[buildDirAbs]),
       commandStatsId = "meson_package.clean_build_dir",
-      toolIdentityRefs = @["sh"])
+      toolIdentityRefs = @["sh", "rm"])
     setupAfter = @[cleanEdge]
 
   var setupIdentityInputs: seq[string] = @[]

@@ -532,7 +532,7 @@ proc cmake_package*(srcDir: string;
       # invalidate this cleanup edge on every warm build.
       dependencyPolicy = automaticMonitorPolicy(@[buildDirAbs]),
       commandStatsId = "cmake_package.clean_build_dir",
-      toolIdentityRefs = @["sh"])
+      toolIdentityRefs = @["sh", "rm"])
     configureAfter = @[cleanEdge]
 
   var configureIdentityInputs: seq[string] = @[]

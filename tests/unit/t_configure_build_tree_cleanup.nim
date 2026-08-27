@@ -98,6 +98,7 @@ suite "configure build-tree cleanup caching":
       check first.dependencyPolicy.kind == bdpAutomaticMonitor
       check first.dependencyPolicy.ignoredInputPrefixes ==
         @[root / "build-cmake"]
+      check first.toolIdentityRefs == @["sh", "rm"]
       check first.inlineArgv() == same.inlineArgv()
       check first.inlineArgv() != changed.inlineArgv()
 
@@ -160,6 +161,7 @@ suite "configure build-tree cleanup caching":
       check first.dependencyPolicy.kind == bdpAutomaticMonitor
       check first.dependencyPolicy.ignoredInputPrefixes ==
         @[root / "build-meson"]
+      check first.toolIdentityRefs == @["sh", "rm"]
       check first.inlineArgv() == same.inlineArgv()
       check first.inlineArgv() != changed.inlineArgv()
 
