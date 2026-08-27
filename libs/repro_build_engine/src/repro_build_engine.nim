@@ -4894,6 +4894,15 @@ proc launchChildEnv(action: BuildAction;
     else: findShimLibrary()
   if shimLib.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)
+    # Same event-interest as the hosted path (`monitorHostRequest`): a build edge
+    # wants file/process/library deps, not the clock/env/sysctl/entropy or IPC a
+    # tool incidentally touches, so io-mon skips those hooks unless the edge opts
+    # in. On this direct-spawn path the shim reads it from the action's env rather
+    # than io-mon's `childEnv`.
+    var interest = {ecFileDeps, ecProcessTree, ecLibraryLoads}
+    if action.dependencyPolicy.captureNonDeterminism: interest.incl ecNonDeterminism
+    if action.dependencyPolicy.captureIpc: interest.incl ecIpc
+    result.add("REPRO_MONITOR_INTEREST=" & interestToTokens(interest))
   # macOS monitoring needs NO env seed: the io-mon shim always runs BOTH
   # monitoring mechanisms (interpose + body-patch) by default — the
   # user-facing ``IO_MON_MACOS_BACKEND`` selector was removed (see
@@ -5466,11 +5475,22 @@ proc monitorHostRequest(action: BuildAction;
   ## reads. Passing it explicitly is what keeps that decision at the one call
   ## site that makes it, instead of leaving a second proc quietly able to
   ## write the destination in place.
+  # A build edge depends on the files it reads, the binaries it launches and the
+  # libraries they load — not on the clock/env/sysctl/entropy or IPC peers a tool
+  # incidentally touches. Ask io-mon for those three categories only, so it skips
+  # installing/recording the non-determinism + IPC observations it would
+  # otherwise spend resources on (io-mon/docs/contributors/event-interest-filter.md).
+  # An edge that genuinely depends on such an input opts the category back in via
+  # its dependency policy.
+  var interest = {ecFileDeps, ecProcessTree, ecLibraryLoads}
+  if action.dependencyPolicy.captureNonDeterminism: interest.incl ecNonDeterminism
+  if action.dependencyPolicy.captureIpc: interest.incl ecIpc
   result = FsSnoopRequest(
     command: command.argv,
     depFilePath: depFilePath,
     cwd: command.cwd,
     streamMode: fsoNone,
+    interest: interest,
     passthroughChildStdout: true,
     passthroughChildStderr: true)
   for entry in command.env:

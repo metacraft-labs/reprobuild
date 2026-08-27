@@ -95,6 +95,18 @@ type
     recognizedReports*: seq[RecognizedDependencyReportSpec]
     postBuildConverters*: seq[PostBuildDependencyConverterSpec]
     ignoredInputPrefixes*: seq[string]
+    # Event-interest opt-ins for automatic monitoring. A build edge's
+    # reproducibility hinges on the files/binaries/libraries it reads, NOT on the
+    # clock, environment, sysctls, entropy, or IPC peers a tool happens to touch,
+    # so the engine monitors an action with io-mon's ecFileDeps+ecProcessTree+
+    # ecLibraryLoads categories only (see `monitorHostRequest`). io-mon then skips
+    # installing/recording the non-determinism and IPC observations, which it
+    # would otherwise spend resources on. An edge that genuinely depends on such
+    # an input sets the matching flag to add the category back. Kept as bools (not
+    # a `set[EventCategory]`) so repro_core carries no io_mon dependency; the
+    # engine translates them. Default false = off.
+    captureNonDeterminism*: bool  ## add io-mon's ecNonDeterminism
+    captureIpc*: bool             ## add io-mon's ecIpc
 
 proc `$`*(name: DependencyFormatName): string =
   string(name)
