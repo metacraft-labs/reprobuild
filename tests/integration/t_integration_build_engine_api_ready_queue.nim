@@ -120,7 +120,7 @@ proc fixtureMain(args: seq[string]) =
     fixtureWrite(args[5], args[4] & ": " & args[2] & " " & args[3] & "\n")
   of "monitor":
     # dgDeclaredOnly removal: ``monitor-action`` no longer hand-writes a
-    # synthetic RMDF for the engine to read back. The default automatic
+    # synthetic iomon for the engine to read back. The default automatic
     # monitor policy now wraps this process under real ``repro internal io monitor``,
     # so the action must perform the file operations it wants reflected in
     # the monitor evidence. Argv layout is now:
@@ -1296,7 +1296,7 @@ suite "integration_build_engine_api_ready_queue":
         governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       # dgDeclaredOnly removal: the legacy ``monitorDepfile`` field (which made
-      # the engine read a hand-written RMDF) is gone. Under the default
+      # the engine read a hand-written iomon) is gone. Under the default
       # automatic-monitor policy the engine wraps this process in real
       # ``repro internal io monitor`` and records the syscalls the fixture
       # actually makes:

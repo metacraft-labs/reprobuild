@@ -221,7 +221,7 @@ int main(int argc, char **argv) {
       let fixtureBin = binDir / "macos-monitor-fixture"
       let inputPath = tempRoot / "input.txt"
       let childInputPath = tempRoot / "child-input.txt"
-      let depfile = tempRoot / "taxonomy.rdep"
+      let depfile = tempRoot / "taxonomy.iomon"
       let eventsPath = tempRoot / "taxonomy.events.jsonl"
 
       writeFile(fixtureSource, FixtureSource)
@@ -239,7 +239,7 @@ int main(int argc, char **argv) {
         fixtureBin, inputPath, childInputPath, outDir, fixtureBin
       ], [("REPRO_MONITOR_SHIM_LIB", shimDylib)]), repoRoot)
 
-      check readFile(depfile)[0 .. 3] == "RMDF"
+      check readFile(depfile)[0 .. 3] == "IOMN"
       let dep = readMonitorDepFile(depfile)
       let records = dep.records
       let canonicalInputPath = expandFilename(inputPath)
@@ -347,7 +347,7 @@ int main(int argc, char **argv) {
       check eventStream.contains("\"recordKind\":\"capability-gap\"")
 
       let rendered = parseJson(renderMonitorDepFileJson(dep))
-      check rendered["format"].getStr() == "RMDF"
+      check rendered["format"].getStr() == "iomon"
       check rendered["backendFamily"].getStr() == "macos-interpose-hooks"
       check rendered["backendProfile"]["evidenceComplete"].getBool()
       check rendered["capabilityGaps"].len >= 3

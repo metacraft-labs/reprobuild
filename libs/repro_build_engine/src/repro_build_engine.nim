@@ -41,7 +41,7 @@ import repro_cas_store
 # public API (`streamMonitorDepFileRecords` / `MonitorRecord` / the `mr*`/`mo*`
 # enums / `MonitorDepFileReaderError`), never by re-deriving the envelope layout.
 # The former `io_mon/codec` + `io_mon/writer` internal imports (the hand-rolled
-# RMDF decoder reached into them) are gone.
+# iomon decoder reached into them) are gone.
 import io_mon
 import repro_platform
 import repro_runquota
@@ -497,7 +497,7 @@ type
 
   BuildEngineConfig* = object
     # Project-local scratch root: holds `runquota-results/*.json`,
-    # `monitor-depfiles/*.rdep`, `dependency-evidence/*.rbar`, and per-build
+    # `monitor-depfiles/*.iomon`, `dependency-evidence/*.rbar`, and per-build
     # transient state. Cleaned by `repro clean`. Per-project by design.
     cacheRoot*: string
     # User-level shared action cache + CAS root. When empty, defaults to
@@ -662,7 +662,7 @@ type
     monitorDirectoryEnumerations*: seq[string]
       ## Directories the action ENUMERATED (`opendir`/`readdir`), as opposed
       ## to merely probed for existence. The monitor reports the two as
-      ## distinct RMDF record kinds (`mrDirectoryEnumerate` vs
+      ## distinct iomon record kinds (`mrDirectoryEnumerate` vs
       ## `mrPathProbe`) and the engine used to collapse them into
       ## `monitorProbes` one line after decoding them, which is where the
       ## distinction was lost.
@@ -2516,9 +2516,9 @@ proc zeroEvidenceDiagnostic*(actionId: string;
       "a weaker guard here.")
 
 proc monitorEvidenceRequired(action: BuildAction): bool =
-  ## Monitor evidence is required for monitored policies once an RMDF
+  ## Monitor evidence is required for monitored policies once an iomon
   ## (monitor depfile) has actually been wired up for the action. The only
-  ## way a monitored action ends up without an RMDF now is an engine config
+  ## way a monitored action ends up without an iomon now is an engine config
   ## that has no io-monitor wired (``monitorCliPath`` empty): the setup step
   ## emits a "requires an io-monitor driver" diagnostic and falls back to the
   ## statically declared inputs/outputs rather than claiming complete
@@ -2539,7 +2539,7 @@ type
     # fields on ``PathSetEvidence``. Threaded through the per-action evidence
     # aggregation so each ``addUnique`` lookup is O(1) instead of O(N).
     # M9.R.72.3: exported so end-to-end regression tests can drive
-    # ``foldMonitorDepFileEvidence`` directly against synthetic RMDFs.
+    # ``foldMonitorDepFileEvidence`` directly against synthetic iomon depfiles.
     depfileInputs*: HashSet[string]
     monitorReads*: HashSet[string]
     monitorWrites*: HashSet[string]
@@ -2587,7 +2587,7 @@ proc benignRawSyscallLoss*(detail: string): bool =
   ## filesystem-namespace mutation — where on x86_64 it is ``getpid``. The
   ## table below is therefore selected by the architecture this engine is
   ## COMPILED for, which is the architecture of the shim that produced the
-  ## RMDF (RMDFs live in the local ``build-engine-cache/monitor-depfiles`` and
+  ## iomon (iomon depfiles live in the local ``build-engine-cache/monitor-depfiles`` and
   ## are never fetched cross-arch from the shared action cache). Architectures
   ## without a verified table get an empty allowlist and keep failing closed.
   ##
@@ -2647,7 +2647,7 @@ proc benignRawSyscallLoss*(detail: string): bool =
   ##   * ``gettid`` (x86_64 nr=186) — provably benign by the same argument as
   ##     ``getpid``, but the pinned io-mon already classifies it at the shim so
   ##     it never reaches this classifier. Left out for lack of evidence that
-  ##     any RMDF carries it.
+  ##     any iomon carries it.
   when defined(linux) and defined(amd64):
     const BenignRawSyscallNumbers: seq[int64] = @[
       39'i64,    # getpid      — asm/unistd_64.h
@@ -2667,7 +2667,7 @@ proc benignRawSyscallLoss*(detail: string): bool =
   # THE NUMBER IS NOT THE END OF THE STRING. Every record the Linux shim
   # emits passes through ``stampRunId`` (io-mon ``linux_preload.nim``),
   # which appends a whitespace-separated ``run=<id>`` token to ``detail``.
-  # A real RMDF therefore carries
+  # A real iomon therefore carries
   #
   #     "libc raw syscall unsupported nr=436 run=1787695082.5534084"
   #
@@ -2730,7 +2730,7 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ##   * "process killed with an un-flushed read batch (kill-before-flush)"
   ##     — writer.nim:2205 / :2224. A subprocess died before flushing its
   ##     read-batch tail. The io-mon writer knows precisely which pid/tid
-  ##     it lost, and every OTHER record in the RMDF is trustworthy.
+  ##     it lost, and every OTHER record in the iomon is trustworthy.
   ##     Level 1 (known scope): downgrade the session to non-cacheable but
   ##     let the action succeed. Currently treated as Level 2 in this
   ##     initial implementation until the per-class narrow-invalidation of
@@ -2781,7 +2781,7 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
       ## Legacy alias retained for the M9.R.72.3 unit-test corpus and any
       ## pre-M9.R.73 depfile that might have been produced against an
       ## older io-mon revision. Level 2.
-    CorruptFragmentPrefix = "corrupt or partial RMDF fragment"
+    CorruptFragmentPrefix = "corrupt or partial iomon fragment"
       ## writer.nim:2158 — Level 2. Newly classified in M9.R.73.2.
     BreakawayReportPrefix = "breakaway-report"
       ## Reserved for the authenticated-daemon report Level 2 path;
@@ -2812,10 +2812,10 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   # unsupported nr=" or "inline raw syscall unsupported nr=", nor the reverse,
   # so the dispatch order over this chain is not observable.)
   #
-  # The property that actually keeps a mixed RMDF fail-closed lives one level
+  # The property that actually keeps a mixed iomon fail-closed lives one level
   # up, in ``foldMonitorDepFileEvidence``'s ``worseMonitorStatus`` fold, and is
   # pinned by ``test_m9r72_phaseD_end_to_end.nim``'s "benign raw syscall does
-  # not rescue an RMDF that also lost a subtree". THIS suite cannot see that
+  # not rescue an iomon that also lost a subtree". THIS suite cannot see that
   # property: inverting the fold leaves every classifier check green
   # (mutation-verified) while the phase-D case fails.
   if benignRawSyscallLoss(detail):
@@ -2832,10 +2832,10 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
                           seen: var EvidenceSeenSets;
                           status: var MonitorEvidenceStatus) =
-  ## Fold ONE decoded RMDF record into the engine's path-set evidence.
+  ## Fold ONE decoded iomon record into the engine's path-set evidence.
   ##
   ## THE ONE IMPLEMENTATION OF THE FOLDING RULES, deliberately. Since HM-5
-  ## there are two SOURCES of records — the ``.rdep`` bytes on the wrapped
+  ## there are two SOURCES of records — the ``.iomon`` bytes on the wrapped
   ## launch paths, and the records ``finishMonitor`` already returned in
   ## memory on the hosted one — and the whole premise of hosting is that
   ## nothing downstream can tell the two apart. Two copies of the rules would
@@ -2994,11 +2994,11 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   ## ALREADY HAS instead of over a file it has to read back.
   ##
   ## WHY THIS EXISTS, and it corrects the milestone's own premise. HM-5 is
-  ## written on the claim that the ``.rdep`` is "a write-only artefact from the
+  ## written on the claim that the ``.iomon`` is "a write-only artefact from the
   ## engine's perspective", evidenced by ``readMonitorDepFile`` having zero call
   ## sites. That is true of ``readMonitorDepFile`` and false of the file: the
-  ## engine re-reads and re-decodes the ``.rdep`` on every monitored action
-  ## through ``foldMonitorDepFileEvidence`` above, which is a hand-rolled RMDF
+  ## engine re-reads and re-decodes the ``.iomon`` on every monitored action
+  ## through ``foldMonitorDepFileEvidence`` above, which is a hand-rolled iomon
   ## reader written precisely so the depfile object is not retained. So the
   ## flush could not have been made asynchronous on its own — a build that
   ## renamed the file into place behind the scheduler would have raced its own
@@ -3057,7 +3057,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
                      EvidenceCollection =
   ## ``hostedRecords`` (HM-5) is the in-memory record set for an action the
   ## engine hosted the monitor for. When it is non-nil the monitor evidence is
-  ## folded from it and the ``.rdep`` is NOT read back — which is what lets the
+  ## folded from it and the ``.iomon`` is NOT read back — which is what lets the
   ## file be published asynchronously, behind this call. It is a ``ptr`` rather
   ## than an ``openArray`` because the parameter has to be OPTIONAL: every
   ## other caller is a launch path with no records in hand, and a default is
@@ -3165,7 +3165,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
     #   Level 2 (mesUnknownScopeLoss): disable cache hits for the session.
     #                                 Same handling as Level 1: succeed
     #                                 without publishing.
-    #   Level 3 (mesMonitorUnavailable): fail closed. Only when the RMDF
+    #   Level 3 (mesMonitorUnavailable): fail closed. Only when the iomon
     #                                 path itself is absent OR the reader
     #                                 hits a decode error — genuine
     #                                 "monitoring unavailable" per spec.
@@ -3188,7 +3188,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
     # non-cacheable arm; do not describe it as the latter.
     try:
       # HM-5 — two SOURCES, one set of folding rules (``foldOneMonitorRecord``).
-      # The hosted arm never touches the filesystem, so the ``.rdep`` may still
+      # The hosted arm never touches the filesystem, so the ``.iomon`` may still
       # be in flight behind this call; the wrapped arm is byte-for-byte what it
       # always was, because on that path the engine has no records — a separate
       # ``repro internal io monitor`` process produced them.
@@ -3313,14 +3313,14 @@ proc collectEvidence(action: BuildAction; strict: bool;
           result.disableCacheHits = true
       of mesMonitorUnavailable:
         # Unreachable from foldMonitorDepFileEvidence today (Level 3 is
-        # asserted here only when the RMDF path was empty), but future
+        # asserted here only when the iomon path was empty), but future
         # readers may promote decode errors to Level 3 — keep the branch.
         result.evidence.diagnostics.add("monitor depfile is incomplete")
         if action.cacheable:
           result.publishable = false
     except MonitorDepFileReaderError as err:
       result.evidence.diagnostics.add("monitor depfile read failed: " & err.msg)
-      # A decode error means the RMDF file is corrupt — cannot classify the
+      # A decode error means the iomon file is corrupt — cannot classify the
       # loss scope, must fail closed on a cacheable action.
       result.monitorStatus = worseMonitorStatus(result.monitorStatus,
         mesMonitorUnavailable)
@@ -3651,7 +3651,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   ## is now taken BEFORE the monitor plan for exactly this reason.
   ##
   ## Both forms select the SAME depfile path and both produce the SAME
-  ## evidence — ``finishMonitor`` writes the canonical RMDF that
+  ## evidence — ``finishMonitor`` writes the canonical iomon that
   ## ``foldMonitorDepFileEvidence`` reads, byte for byte what the CLI wrote
   ## (IoMon-Decomposed-Host-API DH-4), so nothing downstream of
   ## ``action.monitorDepfile`` can tell the two apart.
@@ -3665,7 +3665,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # nothing to gain from wrapping ``argv``. Their dependency evidence is the
   # statically declared inputs/outputs (and, for recognized/converter
   # policies, the post-build reports) — ``monitorEvidenceRequired`` already
-  # returns false for them because no RMDF is ever wired. ``builtinAction``
+  # returns false for them because no iomon is ever wired. ``builtinAction``
   # tags every such action with the default ``automaticMonitorGatheringPolicy``
   # (a ``MonitorPolicyKinds`` member), so without this guard a built-in would
   # incorrectly fall into the monitor wiring below and fail with a spurious
@@ -3675,7 +3675,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   if action.kind != bakProcess:
     return
   # Direct engine callers may provide a monitor depfile path for actions that
-  # produce RMDF evidence themselves. Preserve that prewired evidence path
+  # produce iomon evidence themselves. Preserve that prewired evidence path
   # instead of wrapping the command and overwriting it with monitor output.
   if action.monitorDepfile.len > 0:
     return
@@ -3706,7 +3706,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
         "automatic monitor dependency gathering requires an io-monitor driver"
       return
     let depfile = cacheRoot / "monitor-depfiles" /
-      (sanitizeActionId(action.id) & ".rdep")
+      (sanitizeActionId(action.id) & ".iomon")
     result.action.monitorDepfile = depfile
     if hostInProcess:
       # HM-4 — the ENGINE is the host. The argv stays exactly what the recipe
@@ -5194,14 +5194,14 @@ proc preparedRunQuotaCommand(action: BuildAction;
 # In-Process-Monitor-Hosting HM-5 — the depfile flush, and WHAT IT COULD AND
 # COULD NOT MOVE.
 #
-# HM-5 asks for the `.rdep` to be written asynchronously and atomically so the
+# HM-5 asks for the `.iomon` to be written asynchronously and atomically so the
 # scheduler can hand an action's evidence onward before the file lands. Both
 # halves of its premise turned out to be wrong about this code, and both
 # corrections are load-bearing:
 #
-# 1. "THE `.rdep` IS A WRITE-ONLY ARTEFACT." It is not. `readMonitorDepFile`
+# 1. "THE `.iomon` IS A WRITE-ONLY ARTEFACT." It is not. `readMonitorDepFile`
 #    genuinely has zero call sites, but the engine reads the file anyway,
-#    through `foldMonitorDepFileEvidence` — a hand-rolled RMDF reader written
+#    through `foldMonitorDepFileEvidence` — a hand-rolled iomon reader written
 #    so the depfile OBJECT is not retained. Evidence collection therefore had a
 #    hard dependency on the file existing by the time the action was reaped, and
 #    an async flush alone would have raced it into `mrMissingFile`. The fix is
@@ -5308,7 +5308,7 @@ func monitorHostingRefusal*(path: MonitorLaunchPath): string =
     "; refusing to launch it. A hosted plan carries the recipe's own argv " &
     "with NO `repro internal io monitor` wrapper, so an action that reaches " &
     "a launch site which starts no host runs completely unmonitored: no " &
-    "RMDF, an empty dependency set, and a successful, cache-publishing " &
+    "iomon, an empty dependency set, and a successful, cache-publishing " &
     "action that reports nothing wrong. Teaching this path to host needs a " &
     "RunQuota lease that can adopt an already-spawned child " &
     "(In-Process-Monitor-Hosting P4), not a wider hosting decision."
@@ -5351,7 +5351,7 @@ type
     stdoutPath: string
     stderrPath: string
     depTempPath: string
-      ## HM-5 — where io-mon was told to write this action's canonical RMDF: a
+      ## HM-5 — where io-mon was told to write this action's canonical iomon: a
       ## scratch sibling of ``depDestPath``, never the destination itself and
       ## never ``getTempDir()``. See ``monitorFlushTempPath``.
     depDestPath: string
@@ -5623,7 +5623,7 @@ proc completeMonitorHost(pool: var MonitorHostPool; slot: int) =
     # HM-5 — take the canonical records ``finishMonitor`` already built. This
     # is a MOVE, not a decode and not a copy: ``depFileFromOwnedRecords`` owns
     # the very seq ``writeCanonicalInPlace`` just emitted, so the engine's
-    # evidence source costs nothing here and the ``.rdep`` stops being read
+    # evidence source costs nothing here and the ``.iomon`` stops being read
     # back at all. ``outcome`` dies at the end of this statement list, so
     # nothing retains the ``MonitorDepFile`` object — the rule
     # ``foldMonitorDepFileEvidence``'s doc-comment states is unchanged.
@@ -5691,7 +5691,7 @@ proc finishMonitorHostAction(pool: var MonitorHostPool; id: string; slot: int;
   ## files diagnostics and focused engine tests read.
   ##
   ## HM-5 — this is the seam where the action's outcome and its evidence go
-  ## FORWARD and the ``.rdep`` goes SIDEWAYS. ``hostedRecords`` is moved out to
+  ## FORWARD and the ``.iomon`` goes SIDEWAYS. ``hostedRecords`` is moved out to
   ## the caller (a scheduler local it drops as soon as evidence is collected)
   ## and the publication is queued on the flush worker, so by the time this
   ## returns the scheduler owns everything it needs and the file has not
@@ -8333,7 +8333,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # ``monitoredAction`` strips the ``repro internal io monitor``
         # wrapper when the plan says hosted, so a hosted plan arriving at a
         # site that starts no host runs the recipe's argv NAKED: no wrapper,
-        # no host, no RMDF, an empty dependency set, and a successful,
+        # no host, no iomon, an empty dependency set, and a successful,
         # cache-publishing action that reports nothing wrong. Only the L1
         # branch below honours ``plan.hostInProcess``; an inline launch is
         # staged and ``continue``s above that branch, and the helper path
@@ -8802,7 +8802,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let evidenceStart = statStart()
         var evidence =
           if runningItem.processKind == rpkMonitorHost:
-            # HM-5 — fold from the records the host already has. The ``.rdep``
+            # HM-5 — fold from the records the host already has. The ``.iomon``
             # for this action may not exist yet; that is the point.
             collectEvidence(action, strict = true,
               hostedRecords = addr hostedMonitorRecords)
@@ -8810,7 +8810,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             collectEvidence(action, strict = true)
         hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
-        # HM-5 — a publication that FAILED means this action's ``.rdep`` never
+        # HM-5 — a publication that FAILED means this action's ``.iomon`` never
         # landed. Nothing is wrong with the action or its evidence, which came
         # from memory; what is missing is the artefact ``repro why`` and CI
         # read for the cache entry about to be published. So the entry is not

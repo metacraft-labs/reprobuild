@@ -195,7 +195,7 @@ suite "DSL-port M9.R.15c.1 — io-monitor fragment-log perf & crash recovery":
     # mergeFragments uses the tolerant reader, so the entire directory
     # parses without raising and the canonical depfile contains every
     # complete record.
-    let outputPath = fragmentDir / "merged.rdep"
+    let outputPath = fragmentDir / "merged.iomon"
     let dep = mergeFragments(fragmentDir, outputPath)
     var fileOpenCount = 0
     for r in dep.records:

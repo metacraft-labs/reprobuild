@@ -163,7 +163,7 @@ suite "Deferred-D4: collectEvidence aggregation scales linearly":
     check "proc addUnique(values: var seq[string]; value: string)" in src
 
     # Spot-check: the four ``monitorReads/Writes/Probes/depfileInputs``
-    # hot paths must use the HashSet overload. RMDF folding now lives in
+    # hot paths must use the HashSet overload. iomon folding now lives in
     # ``foldMonitorDepFileEvidence`` and ``collectEvidence`` threads the
     # same ``EvidenceSeenSets`` through it, so scan both bodies and assert
     # NONE of the calls of the form ``evidence.monitorReads.addUnique(path)``
@@ -179,9 +179,9 @@ suite "Deferred-D4: collectEvidence aggregation scales linearly":
     check "foldMonitorDepFileEvidence(action.monitorDepfile" in collectBody
     check "action.cwd, result.evidence, seen" in collectBody
 
-    # In-Process-Monitor-Hosting HM-5 split the RMDF DECODE from the FOLD:
+    # In-Process-Monitor-Hosting HM-5 split the iomon DECODE from the FOLD:
     # ``foldOneMonitorRecord`` is now the single implementation of the folding
-    # rules and both sources go through it — the ``.rdep`` bytes on the
+    # rules and both sources go through it — the ``.iomon`` bytes on the
     # wrapped launch paths (``foldMonitorDepFileEvidence``) and the in-memory
     # records on the hosted one (``foldMonitorRecordsEvidence``). The hot body
     # this case is about is therefore the shared one, and the two delegations

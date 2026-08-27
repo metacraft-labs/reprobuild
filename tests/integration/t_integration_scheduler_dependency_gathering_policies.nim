@@ -324,7 +324,7 @@ proc requirePolicyCase(name, mode: string; policy: DependencyGatheringPolicy;
   if policy.kind in MonitorPolicyKinds:
     check first.monitorDepfilePath.len > 0
     check fileExists(first.monitorDepfilePath)
-    check readFile(first.monitorDepfilePath)[0 .. 3] == "RMDF"
+    check readFile(first.monitorDepfilePath)[0 .. 3] == "IOMN"
   let afterFirst = cacheRecordsSize(cacheRoot)
   check afterFirst > before
   let outputV1 = readFile(output)
@@ -528,8 +528,8 @@ suite "integration_scheduler_dependency_gathering_policies":
         writeFixture(visible, "visible\n")
         writeFixture(hidden, "hidden\n")
 
-        let corruptDepfile = failDir / "corrupt.rdep"
-        writeFixture(corruptDepfile, "not an RMDF depfile")
+        let corruptDepfile = failDir / "corrupt.iomon"
+        writeFixture(corruptDepfile, "not an iomon depfile")
         requireFailureNoPublish(action("corrupt-monitor-evidence",
           [fixtureBin, "plain", visible, hidden,
             failDir / "corrupt.txt", failDir / "unused.sidecar",

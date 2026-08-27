@@ -324,7 +324,7 @@ int main(int argc, char **argv) {
       # one per test; ``prepareMonitorTools`` resolves the identical path.
       let shimDylib = requireBinary(monitorShimPath(repoRoot),
         "reprobuild.test_fixtures.monitor_shim")
-      let depfile = tempRoot / "evidence.rdep"
+      let depfile = tempRoot / "evidence.iomon"
       let parentInput = tempRoot / "parent-input.txt"
       let childInput = tempRoot / "child-input.txt"
 
@@ -364,7 +364,7 @@ int main(int argc, char **argv) {
       let canonicalParentInput = expandFilename(parentInput)
       let canonicalChildInput = expandFilename(childInput)
 
-      check readFile(depfile)[0 .. 3] == "RMDF"
+      check readFile(depfile)[0 .. 3] == "IOMN"
       check records.len > 0
       check hasRecord(records, proc(record: MonitorRecord): bool =
         record.kind == mrProcessStart)

@@ -70,7 +70,7 @@ proc runExport(c: ShellHookCase; extraEnv: openArray[(string, string)] = []):
 proc runExportUnderMonitor(c: ShellHookCase; fingerprint, depfilePath: string):
     tuple[stdout: string; exitCode: int] =
   ## Wrap the export call under ``repro internal io monitor`` so the monitor shim
-  ## records every file read into ``depfilePath`` (RMDF format).
+  ## records every file read into ``depfilePath`` (iomon format).
   var env = c.baselineEnvForBash()
   env["REPRO_MONITOR_SHIM_LIB"] = c.monitorShim
   env["__REPRO_APPLIED"] = fingerprint
@@ -107,7 +107,7 @@ suite "e2e_shell_hook_noop_io_bounded":
 
         # Measured run: same command, but with the fingerprint in env
         # so the fast path engages.
-        let depfilePath = c.tempRoot / "noop-io.rdep"
+        let depfilePath = c.tempRoot / "noop-io.iomon"
         let monitored = runExportUnderMonitor(c, fingerprint, depfilePath)
         if monitored.exitCode != 0 or
             not monitored.stdout.contains(
