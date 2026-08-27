@@ -5378,16 +5378,66 @@ proc addCacheField(payload: var string; value: string) =
   payload.add(value)
   payload.add("\n")
 
-proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
-                          mode: ToolProvisioningMode): string =
+proc pathModeResolutionSignature(artifact: ProjectInterfaceArtifact;
+                                 pathValue: string): string =
+  ## What ``$PATH`` actually decides in path mode: for each declared tool
+  ## use, WHICH executable the resolver would pick under ``pathValue``.
+  ##
+  ## This replaces a verbatim ``getEnv("PATH")`` field in
+  ## ``toolIdentityCacheKey``. That field was the last place the raw host
+  ## ``$PATH`` string was hashed into a cache key, one layer above the
+  ## profile fingerprint that stopped hashing it (see
+  ## ``profileFingerprintFor``'s v6 → v7 note and
+  ## ``tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim``).
+  ## It over-invalidated: any ``$PATH`` difference at all — a reordered
+  ## entry, a directory that does not exist, a shell that exports its
+  ## entries in another order — threw away the whole on-disk tool identity
+  ## and forced a full re-resolve, which since the digest landed also
+  ## re-reads and blake3s every resolved executable. Same-shell,
+  ## same-tools, different-``$PATH`` is the common case in CI and in a
+  ## developer's second terminal, and it paid the most expensive path.
+  ##
+  ## Deleting the field outright would NOT have been correct. It is the
+  ## ONLY thing that invalidates the memo when ``$PATH`` changes WHICH
+  ## binary a use resolves to: ``toolIdentityRealizationsUsable`` (below)
+  ## only asks whether the previously recorded paths still EXIST, and a
+  ## directory prepended in front of ``/usr/bin`` does not make
+  ## ``/usr/bin/gcc`` disappear. Drop the field and a prepended shadow is
+  ## a silent stale-serve of the identity for the shadowed tool.
+  ##
+  ## So key on the RESOLUTION, the same principle the profile fingerprint
+  ## applies one layer down. Uses whose selector was materialized as a
+  ## cross-repo producer are skipped: ``toolProfileFor`` resolves those
+  ## against the producer's realized bin dirs or the aux channels, never
+  ## against the host ``$PATH``, and their realized directories are
+  ## folded into the key separately below.
   var payload = ""
-  payload.addCacheField("reprobuild.toolIdentityCache.v3")
+  payload.addCacheField("path-resolution.v1")
+  for useDef in artifact.projectInterface.toolUses:
+    if useDef.packageSelector.len > 0 and
+        (producerMaterializedBinDirs.hasKey(useDef.packageSelector) or
+         producerMaterializedAuxPaths.hasKey(useDef.packageSelector)):
+      continue
+    payload.addCacheField(useDef.packageSelector)
+    payload.addCacheField(useDef.executableName)
+    payload.addCacheField(pathOnlyResolutionSignature(useDef, pathValue))
+  payload
+
+proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
+                           mode: ToolProvisioningMode;
+                           pathValue = getEnv("PATH")): string =
+  ## Exported so ``tests/unit/t_tool_identity_key_resolves_before_it_keys.nim``
+  ## can assert both directions of the ``$PATH`` contract against the real
+  ## key rather than against a stand-in. ``pathValue`` defaults to the
+  ## process ``$PATH``; every production call site takes the default.
+  var payload = ""
+  payload.addCacheField("reprobuild.toolIdentityCache.v4")
   payload.addCacheField(mode.modeName)
   payload.addCacheField(artifact.projectInterface.projectName)
   payload.addCacheField(artifact.projectInterface.packageName)
   payload.addCacheField(digestHex(artifact.interfaceFingerprint))
   if mode == tpmPathOnly:
-    payload.addCacheField(getEnv("PATH"))
+    payload.addCacheField(pathModeResolutionSignature(artifact, pathValue))
   # Cross-Repo-Source-Consumption SC-6 (§5.2 "a changed pin invalidates the
   # consumer") — fold each materialized cross-repo LIBRARY producer's realized
   # producer directories into the tool-identity cache key. Both channels are
@@ -5455,14 +5505,21 @@ proc toolIdentityRealizationsUsable(identity: PathOnlyBuildIdentity): bool =
   # The cache is usable when the artifacts the identity points at are
   # still on disk: realized store paths (for nix/tarball/scoop) and the
   # resolved executable itself. The ``pathSearchList`` is the snapshot of
-  # ``$PATH`` at resolution time and is fingerprinted into the cache key
-  # via ``toolIdentityCacheKey`` — PATH commonly carries entries for
-  # directories that don't exist on the current host (e.g. Linux-style
-  # ``~/.pixi/bin`` entries persisted in a shell rc and inherited on
-  # macOS). Requiring every PATH entry to exist would invalidate the
-  # cache on every build and force a fresh probe each time. Cache
-  # invalidation when PATH itself changes is already handled by the
-  # cache-key check.
+  # ``$PATH`` at resolution time and is deliberately NOT checked here —
+  # PATH commonly carries entries for directories that don't exist on the
+  # current host (e.g. Linux-style ``~/.pixi/bin`` entries persisted in a
+  # shell rc and inherited on macOS). Requiring every PATH entry to exist
+  # would invalidate the cache on every build and force a fresh probe
+  # each time.
+  #
+  # This check is therefore NOT what catches a ``$PATH`` change: a
+  # directory prepended in front of ``/usr/bin`` does not make
+  # ``/usr/bin/gcc`` stop existing, so every loop below still passes.
+  # What catches it is ``pathModeResolutionSignature`` in the cache key —
+  # which re-runs the resolver's LOOKUP (not its digesting) for each
+  # declared use and so moves the key exactly when some use would now
+  # resolve to a different executable. A ``$PATH`` that resolves every
+  # declared tool to the same binary keeps the key stable on purpose.
   for profile in identity.profiles:
     for storePath in profile.realizedStorePaths:
       if storePath.len > 0 and not dirExists(extendedPath(storePath)):
@@ -7322,10 +7379,18 @@ proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
         continue
       let key = packageName & "\0" & executableName
       if not seenProfiles.containsOrIncl(key):
-        identity.profiles.add(PathOnlyToolProfile(
+        # Sealed like every other construction site even though these
+        # profiles are discarded below — an unsealed profile ships the
+        # zero fingerprint, and a zero fingerprint is not a distinct
+        # identity (see ``refreshProfileIdentity``). Keeping the rule
+        # exceptionless is what makes it checkable; the alternative is a
+        # documented hole that the next caller of this snapshot inherits.
+        var synthetic = PathOnlyToolProfile(
           packageSelector: packageName,
           executableName: executableName,
-          resolvedExecutablePath: executableName))
+          resolvedExecutablePath: executableName)
+        refreshProfileIdentity(synthetic)
+        identity.profiles.add(synthetic)
       if not packageNamesByExecutable.hasKey(executableName):
         packageNamesByExecutable[executableName] = @[]
       if packageNamesByExecutable[executableName].find(packageName) < 0:
