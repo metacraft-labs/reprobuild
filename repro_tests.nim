@@ -438,6 +438,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/test_m10_observed_env_cache_key.nim",
+    binary: "build/test-bin/test_m10_observed_env_cache_key",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_build_engine/tests/test_m10_observed_env_live_windows.nim",
+    binary: "build/test-bin/test_m10_observed_env_live_windows",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_m6_entropy_blessing.nim",
     binary: "build/test-bin/test_m6_entropy_blessing",
     defines: @[],

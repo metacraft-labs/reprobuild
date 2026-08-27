@@ -565,6 +565,23 @@ type
     monitorReads*: seq[string]
     monitorWrites*: seq[string]
     monitorProbes*: seq[string]
+    monitorEnvReads*: seq[string]
+      ## M10 — the NAMES of the environment variables the monitor observed
+      ## this action reading (`mrEnvRead`, io-mon's observed-declared-input
+      ## record; deduped per process by the shim and again here).
+      ##
+      ## NAMES, not paths: they are deliberately kept out of `monitorReads`
+      ## and never run through `materialPath`. A variable is not a file, has
+      ## no content to fingerprint and no directory to resolve against;
+      ## `cacheEnvInputs` pairs each name with the VALUE the action saw and
+      ## the action cache re-reads that value on the next lookup.
+      ##
+      ## This field is what makes io-mon's `mcapObservedEnv` mean anything to
+      ## a consumer. Until it existed, `foldMonitorDepFileEvidence` dropped
+      ## every `mrEnvRead` on its `else: discard` arm -- so all three
+      ## platforms' shims recorded environment reads faithfully and the action
+      ## cache ignored them, which is a false cache HIT whenever a build reads
+      ## a variable whose value later changes.
     diagnostics*: seq[string]
     entropyObservations*: seq[EntropyObservation]
       ## M6 — one entry per distinct (source, origin) the capture recorded.
@@ -1599,6 +1616,33 @@ proc addUnique(values: var seq[string]; seen: var HashSet[string];
     return
   values.add(value)
 
+proc addUnique(values: var seq[string]; seen: var HashSet[string];
+               value, key: string) =
+  ## `addUnique` where MEMBERSHIP is keyed differently from what is stored.
+  ##
+  ## Exists for observed environment names: Windows environment lookup is
+  ## case-insensitive, so `PATH` and `Path` are one variable with one value
+  ## and must produce one cache-key entry, while the stored spelling stays the
+  ## one the program used.
+  if value.len == 0:
+    return
+  if seen.containsOrIncl(key):
+    return
+  values.add(value)
+
+proc envNameKey*(name: string): string =
+  ## The dedup key for an observed environment variable name.
+  ##
+  ## Upper-cased on Windows ONLY. On POSIX the environment is
+  ## case-SENSITIVE -- `Path` and `PATH` really are two variables with two
+  ## values -- so folding case there would merge two distinct inputs into one
+  ## cache-key entry and lose whichever the merge dropped. The io-mon shims
+  ## make the same platform split for the same reason.
+  when defined(windows):
+    name.toUpperAscii
+  else:
+    name
+
 proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
   result = path.replace('\\', '/').strip()
   while result.startsWith("./"):
@@ -1844,6 +1888,11 @@ type
     monitorReads*: HashSet[string]
     monitorWrites*: HashSet[string]
     monitorProbes*: HashSet[string]
+    monitorEnvReads*: HashSet[string]
+      ## M10 — case-INSENSITIVE membership on Windows, where `PATH` and `Path`
+      ## are one variable. The shim already dedupes that way; this is the
+      ## second line, for a merge of fragments from processes that spelled it
+      ## differently.
 
 proc monitorProfileEvidenceComplete(detail: string): bool =
   result = true
@@ -2155,6 +2204,15 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
       evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
     of mrPathProbe, mrDirectoryEnumerate:
       evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+    of mrEnvRead:
+      # `record.path` here is a variable NAME, not a path -- `materialized`
+      # above would have joined it to the action's cwd, which is why this arm
+      # uses `record.path` directly. Getting that wrong would turn
+      # `SOURCE_DATE_EPOCH` into `<cwd>/SOURCE_DATE_EPOCH` and quietly key the
+      # cache on a file that does not exist.
+      if record.path.len > 0:
+        evidence.monitorEnvReads.addUnique(seen.monitorEnvReads,
+          record.path, envNameKey(record.path))
     else:
       discard
 
@@ -2722,6 +2780,73 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
+
+proc actionEnvLookup*(action: BuildAction; name: string):
+    tuple[present: bool, value: string] =
+  ## The value the ACTION would see for `name`, and whether it is set at all.
+  ##
+  ## Resolved against `action.env` -- the environment the engine composed for
+  ## this action -- and NOT against the daemon's own process environment,
+  ## which is a different set entirely. `envValue` above answers "" for both
+  ## unset and set-to-empty; the cache has to tell them apart, because a
+  ## program branching on "is this variable defined" sees the difference.
+  let prefix = name & "="
+  when defined(windows):
+    # Case-insensitive, matching how Windows itself resolves a lookup.
+    let wanted = prefix.toUpperAscii
+    for item in action.env:
+      if item.len >= wanted.len and item[0 ..< wanted.len].toUpperAscii == wanted:
+        return (true, item.substr(wanted.len))
+  else:
+    for item in action.env:
+      if item.startsWith(prefix):
+        return (true, item.substr(prefix.len))
+  (false, "")
+
+proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence):
+    seq[EnvFingerprint] =
+  ## The action-cache key's OBSERVED ENVIRONMENT set: each variable io-mon saw
+  ## the action read, paired with the value it held at the time.
+  ##
+  ## This is the consumer half of io-mon's `mcapObservedEnv`. The shim records
+  ## that the build ASKED for a variable; only the engine knows what it
+  ## answered, and only the engine can re-read it on the next lookup to decide
+  ## whether the recorded result still applies.
+  ##
+  ## Sorted by key so two runs that observed the same variables in different
+  ## orders produce the SAME strong fingerprint. The file-input list gets its
+  ## determinism from a fixed traversal order; observed env reads arrive in
+  ## whatever order the program happened to make them, which for a threaded
+  ## build is not stable across runs -- and an unstable key is a permanent
+  ## cache miss, indistinguishable from a correct invalidation.
+  var names = evidence.monitorEnvReads
+  names.sort(proc (a, b: string): int = cmp(envNameKey(a), envNameKey(b)))
+  for name in names:
+    let resolved = action.actionEnvLookup(name)
+    result.add(EnvFingerprint(name: name, present: resolved.present,
+      value: resolved.value))
+
+proc actionEnvResolver*(action: BuildAction): EnvResolver =
+  ## `cacheEnvInputs`' counterpart for the LOOKUP side: how the action cache
+  ## re-reads a recorded variable when deciding hit or miss.
+  ##
+  ## A closure over a COPY of the action's env, because the resolver outlives
+  ## this call and the store calls it while walking records.
+  let env = action.env
+  result = proc(name: string): tuple[present: bool, value: string]
+      {.gcsafe, raises: [].} =
+    let prefix = name & "="
+    when defined(windows):
+      let wanted = prefix.toUpperAscii
+      for item in env:
+        if item.len >= wanted.len and
+            item[0 ..< wanted.len].toUpperAscii == wanted:
+          return (true, item.substr(wanted.len))
+    else:
+      for item in env:
+        if item.startsWith(prefix):
+          return (true, item.substr(prefix.len))
+    (false, "")
 
 proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
   ## S7 — the subset of the action's ``ignoredInputPrefixes`` that the
@@ -5342,6 +5467,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var metadataCache = initFileMetadataCache()
     if config.skipCacheHitEvidence:
       var hotProbes: seq[HotMetadataProbe] = @[]
+      # M10 — parallel to `hotProbes`, so a record that observed environment
+      # variables can have them re-read on THIS path too. Without it the
+      # whole-graph shortcut below would serve a hit for an action whose
+      # environment moved, and nothing downstream would look again.
+      var hotEnvResolvers: seq[EnvResolver] = @[]
       for action in buildGraph.actions:
         if (not action.cacheable) or action.dynamicDepsFile.len > 0:
           return none(BuildRunResult)
@@ -5353,10 +5483,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         hotProbes.add(HotMetadataProbe(
           weakFingerprint: action.weakFingerprint,
           policy: action.actionCachePolicy))
+        hotEnvResolvers.add(action.actionEnvResolver())
       let lookupStart = statStart()
       let navigatorStart = statStart()
       let scan = cache.scanHotIndexMetadataInputsUnchanged(hotProbes,
-        addr metadataCache)
+        addr metadataCache, hotEnvResolvers)
       finishStat("repro hot index navigator scan", navigatorStart)
       finishStat("repro cache lookup", lookupStart)
       case scan.status
@@ -5378,6 +5509,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         discard
 
     var hotRecords: seq[ActionResultRecord] = @[]
+    # M10 — parallel to `hotRecords`; see `hotEnvResolvers` above.
+    var hotRecordEnvResolvers: seq[EnvResolver] = @[]
     for action in buildGraph.actions:
       if (not action.cacheable) or action.dynamicDepsFile.len > 0:
         return none(BuildRunResult)
@@ -5393,10 +5526,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if hotRecord.isNone:
         return none(BuildRunResult)
       hotRecords.add(hotRecord.get())
+      hotRecordEnvResolvers.add(action.actionEnvResolver())
     let lookupStart = statStart()
     let inputScanStart = statStart()
     let inputsUnchanged =
-      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
+      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache,
+        hotRecordEnvResolvers)
     finishStat("repro hot input scan", inputScanStart)
     finishStat("repro cache lookup", lookupStart)
     if not inputsUnchanged:
@@ -6039,7 +6174,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             verifyOutputBlobs = not outputsPresentBeforeLookup,
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
               outputsPresentBeforeLookup,
-            metadataCache = addr fileMetadataCache)
+            metadataCache = addr fileMetadataCache,
+            envResolver = action.actionEnvResolver())
           finishStat("repro cache lookup", lookupStart)
           # Peer-Cache M1: on local miss, consult the LAN peer cache.
           # `peerCacheActionFetcher` is nil when ``--peer-cache=…`` was
@@ -6069,7 +6205,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   allowMetadataOnlyHit =
                     config.rebuildMissingOutputsOnCacheHit and
                     outputsPresentBeforeLookup,
-                  metadataCache = addr fileMetadataCache)
+                  metadataCache = addr fileMetadataCache,
+                  envResolver = action.actionEnvResolver())
                 finishStat("repro peer-cache lookup-retry", retryStart)
                 runResult.trace(id, "peer-cache-hit", $lookup.status)
               else:
@@ -6322,7 +6459,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 action.cacheInputPaths(evidence.evidence),
                 action.outputs, action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache)
+                metadataCache = addr fileMetadataCache,
+                envInputs = action.cacheEnvInputs(evidence.evidence))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, action.id), record)
@@ -6436,7 +6574,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache)
+                metadataCache = addr fileMetadataCache,
+                envInputs = plan.action.cacheEnvInputs(evidence.evidence))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
@@ -6856,7 +6995,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
             storeOutputBlobs = storeOutputBlobs,
-            metadataCache = addr fileMetadataCache)
+            metadataCache = addr fileMetadataCache,
+            envInputs = action.cacheEnvInputs(evidence.evidence))
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)

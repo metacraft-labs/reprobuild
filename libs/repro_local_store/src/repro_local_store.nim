@@ -78,13 +78,52 @@ type
     blob*: CasBlobRef
     permissions*: set[FilePermission]
 
+  EnvFingerprint* = object
+    ## One OBSERVED ENVIRONMENT VARIABLE, and what it held when the action
+    ## ran.
+    ##
+    ## io-mon records `mrEnvRead` with the variable's NAME: the monitor saw
+    ## that the build asked for it, and folding the VALUE into the cache key
+    ## is the consumer's half of the contract (BuildXL's observed-environment
+    ## model). This is that half. Before it existed, `foldMonitorDepFileEvidence`
+    ## dropped `mrEnvRead` on its `else: discard` arm -- so a build could read
+    ## `SOURCE_DATE_EPOCH` or `CFLAGS`, the capture could record the read
+    ## faithfully, and the action cache would still serve a stale result when
+    ## the value changed.
+    ##
+    ## `present` is carried separately from an empty `value` because the two
+    ## are DIFFERENT states that programs act on differently: `if
+    ## os.environ.get("X")` and `if os.environ["X"] != ""` are not the same
+    ## test, and a variable going from unset to empty must invalidate.
+    name*: string
+    present*: bool
+    value*: string
+
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
     policy*: FileFingerprintPolicy
     inputs*: seq[FileFingerprint]
+    envInputs*: seq[EnvFingerprint]
+      ## The environment variables the monitor observed this action reading.
+      ## Empty for every action that read none, and for every record written
+      ## before this field existed -- which is why an empty seq contributes
+      ## NOTHING to `strongIdentityPayload` and leaves the record at the older
+      ## on-disk version. Existing cache entries keep their keys and stay
+      ## readable by an older peer.
     strongFingerprint*: ContentDigest
     outputPayloadKind*: OutputPayloadKind
     outputs*: seq[OutputBlob]
+
+  EnvResolver* = proc(name: string): tuple[present: bool, value: string]
+    {.gcsafe, raises: [].}
+    ## How a lookup re-reads an observed variable's CURRENT value.
+    ##
+    ## Supplied by the caller rather than read from the process environment,
+    ## because the value that matters is the one the ACTION would see -- the
+    ## engine composes that env per action, and the daemon process running the
+    ## lookup has a different one. A `nil` resolver means the caller cannot
+    ## answer, and a record carrying env inputs is then treated as CHANGED:
+    ## re-running an action is recoverable, serving a stale result is not.
 
   LocalCas* = object
     root*: string
@@ -168,6 +207,13 @@ type
 const
   ActionRecordMagic = "RBAR"
   ActionRecordVersion = 3'u16
+  ActionRecordVersionEnv = 4'u16
+    ## Written ONLY for a record that actually carries observed environment
+    ## inputs. A record with none stays version 3, byte-for-byte what this
+    ## code wrote before, so no existing cache entry is invalidated and no
+    ## older reader (a peer cache, a previously built binary) is locked out of
+    ## the records it could already read. The version bump is scoped to the
+    ## records that genuinely need the new section.
   # Per-edge record file: a small self-describing container holding the
   # edge's bounded record set. Each contained record is the existing
   # `RBAR` full-record frame, so producers/consumers (incl. the peer cache)
@@ -1004,7 +1050,8 @@ proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
       setFilePermissions(extendedPath(destination), output.permissions)
 
 proc strongIdentityPayload(weak: ContentDigest;
-                           inputs: openArray[FileFingerprint]): seq[byte] =
+                           inputs: openArray[FileFingerprint];
+                           envInputs: openArray[EnvFingerprint]): seq[byte] =
   result.add(byte(ord('R')))
   result.add(byte(ord('B')))
   result.add(byte(ord('S')))
@@ -1022,22 +1069,53 @@ proc strongIdentityPayload(weak: ContentDigest;
         raise newException(ActionRecordError,
           "content fingerprint missing for " & input.path)
       result.writeLocalHash(input.localHash)
+  # THE ENV SECTION IS APPENDED ONLY WHEN THERE IS ONE.
+  #
+  # Not a stylistic choice. Emitting a zero count for every action would
+  # change the payload bytes of EVERY record ever written, so every strong
+  # fingerprint in every existing cache would shift and every warm build on
+  # every machine would miss once -- a full rebuild of the world to add a
+  # field that the overwhelming majority of records do not use. Appending
+  # nothing for an empty set keeps those keys identical and confines the new
+  # bytes to the records that actually observed a variable.
+  if envInputs.len > 0:
+    result.add(byte(ord('E')))
+    result.add(byte(ord('N')))
+    result.add(byte(ord('V')))
+    result.writeU32Le(uint32(envInputs.len))
+    for env in envInputs:
+      result.writeString(env.name)
+      result.add(byte(if env.present: 1 else: 0))
+      result.writeString(env.value)
 
 proc computeStrongFingerprint*(weak: ContentDigest;
-                               inputs: openArray[FileFingerprint]): ContentDigest =
-  blake3DomainDigest(strongIdentityPayload(weak, inputs), hdActionFingerprint)
+                               inputs: openArray[FileFingerprint];
+                               envInputs: openArray[EnvFingerprint] = []):
+                               ContentDigest =
+  blake3DomainDigest(strongIdentityPayload(weak, inputs, envInputs),
+    hdActionFingerprint)
 
 proc encodeRecord(record: ActionResultRecord): seq[byte] =
   result.add(byte(ord(ActionRecordMagic[0])))
   result.add(byte(ord(ActionRecordMagic[1])))
   result.add(byte(ord(ActionRecordMagic[2])))
   result.add(byte(ord(ActionRecordMagic[3])))
-  result.writeU16Le(ActionRecordVersion)
+  # Version 4 ONLY when there is an env section to carry; see
+  # `ActionRecordVersionEnv`.
+  result.writeU16Le(
+    if record.envInputs.len > 0: ActionRecordVersionEnv
+    else: ActionRecordVersion)
   result.writeDigest(record.weakFingerprint)
   result.add(byte(ord(record.policy)))
   result.writeU32Le(uint32(record.inputs.len))
   for input in record.inputs:
     result.writeFingerprint(input)
+  if record.envInputs.len > 0:
+    result.writeU32Le(uint32(record.envInputs.len))
+    for env in record.envInputs:
+      result.writeString(env.name)
+      result.add(byte(if env.present: 1 else: 0))
+      result.writeString(env.value)
   result.writeDigest(record.strongFingerprint)
   result.add(byte(ord(record.outputPayloadKind)))
   result.writeU32Le(uint32(record.outputs.len))
@@ -1060,7 +1138,7 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       raiseEnvelopeError(eeUnknownMagic, "unknown action record magic")
   var pos = 4
   let version = readU16Le(payload, pos)
-  if version notin {2'u16, ActionRecordVersion}:
+  if version notin {2'u16, ActionRecordVersion, ActionRecordVersionEnv}:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported action record version")
   result.weakFingerprint = readDigest(payload, pos)
   let policy = readByte(payload, pos)
@@ -1071,6 +1149,13 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
   result.inputs = newSeq[FileFingerprint](inputCount)
   for i in 0 ..< inputCount:
     result.inputs[i] = readFingerprint(payload, pos)
+  if version >= ActionRecordVersionEnv:
+    let envCount = int(readU32Le(payload, pos))
+    result.envInputs = newSeq[EnvFingerprint](envCount)
+    for i in 0 ..< envCount:
+      result.envInputs[i].name = readString(payload, pos)
+      result.envInputs[i].present = readByte(payload, pos) != 0'u8
+      result.envInputs[i].value = readString(payload, pos)
   result.strongFingerprint = readDigest(payload, pos)
   if version >= 3'u16:
     let outputPayloadKind = readByte(payload, pos)
@@ -1556,9 +1641,41 @@ proc hotInputKey(input: FileFingerprint): string =
     $ord(input.metadata.kind) & "\0" & $input.metadata.sizeBytes & "\0" &
     $input.metadata.mtimeNs
 
+proc envInputChanged*(record: ActionResultRecord; resolver: EnvResolver;
+                     changedName: var string): bool =
+  ## Has any observed environment variable moved since the action ran?
+  ##
+  ## This is the whole point of `mcapObservedEnv` reaching the consumer: a
+  ## build that read `SOURCE_DATE_EPOCH` must re-run when it changes and must
+  ## NOT re-run when it does not. Both directions matter -- always answering
+  ## "changed" would make every action that reads a variable uncacheable,
+  ## which is the same damage as a stale hit arriving from the other side.
+  ##
+  ## A record with no env inputs is unaffected and never consults the
+  ## resolver, so nothing that existed before this feature changes behaviour.
+  ## A record that HAS them and no resolver is CHANGED: the caller could not
+  ## establish that the inputs still hold, and an unnecessary re-run is
+  ## recoverable where a stale result is not.
+  changedName = ""
+  if record.envInputs.len == 0:
+    return false
+  if resolver == nil:
+    changedName = record.envInputs[0].name & " (no environment resolver)"
+    return true
+  for env in record.envInputs:
+    let current = resolver(env.name)
+    # `present` is compared as well as `value`: unset and set-to-empty are
+    # different states, and a program that branches on `is None` sees the
+    # difference even though both render as "".
+    if current.present != env.present or current.value != env.value:
+      changedName = env.name
+      return true
+  false
+
 proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
                                           probes: openArray[HotMetadataProbe];
-                                          metadataCache: ptr FileMetadataCache = nil):
+                                          metadataCache: ptr FileMetadataCache = nil;
+                                          envResolvers: openArray[EnvResolver] = []):
                                           HotMetadataScan =
   ## Batch "are all these edges still cache hits" check, now served by
   ## reading each probe's single authoritative `hot-records/<key>` file
@@ -1571,7 +1688,7 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     return HotMetadataScan(status: hmssHit)
   var checkedInputs = 0
   var totalRecords = 0
-  for probe in probes:
+  for probeIndex, probe in probes:
     let records = cache.loadPerEdgeRecords(probe.weakFingerprint)
     var matched = false
     for record in records:
@@ -1585,6 +1702,18 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     for record in records:
       if record.weakFingerprint == probe.weakFingerprint and
           record.policy == probe.policy:
+        # M10 — the OBSERVED ENVIRONMENT has to be checked on this path too.
+        # It is the whole-graph "everything is already up to date" shortcut,
+        # so a record whose environment moved and is not caught HERE is served
+        # as a hit without any other check ever running. `envInputChanged`
+        # fails closed when no resolver was supplied for this probe.
+        var changedEnv = ""
+        let resolver =
+          if probeIndex < envResolvers.len: envResolvers[probeIndex]
+          else: nil
+        if envInputChanged(record, resolver, changedEnv):
+          return HotMetadataScan(status: hmssInputChanged,
+            recordCount: totalRecords, checkedInputCount: checkedInputs)
         for input in record.inputs:
           inc checkedInputs
           if fingerprintRecordedMetadata(input.path, input.metadata,
@@ -2000,9 +2129,19 @@ proc hotMetadataRecordCount*(cache: var ActionCache): int =
   0
 
 proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
-                                       metadataCache: ptr FileMetadataCache = nil): bool =
+                                       metadataCache: ptr FileMetadataCache = nil;
+                                       envResolvers: openArray[EnvResolver] = []): bool =
   var seen = initHashSet[string]()
-  for record in records:
+  for recordIndex, record in records:
+    # M10 — see `scanHotIndexMetadataInputsUnchanged`: this is the other
+    # whole-graph shortcut, and an unchecked environment here is a stale hit
+    # nothing downstream would catch.
+    var changedEnv = ""
+    let resolver =
+      if recordIndex < envResolvers.len: envResolvers[recordIndex]
+      else: nil
+    if envInputChanged(record, resolver, changedEnv):
+      return false
     for input in record.inputs:
       let inputKey = hotInputKey(input)
       if seen.contains(inputKey):
@@ -2018,7 +2157,8 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
                          inputPaths, outputPaths: openArray[string];
                          outputRoot = "";
                          storeOutputBlobs = true;
-                         metadataCache: ptr FileMetadataCache = nil):
+                         metadataCache: ptr FileMetadataCache = nil;
+                         envInputs: openArray[EnvFingerprint] = []):
                          ActionResultRecord =
   result.weakFingerprint = weak
   result.policy = policy
@@ -2026,7 +2166,10 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     let input = observeFile(path, policy, metadataCache)
     if input.isRecordableInput():
       result.inputs.add(input)
-  result.strongFingerprint = computeStrongFingerprint(weak, result.inputs)
+  for env in envInputs:
+    result.envInputs.add(env)
+  result.strongFingerprint = computeStrongFingerprint(weak, result.inputs,
+    result.envInputs)
   result.outputPayloadKind =
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
@@ -2062,7 +2205,8 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
                          inputPaths, outputPaths: openArray[string];
                          outputRoot = "";
                          storeOutputBlobs = true;
-                         metadataCache: ptr FileMetadataCache = nil):
+                         metadataCache: ptr FileMetadataCache = nil;
+                         envInputs: openArray[EnvFingerprint] = []):
                          ActionResultRecord =
   result.weakFingerprint = weak
   result.policy = policy
@@ -2070,7 +2214,10 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
     let input = observeFile(path, policy, metadataCache)
     if input.isRecordableInput():
       result.inputs.add(input)
-  result.strongFingerprint = computeStrongFingerprint(weak, result.inputs)
+  for env in envInputs:
+    result.envInputs.add(env)
+  result.strongFingerprint = computeStrongFingerprint(weak, result.inputs,
+    result.envInputs)
   result.outputPayloadKind =
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
   for path in outputPaths:
@@ -2172,14 +2319,22 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
                                   policy: FileFingerprintPolicy;
                                   verifyOutputBlobs = true;
                                   allowMetadataOnlyHit = false;
-                                  metadataCache: ptr FileMetadataCache = nil):
+                                  metadataCache: ptr FileMetadataCache = nil;
+                                  envResolver: EnvResolver = nil):
                                   ActionCacheLookup =
   if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
     if hot.found and hot.record.policy == policy:
       var changed = false
       var changedInput = ""
+      # The env check comes FIRST on this path because it is the cheap one --
+      # a handful of string compares against values the caller already has,
+      # versus a stat per recorded input.
+      if envInputChanged(hot.record, envResolver, changedInput):
+        changed = true
       for input in hot.record.inputs:
+        if changed:
+          break
         if fingerprintRecordedMetadata(input.path, input.metadata,
             metadataCache) != input.metadata:
           changed = true
@@ -2206,6 +2361,11 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
     var changed = false
     var hybridCutoff = false
     var changedInput = ""
+    if envInputChanged(record, envResolver, changedInput):
+      sawInputChange = true
+      if firstChangedInput.len == 0:
+        firstChangedInput = "environment: " & changedInput
+      continue
     let refreshed = refreshedInputs(record, changed, hybridCutoff,
       changedInput, metadataCache)
     if changed:
@@ -2217,7 +2377,7 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
     if not refreshed.reusedRecordedInputs:
       candidate.inputs = refreshed.inputs
       candidate.strongFingerprint = computeStrongFingerprint(weak,
-        candidate.inputs)
+        candidate.inputs, candidate.envInputs)
       if candidate.strongFingerprint != record.strongFingerprint:
         sawInputChange = true
         if firstChangedInput.len == 0:
@@ -2254,18 +2414,22 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
                          verifyOutputBlobs = true;
                          allowMetadataOnlyHit = false;
-                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
+                         metadataCache: ptr FileMetadataCache = nil;
+                         envResolver: EnvResolver = nil): ActionCacheLookup =
   cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
-    metadataCache = metadataCache)
+    metadataCache = metadataCache,
+    envResolver = envResolver)
 
 proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
                          verifyOutputBlobs = true;
                          allowMetadataOnlyHit = false;
-                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
+                         metadataCache: ptr FileMetadataCache = nil;
+                         envResolver: EnvResolver = nil): ActionCacheLookup =
   cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
-    metadataCache = metadataCache)
+    metadataCache = metadataCache,
+    envResolver = envResolver)
