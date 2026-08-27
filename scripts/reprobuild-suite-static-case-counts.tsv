@@ -73,7 +73,7 @@ libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim	nim	9
 libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim	nim	12
 libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim	nim	5
 libs/repro_build_engine/tests/test_no_progress_diagnostic.nim	nim	1
-libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	9
+libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	10
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
@@ -1105,7 +1105,7 @@ tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim	nim	1
 tests/integration/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers.nim	nim	1
 tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim	nim	1
 tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim	nim	1
-tests/integration/t_project_dsl_build_action_payload.nim	nim	7
+tests/integration/t_project_dsl_build_action_payload.nim	nim	9
 tests/integration/t_project_extension_adds_edges_to_original_when_present.nim	nim	1
 tests/integration/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace.nim	nim	1
 tests/integration/t_project_extension_target_rehomed_and_toggles_without_force_rebuild.nim	nim	1
@@ -1369,7 +1369,7 @@ tests/unit/t_m9r23_1_installer_state_install_sequence.nim	nim	6
 tests/unit/t_m9r2_typed_cli_surfaces.nim	nim	18
 tests/unit/t_m9r2b_typed_value_layer.nim	nim	15
 tests/unit/t_m9r2c_artifact_slot_typed.nim	nim	8
-tests/unit/t_m9r30_transitive_rpath_propagation.nim	nim	11
+tests/unit/t_m9r30_transitive_rpath_propagation.nim	nim	13
 tests/unit/t_m9r33_2_qt6_module_path_walker.nim	nim	11
 tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim	nim	8
 tests/unit/t_m9r3_library_api_block.nim	nim	8
@@ -1403,7 +1403,7 @@ tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
 tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
 tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10
 tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	19
-tests/unit/t_trusted_declared_inputs_policy_guards.nim	nim	6
+tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	13
 tests/unit/t_version.nim	nim	2
 tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1

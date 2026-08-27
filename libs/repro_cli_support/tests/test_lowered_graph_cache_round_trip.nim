@@ -44,7 +44,8 @@ suite "lowered graph cache action round trip":
       actionCachePolicy: ffpHybrid,
       dependencyPolicy: DependencyGatheringPolicy(
         kind: dgAutomaticMonitor, completeness: decComplete,
-        captureNonDeterminism: true, captureIpc: true),
+        captureNonDeterminism: true, captureIpc: true,
+        suppressMonitorShimSeed: true),
       targetNames: @["zlib"],
       typedOutputs: @[EngineTypedOutput(
         fieldName: "library", types: @["Library"], path: "usr/lib")],
@@ -100,6 +101,13 @@ suite "lowered graph cache action round trip":
     check roundTrip.dependencyPolicy.captureNonDeterminism
     check roundTrip.dependencyPolicy.captureIpc
 
+    # Same argument for the shim-seed opt-out, with a sharper consequence: an
+    # edge that must not receive `REPRO_MONITOR_SHIM_LIB` is one that performs
+    # library interposition itself, so a warm build that decoded the flag as
+    # false would hand it a second interposer and livelock — the failure this
+    # flag exists to prevent, reappearing only on cache hits.
+    check roundTrip.dependencyPolicy.suppressMonitorShimSeed
+
   test "rejects the previous cache version instead of decoding without lock identity":
     let action = BuildAction(
       governingLockIdentity: emptySolvedGraphIdentity("codec-version-test"),
@@ -107,14 +115,15 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 7'u8
+    check encoded[versionOffset] == 8'u8
     check encoded[versionOffset + 1] == 0'u8
     # An older version could not carry the newer per-action fields (v5:
-    # `envPassthrough`; v6: the dependency-policy event-interest opt-ins).
+    # `envPassthrough`; v6: the dependency-policy event-interest opt-ins;
+    # v8: the dependency-policy shim-seed opt-out).
     # Decoding such a record under the current layout would silently return
     # defaults for every action rather than failing, so the rejection below
     # is what makes a field's absence impossible instead of invisible.
-    encoded[versionOffset] = 6'u8
+    encoded[versionOffset] = 7'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)

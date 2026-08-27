@@ -332,10 +332,12 @@ proc run*(self: NimUnittestBinary; filter = "";
   ##
   ## A test that performs ``LD_PRELOAD`` interposition ITSELF cannot be
   ## observed that way — two interposers on the same libc entry points
-  ## re-enter each other. Such a test passes ``makeDepfilePolicy(...)`` where
-  ## a depfile describing its inputs exists, or, as a last resort,
-  ## ``trustedDeclaredInputsPolicy(...)``. Both resolve to kinds outside the
+  ## re-enter each other. Such a test passes ``makeDepfilePolicy(...)`` naming
+  ## a depfile that describes its inputs, which resolves to a kind outside the
   ## engine's ``MonitorPolicyKinds``, so no wrap and no shim injection happen.
+  ## Where no step in the graph already emits such a file,
+  ## ``fs.unmonitorableActionDepfile`` generates one as a graph output; read
+  ## its docstring before reaching for it.
   ##
   ## This is NOT a way to skip dependency tracking. Declaring inputs
   ## statically and calling the action complete is a soundness hole that was

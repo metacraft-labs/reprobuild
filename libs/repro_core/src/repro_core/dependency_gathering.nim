@@ -8,41 +8,8 @@ type
     dgRecognizedFormatValidatedByMonitor
     dgPostBuildConverterValidatedByMonitor
 
-    dgTrustedDeclaredInputs
-      ## HAZARDOUS. The action's inputs are whatever the recipe author wrote
-      ## inline, and the engine performs NO monitoring and NO result
-      ## processing for the edge. Nothing verifies the list.
-      ##
-      ## USE ONLY when the action CANNOT be monitored at all — today that
-      ## means an action performing ``LD_PRELOAD`` interposition itself,
-      ## because the monitor's interposer and the action's re-enter each
-      ## other on the same libc entry points and livelock. "Monitoring is
-      ## inconvenient", "the action is slow", or "the evidence looks noisy"
-      ## are NOT reasons; those keep ``dgAutomaticMonitor``.
-      ##
-      ## THE HAZARD: a declared list that is wrong, or that goes stale when a
-      ## dependency moves, will NOT invalidate the cache. The action keeps
-      ## serving a cached result built from inputs that have since changed,
-      ## silently and indefinitely, until a human notices and edits the list.
-      ## Automatic monitoring exists precisely so that cannot happen.
-      ##
-      ## Note the engine must ALSO withhold the shim-library env seed for
-      ## this kind (see ``launchChildEnv``): suppressing the monitor wrap
-      ## alone is not enough, because io-mon's preload runtime propagates
-      ## whatever ``REPRO_MONITOR_SHIM_LIB`` names into child processes.
-      ##
-      ## Authorized by the repository owner on 2026-08-21 for the narrow
-      ## self-interposing-test case, with the explicit instruction that its
-      ## use stay discouraged. See the history note below for why the
-      ## unrestricted forms of this idea were removed and must not return.
-
     # NOTE: there is intentionally NO "declared-only" / "no runtime
-    # dependencies" gathering kind of the UNRESTRICTED kind described below.
-    # ``dgTrustedDeclaredInputs`` above is a deliberately narrow,
-    # owner-authorized exception requiring the author to write the inputs and
-    # a justification inline at the call site; it is NOT a default, NOT a
-    # fallback, and NOT reachable from an environment variable. The blanket
-    # forms remain banned:
+    # dependencies" gathering kind, in any form — narrow ones included.
     #
     # A mode that tracked only the
     # statically declared inputs and marked the action complete/cacheable
@@ -59,6 +26,27 @@ type
     # fail the monitored action or make it non-cacheable"), never marked
     # complete-on-declared-inputs. See
     # reprobuild-specs/Reprobuild-Development.milestones.org M17.
+    #
+    # A FOURTH form, ``dgTrustedDeclaredInputs``, was added and has now been
+    # removed too. It was pitched as a narrow exception — the author writes
+    # the input list and a justification inline, the engine trusts both — but
+    # it was the same shape as the other three: ``decComplete``, cacheable,
+    # outside ``MonitorPolicyKinds``, and nothing anywhere able to recompute
+    # or re-check the list. The specs ban the idea by name (Domain-Types.md
+    # "there is intentionally NO declared-only / no-runtime-dependencies",
+    # "There is deliberately no 'declared inputs only' mode", "there is
+    # intentionally NO ``dgpDeclaredOnly``") and were never amended.
+    #
+    # THE SANCTIONED ROUTE for an action that genuinely cannot be monitored
+    # (today: one that performs library interposition itself, so the engine's
+    # interposer and the action's re-enter each other on the same libc entry
+    # points) is a DEPFILE — ``dgRecognizedFormat`` via ``makeDepfilePolicy``.
+    # It is likewise unmonitored, but the input set is DERIVED rather than
+    # ASSERTED: it lives in a file that some edge produces, that can be
+    # regenerated, and that the engine reads back as real evidence, so the
+    # listed paths do invalidate the action cache when their content changes.
+    # The DSL helper ``unmonitorableActionDepfile`` generates such a file as a
+    # graph output; see its docstring in repro_project_dsl/runtime_core.nim.
 
   DependencyEvidenceCompleteness* = enum
     decComplete
@@ -107,6 +95,25 @@ type
     # engine translates them. Default false = off.
     captureNonDeterminism*: bool  ## add io-mon's ecNonDeterminism
     captureIpc*: bool             ## add io-mon's ecIpc
+    suppressMonitorShimSeed*: bool
+      ## Withhold the launch-time ``REPRO_MONITOR_SHIM_LIB`` environment seed
+      ## from this action (see ``launchChildEnv`` in the build engine).
+      ##
+      ## Default false, so every edge that exists today — monitored or not —
+      ## keeps the seed it gets today. Only an edge that asks for it loses the
+      ## variable.
+      ##
+      ## An edge asks for it when the action performs library interposition
+      ## ITSELF. Declining to WRAP such an action is not enough to keep it
+      ## shim-free: io-mon's preload runtime propagates whatever this variable
+      ## names into the processes it starts, so an action that builds its own
+      ## interposer on top of that runtime re-injects our shim into its own
+      ## children and the two interposers re-enter each other on the same libc
+      ## entry points. "Do not monitor this action" therefore has to also mean
+      ## "do not hand this action the means to monitor itself".
+      ##
+      ## Requested from a recipe with
+      ## ``makeDepfilePolicy(..., suppressMonitorShimSeed = true)``.
 
 const IomonFormatName* = "iomon"
   ## Recognized-report format name for an edge whose command PRODUCES its own
