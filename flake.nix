@@ -90,7 +90,11 @@
       # memory-frugal ``streamMonitorDepFileRecords`` API consumed directly by
       # repro_build_engine. Keeping the sandbox pin behind that API makes the
       # release build fail even when a newer sibling checkout masks the skew.
-      url = "github:metacraft-labs/io-mon/2d602cc4b67edd5639421c33907ab9caf5aa683f";
+      #
+      # Bumped to the per-request event-interest API used by the engine to avoid
+      # collecting categories an edge does not depend on. The enum, request
+      # field, and environment codec are all introduced by this revision.
+      url = "github:metacraft-labs/io-mon/cb26b626e6642f00818da0f64938e64c7ae0d209";
       flake = false;
     };
     nim-shm-gset-src = {
