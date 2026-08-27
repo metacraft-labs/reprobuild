@@ -1047,6 +1047,7 @@ tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim	nim	3
 tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim	nim	1
 tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim	nim	1
 tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	nim	7
+tests/integration/t_manifest_commit_targets_the_manifest_repo_under_inherited_git_dir.nim	nim	1
 tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim	nim	1
 tests/integration/t_manifest_init_rejects_unsigned_or_tampered_manifest.nim	nim	1
 tests/integration/t_manifest_store_ops_routed_through_interface_not_literals.nim	nim	1
@@ -1096,6 +1097,7 @@ tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim	nim	1
 tests/integration/t_pre_push_protocol_v2_policy_regressions.nim	nim	5
 tests/integration/t_pre_push_protocol_v2_ref_validation.nim	nim	3
 tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim	nim	1
+tests/integration/t_pre_push_refuses_an_undeclared_depends_edge.nim	nim	1
 tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim	nim	1
 tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim	nim	1
 tests/integration/t_pre_push_requires_certificate_coverage_when_project_opts_in.nim	nim	1
@@ -1211,6 +1213,7 @@ tests/integration/t_ti3_fingerprint_split.nim	nim	3
 tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim	nim	1
 tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1
+tests/integration/t_unpublished_evidence_names_the_search_that_ran.nim	nim	1
 tests/integration/t_unrouted_private_repo_refuses_loudly.nim	nim	1
 tests/integration/t_unsatisfiable_floor_does_not_fall_through_to_path.nim	nim	6
 tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim	nim	1
