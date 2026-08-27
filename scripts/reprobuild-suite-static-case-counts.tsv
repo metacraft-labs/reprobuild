@@ -1043,6 +1043,7 @@ tests/integration/t_m21_point_in_time_queries.nim	nim	2
 tests/integration/t_m9r21_4_hardware_e2e.nim	nim	3
 tests/integration/t_m9r22b_2_apply_loopback.nim	nim	5
 tests/integration/t_macho_runtime_audit.nim	nim	15
+tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim	nim	3
 tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim	nim	1
 tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim	nim	1
 tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	nim	7
@@ -1317,7 +1318,7 @@ tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	9
 tests/unit/t_m9r12_3_runquota_standard_pools.nim	nim	5
 tests/unit/t_m9r12_4_autotools_emits_fetch.nim	nim	3
 tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim	nim	15
-tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	15
+tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	17
 tests/unit/t_m9r13b_1_toolchain_pin.nim	nim	4
 tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	nim	6
 tests/unit/t_m9r13c_2_shim_lib_resolution.nim	nim	4
@@ -1334,7 +1335,7 @@ tests/unit/t_m9r14e_1_resolver_pkg_config_paths.nim	nim	12
 tests/unit/t_m9r14e_2_install_tree_mirror.nim	nim	8
 tests/unit/t_m9r14e_3_action_env_threading.nim	nim	29
 tests/unit/t_m9r14f_1_transitive_lib_dirs.nim	nim	12
-tests/unit/t_m9r14f_2_rpath_patching.nim	nim	13
+tests/unit/t_m9r14f_2_rpath_patching.nim	nim	14
 tests/unit/t_m9r14h_1_auto_recurse_idempotency.nim	nim	15
 tests/unit/t_m9r15c_1_io_monitor_fragment_log_perf.nim	nim	3
 tests/unit/t_m9r15d_1_libegl_headers_stub.nim	nim	5

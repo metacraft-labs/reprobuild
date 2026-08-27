@@ -43,7 +43,7 @@ suite "Lockfile Foreign Coordinates Integration Tests":
       visibility: "public",
       participation: "",
       depends: @[],
-      groups: @[]
+      tags: @[]
     )
 
     let ld = LockedDependencies(
@@ -87,7 +87,7 @@ optimal = true
 inputs_digest = "fnv1a64:12345"
 variants = []
 packages = []
-deps = [{ name = "reprobuild", path = "reprobuild", coord_kind = "vcs", url = "github.com", ref = "main", revision = "abc", integrity = "sha256-11", version = "1.0", visibility = "public", participation = "", depends = "", groups = "" }, { name = "nim", path = "", coord_kind = "store", store_hash = "xyz", integrity = "sha256-22", version = "2.2.0", visibility = "public", participation = "", depends = "", groups = "" }]
+deps = [{ name = "reprobuild", path = "reprobuild", coord_kind = "vcs", url = "github.com", ref = "main", revision = "abc", integrity = "sha256-11", version = "1.0", visibility = "public", participation = "", depends = "", tags = "" }, { name = "nim", path = "", coord_kind = "store", store_hash = "xyz", integrity = "sha256-22", version = "2.2.0", visibility = "public", participation = "", depends = "", tags = "" }]
 """
     let ld = parseLockedDependencies(legacyToml)
     check ld.deps.len == 2

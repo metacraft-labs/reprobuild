@@ -1,7 +1,8 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 from repro_test_support import requireBinary, monitorShimPath,
-  requireCodeTracerSourceRoot, requireRunQuotaDaemonBin
+  requireCodeTracerSourceRoot, requireRunQuotaDaemonBin,
+  runquotaSocketEndpoint
 
 const GccProxySource = r"""
 #include <fcntl.h>
