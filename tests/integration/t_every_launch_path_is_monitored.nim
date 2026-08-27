@@ -753,7 +753,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
       sourceRel: "io_mon/fs_snoop.nim",
       spawning: @["runMonitored", "runFsSnoopCli", "startMonitor",
                   "pollMonitor", "finishMonitor"],
-      inert: @["appendLauncherEventLoss", "findShimLibrary", "completeness",
+      inert: @["appendLauncherEventLoss", "completeness",
                "records", "monitorLifecycleCounts", "live", "hasExited",
                "rootPid"]),
     # The escape hatches, and the rewrite templates that warn about the
