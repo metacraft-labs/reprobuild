@@ -6530,6 +6530,12 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       item.stderr = "binary-cache publisher is not configured"
       result.results.add(item)
       continue
+    if not action.allOutputsExist():
+      item.stderr =
+        "materialized binary-cache action outputs are incomplete: " &
+        (if action.outputs.len > 0: action.outputs.join(", ") else: "<none>")
+      result.results.add(item)
+      continue
     if prefix.len == 0 or
         (not fileExists(prefix) and not dirExists(prefix)):
       item.stderr = "materialized binary-cache prefix does not exist: " &
