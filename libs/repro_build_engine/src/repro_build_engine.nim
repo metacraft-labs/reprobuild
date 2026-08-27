@@ -8174,6 +8174,138 @@ proc builtinCopyDestinationMatches(source, destination: string): bool =
   else:
     true
 
+const busyReplacedSuffix = ".repro-replaced-"
+  ## Names a destination file that had to be renamed out of the way because a
+  ## live process still had it mapped. Deliberately appended AFTER the original
+  ## extension: a displaced ``libcrypto-3-x64.dll`` becomes
+  ## ``libcrypto-3-x64.dll.repro-replaced-1234-0``, which no longer matches the
+  ## ``*.dll`` sweep in ``stageHostDynlibsBesideBinary`` and so cannot be
+  ## re-staged into a scratch tree as if it were a real library.
+
+proc sweepBusyReplacedLeftovers(destination: string) =
+  ## Best-effort reaping of ``<destination>.repro-replaced-*`` files.
+  ##
+  ## The rename in ``copyFileReplacingBusyDestination`` always succeeds, but the
+  ## subsequent DELETE of the displaced file cannot: Windows refuses to unlink a
+  ## file that is still mapped as an image, and during the very build that
+  ## displaced it, it always is — the process holding it is that build's own
+  ## driver. So the delete is retried here, at the start of the next staging
+  ## attempt, by which time the holder has exited. This is the only place the
+  ## leftovers ever get collected, so it must also run on the no-op path where
+  ## the destination already matches and no copy happens at all.
+  let dir = destination.splitPath.head
+  let leaf = destination.extractFilename
+  if dir.len == 0 or leaf.len == 0 or not dirExists(extendedPath(dir)):
+    return
+  # Prefix match over walkDir, NOT a ``walkFiles`` glob. ``walkFiles`` carries a
+  # FindFirstFile workaround (std/private/osdirs.nim: "Windows bug/gotcha:
+  # 't*.nim' matches 'tfoo.nims'") that treats everything after the last dot in
+  # the PATTERN as an extension and then demands the match have an extension of
+  # the same length. ``libcrypto-3-x64.dll.repro-replaced-*`` therefore matches
+  # NOTHING — the sweep appears to run and silently reaps zero files forever.
+  # Verified the hard way: the first cut of this used the glob and left the real
+  # displaced DLLs sitting in build/bin across repeated green builds.
+  let prefix = leaf & busyReplacedSuffix
+  let dirExt = extendedPath(dir)
+  for kind, entry in walkDir(dirExt, relative = true):
+    if kind == pcFile and entry.startsWith(prefix):
+      discard tryRemoveFile(dirExt / entry)
+
+proc copyFileReplacingBusyDestination(source, destination: string) =
+  ## ``copyFileWithPermissions``, but able to replace a destination that a live
+  ## process still has open.
+  ##
+  ## Why this is needed at all: reprobuild stages its Windows runtime DLLs INTO
+  ## the same ``build/bin`` tree its own binaries run from (see the B5 block in
+  ## ``repro.nim``). Every one of those libraries is dlopen'd by leaf name, and
+  ## Win32's LoadLibrary searches the running .exe's own directory FIRST — that
+  ## co-location is the whole point of staging. The consequence is a genuine
+  ## self-conflict: ``build/bin/repro.exe`` (and the workers it spawns, and any
+  ## resident ``repro-daemon``) map ``build/bin/libcrypto-3-x64.dll``, and then
+  ## the build graph that same process is executing tries to overwrite that file.
+  ##
+  ## In the steady state ``builtinCopyDestinationMatches`` makes this a no-op, so
+  ## the conflict is invisible. It becomes a HARD WEDGE the moment the source
+  ## content changes — an OpenSSL bump, a re-provisioned toolchain. From then on
+  ## the copy is genuinely required, the destination is genuinely mapped, and the
+  ## staging action fails on EVERY build, forever: the driver cannot release a
+  ## library it needs in order to run. Stopping the daemon does not help, because
+  ## the driver itself is a holder. That is not a race to narrow; it is a
+  ## deadlock, and it must be broken rather than retried.
+  ##
+  ## The way out is a Windows asymmetry that is easy to miss: a mapped image
+  ## cannot be OPENED for writing or DELETED, but it CAN be RENAMED. Renaming it
+  ## aside leaves the holders running happily against the displaced file (Windows
+  ## tracks the mapping, not the name) and frees the name for the new content.
+  ## Note that plain write-to-temp-then-replace is NOT sufficient on its own:
+  ## replacing still has to unlink the mapped destination, which fails exactly as
+  ## the direct copy does. The rename is the load-bearing step.
+  ##
+  ## Sequenced as copy-to-temp, rename-away, rename-into-place so the destination
+  ## flips from old content to new in a single atomic step. It is never absent
+  ## and never partially written, which matters because concurrent workers are
+  ## loading that very path while this runs.
+  ##
+  ## The fallback is entered only after a plain copy fails with a sharing error.
+  ## That keeps the ordinary path — and all of POSIX — on exactly the code it
+  ## was on before, and it is safe to attempt second because a failed copy of a
+  ## mapped destination fails at the OPEN: it cannot have truncated anything.
+  when not defined(windows):
+    copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+  else:
+    const
+      errorAccessDenied = 5'i32
+      errorSharingViolation = 32'i32
+      errorUserMappedFile = 1224'i32
+
+    sweepBusyReplacedLeftovers(destination)
+    try:
+      copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+      return
+    except OSError as err:
+      if err.errorCode notin
+          [errorAccessDenied, errorSharingViolation, errorUserMappedFile] or
+          not fileExists(extendedPath(destination)):
+        # Not a busy destination — a missing source, a bad path, a full disk.
+        # Renaming would only obscure the real diagnostic.
+        raise
+
+    let incoming = destination & ".repro-incoming-" & $getCurrentProcessId()
+    discard tryRemoveFile(extendedPath(incoming))
+    copyFileWithPermissions(extendedPath(source), extendedPath(incoming))
+
+    # Pick a displaced name that is free. Leftovers from a still-running holder
+    # can legitimately be sitting there, so this cannot assume attempt 0 is
+    # available; the bound just refuses to spin forever on a pathological dir.
+    var displaced = ""
+    for attempt in 0 ..< 1024:
+      let candidate = destination & busyReplacedSuffix &
+        $getCurrentProcessId() & "-" & $attempt
+      if not fileExists(extendedPath(candidate)):
+        displaced = candidate
+        break
+    if displaced.len == 0:
+      discard tryRemoveFile(extendedPath(incoming))
+      raiseEngine("could not find a free name to displace a busy output: " &
+        destination)
+
+    try:
+      moveFile(extendedPath(destination), extendedPath(displaced))
+    except OSError:
+      discard tryRemoveFile(extendedPath(incoming))
+      raise
+    try:
+      moveFile(extendedPath(incoming), extendedPath(destination))
+    except OSError:
+      # The output must never be left missing: restore what we displaced before
+      # surfacing the failure.
+      moveFile(extendedPath(displaced), extendedPath(destination))
+      discard tryRemoveFile(extendedPath(incoming))
+      raise
+    # Expected to fail while a holder still has the displaced image mapped; the
+    # sweep above collects it on the next build.
+    discard tryRemoveFile(extendedPath(displaced))
+
 proc removeExistingPath(path: string) =
   let expanded = extendedPath(path)
   if symlinkExists(expanded) or fileExists(expanded):
@@ -8243,16 +8375,22 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       let destination = action.builtinPath(action.outputs[0])
       let destinationMatches =
         builtinCopyDestinationMatches(source, destination)
-      if not destinationMatches:
+      if destinationMatches:
+        # The no-op path is the ONLY moment a wedged staging action ever gets
+        # back to steady state, so it is also where the displaced files from an
+        # earlier busy replacement finally become deletable. See
+        # ``sweepBusyReplacedLeftovers``.
+        when defined(windows):
+          sweepBusyReplacedLeftovers(destination)
+      else:
         createDir(extendedPath(destination.splitPath.head))
         prepareBuiltinFileOutput(destination)
-      # Preserve the source file's mode bits — plain ``copyFile`` creates the
-      # destination with the process umask default (typically 0644), which
-      # silently drops the executable bit. CodeTracer's recipe copies the
-      # cargo-built ``replay-server`` / ``session-manager`` binaries through
-      # this action; without the exec bit they fail to launch (exit 126).
-      if not destinationMatches:
-        copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+        # Preserve the source file's mode bits — plain ``copyFile`` creates the
+        # destination with the process umask default (typically 0644), which
+        # silently drops the executable bit. CodeTracer's recipe copies the
+        # cargo-built ``replay-server`` / ``session-manager`` binaries through
+        # this action; without the exec bit they fail to launch (exit 126).
+        copyFileReplacingBusyDestination(source, destination)
     of bakEnsureDir:
       if action.outputs.len != 1:
         raiseEngine("ensureDir action requires exactly one output: " & action.id)
@@ -8375,8 +8513,10 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           prepareBuiltinFileOutput(destination)
           # Preserve source mode bits (notably the exec bit) — see the
           # bakCopyFile note above; preserveTree mirrors arbitrary trees that
-          # may contain executables.
-          copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+          # may contain executables. It mirrors DLLs too, and unlike bakCopyFile
+          # it has no identical-destination guard, so it re-copies every build —
+          # which makes the busy-destination hazard strictly worse here.
+          copyFileReplacingBusyDestination(source, destination)
         of ptekSymlink:
           if not symlinkExists(extendedPath(source)):
             raiseEngine("preserveTree source symlink disappeared before execution: " &

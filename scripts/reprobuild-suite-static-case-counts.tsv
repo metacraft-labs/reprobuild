@@ -65,7 +65,7 @@ libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	6
 libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
 libs/repro_build_engine/tests/test_action_cache_restore_narrow_payloads.nim	nim	5
 libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	10
-libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	1
+libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	2
 libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim	nim	2
 libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim	nim	1
 libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim	nim	5
