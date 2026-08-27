@@ -166,6 +166,12 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     case spec.hashAlg
     of dshaSha256: "sha256"
     of dshaBlake3: "blake3"
+  let hashTools =
+    case spec.hashAlg
+    of dshaSha256: @["sha256sum"]
+    of dshaBlake3: @["b2sum", "blake3sum"]
+  let fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
+    copiesDataFile = spec.kind == dfkDataFile)
   # M9.R.15q.5.4 — support a relative ``file:./vendor/...`` URL form so
   # recipes that vendor a tarball can reference it without baking the
   # host's absolute path into the recipe. The relative path is resolved
@@ -247,7 +253,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.fetch." & hashAlgTag,
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = fetchToolRefs)
   some(act)
 
 # ---------------------------------------------------------------------------

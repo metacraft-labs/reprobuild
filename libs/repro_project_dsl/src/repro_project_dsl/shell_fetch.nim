@@ -7,6 +7,16 @@ const
     "--retry 5 --retry-delay 2 --retry-max-time 300 --retry-all-errors " &
     "--connect-timeout 30 --max-time 300"
 
+proc shellFetchToolIdentityRefs*(hashTools: openArray[string];
+                                 copiesDataFile = false): seq[string] =
+  ## Keep the execution profile aligned with every external command emitted
+  ## by ``appendCurlDownload`` and ``appendTarExtraction``.
+  result = @["sh", "rm", "mkdir", "curl", "mv"]
+  for tool in hashTools:
+    if tool.len > 0 and tool notin result:
+      result.add(tool)
+  result.add(if copiesDataFile: "cp" else: "tar")
+
 proc shellDoubleQuote(value: string): string =
   value.replace("\\", "/").replace("\"", "\\\"")
 

@@ -11519,6 +11519,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_constructor_fetch_tool_refs.nim",
+    binary: "build/test-bin/t_constructor_fetch_tool_refs",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_cross_repo_runtime_tool_closure.nim",
     binary: "build/test-bin/t_cross_repo_runtime_tool_closure",
     defines: @[],
