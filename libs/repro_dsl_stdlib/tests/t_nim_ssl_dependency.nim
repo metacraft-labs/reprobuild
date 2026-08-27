@@ -2,6 +2,7 @@ import std/[os, strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/packages/nim as nim_module
+import repro_dsl_stdlib/packages/openssl
 
 proc argByName(action: BuildActionDef; name: string): PublicCliArg =
   for arg in action.call.arguments:
@@ -45,3 +46,14 @@ suite "Nim SSL compile dependency":
     let registered = registeredBuildActions()
     check registered.len == 1
     check "openssl" notin registered[0].toolIdentityRefs
+
+  test "OpenSSL provisioning includes every Nix package output":
+    var found = false
+    for pkg in registeredPackages():
+      if pkg.packageName != "openssl":
+        continue
+      found = true
+      check pkg.nixProvisioning.len == 1
+      check pkg.nixProvisioning[0].selector == "nixpkgs#openssl^*"
+      check pkg.nixProvisioning[0].executablePath == "bin/openssl"
+    check found
