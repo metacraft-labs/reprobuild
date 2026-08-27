@@ -1219,8 +1219,8 @@ proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
     stdoutLimit: 256 * 1024,
     stderrLimit: 256 * 1024,
     # In-process hosting is OPT-IN and off in production (see
-    # ``BuildEngineConfig.hostMonitorInProcess``). It is requested here for
-    # EVERY launch path, not only for L1, and that is what keeps the negative
+    # ``BuildEngineConfig.monitorHosting``). It is requested here for EVERY
+    # launch path, not only for L1, and that is what keeps the negative
     # half of the oracle honest: with the switch on across the board, the only
     # thing deciding who hosts is the engine's own hosting decision. A change
     # that let L2/L3/L3b host would show up as a ``.host.stdout`` under their
@@ -1229,12 +1229,17 @@ proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
     # NOT "whether the ENGINE spawns", which is the tempting shorthand and is
     # WRONG: L3/L3b spawn inside the engine process too, from
     # ``offerWithRunQuotaBatch`` / the grant poller, and those sites never
-    # consult ``plan.hostInProcess``. Relaxing the hosting decision to cover
-    # them strips the CLI wrapper without starting a host, so they run
-    # unmonitored while the negative oracle here stays green — it is the
-    # POSITIVE monitoring oracle (``checkMonitoredEvidence``) that catches
-    # that one. Both halves are load-bearing, and they catch different paths.
-    hostMonitorInProcess: true)
+    # start an in-process host. What used to follow from that is that
+    # relaxing the hosting decision to cover them would strip the CLI wrapper
+    # without starting a host, so they would run unmonitored while the
+    # negative oracle here stayed green. That is no longer reachable:
+    # In-Process-Monitor-Hosting P3 made ``runBuild`` REFUSE a hosted plan on
+    # any path that does not host, and
+    # ``t_inline_launch_refuses_unhostable_monitor_hosting`` drives the
+    # refusal through ``mhmRequired``. ``mhmWhereSupported`` below is still
+    # the right request for THIS file: it is the mode a product would use,
+    # and under it the launch path is the only thing deciding who hosts.
+    monitorHosting: mhmWhereSupported)
   case lp.kind
   of lpBypassRunQuota:
     result.bypassRunQuota = true

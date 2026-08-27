@@ -158,6 +158,21 @@ type
     candidateSinceMs: int64
     lastCheckMs: int64
     restartPending: bool
+    # Stat identity (device, inode, size, mtime-with-nanoseconds) of
+    # ``sourceImagePath`` as of the last time its digest was computed. The
+    # dev-restart poll re-checks the source image several times a second
+    # forever; digesting a ~28 MB image on every one of those passes burned
+    # a third of a core and ~74 MB/s of page-cache reads on a daemon with
+    # NO work to do. The content of a file cannot change without its stat
+    # identity changing, so this is the cheap gate in front of the digest.
+    sourceStamp: string
+    # Backoff for the OTHER per-pass disk scan in ``restartCandidateReady``:
+    # the active-session census that decides whether a ready restart may
+    # proceed. Re-asked on the stability cadence rather than the poll
+    # cadence, with the last answer remembered so an unchanged deferral is
+    # logged once instead of every pass.
+    deferredUntilMs: int64
+    deferredActive: int
 
 const UserDaemonLockFileName = ".repro-daemon.lock"
 
@@ -242,6 +257,26 @@ proc fileDigestHex(path: string): string =
       break
     hasher.update(buffer[0].addr, readCount)
   "blake3-256:" & hasher.finalize().toHex()
+
+proc fileIdentityStamp(path: string): string =
+  ## Cheap "could this file's content have changed?" probe: one ``stat``.
+  ##
+  ## Returns "" when the identity cannot be established (missing file, stat
+  ## error); callers MUST treat "" as "unknown, assume changed" so a probe
+  ## failure can never suppress a real dev-restart. A non-empty stamp is
+  ## stable exactly as long as the bytes are: it folds in the device and
+  ## inode (so an atomic rename-over is a new identity even at the same
+  ## size and timestamp), the size, and the modification time at the full
+  ## nanosecond resolution ``stat`` reports on this platform.
+  if path.len == 0:
+    return ""
+  try:
+    let info = getFileInfo(path, followSymlink = true)
+    let written = info.lastWriteTime
+    result = $info.id.device & ":" & $info.id.file & ":" & $info.size & ":" &
+      $written.toUnix & "." & $written.nanosecond
+  except OSError, IOError:
+    result = ""
 
 proc nowUnixMs(): int64 =
   let current = getTime()
@@ -1485,23 +1520,58 @@ proc restartCandidateReady(config: UserDaemonConfig;
   if nowMs - state.lastCheckMs < devRestartPollIntervalMs():
     return false
   state.lastCheckMs = nowMs
-  let currentHash = imageDigestHex(state.sourceImagePath)
-  if currentHash.len == 0 or currentHash == state.runningHash:
-    state.candidateHash = ""
-    state.candidateSinceMs = 0
+  # The digest is the decision, but a ``stat`` is the gate in front of it.
+  # An unchanged (device, inode, size, mtime-ns) identity means the bytes we
+  # already digested are still the bytes on disk, so re-reading ~28 MB to
+  # learn that again is pure waste — and at the 250 ms poll cadence it is
+  # waste paid ~3x a second for the entire lifetime of an IDLE daemon.
+  # An empty stamp means "unknown"; that falls through and digests, so a
+  # stat failure degrades to the old always-digest behaviour rather than
+  # silently disabling dev restart.
+  let stamp = fileIdentityStamp(state.sourceImagePath)
+  if stamp.len == 0 or stamp != state.sourceStamp:
+    state.sourceStamp = stamp
+    let currentHash = imageDigestHex(state.sourceImagePath)
+    if currentHash.len == 0 or currentHash == state.runningHash:
+      state.candidateHash = ""
+      state.candidateSinceMs = 0
+      return false
+    if currentHash != state.candidateHash:
+      state.candidateHash = currentHash
+      state.candidateSinceMs = nowMs
+      logLine(config.logPath, "dev restart candidate source=" &
+        state.sourceImagePath & " hash=" & currentHash)
+      return false
+  elif state.candidateHash.len == 0:
+    # Identity unchanged and no restart pending: the steady state. This is
+    # the branch an idle dev daemon takes forever, and it costs one stat.
     return false
-  if currentHash != state.candidateHash:
-    state.candidateHash = currentHash
-    state.candidateSinceMs = nowMs
-    logLine(config.logPath, "dev restart candidate source=" &
-      state.sourceImagePath & " hash=" & currentHash)
-    return false
+  # Either the digest just confirmed the pending candidate, or the source
+  # has stopped moving while a candidate waits out the stability window.
+  # Both cases fall through to the same settle-then-restart gate as before.
   if nowMs - state.candidateSinceMs < devRestartStableMs():
+    return false
+  if nowMs < state.deferredUntilMs:
     return false
   let active = countActiveSessionRecords(config)
   if active > 0:
-    logLine(config.logPath, "dev restart deferred active-sessions=" & $active)
+    # The SECOND re-read loop reachable from this proc, and it is worse than
+    # the digest one: ``countActiveSessionRecords`` opens and parses EVERY
+    # ``*.session`` record in the state directory (1343 of them on the host
+    # this was found on), and at the 250 ms poll cadence that is thousands
+    # of opens a second plus one repeated log line per pass, for as long as
+    # a candidate stays deferred. Sessions that block a restart are
+    # long-lived by nature — and records stuck non-terminal by a crashed
+    # writer never clear at all — so re-asking on the poll cadence buys
+    # nothing. Re-ask on the stability cadence, and log only when the
+    # answer changes, so a permanently-deferred restart is stated once
+    # instead of flooding the log.
+    state.deferredUntilMs = nowMs + devRestartStableMs()
+    if active != state.deferredActive:
+      state.deferredActive = active
+      logLine(config.logPath, "dev restart deferred active-sessions=" & $active)
     return false
+  state.deferredActive = 0
   true
 
 proc daemonProcessArgs(config: UserDaemonConfig): seq[string]

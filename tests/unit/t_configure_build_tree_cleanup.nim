@@ -7,6 +7,18 @@ when defined(reproProviderMode):
   import repro_project_dsl
   import repro_dsl_stdlib/constructors
 
+  package cmakeCleanupTest:
+    nativeBuildDeps:
+      "chmod"
+    config:
+      discard
+
+  package mesonCleanupTest:
+    nativeBuildDeps:
+      "chmod"
+    config:
+      discard
+
   proc dummyRequest(projectRoot, packageName: string): ProviderGraphRequest =
     ProviderGraphRequest(
       kind: prkGraphInvocation,
@@ -34,7 +46,8 @@ when defined(reproProviderMode):
         return arg.encodedValue.split("\x1f")
 
   proc cmakeActions(projectRoot, generator: string;
-                    cacheVars: seq[string]): seq[BuildActionDef] =
+                    cacheVars: seq[string];
+                    srcPatches: seq[string] = @[]): seq[BuildActionDef] =
     let packageName = "cmakeCleanupTest"
     let pkg = PackageDef(
       packageName: packageName,
@@ -50,12 +63,14 @@ when defined(reproProviderMode):
           srcDir = "src",
           buildDir = "build-cmake",
           generator = generator,
-          cacheVars = cacheVars),
+          cacheVars = cacheVars,
+          srcPatches = srcPatches),
       includeDefault = false)
     extractActions(fragment)
 
   proc mesonActions(projectRoot, buildtype: string;
-                    options: seq[string]): seq[BuildActionDef] =
+                    options: seq[string];
+                    srcPatches: seq[string] = @[]): seq[BuildActionDef] =
     let packageName = "mesonCleanupTest"
     let pkg = PackageDef(
       packageName: packageName,
@@ -71,11 +86,35 @@ when defined(reproProviderMode):
           srcDir = "src",
           buildDir = "build-meson",
           buildtype = buildtype,
-          configureOptions = options),
+          configureOptions = options,
+          srcPatches = srcPatches),
       includeDefault = false)
     extractActions(fragment)
 
 suite "configure build-tree cleanup caching":
+  test "source patch actions inherit recipe tool identities":
+    when defined(reproProviderMode):
+      let root = getTempDir() / "repro-configure-patch-tools"
+      if dirExists(root):
+        removeDir(root)
+      createDir(root)
+      defer:
+        if dirExists(root):
+          removeDir(root)
+      writeFile(root / "repro.nim", "discard\n")
+
+      let cmakePatch = findById(cmakeActions(root, "Ninja", @[],
+        srcPatches = @["chmod +x src/tool"]),
+        "cmake-patch-cmakeCleanupTest")
+      let mesonPatch = findById(mesonActions(root, "release", @[],
+        srcPatches = @["chmod +x src/tool"]),
+        "meson-patch-mesonCleanupTest")
+
+      check cmakePatch.toolIdentityRefs == @["sh", "chmod"]
+      check mesonPatch.toolIdentityRefs == @["sh", "chmod"]
+    else:
+      skip()
+
   test "CMake cleanup is reusable until configure identity changes":
     when defined(reproProviderMode):
       let root = getTempDir() / "repro-cmake-cleanup-cache"
@@ -98,6 +137,7 @@ suite "configure build-tree cleanup caching":
       check first.dependencyPolicy.kind == bdpAutomaticMonitor
       check first.dependencyPolicy.ignoredInputPrefixes ==
         @[root / "build-cmake"]
+      check first.toolIdentityRefs == @["sh", "rm"]
       check first.inlineArgv() == same.inlineArgv()
       check first.inlineArgv() != changed.inlineArgv()
 
@@ -160,6 +200,7 @@ suite "configure build-tree cleanup caching":
       check first.dependencyPolicy.kind == bdpAutomaticMonitor
       check first.dependencyPolicy.ignoredInputPrefixes ==
         @[root / "build-meson"]
+      check first.toolIdentityRefs == @["sh", "rm"]
       check first.inlineArgv() == same.inlineArgv()
       check first.inlineArgv() != changed.inlineArgv()
 

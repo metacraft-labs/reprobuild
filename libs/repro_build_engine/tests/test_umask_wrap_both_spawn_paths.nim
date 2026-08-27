@@ -138,7 +138,7 @@ when defined(linux) or defined(macosx):
       bypassRunQuota: true,
       # In-process hosting is opt-in and off by default; these cases are
       # ABOUT the hosted path, so they ask for it explicitly.
-      hostMonitorInProcess: true)
+      monitorHosting: mhmWhereSupported)
 
   proc hm4ScratchRoot(name: string): string =
     let root = absolutePath("build" / "test-tmp" /
@@ -292,7 +292,8 @@ when defined(linux) or defined(macosx):
       ## So the
       ## default is a decision, not an accident — and it is a decision no
       ## test could see being reversed. `t_every_launch_path_is_monitored`
-      ## sets the field TRUE for all four launch paths on purpose, so it
+      ## sets the field to `mhmWhereSupported` for all four launch paths on
+      ## purpose (it was a bare `true` before P3 made the field an enum), so it
       ## stays green either way; production takes L3/L3b, which cannot host
       ## at all, so it would not notice; and what WOULD change is every
       ## `--no-runquota` build and every nested test build in the suite,
@@ -305,20 +306,25 @@ when defined(linux) or defined(macosx):
       ##
       ## Two independent halves, because they fail differently:
       ##
-      ## MUTATION TARGET A — add `hostMonitorInProcess: true` to
-      ## `defaultBuildEngineConfig`, or give the field a `= true` default in
-      ## `BuildEngineConfig`: the first two checks redden.
+      ## MUTATION TARGET A — add `monitorHosting: mhmWhereSupported` to
+      ## `defaultBuildEngineConfig`, or reorder `MonitorHostingMode` so that
+      ## `mhmNever` is no longer its zero value: the first two checks redden.
       ## MUTATION TARGET B — set the field at any construction site in any
       ## shipped source under `libs/` or `apps/` (for instance
       ## `repro_profile_compile/edge.nim`, which is on the bypass path and so
       ## is the one where it would actually take effect): the last check
       ## reddens and names the file.
-      check not defaultBuildEngineConfig(getCurrentDir() / "build" /
-        "test-tmp" / "hm6-default").hostMonitorInProcess
+      ##
+      ## In-Process-Monitor-Hosting P3 turned the field from a `bool` into
+      ## `MonitorHostingMode`, and the scan below follows the FIELD NAME, so
+      ## it covers `mhmWhereSupported` and `mhmRequired` alike — a shipped
+      ## site cannot request either one without writing `monitorHosting`.
+      check defaultBuildEngineConfig(getCurrentDir() / "build" /
+        "test-tmp" / "hm6-default").monitorHosting == mhmNever
       # And not merely because `defaultBuildEngineConfig` omits it: a bare
       # object must be off too, since most construction sites in the tree
       # build one field-by-field rather than starting from the default.
-      check not BuildEngineConfig(cacheRoot: "unused").hostMonitorInProcess
+      check BuildEngineConfig(cacheRoot: "unused").monitorHosting == mhmNever
 
       # No shipped construction site enables it. This is a source scan and it
       # RAISES rather than passing when it cannot read what it is scanning —
@@ -327,13 +333,13 @@ when defined(linux) or defined(macosx):
       #
       # THE SCAN COVERS EVERY SHIPPED SOURCE, not just the CLI. An earlier
       # version read `repro_cli_support.nim` plus `apps/` only, and adding
-      # `hostMonitorInProcess: true` to
+      # `monitorHosting: mhmWhereSupported` to
       # `repro_profile_compile/edge.nim`'s `BuildEngineConfig(` — a shipped
       # construction site that already sets `bypassRunQuota: true`, i.e. the
       # ONE launch path that can host — reddened nothing. A config no test
       # covers, on the only path where the field has any effect, is exactly
       # the silent flip this case exists to refuse.
-      const Field = "hostMonitorInProcess"
+      const Field = "monitorHosting"
       # The module that DECLARES the field names it in its own type, in three
       # comments and in the hosting decision, so it cannot be scanned for a
       # bare mention. It needs no scanning: the only config it constructs is

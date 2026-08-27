@@ -74,7 +74,7 @@ when defined(linux) or defined(macosx):
     ## The L1 bypass path with a monitor driver wired — the one combination
     ## the engine hosts in-process, and therefore the only one HM-5's flush
     ## runs on. Hosting is opt-in and off by default, so it is requested here
-    ## explicitly; see ``BuildEngineConfig.hostMonitorInProcess``.
+    ## explicitly; see ``BuildEngineConfig.monitorHosting``.
     let tools = prepareMonitorTools(getCurrentDir(),
       getCurrentDir() / "build" / "test-hm5-flush", "hm5-flush")
     putEnv("REPRO_MONITOR_SHIM_LIB", tools.shim)
@@ -87,7 +87,7 @@ when defined(linux) or defined(macosx):
       stdoutLimit: 256 * 1024,
       stderrLimit: 256 * 1024,
       bypassRunQuota: true,
-      hostMonitorInProcess: true)
+      monitorHosting: mhmWhereSupported)
 
   proc depfilePathFor(cacheRoot, actionId: string): string =
     ## Where the engine publishes one action's depfile. Derived the same way
