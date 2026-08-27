@@ -103,6 +103,14 @@ proc emitFetchAction*(projectRoot, packageName: string;
     of dfkTarball: "tarball"
     of dfkGitArchive: "git"
     of dfkDataFile: "data-file"
+  let hashTools = case spec.hashAlg
+    of dshaSha256: @["sha256sum"]
+    of dshaBlake3: @["b2sum", "blake3sum"]
+  var fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
+    copiesDataFile = spec.kind == dfkDataFile,
+    archiveUrl = spec.url)
+  if spec.kind == dfkGitArchive:
+    fetchToolRefs.add("git")
   let shExe = findExe("sh")
   let escapedUrl = spec.url.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
@@ -176,7 +184,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
         escapedStaged & "/source\"; ")
     script.add("rm -rf \"" & escapedExtracted & "\"; ")
     script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
-    script.add("touch \"" & escapedStamp & "\"")
+    script.add(": > \"" & escapedStamp & "\"")
     argv = @[shExe, "-c", script]
   else:
     # No sh on PATH — emit a best-effort direct argv. Caller can detect
@@ -214,4 +222,5 @@ proc emitFetchAction*(projectRoot, packageName: string;
     pool = "fetch",
     cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-fetch." & kindTag & "." & hashAlgTag)
+    commandStatsId = "ccpp-fetch." & kindTag & "." & hashAlgTag,
+    toolIdentityRefs = fetchToolRefs)
