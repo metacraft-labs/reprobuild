@@ -137,6 +137,12 @@ package `rm`:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+package `find`:
+  provisioning:
+    nixPackage "nixpkgs#findutils", executablePath = "bin/find",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package `mkdir`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/mkdir",

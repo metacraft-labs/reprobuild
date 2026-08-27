@@ -11627,6 +11627,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_host_system_tools.nim",
+    binary: "build/test-bin/t_host_system_tools",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_infra_apply_lock_hung_owner.nim",
     binary: "build/test-bin/t_infra_apply_lock_hung_owner",
     defines: @[],
