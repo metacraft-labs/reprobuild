@@ -382,7 +382,26 @@ const EnumeratedLaunchPaths: array[4, LaunchPath] = [
 ## the action's ``cwd`` — which is precisely the defect P6 found (the
 ## wrapped path's ``umask`` wrapper shell set ``PWD=<action cwd>`` while
 ## the hosted path let the child inherit the ENGINE's ``PWD``).
+##
+## AND IT ENUMERATES THAT SAME DIRECTORY, which is a SECOND observation
+## and not a flourish (In-Process-Monitor-Hosting P10).
+## ``PathSetEvidence`` has eight path fields;
+## ``monitorDirectoryEnumerations`` — the membership half of an
+## enumeration, and the input ``cacheEnumeratedDirectories`` invalidates
+## on — was rendered by nothing here and asserted by no test in the
+## suite. P6's verification round MEASURED the consequence: reclassifying
+## one hosted-path ``mrPathProbe`` as ``mrDirectoryEnumerate`` gives L1
+## ``[/tmp]`` against ``[]`` on L2/L3/L3b and the case still reports
+## 11/0/0.
+##
+## THE RENDER LINE ALONE WOULD HAVE BEEN THE VACUOUS FIX, exactly as it
+## was for ``monitorProbes`` one field over: with no ``opendir`` anywhere
+## in the fixture all five recorded paths render
+## ``monitorDirectoryEnumerations=[]`` and the comparison cannot fail for
+## the class it names. So the fixture PRODUCES the class, and the case
+## asserts the enumeration is present before it asserts the sets agree.
 const FixtureSource = r"""
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -390,6 +409,30 @@ const FixtureSource = r"""
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Enumerate a directory the way a globbing tool does: opendir() plus
+   readdir() to exhaustion. The entries are not used — the OBSERVATION is
+   the point, and it is a different one from probe_ancestors() below:
+   io-mon records this as `mrDirectoryEnumerate`, which the engine folds
+   into BOTH `monitorProbes` (existence) and
+   `monitorDirectoryEnumerations` (membership, and the input to
+   `cacheEnumeratedDirectories`).
+
+   IN C, FOR THE SAME SIP REASON THE ANCESTOR WALK IS IN C. Wrapping the
+   action in `/bin/sh -c 'ls'` would be shorter and would be blind on
+   macOS: a SIP-protected `/bin/sh` at the top of a monitored tree strips
+   DYLD_INSERT_LIBRARIES, so the action would record nothing at all and
+   the case would fail for a reason that has nothing to do with launch
+   paths. */
+static void enumerate_directory(const char *path) {
+  DIR *dir;
+  if (path == NULL || path[0] != '/') return;
+  dir = opendir(path);
+  if (dir == NULL) return;
+  while (readdir(dir) != NULL) {
+  }
+  closedir(dir);
+}
 
 /* Resolve an absolute path the way a POSIX shell resolves an inherited
    $PWD: one stat() per ancestor, from the top down. The results are not
@@ -415,6 +458,9 @@ static void probe_ancestors(const char *path) {
 int main(int argc, char **argv) {
   if (argc != 4) return 64;
   probe_ancestors(getenv("PWD"));
+  /* The action's own work root. Enumerated BEFORE the output is written so
+     the observation does not depend on this action's own side effects. */
+  enumerate_directory(getenv("PWD"));
   int fd = open(argv[1], O_RDONLY);
   if (fd < 0) return 80;
   char buffer[256];
@@ -1353,6 +1399,13 @@ proc resultById(run: BuildRunResult; id: string): ActionResult =
 ## the case asserts that the walk is present before it asserts the sets
 ## agree — a comparison whose operands are empty is recorded as a failure
 ## here rather than as a pass.
+##
+## THE SAME SHAPE, ONE FIELD OVER, WAS STILL OPEN UNTIL P10:
+## ``monitorDirectoryEnumerations`` — eighth of ``PathSetEvidence``'s
+## eight path fields — was not rendered here at all, and no test in the
+## suite asserted it. It is now rendered, and the fixture ``opendir``s its
+## own work root so that rendering compares something. Both halves are
+## required and neither is sufficient; see ``FixtureSource``.
 ## ---------------------------------------------------------------------
 var recordedEvidence: seq[tuple[label, shape: string]] = @[]
 
@@ -1376,6 +1429,13 @@ proc evidenceShape(res: ActionResult;
     render("monitorReads", ev.monitorReads),
     render("monitorWrites", ev.monitorWrites),
     render("monitorProbes", ev.monitorProbes),
+    # P10. The EIGHTH field, and the last one this rendering was blind to.
+    # An enumeration lands in `monitorProbes` too, so a difference in this
+    # field alone is only visible if it is rendered separately — and the
+    # fixture has to actually enumerate something, or five empty sets
+    # compare equal. Both halves; see `FixtureSource` and the presence pin
+    # in `evidence is identical across launch paths`.
+    render("monitorDirectoryEnumerations", ev.monitorDirectoryEnumerations),
     render("diagnostics", ev.diagnostics)
   ].join("\n")
 
@@ -1390,6 +1450,20 @@ proc shapeList(shape, field: string): seq[string] =
         return @[]
       return inner.split(' ')
   @[]
+
+proc shapeHasField(shape, field: string): bool =
+  ## Whether ``evidenceShape`` rendered a line for ``field`` AT ALL.
+  ##
+  ## DISTINCT FROM ``shapeList``, and that is the whole point.
+  ## ``shapeList`` answers ``@[]`` for a field that rendered empty and
+  ## ``@[]`` for a field that was never rendered, so it cannot tell "the
+  ## action enumerated nothing" from "this rendering has never heard of
+  ## enumerations" — which is exactly the difference P10 turned out to
+  ## be about.
+  for line in shape.splitLines():
+    if line.startsWith(field & "=[") and line.endsWith("]"):
+      return true
+  false
 
 proc looksLikeSharedObject(path: string): bool =
   ## A dynamic object the loader maps into the monitored child. Matched on
@@ -2287,6 +2361,44 @@ suite "every_launch_path_is_monitored":
           # stray file that is neither fails it. What it no longer does
           # is pin the exact list of DSOs a particular host maps.
           let shape = recordedEvidence[0].shape
+
+          # EVERY FIELD OF `PathSetEvidence` IS RENDERED, ASKED OF THE TYPE
+          # RATHER THAN OF A LIST SOMEBODY MAINTAINS.
+          #
+          # This case has gone blind twice, and P10's half of it was the
+          # simplest possible cause: `evidenceShape` rendered seven of the
+          # type's eight fields, so a cross-path difference in the eighth
+          # could not appear in the string being compared. Nothing said so.
+          # The field was added to the engine, every launch path started
+          # populating it, and the comparison below went on comparing seven.
+          #
+          # Adding the eighth render line fixes THAT instance and nothing
+          # else: the ninth field will arrive the same way. So the coverage
+          # is asserted against the type's own field list — `fieldPairs`
+          # over a `PathSetEvidence` — and a field the engine grows without
+          # a render line reddens HERE, in the case that would otherwise
+          # have quietly stopped covering it.
+          #
+          # It is `shapeHasField` and not `shapeList` deliberately: a field
+          # that renders EMPTY is fine here (that is what the per-field
+          # non-vacuity pins below are for), a field that renders NOT AT
+          # ALL is not.
+          var fieldProbe: PathSetEvidence
+          var unrenderedFields: seq[string] = @[]
+          for name, value in fieldProbe.fieldPairs:
+            discard value
+            if not shapeHasField(shape, name):
+              unrenderedFields.add name
+          if unrenderedFields.len > 0:
+            echo "`evidenceShape` does not render ",
+              unrenderedFields.join(", "), " of `PathSetEvidence`, so the ",
+              "cross-path comparison below cannot fail for a difference in ",
+              "those fields. Add a `render(...)` line for each — and, ",
+              "because rendering alone is the vacuous half, make the ",
+              "fixture produce the class and pin its presence, exactly as ",
+              "`monitorProbes` and `monitorDirectoryEnumerations` do."
+          check unrenderedFields.len == 0
+
           let reads = shapeList(shape, "monitorReads")
           if "<marker>" notin reads:
             echo "[", recordedEvidence[0].label,
@@ -2338,6 +2450,39 @@ suite "every_launch_path_is_monitored":
           check "<work>" in probes
           check "<case>" in probes
           check "<temp>" in probes
+
+          # AND THE ENUMERATION SET IS NOT EMPTY EITHER — the same pin, one
+          # field over, for the same reason (In-Process-Monitor-Hosting
+          # P10).
+          #
+          # `monitorDirectoryEnumerations` is the membership half of a
+          # directory observation and the input `cacheEnumeratedDirectories`
+          # invalidates on. It was the ONE field of `PathSetEvidence` this
+          # case did not even render, and P6's verification round measured
+          # what that cost: reclassify a single hosted-path `mrPathProbe` as
+          # `mrDirectoryEnumerate` and L1 records `[/tmp]` where L2/L3/L3b
+          # record `[]`, with this case still reporting 11 passes.
+          #
+          # RENDERING IT IS HALF THE FIX AND THE HALF THAT PROVES NOTHING.
+          # Before the fixture enumerated anything, every recorded path
+          # rendered `monitorDirectoryEnumerations=[]`, so the comparison
+          # below would have compared five empty sets — green under exactly
+          # the mutation it is supposed to catch. The fixture now runs
+          # `opendir`/`readdir` over its own work root (see
+          # `FixtureSource`), and this pin is what says the class ARISES: if
+          # the fixture stops enumerating, or io-mon stops classifying
+          # `opendir` as an enumeration, or the engine stops folding it into
+          # this field, it reddens HERE rather than turning the comparison
+          # below into a tautology.
+          let enumerations = shapeList(shape,
+            "monitorDirectoryEnumerations")
+          if "<work>" notin enumerations:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape carries no enumeration of the ",
+              "action's own work root, so the cross-path comparison of ",
+              "`monitorDirectoryEnumerations` below is vacuous:\n", shape
+          check enumerations.len > 0
+          check "<work>" in enumerations
 
           # PRIMARY ASSERTION.
           for i in 1 ..< recordedEvidence.len:
