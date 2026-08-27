@@ -194,7 +194,16 @@ proc gateRefuses(fx: Fixture; cert: TestCertificate; gitBin: string): bool =
   discard execCmdEx(quoteShellCommand(@[gitBin, "-C", fx.libAPath,
     "notes", "--ref", certificateNotesRef, "remove", fx.libASha]))
   let att = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert)
-  check att.ok
+  # ``doAssert``, NOT ``check``. A ``check`` inside a plain proc has no
+  # ``testStatusIMPL`` to fail, so it prints "Check failed", sets the process
+  # exit code, and leaves the case reporting ``[OK]`` (measured). That matters
+  # HERE more than anywhere else in this file: if the attach silently fails the
+  # commit carries NO cert, the `required` gate refuses it as UNCOVERED with the
+  # same ``certificate-coverage`` failure, and this proc returns true — so every
+  # negative case below would pass while testing nothing. That is precisely the
+  # vacuous-pass shape W10 exists to remove.
+  doAssert att.ok, "attachCertificate failed; the negative cases below would " &
+    "pass vacuously against a commit that carries no certificate at all"
   let refsFile = fx.scratch / "pushed-refs.txt"
   writeRefsFile(refsFile, fx.libASha)
   let res = invokeCheckPrePush(fx, refsFile)

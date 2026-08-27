@@ -3,6 +3,11 @@ import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
 
 when defined(windows):
   import std/winlean
+else:
+  # Only these three, and only for the pipe-feeding guard in
+  # ``runFeedingStdin`` — `from … import` keeps the rest of `std/posix` out of
+  # this module's namespace.
+  from std/posix import signal, SIGPIPE, SIG_IGN
 import repro_core
 import repro_build_engine
 import repro_cmake_trycompile
@@ -37612,6 +37617,80 @@ proc allowedSignerIdentity*(keyId: string): string =
   ## a stable principal so the allowed-signers line ties a key to its id.
   "repro-cert/" & keyId
 
+proc runFeedingStdin(exe: string;
+                     args: openArray[string];
+                     payload: string): tuple[code: int; output: string] =
+  ## Run ``exe`` with an ARGV and hand it ``payload`` on its stdin, capturing
+  ## stdout+stderr. Returns the child's exit code.
+  ##
+  ## This exists because a shell redirect is NOT a portable way to feed a
+  ## child. ``execCmdEx`` adds ``poEvalCommand``, and on POSIX Nim then runs
+  ## the string through ``/bin/sh -c`` (so ``… < file`` redirects), while on
+  ## Windows it hands the string to ``CreateProcessW`` VERBATIM — there is no
+  ## shell, so ``<`` and the path become two ordinary argv entries and stdin
+  ## is never redirected. Measured: ``git hash-object --stdin < payload``
+  ## through ``execCmdEx`` on Windows exits 128 having hashed the EMPTY input
+  ## (``e69de29b…``) and then reports ``could not open '<' for reading``.
+  ##
+  ## Quoting cannot rescue the redirect form either: ``quoteShell`` on Windows
+  ## quotes on WHITESPACE only, so ``&``, ``^``, ``|``, ``(``, ``)`` and
+  ## ``%VAR%`` all pass through bare. An argv plus a real pipe write has
+  ## neither problem: no metacharacter in a path is ever interpreted, on
+  ## either platform.
+  ##
+  ## Read discipline: stdin is written and CLOSED first (so the child sees
+  ## EOF and can finish), then stdout is drained to EOF, then we wait. Drain
+  ## before wait — a child blocked on a full pipe never exits. ``readLine``
+  ## rather than ``readAll``: Nim 2.2's ``readAll`` stops at the first short
+  ## pipe read on Windows (the same trap ``gitRunPlain`` documents). The
+  ## output stream is deliberately NOT closed here — ``osproc``'s Windows
+  ## ``close`` asserts that it is still open — while closing the INPUT stream
+  ## is anticipated: ``fileClose`` blanks the handle, so ``process.close``'s
+  ## second close of it is a no-op on both platforms.
+  var process: Process
+  try:
+    process = startProcess(exe, args = @args,
+      options = {poStdErrToStdOut, poUsePath})
+  except CatchableError:
+    # Could not spawn at all. Fail closed with a non-zero code, exactly as a
+    # failed ``execCmdEx`` would have.
+    return (code: 127, output: "could not start " & exe)
+  defer: process.close()
+  let input = process.inputStream
+  # POSIX: a child that exits before reading leaves us writing to a pipe with
+  # no reader, and the DEFAULT disposition of SIGPIPE kills US — silently,
+  # with no exception and no message. ``ssh-keygen -Y verify`` does exactly
+  # that when the ``-s`` file will not parse, which is the path
+  # ``t_unsigned_or_wrong_key_certificate_is_rejected``'s garbled-signature
+  # case walks. Measured: writing 1 MiB into such a verify killed the writer
+  # with 141 (128 + SIGPIPE). Ignoring the signal across the write turns that
+  # into an ordinary EPIPE ``IOError``, and the child's exit code stays the
+  # verdict. The previous disposition is restored, so this is not a
+  # process-wide policy change.
+  when not defined(windows):
+    let previousSigPipe = signal(SIGPIPE, SIG_IGN)
+  try:
+    if payload.len > 0:
+      input.write(payload)
+    input.flush()
+  except CatchableError:
+    discard  # child died early; the exit code below is the verdict
+  # Inside the guard too: POSIX `close` is `fclose`, which flushes, so it can
+  # be the call that writes into a reader-less pipe.
+  try:
+    input.close()   # EOF for the child; osproc's `close` tolerates this
+  except CatchableError:
+    discard
+  when not defined(windows):
+    discard signal(SIGPIPE, previousSigPipe)
+  var captured = ""
+  let outStream = process.outputStream
+  var line = ""
+  while outStream.readLine(line):
+    captured.add(line)
+    captured.add("\n")
+  (code: process.waitForExit(), output: captured)
+
 proc verifyCertificateSignature*(cert: TestCertificate;
                                  store: RegisteredKeyStore): SignatureVerdict =
   ## The TC-5 SIGNATURE verifier (additive to the TC-1 COVERAGE verifier). A
@@ -37641,23 +37720,24 @@ proc verifyCertificateSignature*(cert: TestCertificate;
     return svBadSignature
   let scratch = createTempDir("repro-cert-verify-", "")
   defer: removeDir(scratch)
-  let payloadFile = scratch / "payload"
   let sigFile = scratch / "payload.sig"
   let allowedSigners = scratch / "allowed_signers"
-  writeFile(payloadFile, payload)
   writeFile(sigFile, sigBytes)
   # The allowed-signers file ties THIS key_id's registered public key to the
   # principal we verify as, so a signature made by a DIFFERENT key (even a
   # registered one under another id) does not verify for this key_id.
   writeFile(allowedSigners,
     allowedSignerIdentity(cert.keyId) & " " & signer.publicKey & "\n")
-  # ``ssh-keygen -Y verify`` reads the signed payload on stdin.
-  let cmd = shellCommand(@[sshKeygen, "-Y", "verify",
+  # ``ssh-keygen -Y verify`` reads the signed payload on STDIN and has no flag
+  # to read it from a file, so the payload has to be WRITTEN to the child's
+  # input pipe. It must NOT be a `` < file`` appended to a command string:
+  # that is a no-op on Windows (see ``runFeedingStdin``), which made every
+  # signature verify against an EMPTY payload and therefore fail — no
+  # certificate has ever been trusted on Windows.
+  let res = runFeedingStdin(sshKeygen, @["-Y", "verify",
     "-f", allowedSigners, "-I", allowedSignerIdentity(cert.keyId),
-    "-n", certificateSignatureNamespace, "-s", sigFile]) &
-    " < " & quoteShell(payloadFile)
-  let res = execCmdEx(cmd)
-  if res.exitCode == 0: svValid else: svBadSignature
+    "-n", certificateSignatureNamespace, "-s", sigFile], payload)
+  if res.code == 0: svValid else: svBadSignature
 
 proc certificateIsTrusted*(cert: TestCertificate;
                            store: RegisteredKeyStore): bool =
