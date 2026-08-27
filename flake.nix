@@ -85,7 +85,12 @@
       # and the same commit closes a false-complete hole in which an ``opendir`` /
       # ``readdir`` fault during the sweep was silently reported as "no
       # descendants" instead of as an incomplete observation.
-      url = "github:metacraft-labs/io-mon/30e54993547363efa46a646556b32c5f2dc930fd";
+      #
+      # Bumped to the depfile-format rename tip, which also includes the
+      # memory-frugal ``streamMonitorDepFileRecords`` API consumed directly by
+      # repro_build_engine. Keeping the sandbox pin behind that API makes the
+      # release build fail even when a newer sibling checkout masks the skew.
+      url = "github:metacraft-labs/io-mon/2d602cc4b67edd5639421c33907ab9caf5aa683f";
       flake = false;
     };
     nim-shm-gset-src = {
