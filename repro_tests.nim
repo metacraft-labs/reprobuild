@@ -11546,6 +11546,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_every_tool_profile_is_sealed.nim",
+    binary: "build/test-bin/t_every_tool_profile_is_sealed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_fribidi_dev_stub.nim",
     binary: "build/test-bin/t_fribidi_dev_stub",
     defines: @[],
@@ -12475,6 +12484,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_test_execution_extension_is_framework_neutral.nim",
     binary: "build/test-bin/t_test_execution_extension_is_framework_neutral",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_tool_identity_key_resolves_before_it_keys.nim",
+    binary: "build/test-bin/t_tool_identity_key_resolves_before_it_keys",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

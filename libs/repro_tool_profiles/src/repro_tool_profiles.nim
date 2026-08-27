@@ -196,6 +196,13 @@ type
     scoopRoot*: string
     scoopJunctionTarget*: string
     profileFingerprint*: ContentDigest
+      ## NEVER set this in an object literal. Construct the profile, then
+      ## call ``refreshProfileIdentity`` — that is the only place the
+      ## field is computed, and skipping it leaves the type's zero value,
+      ## which is not a distinct identity: all unsealed profiles carry
+      ## ``0000…0000`` and compare EQUAL to one another. See
+      ## ``refreshProfileIdentity`` for the collision this actually
+      ## produced.
 
   ToolActionIdentity* = object
     providerEntrypointId*: string
@@ -681,11 +688,37 @@ proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   payload.writeString(identity.scoopJunctionTarget)
   blake3DomainDigest(payload, hdActionFingerprint)
 
-proc refreshProfileIdentity(profile: var PathOnlyToolProfile) =
+proc refreshProfileIdentity*(profile: var PathOnlyToolProfile) =
   ## The single place a profile's identity is sealed: hash the resolved
-  ## executable's bytes, then fingerprint. Every adapter goes through
-  ## here so no construction site can produce a profile whose fingerprint
-  ## claims a content identity it never computed.
+  ## executable's bytes, then fingerprint.
+  ##
+  ## ## The invariant, and what actually holds it up
+  ##
+  ## ``profileFingerprint`` is assigned in exactly two places in this
+  ## repository: here, and ``readPathOnlyBuildIdentity`` reading one back
+  ## off disk. No object literal sets it. So a profile's fingerprint is
+  ## either computed here or it is the type's zero value —
+  ## ``0000…0000`` — and a zero-valued fingerprint is NOT a distinct
+  ## identity: every unsealed profile carries the same one and they all
+  ## compare EQUAL.
+  ##
+  ## That was not a hypothetical. ``mkAuxChannelProducerProfile`` (the
+  ## SC-3 library-channel adapter) returned an object literal and never
+  ## sealed, so two cross-repo library producers with entirely different
+  ## realized include / lib directories both fingerprinted ``0000…0000``
+  ## and were indistinguishable to everything downstream that keys on the
+  ## field. Whether a docstring here claims otherwise does not change
+  ## that; the claim has to be paid for at the construction sites. Both
+  ## sites that were skipping the seal now call it:
+  ##
+  ##   * ``mkAuxChannelProducerProfile`` (this module), and
+  ##   * the synthetic metadata-selection profiles in
+  ##     ``repro_cli_support.selectedToolIdentitySelectors`` — which is
+  ##     why this proc is exported.
+  ##
+  ## Adding an adapter means adding a call here. There is no compiler
+  ## check for that, so it is stated where the field is declared as well
+  ## (see ``PathOnlyToolProfile.profileFingerprint``).
   profile.resolvedExecutableDigest =
     resolvedExecutableContentDigest(profile.resolvedExecutablePath)
   profile.profileFingerprint = profileFingerprintFor(profile)
@@ -864,6 +897,42 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
     useDef.packageSelector, useDef.executableName)
 
   refreshProfileIdentity(result)
+
+proc pathOnlyResolutionSignature*(useDef: InterfaceToolUse;
+                                  pathValue = getEnv("PATH")): string =
+  ## WHERE path-mode resolution lands for ``useDef`` under ``pathValue`` —
+  ## and nothing else. No file is opened, no probe is spawned.
+  ##
+  ## This mirrors ``resolvePathOnlyTool``'s lookup exactly (sidecar-first,
+  ## then ``findExecutableOnPath``, same order, same predicates) and stops
+  ## at the answer. It exists so a caller that would otherwise fold the
+  ## verbatim host ``$PATH`` into a cache key can fold the RESOLUTION
+  ## instead: two ``$PATH`` values that select the same executable for
+  ## every declared use produce byte-identical signatures, and a ``$PATH``
+  ## that selects a DIFFERENT executable for any of them — a prepended
+  ## shadow, a removed directory — produces a different one.
+  ##
+  ## Deliberately NOT a content identity. The question it answers is
+  ## "would the resolver look somewhere else now?", which is the question
+  ## a re-resolution decision asks. A content change at an unchanged path
+  ## is a different question and is answered downstream by
+  ## ``resolvedExecutableDigest`` on the profile itself (see
+  ## ``refreshProfileIdentity``), which is computed only once resolution
+  ## has actually run.
+  ##
+  ## Keep this in lockstep with ``resolvePathOnlyTool``: if that resolver
+  ## grows a new way to pick an executable out of ``$PATH``, this must
+  ## grow the same branch or the key stops covering it.
+  let searchList = splitPathList(pathValue)
+  let sidecarPath =
+    findToolProfileSidecarOnPath(useDef.executableName, searchList)
+  if sidecarPath.len > 0:
+    let sidecar = readSidecarToolProfile(sidecarPath)
+    let resolvedFromSidecar = sidecar.getOrDefault("resolvedExecutablePath")
+    if resolvedFromSidecar.len > 0 and
+        fileExists(extendedPath(resolvedFromSidecar)):
+      return "sidecar\x1f" & sidecarPath & "\x1f" & resolvedFromSidecar
+  "executable\x1f" & findExecutableOnPath(useDef.executableName, searchList)
 
 proc lockedNixpkgsRef(baseRef, narHash: string): string =
   result = baseRef
@@ -5202,7 +5271,21 @@ proc mkAuxChannelProducerProfile(useDef: InterfaceToolUse;
   ## the resolver closure's EXISTING aux projection returns these dirs for the
   ## consuming action's ``CPATH``/``LIBRARY_PATH``/``LD_LIBRARY_PATH`` — a NEW
   ## source (from-source sibling PROJECT build) feeding the SAME channels.
-  PathOnlyToolProfile(
+  ##
+  ## The profile is SEALED through ``refreshProfileIdentity`` like every
+  ## other adapter's. It was not, and the object literal's zero-initialized
+  ## ``profileFingerprint`` was therefore shipped as if it were a computed
+  ## one: two library producers with entirely different realized include /
+  ## lib directories both fingerprinted to ``0000…0000`` and compared
+  ## EQUAL. Everything that keys on ``profileFingerprint`` — including the
+  ## typed-tool action's weak fingerprint in ``repro_cli_support``'s
+  ## ``reprobuild.localProjectAction`` — could not tell them apart. Sealing
+  ## here hashes the four aux-channel lists (``profileFingerprintFor``
+  ## writes all of them), so a producer whose realized dirs move gets a
+  ## different fingerprint. ``resolvedExecutableContentDigest("")`` is a
+  ## no-op for the empty ``resolvedExecutablePath``, so the seal costs no
+  ## I/O for this adapter.
+  result = PathOnlyToolProfile(
     installMethod: "path",
     packageSelector: useDef.packageSelector,
     packageId: useDef.packageSelector,
@@ -5215,6 +5298,7 @@ proc mkAuxChannelProducerProfile(useDef: InterfaceToolUse;
     cmakePrefixList: dirs.cmakePrefixDirs,
     adapterStrength: asWeak,
     cachePortability: cpLocalOnly)
+  refreshProfileIdentity(result)
 
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string;
