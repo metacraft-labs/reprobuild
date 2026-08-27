@@ -355,16 +355,66 @@ const EnumeratedLaunchPaths: array[4, LaunchPath] = [
 ## daemon's queue while this one holds the lease (L3b). The read is the
 ## observable: it can only appear in the action's evidence if the
 ## io-monitor shim was actually injected into this process.
+##
+## IT ALSO RESOLVES ITS OWN ``$PWD``, ancestor by ancestor, AND THAT IS
+## NOT DECORATION — it is what makes ``evidence is identical across
+## launch paths`` able to fail for the class of difference it names.
+## Before this, that case recorded ``monitorProbes=[]`` on all five
+## recorded paths (measured with an instrumented copy of the gate) and
+## compared an empty set with an empty set: the fixture never produced a
+## directory walk, so a walk attributed to the action on one launch path
+## and not on another was invisible to it, however the paths were spelled.
+##
+## The walk is not synthetic in the sense that matters. Every real
+## toolchain root does it: a POSIX shell — which is what a Nix ``gcc``
+## wrapper IS — validates the ``PWD`` it inherits by resolving it one
+## component at a time, one ``stat`` per ancestor, and that is exactly the
+## ancestor chain the HM-6 acceptance harness saw the wrapped arm record
+## and the hosted arm not record (In-Process-Monitor-Hosting P6). Doing it
+## here in C rather than by wrapping the action in ``/bin/sh`` keeps the
+## fixture usable on macOS, where a SIP-protected ``/bin/sh`` at the top of
+## a monitored tree strips ``DYLD_INSERT_LIBRARIES`` and would make the
+## action blind for a reason that has nothing to do with launch paths.
+##
+## Reading ``$PWD`` rather than ``getcwd()`` is the load-bearing detail:
+## it is the ENVIRONMENT the engine composes, so this fixture reddens if
+## the engine stops handing every launch path a ``PWD`` that agrees with
+## the action's ``cwd`` — which is precisely the defect P6 found (the
+## wrapped path's ``umask`` wrapper shell set ``PWD=<action cwd>`` while
+## the hosted path let the child inherit the ENGINE's ``PWD``).
 const FixtureSource = r"""
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
+/* Resolve an absolute path the way a POSIX shell resolves an inherited
+   $PWD: one stat() per ancestor, from the top down. The results are not
+   used — the observation is the point. */
+static void probe_ancestors(const char *path) {
+  char buffer[4096];
+  size_t length;
+  size_t i;
+  if (path == NULL || path[0] != '/') return;
+  length = strlen(path);
+  if (length < 2 || length >= sizeof(buffer)) return;
+  for (i = 1; i <= length; i++) {
+    if (path[i] == '/' || path[i] == '\0') {
+      struct stat info;
+      if (i == length && path[length - 1] == '/') break;
+      memcpy(buffer, path, i);
+      buffer[i] = '\0';
+      stat(buffer, &info);
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   if (argc != 4) return 64;
+  probe_ancestors(getenv("PWD"));
   int fd = open(argv[1], O_RDONLY);
   if (fd < 0) return 80;
   char buffer[256];
@@ -1293,6 +1343,16 @@ proc resultById(run: BuildRunResult; id: string): ActionResult =
 ## every field (not just ``monitorReads``) is deliberate: a change that
 ## moved a path from ``monitorReads`` into ``monitorProbes`` on one path
 ## only would otherwise pass.
+##
+## RENDERING A FIELD IS NOT COMPARING IT, though, and that distinction
+## cost this campaign a round. ``monitorProbes`` was rendered here from
+## the beginning and was still the ONE field the two hosting mechanisms
+## were measured to disagree about, because this fixture produced no
+## probes at all: five empty sets compare equal. The fixture now performs
+## a working-directory ancestor walk on purpose so the class arises, and
+## the case asserts that the walk is present before it asserts the sets
+## agree — a comparison whose operands are empty is recorded as a failure
+## here rather than as a pass.
 ## ---------------------------------------------------------------------
 var recordedEvidence: seq[tuple[label, shape: string]] = @[]
 
@@ -2245,6 +2305,39 @@ suite "every_launch_path_is_monitored":
           check unexplained.len == 0
           check shape.contains("\nmonitorWrites=[<out>]\n")
           check shape.contains("\ndiagnostics=[]")
+
+          # AND THE PROBE SET IS NOT EMPTY, WHICH IS THE ONE THAT KEEPS
+          # THIS CASE FROM GOING BLIND AGAIN.
+          #
+          # ``monitorProbes`` is the field the two hosting mechanisms were
+          # measured to disagree about (In-Process-Monitor-Hosting P6): the
+          # wrapped arm recorded the action's working-directory ancestor
+          # chain and the hosted arm did not, because the wrapped path's
+          # ``umask`` wrapper shell exported ``PWD=<action cwd>`` while the
+          # hosted path let the child inherit the ENGINE's ``PWD``. The
+          # comparison below would have caught that — except that this
+          # fixture used to record ``monitorProbes=[]`` on ALL FIVE paths,
+          # so it compared an empty set with an empty set and could not fail
+          # for that class of difference at all.
+          #
+          # The fixture now resolves its own ``$PWD`` ancestor by ancestor
+          # (see ``FixtureSource``), so the class ARISES here. This pin is
+          # what says so out loud: if the walk stops being recorded — a
+          # fixture that no longer probes, an engine that stops composing
+          # ``PWD``, a monitor that stops capturing ``stat`` — the identity
+          # comparison silently becomes vacuous again, and it reddens HERE
+          # instead of passing.
+          let probes = shapeList(shape, "monitorProbes")
+          if probes.len == 0 or "<work>" notin probes or
+              "<case>" notin probes or "<temp>" notin probes:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape does not carry the working-",
+              "directory ancestor walk, so the cross-path comparison of ",
+              "`monitorProbes` below is vacuous:\n", shape
+          check probes.len > 0
+          check "<work>" in probes
+          check "<case>" in probes
+          check "<temp>" in probes
 
           # PRIMARY ASSERTION.
           for i in 1 ..< recordedEvidence.len:

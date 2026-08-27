@@ -4802,6 +4802,64 @@ proc launchChildEnv(action: BuildAction;
   ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
   ## after).
   result = @["REPROBUILD_NO_RUNQUOTA=1", "IO_MON_MUTE=1"]
+  # In-Process-Monitor-Hosting P6 — **``PWD`` is the action's working
+  # directory, on every launch path**, because otherwise the LAUNCHER's
+  # working directory leaks into the ACTION's dependency evidence.
+  #
+  # WHAT WAS MEASURED, and it is not what P6 guessed. The wrapped arm
+  # recorded the run root's whole ancestor chain in ``monitorProbes``
+  # (``/tmp``, each intermediate directory, the run root, the work root) and
+  # the hosted arm did not. It is NOT a directory-creation walk by the
+  # engine or by io-mon: ``createDir(depDest.parentDir)`` in
+  # ``startMonitorHost``, and io-mon's ``createLocalTempDir`` /
+  # ``ensureParentDir``, all run in a process that is OUTSIDE the monitored
+  # tree on BOTH paths, so none of them can be recorded at all (a monitored
+  # ``repro internal io monitor`` run over a one-``open`` C binary records
+  # zero probes, and with the shm set disabled every chain probe carries the
+  # monitored ROOT's pid, not the host's).
+  #
+  # The walk is the action's OWN root process — any POSIX shell, including
+  # the Nix ``gcc`` wrapper script — validating an inherited ``PWD`` that
+  # names its own working directory: bash resolves that path component by
+  # component (one stat per ancestor ⇒ one probe per ancestor). Two
+  # controls, both run: (a) an action whose root is a plain C binary records
+  # NO probes on either path, and (b) the HOSTED arm reproduces the whole
+  # chain, entry for entry, as soon as the ENGINE is invoked from the
+  # action's own work directory. What differed between the arms was never
+  # the monitor — it was ``PWD``: the wrapped path interposes
+  # ``umaskWrappedArgv``'s ``/bin/sh -c 'umask 022 && …'`` ABOVE the monitor
+  # and that shell exports ``PWD=<action cwd>``, while the hosted path has no
+  # wrapper shell and the child inherited the ENGINE's ``PWD``.
+  #
+  # So the same action recorded different evidence depending on which
+  # directory the user happened to run ``repro build`` from — a launcher
+  # fact reaching a cache-invalidation input — and the two launch paths
+  # disagreed for the same reason. Handing every action a ``PWD`` that
+  # agrees with its own ``cwd`` fixes both: it is what a POSIX shell would
+  # have set anyway, it is a function of the action rather than of the
+  # invocation, and it makes the hosted and wrapped forms produce the same
+  # probes. Pinned by ``evidence is identical across launch paths`` in
+  # ``tests/integration/t_every_launch_path_is_monitored.nim``, whose
+  # fixture now PRODUCES the walk instead of comparing two empty sets.
+  #
+  # Only when the action names a ``cwd``: with none, the child's working
+  # directory IS the engine's, so the inherited ``PWD`` already agrees with
+  # it and there is no chdir for a shell to notice. An explicit
+  # ``action.env`` entry still wins — it is appended after this one.
+  #
+  # ``OLDPWD`` travels with it, and for the same reason rather than for
+  # tidiness: a shell validates that one too, so the directory the engine's
+  # own parent shell happened to come FROM was landing in the action's probe
+  # set (measured: one ``prExistingOther`` for it, which disappears when
+  # ``OLDPWD`` is unset). It cannot be unset from here — this list is layered
+  # OVER the inherited environment, so there is no removal channel — so it is
+  # pointed at the same directory as ``PWD``, which costs the action nothing
+  # (``cd -`` returns where it already is) and puts no launcher path in the
+  # evidence.
+  if action.cwd.len > 0:
+    let actionPwd = absolutePath(action.cwd)
+    result.add("PWD=" & actionPwd)
+    result.add("OLDPWD=" & actionPwd)
   # M9.R.13c.2 — **shim-library env seed**. Inject
   # ``REPRO_MONITOR_SHIM_LIB`` at launch time so the daemon-spawned
   # ``repro internal io monitor`` subprocess deterministically locates
