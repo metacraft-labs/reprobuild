@@ -850,7 +850,7 @@ tests/integration/t_b0_repro_build_runquota_daemon.nim	nim	1
 tests/integration/t_b0_runquota_repro_nim_compiles.nim	nim	2
 tests/integration/t_b1_apps_action_cache_hit.nim	nim	1
 tests/integration/t_b1_repro_build_apps_byte_equivalent.nim	nim	3
-tests/integration/t_b1_repro_build_apps_collection.nim	nim	3
+tests/integration/t_b1_repro_build_apps_collection.nim	nim	4
 tests/integration/t_b2_helper_invalidation.nim	nim	1
 tests/integration/t_b2_helpers_built_by_engine.nim	nim	2
 tests/integration/t_b3_repro_test_runs_through_engine.nim	nim	3
@@ -1329,7 +1329,7 @@ tests/unit/t_m9r14e_1_resolver_pkg_config_paths.nim	nim	12
 tests/unit/t_m9r14e_2_install_tree_mirror.nim	nim	8
 tests/unit/t_m9r14e_3_action_env_threading.nim	nim	29
 tests/unit/t_m9r14f_1_transitive_lib_dirs.nim	nim	12
-tests/unit/t_m9r14f_2_rpath_patching.nim	nim	12
+tests/unit/t_m9r14f_2_rpath_patching.nim	nim	13
 tests/unit/t_m9r14h_1_auto_recurse_idempotency.nim	nim	15
 tests/unit/t_m9r15c_1_io_monitor_fragment_log_perf.nim	nim	3
 tests/unit/t_m9r15d_1_libegl_headers_stub.nim	nim	5
