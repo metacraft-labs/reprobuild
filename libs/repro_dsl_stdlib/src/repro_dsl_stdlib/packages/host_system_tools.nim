@@ -95,6 +95,18 @@ package `awk`:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+package `cmp`:
+  provisioning:
+    nixPackage "nixpkgs#diffutils", executablePath = "bin/cmp",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `diff`:
+  provisioning:
+    nixPackage "nixpkgs#diffutils", executablePath = "bin/diff",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package `sha256sum`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/sha256sum",

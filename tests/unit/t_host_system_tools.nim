@@ -15,3 +15,10 @@ suite "host system tool provisioning":
     check pkg.nixProvisioning.len == 1
     check pkg.nixProvisioning[0].selector == "nixpkgs#findutils"
     check pkg.nixProvisioning[0].executablePath == "bin/find"
+
+  test "configure comparison tools use the pinned Nix diffutils provider":
+    for tool in ["cmp", "diff"]:
+      let pkg = findPackage(tool)
+      check pkg.nixProvisioning.len == 1
+      check pkg.nixProvisioning[0].selector == "nixpkgs#diffutils"
+      check pkg.nixProvisioning[0].executablePath == "bin/" & tool
