@@ -390,89 +390,71 @@ proc lockedCheckoutPathRejection*(value: string): string =
   ##
   ## `../ws` is not a live incident, and WHY it is not is the part that
   ## matters here: `developPlacementRejection` catches it downstream, on
-  ## `normalizedPath(absolutePath(...))` values rather than on the spelling,
-  ## so `repro develop --all --reset` exits 1 and deletes nothing. That guard
-  ## is one of the five W8 proposes to rework. The containment for this shape
-  ## therefore lives entirely inside the code W8 will touch, which is the
-  ## reason to record it here rather than to file it as harmless.
+  ## RESOLVED values rather than on the spelling, so
+  ## `repro develop --all --reset` exits 1 and deletes nothing. That guard is
+  ## one of the five W8 reworked, so the containment for this shape lives
+  ## entirely in code this proc does not own — which is the reason to record
+  ## it here rather than to file it as harmless.
   ##
-  ## ## RESIDUAL W5-R1 — reparse points defeat any lexical rule (OPEN, W8)
+  ## ## W5-R1 / W5-R2 — CLOSED at the five consumers (W8, 2026-08-27)
   ##
-  ## `../sib` is accepted by design: a sibling is a peer of the workspace and
-  ## the develop plane's documented default placement. If `sib` is a
-  ## DIRECTORY JUNCTION (or a symlink) whose target is the workspace itself,
-  ## that accepted-by-design value resolves to the workspace root anyway, and
-  ## no amount of string folding can tell. Reproduced:
+  ## Both residuals this note used to carry are fixed, and NOT here: this proc
+  ## is still a check on the SPELLING IN ISOLATION and still cannot resolve
+  ## anything. That is deliberate — a filesystem call inside a pure string
+  ## rule makes it fallible, TOCTOU-prone and platform-divergent, and the rule
+  ## is asked at a boundary that has no workspace root to resolve against.
   ##
-  ##   mkdir …\w5junc1\workspace   # git repo + PRECIOUS.txt + src\ + repro.lock
-  ##   mklink /J …\w5junc1\sib …\w5junc1\workspace
+  ## W5-R1 was that `../sib` is accepted by design — a sibling is a peer of
+  ## the workspace and the develop plane's documented default placement — so
+  ## when `sib` was a DIRECTORY JUNCTION or symlink aimed at the workspace,
+  ## the accepted-by-design value resolved to the workspace root and no amount
+  ## of string folding could tell. Reproduced on `09324b61`, identically for
+  ## both reparse tags:
+  ##
+  ##   mklink /J …\parent\sib …\parent\workspace
   ##   # repro.lock: deps = [{ …, path = "../sib", … }]
-  ##   repro develop --all --reset --workspace-root=…\w5junc1\workspace
-  ##   # EXIT=0 — and it REPORTS SUCCESS. The workspace is reduced to `.repro`:
-  ##   # `.git`, `PRECIOUS.txt`, `src\` and `repro.lock` are gone.
+  ##   repro develop --all --reset --workspace-root=…\parent\workspace
+  ##   # EXIT=0 — and it REPORTED SUCCESS. The workspace was reduced to
+  ##   # `.repro`: `.git`, `PRECIOUS.txt`, `src\` and `repro.lock` were gone.
   ##
-  ## The exit code is the sharpest part. This is not a guard that refuses too
-  ## little; it is an irreversible delete that reports having done the right
-  ## thing. `d0c6ad8f` (pristine, before the lock-plane boundary existed)
-  ## behaves IDENTICALLY, so the route is pre-existing in kind and this
-  ## boundary neither opened it nor closed it.
+  ## W5-R2 was that the same comparisons were byte-wise, so `C:\…\W5CASE\ws`
+  ## and `C:\…\w5case\ws` — one directory on a case-insensitive volume —
+  ## compared UNEQUAL and downgraded "IS the workspace root" to
+  ## "beneath"/"disjoint". Latent rather than live, and what made it latent
+  ## was the CALLERS, not the comparison: every one of them took both sides
+  ## from one `cwd`, so the two spellings never met.
   ##
-  ## THE FIX IS NOT HERE and is deliberately not attempted in W5. A lexical
-  ## predicate cannot resolve a reparse point without a filesystem call, and a
-  ## filesystem call inside a pure string rule makes it fallible, TOCTOU-prone
-  ## and platform-divergent. The fix belongs at the FIVE consumers that
-  ## actually delete — each already asks a containment/placement question of
-  ## its own, and each would ask it of the RESOLVED target, with a stated
-  ## policy for what to do when resolution fails, which must be "refuse", not
-  ## "proceed".
+  ## THE FIX IS ONE CANONICALIZATION APPLIED AT THE FIVE CONSUMERS THAT
+  ## DELETE, which is where the workspace root is actually in hand. Each of
+  ## them now asks its own question of the RESOLVED target through
+  ## `repro_core/path_identity.nim`'s `fsContainment`:
   ##
-  ## AND THE RESOLUTION PRIMITIVE IS NOT `expandFilename`. An earlier shape of
-  ## this note named it; measured on this host, against the very junction
-  ## above, it does not resolve one:
+  ##   * `containmentInWorkspaceRoot` (`git_actions.nim`), serving
+  ##     `removeCloneTargetSafely` and `executeForceReset`;
+  ##   * `developPlacementRejection`, `executeRemove` (both routes) and
+  ##     `runWorkspaceDisableCommand` (all `repro_cli_support.nim`).
+  ##
+  ## And the primitive is NOT `expandFilename`. An earlier shape of this note
+  ## named it; measured on this host, against the very junction above, it does
+  ## not resolve one:
   ##
   ##   expandFilename(…\sib)        -> …\sib          (unchanged)
-  ##   expandFilename(…\workspace)  -> …\workspace
   ##   expandSymlink(…\sib)         -> …\sib          (also unchanged)
   ##   symlinkExists(…\sib)         -> true           (the reparse point IS
   ##                                                   detectable)
   ##
-  ## So `expandFilename` would have bought W8 exactly nothing: it makes the
-  ## path absolute and folds it, which is what `absolutePath` +
-  ## `normalizedPath` already do. Resolving a junction needs
-  ## `GetFinalPathNameByHandle` on a handle opened with
-  ## `FILE_FLAG_BACKUP_SEMANTICS` (which returns the target, in `\\?\` form
-  ## that must then be stripped), or an explicit reparse-tag probe
-  ## (`FSCTL_GET_REPARSE_POINT`, or the cheap `symlinkExists` screen above)
-  ## followed by a refusal. Either is a real Win32 call and a real policy
-  ## decision, which is the second reason this is W8's and not a line here.
-  ## Those five consumers are `containmentInWorkspaceRoot` (`git_actions.nim`,
-  ## serving
-  ## `removeCloneTargetSafely` and `executeForceReset`),
-  ## `developPlacementRejection`, `executeRemove` and
-  ## `runWorkspaceDisableCommand` (all `repro_cli_support.nim`). It is a
-  ## design pass of its own and is tracked as MILESTONE W8 in
-  ## `Windows-Cacheable-Builds-Session-Residuals.milestones.org`, together
-  ## with W5-R2 below — one canonicalization decision, applied at all five,
-  ## rather than five spot fixes.
-  ##
-  ## ## RESIDUAL W5-R2 — those same comparisons are byte-wise (OPEN, latent, W8)
-  ##
-  ## Same class, same design pass. `containmentInWorkspaceRoot` and
-  ## `developPlacementRejection` both compare `normalizedPath(absolutePath(x))`
-  ## values with `==` and `startsWith`. On a case-insensitive filesystem
-  ## `C:\…\W5CASE\ws` and `C:\…\w5case\ws` are the SAME directory and compare
-  ## UNEQUAL, which downgrades `cmIsWorkspaceRoot` to "beneath"/"disjoint" and
-  ## lets the delete through. Not currently reachable — every caller derives
-  ## both sides from the same `cwd` bytes — so it is a latent rather than a
-  ## live defect. It is recorded here because whatever canonicalization W5-R1
-  ## introduces is the thing both sides must then be compared under, and
-  ## fixing one without the other would just move the blind spot. Reproduced
-  ## as a comparison rather than as an incident, because there is no incident
-  ## to reproduce: `normalizedPath(absolutePath("C:\\…\\W5CASE\\ws"))` and the
-  ## same call on `"C:\\…\\w5case\\ws"` name one directory on this filesystem
-  ## and return two unequal strings. What makes it latent is the CALLERS, not
-  ## the comparison — every one of them takes both sides from one `cwd`, so
-  ## the two spellings never meet.
+  ## It is `GetFinalPathNameByHandle` on a handle opened with
+  ## `FILE_FLAG_BACKUP_SEMANTICS` and WITHOUT `FILE_FLAG_OPEN_REPARSE_POINT`
+  ## (so the open traverses the reparse point) on Windows, and `realpath(3)`
+  ## on POSIX. `FILE_NAME_NORMALIZED` returns each component in its ON-DISK
+  ## case, which is what answers W5-R2 on Windows without guessing a case rule
+  ## or querying a volume property; the `(volume, file id)` / `(st_dev,
+  ## st_ino)` identity layer answers it where the canonicalization cannot,
+  ## because `realpath` does not case-fold. Resolution FAILURE refuses — a
+  ## target whose location cannot be established is a target whose containment
+  ## cannot be proven — and the per-failure-mode policy, the TOCTOU window
+  ## and the threat-model judgement are stated in full at the top of
+  ## `path_identity.nim`.
   ##
   ## The two CANONICAL root spellings pass: `"."` (what reprobuild writes) and
   ## `""` (what a lock that omits the key parses to). Both are what

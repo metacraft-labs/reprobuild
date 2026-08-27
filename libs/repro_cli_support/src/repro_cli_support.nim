@@ -9,6 +9,12 @@ else:
   # this module's namespace.
   from std/posix import signal, SIGPIPE, SIG_IGN
 import repro_core
+# W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
+# their containment question under. Imported by MODULE rather than folded into
+# `repro_core`'s re-exports on purpose: it is wanted at four named sites here
+# and at two in `git_actions.nim`, and a repo-wide re-export would put
+# `fsContainment` in the namespace of every module that touches `repro_core`.
+import repro_core/path_identity
 import repro_build_engine
 import repro_cmake_trycompile
 import repro_dev_env_activation
@@ -22417,36 +22423,53 @@ proc developPlacementRejection(absTarget, workspaceRoot, intoDir: string):
   ##     to an arbitrary directory: `../sib` is a sibling and is honoured,
   ##     `../../../Users` is not a sibling of anything and is refused.
   ##
-  ## WHAT IT DOES NOT PROVE — the same two OPEN residuals
-  ## `containmentInWorkspaceRoot` carries, written up in full at
-  ## `repro_workspace_manifests/reader.nim`'s `lockedCheckoutPathRejection`:
-  ## W5-R1, `normalizedPath(absolutePath(...))` is a lexical fold that does not
-  ## resolve reparse points, so a junction/symlink sibling whose target IS the
-  ## workspace root passes the scope test and is deleted under `--reset` at
-  ## exit 0 (reproduced); and W5-R2, the compares below are byte-wise and so
-  ## miss a case-different spelling of the same directory on a
-  ## case-insensitive filesystem (latent). Both want
-  ## one canonicalization decision applied at all five deleting consumers, not
-  ## a spot fix here.
-  let root =
-    try: os.normalizedPath(absolutePath(workspaceRoot))
-    except CatchableError: return "the workspace root cannot be resolved"
-  let target =
-    try: os.normalizedPath(absolutePath(absTarget))
-    except CatchableError: return "the checkout target cannot be resolved"
-  if target == root:
+  ## W8-R1/R2 — ASKED OF THE RESOLVED TARGET. This proc used to fold both
+  ## sides with `os.normalizedPath(absolutePath(...))` and compare byte-wise,
+  ## which is a lexical rule and could not see a reparse point: a `../sib`
+  ## whose `sib` is a directory junction onto the workspace passed the scope
+  ## test (it IS in scope — it is a sibling) and `--reset` then `removeDir`'d
+  ## the workspace at EXIT 0. Reproduced on `09324b61`, for a junction and for
+  ## a directory symlink alike.
+  ##
+  ## `fsContainment` (`repro_core/path_identity.nim`) resolves both sides
+  ## through the filesystem, so the junction's verdict is `fcSameDirectory`
+  ## and the first refusal below fires. The SCOPE test is then run on the
+  ## resolved spellings too — it is a `startsWith` like the others, and
+  ## leaving it on the raw spelling would move the blind spot rather than
+  ## close it.
+  ##
+  ## Refusal on RESOLUTION FAILURE is deliberate and is the same policy the
+  ## other four consumers take: `--reset` deletes the directory this proc
+  ## approves, so a target whose location cannot be established is a target
+  ## whose placement cannot be proven. The failure modes and what each means
+  ## are tabulated at the top of `path_identity.nim`.
+  let contained = fsContainment(absTarget, workspaceRoot)
+  let root = contained.root
+  let target = contained.target
+  case contained.verdict
+  of fcUnresolvable:
+    return "the checkout target '" & absTarget & "' cannot be located " &
+      "relative to the workspace root: " & contained.reason &
+      "; nothing was created or removed — resolve the path (or the " &
+      "junction/symlink it goes through) and re-run, or pass `--into=DIR` " &
+      "to place this checkout deliberately"
+  of fcSameDirectory:
     return "the checkout target '" & target & "' IS the workspace root; " &
       "a lock records the workspace root repo as `.` and it is never placed " &
       "into develop mode — regenerate the lock with `repro lock refresh`"
-  if root.len > target.len and root.startsWith(target & $DirSep):
+  of fcContainsRoot:
     return "the checkout target '" & target & "' CONTAINS the workspace " &
       "root '" & root & "'; a develop checkout may be a sibling of the " &
       "workspace but never an ancestor of it — regenerate the lock with " &
       "`repro lock refresh`"
+  of fcBeneath, fcDisjoint:
+    discard
   var scopes: seq[string]
   if intoDir.len > 0:
-    scopes.add(try: os.normalizedPath(absolutePath(intoDir))
-               except CatchableError: return "`--into` cannot be resolved")
+    let intoResolved = resolveCanonicalPath(intoDir)
+    if intoResolved.status == prsFailed:
+      return "`--into` cannot be resolved: " & intoResolved.reason
+    scopes.add(intoResolved.path)
   else:
     scopes.add(root)
     scopes.add(parentDir(root))
@@ -22460,6 +22483,53 @@ proc developPlacementRejection(absTarget, workspaceRoot, intoDir: string):
     "and `--into=DIR` places checkouts under DIR — regenerate the lock with " &
     "`repro lock refresh`, or pass `--into=DIR` to place this checkout " &
     "deliberately"
+
+proc resolvedOwnTreeRejection(computedTarget, workspaceRoot: string): string =
+  ## Why the directory `computedTarget` RESOLVES TO may not be deleted as a
+  ## repo's own tree, or "" when it may.
+  ##
+  ## The filesystem half of `checkoutPathRejection`, and the two are a pair
+  ## rather than alternatives. `checkoutPathRejection` asks about the
+  ## SPELLING: is `<workspaceRoot> / <path>` a directory reference that stays
+  ## inside the workspace? That question is total, cheap and platform-
+  ## identical, and it is the right one to ask of a declaration. This one asks
+  ## where the answer actually LANDS, which the spelling cannot say (W8-R1): a
+  ## perfectly ordinary `path = "vendor/thing"` whose `vendor\thing` is a
+  ## directory junction onto the workspace root — or onto `C:\Users` — is
+  ## accepted by every lexical rule in this repository and then handed to
+  ## `removeDir`, which walks straight into the reparse point.
+  ##
+  ## The manifest plane's rule is the strict one, because it can afford to be:
+  ## a declared checkout path is workspace-relative with no `..` and no drive,
+  ## so a repo's own tree is BENEATH the workspace root by construction. Any
+  ## other resolved verdict means a reparse point moved it, and the two
+  ## planes' answers are deliberately different here — `git_actions.nim`'s
+  ## executors permit a DISJOINT sibling because the develop plane's
+  ## documented default placement is one, and this plane has no such default.
+  ##
+  ## `fcUnresolvable` refuses for the reason every site in this class refuses:
+  ## the next statement is a recursive delete, and a location that could not
+  ## be established is a containment that was not proven. See
+  ## `repro_core/path_identity.nim` for the per-failure-mode policy.
+  let contained = fsContainment(computedTarget, workspaceRoot)
+  case contained.verdict
+  of fcBeneath:
+    ""
+  of fcSameDirectory:
+    "resolves to the workspace root itself (" & contained.root & "), so " &
+      "removing it would delete the workspace"
+  of fcContainsRoot:
+    "resolves to '" & contained.target & "', which CONTAINS the workspace " &
+      "root (" & contained.root & "), so removing it would delete the " &
+      "workspace from the outside"
+  of fcDisjoint:
+    "resolves to '" & contained.target & "', which is OUTSIDE the workspace " &
+      "root (" & contained.root & ") — a checkout path is workspace-" &
+      "relative, so this one reaches out through a junction or symlink and " &
+      "removing it would delete a directory the workspace does not own"
+  of fcUnresolvable:
+    "cannot be located relative to the workspace root (" & contained.root &
+      "): " & contained.reason
 
 proc gitHeadShaOf(gitBinary, repoDir: string): string =
   ## Best-effort ``git rev-parse HEAD`` for adopt/idempotent detection. Returns
@@ -47020,7 +47090,8 @@ proc reachableExcluding(repos: seq[ResolvedRepo];
           pending.add(dep)
 
 proc undeletableCheckoutDiagnostic(repo: ResolvedRepo; rejection: string;
-                                   projectFile, workspaceRoot: string): string =
+                                   projectFile, workspaceRoot: string;
+                                   landingStated = false): string =
   ## The RA-28 shape of a `repro remove` refusal
   ## (Interactive-UX-And-Progress.md Principle 2): NAME the offender and NAME
   ## a copy-pasteable remedy.
@@ -47070,11 +47141,20 @@ proc undeletableCheckoutDiagnostic(repo: ResolvedRepo; rejection: string;
         "(`repro workspace repos remove` would do this for you, but it " &
         "edits " & (workspaceRoot / "projects") & " and cannot reach a " &
         "manifest checkout at " & parentDir(repo.fragmentPath) & ".)"
+  # `landingStated` — the LEXICAL rejection says what is wrong with the
+  # spelling and leaves it to this proc to say where that spelling lands. The
+  # RESOLVED rejection (`resolvedOwnTreeRejection`) has already named the
+  # directory the path resolves to and what deleting it would take, and it is
+  # the only one of the two that CAN: the landing is the whole of what it
+  # measured, and the lexical join below would name a different (and, for a
+  # junction, misleadingly innocent) directory.
   "refusing to remove '" & repo.name & "': its declared checkout path '" &
-    repo.path & "' " & rejection & ", so " &
-    (workspaceRoot / repo.path) & " IS the workspace root and removing it " &
-    "would delete the workspace itself. Nothing was removed for this repo. " &
-    remedy
+    repo.path & "' " & rejection &
+    (if landingStated: ". "
+     else: ", so " & (workspaceRoot / repo.path) &
+       " IS the workspace root and removing it would delete the workspace " &
+       "itself. ") &
+    "Nothing was removed for this repo. " & remedy
 
 proc executeRemove(parsed: RemoveArgs): RemoveReport =
   result.workspaceRoot = parsed.workspaceRoot
@@ -47132,6 +47212,25 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
       name: target.name, path: target.path, effect: "refused",
       diagnostic: undeletableCheckoutDiagnostic(target, targetRejection,
         resolved.projectFile, parsed.workspaceRoot)))
+    return
+
+  # W8-R1 — and then the same question of the RESOLVED path, because the
+  # spelling above cannot see a reparse point. `path = "vendor/thing"` passes
+  # every lexical rule in this repository and still names the workspace root
+  # when `vendor\thing` is a directory junction onto it; `removeDir` walks
+  # into the reparse point and the workspace goes. This is the NAMED-target
+  # route, so it refuses the whole verb before anything is mutated, exactly
+  # as the lexical rejection above does — there is no partial execution of
+  # "remove the workspace root" that is correct.
+  let targetLanding = resolvedOwnTreeRejection(
+    parsed.workspaceRoot / target.path.strip(), parsed.workspaceRoot)
+  if targetLanding.len > 0:
+    result.exitCode = 1
+    result.declarationChanged = false
+    result.repos.add(RemoveRepoEntry(
+      name: target.name, path: target.path, effect: "refused",
+      diagnostic: undeletableCheckoutDiagnostic(target, targetLanding,
+        resolved.projectFile, parsed.workspaceRoot, landingStated = true)))
     return
 
   # RA-22 reachability GC. The removed dependency is the target. The set of
@@ -47207,6 +47306,9 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
     dirty: bool
     dirtyDiag: string
     rejection: string  ## Non-empty when this entry's tree may not be deleted.
+    landingStated: bool  ## True when `rejection` came from the RESOLVED
+                         ## question and so already names where the path
+                         ## lands. See `undeletableCheckoutDiagnostic`.
   var plan: seq[GcEntry]
   var anyDirty = false
   var refusedRemovals = 0
@@ -47225,6 +47327,16 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
       # to discard, and a DIRTY classification here would raise the RA-9
       # confirmation prompt over a removal that is not going to happen.
       plan.add(GcEntry(repo: repo, rejection: rejection))
+      continue
+    # W8-R1 — the SWEPT-IN route's resolved question, asked separately from
+    # the named-target route's above because the two answer differently: this
+    # one skips the ONE delete and lets the rest of the GC stand, since the
+    # operator asked for something else and that removal is legitimate.
+    let landing = resolvedOwnTreeRejection(
+      parsed.workspaceRoot / normalized, parsed.workspaceRoot)
+    if landing.len > 0:
+      inc refusedRemovals
+      plan.add(GcEntry(repo: repo, rejection: landing, landingStated: true))
       continue
     let repoPath = parsed.workspaceRoot / normalized
     var dirty = false
@@ -47261,7 +47373,8 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
         effect: if p.rejection.len > 0: "refused" else: "would_remove")
       if p.rejection.len > 0:
         entry.diagnostic = undeletableCheckoutDiagnostic(p.repo, p.rejection,
-          resolved.projectFile, parsed.workspaceRoot)
+          resolved.projectFile, parsed.workspaceRoot,
+          landingStated = p.landingStated)
       elif p.dirty:
         entry.diagnostic = p.dirtyDiag
       result.repos.add(entry)
@@ -47293,7 +47406,8 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
           else: "declined"
         if p.rejection.len > 0:
           entry.diagnostic = undeletableCheckoutDiagnostic(p.repo, p.rejection,
-            resolved.projectFile, parsed.workspaceRoot)
+            resolved.projectFile, parsed.workspaceRoot,
+            landingStated = p.landingStated)
         elif p.dirty:
           entry.diagnostic = p.dirtyDiag
         result.repos.add(entry)
@@ -47317,7 +47431,8 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
       result.repos.add(RemoveRepoEntry(
         name: p.repo.name, path: p.repo.path, effect: "refused",
         diagnostic: undeletableCheckoutDiagnostic(p.repo, p.rejection,
-          resolved.projectFile, parsed.workspaceRoot)))
+          resolved.projectFile, parsed.workspaceRoot,
+          landingStated = p.landingStated)))
       continue
     let repoPath = parsed.workspaceRoot / p.repo.path.strip()
     if dirExists(repoPath):
@@ -52663,6 +52778,24 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
         "mean to — reprobuild will not delete the directory it is running in.")
       continue
     let dir = workspaceRoot / normalized
+    # W8-R1 — and then the same question of the RESOLVED directory, because
+    # the spelling check above is blind to reparse points. A declared
+    # `path = "only-mine"` whose `only-mine` is a directory junction onto the
+    # workspace root passes every lexical rule and then hands the workspace
+    # root to `removeDir`, which walks into the junction. Refuse this ONE
+    # checkout and say so, exactly as the lexical refusal above does: the
+    # project IS disabled either way, and what is left behind is one tree.
+    let landing = resolvedOwnTreeRejection(dir, workspaceRoot)
+    if landing.len > 0:
+      inc removalFailures
+      stderr.writeLine("repro workspace disable: refusing to remove the " &
+        "declared checkout path '" & path & "' — it " & landing & ". The " &
+        "project is still disabled; this one checkout is left in place. " &
+        "Remedy: inspect what it actually points at with " &
+        "`git -C " & dir & " status` and remove only what you mean to — " &
+        "reprobuild will not delete a directory it cannot prove is the " &
+        "repo's own tree.")
+      continue
     if not dirExists(dir):
       continue
     try:
