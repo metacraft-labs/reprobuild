@@ -232,14 +232,25 @@
 ##
 ## THAT IS A BIJECTION ON KEYS AND NOTHING MORE, which is less than it
 ## sounds and was measured rather than reasoned about. It says nothing
-## about whether a surface's ``sourceRel`` points at the module its key
-## names: a row that keeps the key ``repro_runquota``, points ``sourceRel``
+## about whether a surface's ``sourceRels`` point at the module its key
+## names: a row that keeps the key ``repro_runquota``, points ``sourceRels``
 ## at a file with no exported routines and classifies nothing leaves both
 ## ``unclassified`` and ``vanished`` empty while reading the module not at
 ## all — both lists in perfect bijection, every message silent, and the
 ## same spawn helper green again. So the read is also required to find
 ## something: a capability module has an exported surface by definition,
-## and a read that finds none has read the wrong file.
+## and a read that finds none has read the wrong file. That requirement is
+## per FILE, not per row, so a module split across several files cannot
+## smuggle a path that reads nothing in behind one that reads plenty.
+##
+## A MODULE THAT SPLITS IS AN UPSTREAM CHANGE LIKE ANY OTHER, and this
+## audit is what reports it. io-mon moved ``findShimLibrary`` out of
+## ``fs_snoop.nim`` into ``io_mon/shim_discovery.nim`` and re-exported it:
+## the public surface was unchanged, the file this audit read no longer
+## declared the name, and the case went red naming it. The answer is to
+## read both halves — ``sourceRels`` is a list for exactly this — and not
+## to drop the classification, which would leave the table describing a
+## smaller module than the one the engine imports.
 ##
 ## Two rows are read differently and say so: ``std/posix`` (492 exported
 ## routines) and ``std/winlean`` are gated on their IMPORT LINE instead —
@@ -691,7 +702,11 @@ const SpawnCapabilityModules: array[7, tuple[path: string;
 ##
 ## ``io_mon`` is audited through ``io_mon/fs_snoop``: ``io_mon.nim`` itself
 ## defines no routines, it re-exports, and ``fs_snoop`` is the re-exported
-## module that owns the spawn.
+## module that owns the spawn. ``fs_snoop`` has since split in the same
+## way — ``findShimLibrary`` now lives in ``io_mon/shim_discovery.nim`` and
+## is re-exported from ``fs_snoop`` — so that row reads BOTH files and
+## audits their union. A surface is a list of files rather than one file
+## for this reason; see ``CapabilitySurface.sourceRels``.
 ##
 ## EVERY ROW OF ``SpawnCapabilityModules`` MUST HAVE A SURFACE HERE, and the
 ## audit case asserts it by key. Nothing linked the two lists before, and
@@ -724,7 +739,33 @@ type
   CapabilitySurface = object
     key: string             ## which ``SpawnCapabilityModules`` row this is
     audit: CapabilityAudit
-    sourceRel: string       ## path of the module source, inside its own root
+    sourceRels: seq[string]
+      ## The module's source files, inside its own root. Usually one — a
+      ## capability module is normally one file — but it is a SEQUENCE
+      ## because an upstream module is free to split, and when it does the
+      ## surface being audited is the union across the pieces rather than
+      ## whatever stayed in the original file.
+      ##
+      ## THIS IS NOT A WIDENING. Every file listed here is read in full and
+      ## its exports classified, so adding one adds obligations rather than
+      ## removing them, and the two directions the audit is for hold over
+      ## the union exactly as they held over the single file: an export
+      ## this table has not classified reddens ``unclassified``, and a
+      ## classified name that no listed file declares any more reddens
+      ## ``vanished``. Each file must also carry exports of its own, so a
+      ## row cannot be padded with a path that reads nothing.
+      ##
+      ## AND A SPLIT IS STILL A RED TEST rather than a silent hole: moving
+      ## an export into a module NOT listed here removes it from the union,
+      ## which is ``vanished`` — which is exactly how io-mon's
+      ## ``fs_snoop`` → ``shim_discovery`` split was found. What the list
+      ## does NOT see, declared rather than glossed: a BRAND NEW export
+      ## added to a module the primary file re-exports but this row does
+      ## not name. Nothing moves, so nothing vanishes, and the new name is
+      ## not in the union to be unclassified. That is the same scope the
+      ## ``io_mon`` row already declares one level up — ``io_mon.nim``
+      ## re-exports six more modules that this audit does not read, because
+      ## ``fs_snoop`` is the one that owns the spawn.
     spawning: seq[string]
     inert: seq[string]
     allowedSymbols: seq[string]
@@ -735,7 +776,7 @@ type
 proc capabilitySurfaces(): seq[CapabilitySurface] =
   @[
     CapabilitySurface(key: "osproc", audit: caFullSurface,
-      sourceRel: "pure/osproc.nim",
+      sourceRels: @["pure/osproc.nim"],
       spawning: @["execProcess", "execCmd", "startProcess", "execProcesses",
                   "execCmdEx"],
       inert: @["close", "suspend", "resume", "terminate", "kill", "running",
@@ -745,7 +786,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "errorHandle", "countProcessors", "lines", "readLines",
                "hasData"]),
     CapabilitySurface(key: "runquota_process", audit: caFullSurface,
-      sourceRel: "libs/runquota_process/src/runquota_process.nim",
+      sourceRels: @["libs/runquota_process/src/runquota_process.nim"],
       spawning: @["commandSpec", "launchProcess"],
       inert: @["libraryInfo", "backendProfile", "launchResult", "running",
                "pollCompletion", "terminate", "killNow", "waitForCompletion",
@@ -757,7 +798,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # path from "the engine may import it" to "the engine can start a
     # child the enumeration does not describe".
     CapabilitySurface(key: "repro_runquota", audit: caFullSurface,
-      sourceRel: "libs/repro_runquota/src/repro_runquota.nim",
+      sourceRels: @["libs/repro_runquota/src/repro_runquota.nim"],
       spawning: @["startDirect", "startWithRunQuota", "offerWithRunQuota",
                   "offerWithRunQuotaBatch", "startGrantedWithRunQuota",
                   "runWithRunQuota", "runRunQuotaHelperCli",
@@ -795,8 +836,26 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # arm defers the spawn into them, so "can this put a child on the road"
     # is true of both on at least one platform, and the classification has to
     # be the union rather than this machine's answer.
+    #
+    # AND THE AUDIT DID ITS JOB A SECOND TIME, on an upstream change that was
+    # a REFACTOR rather than an addition: io-mon moved `findShimLibrary` (and
+    # `ShimLibOverrideEnv` / `candidateShimLibraries`) out of `fs_snoop.nim`
+    # into `io_mon/shim_discovery.nim` and re-exported it, so the module's
+    # PUBLIC surface did not change by one name while the file this row used
+    # to read stopped declaring it. `vanished` named it and this case went
+    # red — correctly, because a table that says a module exports something
+    # it no longer declares has stopped describing the module.
+    #
+    # THE FIX IS TO FOLLOW THE SPLIT, NOT TO DROP THE NAME. `findShimLibrary`
+    # is still on io-mon's public surface and is still what resolves the
+    # interpose shim every monitored launch loads, so deleting it from
+    # `inert` would have made the audit AGREE with a smaller module than the
+    # one the engine actually imports. Both files are read and their exports
+    # unioned; see `sourceRels`. The two directions still hold: an export
+    # added to EITHER file lands in `unclassified`, and a name that leaves
+    # both lands in `vanished`.
     CapabilitySurface(key: "io_mon", audit: caFullSurface,
-      sourceRel: "io_mon/fs_snoop.nim",
+      sourceRels: @["io_mon/fs_snoop.nim", "io_mon/shim_discovery.nim"],
       spawning: @["runMonitored", "runFsSnoopCli", "startMonitor",
                   "pollMonitor", "finishMonitor"],
       inert: @["appendLauncherEventLoss", "completeness",
@@ -814,7 +873,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # linter itself does not, and that is a known limitation rather than
     # something this file fixed.
     CapabilitySurface(key: "ambient_execution", audit: caFullSurface,
-      sourceRel: "libs/repro_core/src/repro_core/ambient_execution.nim",
+      sourceRels: @["libs/repro_core/src/repro_core/ambient_execution.nim"],
       spawning: @["uncontrolledFindExe", "uncontrolledExecCmdEx",
                   "uncontrolledExecProcess", "uncontrolledExecShellCmd",
                   "uncontrolledStartProcess", "warnFindExe", "warnExecCmdEx",
@@ -845,13 +904,13 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # individually, and each had to be classified before the suite would go
     # green again.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
-      sourceRel: "posix/posix.nim",
+      sourceRels: @["posix/posix.nim"],
       spawning: @[],
       inert: @["kill", "setpgid", "umask", "dup", "dup2", "close"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
                         "Mode", "umask", "dup", "dup2", "close"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
-      sourceRel: "windows/winlean.nim",
+      sourceRels: @["windows/winlean.nim"],
       spawning: @[],
       inert: @["openProcess", "closeHandle", "waitForMultipleObjects"],
       allowedSymbols: @["Handle", "DWORD", "WINBOOL", "SYNCHRONIZE",
@@ -1962,33 +2021,61 @@ suite "every_launch_path_is_monitored":
     let repoRoot = getCurrentDir()
     for surface in surfaces:
       let root = capabilitySurfaceRoot(surface.key, repoRoot)
-      let path = root / surface.sourceRel
-      if not fileExists(path):
-        echo "cannot audit `", surface.key, "`: no source at ", path,
-          "\n  This test compiled, so the module IS on the compiler's",
-          " search path; fix the resolution in `capabilitySurfaceRoot`",
-          " rather than deleting the audit."
-      check fileExists(path)
-      if not fileExists(path): continue
 
-      let declared = exportedRoutineNames(codeOnly(readFile(path)))
+      # A ROW WITH NO FILES READS NOTHING and would sail through every
+      # check below on empty sets, so it is refused before they run.
+      if surface.sourceRels.len == 0:
+        echo "`", surface.key, "` names no source file at all, so its",
+          " surface is never read."
+      check surface.sourceRels.len > 0
 
-      # NOT VACUOUS. Key equality with `SpawnCapabilityModules` says the
-      # right MODULES are audited; it says nothing about whether
-      # `sourceRel` points at the right FILE. A surface that keeps its key
-      # and points `sourceRel` at a file with no exported routines — while
-      # classifying nothing — leaves `unclassified` and `vanished` both
-      # empty and reads the module not at all, with both lists still in
-      # perfect bijection. That was measured, paired with an exported
-      # spawn helper added to `repro_runquota`: the whole gate stayed
-      # green. A capability module has a surface by definition, so requiring
-      # the read to have found one closes it.
-      if declared.len == 0:
-        echo "`", surface.key, "`: reading ", path,
-          " found NO exported routines, so this row audits nothing.",
-          "\n  `sourceRel` is pointing somewhere that is not the module,",
-          " and key equality with `SpawnCapabilityModules` cannot see that."
-      check declared.len > 0
+      # THE UNION ACROSS THE MODULE'S FILES. One entry for a module that is
+      # one file; more when it has been split and re-exports the pieces (see
+      # `sourceRels`). Every listed file is read in full, and every listed
+      # file has to CONTRIBUTE — the per-file emptiness check below is what
+      # stops a path that reads nothing from being added to pad the row.
+      var declared = initHashSet[string]()
+      var readAny = true
+      var paths: seq[string] = @[]
+      for rel in surface.sourceRels:
+        let path = root / rel
+        paths.add path
+        if not fileExists(path):
+          echo "cannot audit `", surface.key, "`: no source at ", path,
+            "\n  This test compiled, so the module IS on the compiler's",
+            " search path; fix the resolution in `capabilitySurfaceRoot`",
+            " rather than deleting the audit."
+        check fileExists(path)
+        if not fileExists(path):
+          readAny = false
+          continue
+
+        let fromFile = exportedRoutineNames(codeOnly(readFile(path)))
+
+        # NOT VACUOUS, AND PER FILE RATHER THAN PER ROW. Key equality with
+        # `SpawnCapabilityModules` says the right MODULES are audited; it
+        # says nothing about whether a `sourceRels` entry points at the
+        # right FILE. A surface that keeps its key and points at a file
+        # with no exported routines — while classifying nothing — leaves
+        # `unclassified` and `vanished` both empty and reads the module not
+        # at all, with both lists still in perfect bijection. That was
+        # measured, paired with an exported spawn helper added to
+        # `repro_runquota`: the whole gate stayed green. A capability
+        # module has a surface by definition, so requiring the read to have
+        # found one closes it — and requiring it of EACH entry rather than
+        # of the union is what keeps the check from being weakened by the
+        # move to a list, where one real file would otherwise cover for any
+        # number of wrong ones.
+        if fromFile.len == 0:
+          echo "`", surface.key, "`: reading ", path,
+            " found NO exported routines, so this file audits nothing.",
+            "\n  The `sourceRels` entry is pointing somewhere that is not",
+            " part of the module, and key equality with",
+            " `SpawnCapabilityModules` cannot see that."
+        check fromFile.len > 0
+        declared.incl fromFile
+      if not readAny: continue
+      let path = paths.join(", ")
 
       var classified = initHashSet[string]()
       for name in surface.spawning: classified.incl name
