@@ -17,7 +17,7 @@
 ##     ``EvidenceCollection.disableCacheHits`` to skip THIS action's
 ##     publish, and flip a session-wide flag that forces ALL
 ##     downstream cache lookups to miss.
-##   Level 3 (RMDF path empty or decode error) — fail closed.
+##   Level 3 (iomon path empty or decode error) — fail closed.
 ##
 ## These tests exercise the classifier's Level-1 output at the evidence
 ## level (unit) and the ``invalidatedPaths`` population at the
@@ -45,7 +45,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     ## fails to decode cleanly to EOF. Per the memo, this is Level 2
     ## because the reader cannot bound which records were lost.
     check classifyEventLossDetail(
-      "corrupt or partial RMDF fragment in /tmp/frag-dir-abc123") ==
+      "corrupt or partial iomon fragment in /tmp/frag-dir-abc123") ==
       mesUnknownScopeLoss
 
   test "classifier maps out-of-tree content channel to Level 2 (M9.R.73.2 addition)":
@@ -58,12 +58,12 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
       "with no in-tree create) — the real input is invisible, re-run") ==
       mesUnknownScopeLoss
 
-  test "kill-before-flush RMDF yields Level 1 status":
+  test "kill-before-flush iomon yields Level 1 status":
     ## Baseline: the M9.R.72.3 semantic still holds — kill-before-flush
     ## classifies as Level 1 (known scope), which unlocks the narrow
     ## invalidation path in ``collectEvidence``.
     resetTmp()
-    let rmdfPath = TmpDir / "kill-before-flush.rdep"
+    let rmdfPath = TmpDir / "kill-before-flush.iomon"
     let killLoss = MonitorRecord(
       kind: mrEventLoss,
       observationKind: moEventLoss,
@@ -78,14 +78,14 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
     check status == mesKnownScopeLoss
 
-  test "unmonitored subtree RMDF yields Level 2 status (baseline)":
+  test "unmonitored subtree iomon yields Level 2 status (baseline)":
     ## Distinguishing case for the Level 1 vs Level 2 split: an
     ## unmonitored subtree loss is Level 2. The scheduler's
     ## ``cacheLookupBlockedByMonitorLoss`` predicate must respond to
     ## Level 2 by disabling cache hits session-wide, not by adding to
     ## the narrow ``sessionInvalidatedPaths`` accumulator.
     resetTmp()
-    let rmdfPath = TmpDir / "unmonitored-subtree.rdep"
+    let rmdfPath = TmpDir / "unmonitored-subtree.iomon"
     let subtreeLoss = MonitorRecord(
       kind: mrEventLoss,
       observationKind: moEventLoss,
@@ -107,7 +107,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     ## path observations because one action was kill-before-flushed
     ## would be the pre-M9.R.72 behavior.
     resetTmp()
-    let rmdfPath = TmpDir / "kill-with-reads.rdep"
+    let rmdfPath = TmpDir / "kill-with-reads.iomon"
 
     let realRead1 = MonitorRecord(
       kind: mrFileRead, observationKind: moFileRead,
@@ -130,14 +130,14 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     check evidence.monitorReads.len == 2
 
   test "worst-status wins across mixed loss records (Level 1 + Level 2)":
-    ## An RMDF with BOTH a Level 1 loss AND a Level 2 loss must return
+    ## An iomon with BOTH a Level 1 loss AND a Level 2 loss must return
     ## Level 2 (the worse of the two). At the scheduler level this
     ## means the ``sessionCachePublishDisabled`` bit is flipped even
     ## when a Level 1 was present — a Level 2 promotes to full
     ## session-wide disable, per the memo's "Interaction With Level 2"
     ## note.
     resetTmp()
-    let rmdfPath = TmpDir / "mixed-loss.rdep"
+    let rmdfPath = TmpDir / "mixed-loss.iomon"
 
     let killLoss = MonitorRecord(
       kind: mrEventLoss, observationKind: moEventLoss,
@@ -158,10 +158,10 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
 
   test "no loss records yields Level 0 (baseline)":
     ## Sanity check: the M9.R.73.2 refactor MUST NOT flip a healthy
-    ## RMDF to any loss level. Any regression here would poison every
+    ## iomon to any loss level. Any regression here would poison every
     ## build's cache lookups.
     resetTmp()
-    let rmdfPath = TmpDir / "complete.rdep"
+    let rmdfPath = TmpDir / "complete.iomon"
 
     let read1 = MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
       osPid: 1, threadId: 1, path: "/x.h", detail: "")
@@ -175,7 +175,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
 
   test "volatile runtime paths never become observed cache inputs":
     resetTmp()
-    let rmdfPath = TmpDir / "volatile-runtime-paths.rdep"
+    let rmdfPath = TmpDir / "volatile-runtime-paths.iomon"
     let stablePath = TmpDir / "stable-input.txt"
     let records = @[
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,

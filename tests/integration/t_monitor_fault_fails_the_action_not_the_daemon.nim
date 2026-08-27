@@ -14,7 +14,7 @@
 ## This test pins that scoping as a property of the ENGINE rather than of
 ## the process model, so it keeps its meaning across the hosting change:
 ##
-##   1. a corrupt RMDF does not escape ``runBuild`` — the host survives;
+##   1. a corrupt iomon does not escape ``runBuild`` — the host survives;
 ##   2. it fails exactly the action whose evidence is corrupt;
 ##   3. an INDEPENDENT action in the SAME build still succeeds with
 ##      complete monitor evidence — the fault is not build-wide;
@@ -23,7 +23,7 @@
 ##
 ## THE FAULT INJECTION
 ## -------------------
-## A real, corrupt RMDF file on the real filesystem, pre-wired onto the
+## A real, corrupt iomon file on the real filesystem, pre-wired onto the
 ## action via ``BuildAction.monitorDepfile``. ``monitoredAction``
 ## (repro_build_engine.nim:2735) deliberately preserves a caller-supplied
 ## evidence path instead of wrapping the command, so the engine reaches
@@ -71,12 +71,12 @@ proc compileFixture(sourcePath, outputPath: string) =
   doAssert res.exitCode == 0, "fixture compile failed"
 
 proc writeCorruptRmdf(path: string) =
-  ## A file that LOOKS like an RMDF (right magic) but whose body cannot
+  ## A file that LOOKS like an iomon (right magic) but whose body cannot
   ## be decoded. Uses the real magic so the reader gets past the cheap
   ## checks and fails in the frame decoder, which is where an in-process
   ## host would fail too.
   createDir(path.parentDir)
-  var bytes = "RMDF"
+  var bytes = "IOMN"
   for i in 0 ..< 64:
     bytes.add(chr((i * 37 + 11) mod 251))
   writeFile(path, bytes)
@@ -125,7 +125,7 @@ suite "monitor_fault_fails_the_action_not_the_daemon":
     writeFile(fixtureSource, FixtureSource)
     compileFixture(fixtureSource, fixtureBin)
 
-    test "a corrupt RMDF fails one action, not the build and not the host":
+    test "a corrupt iomon fails one action, not the build and not the host":
       let workRoot = tempRoot / "work"
       createDir(workRoot)
       let cacheRoot = tempRoot / ".repro-cache"
@@ -136,7 +136,7 @@ suite "monitor_fault_fails_the_action_not_the_daemon":
       writeFile(healthyMarker, "healthy payload\n")
 
       # The corrupt evidence, on disk, before the build starts.
-      let corruptRmdf = tempRoot / "corrupt" / "faulted.rdep"
+      let corruptRmdf = tempRoot / "corrupt" / "faulted.iomon"
       writeCorruptRmdf(corruptRmdf)
 
       let faulted = action("faulted",

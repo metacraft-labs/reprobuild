@@ -56,7 +56,7 @@ The engine refuses that state rather than producing it.
 ### How the dependency record file is published
 
 Each monitored action leaves a record of what it touched at
-`<cacheRoot>/monitor-depfiles/<action>.rdep`. It is a debugging surface and a CI
+`<cacheRoot>/monitor-depfiles/<action>.iomon`. It is a debugging surface and a CI
 artefact. Whether the build reads it back depends on who ran the monitor: with
 the separate monitor process — the default — the file is how an action's record
 reaches the build, so it is read once per monitored action; when the build hosts
@@ -65,7 +65,7 @@ the monitor itself it already holds the record and never opens the file.
 The file appears **atomically**: it is written to a scratch sibling in the same
 directory and renamed into place, so a tool watching that directory sees either
 no file or a complete one, never a partial write. Nothing else creates or
-modifies a `.rdep`.
+modifies a `.iomon`.
 
 When the engine hosts the monitor itself, that rename happens **behind the
 build** — the action's result is reported and the next actions start before the
@@ -76,7 +76,7 @@ entry is not published, so the next build re-runs that action instead of
 reusing it. You will see this as an action that keeps re-executing, with the
 reason recorded on its result.
 
-Files named `.<action>.rdep.flush-*` in that directory are scratch. A build
+Files named `.<action>.iomon.flush-*` in that directory are scratch. A build
 removes its own; leftovers mean a build was killed mid-flight and they can be
 deleted.
 

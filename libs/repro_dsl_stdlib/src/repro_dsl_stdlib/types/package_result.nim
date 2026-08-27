@@ -1329,6 +1329,20 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("fi; ")
     script.add("done; ")
     script.add("fi; ")
+  # A Nix-provisioned compiler gives executables a Nix dynamic interpreter.
+  # When the package explicitly depends on a source-built libc, the RPATH
+  # assembled above can then select that libc under the old interpreter. That
+  # loader/libc combination is unsupported and, among other things, crashes as
+  # soon as the io-monitor shim is preloaded. Select the first declared runtime
+  # loader in RPATH order and move executable ELFs to it together with the
+  # libraries that RPATH already selected. Shared libraries have no interpreter
+  # and are left alone by the print-interpreter guard below.
+  script.add("m9r14f_runtime_loader=; OLD_IFS=$IFS; IFS=':'; ")
+  script.add("for rp in $rpath; do ")
+  script.add("case \"$rp\" in '$ORIGIN'*) continue;; esac; ")
+  script.add("for candidate in \"$rp\"/ld-linux-*.so.* \"$rp\"/ld-musl-*.so.*; do ")
+  script.add("if [ -f \"$candidate\" ]; then m9r14f_runtime_loader=$candidate; break 2; fi; ")
+  script.add("done; done; IFS=$OLD_IFS; ")
   # DSL-port M9.R.30.2 — write the consumer's own propagated-libdirs
   # manifest BEFORE walking the ELFs so a parallel build pass that
   # races against this consumer's downstream recipe can read the
@@ -1380,6 +1394,10 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # pollute the log with errors. ``\\177ELF`` is the 4-byte magic.
   script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
   script.add("case \"$magic\" in 177ELF*) ")
+  script.add("if [ -n \"$m9r14f_runtime_loader\" ]; then ")
+  script.add("m9r14f_old_interpreter=$(patchelf --print-interpreter \"$f\" 2>/dev/null || true); ")
+  script.add("if [ -n \"$m9r14f_old_interpreter\" ]; then ")
+  script.add("patchelf --set-interpreter \"$m9r14f_runtime_loader\" \"$f\"; fi; fi; ")
   script.add("patchelf --set-rpath \"$rpath\" \"$f\" 2>/dev/null || true; ")
   script.add(";; esac; ")
   script.add("done; ")
@@ -1685,12 +1703,21 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # folds every existing dir into the embedded RPATH so nix-stub-resolved
   # deps (libltdl, hwdata, libxdmcp, ...) reach the patched ELF without
   # the install-mirror having to enumerate ``/nix/store`` paths itself.
-  var mirrorToolRefs = @["sh"]
+  var mirrorToolRefs = @InstallMirrorCoreToolNames
+  for generatedTool in ["sed", "chmod"]:
+    if generatedTool notin mirrorToolRefs:
+      mirrorToolRefs.add(generatedTool)
   if InstallMirrorPublishToolName notin mirrorToolRefs:
     mirrorToolRefs.add(InstallMirrorPublishToolName)
   when defined(linux):
-    if "patchelf" notin mirrorToolRefs:
-      mirrorToolRefs.add("patchelf")
+    for generatedTool in ["find", "head", "od", "tr", "sort", "grep",
+                          "dirname", "basename", "wc", "patchelf"]:
+      if generatedTool notin mirrorToolRefs:
+        mirrorToolRefs.add(generatedTool)
+    if packageName == "glibcSource":
+      for generatedTool in ["readlink", "ln"]:
+        if generatedTool notin mirrorToolRefs:
+          mirrorToolRefs.add(generatedTool)
   for raw in registeredNativeBuildDeps(packageName):
     let dep = m9r14fStripDepConstraint(raw)
     if dep.len > 0 and dep notin mirrorToolRefs:

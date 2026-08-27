@@ -569,7 +569,8 @@ proc emitInstallMirrorPublishAction(projectRoot, dslPackageName, outPath,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-custom.mirror",
-    toolIdentityRefs = @["sh", InstallMirrorPublishToolName],
+    toolIdentityRefs = @InstallMirrorCoreToolNames &
+      @[InstallMirrorPublishToolName],
     declaredOutputs = @[mirrorRoot, sidecar])
 
 # ---------------------------------------------------------------------------

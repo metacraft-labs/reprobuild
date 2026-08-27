@@ -5,7 +5,7 @@
 ## The scheduler (`runBuild`), the evidence collector (`collectEvidence`,
 ## `foldMonitorDepFileEvidence`), the per-edge `ActionCache`, the CAS,
 ## the fingerprinting in `repro_local_store`, the subprocess and the
-## files are all the production ones. What is supplied here is the RMDF
+## files are all the production ones. What is supplied here is the iomon
 ## the action is fingerprinted against: it is written with io-mon's OWN
 ## canonical encoder (`io_mon/writer.encodeCanonical`) and read back by
 ## the production reader, so the FILE is real — it is its CONTENT that
@@ -128,7 +128,7 @@ proc makeFixture(name: string): Fixture =
     root: root,
     workRoot: workRoot,
     cacheRoot: root / "cache",
-    rmdfPath: workRoot / "observed.rdep",
+    rmdfPath: workRoot / "observed.iomon",
     runLogPath: workRoot / "runs.log",
     observedPath: workRoot / "observed.txt")
   writeFile(result.observedPath, "generation-1\n")
@@ -160,7 +160,7 @@ proc readRecord(path: string): MonitorRecord =
 proc runEdge(f: Fixture; id: string; cacheable = true): BuildAction =
   ## `monitoredAction` preserves a monitor depfile the caller already set
   ## ("direct engine callers may provide a monitor depfile path for
-  ## actions that produce RMDF evidence themselves"), so the fixture RMDF
+  ## actions that produce iomon evidence themselves"), so the fixture iomon
   ## is what `collectEvidence` folds instead of the engine wrapping the
   ## command in the monitor and overwriting it.
   result = action(id,

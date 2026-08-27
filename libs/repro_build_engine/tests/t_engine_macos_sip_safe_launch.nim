@@ -185,7 +185,7 @@ when defined(macosx):
         "    *) shift;;\n" &
         "  esac\n" &
         "done\n" &
-        "[ -n \"$depfile\" ] && printf 'RMDF' > \"$depfile\"\n" &
+        "[ -n \"$depfile\" ] && printf 'IOMN' > \"$depfile\"\n" &
         "exec \"$@\"\n")
       setFilePermissions(fakeMonitor, {fpUserExec, fpUserRead, fpUserWrite,
         fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})

@@ -23,48 +23,48 @@ proc expectReaderError(path: string; kind: MonitorDepFileReaderErrorKind) =
     check err.kind == kind
 
 suite "monitor depfile reader validation":
-  test "binary RMDF round-trips and JSON is inspection-only":
+  test "binary iomon round-trips and JSON is inspection-only":
     let tempRoot = createTempDir("repro-rmdf-reader", "")
     defer: removeDir(tempRoot)
 
-    let depfile = tempRoot / "ok.rdep"
+    let depfile = tempRoot / "ok.iomon"
     writeCanonical(depfile, [sampleRecord(tempRoot / "input.txt")])
 
     let raw = readFile(depfile)
-    check raw[0 .. 3] == "RMDF"
+    check raw[0 .. 3] == "IOMN"
     check raw[0] != '{'
     let dep = readMonitorDepFile(depfile)
-    check dep.version == RmdfVersion
+    check dep.version == IomonVersion
     check dep.records.len == 1
     check dep.records[0].seq == 1
     check dep.records[0].path.endsWith("input.txt")
-    check renderMonitorDepFileJson(dep).contains("\"format\":\"RMDF\"")
+    check renderMonitorDepFileJson(dep).contains("\"format\":\"iomon\"")
 
-  test "corrupt and truncated RMDF files fail validation":
+  test "corrupt and truncated iomon files fail validation":
     let tempRoot = createTempDir("repro-rmdf-corrupt", "")
     defer: removeDir(tempRoot)
 
-    let depfile = tempRoot / "ok.rdep"
+    let depfile = tempRoot / "ok.iomon"
     writeCanonical(depfile, [sampleRecord(tempRoot / "input.txt")])
 
-    let missing = tempRoot / "missing.rdep"
+    let missing = tempRoot / "missing.iomon"
     expectReaderError(missing, mrMissingFile)
 
-    let badMagic = tempRoot / "bad-magic.rdep"
+    let badMagic = tempRoot / "bad-magic.iomon"
     writeFile(badMagic, "NOPE" & readFile(depfile)[4 .. ^1])
     expectReaderError(badMagic, mrBadMagic)
 
-    let truncated = tempRoot / "truncated.rdep"
+    let truncated = tempRoot / "truncated.iomon"
     writeFile(truncated, readFile(depfile)[0 .. 15])
     expectReaderError(truncated, mrTruncated)
 
-    let badChecksum = tempRoot / "bad-checksum.rdep"
+    let badChecksum = tempRoot / "bad-checksum.iomon"
     var raw = readFile(depfile)
     raw[^1] = char(ord(raw[^1]) xor 0x01)
     writeFile(badChecksum, raw)
     expectReaderError(badChecksum, mrChecksumMismatch)
 
-    let badKind = tempRoot / "bad-kind.rdep"
+    let badKind = tempRoot / "bad-kind.iomon"
     var badKindBytes = readFile(depfile).toBytes()
     badKindBytes[28] = 0xff'u8
     badKindBytes[29] = 0xff'u8

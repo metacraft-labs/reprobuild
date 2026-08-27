@@ -219,7 +219,7 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     test "monitor-wrapped shell actions defer runtime paths":
       let argv = @[
         "/opt/repro/bin/repro", "internal", "io", "monitor",
-        "--depfile", "/tmp/action.rdep", "--",
+        "--depfile", "/tmp/action.iomon", "--",
         "/nix/store/bash/bin/bash", "-lc", "run-build"]
       let env = @[
         "LD_LIBRARY_PATH=/source/lib",
@@ -234,7 +234,7 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     test "monitor-wrapped direct actions defer runtime paths":
       let argv = @[
         "/opt/repro/bin/repro", "internal", "io", "monitor",
-        "--depfile", "/tmp/action.rdep", "--",
+        "--depfile", "/tmp/action.iomon", "--",
         "/nix/store/cmake/bin/cmake", "-S", ".", "-B", "build"]
       let env = @[
         "PATH=/usr/bin",
@@ -278,7 +278,7 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     test "StringTable launcher defers monitored direct runtime paths":
       let argv = @[
         "/opt/repro/bin/repro", "internal", "io", "monitor",
-        "--depfile", "/tmp/action.rdep", "--", "/usr/bin/cmake"]
+        "--depfile", "/tmp/action.iomon", "--", "/usr/bin/cmake"]
       let table = newStringTable(modeCaseSensitive)
       table["LD_LIBRARY_PATH"] = "/source/sqlite/lib"
       let deferredArgv = deferRuntimeLibraryEnvForShell(argv, table)
@@ -416,13 +416,13 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     let linuxRoot = "/source/linux/usr/include"
     let argv = @[
       "/opt/repro/bin/repro", "internal", "io", "monitor",
-      "--depfile", "/tmp/action.rdep", "--",
+      "--depfile", "/tmp/action.iomon", "--",
       "/source/gcc/bin/x86_64-linux-gnu-g++-14", "-c", "input.cc"]
     let result = applyCompilerSystemIncludeArgs(argv,
       @[glibcRoot, linuxRoot])
     check result == @[
       "/opt/repro/bin/repro", "internal", "io", "monitor",
-      "--depfile", "/tmp/action.rdep", "--",
+      "--depfile", "/tmp/action.iomon", "--",
       "/source/gcc/bin/x86_64-linux-gnu-g++-14",
       "-idirafter", glibcRoot, "-idirafter", linuxRoot,
       "-c", "input.cc"]

@@ -5,13 +5,13 @@
 ## description does not survive contact with the code and a reader who assumes
 ## it does will mis-read every proc below.
 ##
-## io-mon owns the canonical RMDF write. ``finishMonitor`` produces the evidence
+## io-mon owns the canonical iomon write. ``finishMonitor`` produces the evidence
 ## through ``collectMonitorEvidence`` -> ``mergeFragments`` ->
 ## ``writeCanonicalInPlace``, and there is no request field, no option and no
 ## alternative entry point that lets a host obtain the records WITHOUT that
 ## write happening. So reprobuild cannot move the encode+write off its serial
 ## path from this side; what it can do — and what this module does — is decide
-## WHERE io-mon writes and WHEN that write becomes the published ``.rdep``:
+## WHERE io-mon writes and WHEN that write becomes the published ``.iomon``:
 ##
 ##   * io-mon is pointed at a TEMPORARY file in the destination's OWN
 ##     directory (``monitorFlushTempPath``), never at the destination;
@@ -47,7 +47,7 @@
 ## file, removes the ~193 ms decode. Read ``repro_build_engine.nim``'s HM-5
 ## block for the arithmetic and for what an io-mon change would be worth.
 ##
-## ATOMICITY IS NOT THE OPTIONAL HALF. A torn ``.rdep`` decoded as truth is a
+## ATOMICITY IS NOT THE OPTIONAL HALF. A torn ``.iomon`` decoded as truth is a
 ## wrong dependency set. ``rename(2)`` is atomic only WITHIN one filesystem and
 ## degrades silently to copy-then-unlink across one, so the temp file is placed
 ## in the destination's own directory by construction — never in
@@ -119,7 +119,7 @@ type
     ## The result of one publication, as the scheduler learns about it.
     actionId*: string
     error*: string
-      ## Empty on success. Non-empty means the ``.rdep`` did NOT land, which
+      ## Empty on success. Non-empty means the ``.iomon`` did NOT land, which
       ## costs a re-execution and never a wrong answer: the engine's evidence
       ## came from memory, so the action's own result stands, and the cache
       ## publish is skipped so the next build MISSES and re-runs.

@@ -13,7 +13,7 @@
 ##                                 content channel, breakaway report).
 ##   Level 3 (mesMonitorUnavailable): monitor entirely unavailable —
 ##                                 handled by ``collectEvidence`` for the
-##                                 empty-RMDF-path case, not by the
+##                                 empty-iomon-path case, not by the
 ##                                 classifier itself.
 ##
 ## The load-bearing behaviour is that ``mesKnownScopeLoss`` and
@@ -33,7 +33,7 @@ suite "M9.R.72.3 monitor-loss classifier":
   test "kill-before-flush maps to Level 1 (known scope)":
     # io-mon writer.nim:2205 / :2224 emit this exact prefix. A subprocess
     # died before flushing its per-thread read-batch tail; the io-mon
-    # writer knows which pid/tid it lost, and every OTHER RMDF record is
+    # writer knows which pid/tid it lost, and every OTHER iomon record is
     # trustworthy. Spec says invalidate the affected path set (Level 1) —
     # currently implemented as session cache-skip until Gap II ships the
     # per-class narrow invalidation.
@@ -103,7 +103,7 @@ suite "M9.R.72.3 monitor-loss classifier":
     # represents no lost filesystem information.
     when defined(linux) and defined(amd64):
       # nr=436 close_range, nr=39 getpid on x86_64 — the two numbers actually
-      # observed in this repo's own RMDFs.
+      # observed in this repo's own iomon depfiles.
       check classifyEventLossDetail(
         "libc raw syscall unsupported nr=436") == mesComplete
       check classifyEventLossDetail(
@@ -120,7 +120,7 @@ suite "M9.R.72.3 monitor-loss classifier":
       check classifyEventLossDetail(
         "libc raw syscall unsupported nr=172") == mesComplete
 
-  test "the detail shape a REAL RMDF carries classifies as Level 0":
+  test "the detail shape a REAL iomon carries classifies as Level 0":
     # THE REGRESSION THIS SUITE ORIGINALLY MISSED.
     #
     # Every record the Linux shim emits goes through `stampRunId`
@@ -128,14 +128,14 @@ suite "M9.R.72.3 monitor-loss classifier":
     # `run=<id>` token to `detail`. The strings below are copied verbatim
     # out of
     #   .repro/build/repro/build-engine-cache/monitor-depfiles/
-    #     reprobuild.test_execute.t_zero_output_edge_is_cacheable.rdep
+    #     reprobuild.test_execute.t_zero_output_edge_is_cacheable.iomon
     # produced by a real `repro build '.#test#t_zero_output_edge_is_cacheable'`
     # on this host. The first version of `benignRawSyscallLoss` required the
     # remainder after `nr=` to be a bare decimal, so it matched NONE of them:
     # every synthetic case above passed while the edge this class was written
     # to rescue kept re-executing on every build.
     #
-    # A synthetic detail string is not evidence about a real RMDF. Keep at
+    # A synthetic detail string is not evidence about a real iomon. Keep at
     # least one case here that is a byte-for-byte capture.
     when defined(linux) and defined(amd64):
       check classifyEventLossDetail(
@@ -225,7 +225,7 @@ suite "M9.R.72.3 monitor-loss classifier":
     # `foldMonitorDepFileEvidence`, which this suite cannot reach: inverting
     # that fold leaves every check here passing (verified by mutation). The
     # fold-level gate lives in `test_m9r72_phaseD_end_to_end.nim`, "benign raw
-    # syscall does not rescue an RMDF that also lost a subtree".
+    # syscall does not rescue an iomon that also lost a subtree".
     let subtree = classifyEventLossDetail(
       "unmonitored subtree/peer (un-injectable spawn child, SETEXEC into " &
       "a hardened image, or IPC connect to an out-of-tree breakaway daemon)")
@@ -239,7 +239,7 @@ suite "M9.R.72.3 monitor-loss classifier":
     # mesMonitorUnavailable. The classifier emits mesComplete only for the
     # justified benign raw-syscall allowlist and never emits
     # mesMonitorUnavailable; the caller's fold-over loop uses the ordering to
-    # keep the worst observed status across the whole RMDF.
+    # keep the worst observed status across the whole iomon.
     check ord(mesComplete) < ord(mesKnownScopeLoss)
     check ord(mesKnownScopeLoss) < ord(mesUnknownScopeLoss)
     check ord(mesUnknownScopeLoss) < ord(mesMonitorUnavailable)

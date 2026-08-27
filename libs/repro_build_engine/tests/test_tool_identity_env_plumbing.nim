@@ -183,12 +183,12 @@ proc passthroughMonitorCli(cacheRoot: string): string =
   ## "injection failure MUST fail the monitored action or make it
   ## non-cacheable"). This test is about env plumbing, not monitor
   ## evidence, so it wires a passthrough fake-monitor: parse ``--depfile``,
-  ## copy a pre-built empty-but-valid RMDF there (the engine's evidence
+  ## copy a pre-built empty-but-valid iomon there (the engine's evidence
   ## read then succeeds with a complete, zero-record dependency set), then
   ## ``exec`` the real action argv unchanged (preserving the inherited
-  ## environment the test asserts on). The RMDF template is produced via
+  ## environment the test asserts on). The iomon template is produced via
   ## io-mon's own ``encodeCanonical(@[])`` so the wrapper stays decoupled
-  ## from the RMDF wire format.
+  ## from the iomon wire format.
   let dir = cacheRoot / "monitor-cli"
   createDir(dir)
   let rmdfTemplate = dir / "empty.rmdf"
@@ -197,7 +197,7 @@ proc passthroughMonitorCli(cacheRoot: string): string =
     result = dir / "passthrough-monitor.cmd"
     # ``%1 %2`` are ``--depfile`` and the depfile path; ``%3`` is ``--``;
     # ``%4`` onward is the real argv. Create the depfile's directory, copy
-    # the RMDF template there, then invoke the real argv.
+    # the iomon template there, then invoke the real argv.
     writeFile(result,
       "@echo off\r\n" &
       "for %%I in (\"%~2\") do if not exist \"%%~dpI\" mkdir \"%%~dpI\"\r\n" &

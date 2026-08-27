@@ -130,6 +130,17 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
     check script.contains("ld-*.so*) continue")
     check script.contains("patchelf --remove-rpath")
 
+  test "emitted_script_keeps_dynamic_interpreter_and_libc_together":
+    let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[
+      "/recipes/glibc/.repro/output/install/usr/lib64"])
+    check script.contains("m9r14f_runtime_loader")
+    check script.contains("ld-linux-*.so.*")
+    check script.contains("ld-musl-*.so.*")
+    check script.contains("patchelf --print-interpreter")
+    check script.contains("patchelf --set-interpreter")
+    check script.find("patchelf --set-interpreter") <
+      script.find("patchelf --set-rpath")
+
   test "M9.R.26.5 emitted_script_enumerates_internal_versioned_subdirs":
     # DSL-port M9.R.26.5 — for recipes that ship internal-implementation
     # .so files in versioned subdirs (mutter-15/, qt6/plugins/, etc.),
@@ -180,6 +191,41 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
                   "-L" & scratch, "-lfoo", "-Wl,-rpath,/will/overwrite"],
           options = {poUsePath, poParentStreams})
         check waitForExit(compileExe) == 0
+
+        # Exercise the emitted install-mirror script itself. A copied loader
+        # models a source-built libc dependency while keeping the fixture
+        # independent from any particular host glibc path.
+        let interpreterProbe = startProcess(patchelfPath,
+          args = ["--print-interpreter", scratch / "main"],
+          options = {poUsePath})
+        let originalInterpreter = interpreterProbe.outputStream.readAll().strip()
+        check waitForExit(interpreterProbe) == 0
+        check originalInterpreter.len > 0
+
+        let mirrorUsr = scratch / "mirror" / "usr"
+        let mirrorMain = mirrorUsr / "bin" / "main"
+        let runtimeLib = scratch / "runtime" / "lib64"
+        let sourceLoader = runtimeLib / "ld-linux-repro.so.2"
+        createDir(mirrorUsr / "bin")
+        createDir(runtimeLib)
+        copyFileWithPermissions(scratch / "main", mirrorMain)
+        copyFileWithPermissions(originalInterpreter, sourceLoader)
+
+        let installScript = scratch / "patch-install-mirror.sh"
+        writeFile(installScript, m9r14fEmitRpathPatchScript(
+          mirrorUsr, @[runtimeLib]))
+        let runInstallScript = startProcess("/bin/sh",
+          args = [installScript],
+          options = {poUsePath, poParentStreams})
+        check waitForExit(runInstallScript) == 0
+
+        let patchedInterpreterProbe = startProcess(patchelfPath,
+          args = ["--print-interpreter", mirrorMain],
+          options = {poUsePath})
+        let patchedInterpreter =
+          patchedInterpreterProbe.outputStream.readAll().strip()
+        check waitForExit(patchedInterpreterProbe) == 0
+        check patchedInterpreter == sourceLoader
 
         # Construct the same RPATH the install-mirror script generates.
         let expectedRpath = "$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:" &

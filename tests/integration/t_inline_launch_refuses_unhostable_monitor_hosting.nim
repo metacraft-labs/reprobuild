@@ -17,7 +17,7 @@
 ## hosted plan reaching the inline path got (1) and not (2): the recipe's
 ## argv, naked, with nobody monitoring it. HM-4 measured exactly that by
 ## relaxing the hosting decision — the inline actions came back with an
-## EMPTY read set and "RMDF file does not exist", the actions SUCCEEDED, and
+## EMPTY read set and "iomon file does not exist", the actions SUCCEEDED, and
 ## nothing anywhere said a word. An action that publishes a cache entry
 ## against a dependency set that is silently wrong is the cardinal sin this
 ## whole subsystem exists to prevent.

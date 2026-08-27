@@ -1459,7 +1459,7 @@ template checkMonitoredEvidence(res: ActionResult; markerPath, label: string) =
   for diagnostic in res.evidence.diagnostics:
     check not diagnostic.contains("monitor depfile read failed")
     check not diagnostic.contains(
-      "requires monitor evidence but no RMDF path is selected")
+      "requires monitor evidence but no iomon path is selected")
 
 suite "every_launch_path_is_monitored":
 

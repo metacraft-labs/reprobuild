@@ -268,7 +268,7 @@ when isMainModule:
     var incomplete = false
     for d in res.evidence.diagnostics:
       if d.contains("monitor depfile read failed") or
-         d.contains("requires monitor evidence but no RMDF path is selected") or
+         d.contains("requires monitor evidence but no iomon path is selected") or
          d.contains("incomplete"):
         incomplete = true
     if not incomplete: inc complete

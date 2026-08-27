@@ -11,7 +11,7 @@
 ## `foldMonitorDepFileEvidence` evidence path, the real graph-built
 ## io-monitor (`build/bin/repro internal io monitor` + the graph-built
 ## shim), real subprocesses and real directories on a real filesystem.
-## Every RMDF consumed here was written by the production monitor
+## Every iomon consumed here was written by the production monitor
 ## observing a production process that really listed a real directory —
 ## none is synthesized.
 ##
@@ -58,7 +58,7 @@
 ##   2. The plan/builtin record site called `recordActionResult` without
 ##      `enumeratedDirectories`. Reached here through the seam
 ##      `monitoredAction` documents — "direct engine callers may provide
-##      a monitor depfile path for actions that produce RMDF evidence
+##      a monitor depfile path for actions that produce iomon evidence
 ##      themselves" — because a builtin runs in-process and can never
 ##      have an io-monitor wrapped around it.
 ##   3. The elevated-broker record site did the same. Reached with a
@@ -199,7 +199,7 @@ proc makeFixture(name: string): Fixture =
     listDir: workRoot / "listed",
     runLogPath: workRoot / "out" / "runs.log",
     pathSetPath: workRoot / "out" / "paths.rps",
-    rmdfPath: workRoot / "out" / "observed.rdep")
+    rmdfPath: workRoot / "out" / "observed.iomon")
 
 proc converterPolicy(f: Fixture): DependencyGatheringPolicy =
   DependencyGatheringPolicy(
@@ -249,7 +249,7 @@ proc directoryCounts(inputs: seq[FileFingerprint]):
         inc result.tracked
 
 proc runUnderMonitor(repoRoot, depfile: string; argv: seq[string]) =
-  ## Drive the real io-monitor over a real process, writing a real RMDF.
+  ## Drive the real io-monitor over a real process, writing a real iomon.
   let tools = monitorTools(repoRoot)
   createDir(depfile.splitPath.head)
   let child = startProcess(tools.monitorCliPath,
@@ -362,8 +362,8 @@ suite "the builtin record site carries enumerated directories":
     # A builtin runs in-process, so no io-monitor can ever wrap it. The
     # engine's documented seam for that is a PREWIRED monitor depfile
     # (`monitoredAction`: "direct engine callers may provide a monitor
-    # depfile path for actions that produce RMDF evidence themselves").
-    # The RMDF here is produced by the real monitor observing a real
+    # depfile path for actions that produce iomon evidence themselves").
+    # The iomon here is produced by the real monitor observing a real
     # process that really listed the directory — it is not synthesized.
     let repoRoot = findRepoRoot()
     let f = makeFixture("builtin")

@@ -85,10 +85,15 @@ suite "M9.R.83 install mirror emitted action shape":
         ".install.stamp"]
       check stamp in mirror.outputs
       check sidecar in mirror.outputs
-      check "sh" in mirror.toolIdentityRefs
+      for toolName in InstallMirrorCoreToolNames:
+        check toolName in mirror.toolIdentityRefs
+      check "sed" in mirror.toolIdentityRefs
+      check "chmod" in mirror.toolIdentityRefs
       check InstallMirrorPublishToolName in mirror.toolIdentityRefs
       when defined(linux):
-        check "patchelf" in mirror.toolIdentityRefs
+        for toolName in ["find", "head", "od", "tr", "sort", "grep",
+                         "dirname", "basename", "wc", "patchelf"]:
+          check toolName in mirror.toolIdentityRefs
       check "rm -rf" in script
       check "build/dest/usr" in script
       check "cp -a --" in script
@@ -102,7 +107,9 @@ suite "M9.R.83 install mirror emitted action shape":
       check "--source \"" & (projectRoot / ".repro" / "output" /
         "install").replace("\\", "/") & "\"" in script
       check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
-        "\"; : > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
+        "\"; : > \"" & sidecar.replace("\\", "/") in script
+      check "printf '%s\\n' 'platform=" & currentRealizationPlatformTag() &
+        "' > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
     else:
       check true
 
@@ -145,8 +152,13 @@ suite "M9.R.83 install mirror emitted action shape":
       let script = inlineScriptOf(mirror)
 
       check actions.len == 3
+      for shellAction in actions[0 .. 1]:
+        for toolName in ["sh", "mkdir", "touch"]:
+          check toolName in shellAction.toolIdentityRefs
       check mirror.deps == @["from-source-custom-shell-2-" & PackageName]
-      check "sh" in mirror.toolIdentityRefs
+      for toolName in InstallMirrorCoreToolNames:
+        check toolName in mirror.toolIdentityRefs
+      check "sed" in mirror.toolIdentityRefs
       check InstallMirrorPublishToolName in mirror.toolIdentityRefs
       check sidecar in mirror.outputs
       check InstallMirrorPublishToolName in script
@@ -156,7 +168,9 @@ suite "M9.R.83 install mirror emitted action shape":
       check "--package \"" & PackageName & "\"" notin script
       check "--version \"8.3.0\"" in script
       check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
-        "\"; : > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
+        "\"; : > \"" & sidecar.replace("\\", "/") in script
+      check "printf '%s\\n' 'platform=" & currentRealizationPlatformTag() &
+        "' > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
     else:
       check true
 

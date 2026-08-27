@@ -3,7 +3,7 @@
 ##
 ## WHAT IS BEING PINNED, and why each case is shaped the way it is.
 ##
-## HM-5 moves the publication of an action's ``.rdep`` off the scheduler's
+## HM-5 moves the publication of an action's ``.iomon`` off the scheduler's
 ## serial path: ``finishMonitorHostAction`` hands the action's result and its
 ## in-memory records forward and queues a rename behind them. Two things can go
 ## wrong with that, and they fail in opposite directions:
@@ -94,7 +94,7 @@ when defined(linux) or defined(macosx):
     ## ``monitoredAction`` derives it; the ids used below are already
     ## filename-safe, so no sanitisation is involved and this cannot drift
     ## into agreeing with the engine by accident.
-    cacheRoot / "monitor-depfiles" / (actionId & ".rdep")
+    cacheRoot / "monitor-depfiles" / (actionId & ".iomon")
 
   type TornReaderCtx = object
     ## The concurrent reader's whole world, in manually-managed shared memory.
@@ -129,13 +129,13 @@ when defined(linux) or defined(macosx):
       result = result or (uint64(uint8(s[pos + i])) shl (8 * i))
 
   proc envelopeFault(raw: string): string =
-    ## "" when ``raw`` is a structurally complete RMDF envelope, otherwise why
+    ## "" when ``raw`` is a structurally complete iomon envelope, otherwise why
     ## it is not. A file caught mid-copy is a PREFIX of a complete one, so it
     ## fails on the length or on the trailer that is no longer where the header
     ## says it should be.
     if raw.len < 44:
       return "too short (" & $raw.len & " bytes)"
-    if raw[0 .. 3] != RmdfMagic:
+    if raw[0 .. 3] != IomonMagic:
       return "bad magic"
     let headerCount = readU64Le(raw, 8)
     let bodyLen = readU64Le(raw, 16)
@@ -145,7 +145,7 @@ when defined(linux) or defined(macosx):
     if bodyEnd + 20 != raw.len:
       return "body/trailer length mismatch: header says body ends at " &
         $bodyEnd & " but the file is " & $raw.len & " bytes"
-    if raw[bodyEnd .. bodyEnd + 3] != RmdfTrailerMagic:
+    if raw[bodyEnd .. bodyEnd + 3] != IomonTrailerMagic:
       return "missing trailer magic at " & $bodyEnd
     if readU64Le(raw, bodyEnd + 4) != headerCount:
       return "header/trailer record-count mismatch"
@@ -225,7 +225,7 @@ when defined(linux) or defined(macosx):
         # The destination is on the workspace filesystem; the relocated
         # scratch dir is on the other one. A correct derivation follows the
         # DESTINATION.
-        let dest = onCacheFs / "hm5-fs-probe.rdep"
+        let dest = onCacheFs / "hm5-fs-probe.iomon"
         let temp = monitorFlushTempPath(dest, 1)
         writeFile(temp, "scratch")
         writeFile(dest, "destination")
@@ -506,7 +506,7 @@ when defined(linux) or defined(macosx):
       ## complete depfiles or no file at all.
       ##
       ## The reader is a real thread hammering every destination while a real
-      ## parallel build publishes into them, and it validates the RMDF ENVELOPE
+      ## parallel build publishes into them, and it validates the iomon ENVELOPE
       ## on every observation: magic, declared body length, trailer magic,
       ## header-count == trailer-count, and total size. That is exactly what a
       ## file caught mid-copy fails, and it is the first thing the engine's own

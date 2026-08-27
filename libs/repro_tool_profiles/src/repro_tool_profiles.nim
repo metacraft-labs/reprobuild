@@ -12,6 +12,7 @@ import repro_core
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_domain_types
+import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
 import repro_interface_artifacts
 import repro_local_store
@@ -2622,12 +2623,13 @@ proc bootstrapNimToolUse(): InterfaceToolUse =
         cpu: "x86_64",
         os: "linux")]
 
-proc bootstrapGccToolUse(): InterfaceToolUse =
+proc bootstrapGccToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: "gcc",
-    packageSelector: "gcc-winlibs@16.1.0",
+    packageSelector: "gcc",
     executableName: "gcc")
   when defined(windows):
+    result.packageSelector = "gcc-winlibs@16.1.0"
     result.tarballProvisioning = @[
       InterfaceTarballProvisioning(
         packageName: "gcc",
@@ -2641,6 +2643,19 @@ proc bootstrapGccToolUse(): InterfaceToolUse =
           BootstrapGccWindowsTarballSha256,
         cpu: "x86_64",
         os: "windows")]
+  elif defined(linux):
+    let nixpkgsRef = "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
+    result.nixProvisioning = @[
+      InterfaceNixProvisioning(
+        packageName: "gcc",
+        selector: "nixpkgs#gcc",
+        executablePath: "bin/gcc",
+        nixpkgsRef: nixpkgsRef,
+        nixpkgsRev: CanonicalNixpkgsRev,
+        nixpkgsNarHash: CanonicalNixpkgsNarHash,
+        packageId: "nixpkgs#gcc",
+        lockIdentity: nixpkgsRef & "?narHash=" &
+          CanonicalNixpkgsNarHash & "#gcc")]
 
 proc findEditBin(): string =
   ## Locate `editbin.exe`, the MSVC PE-header editor. The build-shell
@@ -2710,6 +2725,17 @@ proc compilerPathForShellEnvironment*(path: string;
   else:
     path
 
+proc publishBootstrapCompilerEnv*(compilerPath: string;
+                                  windowsHost: bool) =
+  ## Keep the compiler used for recipe/provider compilation separate from
+  ## package build actions. Windows also needs the conventional ``CC`` value;
+  ## POSIX package actions must remain free to select their declared compiler.
+  if compilerPath.len == 0:
+    return
+  putEnv("REPRO_BOOTSTRAP_CC", compilerPath)
+  if windowsHost and getEnv("CC").len == 0:
+    putEnv("CC", compilerPathForShellEnvironment(compilerPath, true))
+
 proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
                                   storeRoot: string) =
   ## MR5 — before the engine's interface-extract step shells out to
@@ -2726,18 +2752,19 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   ##
   ## MR9 — `$CC` honors pre-set values for backward compat with callers
   ## that pre-pin the compiler (CI, integration tests). But the
-  ## interface-extract step ALSO publishes a dedicated, always-overridden
+  ## interface-extract step ALSO publishes a dedicated
   ## `$REPRO_BOOTSTRAP_CC` pointing at the bootstrap-resolved gcc's
-  ## absolute path on Windows. `hostCCompilerPath()` in
+  ## absolute path. `hostCCompilerPath()` in
   ## `repro_interface_artifacts` consults that var FIRST so the nim
   ## invocation gets `--gcc.exe:<bootstrap>` regardless of whether a
   ## (possibly bare / PATH-relative) `$CC` was inherited from env.ps1
   ## or a parent shell. Without this, env.ps1's `$env:CC = "gcc"`
   ## (bare basename, not absolute) defeats the `hostCCompilerPath`
   ## `isAbsolute(ccEnv)` check, no `--gcc.exe` flag is emitted, and
-  ## nim falls back to the PATH lookup that picks up FPC's 1999-era
-  ## i386-target gcc 2.95 — failing the C compile of e.g. `blake3/capi.c`
-  ## with `stddef.h: Invalid argument`.
+  ## nim falls back to a PATH lookup. On Windows that can pick up FPC's
+  ## 1999-era i386-target gcc; on Linux a sealed profile may have no gcc at
+  ## all. Both fail while compiling Nim-generated C before the recipe graph
+  ## is available.
   if mode != tpmTarball and mode != tpmFromSource:
     return
   let effectiveStoreRoot =
@@ -2756,26 +2783,35 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
       # the existing PATH-based fallback in `nimCompilerPath()` still
       # runs and may succeed when the host has a usable nim/gcc.
       discard
-  when defined(windows):
-    # Always (re-)resolve the bootstrap gcc on Windows in tarball mode.
-    # Publish via `$REPRO_BOOTSTRAP_CC` so the interface-extract flag
-    # builder can pin `--gcc.exe:<absolute>` regardless of the inherited
-    # `$CC` shape (see proc docstring). Resolution is cheap once the
-    # tarball is materialized — `resolveTarballTool` short-circuits to
-    # the existing prefix when the receipt is present.
+  when defined(windows) or defined(linux):
+    # Resolve the compiler through a pinned bootstrap channel. Linux needs
+    # this in from-source mode because the sealed recipe-interface compile
+    # runs before the recipe's own tool declarations are available.
+    # Publish only through `$REPRO_BOOTSTRAP_CC`, which pins Nim's compiler
+    # subprocess without overriding the compiler selected by package actions.
     var bootstrapGcc = ""
-    try:
-      let useDef = bootstrapGccToolUse()
-      if useDef.tarballProvisioning.len > 0:
-        let profile = resolveTarballTool(useDef, effectiveStoreRoot)
-        if profile.resolvedExecutablePath.len > 0:
-          bootstrapGcc = profile.resolvedExecutablePath
-    except CatchableError:
-      discard
+    when defined(linux):
+      let existing = getEnv("REPRO_BOOTSTRAP_CC")
+      if existing.isAbsolute and fileExists(extendedPath(existing)):
+        bootstrapGcc = existing
+    if bootstrapGcc.len == 0:
+      try:
+        let useDef = bootstrapGccToolUse()
+        when defined(windows):
+          let profile = resolveTarballTool(useDef, effectiveStoreRoot)
+          if profile.resolvedExecutablePath.len > 0:
+            bootstrapGcc = profile.resolvedExecutablePath
+        else:
+          let profile = resolveNixTool(useDef, effectiveStoreRoot)
+          if profile.resolvedExecutablePath.len > 0:
+            bootstrapGcc = profile.resolvedExecutablePath
+      except CatchableError:
+        discard
     if bootstrapGcc.len > 0:
-      putEnv("REPRO_BOOTSTRAP_CC", bootstrapGcc)
-      if getEnv("CC").len == 0:
-        putEnv("CC", compilerPathForShellEnvironment(bootstrapGcc, true))
+      when defined(windows):
+        publishBootstrapCompilerEnv(bootstrapGcc, true)
+      else:
+        publishBootstrapCompilerEnv(bootstrapGcc, false)
 
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))

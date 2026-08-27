@@ -94,6 +94,7 @@
 
 import std/[os, osproc, sequtils, streams, strutils, times, unittest]
 
+import repro_dsl_stdlib/nixpkgs_pin
 import repro_interface_artifacts
 import repro_tool_profiles
 
@@ -271,6 +272,52 @@ suite "bootstrap compiler environment paths":
       "C:/tools/gcc.exe"
     check compilerPathForShellEnvironment("/opt/toolchain/bin/gcc", false) ==
       "/opt/toolchain/bin/gcc"
+
+  test "Linux interface compilation has a pinned compiler channel":
+    when defined(linux):
+      let useDef = bootstrapGccToolUse()
+      check useDef.nixProvisioning.len == 1
+      let provisioning = useDef.nixProvisioning[0]
+      check provisioning.selector == "nixpkgs#gcc"
+      check provisioning.executablePath == "bin/gcc"
+      check provisioning.nixpkgsRev == CanonicalNixpkgsRev
+      check provisioning.nixpkgsNarHash == CanonicalNixpkgsNarHash
+      check provisioning.nixpkgsRef ==
+        "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
+    else:
+      skip()
+
+  test "Linux bootstrap compiler does not replace package CC":
+    when defined(linux):
+      let scratch = getTempDir() /
+        ("repro-bootstrap-cc-" & $getCurrentProcessId())
+      createDir(scratch)
+      defer:
+        try: removeDir(scratch)
+        except CatchableError: discard
+      let compiler = scratch / "gcc"
+      writeFile(compiler, "#!/bin/sh\nexit 0\n")
+      setFilePermissions(compiler, {fpUserRead, fpUserWrite, fpUserExec})
+      let priorBootstrapSet = existsEnv("REPRO_BOOTSTRAP_CC")
+      let priorBootstrap = getEnv("REPRO_BOOTSTRAP_CC")
+      let priorCcSet = existsEnv("CC")
+      let priorCc = getEnv("CC")
+      try:
+        delEnv("CC")
+        publishBootstrapCompilerEnv(compiler, false)
+        check getEnv("REPRO_BOOTSTRAP_CC") == compiler
+        check not existsEnv("CC")
+      finally:
+        if priorBootstrapSet:
+          putEnv("REPRO_BOOTSTRAP_CC", priorBootstrap)
+        else:
+          delEnv("REPRO_BOOTSTRAP_CC")
+        if priorCcSet:
+          putEnv("CC", priorCc)
+        else:
+          delEnv("CC")
+    else:
+      skip()
 
 suite "M9.R.13a provider-compile cache sharing":
 

@@ -4076,7 +4076,7 @@ proc dslPortCustomShellToolIdentityRefs*(packageName: string):
   ## Attach every declared dependency profile to custom shell actions.
   ## This supplies PATH and the auxiliary CPATH/LIBRARY_PATH channels
   ## while preserving the shell as the command interpreter identity.
-  result = @["sh"]
+  result = @["sh", "mkdir", "touch"]
   for raw in registeredNativeBuildDeps(packageName):
     let dep = dslPortStripDepConstraint(raw)
     if dep.len > 0 and dep notin result:
@@ -4288,7 +4288,8 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       commandStatsId = "from-source-custom.mirror",
       publishToBinaryCache = true,
       cacheEntryIdentity = some(cacheIdentity),
-      toolIdentityRefs = @["sh", InstallMirrorPublishToolName],
+      toolIdentityRefs = @InstallMirrorCoreToolNames &
+        @["sed", InstallMirrorPublishToolName],
       declaredOutputs = @[mirrorRoot])
 
 # ---------------------------------------------------------------------------
