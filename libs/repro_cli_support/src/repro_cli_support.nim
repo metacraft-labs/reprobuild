@@ -2126,6 +2126,33 @@ proc depfilePolicy(depfile: string): DependencyGatheringPolicy =
     return repro_core.automaticMonitorGatheringPolicy()
   depfilePolicyMulti([depfile])
 
+proc iomonReportGatheringPolicy(paths: openArray[string]):
+    DependencyGatheringPolicy =
+  ## An edge whose command PRODUCES its own io-mon ``.iomon`` dependency
+  ## capture; the engine consumes that file as the edge's evidence (folded
+  ## via ``foldMonitorDepFileEvidence``) rather than monitoring the
+  ## orchestrator process. Modelled on ``depfilePolicyMulti`` but routed to a
+  ## distinct ``formatName`` (``IomonFormatName``) so the build engine reads it
+  ## with the io-mon binary reader instead of the make-format text reader.
+  ## Each produced-report path is ``required = true``: unlike a compiler's
+  ## per-crate depfile split, the edge is declared to emit exactly this file.
+  var outputs: seq[ExpectedDependencyFile] = @[]
+  for path in paths:
+    if path.len > 0:
+      outputs.add(ExpectedDependencyFile(
+        logicalName: "iomon",
+        path: path,
+        required: true))
+  DependencyGatheringPolicy(
+    kind: dgRecognizedFormat,
+    completeness: decComplete,
+    recognizedReports: @[
+      RecognizedDependencyReportSpec(
+        formatName: DependencyFormatName(IomonFormatName),
+        outputs: outputs,
+        completeness: decComplete)
+    ])
+
 proc lowerDependencyPolicy(actionId, depfile: string;
                            policy: BuildActionDependencyPolicy):
     DependencyGatheringPolicy =
@@ -2177,7 +2204,21 @@ proc lowerDependencyPolicy(actionId, depfile: string;
       raise newException(ValueError,
         "action " & actionId & " uses makeDepfilePolicy without a depfile path")
     result = depfilePolicyMulti(merged)
+  of bdpIomonReport:
+    # The edge's command produces its own ``.iomon`` capture at the declared
+    # path(s); consume it as the edge's evidence via ``IomonFormatName``.
+    var merged: seq[string] = @[]
+    for path in policy.depfiles:
+      if path.len > 0 and path notin merged:
+        merged.add(path)
+    if merged.len == 0:
+      raise newException(ValueError,
+        "action " & actionId & " uses iomonReportPolicy without a report path")
+    result = iomonReportGatheringPolicy(merged)
   result.ignoredInputPrefixes = policy.ignoredInputPrefixes
+  # Feature 1: the two event-interest opt-ins ride onto every lowered kind.
+  result.captureNonDeterminism = policy.captureNonDeterminism
+  result.captureIpc = policy.captureIpc
 
 # ---------------------------------------------------------------------------
 # Named-Lock-Files §3.1 / §7.2 — the workspace's governing lock identity
@@ -3787,7 +3828,11 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 6'u16
+  LoweredGraphCacheVersion = 7'u16
+    # v7: DependencyGatheringPolicy now serializes two trailing event-interest
+    # bools (captureNonDeterminism, captureIpc). The decoder rejects any other
+    # version outright (see `decodeLoweredGraphCache`), so the two new bytes are
+    # always present on a v7 record and never straddle an older one.
   LoweredGraphAlgorithmVersion = "reprobuild.loweredGraph.v1"
 
 type
@@ -4401,6 +4446,10 @@ proc writeDependencyPolicy(outp: var seq[byte];
     outp.writeString($converterSpec.outputFormatName)
     outp.add(byte(ord(converterSpec.completeness)))
   outp.writeStringSeq(policy.ignoredInputPrefixes)
+  # Event-interest opt-ins (Feature 1). Appended last so the lowered-graph
+  # cache round-trip preserves them; two trailing bool bytes.
+  outp.add(byte(if policy.captureNonDeterminism: 1 else: 0))
+  outp.add(byte(if policy.captureIpc: 1 else: 0))
 
 proc readCompleteness(bytes: openArray[byte]; pos: var int):
     DependencyEvidenceCompleteness =
@@ -4453,6 +4502,11 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
       DependencyFormatName(readString(bytes, pos))
     result.postBuildConverters[i].completeness = readCompleteness(bytes, pos)
   result.ignoredInputPrefixes = readStringSeq(bytes, pos)
+  # Event-interest opt-ins (Feature 1), written last by writeDependencyPolicy.
+  # The lowered-graph-cache version gate rejects any non-current record, so a
+  # v7 payload always carries these two trailing bool bytes.
+  result.captureNonDeterminism = readByteValue(bytes, pos) != 0'u8
+  result.captureIpc = readByteValue(bytes, pos) != 0'u8
 
 proc writeCacheEntryIdentity(outp: var seq[byte];
                              identity: CacheEntryIdentity) =

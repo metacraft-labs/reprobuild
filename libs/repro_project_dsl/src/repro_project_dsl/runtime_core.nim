@@ -1302,18 +1302,24 @@ proc selectedExecutable*(packageName, executableName: string): SelectedExecutabl
   SelectedExecutable(packageName: packageName, executableName: executableName)
 
 proc defaultDependencyPolicy*(
-    ignoredInputPrefixes: openArray[string] = []):
+    ignoredInputPrefixes: openArray[string] = [];
+    captureNonDeterminism = false; captureIpc = false):
     BuildActionDependencyPolicy {.dynOrStatic.} =
   BuildActionDependencyPolicy(
     kind: bdpDefault,
-    ignoredInputPrefixes: @ignoredInputPrefixes)
+    ignoredInputPrefixes: @ignoredInputPrefixes,
+    captureNonDeterminism: captureNonDeterminism,
+    captureIpc: captureIpc)
 
 proc automaticMonitorPolicy*(
-    ignoredInputPrefixes: openArray[string] = []):
+    ignoredInputPrefixes: openArray[string] = [];
+    captureNonDeterminism = false; captureIpc = false):
     BuildActionDependencyPolicy {.dynOrStatic.} =
   BuildActionDependencyPolicy(
     kind: bdpAutomaticMonitor,
-    ignoredInputPrefixes: @ignoredInputPrefixes)
+    ignoredInputPrefixes: @ignoredInputPrefixes,
+    captureNonDeterminism: captureNonDeterminism,
+    captureIpc: captureIpc)
 
 # NOTE: a ``declaredOnlyDependencyPolicy`` constructor used to live here. It
 # produced a "track only the statically declared inputs, no runtime
@@ -1326,7 +1332,9 @@ proc automaticMonitorPolicy*(
 # Monitor-Hook-Shim.md:501, never marked complete-on-declared-inputs.
 
 proc trustedDeclaredInputsPolicy*(inputs: openArray[string];
-                                  reason: string):
+                                  reason: string;
+                                  captureNonDeterminism = false;
+                                  captureIpc = false):
     BuildActionDependencyPolicy {.dynOrStatic.} =
   ## HAZARDOUS, DISCOURAGED. Declare an edge's inputs inline and have the
   ## engine trust them: no monitoring, no result processing, no verification.
@@ -1377,11 +1385,15 @@ proc trustedDeclaredInputsPolicy*(inputs: openArray[string];
   BuildActionDependencyPolicy(
     kind: bdpTrustedDeclaredInputs,
     trustedInputs: declared,
-    trustedReason: reason)
+    trustedReason: reason,
+    captureNonDeterminism: captureNonDeterminism,
+    captureIpc: captureIpc)
 
 proc makeDepfilePolicy*(depfile = "";
                         depfiles: openArray[string] = [];
-                        ignoredInputPrefixes: openArray[string] = []):
+                        ignoredInputPrefixes: openArray[string] = [];
+                        captureNonDeterminism = false;
+                        captureIpc = false):
     BuildActionDependencyPolicy {.dynOrStatic.} =
   ## MR16: dependency-gathering policy for tools that emit one or
   ## more recognized ``make-depfile`` reports. ``depfile`` (single
@@ -1400,7 +1412,28 @@ proc makeDepfilePolicy*(depfile = "";
   BuildActionDependencyPolicy(
     kind: bdpMakeDepfile,
     depfiles: merged,
-    ignoredInputPrefixes: @ignoredInputPrefixes)
+    ignoredInputPrefixes: @ignoredInputPrefixes,
+    captureNonDeterminism: captureNonDeterminism,
+    captureIpc: captureIpc)
+
+proc iomonReportPolicy*(depfile: string;
+                        captureNonDeterminism = false;
+                        captureIpc = false):
+    BuildActionDependencyPolicy {.dynOrStatic.} =
+  ## Dependency-gathering policy for an edge whose command PRODUCES its own
+  ## io-mon ``.iomon`` dependency capture at ``depfile`` (e.g. ``ct test``
+  ## writing the record set of files it actually read). The engine reads that
+  ## file back as the edge's evidence (folded through the monitor-evidence
+  ## reader) instead of monitoring the orchestrator process. Modelled on
+  ## ``makeDepfilePolicy`` but a distinct kind because the produced file is
+  ## io-mon's binary record format, routed to its own engine ``formatName``.
+  ## The path may be a literal or a glob (``*``, ``?``, ``**``) expanded at
+  ## evidence-collection time against the action's cwd.
+  BuildActionDependencyPolicy(
+    kind: bdpIomonReport,
+    depfiles: (if depfile.len > 0: @[depfile] else: @[]),
+    captureNonDeterminism: captureNonDeterminism,
+    captureIpc: captureIpc)
 
 proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy {.dynOrStatic.} =
   acfpTimestamp

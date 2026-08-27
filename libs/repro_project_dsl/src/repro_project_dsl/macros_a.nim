@@ -257,6 +257,8 @@ proc parseCommandDependencyPolicy(node: NimNode;
     result = automaticMonitorPolicy()
   of "makedepfile":
     result = makeDepfilePolicy()
+  of "iomonreport", "iomon":
+    result = iomonReportPolicy("")
   else:
     result = fallback
   for i in 2 ..< node.len:
@@ -273,6 +275,14 @@ proc parseCommandDependencyPolicy(node: NimNode;
     let ignoredValue = namedValue(node[i], "ignoredInputPrefixes")
     if not ignoredValue.isNil:
       result.ignoredInputPrefixes = stringSeqLiteral(ignoredValue)
+    let captureNonDeterminismValue =
+      namedValue(node[i], "captureNonDeterminism")
+    if not captureNonDeterminismValue.isNil:
+      result.captureNonDeterminism =
+        boolLiteral(captureNonDeterminismValue, result.captureNonDeterminism)
+    let captureIpcValue = namedValue(node[i], "captureIpc")
+    if not captureIpcValue.isNil:
+      result.captureIpc = boolLiteral(captureIpcValue, result.captureIpc)
 
 proc collectOutputsOperands(node: NimNode; sink: var seq[NimNode]) =
   ## Flatten the operand list of an ``outputs`` statement into a sequence
@@ -2093,18 +2103,44 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
       result.add(escForCode(path))
     result.add("]")
 
+  proc captureParts(): seq[string] =
+    # Only emit when set (default false), so a regenerated recipe that never
+    # opted in stays byte-identical to a fresh one.
+    if policy.captureNonDeterminism:
+      result.add("captureNonDeterminism = true")
+    if policy.captureIpc:
+      result.add("captureIpc = true")
+
   case policy.kind
   of bdpDefault:
-    "defaultDependencyPolicy(" & ignoredCode() & ")"
+    var parts: seq[string] = @[]
+    if policy.ignoredInputPrefixes.len > 0:
+      parts.add(ignoredCode())
+    parts.add(captureParts())
+    "defaultDependencyPolicy(" & parts.join(", ") & ")"
   of bdpAutomaticMonitor:
-    "automaticMonitorPolicy(" & ignoredCode() & ")"
+    var parts: seq[string] = @[]
+    if policy.ignoredInputPrefixes.len > 0:
+      parts.add(ignoredCode())
+    parts.add(captureParts())
+    "automaticMonitorPolicy(" & parts.join(", ") & ")"
   of bdpMakeDepfile:
     var parts: seq[string] = @[]
     if policy.depfiles.len > 0:
       parts.add(depfilesCode())
     if policy.ignoredInputPrefixes.len > 0:
       parts.add(ignoredCode())
+    parts.add(captureParts())
     "makeDepfilePolicy(" & parts.join(", ") & ")"
+  of bdpIomonReport:
+    # First positional arg is the produced ``.iomon`` path; capture flags are
+    # named. ``iomonReportPolicy`` carries the path on ``depfiles``.
+    let pathLit =
+      if policy.depfiles.len > 0: escForCode(policy.depfiles[0])
+      else: escForCode("")
+    var parts = @[pathLit]
+    parts.add(captureParts())
+    "iomonReportPolicy(" & parts.join(", ") & ")"
   of bdpTrustedDeclaredInputs:
     # Round-trips through the constructor rather than an object literal, so
     # the regenerated code re-runs the guards: a regenerated recipe cannot
@@ -2116,8 +2152,9 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
         inputsCode.add(", ")
       inputsCode.add(escForCode(path))
     inputsCode.add("]")
-    "trustedDeclaredInputsPolicy(" & inputsCode & ", " &
-      escForCode(policy.trustedReason) & ")"
+    var parts = @[inputsCode, escForCode(policy.trustedReason)]
+    parts.add(captureParts())
+    "trustedDeclaredInputsPolicy(" & parts.join(", ") & ")"
 
 proc packageUseSeqLiteral(uses: seq[PackageUseDef]): string =
   ## DSL-port M9.R.1: shared serializer for ``seq[PackageUseDef]``
@@ -3896,6 +3933,8 @@ proc dependencyPolicyLiteral(node: NimNode;
       automaticMonitorPolicy()
   of "makedepfile":
     makeDepfilePolicy()
+  of "iomonreport", "iomon":
+    iomonReportPolicy("")
   else:
     fallback
 
@@ -3916,6 +3955,14 @@ proc parseInterfaceDependencyPolicy(node: NimNode;
       for path in stringSeqLiteral(depfilesValue):
         if path.len > 0 and path notin result.depfiles:
           result.depfiles.add(path)
+    let captureNonDeterminismValue =
+      namedValue(node[i], "captureNonDeterminism")
+    if not captureNonDeterminismValue.isNil:
+      result.captureNonDeterminism =
+        boolLiteral(captureNonDeterminismValue, result.captureNonDeterminism)
+    let captureIpcValue = namedValue(node[i], "captureIpc")
+    if not captureIpcValue.isNil:
+      result.captureIpc = boolLiteral(captureIpcValue, result.captureIpc)
 
 proc collectParamGroup(node: NimNode): tuple[name: string,
                                             statements: seq[NimNode]] =

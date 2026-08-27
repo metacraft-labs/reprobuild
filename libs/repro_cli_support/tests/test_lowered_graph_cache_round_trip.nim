@@ -43,7 +43,8 @@ suite "lowered graph cache action round trip":
       weakFingerprint: testFingerprint(),
       actionCachePolicy: ffpHybrid,
       dependencyPolicy: DependencyGatheringPolicy(
-        kind: dgAutomaticMonitor, completeness: decComplete),
+        kind: dgAutomaticMonitor, completeness: decComplete,
+        captureNonDeterminism: true, captureIpc: true),
       targetNames: @["zlib"],
       typedOutputs: @[EngineTypedOutput(
         fieldName: "library", types: @["Library"], path: "usr/lib")],
@@ -91,6 +92,14 @@ suite "lowered graph cache action round trip":
     check "A=B" in roundTrip.env
     check "A" notin roundTrip.envPassthrough
 
+    # Feature 1: the event-interest opt-ins on the dependency-gathering
+    # policy must survive the lowered-graph-cache round trip. Before they
+    # were serialised, a warm build decoded every action with both flags
+    # false, so an edge that opted into non-determinism / IPC capture lost
+    # that interest on any cache hit.
+    check roundTrip.dependencyPolicy.captureNonDeterminism
+    check roundTrip.dependencyPolicy.captureIpc
+
   test "rejects the previous cache version instead of decoding without lock identity":
     let action = BuildAction(
       governingLockIdentity: emptySolvedGraphIdentity("codec-version-test"),
@@ -98,13 +107,14 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 6'u8
+    check encoded[versionOffset] == 7'u8
     check encoded[versionOffset + 1] == 0'u8
-    # v5 is the version that could not carry `envPassthrough`. Decoding a
-    # v5 record as v6 would silently return an empty passthrough set for
-    # every action rather than failing, so the rejection below is what
-    # makes the field's absence impossible instead of invisible.
-    encoded[versionOffset] = 5'u8
+    # An older version could not carry the newer per-action fields (v5:
+    # `envPassthrough`; v6: the dependency-policy event-interest opt-ins).
+    # Decoding such a record under the current layout would silently return
+    # defaults for every action rather than failing, so the rejection below
+    # is what makes a field's absence impossible instead of invisible.
+    encoded[versionOffset] = 6'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)

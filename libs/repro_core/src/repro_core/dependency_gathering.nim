@@ -108,6 +108,14 @@ type
     captureNonDeterminism*: bool  ## add io-mon's ecNonDeterminism
     captureIpc*: bool             ## add io-mon's ecIpc
 
+const IomonFormatName* = "iomon"
+  ## Recognized-report format name for an edge whose command PRODUCES its own
+  ## io-mon ``.iomon`` dependency capture, which the engine then consumes as
+  ## the edge's evidence (read via ``foldMonitorDepFileEvidence`` in the build
+  ## engine) instead of monitoring the orchestrator process itself. Kept as a
+  ## plain string constant so ``repro_core`` stays free of any io_mon
+  ## dependency; the build engine routes on ``DependencyFormatName(this)``.
+
 proc `$`*(name: DependencyFormatName): string =
   string(name)
 

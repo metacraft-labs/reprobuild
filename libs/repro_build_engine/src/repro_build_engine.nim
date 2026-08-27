@@ -3052,6 +3052,136 @@ proc collectConvertedEvidence(action: BuildAction;
                               evidence: var PathSetEvidence;
                               seen: var EvidenceSeenSets): bool
 
+proc applyMonitorEvidenceStatus(action: BuildAction;
+                                status: MonitorEvidenceStatus;
+                                col: var EvidenceCollection) =
+  ## Fold a monitor-evidence ``status`` (Level 0-3) into ``col``. Extracted
+  ## so that two producers of monitor evidence share ONE mapping into
+  ## ``monitorStatus`` / ``publishable`` / ``disableCacheHits`` /
+  ## ``invalidatedPaths`` / diagnostics: the wrapped-or-hosted monitor path
+  ## (which reads ``action.monitorDepfile`` or in-memory hosted records) and
+  ## the ``iomon``-recognized-report path (an edge whose command PRODUCES its
+  ## own ``.iomon`` dependency capture, consumed as the edge's evidence).
+  col.monitorStatus = worseMonitorStatus(col.monitorStatus, status)
+  case status
+  of mesComplete:
+    # An action that observed NOTHING is not cacheable, even though
+    # the monitor reported success.
+    #
+    # This is the engine predicate that
+    # `repro_core/dependency_gathering.nim` has documented since M17
+    # ("actions with no monitorable evidence ... are made
+    # NON-CACHEABLE, never marked complete-on-declared-inputs") and
+    # that nothing enforced. It was documentation plus two
+    # hand-applied `cacheable = false` call sites; an action that
+    # reached this point with an empty observation set published a
+    # record keyed on its declared inputs alone and was reused
+    # against every change to everything else it touched.
+    #
+    # WHY IT MATTERS NOW. A zero-output edge used to be an
+    # unconditional cache miss, so such an action re-ran regardless
+    # of what its record said. Once test-execute edges became
+    # cacheable on their recorded inputs alone, the record became the
+    # only thing standing between the edge and a stale skip.
+    #
+    # WHY `disableCacheHits` AND NOT `publishable = false`.
+    # Monitor-Hook-Shim.md:501 offers two arms — "fail the monitored
+    # action OR make it non-cacheable, depending on policy". Failing
+    # a successful, exit-0 action to punish its monitor is the wrong
+    # one: it breaks builds for a soundness property that the
+    # cheaper arm secures completely. Skipping the publish means the
+    # action succeeds now and re-executes next time, which IS
+    # non-cacheable.
+    #
+    # WHY NO "THIS ACTION DECLARES IT READS NOTHING" ESCAPE HATCH.
+    # Three reasons, in order of weight. (a) The declaration is
+    # unfalsifiable exactly where it is load-bearing: it only takes
+    # effect when the evidence is empty, i.e. when the monitor cannot
+    # corroborate it. (b) No such concept exists in the specs, and
+    # its nearest neighbour — a declared-only gathering mode — is
+    # explicitly prohibited and has been re-introduced by agents more
+    # than once (see the note in
+    # `repro_core/dependency_gathering.nim`). (c) On a platform with
+    # a library-load floor it is not needed: measured on this host,
+    # every process the shim can inject reports at least the loader
+    # plus its dependent libraries (6 records for a `-nostdlib`
+    # dynamic binary; 18 records naming 14 distinct paths / 9
+    # distinct sonames for `env true`), and a process the shim CANNOT
+    # inject — a static binary — already trips `mrEventLoss` and
+    # lands on the Level 2 arm below. An edge that genuinely needs to
+    # run without evidence already has a sanctioned answer with no
+    # new soundness surface: `cacheable = false`.
+    #
+    # READ (c) NARROWLY — it is platform-conditional and the
+    # condition is real. `MonitorHasLibraryLoadFloor` is false on
+    # Windows, whose shim emits no library-load records at all, so
+    # there an ordinary monitored action that performs no interposed
+    # read, probe or write DOES reach this branch and stops
+    # publishing for good. The guard is deliberately NOT scoped away
+    # from such platforms: scoping it off would hand exactly the
+    # platform with no floor the original soundness hole AND no
+    # signal that it has it. Instead the diagnostic says which regime
+    # it is in — see `zeroEvidenceDiagnostic` — so the outcome is a
+    # report rather than a silent permanent non-publish. The
+    # behaviour is the fail-closed direction on every platform; only
+    # its reachability differs.
+    #
+    # The test is deliberately narrow — no observation of ANY kind
+    # from ANY source, including a recognized report's
+    # `depfileInputs`. An action with one recorded probe has said
+    # something about the world and keeps its record.
+    if action.cacheable and
+        col.evidence.monitorReads.len == 0 and
+        col.evidence.monitorWrites.len == 0 and
+        col.evidence.monitorProbes.len == 0 and
+        col.evidence.monitorDirectoryEnumerations.len == 0 and
+        col.evidence.depfileInputs.len == 0:
+      col.evidence.diagnostics.add(
+        zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
+      col.disableCacheHits = true
+  of mesKnownScopeLoss:
+    # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
+    # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
+    # sole class io-mon currently emits at Level 1 is
+    # kill-before-flush, whose invalidated-path predicate is the
+    # action's own declared outputs (the soundness proof in the
+    # memo). Populate ``invalidatedPaths`` with the materialized
+    # output paths and let the scheduler fold them into a
+    # session-scoped accumulator that gates DOWNSTREAM cache
+    # lookups. The current action still publishes its own cache
+    # entry — the narrow invalidation covers downstream consumers
+    # of its outputs, not the action itself.
+    col.evidence.diagnostics.add(
+      "monitor depfile has known-scope loss; downstream cache " &
+      "lookups intersecting this action's outputs will be skipped " &
+      "this session per Failure-Semantics.md §Monitoring Failures " &
+      "and Monitor-Loss-Path-Invalidation.md")
+    if action.cacheable:
+      for output in action.outputs:
+        col.invalidatedPaths.incl(materialPath(action.cwd, output))
+  of mesUnknownScopeLoss:
+    # Spec Level 2: session cache-skip, action succeeds. Diagnostic
+    # preserved for ``repro why``. ``publishable`` stays true so the
+    # scheduler does NOT flip status to asFailed; ``disableCacheHits``
+    # tells the scheduler to skip THIS action's
+    # ``cache.recordActionResult`` publish. The unknown-scope
+    # semantic is fully realized by the scheduler by observing this
+    # ``mesUnknownScopeLoss`` status and flipping its own
+    # ``sessionCachePublishDisabled`` bit — see the scheduler.
+    col.evidence.diagnostics.add(
+      "monitor depfile is incomplete (unknown-scope loss); " &
+      "action-cache publish skipped this session per " &
+      "Failure-Semantics.md §Monitoring Failures")
+    if action.cacheable:
+      col.disableCacheHits = true
+  of mesMonitorUnavailable:
+    # Unreachable from foldMonitorDepFileEvidence today (Level 3 is
+    # asserted here only when the iomon path was empty), but future
+    # readers may promote decode errors to Level 3 — keep the branch.
+    col.evidence.diagnostics.add("monitor depfile is incomplete")
+    if action.cacheable:
+      col.publishable = false
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil):
                      EvidenceCollection =
@@ -3080,6 +3210,47 @@ proc collectEvidence(action: BuildAction; strict: bool;
       "dependency policy requires a recognized report but none is declared")
     result.publishable = false
   for report in reports:
+    if report.formatName == DependencyFormatName(IomonFormatName):
+      # An edge whose command PRODUCES its own ``.iomon`` dependency
+      # capture — e.g. ``ct test`` writing the io-mon record set of the
+      # files it actually read — and the engine consumes THAT file as the
+      # edge's evidence instead of monitoring the orchestrator process.
+      # The text ``readRecognizedDependencyReport`` readers know nothing
+      # about io-mon's binary record format, so this branch folds the file
+      # through ``foldMonitorDepFileEvidence`` and maps the returned
+      # ``MonitorEvidenceStatus`` through the SAME handling the wrapped /
+      # hosted monitor path uses (``applyMonitorEvidenceStatus``). Path
+      # resolution (literal / glob / required-missing) mirrors the
+      # make-depfile branch below.
+      for output in report.outputs:
+        let path = action.expectedPath(output)
+        let isGlob = '*' in path or '?' in path or '[' in path
+        var resolvedPaths: seq[string] = @[]
+        if isGlob:
+          for resolved in walkPattern(path):
+            resolvedPaths.add(resolved)
+          if output.required and resolvedPaths.len == 0:
+            result.evidence.diagnostics.add(
+              "dependency report glob produced no matches: " & path)
+            result.publishable = false
+        elif output.required and not fileExists(extendedPath(path)):
+          result.evidence.diagnostics.add("dependency report missing: " & path)
+          result.publishable = false
+        elif fileExists(extendedPath(path)):
+          resolvedPaths.add(path)
+        for resolved in resolvedPaths:
+          try:
+            let status = foldMonitorDepFileEvidence(resolved, action.cwd,
+              result.evidence, seen)
+            applyMonitorEvidenceStatus(action, status, result)
+          except MonitorDepFileReaderError as err:
+            result.evidence.diagnostics.add(
+              "monitor depfile read failed: " & err.msg)
+            result.monitorStatus = worseMonitorStatus(result.monitorStatus,
+              mesMonitorUnavailable)
+            if action.cacheable:
+              result.publishable = false
+      continue
     for output in report.outputs:
       let path = action.expectedPath(output)
       # MR16: a depfile entry whose path contains a glob meta-character
@@ -3199,125 +3370,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
         else:
           foldMonitorDepFileEvidence(action.monitorDepfile,
             action.cwd, result.evidence, seen)
-      result.monitorStatus = worseMonitorStatus(result.monitorStatus, status)
-      case status
-      of mesComplete:
-        # An action that observed NOTHING is not cacheable, even though
-        # the monitor reported success.
-        #
-        # This is the engine predicate that
-        # `repro_core/dependency_gathering.nim` has documented since M17
-        # ("actions with no monitorable evidence ... are made
-        # NON-CACHEABLE, never marked complete-on-declared-inputs") and
-        # that nothing enforced. It was documentation plus two
-        # hand-applied `cacheable = false` call sites; an action that
-        # reached this point with an empty observation set published a
-        # record keyed on its declared inputs alone and was reused
-        # against every change to everything else it touched.
-        #
-        # WHY IT MATTERS NOW. A zero-output edge used to be an
-        # unconditional cache miss, so such an action re-ran regardless
-        # of what its record said. Once test-execute edges became
-        # cacheable on their recorded inputs alone, the record became the
-        # only thing standing between the edge and a stale skip.
-        #
-        # WHY `disableCacheHits` AND NOT `publishable = false`.
-        # Monitor-Hook-Shim.md:501 offers two arms — "fail the monitored
-        # action OR make it non-cacheable, depending on policy". Failing
-        # a successful, exit-0 action to punish its monitor is the wrong
-        # one: it breaks builds for a soundness property that the
-        # cheaper arm secures completely. Skipping the publish means the
-        # action succeeds now and re-executes next time, which IS
-        # non-cacheable.
-        #
-        # WHY NO "THIS ACTION DECLARES IT READS NOTHING" ESCAPE HATCH.
-        # Three reasons, in order of weight. (a) The declaration is
-        # unfalsifiable exactly where it is load-bearing: it only takes
-        # effect when the evidence is empty, i.e. when the monitor cannot
-        # corroborate it. (b) No such concept exists in the specs, and
-        # its nearest neighbour — a declared-only gathering mode — is
-        # explicitly prohibited and has been re-introduced by agents more
-        # than once (see the note in
-        # `repro_core/dependency_gathering.nim`). (c) On a platform with
-        # a library-load floor it is not needed: measured on this host,
-        # every process the shim can inject reports at least the loader
-        # plus its dependent libraries (6 records for a `-nostdlib`
-        # dynamic binary; 18 records naming 14 distinct paths / 9
-        # distinct sonames for `env true`), and a process the shim CANNOT
-        # inject — a static binary — already trips `mrEventLoss` and
-        # lands on the Level 2 arm below. An edge that genuinely needs to
-        # run without evidence already has a sanctioned answer with no
-        # new soundness surface: `cacheable = false`.
-        #
-        # READ (c) NARROWLY — it is platform-conditional and the
-        # condition is real. `MonitorHasLibraryLoadFloor` is false on
-        # Windows, whose shim emits no library-load records at all, so
-        # there an ordinary monitored action that performs no interposed
-        # read, probe or write DOES reach this branch and stops
-        # publishing for good. The guard is deliberately NOT scoped away
-        # from such platforms: scoping it off would hand exactly the
-        # platform with no floor the original soundness hole AND no
-        # signal that it has it. Instead the diagnostic says which regime
-        # it is in — see `zeroEvidenceDiagnostic` — so the outcome is a
-        # report rather than a silent permanent non-publish. The
-        # behaviour is the fail-closed direction on every platform; only
-        # its reachability differs.
-        #
-        # The test is deliberately narrow — no observation of ANY kind
-        # from ANY source, including a recognized report's
-        # `depfileInputs`. An action with one recorded probe has said
-        # something about the world and keeps its record.
-        if action.cacheable and
-            result.evidence.monitorReads.len == 0 and
-            result.evidence.monitorWrites.len == 0 and
-            result.evidence.monitorProbes.len == 0 and
-            result.evidence.monitorDirectoryEnumerations.len == 0 and
-            result.evidence.depfileInputs.len == 0:
-          result.evidence.diagnostics.add(
-            zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
-          result.disableCacheHits = true
-      of mesKnownScopeLoss:
-        # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
-        # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
-        # sole class io-mon currently emits at Level 1 is
-        # kill-before-flush, whose invalidated-path predicate is the
-        # action's own declared outputs (the soundness proof in the
-        # memo). Populate ``invalidatedPaths`` with the materialized
-        # output paths and let the scheduler fold them into a
-        # session-scoped accumulator that gates DOWNSTREAM cache
-        # lookups. The current action still publishes its own cache
-        # entry — the narrow invalidation covers downstream consumers
-        # of its outputs, not the action itself.
-        result.evidence.diagnostics.add(
-          "monitor depfile has known-scope loss; downstream cache " &
-          "lookups intersecting this action's outputs will be skipped " &
-          "this session per Failure-Semantics.md §Monitoring Failures " &
-          "and Monitor-Loss-Path-Invalidation.md")
-        if action.cacheable:
-          for output in action.outputs:
-            result.invalidatedPaths.incl(materialPath(action.cwd, output))
-      of mesUnknownScopeLoss:
-        # Spec Level 2: session cache-skip, action succeeds. Diagnostic
-        # preserved for ``repro why``. ``publishable`` stays true so the
-        # scheduler does NOT flip status to asFailed; ``disableCacheHits``
-        # tells the scheduler to skip THIS action's
-        # ``cache.recordActionResult`` publish. The unknown-scope
-        # semantic is fully realized by the scheduler by observing this
-        # ``mesUnknownScopeLoss`` status and flipping its own
-        # ``sessionCachePublishDisabled`` bit — see the scheduler.
-        result.evidence.diagnostics.add(
-          "monitor depfile is incomplete (unknown-scope loss); " &
-          "action-cache publish skipped this session per " &
-          "Failure-Semantics.md §Monitoring Failures")
-        if action.cacheable:
-          result.disableCacheHits = true
-      of mesMonitorUnavailable:
-        # Unreachable from foldMonitorDepFileEvidence today (Level 3 is
-        # asserted here only when the iomon path was empty), but future
-        # readers may promote decode errors to Level 3 — keep the branch.
-        result.evidence.diagnostics.add("monitor depfile is incomplete")
-        if action.cacheable:
-          result.publishable = false
+      applyMonitorEvidenceStatus(action, status, result)
     except MonitorDepFileReaderError as err:
       result.evidence.diagnostics.add("monitor depfile read failed: " & err.msg)
       # A decode error means the iomon file is corrupt — cannot classify the

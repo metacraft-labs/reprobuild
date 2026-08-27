@@ -572,6 +572,16 @@ type
     bdpDefault
     bdpAutomaticMonitor
     bdpMakeDepfile
+    bdpIomonReport
+      ## The edge's command PRODUCES its own io-mon ``.iomon`` dependency
+      ## capture (e.g. ``ct test`` writing the record set of the files it
+      ## actually read). The engine consumes THAT file as the edge's
+      ## evidence, folding it via the monitor-evidence reader, instead of
+      ## monitoring the orchestrator process. Declared with
+      ## ``iomonReportPolicy`` / the ``iomonReport`` keyword, giving the
+      ## produced file's path. Modelled on ``bdpMakeDepfile`` but routed to
+      ## a distinct engine ``formatName`` because the file is io-mon's
+      ## binary record format, not a make-format text depfile.
     bdpTrustedDeclaredInputs
       ## HAZARDOUS, DISCOURAGED, LAST RESORT. The edge's inputs are exactly
       ## what the recipe author wrote inline. The engine does NO monitoring
@@ -634,6 +644,17 @@ type
       ## monitored. Required, non-empty, and surfaced in the build report so
       ## "trusted, not verified" is visible in output rather than
       ## discoverable only by reading the recipe.
+    captureNonDeterminism*: bool
+      ## Opt into io-mon's non-determinism event category for this edge's
+      ## automatic monitoring (clock/env/sysctl/entropy reads). Default
+      ## false: reproducibility hinges on files read, not on such inputs, so
+      ## the engine skips the category unless an edge genuinely depends on
+      ## it. Lowered onto the engine ``DependencyGatheringPolicy`` of the
+      ## same name.
+    captureIpc*: bool
+      ## Opt into io-mon's IPC event category for this edge's automatic
+      ## monitoring. Default false; lowered onto the engine
+      ## ``DependencyGatheringPolicy`` of the same name.
 
   ActionCacheFingerprintPolicy* = enum
     acfpTimestamp
