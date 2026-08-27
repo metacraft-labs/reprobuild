@@ -678,6 +678,19 @@ package reprobuild:
         else: binary
       "reprobuild.test_execute." & stem
 
+    proc reproTestDepfilePath(binary: string): string =
+      ## Where the generated depfile for a self-interposing test's execute
+      ## edge lives. Same raw string-slicing as ``reproTestExecuteId`` and for
+      ## the same scoping reason.
+      var lastSlash = -1
+      for i in 0 ..< binary.len:
+        if binary[i] == '/' or binary[i] == '\\':
+          lastSlash = i
+      let stem =
+        if lastSlash >= 0: binary[lastSlash + 1 .. ^1]
+        else: binary
+      "build/test-deps/" & stem & ".d"
+
     # Bootstrap-And-Self-Build B4: the three macOS-arm64 HCR tests
     # carry ``extraPassC`` / ``extraPassL`` lists (the codesign
     # workaround flags that previously lived in ``scripts/run_tests.sh``'s
@@ -1014,65 +1027,71 @@ package reprobuild:
       # ``/proc/<pid>/maps`` showed both ``librepro_monitor_shim.so`` and the
       # test's own ``libstackable_shim.so`` mapped into the same process.
       #
-      # For those tests we declare the inputs and tell the engine to trust
-      # them. ``trustedDeclaredInputsPolicy`` resolves to
-      # ``dgTrustedDeclaredInputs``, which is deliberately absent from the
-      # engine's ``MonitorPolicyKinds``, so ``monitoredAction`` returns early
-      # and no shim is injected. It keeps ``decComplete``, so the edge stays
-      # cacheable.
+      # For those tests the edge's dependency evidence comes from a DEPFILE
+      # instead of from the monitor. ``fs.unmonitorableActionDepfile`` emits a
+      # separate edge whose OUTPUT is a make-format depfile listing the test's
+      # inputs, and the execute edge consumes it with ``makeDepfilePolicy``.
+      # That resolves to ``dgRecognizedFormat``, which is deliberately absent
+      # from the engine's ``MonitorPolicyKinds``, so ``monitoredAction``
+      # returns early and no shim is injected — and the paths in the depfile
+      # are read back as real evidence, so a change to any of them does
+      # invalidate the edge.
       #
       # NOTE the second half of that fix, which is easy to miss: the engine
-      # must ALSO withhold the ``REPRO_MONITOR_SHIM_LIB`` env seed for this
-      # policy (see ``launchChildEnv``). Suppressing the wrap alone is not
-      # enough — io-mon's preload runtime propagates whatever that variable
-      # names into child processes, so a test building its own interposer
-      # from that runtime re-injects OUR shim into its children and livelocks
-      # again. Measured directly: wrap suppressed, seed still present, and
-      # the fixture came up with two shims on ``LD_PRELOAD`` at 92% CPU.
+      # must ALSO withhold the ``REPRO_MONITOR_SHIM_LIB`` env seed, which is
+      # what ``suppressMonitorShimSeed = true`` asks for (see
+      # ``launchChildEnv``). Suppressing the wrap alone is not enough —
+      # io-mon's preload runtime propagates whatever that variable names into
+      # child processes, so a test building its own interposer from that
+      # runtime re-injects OUR shim into its children and livelocks again.
+      # Measured directly: wrap suppressed, seed still present, and the
+      # fixture came up with two shims on ``LD_PRELOAD`` at 92% CPU. The flag
+      # is a narrow per-edge opt-out rather than "every unmonitored kind",
+      # because ordinary ``makeDepfilePolicy`` edges are seeded today and must
+      # stay that way.
       #
-      # WHY AN EXPLICIT PER-TEST FLAG rather than an env var or a blanket
-      # "tests are not monitored" rule: unrestricted forms of "trust the
-      # declared inputs" were added to this codebase three times and removed
-      # every time as a soundness hole (``dgDeclaredOnly``,
-      # ``declaredOnlyDependencyPolicy``,
-      # ``REPRO_MACOS_DISABLE_ACTION_MONITOR``); see the history note in
-      # ``repro_core/dependency_gathering.nim``. The narrow form here was
-      # authorized by the repository owner on 2026-08-21 on the explicit
-      # condition that it stay discouraged and visible. Hence: a field on one
-      # ``TestSpec`` row, greppable, defaulting to ``false``, with a
-      # constructor that refuses an empty list or a missing reason.
+      # WHY A GENERATED FILE rather than a list written inline and trusted:
+      # forms of "track only the statically declared inputs and call the
+      # action complete" have been added to this codebase FOUR times and
+      # removed every time as a soundness hole (``dgDeclaredOnly``,
+      # ``declaredOnlyDependencyPolicy``, ``REPRO_MACOS_DISABLE_ACTION_MONITOR``
+      # and, most recently, ``dgTrustedDeclaredInputs`` — which is what these
+      # two rows used to carry); see the history note in
+      # ``repro_core/dependency_gathering.nim``. A depfile is the sanctioned
+      # route because the input set is DERIVED rather than ASSERTED: it lives
+      # in a file that an edge produces, that can be regenerated, and that the
+      # engine actually reads.
       #
-      # THE HAZARD YOU INHERIT BY SETTING IT: the declared list is never
-      # checked against reality. If one of these tests grows a dependency, or
-      # a listed path moves, the cache will NOT notice — the edge keeps
-      # serving a result built from inputs that have since changed, silently,
-      # until a human edits the list below.
+      # THE OBLIGATION YOU INHERIT: the generated list is only as good as what
+      # is passed to the generator. The engine will re-run the edge when a
+      # LISTED path changes, but a runtime dependency nobody listed is a
+      # dependency the build does not have. If one of these tests grows one,
+      # add it below.
       #
-      # PREFER, WHERE POSSIBLE, the sound alternatives, both of which keep
-      # real evidence AND caching:
-      #   * ``makeDepfilePolicy`` when the action emits its own depfile.
-      #   * ``makeDepfilePolicy`` pointed at a depfile produced by ANOTHER
-      #     edge ordered before this one — the engine resolves a report path
-      #     against the action's cwd and reads it after the action runs, so
-      #     it need not be that action's own output. These two tests compile
-      #     their shim AT RUNTIME; lifting that compile into its own graph
-      #     edge (which milestone M3 wants regardless) would produce a
-      #     depfile this edge could consume, and this flag could then be
-      #     dropped. That is the intended end state, not this.
+      # THE INTENDED END STATE, unchanged: these two tests compile their shim
+      # AT RUNTIME. Lifting that compile into its own graph edge (which
+      # milestone M3 wants regardless) would make the compiler emit this
+      # depfile for free, and the generator call below could be deleted.
+      var executeAfter: seq[BuildActionDef] = @[]
       let executePolicy =
         if spec.selfInterposes:
-          trustedDeclaredInputsPolicy(
+          let testDepfile = reproTestDepfilePath(spec.binary)
+          let testDepfileEdge = dslfs.unmonitorableActionDepfile(
+            output = testDepfile,
             inputs = @[spec.binary] & @(requiredBinaries),
             reason =
               "test performs LD_PRELOAD interposition itself; the engine's " &
               "io-monitor injects a second interposer and the two livelock " &
               "on the same libc entry points (observed: 19h spin in " &
-              "t_stackable_hooks_extracted_process_tree). Inputs are " &
-              "declared and UNVERIFIED — see the note above this call.")
+              "t_stackable_hooks_extracted_process_tree)")
+          reprobuildTestBuildActions.add(testDepfileEdge)
+          executeAfter.add(testDepfileEdge)
+          makeDepfilePolicy(testDepfile, suppressMonitorShimSeed = true)
         else:
           automaticMonitorPolicy()
       let executeEdge = edge.testBinary.run(
         deps = executeDeps,
+        after = executeAfter,
         requiredBinaries = requiredBinaries,
         actionId = executeActionId,
         registerImplicitName = false,

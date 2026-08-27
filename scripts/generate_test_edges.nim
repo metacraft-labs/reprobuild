@@ -344,10 +344,11 @@ const SelfInterposingTestStems = [
 ]
   ## Tests that perform ``LD_PRELOAD`` interposition THEMSELVES, and so cannot
   ## be observed by the engine's io-monitor: two interposers on the same libc
-  ## entry points re-enter each other and livelock. Their execute edges get
-  ## ``trustedDeclaredInputsPolicy`` — declared, UNVERIFIED inputs and no
-  ## monitoring. See the long note at the execute-edge call site in
-  ## ``repro.nim`` for the hazard and the sound alternatives.
+  ## entry points re-enter each other and livelock. Their execute edges get a
+  ## GENERATED DEPFILE (``fs.unmonitorableActionDepfile`` feeding
+  ## ``makeDepfilePolicy``) as their dependency evidence instead of monitoring.
+  ## See the long note at the execute-edge call site in ``repro.nim`` for the
+  ## obligation this carries and for the intended end state.
   ##
   ## Deliberately an explicit list rather than sniffed from source text: a
   ## heuristic matching any file mentioning "LD_PRELOAD" would silently opt
@@ -614,10 +615,11 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
   result.add("    selfInterposes*: bool\n")
   result.add("      ## HAZARDOUS opt-out: this test performs LD_PRELOAD\n")
   result.add("      ## interposition itself and cannot be observed by the\n")
-  result.add("      ## engine's own interposer. Its execute edge is given\n")
-  result.add("      ## ``trustedDeclaredInputsPolicy`` — declared, UNVERIFIED\n")
-  result.add("      ## inputs and no monitoring. See the note at the\n")
-  result.add("      ## execute-edge call site in ``repro.nim``.\n")
+  result.add("      ## engine's own interposer. Its execute edge takes its\n")
+  result.add("      ## dependency evidence from a GENERATED DEPFILE instead\n")
+  result.add("      ## of from the monitor, and is denied the monitor shim\n")
+  result.add("      ## env seed. See the note at the execute-edge call site\n")
+  result.add("      ## in ``repro.nim``.\n")
   result.add("\n")
   result.add("const reprobuildTestSpecs*: seq[TestSpec] = @[\n")
   for i, edge in edges:

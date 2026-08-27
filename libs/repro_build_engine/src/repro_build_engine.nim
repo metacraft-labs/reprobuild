@@ -4928,22 +4928,29 @@ proc launchChildEnv(action: BuildAction;
   # appended after the seed and the process launcher's overlay is
   # last-write-wins.
   #
-  # NOT SEEDED for ``dgTrustedDeclaredInputs``. Suppressing the monitor WRAP is
-  # not sufficient on its own to keep an action shim-free: io-mon's preload
-  # runtime propagates itself to child processes by prepending the library
-  # named in ``REPRO_MONITOR_SHIM_LIB`` to their ``LD_PRELOAD``. An action that
-  # builds its own interposer from that same runtime therefore re-injects OUR
-  # shim into its children even though the engine never wrapped it — which is
-  # exactly how a self-interposing test ends up with two interposers again and
-  # livelocks.
+  # NOT SEEDED when the edge's policy sets ``suppressMonitorShimSeed``.
+  # Suppressing the monitor WRAP is not sufficient on its own to keep an action
+  # shim-free: io-mon's preload runtime propagates itself to child processes by
+  # prepending the library named in ``REPRO_MONITOR_SHIM_LIB`` to their
+  # ``LD_PRELOAD``. An action that builds its own interposer from that same
+  # runtime therefore re-injects OUR shim into its children even though the
+  # engine never wrapped it — which is exactly how a self-interposing test ends
+  # up with two interposers again and livelocks.
   #
   # Measured: with the wrap suppressed but the seed still present, the
   # stackable-hooks fixture came up with
   # ``LD_PRELOAD=<monitor shim>:<test shim>`` and spun at 92% CPU. The two
   # must be gated together — a policy that says "do not monitor this action"
   # has to also mean "do not hand this action the means to monitor itself".
+  #
+  # The gate is an explicit per-edge OPT-OUT rather than "any kind outside
+  # ``MonitorPolicyKinds``". Several non-monitored kinds — ``dgRecognizedFormat``
+  # (every ``makeDepfilePolicy`` edge), ``dgPostBuildConverter`` — are seeded
+  # today, and withdrawing the variable from all of them would be a silent
+  # behaviour change across the whole depfile population. Only an edge that
+  # asks loses it; the default is false.
   let shimLib =
-    if action.dependencyPolicy.kind == dgTrustedDeclaredInputs: ""
+    if action.dependencyPolicy.suppressMonitorShimSeed: ""
     else: findShimLibrary()
   if shimLib.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)

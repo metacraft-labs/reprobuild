@@ -2167,28 +2167,6 @@ proc lowerDependencyPolicy(actionId, depfile: string;
           "makeDepfilePolicy")
     result = DependencyGatheringPolicy(kind: dgAutomaticMonitor,
         completeness: decComplete)
-  of bdpTrustedDeclaredInputs:
-    # HAZARDOUS, owner-authorized 2026-08-21. No monitor wrap and no result
-    # processing: the author's inline list IS the evidence. ``decComplete``
-    # keeps the edge cacheable, which is simultaneously the point of the
-    # policy and its entire hazard, because nothing ever re-checks the list.
-    # ``dgTrustedDeclaredInputs`` is deliberately absent from the engine's
-    # ``MonitorPolicyKinds``, so ``monitoredAction`` returns early and no
-    # ``LD_PRELOAD`` shim is injected.
-    #
-    # Guards are re-checked here, not only in the constructor, because a
-    # policy can also arrive from a decoded payload.
-    if policy.trustedInputs.len == 0:
-      raise newException(ValueError,
-        "action " & actionId & " uses trustedDeclaredInputsPolicy with an " &
-          "empty input list; that would disable dependency tracking entirely")
-    if policy.trustedReason.len == 0:
-      raise newException(ValueError,
-        "action " & actionId & " uses trustedDeclaredInputsPolicy without a " &
-          "reason; the justification is surfaced in the build report")
-    result = DependencyGatheringPolicy(
-      kind: dgTrustedDeclaredInputs,
-      completeness: decComplete)
   of bdpMakeDepfile:
     # MR16: ``policy.depfiles`` is the canonical multi-path list.
     # ``depfile`` (the per-action legacy single-path field) is merged
@@ -2219,6 +2197,9 @@ proc lowerDependencyPolicy(actionId, depfile: string;
   # Feature 1: the two event-interest opt-ins ride onto every lowered kind.
   result.captureNonDeterminism = policy.captureNonDeterminism
   result.captureIpc = policy.captureIpc
+  # The shim-seed opt-out rides along the same way. False unless the recipe
+  # explicitly asked, so no existing edge's lowered policy changes.
+  result.suppressMonitorShimSeed = policy.suppressMonitorShimSeed
 
 # ---------------------------------------------------------------------------
 # Named-Lock-Files §3.1 / §7.2 — the workspace's governing lock identity
@@ -3828,7 +3809,14 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 7'u16
+  LoweredGraphCacheVersion = 8'u16
+    # v8: DependencyGatheringPolicy serializes a third trailing bool,
+    # `suppressMonitorShimSeed`. A warm record that lost it would hand the
+    # shim-library env seed back to an action that must not receive it — the
+    # exact condition that livelocks a self-interposing edge — so the field
+    # has to survive the cache, and the bump is what guarantees the byte is
+    # there to be read.
+    #
     # v7: DependencyGatheringPolicy now serializes two trailing event-interest
     # bools (captureNonDeterminism, captureIpc). The decoder rejects any other
     # version outright (see `decodeLoweredGraphCache`), so the two new bytes are
@@ -4450,6 +4438,8 @@ proc writeDependencyPolicy(outp: var seq[byte];
   # cache round-trip preserves them; two trailing bool bytes.
   outp.add(byte(if policy.captureNonDeterminism: 1 else: 0))
   outp.add(byte(if policy.captureIpc: 1 else: 0))
+  # v8: the shim-seed opt-out, same trailing-bool treatment.
+  outp.add(byte(if policy.suppressMonitorShimSeed: 1 else: 0))
 
 proc readCompleteness(bytes: openArray[byte]; pos: var int):
     DependencyEvidenceCompleteness =
@@ -4507,6 +4497,7 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
   # v7 payload always carries these two trailing bool bytes.
   result.captureNonDeterminism = readByteValue(bytes, pos) != 0'u8
   result.captureIpc = readByteValue(bytes, pos) != 0'u8
+  result.suppressMonitorShimSeed = readByteValue(bytes, pos) != 0'u8
 
 proc writeCacheEntryIdentity(outp: var seq[byte];
                              identity: CacheEntryIdentity) =

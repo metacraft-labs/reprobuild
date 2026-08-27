@@ -283,6 +283,10 @@ proc parseCommandDependencyPolicy(node: NimNode;
     let captureIpcValue = namedValue(node[i], "captureIpc")
     if not captureIpcValue.isNil:
       result.captureIpc = boolLiteral(captureIpcValue, result.captureIpc)
+    let suppressSeedValue = namedValue(node[i], "suppressMonitorShimSeed")
+    if not suppressSeedValue.isNil:
+      result.suppressMonitorShimSeed =
+        boolLiteral(suppressSeedValue, result.suppressMonitorShimSeed)
 
 proc collectOutputsOperands(node: NimNode; sink: var seq[NimNode]) =
   ## Flatten the operand list of an ``outputs`` statement into a sequence
@@ -2131,6 +2135,11 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
     if policy.ignoredInputPrefixes.len > 0:
       parts.add(ignoredCode())
     parts.add(captureParts())
+    # ``makeDepfilePolicy`` is the only constructor that accepts this, and it
+    # is only emitted when set, so an edge that never opted in regenerates
+    # byte-identically.
+    if policy.suppressMonitorShimSeed:
+      parts.add("suppressMonitorShimSeed = true")
     "makeDepfilePolicy(" & parts.join(", ") & ")"
   of bdpIomonReport:
     # First positional arg is the produced ``.iomon`` path; capture flags are
@@ -2141,20 +2150,6 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
     var parts = @[pathLit]
     parts.add(captureParts())
     "iomonReportPolicy(" & parts.join(", ") & ")"
-  of bdpTrustedDeclaredInputs:
-    # Round-trips through the constructor rather than an object literal, so
-    # the regenerated code re-runs the guards: a regenerated recipe cannot
-    # end up with an empty list or a missing justification that the
-    # hand-written one would have been refused for.
-    var inputsCode = "@["
-    for i, path in policy.trustedInputs:
-      if i > 0:
-        inputsCode.add(", ")
-      inputsCode.add(escForCode(path))
-    inputsCode.add("]")
-    var parts = @[inputsCode, escForCode(policy.trustedReason)]
-    parts.add(captureParts())
-    "trustedDeclaredInputsPolicy(" & parts.join(", ") & ")"
 
 proc packageUseSeqLiteral(uses: seq[PackageUseDef]): string =
   ## DSL-port M9.R.1: shared serializer for ``seq[PackageUseDef]``
@@ -3963,6 +3958,10 @@ proc parseInterfaceDependencyPolicy(node: NimNode;
     let captureIpcValue = namedValue(node[i], "captureIpc")
     if not captureIpcValue.isNil:
       result.captureIpc = boolLiteral(captureIpcValue, result.captureIpc)
+    let suppressSeedValue = namedValue(node[i], "suppressMonitorShimSeed")
+    if not suppressSeedValue.isNil:
+      result.suppressMonitorShimSeed =
+        boolLiteral(suppressSeedValue, result.suppressMonitorShimSeed)
 
 proc collectParamGroup(node: NimNode): tuple[name: string,
                                             statements: seq[NimNode]] =

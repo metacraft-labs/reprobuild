@@ -582,38 +582,6 @@ type
       ## produced file's path. Modelled on ``bdpMakeDepfile`` but routed to
       ## a distinct engine ``formatName`` because the file is io-mon's
       ## binary record format, not a make-format text depfile.
-    bdpTrustedDeclaredInputs
-      ## HAZARDOUS, DISCOURAGED, LAST RESORT. The edge's inputs are exactly
-      ## what the recipe author wrote inline. The engine does NO monitoring
-      ## and NO result processing for the edge and verifies nothing.
-      ##
-      ## Reach for the two sound options FIRST — both keep caching:
-      ##
-      ## 1. ``makeDepfilePolicy`` where the action emits its own make-format
-      ##    depfile.
-      ## 2. ``makeDepfilePolicy`` pointing at a depfile produced by ANOTHER
-      ##    edge in the graph, ordered before this one. The engine resolves a
-      ##    report path against the action's cwd and reads it after the
-      ##    action runs; it does NOT require the file to be this action's own
-      ##    output. So a runtime step that compiles something can be lifted
-      ##    into its own edge, and this edge can consume that edge's depfile
-      ##    as real evidence.
-      ##
-      ## Only when neither is possible — the action cannot be monitored AND
-      ## nothing in the graph produces a depfile describing its inputs — is
-      ## this policy appropriate. Today that means an action performing
-      ## ``LD_PRELOAD`` interposition itself, which the monitor's own
-      ## interposer cannot observe without the two livelocking.
-      ##
-      ## THE HAZARD: a list that is wrong, or that goes stale when a
-      ## dependency moves, will NOT invalidate the cache. The edge keeps
-      ## serving a result built from inputs that have since changed —
-      ## silently, indefinitely, until a human edits the list. Every use is a
-      ## standing maintenance obligation on whoever wrote it.
-      ##
-      ## Owner-authorized 2026-08-21 for the self-interposing-test case, with
-      ## the explicit instruction that its use stay discouraged.
-
     # NOTE: there is intentionally NO ``bdpDeclaredOnly``. A recipe-facing
     # "declared-only" policy (track only statically declared inputs, no
     # runtime monitoring, mark the action complete/cacheable anyway) is an
@@ -622,6 +590,15 @@ type
     # opaque tools use ``bdpAutomaticMonitor``, and actions with no
     # monitorable evidence are made non-cacheable per Monitor-Hook-Shim.md:501.
     # See Reprobuild-Development.milestones.org M17.
+    #
+    # ``bdpTrustedDeclaredInputs`` — "declare the edge's inputs inline and
+    # have the engine trust them", added for self-interposing test edges — was
+    # the same idea in a narrower wrapper and has been REMOVED as well. An
+    # action that cannot be monitored declares its inputs through a DEPFILE
+    # (``bdpMakeDepfile``) instead: the list then lives in a file some edge
+    # produces, can be regenerated, and is read back by the engine as real
+    # evidence, so the paths in it actually invalidate the action cache.
+    # ``unmonitorableActionDepfile`` in ``runtime_core.nim`` generates one.
 
   BuildActionDependencyPolicy* = object
     kind*: BuildActionDependencyPolicyKind
@@ -636,14 +613,19 @@ type
       ## ``depfile: string`` field has been removed; recipes that need
       ## one depfile pass a one-element ``depfiles`` seq.
     ignoredInputPrefixes*: seq[string]
-    trustedInputs*: seq[string]
-      ## ``bdpTrustedDeclaredInputs`` only: the author-written input list.
-      ## Never populated for any other kind.
-    trustedReason*: string
-      ## ``bdpTrustedDeclaredInputs`` only: why this edge cannot be
-      ## monitored. Required, non-empty, and surfaced in the build report so
-      ## "trusted, not verified" is visible in output rather than
-      ## discoverable only by reading the recipe.
+    suppressMonitorShimSeed*: bool
+      ## Withhold the launch-time ``REPRO_MONITOR_SHIM_LIB`` environment seed
+      ## from this edge's action. Lowered onto the engine
+      ## ``DependencyGatheringPolicy`` field of the same name, where the full
+      ## rationale lives.
+      ##
+      ## Default false, so no existing edge changes. Set it ONLY for an action
+      ## that performs library interposition itself: leaving the engine's
+      ## monitor un-wrapped is not sufficient to keep such an action shim-free,
+      ## because io-mon's preload runtime propagates whatever this variable
+      ## names into the processes the action starts, re-injecting our shim
+      ## alongside the action's own. Requested with
+      ## ``makeDepfilePolicy(..., suppressMonitorShimSeed = true)``.
     captureNonDeterminism*: bool
       ## Opt into io-mon's non-determinism event category for this edge's
       ## automatic monitoring (clock/env/sysctl/entropy reads). Default

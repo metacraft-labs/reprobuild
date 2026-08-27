@@ -73,10 +73,11 @@ type
     selfInterposes*: bool
       ## HAZARDOUS opt-out: this test performs LD_PRELOAD
       ## interposition itself and cannot be observed by the
-      ## engine's own interposer. Its execute edge is given
-      ## ``trustedDeclaredInputsPolicy`` — declared, UNVERIFIED
-      ## inputs and no monitoring. See the note at the
-      ## execute-edge call site in ``repro.nim``.
+      ## engine's own interposer. Its execute edge takes its
+      ## dependency evidence from a GENERATED DEPFILE instead
+      ## of from the monitor, and is denied the monitor shim
+      ## env seed. See the note at the execute-edge call site
+      ## in ``repro.nim``.
 
 const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
@@ -12563,8 +12564,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/unit/t_trusted_declared_inputs_policy_guards.nim",
-    binary: "build/test-bin/t_trusted_declared_inputs_policy_guards",
+    source: "tests/unit/t_unmonitorable_action_depfile_guards.nim",
+    binary: "build/test-bin/t_unmonitorable_action_depfile_guards",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

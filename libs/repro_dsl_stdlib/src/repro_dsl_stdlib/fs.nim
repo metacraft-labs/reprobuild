@@ -30,6 +30,19 @@ proc writeText*(output, text: string; actionId = "";
     deps = deps, after = after, cacheable = cacheable,
     commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy)
 
+proc unmonitorableActionDepfile*(output: string;
+                                 inputs: openArray[string];
+                                 reason: string;
+                                 actionId = "";
+                                 deps: openArray[string] = [];
+                                 after: openArray[BuildActionDef] = []):
+    BuildActionDef {.discardable.} =
+  ## ESCAPE HATCH. See ``repro_project_dsl.fs.unmonitorableActionDepfile`` for
+  ## the full contract — what it disables, when an action legitimately cannot
+  ## be monitored, and the standing obligation to keep the input list current.
+  repro_project_dsl.fs.unmonitorableActionDepfile(output, inputs, reason,
+    actionId = actionId, deps = deps, after = after)
+
 proc stamp*(output, title: string; entries: openArray[string] = [];
             inputs: openArray[string] = []; actionId = "";
             deps: openArray[string] = [];
