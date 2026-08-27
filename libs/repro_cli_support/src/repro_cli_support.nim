@@ -243,7 +243,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -7848,6 +7848,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         substituteMaterialized = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false;
+                        monitorHosting = mhmNever;
                         benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
@@ -8141,6 +8142,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
+      # In-Process-Monitor-Hosting P1(b) — the operator's value, NEVER a
+      # literal. `mhmNever` unless `--monitor-hosting` or
+      # `REPROBUILD_MONITOR_HOSTING` said otherwise, so the shipped default
+      # is unchanged and `test_umask_wrap_both_spawn_paths` still pins it.
+      monitorHosting: monitorHosting,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       publishCachedResults: publishCacheHits,
@@ -9445,6 +9451,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
+      # In-Process-Monitor-Hosting P1(b) — same operator value as the
+      # `runLoweredGraphBuild` config above, and for the same reason: the
+      # two are alternative entry points into the SAME build, so a flag
+      # wired to only one of them would work or not depending on whether
+      # the lowered-graph cache happened to hit.
+      monitorHosting: monitorHosting,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       publishCachedResults: publishCacheHits,
@@ -17593,6 +17605,22 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
+  # In-Process-Monitor-Hosting P1(b): the operator surface for
+  # ``BuildEngineConfig.monitorHosting``. Same shape as ``--daemon`` above —
+  # an environment default (``REPROBUILD_MONITOR_HOSTING``) that the flag
+  # overrides, both decoded by the same parser, which lives beside the enum
+  # in ``repro_build_engine``. The default is ``mhmNever``, which is the
+  # measured HM-6 verdict and is what ``test_umask_wrap_both_spawn_paths``
+  # pins; this knob exists so that verdict can be RE-CHECKED on other
+  # hardware through the CLI instead of by writing a harness.
+  #
+  # Note which launch path each setting actually reaches: hosting is only
+  # possible on L1, so the experiment is
+  # ``repro build --no-runquota --monitor-hosting=where-supported``. On a
+  # normal (RunQuota) build ``where-supported`` silently keeps the wrapper
+  # and ``required`` FAILS the action with ``monitorHostingRefusal``'s
+  # sentence rather than running it unmonitored.
+  var monitorHosting = configuredMonitorHostingMode()
   # Named-Targets M5: ``--list-targets`` enumerates every implicit /
   # explicit target name visible in the current project's target-export
   # table. ``--list-targets-json`` is the JSON view; ``--list-targets``
@@ -17727,6 +17755,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       bypassRunQuota = true
     elif arg == "--runquota":
       bypassRunQuota = false
+    elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
+      monitorHosting = parseMonitorHostingMode(
+        valueFromFlag(args, i, "--monitor-hosting"), "--monitor-hosting")
     elif arg == "--unicode":
       setUnicodeOverride(true)
     elif arg == "--no-unicode":
@@ -18071,6 +18102,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         publishMaterialized = publishMaterialized,
         skipCmakeRegeneration = skipCmakeRegeneration,
         bypassRunQuotaExplicit = bypassRunQuota,
+        monitorHosting = monitorHosting,
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck,
@@ -25541,7 +25573,7 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
       forceRefresh = true
     elif arg in ["--daemon", "--progress", "--progress-bars",
         "--write-diagnostics", "--show", "--measure", "--write-report",
-        "--log", "--write-benchmark", "--write-stats"]:
+        "--log", "--write-benchmark", "--write-stats", "--monitor-hosting"]:
       discard valueFromFlag(args, i, arg)
     elif arg == "--no-write-report":
       discard
@@ -25552,6 +25584,7 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
         arg.startsWith("--write-report=") or
         arg.startsWith("--log=") or arg.startsWith("--write-benchmark=") or
         arg.startsWith("--write-stats=") or
+        arg.startsWith("--monitor-hosting=") or
         arg.startsWith("--stats-groups="):
       discard
     elif arg == "--prepare-only":
@@ -50132,6 +50165,12 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
         valueFromFlag(args, i, "--stats-groups"))
     elif arg == "--log" or arg.startsWith("--log="):
       result.buildFlags.add("--log=" & valueFromFlag(args, i, "--log"))
+    elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
+      # In-Process-Monitor-Hosting P1(b): forwarded verbatim, like every
+      # other value-taking build flag here, so `repro test`/`bench`/`lint`
+      # can drive the same experiment as `repro build`.
+      result.buildFlags.add("--monitor-hosting=" &
+        valueFromFlag(args, i, "--monitor-hosting"))
     elif arg == "--package" or arg.startsWith("--package="):
       result.buildFlags.add("--package=" &
         valueFromFlag(args, i, "--package"))

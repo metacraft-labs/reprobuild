@@ -559,6 +559,15 @@ type
     # ``preparedRunQuotaCommand`` for the numbers and for what would have to
     # change before this becomes the default, and ``MonitorHostingMode`` for
     # what the three settings mean.
+    #
+    # IT IS A PRODUCT OPTION, NOT A TEST SEAM (In-Process-Monitor-Hosting P1,
+    # option (b)). ``repro build --monitor-hosting=never|where-supported|
+    # required`` and ``REPROBUILD_MONITOR_HOSTING`` set it; both go through
+    # ``parseMonitorHostingMode`` below. The surface exists so the HM-6
+    # verdict above can be RE-MEASURED on other hardware without writing a
+    # harness — which is the only reason to move it off ``mhmNever``. Note
+    # that only L1 (``--no-runquota``) can host, so the experiment is
+    # ``--no-runquota --monitor-hosting=where-supported``.
     monitorHosting*: MonitorHostingMode
     dryRun*: bool
     progressCallback*: BuildProgressCallback
@@ -5450,6 +5459,51 @@ func monitorHostingRefusal*(path: MonitorLaunchPath): string =
     "in-process monitor hosting was requested for an action on the RunQuota " &
     "helper launch path, which starts the action from a separate " &
     "`repro __repro-runquota-helper` process" & Why
+
+const MonitorHostingEnvVar* = "REPROBUILD_MONITOR_HOSTING"
+  ## The environment spelling of ``--monitor-hosting``
+  ## (In-Process-Monitor-Hosting P1, option (b)). Same vocabulary, same
+  ## parser, same default — see ``configuredMonitorHostingMode``.
+
+func parseMonitorHostingMode*(value, source: string): MonitorHostingMode =
+  ## In-Process-Monitor-Hosting P1(b) — the OPERATOR SURFACE for
+  ## ``BuildEngineConfig.monitorHosting``.
+  ##
+  ## WHY IT LIVES HERE rather than beside the CLI's other flag parsers. The
+  ## default this decodes is a MEASURED verdict, not a UI preference, and
+  ## ``test_umask_wrap_both_spawn_paths``'s "in-process hosting is off in
+  ## every shipped configuration" pins it by scanning the shipped sources
+  ## for the field name. Keeping the ``mhm*`` literals in the module that
+  ## DECLARES them — the one module the scan exempts, because the first two
+  ## checks of that case pin its only construction site at RUNTIME instead —
+  ## means the CLI never has to spell an enabling mode to offer the flag.
+  ## ``--monitor-hosting`` is therefore plumbing, not a shipped enable, and
+  ## the pin can say so precisely.
+  ##
+  ## ``source`` is the spelling to blame in the diagnostic, exactly as
+  ## ``parseBuildDaemonMode(value, source)`` uses it: the flag on the command
+  ## line, the variable name in the environment.
+  case value.toLowerAscii()
+  of "never", "off":
+    mhmNever
+  of "where-supported", "wheresupported", "auto":
+    mhmWhereSupported
+  of "required", "require":
+    mhmRequired
+  else:
+    raise newException(ValueError,
+      "unsupported " & source & "=" & value &
+        " (expected never, where-supported, or required)")
+
+proc configuredMonitorHostingMode*(): MonitorHostingMode =
+  ## The environment default for ``--monitor-hosting``. ``mhmNever`` when
+  ## unset, which is the same value ``BuildEngineConfig``'s zero value gives,
+  ## so an operator who never heard of this knob gets byte-identical
+  ## behaviour to the pre-P1 engine.
+  let configured = getEnv(MonitorHostingEnvVar, "")
+  if configured.len == 0:
+    return mhmNever
+  parseMonitorHostingMode(configured, MonitorHostingEnvVar)
 
 type
   MonitorHostRecord = object
