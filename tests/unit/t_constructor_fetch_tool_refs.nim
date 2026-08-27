@@ -64,6 +64,28 @@ when defined(reproProviderMode):
       extractStrip = 1,
       extractedRoot = "")
 
+  proc customSynthActions(projectRoot, packageName: string):
+      seq[BuildActionDef] =
+    let pkg = PackageDef(
+      packageName: packageName,
+      sourceFile: projectRoot / "repro.nim",
+      hasDevEnv: false,
+      devEnvBodyHash: "",
+      toolUses: @[])
+    let fragment = buildPackageFragment(
+      pkg,
+      dummyRequest(projectRoot, packageName),
+      proc() =
+        resetDslPortShellStateForPackage(packageName)
+        let state = beginBuildBlock(packageName, "executable", "probe")
+        try:
+          shell "mkdir -p $out/bin"
+        finally:
+          endBuildBlock(state)
+        synthesizeCustomShellBuildActions(packageName),
+      includeDefault = false)
+    extractActions(fragment)
+
 suite "constructor fetch tool identities":
   test "CMake, Meson, and Autotools declare every shell command tool":
     when defined(reproProviderMode):
@@ -99,5 +121,30 @@ suite "constructor fetch tool identities":
         let action = findById(constructorActions(root, packageName, kind),
           actionId)
         check action.toolIdentityRefs == expected
+    else:
+      skip()
+
+  test "custom-shell synthesis declares every fetch command tool":
+    when defined(reproProviderMode):
+      const PackageName = "customFetchTest"
+      resetDslPortFetchState()
+      resetDslPortShellStateForPackage(PackageName)
+      defer:
+        resetDslPortFetchState()
+        resetDslPortShellStateForPackage(PackageName)
+      let root = getTempDir() / "repro-custom-fetch-tool-refs"
+      if dirExists(root):
+        removeDir(root)
+      createDir(root)
+      defer:
+        if dirExists(root):
+          removeDir(root)
+      writeFile(root / "repro.nim", "package customFetchTest:\n  discard\n")
+
+      registerSha256Fetch(PackageName)
+      let action = findById(customSynthActions(root, PackageName),
+        "ccpp-fetch-" & PackageName)
+      check action.toolIdentityRefs ==
+        @["sh", "rm", "mkdir", "curl", "mv", "sha256sum", "tar", "gzip"]
     else:
       skip()

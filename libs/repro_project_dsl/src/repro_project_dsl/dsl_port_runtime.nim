@@ -4032,7 +4032,7 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
     script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
-  script.add("touch \"" & escapedStamp & "\"")
+  script.add(": > \"" & escapedStamp & "\"")
   script
 
 proc dslPortSubstituteShellPlaceholders*(command, fetchPath, extractedPath,
@@ -4135,6 +4135,13 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       of dshaBlake3: "blake3"
     let fetchScript = dslPortCustomFetchScriptShell(spec, fetchPath,
       extracted, fetchStamp)
+    let hashTools =
+      case spec.hashAlg
+      of dshaSha256: @["sha256sum"]
+      of dshaBlake3: @["b2sum", "blake3sum"]
+    let fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
+      copiesDataFile = spec.kind == dfkDataFile,
+      archiveUrl = spec.url)
     fetchId = "ccpp-fetch-" & dslPortSanitizeIdPart(packageName)
     discard buildAction(
       id = fetchId,
@@ -4144,7 +4151,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       pool = "fetch",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.fetch." & hashAlgTag,
-      toolIdentityRefs = @["sh"])
+      toolIdentityRefs = fetchToolRefs)
   # Shell-action chain: action[0] depends on the fetch action (or no
   # deps when no fetch); action[i>0] depends on action[i-1].
   var prevId = ""
