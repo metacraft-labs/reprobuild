@@ -39984,8 +39984,11 @@ proc developSetClosure(repos: seq[ResolvedRepo];
   ## develop-mode sibling is a git-submodule replacement, so only the
   ## pushed repo's own dependency closure can break a teammate's build of
   ## it). Unknown dependency names (a ``depends`` entry that names no repo
-  ## in the resolved set) are skipped — the closure only ever contains
-  ## repos that actually participate in this workspace.
+  ## in the resolved set) contribute nothing to the closure — there is no
+  ## repo to observe. They are NOT thereby harmless, and the gate does not
+  ## treat them as such: ``undeclaredDependsInClosure`` below reports them and
+  ## the gate refuses, because a name it cannot resolve is a repo the push
+  ## claims to depend on and the gate did not check.
   ##
   ## When ``pushedRepoName`` is empty (the hook was invoked without a
   ## resolvable ``--current-repo``), the closure is empty and the caller
@@ -40009,6 +40012,53 @@ proc developSetClosure(repos: seq[ResolvedRepo];
       for dep in byName[name].depends:
         if dep.len > 0 and dep notin result:
           pending.add(dep)
+
+proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
+    pushedRepoName: string): seq[string] =
+  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
+  ## repo the workspace declares, in first-seen order and de-duplicated.
+  ##
+  ## Such an edge used to be dropped in silence. The effect was that the gate
+  ## verified a SMALLER set than the manifests declare while still reporting
+  ## success: one typo in a ``depends`` list removed a real dependency from the
+  ## cleanliness / publication / lock stages, and nothing said so. That is the
+  ## same shape as a check that passes having verified nothing, just at the
+  ## granularity of one edge — so the gate refuses on it and names the edge.
+  ##
+  ## The resolver already refuses a fragment that references an undeclared
+  ## remote for exactly this reason ("turning a typo into a silent success is a
+  ## worse failure mode than the transitional convenience is worth"); this is
+  ## the same rule applied to the other cross-reference a fragment can make.
+  if pushedRepoName.len == 0:
+    return
+  var byName = initHashSet[string]()
+  for repo in repos:
+    byName.incl(repo.name)
+  if pushedRepoName notin byName:
+    return
+  var byNameRepo = initTable[string, ResolvedRepo]()
+  for repo in repos:
+    byNameRepo[repo.name] = repo
+  var seen = initHashSet[string]()
+  var reported = initHashSet[string]()
+  var pending = @[pushedRepoName]
+  while pending.len > 0:
+    let name = pending.pop()
+    if name in seen:
+      continue
+    seen.incl(name)
+    if name notin byNameRepo:
+      continue
+    for dep in byNameRepo[name].depends:
+      if dep.len == 0:
+        continue
+      if dep notin byName:
+        if dep notin reported:
+          reported.incl(dep)
+          result.add(name & " -> " & dep)
+        continue
+      if dep notin seen:
+        pending.add(dep)
 
 proc repoNameForFragment(identity: GitToolIdentity; membershipRoot, relPath,
     newTip, oldTip: string): string =
@@ -40433,6 +40483,32 @@ proc findLockPinningOrphan(identity: GitToolIdentity;
           return LockPinFinding(orphanOid: oid, lockedPath: path,
             lockRelPath: cand.relPath, lockRoot: root, lockTriggerSha: trigger)
 
+proc unpublishedHeadEvidence*(headSha, requestedRemote,
+                              answeredScope: string): string =
+  ## The "HEAD is not published" evidence line, worded from the search that
+  ## ACTUALLY ran rather than from the remote name the gate asked about.
+  ##
+  ## ``isPublishedQuery`` scopes to ``<remote>/*`` only when that remote is
+  ## configured in the checkout; otherwise it answers the ANY-remote question
+  ## (``git_actions.remoteBranchContainsHead``). Reporting the requested name
+  ## regardless produced refusals like "HEAD … not on a 'origin/*'
+  ## remote-tracking branch" against a checkout with no ``origin`` at all —
+  ## true only of a remote that does not exist, and silent about the fact that
+  ## every remote the checkout DOES have had already been searched. An
+  ## operator reading that goes looking for the wrong publication.
+  ##
+  ## ``answeredScope`` is ``GitQueryResult.publishedScope``: a remote name when
+  ## the search was scoped, ``""`` when it covered every remote-tracking
+  ## branch.
+  let head = if headSha.len > 0: "HEAD " & headSha else: "HEAD"
+  if answeredScope.len > 0:
+    return head & " not on a '" & answeredScope & "/*' remote-tracking branch"
+  if requestedRemote.len > 0:
+    return head & " not on any remote-tracking branch (this checkout has no " &
+      "remote named '" & requestedRemote & "', so every configured remote " &
+      "was accepted)"
+  head & " not on any remote-tracking branch"
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
@@ -40605,6 +40681,24 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       identity, resolved, membershipRoot, newTip, oldTip))
   let scope = prePushScope(resolved, currentRepoName, currentManifestLayer,
     membershipScope)
+  # A `depends` edge that names no declared repo silently SHRANK the scope the
+  # stages below walk. Refuse instead: the gate must not report success over a
+  # dependency it could not resolve, and the offending edge is named so the
+  # manifest can be fixed rather than guessed at.
+  let danglingDepends = undeclaredDependsInClosure(resolved.repos,
+    currentRepoName)
+  if danglingDepends.len > 0:
+    result.failures.add(CheckFailure(
+      repo: currentRepoPath,
+      property: "dependency-not-declared",
+      remediation: "declare the missing repo in this workspace's manifests " &
+        "(or fix the name) — the gate cannot verify a dependency the " &
+        "workspace does not declare; edges: " & danglingDepends.join(", "),
+      evidence: $danglingDepends.len &
+        " `depends` edge(s) in the pushed repo's closure name a repo this " &
+        "workspace does not declare: " & danglingDepends.join(", ")))
+    result.exitCode = 2
+    return
   let scopeClosure = scope.names
   let scopeIsWholeWorkspace = scope.wholeWorkspace
   proc repoInScope(name: string): bool =
@@ -40649,6 +40743,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       pubDiagnostic: string
       branch: string
       remoteName: string
+      pubScope: string
+        ## Which remote the ``isPublished`` answer was actually scoped to
+        ## (``""`` = every remote-tracking branch). NOT the same as
+        ## ``remoteName``: the query degrades to the any-remote answer when
+        ## the manifest-derived name is not a remote of this checkout, and
+        ## the refusal below must describe the search that happened.
       hasGit: bool
   var observations: seq[RepoObs]
   # MO-5 — PRIVATE repos whose source is NOT present locally (unreadable /
@@ -40684,6 +40784,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     obs.remoteName = rName
     let pubRes = queryGitState(
       isPublishedQuery(absRepo, rName), identity)
+    obs.pubScope = pubRes.publishedScope
     if pubRes.status == gqsOk:
       obs.isPublished = pubRes.isPublished
     else:
@@ -40896,8 +40997,8 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           outgoing.diagnostic
         elif obs.pubDiagnostic.len > 0:
           "publish-probe-failed: " & obs.pubDiagnostic
-        else: "HEAD " & obs.headSha &
-          " not on a '" & obs.remoteName & "/*' remote-tracking branch"
+        else:
+          unpublishedHeadEvidence(obs.headSha, obs.remoteName, obs.pubScope)
       let remediation =
         if selfPush and outgoing.diagnostic.len > 0:
           "resolve '" & outgoing.diagnostic & "' in " & obs.path &
@@ -41123,10 +41224,11 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
             headSha == outgoing.headOid and
             sameFilesystemPath(sourcePath, parsed.currentRepo):
           continue
-        let evidence =
-          if headSha.len > 0:
-            "HEAD " & headSha & " not on any remote-tracking branch"
-          else: "HEAD not on any remote-tracking branch"
+        # A develop-override deliberately asks the ANY-remote question (it is
+        # an arbitrary local path with no manifest-declared remote), so the
+        # requested name is empty and the wording is the plain one.
+        let evidence = unpublishedHeadEvidence(headSha, "",
+          pubRes.publishedScope)
         result.failures.add(CheckFailure(
           repo: entry.package,
           property: "develop_override_unpublished",
@@ -54924,9 +55026,22 @@ proc runCompletionCommand*(programName: string; args: openArray[string];
 
 proc gitOutput(gitBin, repoRoot: string; sub: openArray[string]): tuple[
     code: int; output: string] =
+  ## Run one `git -C <repoRoot> …` against the membership manifest repo.
+  ##
+  ## The child MUST NOT inherit Git's repository-local bindings. Git exports an
+  ## absolute `GIT_DIR` (plus `GIT_INDEX_FILE`, `GIT_WORK_TREE`, …) to every
+  ## hook it runs, and those OVERRIDE `-C` — so a `repro workspace repos add`
+  ## reached from a hook, or from any `.git`-file checkout that exported them,
+  ## resolves this `-C` to the INVOKING repository instead. Every other git
+  ## helper in this file already scrubs (`gitRunPlain`, `gitRunPlainEnv`,
+  ## `gitTopLevel`, `gitHooksDir`); this one did not, and it is the one that
+  ## runs `add` / `commit` / `push`. The read-side version of the same leak
+  ## made every sibling look dirty; the write-side version stages and COMMITS
+  ## into the wrong repository, so the scrub is not optional here.
   var argv = @[gitBin, "-C", repoRoot]
   for a in sub: argv.add(a)
-  let res = execCmdEx(quoteShellCommand(argv))
+  let res = execCmdEx(quoteShellCommand(argv),
+    env = scrubbedGitRepositoryEnv())
   (code: res.exitCode, output: res.output)
 
 proc manifestRepoRootFor(workspaceRoot: string): string =
@@ -54957,10 +55072,17 @@ proc remoteRevisionState(gitBin, remoteUrl, revision: string): tuple[
     return (rrsOk, "")
   if gitBin.len == 0:
     return (rrsUnknown, "no git binary")
-  # Never let a credential prompt block manifest authoring.
-  putEnv("GIT_TERMINAL_PROMPT", "0")
+  # Never let a credential prompt block manifest authoring. Set it on the
+  # CHILD's environment rather than with `putEnv`: this proc runs inside a
+  # long-lived CLI process, and a process-wide mutation would silently change
+  # the prompting behaviour of every later git invocation in the same run.
+  # The same environment is scrubbed of Git's repository-local bindings, so an
+  # inherited `GIT_DIR` / `GIT_CONFIG*` cannot redirect the query.
+  var lsRemoteEnv = scrubbedGitRepositoryEnv()
+  lsRemoteEnv["GIT_TERMINAL_PROMPT"] = "0"
   let res = execCmdEx(quoteShellCommand(
-    [gitBin, "ls-remote", "--heads", "--tags", remoteUrl, revision]))
+    [gitBin, "ls-remote", "--heads", "--tags", remoteUrl, revision]),
+    env = lsRemoteEnv)
   if res.exitCode != 0:
     return (rrsUnknown, res.output.strip())
   for line in res.output.splitLines():
