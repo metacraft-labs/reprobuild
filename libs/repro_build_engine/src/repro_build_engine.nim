@@ -441,6 +441,57 @@ type
     actions*: seq[BuildAction]
     pools*: seq[BuildPool]
 
+  MonitorLaunchPath* = enum
+    ## In-Process-Monitor-Hosting P3 — the launch paths a ``bakProcess``
+    ## action can be started through, as ONE value.
+    ##
+    ## It exists so that "which launch path is this" and "may that launch
+    ## path host io-mon in-process" stop being two independent boolean
+    ## expressions that can drift apart. They used to be exactly that: the
+    ## hosting decision carried a bare ``bypassRunQuota`` conjunct and the
+    ## inline launch site never looked at the answer at all, so relaxing the
+    ## conjunct would have stripped the monitor wrapper from an action that
+    ## no site was going to host. See ``launchPathHostsMonitorInProcess``.
+    mlpBypassRunQuota
+      ## L1 — the engine spawns the child itself (`--no-runquota`, an
+      ## unreachable daemon, and every nested build in the test suite).
+    mlpInlineRunQuota
+      ## L3 / L3b — the engine holds the RunQuota session, but
+      ## ``offerWithRunQuotaBatch`` / ``startGrantedWithRunQuota`` spawn the
+      ## child themselves as an inseparable part of binding it to the
+      ## granted lease. This is what a normal ``repro build`` takes.
+    mlpRunQuotaHelper
+      ## L2 — a separate ``repro __repro-runquota-helper`` process spawns
+      ## the action, two processes deep.
+
+  MonitorHostingMode* = enum
+    ## How hard ``BuildEngineConfig`` asks for in-process monitor hosting.
+    ##
+    ## An enum rather than a bool because "host where you can, wrap
+    ## elsewhere" and "host or fail" are different requests and the
+    ## difference is load-bearing: the second one is what makes the launch
+    ## sites' refusal REACHABLE, and an unreachable refusal is a comment.
+    mhmNever
+      ## The shipped default (Nim's zero value, and it is meant to be).
+      ## Every monitored action is launched as
+      ## ``<repro> internal io monitor --depfile <f> -- <argv>``. HM-6
+      ## measured hosting as no faster at the default parallelism and
+      ## 1.5-2.4x slower on cheap actions; see the "who hosts the monitor"
+      ## block below ``preparedRunQuotaCommand``.
+    mhmWhereSupported
+      ## Host on the launch paths that CAN host and keep the CLI wrapper
+      ## everywhere else. The wrapper is not a degraded form — it is the
+      ## same io-mon code producing evidence nothing downstream can tell
+      ## apart — so this fallback is silent on purpose.
+    mhmRequired
+      ## Host wherever hosting is requested, and FAIL an action whose
+      ## launch path cannot host rather than falling back. Use it to
+      ## measure or audit hosting without a launch path quietly opting out.
+      ## On a platform where hosting is unsupported outright
+      ## (``InProcessMonitorHostSupported``) this mode still takes the
+      ## wrapper: that is a property of the host OS, not of a launch path
+      ## disagreeing with the plan, and the wrapper monitors correctly.
+
   BuildEngineConfig* = object
     # Project-local scratch root: holds `runquota-results/*.json`,
     # `monitor-depfiles/*.rdep`, `dependency-evidence/*.rbar`, and per-build
@@ -496,15 +547,16 @@ type
     # launches child processes directly under leases instead of spawning a
     # `repro __repro-runquota-helper` process for every action.
     inlineRunQuota*: bool
-    # OPT-IN, and OFF by default because measurement says so. When true, the
-    # engine hosts io-mon's consumer itself on the launch paths it spawns
-    # (today only the RunQuota-bypass path) instead of putting a
-    # ``repro internal io monitor`` process in between. The mechanism works and
-    # is exercised by the suite; what does not hold is the LATENCY case for
+    # OPT-IN, and ``mhmNever`` by default because measurement says so. Above
+    # ``mhmNever`` the engine hosts io-mon's consumer itself on the launch
+    # paths it spawns (today only the RunQuota-bypass path) instead of putting
+    # a ``repro internal io monitor`` process in between. The mechanism works
+    # and is exercised by the suite; what does not hold is the LATENCY case for
     # turning it on by default. See the "who hosts the monitor" block below
     # ``preparedRunQuotaCommand`` for the numbers and for what would have to
-    # change before this becomes the default.
-    hostMonitorInProcess*: bool
+    # change before this becomes the default, and ``MonitorHostingMode`` for
+    # what the three settings mean.
+    monitorHosting*: MonitorHostingMode
     dryRun*: bool
     progressCallback*: BuildProgressCallback
     cancelCallback*: BuildCancelCallback
@@ -3715,10 +3767,14 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # unconfigured driver still means "no monitor is wired"), so this branch
       # changes WHO hosts and nothing about WHETHER an action is monitored —
       # PROVIDED the launch site the caller had in mind actually hosts.
-      # Stripping the wrapper is half of a two-part handshake, and this proc
-      # cannot check the other half; the caller's decision is what guarantees
-      # it. See the hosting decision in ``runBuild`` for which launch sites
-      # honour ``hostInProcess`` and which silently would not.
+      # Stripping the wrapper is half of a two-part handshake and this proc
+      # cannot check the other half, so the OTHER half is enforced at the
+      # launch site instead of being documented here: ``runBuild`` refuses a
+      # hosted plan that arrives at a launch path
+      # ``launchPathHostsMonitorInProcess`` does not cover, with
+      # ``monitorHostingRefusal``'s diagnostic. There is therefore no
+      # configuration in which this branch's unwrapped argv reaches a site
+      # that starts no host — it fails the action instead of running it.
       result.hostInProcess = true
     else:
       result.action.argv = @[monitorCli] & config.monitorCliArgs &
@@ -5074,8 +5130,8 @@ proc preparedRunQuotaCommand(action: BuildAction;
 # WHAT THIS IS. A monitored action is normally launched as
 # ``<repro> internal io monitor --depfile <f> -- <argv>``: the engine spawns a
 # SECOND ``repro`` process whose only job is to be io-mon's host, and that
-# process spawns the real command. When ``BuildEngineConfig.hostMonitorInProcess``
-# is set, the launch paths the engine spawns skip that: the engine drives
+# process spawns the real command. When ``BuildEngineConfig.monitorHosting``
+# is above ``mhmNever``, the launch paths the engine spawns skip that: the engine drives
 # io-mon's decomposed host API directly (``startMonitor`` -> ``pollMonitor`` ->
 # ``finishMonitor``, IoMon-Decomposed-Host-API DH-2) and the monitored tree's
 # root is a direct child of the engine.
@@ -5108,6 +5164,21 @@ proc preparedRunQuotaCommand(action: BuildAction;
 # paths`` in tests/integration/t_every_launch_path_is_monitored.nim is what
 # holds the two forms to the same evidence.
 #
+# AND THE LIST ABOVE IS NOT PROSE — it is ``launchPathHostsMonitorInProcess``,
+# an exhaustive ``case`` over ``MonitorLaunchPath`` that the hosting decision
+# in ``runBuild`` reads and that a new launch path does not compile without.
+# It used to be a bare ``bypassRunQuota`` conjunct on the decision line, with
+# this comment carrying the reasoning, and that arrangement had a dormant
+# cardinal-sin hazard in it: the inline launch site is staged and ``continue``s
+# before the branch that consults ``plan.hostInProcess``, so widening the
+# conjunct would have stripped the wrapper from an inline action that no site
+# was going to host — an unmonitored, successful, publishing action with an
+# empty dependency set and no diagnostic. In-Process-Monitor-Hosting P3 turned
+# that into a REFUSAL: ``runBuild`` fails any action whose plan says hosted and
+# whose launch path is not L1, with ``monitorHostingRefusal``'s sentence. The
+# unmonitored state is no longer reachable by widening a boolean; it takes a
+# launch site that actually starts a host.
+#
 # WHEN THE SCHEDULER FINISHES A MONITOR: on the poll pass that first observes
 # the root's exit, for EVERY monitor that has exited, not only the one the
 # scheduler goes on to reap. This is a deliberate choice with an evidence
@@ -5124,7 +5195,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
 # serialisation is real, and it is the price of the evidence agreeing with the
 # reference rather than with the scheduler's queue depth.
 #
-# AND THIS IS WHY ``BuildEngineConfig.hostMonitorInProcess`` DEFAULTS TO FALSE.
+# AND THIS IS WHY ``BuildEngineConfig.monitorHosting`` DEFAULTS TO ``mhmNever``.
 # The case for hosting is latency: one process spawn per monitored action
 # removed. That spawn IS removed and it IS worth something — but the monitor's
 # end-of-action work moves with it, out of N concurrent monitor processes and
@@ -5216,7 +5287,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
 # encode+write is ~1.1 ms of a ~14 ms `finishMonitor`, i.e. under a tenth, and
 # the decode is ~0.4 ms. Removing all of it still leaves ~12 ms paid serially
 # per action, so hosting is still slower than the wrapper at parallelism 8.
-# `hostMonitorInProcess` stays FALSE by default.
+# `monitorHosting` stays `mhmNever` by default.
 #
 # THAT WAS ALSO MEASURED END TO END rather than only argued from the parts: 60
 # trivial actions at parallelism 8, hosted and wrapped arms interleaved, three
@@ -5245,6 +5316,64 @@ const InProcessMonitorHostSupported* = defined(linux) or defined(macosx)
   ## executes serially — hosting in-process there would turn a parallel build
   ## into a sequential one. The wrapper stays on Windows until
   ## nim-stackable-hooks grows a non-blocking spawn.
+
+func launchPathHostsMonitorInProcess*(path: MonitorLaunchPath): bool =
+  ## THE ONE TABLE that says which launch paths the engine can host io-mon
+  ## on, and the only thing the hosting decision in ``runBuild`` reads.
+  ##
+  ## Exhaustive ``case``, no ``else``: a launch path added to
+  ## ``MonitorLaunchPath`` does not compile until somebody classifies it,
+  ## which is the point — the old shape let a launch path exist without
+  ## anyone deciding whether it hosts.
+  ##
+  ## WIDENING A ROW HERE DOES NOT ENABLE HOSTING ON THAT PATH. The refusal in
+  ## ``runBuild`` is keyed on the launch variables that select the spawn, not
+  ## on this table, so a row flipped to ``true`` without teaching the
+  ## corresponding launch site to start a host makes the action FAIL with
+  ## ``monitorHostingRefusal``'s sentence instead of running unmonitored. See
+  ## In-Process-Monitor-Hosting P4 for what the inline row actually needs.
+  case path
+  of mlpBypassRunQuota: true
+  of mlpInlineRunQuota: false
+  of mlpRunQuotaHelper: false
+
+func monitorHostingRequested*(mode: MonitorHostingMode;
+                              path: MonitorLaunchPath): bool =
+  ## Whether ``mode`` asks for a hosted plan on ``path``. ``mhmRequired``
+  ## says yes on every path ON PURPOSE: that is what carries an impossible
+  ## request as far as the launch site, where it is refused with a
+  ## diagnostic, instead of being silently downgraded to the wrapper where
+  ## no test could ever see the difference.
+  case mode
+  of mhmNever: false
+  of mhmWhereSupported: launchPathHostsMonitorInProcess(path)
+  of mhmRequired: true
+
+func monitorHostingRefusal*(path: MonitorLaunchPath): string =
+  ## The diagnostic an action fails with when its monitor plan says the
+  ## engine hosts io-mon and the launch site about to start it does not.
+  ## Empty for a path that does host, so
+  ## ``monitorHostingRefusal(p).len > 0`` and
+  ## ``not launchPathHostsMonitorInProcess(p)`` are the same statement.
+  const Why =
+    "; refusing to launch it. A hosted plan carries the recipe's own argv " &
+    "with NO `repro internal io monitor` wrapper, so an action that reaches " &
+    "a launch site which starts no host runs completely unmonitored: no " &
+    "RMDF, an empty dependency set, and a successful, cache-publishing " &
+    "action that reports nothing wrong. Teaching this path to host needs a " &
+    "RunQuota lease that can adopt an already-spawned child " &
+    "(In-Process-Monitor-Hosting P4), not a wider hosting decision."
+  case path
+  of mlpBypassRunQuota:
+    ""
+  of mlpInlineRunQuota:
+    "in-process monitor hosting was requested for an action on the inline " &
+    "RunQuota launch path, which binds the child to its granted lease by " &
+    "spawning it itself" & Why
+  of mlpRunQuotaHelper:
+    "in-process monitor hosting was requested for an action on the RunQuota " &
+    "helper launch path, which starts the action from a separate " &
+    "`repro __repro-runquota-helper` process" & Why
 
 type
   MonitorHostRecord = object
@@ -8104,38 +8233,28 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             bypassRunQuota = not inlineRunQuota
           else:
             bypassRunQuota = launchBypassesRunQuota()
-        # ``bypassRunQuota`` IS A SAFETY CONJUNCT, NOT A SCOPE NOTE. Read
-        # this before widening it.
-        #
+        # In-Process-Monitor-Hosting P3 — "which launch path" is now ONE
+        # value, and it is the only input to the hosting decision besides the
+        # config. It used to be a bare ``bypassRunQuota`` conjunct on the line
+        # below, which read like a scope note and was in fact the only thing
+        # standing between an inline action and a completely unmonitored run
+        # (see the refusal further down, and ``monitorHostingRefusal``).
+        let launchPath =
+          if bypassRunQuota: mlpBypassRunQuota
+          elif inlineRunQuota: mlpInlineRunQuota
+          else: mlpRunQuotaHelper
         # Saying "hosted" here does two independent things: it tells
         # ``monitoredAction`` to leave the argv ALONE (no
         # ``repro internal io monitor`` wrapper), and it tells the launch
-        # site below to start an in-process host instead. Only the bypass
-        # and helper launch sites consult ``plan.hostInProcess`` at all.
-        # The INLINE RunQuota sites do not: an inline launch is staged into
-        # ``stagedInlineLaunches`` and ``continue``s before that branch is
-        # ever reached, and the batch flush / grant poller spawn the child
-        # themselves as part of binding it to a lease.
-        #
-        # So dropping ``bypassRunQuota`` from this conjunction does not
-        # merely "enable hosting on more paths". An inline action would
-        # lose the wrapper AND get no host: it would run completely
-        # UNMONITORED, produce no RMDF, and be graded as if the monitor had
-        # simply found nothing — no error, no diagnostic, nothing in the
-        # build report. That was measured, not reasoned: with the conjunct
-        # removed, the inline actions in
-        # ``tests/integration/t_every_launch_path_is_monitored.nim`` come
-        # back with an EMPTY read set and "RMDF file does not exist".
-        #
-        # Hosting an inline action therefore requires the inline spawn
-        # sites to consult ``plan.hostInProcess`` first — which in turn
-        # needs a lease that can adopt an already-spawned child, and costs
-        # RunQuota the per-action resource accounting it measures by owning
-        # the spawn. Until that exists, this conjunct is what keeps a
-        # hosted plan and a hosting launch site from drifting apart.
+        # site below to start an in-process host instead. Under
+        # ``mhmWhereSupported`` the two are matched by
+        # ``launchPathHostsMonitorInProcess``; under ``mhmRequired`` a plan
+        # is hosted on every path DELIBERATELY, so that a request the launch
+        # sites cannot satisfy fails loudly at the site instead of being
+        # silently downgraded where nothing could observe it.
         let hostMonitorInProcess = InProcessMonitorHostSupported and
-          config.hostMonitorInProcess and
-          action.kind == bakProcess and bypassRunQuota
+          action.kind == bakProcess and
+          monitorHostingRequested(config.monitorHosting, launchPath)
 
         let monitorPlanStart = statStart()
         let plan = monitoredAction(action, config, cacheRoot,
@@ -8258,6 +8377,44 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           launchedAny = true
           continue
 
+        # In-Process-Monitor-Hosting P3 — A HOSTED PLAN MAY ONLY REACH A
+        # LAUNCH SITE THAT HOSTS. This is the enforcement half of the
+        # handshake ``monitoredAction`` cannot check from where it stands.
+        #
+        # ``monitoredAction`` strips the ``repro internal io monitor``
+        # wrapper when the plan says hosted, so a hosted plan arriving at a
+        # site that starts no host runs the recipe's argv NAKED: no wrapper,
+        # no host, no RMDF, an empty dependency set, and a successful,
+        # cache-publishing action that reports nothing wrong. Only the L1
+        # branch below honours ``plan.hostInProcess``; an inline launch is
+        # staged and ``continue``s above that branch, and the helper path
+        # hands the whole argv to another process.
+        #
+        # THE CONDITION IS KEYED ON ``bypassRunQuota`` — the same variable
+        # that selects the spawn a few lines below — and NOT on
+        # ``launchPathHostsMonitorInProcess``. That is the difference
+        # between a guard and a restatement: flipping the inline row of that
+        # table to ``true`` in the hope of enabling hosting there does not
+        # walk past this check, it makes every inline action fail with the
+        # sentence below until the staging site has actually learned to
+        # start a host (In-Process-Monitor-Hosting P4).
+        if plan.hostInProcess and not bypassRunQuota:
+          let refusal = monitorHostingRefusal(launchPath)
+          statuses[id] = asFailed
+          let refusedIdx = idToIndex.resultIndex(id)
+          runResult.results[refusedIdx].status = asFailed
+          runResult.results[refusedIdx].dependencyPolicyKind =
+            plan.action.dependencyPolicy.kind
+          runResult.results[refusedIdx].monitorDepfilePath =
+            plan.action.monitorDepfile
+          runResult.results[refusedIdx].stderr = refusal
+          runResult.trace(id, "failed", refusal)
+          blockClosure(id, id)
+          emitProgress(bpkActionCompleted, id)
+          completed = terminalCount()
+          launchedAny = true
+          continue
+
         statuses[id] = asRunning
         let runningIdx = idToIndex.resultIndex(id)
         runResult.results[runningIdx].status = asRunning
@@ -8284,13 +8441,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # a single round-trip per wave.
           #
           # NOTE THE ``continue``: this path leaves before the launch
-          # branch below, so it NEVER consults ``plan.hostInProcess``. It
-          # is correct today only because the hosting decision above
-          # requires ``bypassRunQuota``, so an inline action's plan is
-          # never hosted. If that conjunct is ever relaxed, this staging
-          # has to learn about hosting in the same change — otherwise the
-          # action arrives here with an unwrapped argv and no host, and
-          # runs unmonitored without saying so.
+          # branch below, so it never reaches the code that would start an
+          # in-process host. An unwrapped argv staged here would run
+          # completely unmonitored — which is why the guard above refuses a
+          # hosted plan on any path that is not L1, and why this assertion
+          # stands here as well.
+          #
+          # SECOND LINE OF DEFENCE, and it is not redundant with the guard.
+          # The guard's coverage of this site rests on nothing but source
+          # ORDER: move this staging block above it — which is exactly the
+          # shape this code had before P3 — and the guard silently stops
+          # covering the inline path. The assertion is attached to the
+          # staging itself, so it travels with the block and cannot be
+          # separated from it by moving code around. It is unreachable while
+          # the guard is in place; that is the intended state, not an excuse
+          # for leaving it out.
+          doAssert not plan.hostInProcess,
+            monitorHostingRefusal(mlpInlineRunQuota)
           stagedInlineLaunches.add(StagedInlineLaunch(
             id: id,
             pool: poolName,

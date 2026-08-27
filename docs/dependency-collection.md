@@ -40,6 +40,19 @@ gigabytes therefore writes gigabytes into the cache root before anything
 truncates it. If `cacheRoot` is on a small filesystem, that peak is the thing to
 watch.
 
+Not every launch path can host. The engine can only be the monitor's host when
+the engine is the process that spawns the command, and two of the launch paths
+are not: the RunQuota helper path starts the action from a separate helper
+process, and the inline RunQuota path spawns it inside RunQuota as part of
+binding it to a granted lease. Asking for hosting normally leaves those paths on
+the default `repro internal io monitor` path, which monitors them exactly the
+same way. Asking for it in the stricter "hosting is required" form instead
+**fails** such an action with a diagnostic naming the launch path. That is
+deliberate: a hosted command carries no monitor wrapper, so a hosted plan
+arriving at a launch site that starts no host would run with nothing watching
+it, publish a cache entry against an empty dependency set, and report no error.
+The engine refuses that state rather than producing it.
+
 ### How the dependency record file is published
 
 Each monitored action leaves a record of what it touched at

@@ -8585,6 +8585,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim",
+    binary: "build/test-bin/t_inline_launch_refuses_unhostable_monitor_hosting",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_integration_build_engine_api_ready_queue.nim",
     binary: "build/test-bin/t_integration_build_engine_api_ready_queue",
     defines: @[],

@@ -5,7 +5,7 @@
 `hm6_acceptance.nim` + `hm6_run.sh` are the instrument behind
 In-Process-Monitor-Hosting HM-6. They answer one question: on a **real**
 parallel build, is monitoring the action by calling io-mon as a library
-(`BuildEngineConfig.hostMonitorInProcess`) faster than spawning
+(`BuildEngineConfig.monitorHosting`) faster than spawning
 `repro internal io monitor` in front of it?
 
 **Measured answer: no.** At `buildMaxParallelism()`'s default of 8, over 60
@@ -15,8 +15,8 @@ of the difference was not stable across rounds — an independent re-run on the
 same harness read 0.988 with a wider within-arm spread. On ~0 ms actions at the
 same parallelism, hosting is consistently **slower**: 1.5–2.4x on one machine,
 1.1–1.9x on a more heavily loaded one. Quote the direction and the
-sign-stability contrast, not the band. `hostMonitorInProcess` stays
-false. The full tables, the drift control, the sensitivity control and the
+sign-stability contrast, not the band. `monitorHosting` stays
+`mhmNever`. The full tables, the drift control, the sensitivity control and the
 evidence comparison are recorded under HM-6 in
 `reprobuild-specs/In-Process-Monitor-Hosting.milestones.org`.
 
@@ -30,7 +30,7 @@ a hand-written flag list would be measuring something other than the build it
 claims to measure.
 
 Both arms are the same binary and the same graph; only
-`hostMonitorInProcess` differs. Both set `bypassRunQuota`, because the bypass
+`monitorHosting` differs. Both set `bypassRunQuota`, because the bypass
 path is the only launch path that can host at all.
 
 ### Two controls, and why the result is worthless without them

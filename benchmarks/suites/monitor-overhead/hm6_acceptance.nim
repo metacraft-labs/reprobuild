@@ -19,7 +19,7 @@
 ##
 ## WHAT IS STILL SYNTHETIC, stated rather than glossed: the graph is
 ## constructed here instead of being loaded from repro.nim, because
-## `BuildEngineConfig.hostMonitorInProcess` has NO CLI or environment
+## `BuildEngineConfig.monitorHosting` has NO CLI or environment
 ## surface — no construction site outside three test files sets it — so
 ## `repro build` cannot be asked to host and the two arms cannot be
 ## compared through the CLI at all. That is itself a finding; see HM-6.
@@ -220,7 +220,8 @@ when isMainModule:
     stdoutLimit: 256 * 1024,
     stderrLimit: 256 * 1024,
     bypassRunQuota: true,
-    hostMonitorInProcess: hosted)
+    monitorHosting:
+      if hosted: mhmWhereSupported else: mhmNever)
 
   let loadBefore = loadAvg()
   let pidsBefore = livePids()
