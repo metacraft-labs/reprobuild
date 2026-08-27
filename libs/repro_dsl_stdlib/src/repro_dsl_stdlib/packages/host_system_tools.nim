@@ -107,6 +107,24 @@ package `diff`:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+package `head`:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/head",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `ln`:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/ln",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `sort`:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/sort",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package `sha256sum`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/sha256sum",

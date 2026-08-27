@@ -2280,6 +2280,10 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(
       packageName) &
     "-" & sanitizeStageCopyName(name)
+  let stageToolRefs =
+    if kind == "library": @[
+      "sh", "mkdir", "cp", "ls", "sort", "head"]
+    else: @["sh", "mkdir", "cp", "chmod"]
   discard buildAction(
     id = stageId,
     call = inlineExecCall(argv),
@@ -2289,7 +2293,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.stage." & kind,
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = stageToolRefs)
 
 proc emitStageCopyAlias(installEdge: BuildActionDef;
                         buildDir, destdir, packageName, aliasName,
@@ -2393,6 +2397,9 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-alias-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(aliasName)
+  let aliasToolRefs =
+    when defined(windows): @["sh", "mkdir", "cp"]
+    else: @["sh", "mkdir", "cp", "chmod", "ln"]
   discard buildAction(
     id = stageId,
     call = inlineExecCall(argv),
@@ -2402,7 +2409,7 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.stage.executable_alias",
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = aliasToolRefs)
 
 # ---------------------------------------------------------------------------
 # Slicing methods — AutotoolsPackageResult

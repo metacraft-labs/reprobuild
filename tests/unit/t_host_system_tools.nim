@@ -22,3 +22,10 @@ suite "host system tool provisioning":
       check pkg.nixProvisioning.len == 1
       check pkg.nixProvisioning[0].selector == "nixpkgs#diffutils"
       check pkg.nixProvisioning[0].executablePath == "bin/" & tool
+
+  test "staging helpers use the pinned Nix coreutils provider":
+    for tool in ["head", "ln", "sort"]:
+      let pkg = findPackage(tool)
+      check pkg.nixProvisioning.len == 1
+      check pkg.nixProvisioning[0].selector == "nixpkgs#coreutils"
+      check pkg.nixProvisioning[0].executablePath == "bin/" & tool
