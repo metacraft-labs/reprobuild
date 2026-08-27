@@ -265,6 +265,7 @@ proc meson_package*(srcDir: string;
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "meson_package.patch",
       toolIdentityRefs = @["sh"])
+    m9r14eThreadRecipeDepsAsToolRefs(patchEdge.id, pkgName)
     setupAfter.add(patchEdge)
   if projectRoot.len > 0:
     let cleanStamp = projectRoot / ".repro" / "build" / "meson-clean.stamp"

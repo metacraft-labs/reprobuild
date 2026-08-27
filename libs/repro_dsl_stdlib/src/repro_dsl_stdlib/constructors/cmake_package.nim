@@ -223,6 +223,7 @@ proc cmake_package*(srcDir: string;
     if raw.len > 0: raw else: "src"
   let fetchActOpt = maybeEmitFetchAction(pkgName, projectRoot, extractedRel)
   var configureAfter: seq[BuildActionDef] = @[]
+  var patchActionId = ""
   if fetchActOpt.isSome:
     configureAfter.add(fetchActOpt.get())
   # M9.R.15q.10.5 — when ``srcPatches`` is non-empty, emit a per-recipe
@@ -256,6 +257,7 @@ proc cmake_package*(srcDir: string;
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "cmake_package.patch",
       toolIdentityRefs = @["sh"])
+    patchActionId = patchEdge.id
     configureAfter.add(patchEdge)
   # M9.R.15i.1 — auto-thread Qt6 component cmake-config dirs from every
   # ``qt6-*`` dep's install-mirror so KF6 / Plasma recipes consuming
@@ -492,6 +494,9 @@ proc cmake_package*(srcDir: string;
       if extra notin cmakeBuildRefs:
         cmakeBuildRefs.add(extra)
   let cmakeDepRefs = cmakeNativeRefs & cmakeBuildRefs
+  if patchActionId.len > 0:
+    appendRegisteredActionToolIdentityRefs(patchActionId, cmakeDepRefs)
+    classifyRegisteredActionToolIdentityRefs(patchActionId, cmakeBuildRefs)
 
   # CMake records its generator and toolchain in the build tree. Reusing a
   # directory configured by another generator makes a fresh source build fail
