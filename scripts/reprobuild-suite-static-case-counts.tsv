@@ -61,7 +61,7 @@ libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim	nim	6
 libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	6
 libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
-libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	9
+libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	10
 libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	1
 libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim	nim	2
 libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim	nim	1
@@ -1287,8 +1287,8 @@ tests/test_dev_env_m9_policy.py	python	4
 tests/unit/t_action_compatibility_key.nim	nim	4
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
-tests/unit/t_configure_build_tree_cleanup.nim	nim	4
-tests/unit/t_constructor_fetch_tool_refs.nim	nim	1
+tests/unit/t_configure_build_tree_cleanup.nim	nim	5
+tests/unit/t_constructor_fetch_tool_refs.nim	nim	2
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	1
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
@@ -1302,7 +1302,7 @@ tests/unit/t_hcr_agent_process_target.nim	nim	2
 tests/unit/t_hcr_agent_protocol.nim	nim	8
 tests/unit/t_hcr_agent_runtime.nim	nim	4
 tests/unit/t_hcr_watch_inference.nim	nim	1
-tests/unit/t_host_system_tools.nim	nim	1
+tests/unit/t_host_system_tools.nim	nim	3
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_library_stage_alias.nim	nim	3
 tests/unit/t_m21_history_fed_scheduling.nim	nim	22
