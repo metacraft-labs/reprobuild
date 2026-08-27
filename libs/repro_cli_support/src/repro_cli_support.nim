@@ -37708,16 +37708,26 @@ const
     ## deterministically regardless of git's join.
 
 proc gitNoteRun(gitBin: string;
-                args: openArray[string]): tuple[code: int; output: string] =
+                args: openArray[string];
+                received = ReceivedObjectStore()):
+    tuple[code: int; output: string] =
   ## Free-standing argv runner for the notes commands (same shape as
   ## ``gitRunPlain`` but takes a bare git binary path so the transport layer
   ## does not require a resolved ``GitToolIdentity``).
+  ##
+  ## ``received`` is the receive-pack object-store snapshot a ``pre-receive``
+  ## hook captured at entry. It DEFAULTS TO EMPTY, so every ordinary caller
+  ## keeps the plain scrubbed environment byte-for-byte; only a call that has
+  ## explicitly said "this reads the receiving repository's OWN incoming
+  ## objects" gets the bindings back. Passing it for a child that touches any
+  ## other repository would reintroduce precisely the cross-repository bug the
+  ## scrubber exists to prevent — see ``withReceivedObjectStore``.
   var cmd = quoteShell(gitBin)
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-    env = scrubbedGitRepositoryEnv())
+    env = receivedObjectStoreEnv(received))
   (code: res.exitCode, output: res.output)
 
 proc framedCertificateRecord(cert: TestCertificate): string =
@@ -37769,8 +37779,27 @@ proc attachCertificate*(gitBin, repoPath, commit: string;
         res2.output.strip())
   (ok: true, diagnostic: "")
 
+type
+  GitObjectReadStatus* = enum
+    ## The THREE outcomes a read of a git object out of a receiving repository
+    ## can have. They are kept apart deliberately: folding ``gorUnreadable``
+    ## into ``gorAbsent`` is the shape that turned the public-tier lock gate
+    ## into a no-op, because every call site that reads "absent" as "nothing to
+    ## check" then reads "I could not look" as "nothing to check" too.
+    gorAbsent      ## the object store was readable and there is no such record
+    gorPresent     ## the record was read
+    gorUnreadable  ## the read itself FAILED — the caller must not infer
+                   ## absence from it
+
+  GitNoteRead* = object
+    ## Outcome of reading one commit's note blob.
+    status*: GitObjectReadStatus
+    body*: string
+    diagnostic*: string  ## why, when ``status == gorUnreadable``
+
 proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
-                             commit: string): string =
+                             commit: string;
+                             received = ReceivedObjectStore()): GitNoteRead =
   ## Read the note blob attached to ``commit`` straight out of a raw
   ## NOTES-COMMIT SHA (not a ref). ``git notes --ref <raw-sha>`` does NOT work
   ## (``--ref`` resolves a ref NAME, not a commit-ish), but a notes tree maps
@@ -37780,11 +37809,19 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
   ## then ``git cat-file blob`` it. This is what lets the gateway read an
   ## INCOMING certificate note in ``pre-receive`` BEFORE the notes ref has been
   ## moved into place (the objects are already present; only the ref update is
-  ## pending). Returns "" when there is no note for ``commit``.
+  ## pending).
+  ##
+  ## ``gorAbsent`` means the notes tree WAS read and carries no entry for
+  ## ``commit``. A git failure at any step is ``gorUnreadable`` and says which
+  ## step failed — a notes-commit the push just delivered is not allowed to
+  ## read as "no certificate".
   let ls = gitNoteRun(gitBin,
-    ["-C", repoPath, "ls-tree", "-r", notesCommitSha])
+    ["-C", repoPath, "ls-tree", "-r", notesCommitSha], received)
   if ls.code != 0:
-    return ""
+    return GitNoteRead(status: gorUnreadable, body: "",
+      diagnostic: "cannot read the notes tree of " & notesCommitSha &
+        " in '" & repoPath & "' (git ls-tree exit " & $ls.code & ": " &
+        ls.output.strip() & ")")
   for rawLine in ls.output.splitLines():
     let line = rawLine.strip()
     if line.len == 0: continue
@@ -37797,11 +37834,80 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
     let path = line[tabIdx + 1 .. ^1].strip()
     if path.replace("/", "") == commit:
       let blob = gitNoteRun(gitBin,
-        ["-C", repoPath, "cat-file", "blob", objSha])
+        ["-C", repoPath, "cat-file", "blob", objSha], received)
       if blob.code == 0:
-        return blob.output
-      return ""
-  ""
+        return GitNoteRead(status: gorPresent, body: blob.output)
+      return GitNoteRead(status: gorUnreadable, body: "",
+        diagnostic: "the notes tree of " & notesCommitSha & " names blob " &
+          objSha & " for " & commit & " but it cannot be read (git cat-file " &
+          "exit " & $blob.code & ": " & blob.output.strip() & ")")
+  GitNoteRead(status: gorAbsent, body: "")
+
+proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
+                                   notesRef: string;
+                                   received = ReceivedObjectStore()):
+    tuple[certs: seq[TestCertificate]; status: GitObjectReadStatus;
+          diagnostic: string] =
+  ## ``readAttachedCertificatesFromRef`` plus the READ STATUS it had to throw
+  ## away to fit a ``seq`` return. The gate uses this one so it can say
+  ## "the certificate note could not be read" instead of "no certificate" —
+  ## two conditions with the same refusal but opposite remedies, and telling a
+  ## developer to mint a certificate they already minted is how this class of
+  ## defect stays alive.
+  ##
+  ## ``notesRef`` may be a 40-hex notes-COMMIT SHA (the pre-receive case) or a
+  ## ref NAME (the post-receive / settled case). ``git notes --ref`` only
+  ## accepts a ref name, so we try the raw-SHA tree-walk first and fall back to
+  ## ``git notes show`` for a ref name.
+  ##
+  ## The raw-SHA read — the one the pre-receive gate depends on, where the
+  ## object is known to have been delivered — reports unreadability apart.
+  ##
+  ## The ref-NAME read does NOT, and that is a KNOWN RESIDUAL rather than a
+  ## property to rely on. "No such ref" is separated out by the ``rev-parse
+  ## --verify --quiet`` probe below, but every remaining ``git notes show``
+  ## failure is reported ``gorAbsent``, and they are not all absences: git
+  ## itself tells them apart, with exit 1 / ``error: no note found for object``
+  ## for the genuine absence and exit 128 / ``fatal: bad object <sha>`` when the
+  ## note object cannot be read. Folding the second into the first is the same
+  ## shape as the collapse that made the lock gate a no-op — narrower, and
+  ## harmless to the VERDICT (the cert gate refuses on absence anyway), but it
+  ## costs the same wrong remedy on the fallback path the pre-receive gate takes
+  ## when the incoming-notes read yields nothing. Fixing it means classifying on
+  ## the exit code here, the way ``gatewayReadPushedLock`` classifies on its
+  ## three steps.
+  var read: GitNoteRead
+  let looksLikeSha = notesRef.len == 40 and
+    notesRef.allCharsInSet(HexDigits)
+  if looksLikeSha:
+    read = noteBlobFromNotesCommit(gitBin, repoPath, notesRef, commit,
+      received)
+  else:
+    let exists = gitNoteRun(gitBin,
+      ["-C", repoPath, "rev-parse", "--verify", "--quiet", notesRef],
+      received)
+    if exists.code != 0 or exists.output.strip().len == 0:
+      read = GitNoteRead(status: gorAbsent, body: "")
+    else:
+      let res = gitNoteRun(gitBin,
+        ["-C", repoPath, "notes", "--ref", notesRef, "show", commit],
+        received)
+      read =
+        if res.code == 0: GitNoteRead(status: gorPresent, body: res.output)
+        else: GitNoteRead(status: gorAbsent, body: "")
+  result.status = read.status
+  result.diagnostic = read.diagnostic
+  if read.status != gorPresent or read.body.len == 0:
+    return
+  for body in splitCertificateRecords(read.body):
+    var cert: TestCertificate
+    try:
+      cert = parseCertificateFromToml(body)
+    except TestCertificateParseError:
+      continue
+    # Mismatch filter: only certs that genuinely attest THIS commit.
+    if cert.commit == commit:
+      result.certs.add(cert)
 
 proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
                                       notesRef: string): seq[TestCertificate] =
@@ -37814,31 +37920,11 @@ proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
   ## reads off the pre-receive stdin. Records whose internal ``commit`` field
   ## does not equal ``commit`` are DROPPED; unparseable records are skipped.
   ##
-  ## ``notesRef`` may be a 40-hex notes-COMMIT SHA (the pre-receive case) or a
-  ## ref NAME (the post-receive / settled case). ``git notes --ref`` only
-  ## accepts a ref name, so we try the raw-SHA tree-walk first and fall back to
-  ## ``git notes show`` for a ref name.
-  var noteBody = ""
-  let looksLikeSha = notesRef.len == 40 and
-    notesRef.allCharsInSet(HexDigits)
-  if looksLikeSha:
-    noteBody = noteBlobFromNotesCommit(gitBin, repoPath, notesRef, commit)
-  else:
-    let res = gitNoteRun(gitBin,
-      ["-C", repoPath, "notes", "--ref", notesRef, "show", commit])
-    if res.code == 0:
-      noteBody = res.output
-  if noteBody.len == 0:
-    return @[]
-  for body in splitCertificateRecords(noteBody):
-    var cert: TestCertificate
-    try:
-      cert = parseCertificateFromToml(body)
-    except TestCertificateParseError:
-      continue
-    # Mismatch filter: only certs that genuinely attest THIS commit.
-    if cert.commit == commit:
-      result.add(cert)
+  ## This is the seq-shaped convenience wrapper for callers that hold a
+  ## settled repository and have nothing to do with a read failure; anything
+  ## that must tell a failed read from an absent note calls
+  ## ``readAttachedCertificatesFrom``.
+  readAttachedCertificatesFrom(gitBin, repoPath, commit, notesRef).certs
 
 proc readAttachedCertificates*(gitBin, repoPath, commit: string):
     seq[TestCertificate] =
@@ -38261,10 +38347,33 @@ proc parseGatewayRefUpdates*(stdinText: string): seq[GatewayRefUpdate] =
       refName: parts[2]))
 
 type
+  GatewayGateRecord* = object
+    ## POSITIVE evidence that the gate READ a pushed object and decided on its
+    ## CONTENTS, for one pushed ref.
+    ##
+    ## It exists because the absence of a rejection proves nothing. "The push
+    ## succeeded", "the diagnostic did not mention a private repo", "the server
+    ## did not touch the team backend" are all satisfied perfectly by a gate
+    ## that read nothing at all — which is exactly what this gate was doing.
+    ## A record naming the OBJECT ID the gate read and the COUNTS it derived
+    ## from that object's bytes cannot be produced without reading it, so a
+    ## test can assert acceptance was earned rather than defaulted to.
+    refName*: string
+    lockBlobId*: string  ## object id of the ``repro.lock`` blob that was read
+    depCount*: int       ## locked dependencies parsed out of those bytes
+    integrityChecked*: int  ## of those, entries whose integrity was recomputed
+                            ## against the received objects
+    trustedCerts*: int   ## certificates read off the pushed notes object and
+                         ## found registered-signed (the cert gate's half)
+
   GatewayVerifyResult* = object
     ## Outcome of the pre-receive certificate verify for ONE pushed branch.
     accepted*: bool
     diagnostic*: string
+    gated*: seq[GatewayGateRecord]
+      ## What the gate actually read and decided on. Empty when it read
+      ## nothing — which for a branch update carrying a lock is itself the
+      ## defect, not a neutral outcome.
 
 # ---- HL-5 (§6 Decision 3) — server-side PUBLIC-TIER lock gate --------------
 #
@@ -38299,23 +38408,97 @@ type
 const committedLockPathInTree = CommittedLockFileName
   ## The committed lock's path inside a pushed commit's tree (repo root).
 
-proc gatewayReadPushedLock(gitBin, gatewayBareDir, commit: string): string =
+type
+  GatewayLockStatus* = enum
+    ## The FOUR outcomes of reading a pushed commit's committed lock, which the
+    ## old ``string``-returning reader folded into one another.
+    ##
+    ## It returned ``""`` for a git error, for a commit whose tree has no
+    ## ``repro.lock``, and for a committed-but-empty one. The call site then
+    ## chose the most permissive reading of the three — "nothing to gate" — so
+    ## ANY failure to read silently disarmed a security gate. That collapse,
+    ## not the environment quirk that triggered it, is the defect: fix the
+    ## environment and the collapse still stands ready for the next cause.
+    ## Hence four states, and a caller that must decide each on purpose.
+    glrUnreadable  ## the gateway could NOT read the pushed commit or its
+                   ## tree. NOT an absence — the caller must FAIL CLOSED.
+    glrAbsent      ## the tree was read and carries no ``repro.lock``: a
+                   ## public-tier-less repo. Nothing to gate (the §6
+                   ## Decision 3 boundary).
+    glrEmpty       ## a ``repro.lock`` IS committed but is empty/blank. It
+                   ## declares no dependencies, so — like ``glrAbsent``, and
+                   ## unlike ``glrUnreadable`` — there is nothing to gate.
+                   ## Reported apart so the two absences are never confused
+                   ## with the failure.
+    glrPresent     ## lock bytes were read
+
+  GatewayLockRead* = object
+    ## What ``gatewayReadPushedLock`` found.
+    status*: GatewayLockStatus
+    blob*: string        ## the lock bytes, when ``glrPresent``
+    blobId*: string      ## the git object id of the blob that was read
+    diagnostic*: string  ## why, when ``glrUnreadable``
+
+proc gatewayReadPushedLock(gitBin, gatewayBareDir, commit: string;
+                           received = ReceivedObjectStore()): GatewayLockRead =
   ## Read the committed ``repro.lock`` blob out of the pushed COMMIT's tree in
   ## the bare repo. In pre-receive the commit object is already present (the
   ## push delivered it) even though the branch ref update is still pending, so
-  ## ``git show <commit>:repro.lock`` resolves the blob straight from the
-  ## received objects. Returns "" when the pushed commit carries no
-  ## ``repro.lock`` (a public-tier-less repo) or on any git error — the caller
-  ## treats "no lock" as "nothing to gate", never as a pass-through of a bad
-  ## lock.
-  let res = gitNoteRun(gitBin,
-    ["-C", gatewayBareDir, "show", commit & ":" & committedLockPathInTree])
-  if res.code != 0:
-    return ""
-  res.output
+  ## the blob resolves straight from the received objects — provided the child
+  ## git can still SEE them (``ReceivedObjectStore``).
+  ##
+  ## The three git steps exist to separate the two questions a single
+  ## ``git show <commit>:repro.lock`` cannot: that command exits 128 both when
+  ## the commit is unreachable and when the tree simply has no such path.
+  ##
+  ##   1. ``cat-file -t <commit>``     — can we read the pushed commit AT ALL?
+  ##   2. ``ls-tree -- repro.lock``    — does its tree carry the lock?
+  ##   3. ``cat-file blob <id>``       — read it.
+  ##
+  ## A failure at any step is ``glrUnreadable`` and names the step.
+  let typ = gitNoteRun(gitBin,
+    ["-C", gatewayBareDir, "cat-file", "-t", commit], received)
+  if typ.code != 0 or typ.output.strip() != "commit":
+    return GatewayLockRead(status: glrUnreadable,
+      diagnostic: "the pushed commit " & commit & " cannot be read out of '" &
+        gatewayBareDir & "' (git cat-file -t exit " & $typ.code & ": " &
+        typ.output.strip() & ")")
+  let entry = gitNoteRun(gitBin,
+    ["-C", gatewayBareDir, "ls-tree", commit, "--",
+     committedLockPathInTree], received)
+  if entry.code != 0:
+    return GatewayLockRead(status: glrUnreadable,
+      diagnostic: "the tree of the pushed commit " & commit &
+        " cannot be listed in '" & gatewayBareDir & "' (git ls-tree exit " &
+        $entry.code & ": " & entry.output.strip() & ")")
+  var blobId = ""
+  for rawLine in entry.output.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0: continue
+    let tabIdx = line.find('\t')
+    if tabIdx < 0: continue
+    let meta = line[0 ..< tabIdx].splitWhitespace()
+    if meta.len < 3: continue
+    if meta[1] != "blob": continue
+    blobId = meta[2]
+  if blobId.len == 0:
+    return GatewayLockRead(status: glrAbsent)
+  let blob = gitNoteRun(gitBin,
+    ["-C", gatewayBareDir, "cat-file", "blob", blobId], received)
+  if blob.code != 0:
+    return GatewayLockRead(status: glrUnreadable, blobId: blobId,
+      diagnostic: "the tree of the pushed commit " & commit & " names " &
+        committedLockPathInTree & " as blob " & blobId &
+        " but it cannot be read (git cat-file exit " & $blob.code & ": " &
+        blob.output.strip() & ")")
+  if blob.output.strip().len == 0:
+    return GatewayLockRead(status: glrEmpty, blob: blob.output,
+      blobId: blobId)
+  GatewayLockRead(status: glrPresent, blob: blob.output, blobId: blobId)
 
 proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
-    ld: LockedDependencies): seq[LockedIntegrityFailure] =
+    ld: LockedDependencies;
+    received = ReceivedObjectStore()): seq[LockedIntegrityFailure] =
   ## Server-side analogue of ``verifyLockedIntegrityAtCoordinates`` for the
   ## RECEIVED committed lock: recompute each locked entry's git-native multihash
   ## against the BARE repo's object store (no working tree on the server) and
@@ -38342,7 +38525,7 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
     # The locked revision's object must be present among the received objects.
     let rp = gitNoteRun(gitBin,
       ["-C", gatewayBareDir, "rev-parse", "--verify", "--quiet",
-       d.coordinates.revision & "^{commit}"])
+       d.coordinates.revision & "^{commit}"], received)
     if rp.code != 0 or rp.output.strip().len == 0:
       result.add(LockedIntegrityFailure(name: d.name, path: d.path,
         expected: d.integrity, observed: "",
@@ -38359,7 +38542,8 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
           "recorded integrity " & d.integrity))
 
 proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
-                              updates: seq[GatewayRefUpdate]):
+                              updates: seq[GatewayRefUpdate];
+                              received = ReceivedObjectStore()):
     GatewayVerifyResult =
   ## HL-5 (§6 Decision 3) — the PUBLIC-TIER lock gate. For each pushed BRANCH
   ## update, read the committed ``repro.lock`` blob from the received commit and
@@ -38369,14 +38553,38 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
   ## tree is a no-op (public-tier-less repo). ALWAYS runs (independent of the
   ## certificate ``gate_mode``): the public-tier lock invariant holds for every
   ## public repo regardless of whether the project opts into certificates.
+  ##
+  ## FAILS CLOSED on an unreadable lock. "I could not read the pushed commit"
+  ## is not "this push carries no lock", and the gate no longer treats it as
+  ## though it were: a lock the gateway cannot read is not a lock the gateway
+  ## may wave through. This holds whether or not ``received`` was supplied —
+  ## it is the property that makes the NEXT cause of an unreadable object a
+  ## refusal instead of a silent pass.
   result.accepted = true
   let zeroSha = "0000000000000000000000000000000000000000"
   for u in updates:
     if not u.refName.startsWith("refs/heads/"): continue
     if u.newSha == zeroSha: continue  # branch deletion — nothing in the tree.
-    let lockBlob = gatewayReadPushedLock(gitBin, gatewayBareDir, u.newSha)
-    if lockBlob.strip().len == 0:
-      continue  # no public lock in this push — nothing to gate (boundary).
+    let read = gatewayReadPushedLock(gitBin, gatewayBareDir, u.newSha,
+      received)
+    case read.status
+    of glrUnreadable:
+      result.accepted = false
+      result.diagnostic = u.refName &
+        ": lock-unreadable: the gateway could not read the pushed " &
+        committedLockPathInTree & " — " & read.diagnostic &
+        "; REFUSING, because a lock this gate cannot read is not a lock it " &
+        "may wave through (an unreadable object is not an absent one)"
+      return
+    of glrAbsent, glrEmpty:
+      # The §6 Decision 3 boundary, and the ONLY two states that mean it: the
+      # tree was read and declares no public-tier dependencies. Distinct from
+      # ``glrUnreadable`` above on purpose — that is the collapse this gate
+      # used to make.
+      continue
+    of glrPresent:
+      discard
+    let lockBlob = read.blob
     var ld: LockedDependencies
     try:
       ld = parseWorkspaceLockedDeps(lockBlob,
@@ -38413,7 +38621,7 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
         return
     # (b) integrity check against the received objects.
     let failures = gatewayVerifyReceivedLockIntegrity(
-      gitBin, gatewayBareDir, ld)
+      gitBin, gatewayBareDir, ld, received)
     if failures.len > 0:
       let f = failures[0]
       result.accepted = false
@@ -38421,10 +38629,24 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
         ": locked-integrity-mismatch: '" &
         (if f.path.len > 0: f.path else: f.name) & "' — " & f.diagnostic
       return
+    # ACCEPTED — and say what the acceptance was based on. A verdict that only
+    # ever speaks when it refuses is indistinguishable from a verdict that
+    # never looked; this record names the blob the gate read and the counts it
+    # derived from that blob's bytes.
+    var integrityChecked = 0
+    for d in ld.deps:
+      if d.integrity.startsWith("git-sha") and d.coordinates.kind == ckVcs and
+         d.coordinates.revision.len > 0:
+        inc integrityChecked
+    result.gated.add(GatewayGateRecord(refName: u.refName,
+      lockBlobId: read.blobId, depCount: ld.deps.len,
+      integrityChecked: integrityChecked))
 
 proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
                         updates: seq[GatewayRefUpdate];
-                        cfg: GatewayConfig): GatewayVerifyResult =
+                        cfg: GatewayConfig;
+                        received = ReceivedObjectStore()):
+    GatewayVerifyResult =
   ## The AUTHORITATIVE receiving-side check. For each pushed BRANCH update,
   ## read the certificates that arrived for the pushed commit (from the
   ## INCOMING ``refs/notes/reprobuild/certificates`` value — already an object
@@ -38462,13 +38684,28 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
     # Read the certs that arrived for this commit. Prefer the incoming notes
     # SHA (pre-receive: ref not yet updated); fall back to the well-known ref
     # for a post-receive / already-updated read.
+    #
+    # The cert gate already fails CLOSED (an absent certificate is a refusal
+    # under ``required``), so an unreadable note does not let anything
+    # through. It does something else that cost this campaign three sessions:
+    # it reports "no covering test certificate" to an author whose certificate
+    # is right there in the push, and sends them to mint it again. So the read
+    # status is carried and NAMED, without changing any accept/reject
+    # decision.
     var attached: seq[TestCertificate]
+    var noteUnreadable = ""
     if notesSha.len > 0 and notesSha != zeroSha:
-      attached = readAttachedCertificatesFromRef(
-        gitBin, gatewayBareDir, pushedCommit, notesSha)
+      let read = readAttachedCertificatesFrom(
+        gitBin, gatewayBareDir, pushedCommit, notesSha, received)
+      attached = read.certs
+      if read.status == gorUnreadable:
+        noteUnreadable = read.diagnostic
     if attached.len == 0:
-      attached = readAttachedCertificatesFromRef(
-        gitBin, gatewayBareDir, pushedCommit, certificateNotesRef)
+      let read = readAttachedCertificatesFrom(
+        gitBin, gatewayBareDir, pushedCommit, certificateNotesRef, received)
+      attached = read.certs
+      if read.status == gorUnreadable and noteUnreadable.len == 0:
+        noteUnreadable = read.diagnostic
     # Drop every cert that is not a registered-signed, unrevoked, valid-sig
     # attestation (TC-5) BEFORE coverage (TC-1).
     var trusted: seq[TestCertificate]
@@ -38504,13 +38741,27 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
         if sigNotes.len > 0: " (untrusted certs ignored: " &
           sigNotes.join("; ") & ")"
         else: ""
-      let detail = u.refName & ": uncovered: " & missing.join("; ") & sigDetail
+      # Say WHICH of the two uncovered conditions this is. "No certificate
+      # arrived" and "a certificate arrived and the gateway could not read it"
+      # have the same verdict and opposite remedies.
+      let readDetail =
+        if noteUnreadable.len > 0: " (certificate-note-unreadable: " &
+          noteUnreadable & " — this is NOT a missing certificate)"
+        else: ""
+      let detail = u.refName & ": uncovered: " & missing.join("; ") &
+        sigDetail & readDetail
       if cfg.gateMode == cgmRequired:
         result.accepted = false
         result.diagnostic = detail
         return
       else:  # advisory — record but accept.
         result.diagnostic = "advisory: " & detail
+    else:
+      # COVERED — and by WHAT. Same reasoning as the lock gate's record: an
+      # acceptance that says nothing is indistinguishable from a gate that
+      # never read the note.
+      result.gated.add(GatewayGateRecord(refName: u.refName,
+        trustedCerts: trusted.len))
 
 proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
                                updates: seq[GatewayRefUpdate]):
@@ -38559,6 +38810,18 @@ proc runGatewayCommand*(args: openArray[string]): int =
   ##     AUTHORITATIVE certificate verify, exit non-zero to REJECT on a miss.
   ##   - ``post-receive`` : read the same stream, FORWARD the received refs to
   ##     the real upstream bare.
+  ##
+  ## GATEWAY ENTRY, and the reason that phrase matters: the receive-pack
+  ## object-store bindings are captured HERE, on the very first statement,
+  ## before anything in this process has had the chance to scrub them. During
+  ## ``pre-receive`` the pushed objects live in a quarantine directory that
+  ## only those bindings name, so every read the gate makes of the receiving
+  ## bare's OWN incoming objects carries them back in (see
+  ## ``receiveHookObjectStore``). Nothing else does: the ``post-receive``
+  ## forward to the upstream deliberately runs scrubbed, because there the
+  ## child touches a DIFFERENT repository and the bindings would be the
+  ## cross-repository bug the scrubber exists to prevent.
+  let received = receiveHookObjectStore()
   if args.len == 0:
     stderr.writeLine("repro gateway: expected a phase " &
       "(pre-receive | post-receive)")
@@ -38581,9 +38844,13 @@ proc runGatewayCommand*(args: openArray[string]): int =
   case phase
   of "pre-receive":
     # Cert gate (TC-5/TC-1) — kept verbatim (HL-5 is ADDITIVE).
-    let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg)
+    let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg, received)
     if verdict.diagnostic.len > 0:
       stderr.writeLine("reprobuild gateway: " & verdict.diagnostic)
+    for rec in verdict.gated:
+      stderr.writeLine("reprobuild gateway: " & rec.refName &
+        ": certificate gate: COVERED by " & $rec.trustedCerts &
+        " trusted certificate(s) read from the pushed notes object")
     if not verdict.accepted:
       stderr.writeLine("reprobuild gateway: push REJECTED — no covering " &
         "test certificate (run 'repro certify' then push). The receiving-" &
@@ -38595,9 +38862,18 @@ proc runGatewayCommand*(args: openArray[string]): int =
     # mismatch. Server-side, so ``--no-verify`` cannot bypass it (same
     # enforcement point as the cert gate). The server gates ONLY the public
     # tier — team/personal/evidence backends are never read.
-    let lockVerdict = gatewayVerifyPublicLock(gitBin, gatewayDir, updates)
+    let lockVerdict = gatewayVerifyPublicLock(gitBin, gatewayDir, updates,
+      received)
     if lockVerdict.diagnostic.len > 0:
       stderr.writeLine("reprobuild gateway: " & lockVerdict.diagnostic)
+    # What the gate READ, on every accepted branch that carried a lock. This
+    # line is the only thing in an accepted push that a gate reading nothing
+    # cannot also produce, so it is what a test can hold the gate to.
+    for rec in lockVerdict.gated:
+      stderr.writeLine("reprobuild gateway: " & rec.refName &
+        ": public-tier lock gate: read repro.lock blob " & rec.lockBlobId &
+        " deps=" & $rec.depCount &
+        " integrity-checked=" & $rec.integrityChecked & " verdict=ACCEPTED")
     if not lockVerdict.accepted:
       stderr.writeLine("reprobuild gateway: push REJECTED — the pushed " &
         "public repro.lock failed the server-side public-tier lock gate. " &

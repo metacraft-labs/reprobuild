@@ -30,16 +30,26 @@
 ##       the code and by nothing else.
 ##
 ##       (c) calls ``gatewayVerifyPublicLock`` DIRECTLY rather than pushing
-##       through the hook, and the reason is recorded in full on the case:
-##       (a) and (b) DO NOT CURRENTLY PASS, on Windows or on Linux, and on
-##       Windows they fail identically in a pristine ``d0c6ad8f`` worktree, so
-##       it is nothing W5 did. The hooks run — ``post-receive`` forwards — but the
-##       lock gate accepts, so the HL-5 gate is presently a no-op through the
-##       hook. That is a pre-existing defect reported alongside W5 and not
-##       fixed by it; a new case in (a)/(b)'s shape would simply have been a
-##       third red case for a reason unrelated to what it asserts. (c) keeps
-##       the real bare repo, the real pushed commit and the real lock bytes,
-##       and gives up only the claim that the hook reaches the proc.
+##       through the hook. When W5 wrote it, the reason was that (a) and (b)
+##       DID NOT PASS, on Windows or on Linux, and on Windows failed
+##       identically in a pristine ``d0c6ad8f`` worktree — the hooks ran and
+##       ``post-receive`` forwarded, but the lock gate accepted everything, so
+##       the whole HL-5 gate was a no-op through the hook. W5 reported that
+##       rather than fixing it. W9 FIXED IT: (a) and (b) pass as of W9, so
+##       that paragraph is history rather than a live caveat. (c) keeps its
+##       direct call because the arm it pins — the parse/unusable-path
+##       refusal — needs no hook to be meaningful.
+##
+## W9 adds a FOURTH refusal, in a case of its own below:
+##
+##   (d) A push whose committed ``repro.lock`` the gateway CANNOT READ is
+##       REJECTED, while a push whose commit is readable and simply carries no
+##       lock is still ACCEPTED. Those two conditions used to be ONE value —
+##       the reader returned ``""`` for both — and the gate resolved the
+##       ambiguity permissively, which is how a security gate became a no-op
+##       that every green test agreed with. (d) asserts them apart WITHOUT a
+##       hook or a quarantine, so it stays red if the reader is ever collapsed
+##       again even with the plumbing perfectly healthy.
 ##
 ## Baseline: a CLEAN public lock (a single public dep whose integrity is the
 ## real object id of the pushed commit) is ACCEPTED — so the two rejections are
@@ -278,8 +288,9 @@ suite "HL-5 — pre-receive rejects public lock with private ref + " &
     ## and reports success.
     ##
     ## WHY THIS CASE CALLS THE GATE DIRECTLY instead of pushing through the
-    ## real ``pre-receive`` hook the way the case above does. Because the case
-    ## above does not currently work, and neither would this one. Measured:
+    ## real ``pre-receive`` hook the way the case above does. When it was
+    ## written the reason was that the case above did not work, and neither
+    ## would this one. Measured at the time:
     ##
     ##   * Windows, working tree: (a) private-ref push SUCCEEDS (exit 0), the
     ##     upstream receives the bad commit, the gateway prints nothing.
@@ -289,29 +300,33 @@ suite "HL-5 — pre-receive rejects public lock with private ref + " &
     ##     either — an earlier draft of this comment said "Windows" and was
     ##     wrong; the Linux run is what caught it.
     ##
-    ## The gate is not being SKIPPED, which is the part worth recording. The
-    ## ``post-receive`` hook fires and forwards the commit to the upstream, so
-    ## the managed hooks do run and ``pre-receive`` did return 0 — the gate was
-    ## ASKED and answered "accept". ``gatewayReadPushedLock`` turns every git
-    ## error into ``""`` and ``gatewayVerifyPublicLock`` reads ``""`` as
-    ## "no public lock in this push — nothing to gate", so whatever stops the
+    ## The gate was not being SKIPPED, which is the part worth recording. The
+    ## ``post-receive`` hook fired and forwarded the commit to the upstream, so
+    ## the managed hooks did run and ``pre-receive`` returned 0 — the gate was
+    ## ASKED and answered "accept". ``gatewayReadPushedLock`` turned every git
+    ## error into ``""`` and ``gatewayVerifyPublicLock`` read ``""`` as
+    ## "no public lock in this push — nothing to gate", so whatever stopped the
     ## pre-receive child from reading ``<commit>:repro.lock`` out of the
-    ## receiving bare (receive-pack quarantines the incoming objects until the
-    ## refs are updated, which is the obvious suspect and is NOT confirmed
-    ## here), the gate fails OPEN rather than loudly. That is a pre-existing
-    ## product defect of its own size — the whole HL-5 public-tier lock gate is
-    ## a no-op through the hook — and it is reported alongside W5, not fixed by
-    ## it. Writing the new case in the hook's shape would have added a third
-    ## case that is red for a reason that has nothing to do with what it
-    ## asserts.
+    ## receiving bare, the gate failed OPEN rather than loudly.
+    ##
+    ## W9 CONFIRMED THE SUSPECT AND FIXED IT. It was the receive-pack
+    ## quarantine: ``gitNoteRun`` ran every gateway git command with
+    ## ``scrubbedGitRepositoryEnv()``, whose ``GitRepositoryLocalEnv`` strips
+    ## ``GIT_QUARANTINE_PATH`` / ``GIT_OBJECT_DIRECTORY`` /
+    ## ``GIT_ALTERNATE_OBJECT_DIRECTORIES`` — the only address the pushed
+    ## objects have before the ref update lands. The gateway now captures them
+    ## at hook entry and puts them back for reads of its OWN received objects,
+    ## and — independently — the reader no longer folds "cannot read" into
+    ## "no lock". Case (a)/(b) above and case (d) below are the two halves of
+    ## that, and they pass.
     ##
     ## Calling ``gatewayVerifyPublicLock`` directly costs the hook plumbing and
     ## keeps everything the case is actually about: real git objects in a real
     ## bare repo, the real committed lock bytes read out of a real pushed
     ## commit, the real ref-update record the hook parses from its stdin, and
     ## the real verdict. What it does not prove is that the hook reaches this
-    ## proc with objects it can read — and on today's evidence nothing proves
-    ## that, which is the finding rather than this case's omission.
+    ## proc with objects it can read — which cases (a) and (b) now do prove,
+    ## so this case no longer stands alone in claiming it.
     ##
     ## Falsifiability, and each negative fails differently. Make
     ## ``parseWorkspaceLockedDeps`` accept these paths (or route this call site
@@ -406,3 +421,113 @@ suite "HL-5 — pre-receive rejects public lock with private ref + " &
         $afterVerdict.accepted & " diagnostic=" & afterVerdict.diagnostic)
       check afterVerdict.accepted
       check afterVerdict.diagnostic.len == 0
+
+  test "t_pre_receive_lock_gate_refuses_a_lock_it_cannot_read":
+    ## W9 part 2 — the gate must FAIL CLOSED when it cannot read the pushed
+    ## commit, and it must still ACCEPT when it CAN read the commit and the
+    ## commit simply carries no lock.
+    ##
+    ## Those two used to be the same value. ``gatewayReadPushedLock`` returned
+    ## ``""`` for a git error and ``""`` for a commit whose tree has no
+    ## ``repro.lock``, and ``gatewayVerifyPublicLock`` resolved the ambiguity
+    ## in the most permissive direction available to it: "no public lock in
+    ## this push — nothing to gate". So every failure to read, from any cause,
+    ## silently disarmed the gate. In this campaign the cause was the scrubbed
+    ## receive-pack quarantine bindings; the collapse is what turned that
+    ## environment quirk into an accepted push.
+    ##
+    ## WHY THIS CASE IS DELIBERATELY INDEPENDENT OF THE ENVIRONMENT FIX. It
+    ## calls ``gatewayVerifyPublicLock`` directly and never goes near a hook,
+    ## a quarantine or a push, so the quarantine re-injection cannot make it
+    ## pass and cannot make it fail. Restore the old reader and this case goes
+    ## red with the plumbing entirely healthy — which is the whole claim: part
+    ## 2 is what makes the NEXT cause of an unreadable object a refusal rather
+    ## than a silent pass, and it has to be verifiable without part 1.
+    ##
+    ## The unreadable revision is a REAL commit, made in a second repository
+    ## and never pushed anywhere. Not a fabricated sha: a well-formed object
+    ## name the gate genuinely cannot resolve is the honest model of the
+    ## failure, and it forecloses the reading that the gate merely rejected
+    ## something syntactically odd.
+    ##
+    ## Falsifiability, each negative failing differently: collapse the reader
+    ## back to a ``string`` and the unreadable push is ACCEPTED (the refusal
+    ## assertions trip); make the gate refuse on ``glrAbsent`` too and the
+    ## no-lock baseline trips instead. Both are needed — one of them alone is
+    ## a gate that either waves everything through or refuses everything.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("hl5-unreadable-", "")
+      defer: removeDir(scratch)
+      let bare = scratch / "gateway.git"
+      let workPath = scratch / "work"
+      let elsewhere = scratch / "elsewhere"
+      discard requireGit(q(gitBin) & " init --bare -b main " & q(bare))
+      for repo in [workPath, elsewhere]:
+        discard requireGit(q(gitBin) & " init -b main " & q(repo))
+        discard requireGit(q(gitBin) & " -C " & q(repo) &
+          " config user.email tester@example.invalid")
+        discard requireGit(q(gitBin) & " -C " & q(repo) &
+          " config user.name \"HL5 Tester\"")
+      # The readable side: a real commit, landed in the bare, with NO lock.
+      writeFile(workPath / "README.md", "HL-5 unreadable fixture\n")
+      discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
+      discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m seed")
+      let presentRev = headSha(gitBin, workPath)
+      discard requireGit(q(gitBin) & " -C " & q(workPath) &
+        " push --quiet " & q(bare) & " +HEAD:refs/heads/main")
+      # The unreadable side: a real commit in a repository the bare has never
+      # heard of. Its body is derived from the work path so it cannot collide
+      # with the commit above on a one-second timestamp — a collision here
+      # would be a FALSE PASS, since the "unreadable" revision would in fact
+      # be the readable one.
+      writeFile(elsewhere / "README.md", "never pushed: " & workPath & "\n")
+      discard requireGit(q(gitBin) & " -C " & q(elsewhere) & " add README.md")
+      discard requireGit(q(gitBin) & " -C " & q(elsewhere) &
+        " commit -m unreachable")
+      let missingRev = headSha(gitBin, elsewhere)
+      doAssert missingRev != presentRev,
+        "fixture collision: the unreachable commit sha equals the pushed one"
+      doAssert runCmd(q(gitBin) & " -C " & q(bare) & " cat-file -e " &
+        q(missingRev & "^{commit}")).code != 0,
+        "fixture is not measuring what it claims: the bare CAN read " &
+          missingRev
+
+      proc verdictFor(sha: string): GatewayVerifyResult =
+        gatewayVerifyPublicLock(gitBin, bare, @[GatewayRefUpdate(
+          oldSha: "0000000000000000000000000000000000000000",
+          newSha: sha, refName: "refs/heads/main")])
+
+      # ---- readable + no lock → ACCEPTED (the §6 Decision 3 boundary) ----
+      # Asserted FIRST and in the same breath as the refusal below, because
+      # apart they are worthless: a gate that refused everything would satisfy
+      # the refusal, and a gate that accepted everything would satisfy this.
+      # Only a reader that tells ABSENCE from ERROR satisfies both.
+      let absentVerdict = verdictFor(presentRev)
+      checkpoint("no-lock verdict: accepted=" & $absentVerdict.accepted &
+        " diagnostic=" & absentVerdict.diagnostic)
+      check absentVerdict.accepted
+      check absentVerdict.diagnostic.len == 0
+      # Nothing was gated, and the gate says so rather than claiming a check
+      # it did not make.
+      check absentVerdict.gated.len == 0
+
+      # ---- unreadable → REFUSED ------------------------------------------
+      let unreadableVerdict = verdictFor(missingRev)
+      checkpoint("unreadable verdict: accepted=" &
+        $unreadableVerdict.accepted & " diagnostic=" &
+        unreadableVerdict.diagnostic)
+      check not unreadableVerdict.accepted
+      # The classification, so the two conditions are never conflated again...
+      check "lock-unreadable" in unreadableVerdict.diagnostic
+      # ...the ref, so a multi-branch push says which branch...
+      check "refs/heads/main" in unreadableVerdict.diagnostic
+      # ...the object it could not read, so an operator can go look for it...
+      check missingRev in unreadableVerdict.diagnostic
+      # ...and the REASON, in the words that distinguish this refusal from the
+      # "no lock in this push" no-op it used to be indistinguishable from.
+      check "an unreadable object is not an absent one" in
+        unreadableVerdict.diagnostic
+      check unreadableVerdict.gated.len == 0
