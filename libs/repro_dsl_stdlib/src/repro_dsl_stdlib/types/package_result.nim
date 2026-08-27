@@ -1129,7 +1129,8 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
                                  depMirrorLibDirs: seq[string];
                                  depManifestPaths: seq[string] = @[];
                                  ownManifestPath: string = "";
-                                 packageName: string = ""): string =
+                                 packageName: string = "";
+                                 recipesRoot: string = ""): string =
   ## DSL-port M9.R.14f.2 — emit a POSIX shell snippet that walks every
   ## ELF under ``<mirror>/lib`` + ``<mirror>/lib64`` + ``<mirror>/bin`` +
   ## ``<mirror>/sbin``
@@ -1139,6 +1140,10 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   ## DSL-port M9.R.30.2 — when ``depManifestPaths`` is non-empty, the
   ## script reads each dep's ``.m9r30_propagated_libdirs.txt`` manifest
   ## file (if it exists on disk) and appends every line to the RPATH.
+  ## Standard install-mirror paths from a moved producer checkout are remapped
+  ## under ``recipesRoot`` when the equivalent active mirror exists. This keeps
+  ## restored package outputs from retaining historical checkout locations while
+  ## leaving genuine external/federated dependency paths intact.
   ## When ``ownManifestPath`` is non-empty, the script ALSO writes the
   ## consumer's final RPATH lines to that path so downstream consumers
   ## (recipes that buildDep this one) can read the closure transitively.
@@ -1223,7 +1228,18 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     let escapedManifest = manifestPath.replace("\"", "\\\"")
     script.add("if [ -f \"" & escapedManifest & "\" ]; then ")
     script.add("while IFS= read -r line || [ -n \"$line\" ]; do ")
-    script.add("if [ -z \"$line\" ] || ! [ -d \"$line\" ]; then continue; fi; ")
+    script.add("if [ -z \"$line\" ]; then continue; fi; ")
+    if recipesRoot.len > 0:
+      let escapedRecipesRoot = recipesRoot.replace("\"", "\\\"")
+      script.add("case \"$line\" in */.repro/output/install/*) ")
+      script.add("m9r14f_old_recipe=${line%%/.repro/output/install/*}; ")
+      script.add("m9r14f_dep=${m9r14f_old_recipe##*/}; ")
+      script.add("m9r14f_rel=${line#*/.repro/output/install/}; ")
+      script.add("m9r14f_active=\"" & escapedRecipesRoot &
+        "/$m9r14f_dep/.repro/output/install/$m9r14f_rel\"; ")
+      script.add("if [ -d \"$m9r14f_active\" ]; then line=$m9r14f_active; fi;; ")
+      script.add("esac; ")
+    script.add("if ! [ -d \"$line\" ]; then continue; fi; ")
     # A dependency's Nix runtime dirs belong on that dependency's ELFs, not
     # on every downstream consumer. The stage closure walks every ELF, so
     # propagating these paths only multiplies unrelated store outputs.
@@ -1676,7 +1692,8 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   script.add(m9r14fEmitRpathPatchScript(escapedDstUsr, depMirrorLibDirs,
     depManifestPaths = depManifestPaths,
     ownManifestPath = ownManifestPath,
-    packageName = packageName))
+    packageName = packageName,
+    recipesRoot = recipesRoot))
   script.add("touch \"" & escapedStamp & "\"; ")
   script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
     publishVersion, dstUsrRoot))
