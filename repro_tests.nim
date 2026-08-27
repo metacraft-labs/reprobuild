@@ -9350,15 +9350,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate.nim",
-    binary: "build/test-bin/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
     source: "tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim",
     binary: "build/test-bin/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract",
     defines: @[],
@@ -10591,6 +10582,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: true),
+  TestSpec(
+    source: "tests/integration/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate.nim",
+    binary: "build/test-bin/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tests/integration/t_stats_reads_shared_store.nim",
     binary: "build/test-bin/t_stats_reads_shared_store",
