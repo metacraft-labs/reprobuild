@@ -86,11 +86,14 @@ suite "constructor fetch tool identities":
           "autotools-fetch-autotoolsFetchTest"),
       ]
       let expected = @["sh", "rm", "mkdir", "curl", "mv", "sha256sum",
-        "tar"]
+        "tar", "gzip"]
       check shellFetchToolIdentityRefs(@["b2sum", "blake3sum"],
         copiesDataFile = true) ==
           @["sh", "rm", "mkdir", "curl", "mv", "b2sum", "blake3sum",
             "cp"]
+      check shellFetchToolIdentityRefs(@["sha256sum"],
+        archiveUrl = "https://example.invalid/source.tar.xz?mirror=1") ==
+          @["sh", "rm", "mkdir", "curl", "mv", "sha256sum", "tar", "xz"]
       for (packageName, kind, actionId) in cases:
         registerSha256Fetch(packageName)
         let action = findById(constructorActions(root, packageName, kind),

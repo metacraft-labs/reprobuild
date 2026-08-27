@@ -7,15 +7,39 @@ const
     "--retry 5 --retry-delay 2 --retry-max-time 300 --retry-all-errors " &
     "--connect-timeout 30 --max-time 300"
 
+proc archiveDecompressorTool(archiveUrl: string): string =
+  var normalized = archiveUrl.toLowerAscii()
+  for marker in ['?', '#']:
+    let markerPos = normalized.find(marker)
+    if markerPos >= 0:
+      normalized.setLen(markerPos)
+  if normalized.endsWith(".tar.xz") or normalized.endsWith(".txz") or
+      normalized.endsWith(".tar.lzma"):
+    return "xz"
+  if normalized.endsWith(".tar.gz") or normalized.endsWith(".tgz"):
+    return "gzip"
+  if normalized.endsWith(".tar.bz2") or normalized.endsWith(".tbz2") or
+      normalized.endsWith(".tbz"):
+    return "bzip2"
+  if normalized.endsWith(".tar.zst") or normalized.endsWith(".tzst"):
+    return "zstd"
+
 proc shellFetchToolIdentityRefs*(hashTools: openArray[string];
-                                 copiesDataFile = false): seq[string] =
+                                 copiesDataFile = false;
+                                 archiveUrl = ""): seq[string] =
   ## Keep the execution profile aligned with every external command emitted
   ## by ``appendCurlDownload`` and ``appendTarExtraction``.
   result = @["sh", "rm", "mkdir", "curl", "mv"]
   for tool in hashTools:
     if tool.len > 0 and tool notin result:
       result.add(tool)
-  result.add(if copiesDataFile: "cp" else: "tar")
+  if copiesDataFile:
+    result.add("cp")
+  else:
+    result.add("tar")
+    let decompressor = archiveDecompressorTool(archiveUrl)
+    if decompressor.len > 0:
+      result.add(decompressor)
 
 proc shellDoubleQuote(value: string): string =
   value.replace("\\", "/").replace("\"", "\\\"")
