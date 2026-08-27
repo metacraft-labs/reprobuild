@@ -28227,6 +28227,22 @@ method readabilityDiagnostic*(s: GitCheckoutLockStore): string =
         "be read: " & locksDir & " (" & locksDiag & ")"
   ""
 
+proc isCommitAddressedLockStore*(store: LockStore): bool =
+  ## Is this backend COMMIT-ADDRESSED — can it be asked for the record
+  ## belonging to ONE exact commit (``locks/<project>/<repo>/<sha>.toml``),
+  ## rather than only for "the latest record for (project, repo)"?
+  ##
+  ## This is the predicate ``CLI/develop.md`` §"Which record, for a
+  ## commit-addressed backend" turns on, and it is stated ONCE here because two
+  ## different rules read it: ``lockRecordAtCommit`` (which answers ``none`` for
+  ## every other backend, so the caller falls through to the ordinary resolver)
+  ## and ``composeDevelopLockSet`` (which, for a commit-addressed backend whose
+  ## key resolved, must take the key's record and NOTHING else). Two spellings
+  ## of "is this git-checkout" could drift apart, and the drift would be silent:
+  ## one of them deciding "yes" while the other decided "no" is exactly the
+  ## branch-tip fallback the spec forbids.
+  (not store.isNil) and (store of GitCheckoutLockStore)
+
 proc lockRecordAtCommit*(store: LockStore; project, repo, sha: string):
     Option[StoreLockRecord] =
   ## The COMMIT-KEYED record read. The ``LockStore`` interface exposes only
@@ -28244,7 +28260,7 @@ proc lockRecordAtCommit*(store: LockStore; project, repo, sha: string):
   ## uses the ordinary ``latestLock`` resolver.
   if store.isNil or project.len == 0 or repo.len == 0 or sha.len == 0:
     return none(StoreLockRecord)
-  if not (store of GitCheckoutLockStore):
+  if not isCommitAddressedLockStore(store):
     return none(StoreLockRecord)
   let gs = GitCheckoutLockStore(store)
   let rel = lockFileRepoRelativePath(project, repo, sha)
@@ -29579,7 +29595,7 @@ proc lockRecordAtCommitOrAncestor*(store: LockStore; project, repo, sha: string;
   if result.rec.isSome:
     result.foundAt = sha
     return
-  if store.isNil or not (store of GitCheckoutLockStore): return
+  if not isCommitAddressedLockStore(store): return
   if gitBin.len == 0 or repoRoot.len == 0 or sha.len == 0: return
   var chain: seq[string]
   try:
@@ -30040,7 +30056,52 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     # landed on, because a pin silently resolved from a different commit than
     # the one asked for is precisely the surprise this command exists to
     # prevent.
+    #
+    # W7 — and the corollary the fold below MUST honour. When this backend is
+    # commit-addressed AND a key resolved, the record at the key (or at the
+    # nearest locked first-parent ancestor of it) is the backend's ENTIRE
+    # contribution. Nothing else it holds may supply a pin:
+    #
+    #   "There is no branch-tip fallback: a backend that yields no record for
+    #    the resolved key contributes nothing and says so."
+    #                     — CLI/develop.md §"Which record, for a
+    #                       commit-addressed backend"
+    #
+    # ``keyedOnly`` is that sentence. Without it the per-dep fold below fell
+    # through to ``lockedShaFromStore``, whose two reads are BOTH keyed on
+    # something other than the develop key: ``latestLockShas(project)`` folds
+    # every trigger-keyed candidate in the store newest-first by Git history,
+    # and ``latestLock(project, repoName)`` takes the newest candidate under one
+    # repo's own subtree. Neither asks whether the commit in the record's name
+    # is an ancestor of the key, so a record published on a SIBLING BRANCH — a
+    # branch tip, exactly — supplied the pin while the ``keyNotes`` entry just
+    # below said "there is no branch-tip fallback" about the very same backend,
+    # in the very same output. Measured, and not only in the listing: on the
+    # ``--all`` path the same run reported "adopted existing checkout of lib @
+    # <sidebranch pin>" and exited 0, so the disagreement was between the
+    # message and a PLACEMENT.
+    #
+    # The rule is scoped to "a key resolved", and that scope is the whole of
+    # what keeps a routed workspace working. ``rootRepoName`` is empty when no
+    # manifest entry places a repo at ``.``; nothing then keys this backend on a
+    # commit at all (the ``--at`` branch above says so out loud), it is not
+    # commit-addressed IN THIS WORKSPACE, and the ordinary project read applies
+    # unchanged.
+    #
+    # What this deliberately does NOT do is reach for a partition filed under a
+    # DIFFERENT trigger repo's coordinate. Unified-Locking-And-Hooks.md §6
+    # Decision 1 consequence 2 anchors a partition at a trigger that belongs to
+    # it and says consumers reach it by asking "what did the workspace look like
+    # at THIS repo's commit" — for `repro develop` run in the workspace root,
+    # "this repo" is the root repo, and a partition triggered by a sibling is
+    # answering a question about the SIBLING's history. It is reachable by the
+    # consumer keyed on that sibling (CI's `resolve-sibling-rev.sh`), and it is
+    # not an answer about the root's commit. The two documents do not conflict
+    # here: both readers are commit-addressed, and neither sanctions "the newest
+    # record anywhere in the store".
     var commitKeyed = initTable[string, string]()
+    let keyedOnly = isCommitAddressedLockStore(store) and
+      rootRepoName.len > 0 and rootHeadSha.len > 0
     if rootRepoName.len > 0 and rootHeadSha.len > 0:
       let hit = lockRecordAtCommitOrAncestor(
         store, resolved.projectName, rootRepoName, rootHeadSha, gitBin, root)
@@ -30121,8 +30182,14 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       # failed, and a checkout was left behind at a revision nobody locked.
       # Both halves are checked: the record the backend HOLDS and the revision
       # the populator RESOLVED must each be an exact pin.
+      #
+      # W7 — ``keyedOnly`` (above): for a commit-addressed backend whose key
+      # resolved, the key's record is the ONLY record that may answer. An empty
+      # answer here is the spec's "contributes nothing", and the ``noRecord``
+      # entry below is its "and says so".
       let backendRev =
         if commitKeyed.hasKey(d.path): commitKeyed[d.path]
+        elif keyedOnly: ""
         else: lockedShaFromStore(store, resolved.projectName, d.name, d.path)
       if backendRev.len == 0 or
           not isExactLockedRevision(backendRev) or

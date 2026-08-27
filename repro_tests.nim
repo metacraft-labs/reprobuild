@@ -6926,6 +6926,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_develop_commit_keyed_backend_reads_only_the_key_record.nim",
+    binary: "build/test-bin/t_develop_commit_keyed_backend_reads_only_the_key_record",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_develop_composes_lock_set_without_a_committed_lock.nim",
     binary: "build/test-bin/t_develop_composes_lock_set_without_a_committed_lock",
     defines: @[],

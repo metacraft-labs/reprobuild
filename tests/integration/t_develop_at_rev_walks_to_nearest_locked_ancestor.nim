@@ -48,7 +48,10 @@
 ##   5. NO BRANCH-TIP FALLBACK: a record published on a commit that is NOT an
 ##      ancestor of the key (a sibling branch's tip) is never used — the
 ##      backend reports it holds nothing for the key nor for any first-parent
-##      ancestor, and the repo contributes nothing;
+##      ancestor, and the repo contributes nothing. The SAME record is the only
+##      one the workspace ROOT repo could have taken either, so the union is
+##      empty and DS-1's one lock-set failure fires (exit 1) rather than a
+##      listing appearing at a revision nobody locked;
 ##   6. an `--at` that names no commit of the root repository REFUSES rather
 ##      than silently keying on HEAD.
 ##
@@ -62,6 +65,14 @@
 ## has no record) fails (1) and (4); dropping the `foundAt != key` notice fails
 ## (1) and (4)'s ancestor-naming assertions; making the walk fall back to the
 ## backend's newest record regardless of ancestry fails (5).
+##
+## This case owns the WALK — which commits the key may reach. It does NOT own
+## the complementary rule, "what may the backend do with every OTHER record it
+## holds", and it cannot: a fallback that pins only the workspace ROOT repo is
+## invisible here, because the root repo is excluded from the develop set and
+## therefore has no row. That property is
+## ``t_develop_commit_keyed_backend_reads_only_the_key_record``; green here is
+## not evidence for it.
 ##
 ## Mocks: NONE. Real git repositories on the real filesystem, a real manifest
 ## checkout, a real layer-5 config inside a real ``.git``, the real ``repro``
@@ -252,9 +263,7 @@ suite "DS-5: --at and the first-parent walk to the nearest locked ancestor":
       publishRecord(side, libShas.second)
 
       let noAncestor = listAt()
-      if noAncestor.code != 0:
-        checkpoint("develop --list output: " & noAncestor.output)
-      check noAncestor.code == 0
+      checkpoint("develop --list output: " & noAncestor.output)
       check ("holds no lock record for " & c3) in noAncestor.output
       check "nor for any first-parent ancestor" in noAncestor.output
       check "there is no branch-tip fallback" in noAncestor.output
@@ -262,6 +271,30 @@ suite "DS-5: --at and the first-parent walk to the nearest locked ancestor":
       # have leaked into the answer: `lib` contributes NOTHING at all.
       check ("lib (tier=team backend=git-checkout)") in noAncestor.output
       check libRow(noAncestor.output).len == 0
+      check libShas.second notin noAncestor.output
+      # …and neither does the ROOT repo, which is covered by exactly the same
+      # record and has no `--list` row of its own to give it away.
+      check ("ws-root (tier=team backend=git-checkout)") in noAncestor.output
+      # W7 — this used to assert `code == 0`, and that expectation encoded the
+      # defect rather than the rule.
+      #
+      # Nothing is locked at `c3` or at any first-parent ancestor of it. The
+      # ONLY record in the store is the sidebranch one, and it is equally
+      # unreachable for `lib` and for `ws-root`. So the union is genuinely
+      # EMPTY, and CLI/develop.md §"Composing the lock set" makes that the one
+      # lock-set failure: "An empty union — no backend yielded any record — is
+      # the only lock-set failure, and it names every backend consulted."
+      #
+      # Exit 0 was never earned here. Measured against a `repro` built from
+      # `3f86455e^` — where this whole case was GREEN — the team backend
+      # reported "1 record(s)" for the key it had just said it held nothing
+      # for: `ws-root` had silently taken its pin from the SIDEBRANCH commit
+      # via `latestLock(project, "ws-root")`, which is a branch-tip fallback
+      # that this case could not see because the root repo is excluded from the
+      # develop set. `code == 0` and `libRow(...).len == 0` cannot both be
+      # honest in this fixture; the exit code was the half that was lying.
+      check noAncestor.code == 1
+      check "is EMPTY" in noAncestor.output
 
       # ---- (1) HEAD carries no record; the walk finds C1 and NAMES it. ---
       publishRecord(c1, libShas.first)
