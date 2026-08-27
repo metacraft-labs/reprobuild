@@ -1685,12 +1685,21 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # folds every existing dir into the embedded RPATH so nix-stub-resolved
   # deps (libltdl, hwdata, libxdmcp, ...) reach the patched ELF without
   # the install-mirror having to enumerate ``/nix/store`` paths itself.
-  var mirrorToolRefs = @["sh"]
+  var mirrorToolRefs = @InstallMirrorCoreToolNames
+  for generatedTool in ["sed", "chmod"]:
+    if generatedTool notin mirrorToolRefs:
+      mirrorToolRefs.add(generatedTool)
   if InstallMirrorPublishToolName notin mirrorToolRefs:
     mirrorToolRefs.add(InstallMirrorPublishToolName)
   when defined(linux):
-    if "patchelf" notin mirrorToolRefs:
-      mirrorToolRefs.add("patchelf")
+    for generatedTool in ["find", "head", "od", "tr", "sort", "grep",
+                          "dirname", "basename", "wc", "patchelf"]:
+      if generatedTool notin mirrorToolRefs:
+        mirrorToolRefs.add(generatedTool)
+    if packageName == "glibcSource":
+      for generatedTool in ["readlink", "ln"]:
+        if generatedTool notin mirrorToolRefs:
+          mirrorToolRefs.add(generatedTool)
   for raw in registeredNativeBuildDeps(packageName):
     let dep = m9r14fStripDepConstraint(raw)
     if dep.len > 0 and dep notin mirrorToolRefs:

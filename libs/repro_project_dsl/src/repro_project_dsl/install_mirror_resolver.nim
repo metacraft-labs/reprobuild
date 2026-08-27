@@ -30,6 +30,10 @@ type
 
 const LegacyInstallSubpath = ".repro/output/install"
 const InstallMirrorPublishToolName* = "repro-install-mirror-publish"
+const InstallMirrorCoreToolNames* = ["sh", "rm", "mkdir", "cp", "touch"]
+  ## External commands emitted by every install-mirror shell action. Keep
+  ## these explicit so sealed action profiles never depend on ambient PATH or
+  ## on an unrelated dependency happening to provide a core utility.
 
 proc currentInstallMirrorMode*(): InstallMirrorMode =
   case getEnv(InstallMirrorModeEnvVar).toLowerAscii()
