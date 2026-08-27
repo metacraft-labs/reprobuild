@@ -33,6 +33,13 @@
 ## Hermetic: fixture recipes are written to a temp directory under the repo
 ## root (so the repository's compiler configuration applies) and removed
 ## afterwards. Nothing on the host is consulted.
+##
+## The fixtures here use the LEGACY ``platforms:`` colon block deliberately.
+## That is no longer the recommended spelling — the canonical form is
+## ``platforms [windows]``, whose entries the compiler resolves — but the
+## legacy shape is still in recipes in the wild, so this file doubles as its
+## compatibility regression test. The canonical form's version of this same
+## lint is asserted by ``t_platforms_form_diagnostics``.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 

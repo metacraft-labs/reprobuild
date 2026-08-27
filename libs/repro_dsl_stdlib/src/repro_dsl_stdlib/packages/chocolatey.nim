@@ -10,7 +10,7 @@
 ##
 ## The guard is still required, but it is no longer the only thing standing
 ## between an unguarded `uses:` and a wrong answer. Since PMC-1 the package
-## itself declares `platforms: [windows]`, and resolution consults that BEFORE
+## itself declares `platforms [windows]`, and resolution consults that BEFORE
 ## the adapter chain: an unguarded `uses: "chocolatey"` on Linux now fails
 ## naming the reason ("chocolatey is declared for windows only; this host is
 ## linux") instead of exhausting the chain and advising remediations —
@@ -70,10 +70,9 @@
 import repro_project_dsl
 
 package chocolatey:
-  platforms:
-    [windows]
-    msg = "Chocolatey is a Windows package manager; it has no POSIX " &
-      "build, so there is nothing to catalogue for Linux or macOS."
+  ## Chocolatey is a Windows package manager; it has no POSIX build, so there
+  ## is nothing to catalogue for Linux or macOS.
+  platforms [windows]
   provisioning:
     tarball url = "https://community.chocolatey.org/api/v2/package/chocolatey/2.4.3",
       sha256 = "d4998ca928a85a484507dcaa39c30948a6516de0d1469b0511931d44a53456c3",

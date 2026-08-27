@@ -511,6 +511,136 @@ proc parsePlatformConstraintToken*(text: string):
     return (true, "any", "any")
   (false, "", "")
 
+# ---------------------------------------------------------------------------
+# The `platforms` vocabulary.
+#
+# These are ordinary `const`s, not identifiers a macro reads as text. That is
+# the whole point: `windows` resolves, a typo is an undeclared-identifier error
+# from the compiler with the right caret, go-to-definition works, and
+# `platforms someComputedSeq` needs no second code path.
+#
+# They are injected into the EXPRESSION'S scope rather than exported at module
+# level. `import repro_project_dsl` must not put a symbol named `windows` (or
+# `linux`, or `x86_64`) into every consumer's namespace -- that trades one
+# surprise for a worse one. `withPlatformVocabulary` opens the scope for
+# exactly as long as the expression needs it.
+#
+# See `DSL-Macro-Authoring-Guide.md` in reprobuild-specs.
+# ---------------------------------------------------------------------------
+
+template withPlatformVocabulary*(body: untyped): untyped =
+  ## Evaluate `body` in a scope where the platform vocabulary is bound.
+  ##
+  ## `{.inject.}` is what makes the names visible to the caller's expression;
+  ## without it they would be private to this template's own scope and the
+  ## author's `windows` would resolve to nothing -- silently, because the
+  ## error would be about the identifier rather than about the technique.
+  block:
+    const
+      any {.inject, used.} = PlatformConstraint(cpu: "any", os: "any")
+      windows {.inject, used.} = PlatformConstraint(cpu: "any", os: "windows")
+      linux {.inject, used.} = PlatformConstraint(cpu: "any", os: "linux")
+      macos {.inject, used.} = PlatformConstraint(cpu: "any", os: "macos")
+      x86_64 {.inject, used.} = PlatformConstraint(cpu: "x86_64", os: "any")
+      aarch64 {.inject, used.} = PlatformConstraint(cpu: "aarch64", os: "any")
+      x86 {.inject, used.} = PlatformConstraint(cpu: "x86", os: "any")
+    body
+
+const
+  PlatformAxisConflict* = "!conflict:"
+    ## Marks an axis narrowed to two incompatible values (`x86_64 * aarch64`).
+    ## The two values follow, separated by `|`.
+  PlatformAxisUnknown* = "!unknown:"
+    ## Marks an axis built from a token `parsePlatformConstraintToken` does
+    ## not recognise. The offending token follows.
+
+# NEVER `raise` from anything reachable from one of these -- measured, not
+# assumed. It would NOT fail the compile.
+#
+# `platforms <expr>` is evaluated to bind a `static` parameter, and the
+# compiler does that through `tryConstExpr`, which suppresses diagnostics and
+# disables the error-count abort. An unhandled VM exception therefore stops
+# nothing: the exception is raised (a `try`/`except` inside the callee still
+# catches it), but when it goes unhandled it is DROPPED and the VM resumes at
+# the next instruction. The callee runs to completion and whatever it returns
+# is accepted. Measured on Nim 2.2.8:
+#
+#   platforms [platform("totally-bogus-token")]   -> compiled clean,
+#                                                    recorded (any, any)
+#
+# which is the worst possible outcome -- a package silently declared
+# available EVERYWHERE because its declaration was malformed.
+#
+# This is upstream nim-lang/Nim#22623 (open since 2023). It is NOT specific to
+# macros or to this DSL: plain procs and templates with `static` parameters
+# swallow identically, and no compiler flag changes it. The reason the same
+# expression assigned to a `const` DOES fail is only that a `const` is later
+# evaluated for real, outside the gag. See
+# `reprobuild-specs/upstream-bugs/nim-static-arg-swallows-raise/`.
+#
+# So these functions are TOTAL. An invalid combination produces a value that
+# says so, and `applyResolvedPlatforms` (macros_a) rejects it with
+# `error(msg, stmt)` at the author's line -- which is a better diagnostic
+# anyway, since a raised ValueError points at this file rather than at theirs.
+
+func narrowPlatformAxis*(a, b: string): string =
+  ## Intersect one axis of two constraints. Total: a contradiction becomes a
+  ## `PlatformAxisConflict` value rather than an exception.
+  let aVal = if a.len == 0: "any" else: a
+  let bVal = if b.len == 0: "any" else: b
+  if aVal == "any": bVal
+  elif bVal == "any": aVal
+  elif aVal == bVal: aVal
+  else: PlatformAxisConflict & aVal & "|" & bVal
+
+func `*`*(a, b: PlatformConstraint): PlatformConstraint =
+  ## Narrow a constraint by another: `x86_64 * windows`.
+  ##
+  ## `*` because the operation IS set intersection, and Nim already spells
+  ## intersection `*` for `set` and `HashSet`. `x86_64` denotes every x86_64
+  ## host, `windows` every Windows host, and the pair is the hosts in both --
+  ## so the operator is chosen from the semantics rather than picked for
+  ## looks. (An `on` infix would read better still, but Nim has no
+  ## identifier infixes: `x86_64 on windows` parses as `x86_64(on(windows))`
+  ## and fails with a message about the wrong thing entirely.)
+  PlatformConstraint(
+    cpu: narrowPlatformAxis(a.cpu, b.cpu),
+    os: narrowPlatformAxis(a.os, b.os))
+
+func platform*(token: string): PlatformConstraint =
+  ## The escape hatch: build a constraint from a `<cpu>-<os>` token.
+  ##
+  ## Exists for the case a const cannot cover -- a token assembled at compile
+  ## time, or one read from data. Prefer the consts, which cannot be
+  ## misspelled; this one can, so an unrecognised token becomes a
+  ## `PlatformAxisUnknown` value that fails the declaration by name.
+  let parsed = parsePlatformConstraintToken(token)
+  if parsed.ok:
+    PlatformConstraint(cpu: parsed.cpu, os: parsed.os)
+  else:
+    PlatformConstraint(cpu: PlatformAxisUnknown & token, os: "any")
+
+func toConstraintDefs*(items: openArray[PlatformConstraint]):
+    seq[PlatformConstraintDef] =
+  ## Lower evaluated constraints into the stored model.
+  for it in items:
+    result.add(PlatformConstraintDef(cpu: it.cpu, os: it.os))
+
+func toConstraintDefs*(item: PlatformConstraint): seq[PlatformConstraintDef] =
+  ## Single-constraint overload, so `platforms windows` works without the
+  ## author having to remember brackets for the one-platform case.
+  @[PlatformConstraintDef(cpu: item.cpu, os: item.os)]
+
+const NoPlatformConstraints*: seq[PlatformConstraintDef] = @[]
+  ## What stage 1 passes to stage 2 when the package declared no `platforms`
+  ## expression at all.
+  ##
+  ## A distinct SENTINEL is not needed: stage 2 also receives the body and can
+  ## see for itself whether a `platforms` statement is present, so "declared
+  ## the empty set" and "never declared" stay distinguishable -- which
+  ## `PackageDef.platformsDeclared` documents as the difference that must not
+  ## be lost.
+
 proc platformConstraintMatchesHost*(constraint: PlatformConstraintDef;
                                     hostCpu, hostOs: string): bool =
   ## Does ``(hostCpu, hostOs)`` fall inside one declared coordinate?

@@ -3861,6 +3861,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim",
+    binary: "build/test-bin/t_dsl_platforms_resolved_form",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_run_consumes_roundtrip.nim",
     binary: "build/test-bin/t_dsl_run_consumes_roundtrip",
     defines: @[],
@@ -10289,6 +10298,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim",
     binary: "build/test-bin/t_platform_refusal_surfaces_through_realize_and_plan",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_platforms_form_diagnostics.nim",
+    binary: "build/test-bin/t_platforms_form_diagnostics",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

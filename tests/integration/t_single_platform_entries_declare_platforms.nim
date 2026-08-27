@@ -17,7 +17,7 @@
 ## the DSL block "remains the source of truth ... on Nix-capable hosts; the
 ## `gccCatalog` slice is consumed by the M64 `cakBuiltin` adapter on Windows."
 ##
-## Declaring gcc `platforms: [windows]` would make it unavailable on Linux
+## Declaring gcc `platforms [windows]` would make it unavailable on Linux
 ## through PMC-1's gate — a far worse failure than the hole being closed.
 ##
 ## This is the same trap PMC-1 hit from the other side. It shipped
