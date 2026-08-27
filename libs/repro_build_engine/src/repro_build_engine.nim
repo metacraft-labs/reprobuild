@@ -37,9 +37,12 @@ import repro_cas_store
 # (``MonitorDepFile`` / ``readMonitorDepFile`` / ``MonitorRecord`` / the
 # ``mr*`` / ``mo*`` enums / ``mcComplete`` / ``MonitorDepFileReaderError`` /
 # ``findShimLibrary``), so the call sites below are unchanged.
+# The depfile FORMAT is owned by io-mon; reprobuild consumes it through io-mon's
+# public API (`streamMonitorDepFileRecords` / `MonitorRecord` / the `mr*`/`mo*`
+# enums / `MonitorDepFileReaderError`), never by re-deriving the envelope layout.
+# The former `io_mon/codec` + `io_mon/writer` internal imports (the hand-rolled
+# RMDF decoder reached into them) are gone.
 import io_mon
-import io_mon/codec as ioMonCodec
-import io_mon/writer as ioMonWriter
 import repro_platform
 import repro_runquota
 # M17: the ``ext_repro_action`` schema, the compatibility key, and the
@@ -2825,10 +2828,6 @@ proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
   ## mesMonitorUnavailable. Return whichever is more severe.
   if ord(a) >= ord(b): a else: b
 
-proc raiseMonitorDecodeError(kind: MonitorDepFileReaderErrorKind;
-                             message: string) {.noreturn.} =
-  raiseMonitorDepFileReaderError(kind, message)
-
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
                           seen: var EvidenceSeenSets;
@@ -2956,12 +2955,23 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
                                  seen: var EvidenceSeenSets):
                                  MonitorEvidenceStatus =
-  ## Fold RMDF records directly into build-engine evidence.
+  ## Fold depfile records directly into build-engine evidence.
   ##
-  ## `io_mon.readMonitorDepFile` materializes both the decoded record seq and a
-  ## `MonitorDepFile.records` copy. Provider compilation can emit large RMDFs
-  ## because the compiler touches many source/toolchain files, so avoid retaining
-  ## a full depfile object when the engine only needs path sets + completeness.
+  ## Consumes io-mon's `streamMonitorDepFileRecords`, which OWNS the format's
+  ## decode and validation (magic, version, count/length, trailer magic,
+  ## record-count agreement, body checksum, canonical 1..N sequence order) and
+  ## yields one record at a time without ever materializing the full record seq
+  ## — the memory-frugal read a large provider depfile needs (the compiler
+  ## touches many source/toolchain files). The engine keeps only path sets +
+  ## completeness.
+  ##
+  ## Reprobuild is a pure CONSUMER of io-mon's format here: it no longer
+  ## re-implements the depfile envelope parse or reaches into io-mon's
+  ## `codec`/`writer` internals. It only decides what each record MEANS for its
+  ## evidence, in `foldOneMonitorRecord`. A missing file, a truncated/corrupt
+  ## envelope, a bad checksum or a non-canonical sequence surfaces as io-mon's
+  ## `MonitorDepFileReaderError` exactly as before (the hand-rolled reader raised
+  ## the same type via `raiseMonitorDepFileReaderError`).
   ##
   ## M9.R.72.3: Returns the WORST-observed ``MonitorEvidenceStatus`` (Level 0-3)
   ## instead of a plain bool. Each ``mrEventLoss`` / ``moEventLoss`` record's
@@ -2971,70 +2981,9 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   ## Level 3 (monitor entirely unavailable) is asserted at ``collectEvidence``
   ## when the ``monitorDepfile`` path itself is empty.
   result = mesComplete
-  if not fileExists(extendedPath(path)):
-    raiseMonitorDecodeError(mrMissingFile, "RMDF file does not exist: " & path)
-
-  let options = defaultMonitorDepFileReaderOptions()
-  let raw = ioMonCodec.toBytes(readFile(extendedPath(path)))
-  if raw.len < 44:
-    raiseMonitorDecodeError(mrTruncated, "RMDF file is too short")
-  if ioMonCodec.fromBytes(raw.toOpenArray(0, 3)) != RmdfMagic:
-    raiseMonitorDecodeError(mrBadMagic, "unknown RMDF magic")
-
-  var pos = 4
-  let version = ioMonCodec.readU16Le(raw, pos)
-  if version != RmdfVersion:
-    raiseMonitorDecodeError(mrUnsupportedVersion, "unsupported RMDF version")
-  discard ioMonCodec.readU16Le(raw, pos)
-  let headerCount = ioMonCodec.readU64Le(raw, pos)
-  let bodyLen64 = ioMonCodec.readU64Le(raw, pos)
-  if headerCount > options.maxObservationCount:
-    raiseMonitorDecodeError(mrRecordLimitExceeded,
-      "RMDF record count exceeds configured limit")
-  if bodyLen64 > uint64(int.high):
-    raiseMonitorDecodeError(mrTruncated, "RMDF body is too large")
-  let bodyLen = int(bodyLen64)
-  if pos + bodyLen + 20 != raw.len:
-    raiseMonitorDecodeError(mrTruncated,
-      "RMDF body length/trailer mismatch")
-
-  let bodyStart = pos
-  let bodyEnd = bodyStart + bodyLen
-  pos = bodyEnd
-  if ioMonCodec.fromBytes(raw.toOpenArray(pos, pos + 3)) != RmdfTrailerMagic:
-    raiseMonitorDecodeError(mrTruncated, "missing RMDF trailer")
-  pos += 4
-  let trailerCount = ioMonCodec.readU64Le(raw, pos)
-  let trailerChecksum = ioMonCodec.readU64Le(raw, pos)
-  if trailerCount != headerCount:
-    raiseMonitorDecodeError(mrSemanticValidationFailed,
-      "RMDF record count mismatch")
-  if options.requireTrailerChecksum and
-      trailerChecksum != ioMonWriter.checksum(raw.toOpenArray(bodyStart, bodyEnd - 1)):
-    raiseMonitorDecodeError(mrChecksumMismatch, "RMDF checksum mismatch")
-
-  var framePos = bodyStart
-  var expectedSeq = 1'u64
-  var decodedCount = 0'u64
-  while framePos < bodyEnd:
-    var payloadPos = framePos
-    let length = int(ioMonCodec.readU32Le(raw, payloadPos))
-    if length <= 0 or payloadPos + length > bodyEnd:
-      raiseMonitorDecodeError(mrTruncated, "truncated RMDF record frame")
-    let record = ioMonWriter.decodeRecordPayload(
-      raw.toOpenArray(payloadPos, payloadPos + length - 1))
-    if record.seq != expectedSeq:
-      raiseMonitorDecodeError(mrRecordOrderInvalid,
-        "RMDF record sequence is not canonical")
-    inc expectedSeq
-    inc decodedCount
-
+  for record in streamMonitorDepFileRecords(path,
+      defaultMonitorDepFileReaderOptions()):
     foldOneMonitorRecord(record, cwd, evidence, seen, result)
-    framePos = payloadPos + length
-
-  if decodedCount != headerCount:
-    raiseMonitorDecodeError(mrSemanticValidationFailed,
-      "RMDF frame count mismatch")
 
 proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
                                  cwd: string;
