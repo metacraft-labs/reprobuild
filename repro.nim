@@ -59,6 +59,15 @@ proc sanitizeStaticExec(val: string): string =
       cleanLines.add(s)
   if cleanLines.len > 0: cleanLines[^1] else: ""
 
+# The POSIX arm names NO executable. `staticExec` on POSIX already runs its
+# argument through `/bin/sh -c` (`execCmdEx` + `poEvalCommand`), and `printf`
+# is a shell builtin, so the whole read happens inside the shell the compiler
+# started. The previous spelling wrapped this in a BARE `sh -c '…'`, which
+# stopped resolving once a compile action's `PATH` became exactly
+# `<nim>/bin:<gcc-wrapper>/bin` — the same defect, and the same fix, as the
+# DSL's resource-accessor generator (see
+# `repro_project_dsl/compile_time_shell.nim`). Windows keeps its explicit
+# shell because there `staticExec` executes the program directly.
 when defined(windows):
   const CompileTimeIoMonSrc =
     sanitizeStaticExec(staticExec("cmd /C if defined IO_MON_SRC (echo %IO_MON_SRC%)"))
@@ -66,9 +75,9 @@ when defined(windows):
     sanitizeStaticExec(staticExec("cmd /C if defined STACKABLE_HOOKS_SRC (echo %STACKABLE_HOOKS_SRC%)"))
 else:
   const CompileTimeIoMonSrc =
-    sanitizeStaticExec(staticExec("sh -c 'printf %s \"${IO_MON_SRC:-}\"'"))
+    sanitizeStaticExec(staticExec("printf %s \"${IO_MON_SRC:-}\""))
   const CompileTimeStackableHooksSrc =
-    sanitizeStaticExec(staticExec("sh -c 'printf %s \"${STACKABLE_HOOKS_SRC:-}\"'"))
+    sanitizeStaticExec(staticExec("printf %s \"${STACKABLE_HOOKS_SRC:-}\""))
 
 # Interface extraction compiles this project file without the provider build
 # body. Keep the stdlib typed-value surface visible for generated DSL helpers.

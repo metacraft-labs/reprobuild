@@ -9332,6 +9332,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim",
+    binary: "build/test-bin/t_macro_time_shell_out_needs_no_shell_on_the_path",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim",
     binary: "build/test-bin/t_managed_hook_reentry_guard_prevents_recursive_publish",
     defines: @[],

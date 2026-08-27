@@ -3740,28 +3740,21 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
           "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &
           "stdout.write(emitResourceContractAccessors(c))\n"
         writeFile(genPath, genSrc)
-        # ``staticExec`` executes a program directly on Windows, so shell
-        # composition must be passed to an explicit platform shell. The CWD is
-        # significant because ``config.nims`` contains sibling paths relative
-        # to the repository root.
+        # The CWD is significant because ``config.nims`` contains sibling paths
+        # relative to the repository root, so the generator compile has to be
+        # composed rather than handed to ``staticExec`` bare.
+        #
+        # ``compileTimeShellCommand`` owns HOW that composition is spelled, and
+        # it matters: this ``staticExec`` runs inside a Nim compile ACTION whose
+        # ``PATH`` is exactly ``<nim>/bin:<gcc-wrapper>/bin``, and neither
+        # directory holds a shell. The composition names no executable that has
+        # to be searched for. See that module's header.
         let nimCmd =
           quoteShell(compilerExe) &
           " c -r --hints:off --warnings:off " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
-        let genCmd =
-          if repoRoot.len == 0:
-            nimCmd
-          else:
-            let cdAndCompile =
-              when defined(windows):
-                "cd /d " & quoteShell(repoRoot) & " && " & nimCmd
-              else:
-                "cd " & quoteShell(repoRoot) & " && exec " & nimCmd
-            when defined(windows):
-              "cmd.exe /d /c " & quoteShell(cdAndCompile)
-            else:
-              "sh -c " & quoteShell(cdAndCompile)
+        let genCmd = compileTimeShellCommand(repoRoot, nimCmd)
         let genOut = staticExec(genCmd)
         # Split the framed output: first ``IFP:<hex>`` line, then the accessor
         # source. A generator that failed / was killed returns empty/partial
