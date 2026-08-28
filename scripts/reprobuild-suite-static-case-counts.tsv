@@ -1333,7 +1333,7 @@ tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_configure_build_tree_cleanup.nim	nim	5
 tests/unit/t_constructor_fetch_tool_refs.nim	nim	2
-tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	1
+tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
@@ -1443,7 +1443,7 @@ tests/unit/t_shared_mime_info_dev_stub.nim	nim	1
 tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
 tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
 tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10
-tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	19
+tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	20
 tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	13
 tests/unit/t_version.nim	nim	2
 tests/unit/t_windows_system_hash_mode.nim	nim	2

@@ -16,6 +16,7 @@ suite "cross-repository executable runtime closure":
 
     let identity = PathOnlyBuildIdentity(actionIdentities: @[
       ToolActionIdentity(
+        installMethod: "nix",
         packageSelector: "hypervisor",
         executableName: "virsh",
         resolvedExecutablePath: runtimeBin / "virsh",
@@ -35,3 +36,23 @@ suite "cross-repository executable runtime closure":
     check aux.cmakePrefixDirs == @[runtimeRoot]
     check aux.includeDirs == @[runtimeRoot / "include"]
     check aux.libDirs == @[runtimeRoot / "lib"]
+
+  test "path runtime identities exclude the ambient search list":
+    let runtimeRoot = getTempDir() /
+      ("repro-runtime-path-closure-" & $getCurrentProcessId())
+    let resolvedBin = runtimeRoot / "resolved" / "bin"
+    let ambientBin = runtimeRoot / "ambient" / "bin"
+    var identity = PathOnlyBuildIdentity(actionIdentities: @[
+      ToolActionIdentity(
+        installMethod: "path",
+        packageSelector: "hypervisor",
+        executableName: "virsh",
+        resolvedExecutablePath: resolvedBin / "virsh",
+        pathSearchList: @[resolvedBin, ambientBin])])
+    var binDirs: seq[string] = @[]
+    var aux = ProducerAuxPaths()
+
+    mergeProducerRuntimeIdentity(identity, binDirs, aux)
+
+    check binDirs == @[resolvedBin]
+    check ambientBin notin binDirs

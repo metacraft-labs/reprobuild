@@ -80,17 +80,20 @@ package prod:
 
   uses:
     "sh"
+    "mkdir"
+    "chmod"
 
   executable prod:
     name: "prod"
 
   build:
-    discard shell(
+    let buildProd = shell(
       command = "mkdir -p build/bin && " &
         "printf '#!/bin/sh\necho """ & producerStamp & """\n' > build/bin/prod && " &
         "chmod +x build/bin/prod",
       actionId = "prod.build.prod",
       extraOutputs = @["build/bin/prod"])
+    appendRegisteredActionToolIdentityRefs(buildProd.id, ["mkdir", "chmod"])
 """
 
 # The consumer repo. ``uses: "prod"`` names the sibling producer; the develop
@@ -111,6 +114,7 @@ package consumer:
 
   uses:
     "sh"
+    "mkdir"
     "prod"
 
   build:
@@ -118,11 +122,13 @@ package consumer:
       command = "mkdir -p build && printf 'base\n' > build/base.txt",
       actionId = "consumer.build.base",
       extraOutputs = @["build/base.txt"])
+    appendRegisteredActionToolIdentityRefs(base.id, ["mkdir"])
     let consume = shell(
       command = "mkdir -p build && prod > build/consumed.txt",
       actionId = "consumer.build.consume",
       deps = @[base.id],
-      extraOutputs = @["build/consumed.txt"]).withToolIdentities(["prod"])
+      extraOutputs = @["build/consumed.txt"]).withToolIdentities(
+        ["prod", "mkdir"])
     let baseTarget = target("base", [base])
     discard target("consume", [base, consume])
     discard collect("test", actions = @[consume])

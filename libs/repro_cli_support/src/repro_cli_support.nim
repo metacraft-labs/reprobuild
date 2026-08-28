@@ -4003,8 +4003,9 @@ proc mergeProducerRuntimeIdentity*(identity: PathOnlyBuildIdentity;
   for actionIdentity in identity.actionIdentities:
     if actionIdentity.resolvedExecutablePath.len > 0:
       binDirs.addUnique(parentDir(actionIdentity.resolvedExecutablePath))
-    for path in actionIdentity.pathSearchList:
-      binDirs.addUnique(path)
+    if actionIdentity.installMethod != "path":
+      for path in actionIdentity.pathSearchList:
+        binDirs.addUnique(path)
     for path in actionIdentity.pkgConfigSearchList:
       aux.pkgConfigDirs.addUnique(path)
     for path in actionIdentity.cmakePrefixList:
@@ -6083,7 +6084,15 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       # branch above already added. The other adapters keep the fallback
       # because for them the list IS graph-derived — and they need it,
       # since some record no ``resolvedExecutablePath`` at all.
-      if actionIdy.installMethod != "path":
+      # Cross-repo executable producers use a path-shaped profile, but its
+      # search list is graph-derived and includes declared runtime tools.
+      # Retain those directories while continuing to exclude the ambient
+      # search list from ordinary host-path profiles.
+      var isCrossRepoExecutableProducer = false
+      {.cast(gcsafe).}:
+        isCrossRepoExecutableProducer =
+          producerMaterializedBinDirs.hasKey(name)
+      if actionIdy.installMethod != "path" or isCrossRepoExecutableProducer:
         for searchDir in actionIdy.pathSearchList:
           if searchDir.len > 0 and searchDir notin mergedBinDirs:
             mergedBinDirs.add(searchDir)
