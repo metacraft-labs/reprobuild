@@ -11,6 +11,127 @@ mkdir -p build/bin build/lib build/nimcache
 # shellcheck source=scripts/source_paths.sh
 source scripts/source_paths.sh
 
+# ---------------------------------------------------------------------------
+# Artifact accounting: this script must never end a run that produced nothing
+# while leaving the previous run's binaries behind to answer for it.
+#
+# ``set -e`` above stops the script when a ``nim c`` fails, and that is
+# necessary, but on its own it is not enough — twice over:
+#
+#   * The exit status is easy to lose on the way to the caller. Every wrapper
+#     that pipes this script into ``tee`` (the ``build`` and ``bootstrap``
+#     recipes in the Justfile) or that a human or an agent types with
+#     ``| tail`` reports the status of the LAST stage of the pipeline. ``just``
+#     sets ``pipefail`` so its own recipes are safe; an interactive shell and
+#     most ad-hoc tooling do not, and there the build's status is simply
+#     discarded and replaced with ``tail``'s zero.
+#
+#   * Stopping part way through the entrypoint loop leaves every binary that
+#     had not been reached yet on disk at its PREVIOUS contents. So
+#     ``build/bin/repro`` still exists, is still executable, and still runs —
+#     it just does not contain the change under test. A caller that answers
+#     "did the build succeed?" by looking for the file gets yes. That is worse
+#     than producing nothing: it is how a fix gets reported as verified when it
+#     was never compiled.
+#
+# The script therefore does not rely on its exit status alone to carry the
+# news. It also makes the FILESYSTEM tell the truth:
+#
+#   1. Every artifact this script claims to produce is verified immediately
+#      after the step that produces it: present, a regular file, non-empty,
+#      and not older than the moment this run started. ``nim c`` relinks its
+#      ``--out`` target on every invocation, so "not older than this run" is a
+#      true statement about a build that did the work — and an artifact left
+#      over from a previous run fails it.
+#   2. An entrypoint that fails to compile or link has its stale binary
+#      REMOVED, so "does the file exist?" stops answering yes for a binary
+#      nobody built.
+#   3. The loop runs to the end and reports every failure together, instead of
+#      hiding failures 2..N behind the first one.
+#   4. The last line of output is an explicit verdict, so a log read through a
+#      pipe that ate the exit status still says which way the build went.
+# ---------------------------------------------------------------------------
+build_run_marker="build/.build_apps_started"
+: > "${build_run_marker}"
+
+build_failures=()
+
+build_apps_verdict() {
+  local status=$?
+  if [ "${status}" -ne 0 ]; then
+    echo "build_apps: FAILED (exit ${status}) — no usable build was produced." >&2
+  fi
+  return "${status}"
+}
+trap build_apps_verdict EXIT
+
+record_failure() {
+  build_failures+=("$1")
+  echo "build_apps: FAILED: $1" >&2
+}
+
+# Report everything collected so far and stop. Called at each phase boundary so
+# a failure cannot be walked past by a later step that happens to succeed.
+abort_if_failed() {
+  if [ "${#build_failures[@]}" -eq 0 ]; then
+    return 0
+  fi
+  echo "" >&2
+  echo "build_apps: ${#build_failures[@]} build step(s) failed:" >&2
+  local failure
+  for failure in "${build_failures[@]}"; do
+    echo "  - ${failure}" >&2
+  done
+  exit 1
+}
+
+# Verify an artifact the step just before it claimed to produce.
+#
+# Staleness is judged with ``-ot`` (strictly older) rather than ``-nt``
+# (strictly newer) deliberately: a filesystem that keeps whole-second
+# timestamps — HFS+, and several network filesystems — can stamp a fast step
+# with the same tick as the marker, and demanding strictly-newer would turn
+# that into a false failure. Strictly-older cannot produce one, and an artifact
+# carried over from a previous run is strictly older by construction.
+verify_fresh_artifact() {
+  local path="$1"
+  local label="$2"
+  if [ ! -f "${path}" ]; then
+    record_failure "${label}: ${path} was not produced (the build step reported success without writing it)"
+    return 1
+  fi
+  if [ ! -s "${path}" ]; then
+    record_failure "${label}: ${path} is empty"
+    return 1
+  fi
+  if [ "${path}" -ot "${build_run_marker}" ]; then
+    record_failure "${label}: ${path} predates this run — it is a stale artifact from an earlier build, not the one just requested"
+    return 1
+  fi
+  return 0
+}
+
+# On Windows, Nim appends ``.exe`` to an extension-less ``--out``; everywhere
+# else the name is used verbatim. Accept either rather than guessing, so this
+# check cannot become a false failure on a platform it is not exercised on.
+resolve_built_binary() {
+  local name="$1"
+  if [ -f "build/bin/${name}" ]; then
+    printf '%s\n' "build/bin/${name}"
+    return 0
+  fi
+  if [ -f "build/bin/${name}.exe" ]; then
+    printf '%s\n' "build/bin/${name}.exe"
+    return 0
+  fi
+  return 1
+}
+
+discard_stale_binary() {
+  local name="$1"
+  rm -f "build/bin/${name}" "build/bin/${name}.exe"
+}
+
 # Peer-Cache-BearSSL: resolve nim-bearssl the same way every other sibling
 # source is resolved — explicit env value, then a local checkout, then the dev
 # shell's pinned input — and fail loudly when none of them carries the module
@@ -131,11 +252,22 @@ esac
 # flake input / store path (the package build + dev shell), so the shim must not
 # write its nimcache into its own source — pass an absolute writable dir.
 mkdir -p build/lib/tmp
+io_mon_status=0
 IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib/tmp" \
 IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
 IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
 SHM_QUEUE_SRC="${shm_queue_src}" \
-  bash "${io_mon_src}/scripts/build_shim.sh"
+  bash "${io_mon_src}/scripts/build_shim.sh" || io_mon_status=$?
+if [ "${io_mon_status}" -ne 0 ]; then
+  # Name the builder AND the sibling it came from. A Nim error raised inside
+  # io-mon otherwise reads as a reprobuild compile failure, and the reader
+  # goes looking for it in the wrong repository.
+  echo "error: the io-mon shim builder failed (exit ${io_mon_status})." >&2
+  echo "       builder: ${io_mon_src}/scripts/build_shim.sh" >&2
+  echo "       The monitor shim is a hard prerequisite of every monitored" >&2
+  echo "       compile below, so this build produced nothing usable." >&2
+  exit "${io_mon_status}"
+fi
 
 # Publishing the shim = replacing the library this very process's children are
 # being monitored with.
@@ -159,11 +291,10 @@ SHM_QUEUE_SRC="${shm_queue_src}" \
 # again, should anyone reintroduce one. With it unset the script publishes
 # inline, which is what puts the shim in place before an engine build begins.
 staged_shim="build/lib/tmp/librepro_monitor_shim.${dll_ext}"
-if [ ! -f "${staged_shim}" ]; then
-  echo "error: io-mon shim builder did not produce ${staged_shim}" >&2
-  exit 2
-fi
+verify_fresh_artifact "${staged_shim}" "io-mon monitor shim" || abort_if_failed
 if [ "${REPRO_DEFER_SHIM_PUBLISH:-0}" = "1" ]; then
+  # Intentional skip, not a failure: the caller has taken responsibility for
+  # publishing the staged library in a follow-up edge.
   echo "Staged ${staged_shim}; publish deferred to the follow-up edge."
 else
   if [ -f "build/lib/librepro_monitor_shim.${dll_ext}" ]; then
@@ -171,6 +302,9 @@ else
   fi
   mv -f "${staged_shim}" "build/lib/librepro_monitor_shim.${dll_ext}"
   rm -rf build/lib/tmp
+  verify_fresh_artifact \
+    "build/lib/librepro_monitor_shim.${dll_ext}" "monitor shim publish" ||
+    abort_if_failed
 fi
 
 # M9.R.47.3 — clear LD_LIBRARY_PATH and NIX_LDFLAGS for every ``nim c``
@@ -305,16 +439,29 @@ runtime_passl_for_libraries() {
 # gate: it runs the built binary with the loader search-path variables removed
 # from the child environment, so this threading silently disappearing is a test
 # failure rather than a remote-only outage.
-mapfile -t repro_runtime_passl < <(
-  runtime_passl_for_libraries \
+#
+# ``mapfile -t X < <(producer)`` reports the status of MAPFILE, never of the
+# producer: a producer that dies half way through yields a short list and a
+# zero exit, and ``repro`` then links without the rpaths that make its two
+# dlopen'd libraries resolvable off the dev shell. The failure would surface
+# only on a remote host, which is exactly the case the gate above exists to
+# prevent. Route the producer through a file so its status is checked.
+repro_runtime_passl_out="build/nimcache/.repro_runtime_passl"
+if ! runtime_passl_for_libraries \
     libclingo.so libclingo.dylib libzstd.so.1 libzstd.1.dylib -- \
     "${CLINGO_PREFIX:-}" \
     /opt/homebrew/opt/clingo \
     /usr/local/opt/clingo \
     "${ZSTD_PREFIX:-}" \
     /opt/homebrew/opt/zstd \
-    /usr/local/opt/zstd
-)
+    /usr/local/opt/zstd \
+    > "${repro_runtime_passl_out}"; then
+  echo "error: computing the runtime library search path for 'repro' failed." >&2
+  echo "       Linking without it would produce a binary whose libclingo /" >&2
+  echo "       libzstd dlopen resolves only inside this dev shell." >&2
+  exit 2
+fi
+mapfile -t repro_runtime_passl < "${repro_runtime_passl_out}"
 
 # Mach-O load commands live in a fixed-size header pad decided at LINK time,
 # and every `-Wl,-rpath,<dir>` above consumes part of it. Packaging then adds
@@ -358,6 +505,7 @@ while read -r name path extra_flags; do
       runtime_passl=(${repro_runtime_passl[@]+"${repro_runtime_passl[@]}"})
       ;;
   esac
+  entrypoint_status=0
   (
     unset_clingo_searchpath
     nim c \
@@ -369,8 +517,26 @@ while read -r name path extra_flags; do
       --nimcache:"build/nimcache/${name}" \
       --out:"build/bin/${name}" \
       "${path}"
-  )
+  ) || entrypoint_status=$?
+  if [ "${entrypoint_status}" -ne 0 ]; then
+    # Delete whatever was there before. ``nim c`` leaves the previous binary
+    # untouched when it fails, and that leftover is the thing that lets a
+    # broken build keep answering yes to "is build/bin/<name> there?".
+    discard_stale_binary "${name}"
+    record_failure "${name}: 'nim c ${path}' exited ${entrypoint_status} (compile or link failure); removed the stale build/bin/${name}"
+    # Keep going. The next entrypoint's failure is worth knowing about in the
+    # same run, and every entrypoint that is NOT rebuilt from here on has to be
+    # accounted for by the sweep below rather than left silently stale.
+    continue
+  fi
+  if built_binary="$(resolve_built_binary "${name}")"; then
+    verify_fresh_artifact "${built_binary}" "${name}" ||
+      discard_stale_binary "${name}"
+  else
+    record_failure "${name}: 'nim c ${path}' exited 0 but produced no build/bin/${name}"
+  fi
 done < apps/entrypoints.txt
+abort_if_failed
 
 # Keep the standalone bootstrap byte-for-byte aligned with the graph's
 # ``reprobuild.apps.reprobuild-nix-daemon`` edge. The daemon is a shipped
@@ -379,6 +545,9 @@ done < apps/entrypoints.txt
 cp -f tools/reprobuild-nix-daemon/reprobuild-nix-daemon \
   build/bin/reprobuild-nix-daemon
 chmod +x build/bin/reprobuild-nix-daemon
+verify_fresh_artifact \
+  "build/bin/reprobuild-nix-daemon" "reprobuild-nix-daemon staging" ||
+  abort_if_failed
 
 # Build the shared DSL runtime DLL — the Tier 1 artifact described in
 # reprobuild-specs/Provider-Compile-Tiering.md. Per-project provider
@@ -397,6 +566,7 @@ case "${REPRO_HOST_PLATFORM}" in
   *)
     dll_ext="so" ;;
 esac
+dsl_runtime_status=0
 (
   # Same /nix/store .rodata-bake guard as the entrypoints loop above.
   unset_clingo_searchpath
@@ -411,11 +581,25 @@ esac
     --nimcache:build/nimcache/repro-project-dsl-runtime-dll \
     --out:"build/lib/librepro_project_dsl_runtime.new.${dll_ext}" \
     libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim
-)
+) || dsl_runtime_status=$?
+if [ "${dsl_runtime_status}" -ne 0 ]; then
+  # Same reasoning as the entrypoints: a provider that links against a DSL
+  # runtime left over from an earlier build is a wrong artifact, not a
+  # partial one.
+  rm -f "build/lib/librepro_project_dsl_runtime.${dll_ext}"
+  record_failure "librepro_project_dsl_runtime: 'nim c --app:lib' exited ${dsl_runtime_status}; removed the stale build/lib/librepro_project_dsl_runtime.${dll_ext}"
+  abort_if_failed
+fi
+verify_fresh_artifact \
+  "build/lib/librepro_project_dsl_runtime.new.${dll_ext}" \
+  "librepro_project_dsl_runtime" || abort_if_failed
 if [ -f "build/lib/librepro_project_dsl_runtime.${dll_ext}" ]; then
   mv -f "build/lib/librepro_project_dsl_runtime.${dll_ext}" "build/lib/librepro_project_dsl_runtime.${dll_ext}.old" || true
 fi
 mv -f "build/lib/librepro_project_dsl_runtime.new.${dll_ext}" "build/lib/librepro_project_dsl_runtime.${dll_ext}"
+verify_fresh_artifact \
+  "build/lib/librepro_project_dsl_runtime.${dll_ext}" \
+  "librepro_project_dsl_runtime publish" || abort_if_failed
 
 # Windows runtime-DLL staging: the blocks below copy each dlopen'd library next
 # to the built binaries so LoadLibrary resolves it from the .exe's own
@@ -686,3 +870,51 @@ case "${REPRO_HOST_PLATFORM}" in
     fi
     ;;
 esac
+
+# ---------------------------------------------------------------------------
+# Closing sweep: every binary this script is responsible for, re-checked as a
+# set.
+#
+# The per-step checks above each cover the step that ran. This one covers the
+# steps that DIDN'T — an entrypoint the loop never reached, an artifact a later
+# staging step clobbered, a binary someone deleted mid-run. It is the check
+# that makes the final verdict a statement about the whole of build/bin rather
+# than about the last thing that happened to be compiled.
+#
+# Deliberately NOT swept: the Windows runtime DLLs staged above. Their
+# fail-vs-warn policy is a policy — libzstd, sqlite3 and cacert.pem are loaded
+# by specific subcommands and a dev build without them is usable, which is why
+# they warn unless REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS=1 promotes them. Sweeping
+# them here would quietly override that and turn an intentional skip into a
+# failure.
+# ---------------------------------------------------------------------------
+while read -r name _path _extra_flags; do
+  name="${name%$'\r'}"
+  case "${name}" in
+    ""|\#*) continue ;;
+  esac
+  if swept_binary="$(resolve_built_binary "${name}")"; then
+    verify_fresh_artifact "${swept_binary}" "${name} (final sweep)" || true
+  else
+    record_failure "${name} (final sweep): build/bin/${name} is missing at the end of a build that was about to report success"
+  fi
+done < apps/entrypoints.txt
+verify_fresh_artifact \
+  "build/bin/reprobuild-nix-daemon" "reprobuild-nix-daemon (final sweep)" || true
+verify_fresh_artifact \
+  "build/lib/librepro_project_dsl_runtime.${dll_ext}" \
+  "librepro_project_dsl_runtime (final sweep)" || true
+if [ "${REPRO_DEFER_SHIM_PUBLISH:-0}" = "1" ]; then
+  # The publish was deliberately deferred; the staged library is the artifact
+  # this run is answerable for.
+  verify_fresh_artifact \
+    "build/lib/tmp/librepro_monitor_shim.${dll_ext}" \
+    "monitor shim, staged (final sweep)" || true
+else
+  verify_fresh_artifact \
+    "build/lib/librepro_monitor_shim.${dll_ext}" \
+    "monitor shim (final sweep)" || true
+fi
+abort_if_failed
+
+echo "build_apps: OK — every entrypoint in apps/entrypoints.txt, the DSL runtime library, and the monitor shim were rebuilt by this run."
