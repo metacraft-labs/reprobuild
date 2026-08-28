@@ -472,6 +472,41 @@ suite "hooks ensure reconciles a git-backed workspace root":
       check isDispatcher(hooksDir / "pre-push")
       check "repaired pre-push" in healed.output
 
+  test "test_hook_repair_preserves_an_active_dispatcher_reader":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupWorkspace(gitBin, "atomic-repair", gitBackedRoot = true)
+      defer: removeDir(fx.scratch)
+      let target = fx.root / "lib-2"
+      let dispatcher = hooksDirOf(target) / "post-commit"
+
+      check ensure(fx).code == 0
+      let canonical = readFile(dispatcher)
+      let drifted = canonical & "# drift that reconciliation must replace\n"
+      writeFile(dispatcher, drifted)
+      inclFilePermissions(dispatcher, {fpUserExec})
+
+      # A running shell holds the same kind of read handle. After an atomic
+      # rename it must finish reading the old inode; a truncate-in-place repair
+      # makes this value a splice of the old prefix and canonical replacement.
+      var activeReader: File
+      check open(activeReader, dispatcher, fmRead)
+      defer: activeReader.close()
+      var prefix = newString(32)
+      let prefixLen = activeReader.readBuffer(addr prefix[0], prefix.len)
+      prefix.setLen(prefixLen)
+
+      let repaired = ensure(fx)
+      checkpoint(repaired.output)
+      check repaired.code == 0
+      let observedByActiveReader = prefix & activeReader.readAll()
+      check observedByActiveReader == drifted
+      check readFile(dispatcher) == canonical
+      check not fileExists(dispatcher & ".repro-write-" &
+        $getCurrentProcessId() & ".tmp")
+
   test "test_ensure_still_refuses_a_second_distinct_user_hook":
     let gitBin = findExe("git")
     if gitBin.len == 0:

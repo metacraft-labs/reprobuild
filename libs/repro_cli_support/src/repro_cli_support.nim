@@ -3350,6 +3350,15 @@ proc materializedSubstitutionConfigured(): bool =
   except CatchableError:
     false
 
+proc shouldTryFromSourceCacheSubstitution*(
+    outcome: FromSourceResolveResult;
+    cacheConfigured, prepareOnly, dryRun, forceRebuild: bool): bool =
+  ## Cached source artifacts remain valid for bootstrap-floor tools. The floor
+  ## prevents recursive self-hosting builds; it must not prevent restoring an
+  ## artifact that was already built from source under the same identity.
+  outcome.kind == rrNeedsBuild and cacheConfigured and
+    not prepareOnly and not dryRun and not forceRebuild
+
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
                             projectRoot: string;
@@ -7668,6 +7677,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
                           suppressTrace = true;
                           skipCacheHitEvidence = true;
                           statsEnabled = false;
+                          validateExistingOnly = false;
                           cancelCheck: BuildCancelCallback = nil):
     ProjectInterfaceArtifact =
   ## Materialize a project interface through the build engine.
@@ -7745,7 +7755,8 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # by the engine's recorded-input revalidation on top of it.
   let edgeIdentity = weakFingerprintFromText(command.join("\x00"))
   let sessionKey = toHex(edgeIdentity.bytes)
-  if not forceRebuild and interfaceEdgeSessionResults.hasKey(sessionKey) and
+  if not forceRebuild and not validateExistingOnly and
+      interfaceEdgeSessionResults.hasKey(sessionKey) and
       fileExists(extendedPath(artifactPath)):
     return interfaceEdgeSessionResults[sessionKey]
   let actionId = "__repro_interface_extract-" &
@@ -7791,7 +7802,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     bypassRunQuota: bypassRunQuota,
     fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
     inlineRunQuota: true,
-    dryRun: false,
+    dryRun: validateExistingOnly,
     forceRebuild: forceRebuild,
     suppressTrace: suppressTrace,
     skipCacheHitEvidence: skipCacheHitEvidence,
@@ -7820,6 +7831,14 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       if detail.len == 0:
         detail = "interface extraction edge failed for " & modulePath
       raise newException(OSError, detail)
+    if validateExistingOnly:
+      var validated = false
+      for item in edgeResult.results:
+        if item.id == extractAction.id and item.status == asUpToDate:
+          validated = true
+      if not validated:
+        raise newException(IOError,
+          "interface extraction edge requires execution for " & modulePath)
     if not fileExists(extendedPath(artifactPath)):
       raise newException(IOError,
         "interface extraction edge did not write artifact: " & artifactPath)
@@ -8613,17 +8632,47 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       let outcome = tryResolveFromSourceTool(useDef)
       if outcome.kind == rrResolved:
         continue
-      # M9.R.14c.2 — if the unresolved tool is in the cycle-break set
-      # (either seeded as part of the bootstrap floor OR added
-      # reactively by an earlier closing-edge cycle), skip auto-recurse.
-      # The downstream resolver routes it through stdlib provisioning.
-      if useDef.executableName.len > 0 and
-          useDef.executableName in fromSourceCycleBrokenTools:
-        continue
       if outcome.kind != rrNeedsBuild:
         continue
       let siblingRecipeDir = absolutePath(outcome.recipeDir)
       if siblingRecipeDir in fromSourceResolvedRecipes:
+        continue
+      let siblingManifest = siblingRecipeDir / "repro.nim"
+      if shouldTryFromSourceCacheSubstitution(outcome,
+          materializedSubstitutionConfigured(), prepareOnly, dryRun,
+          forceRebuild):
+        let substituteOutcome = executeBuildTarget(
+          siblingManifest, effectiveMode, publicCliPath,
+          selectDefaultAction = true,
+          workRoot = workRoot,
+          progressMode = bpmQuiet,
+          progressBarStyle = progressBarStyle,
+          showSet = {},
+          measureSet = {},
+          reportPersistence = BuildReportPersistence(suppressed: true),
+          logMode = blmSummary,
+          diagnosticsPath = "",
+          prepareOnly = false,
+          dryRun = false,
+          forceRebuild = false,
+          noOutputCleanup = true,
+          publishCacheHits = false,
+          publishMaterialized = false,
+          substituteMaterialized = true,
+          skipCmakeRegeneration = skipCmakeRegeneration,
+          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          eventSink = eventSink,
+          cancelCheck = cancelCheck)
+        if substituteOutcome.exitCode == 0 and
+            tryResolveFromSourceTool(useDef).kind == rrResolved:
+          logSummary("from-source cache substitute: restored \"" &
+            outcome.toolName & "\" at " & siblingRecipeDir)
+          fromSourceResolvedRecipes.incl(siblingRecipeDir)
+          continue
+      # The bootstrap floor suppresses recursive construction only after a
+      # configured source-artifact cache had a chance to restore the mirror.
+      if useDef.executableName.len > 0 and
+          useDef.executableName in fromSourceCycleBrokenTools:
         continue
       if siblingRecipeDir in fromSourceBuildStack:
         # DSL-port M9.R.10a — cycle break via stdlib fall-through.
@@ -8659,36 +8708,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           ". This is a sanity ceiling — production recipe chains should " &
           "stay well below it; investigate the call chain for an " &
           "accidental fan-out.")
-      let siblingManifest = siblingRecipeDir / "repro.nim"
-      if materializedSubstitutionConfigured() and
-          not prepareOnly and not dryRun and not forceRebuild:
-        let substituteOutcome = executeBuildTarget(
-          siblingManifest, effectiveMode, publicCliPath,
-          selectDefaultAction = true,
-          workRoot = workRoot,
-          progressMode = bpmQuiet,
-          progressBarStyle = progressBarStyle,
-          showSet = {},
-          measureSet = {},
-          reportPersistence = BuildReportPersistence(suppressed: true),
-          logMode = blmSummary,
-          diagnosticsPath = "",
-          prepareOnly = false,
-          dryRun = false,
-          forceRebuild = false,
-          noOutputCleanup = true,
-          publishCacheHits = false,
-          publishMaterialized = false,
-          substituteMaterialized = true,
-          skipCmakeRegeneration = skipCmakeRegeneration,
-          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
-          eventSink = eventSink,
-          cancelCheck = cancelCheck)
-        if substituteOutcome.exitCode == 0:
-          logSummary("from-source cache substitute: restored \"" &
-            outcome.toolName & "\" at " & siblingRecipeDir)
-          fromSourceResolvedRecipes.incl(siblingRecipeDir)
-          continue
       logSummary("from-source auto-recurse: building \"" & outcome.toolName &
         "\" at " & siblingRecipeDir)
       fromSourceBuildStack.add(siblingRecipeDir)
@@ -12821,8 +12840,18 @@ proc writeExecutableIfChanged(path, content: string): bool =
   if fileExists(extendedPath(path)) and readFile(extendedPath(path)) == content:
     ensureExecutable(path)
     return false
-  writeFile(extendedPath(path), content)
-  ensureExecutable(path)
+  # A managed hook can reconcile itself while its shell still has the
+  # dispatcher open. Truncating that inode in place lets the active shell read
+  # a mixture of the old and new scripts. Stage beside the hook and replace it
+  # with one rename so existing readers retain the complete old inode.
+  let staged = path & ".repro-write-" & $getCurrentProcessId() & ".tmp"
+  try:
+    writeFile(extendedPath(staged), content)
+    ensureExecutable(staged)
+    moveFile(extendedPath(staged), extendedPath(path))
+  finally:
+    if fileExists(extendedPath(staged)):
+      removeFile(extendedPath(staged))
   true
 
 proc removeFileIfExists(path: string): bool =
@@ -52036,6 +52065,82 @@ type CompiledProviderSolverInputs = object
   defaultToolProvisioning: string
   sourceRecipeRoots: seq[string]
 
+type DurableSolverProviderArtifacts = object
+  interfaceArtifact: ProjectInterfaceArtifact
+  providerArtifact: ProviderCompileArtifact
+
+proc tryLoadDurableSolverProviderArtifacts(
+    modulePath, compileWorkDir: string):
+    Option[DurableSolverProviderArtifacts] =
+  ## A normal build already materializes monitored interface/provider edges in
+  ## the recipe's output directory. Lock refresh asks the same build-engine
+  ## edges to validate their recorded read sets in dry-run mode before reading
+  ## those artifacts. A miss falls back to the disposable direct-extraction
+  ## path below, so lock refresh still writes no project artifacts of its own.
+  try:
+    let outDir = outputDirForTarget(parseBuildTarget(modulePath), "")
+    let interfacePath = outDir / "project-interface.rbsz"
+    let stubPath = outDir / "project-interface.nim"
+    let providerBinaryPath = outDir / "provider" / "project-provider"
+    let providerArtifactPath = outDir / "provider-compile.rbsz"
+    if not fileExists(extendedPath(interfacePath)) or
+        not fileExists(extendedPath(providerBinaryPath)) or
+        not fileExists(extendedPath(providerArtifactPath)):
+      return none(DurableSolverProviderArtifacts)
+    let publicCliPath = stablePublicCliPath()
+    var inspectionStats: BuildStats
+    let interfaceArtifact = extractInterfaceEdge(modulePath, interfacePath,
+      stubPath, compileWorkDir, outDir / "provider-work",
+      projectRootForModule(modulePath), publicCliPath,
+      outDir / "build-engine-cache", inspectionStats, requireStub = false,
+      bypassRunQuota = runQuotaBypassedByEnv(),
+      validateExistingOnly = true)
+    let plan = providerCompilePlan(modulePath, providerBinaryPath,
+      interfaceArtifact.interfaceFingerprint, compileWorkDir,
+      outDir / "provider-work")
+    var provider = staticFreshnessFallbackProvider(plan,
+      providerArtifactPath, modulePath, providerBinaryPath,
+      interfaceArtifact.interfaceFingerprint, compileWorkDir)
+    if provider.isNone:
+      let providerAction = providerCompileBuildAction(plan,
+        modulePath, interfacePath, providerArtifactPath,
+        internalReproHelperCliPath(publicCliPath), compileWorkDir,
+        outDir / "provider-work")
+      let validation = runBuild(graph([providerAction]), BuildEngineConfig(
+        cacheRoot: outDir / "build-engine-cache",
+        actionCacheRoot: currentActionCacheRoot(),
+        runQuotaCliPath: publicCliPath,
+        monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
+        monitorCliArgs: internalIoMonitorArgs,
+        maxParallelism: 1'u32,
+        stdoutLimit: 1024 * 1024,
+        stderrLimit: 1024 * 1024,
+        rebuildMissingOutputsOnCacheHit: true,
+        deferLocalOutputBlobs: true,
+        bypassRunQuota: runQuotaBypassedByEnv(),
+        inlineRunQuota: true,
+        dryRun: true,
+        suppressTrace: true,
+        skipCacheHitEvidence: true))
+      if validation.hasFailedActions():
+        return none(DurableSolverProviderArtifacts)
+      var validated = false
+      for item in validation.results:
+        if item.id == providerAction.id and item.status == asUpToDate:
+          validated = true
+      if not validated:
+        return none(DurableSolverProviderArtifacts)
+      provider = some(readProviderCompileArtifact(providerArtifactPath))
+    if not providerCompileArtifactFresh(providerArtifactPath,
+        providerBinaryPath, interfaceArtifact.interfaceFingerprint,
+        plan.providerFingerprint, compileWorkDir):
+      return none(DurableSolverProviderArtifacts)
+    some(DurableSolverProviderArtifacts(
+      interfaceArtifact: interfaceArtifact,
+      providerArtifact: provider.get()))
+  except CatchableError:
+    none(DurableSolverProviderArtifacts)
+
 proc solverInputsFromCompiledProvider(projectDir: string;
                                       requireSolverBinding = true;
                                       strict = false):
@@ -52087,12 +52192,11 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     ensureBootstrapToolchainEnv(tpmPathOnly, resolveStoreRoot() / "tool-store")
     let interfacePath = scratchRoot / "project-interface.rbsz"
     let stubPath = scratchRoot / "project-interface.nim"
-    # Deliberately NOT the extraction edge (Compiles-Are-Normal-Edges.md):
-    # every path here — artifact, stub, sidecars, nimcache — lives under a
-    # temp root this proc creates and deletes in the same call, so an edge
-    # would be keyed on paths that never exist again and could never hit.
-    # This is a best-effort probe for the lock refresh, not a build; its
-    # results are thrown away and it writes nothing into the project tree.
+    # Fresh monitored artifacts from a normal build are reused below. On a
+    # miss, deliberately do NOT create extraction edges for these temp paths:
+    # they disappear at the end of this call, so such edges could never hit.
+    # The fallback remains a best-effort lock probe whose results are thrown
+    # away and which writes nothing into the project tree.
     # A refresh always re-solves. Clear inherited build pins before interface
     # extraction as well as provider execution: module initialization can run
     # during either process, and an old pin must not prevent us from observing
@@ -52104,9 +52208,15 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     defer:
       if inheritedPins.len > 0: putEnv(LockPinsEnvVar, inheritedPins)
       if inheritedLockPath.len > 0: putEnv(LockPathEnvVar, inheritedLockPath)
-    let artifact = extractInterfaceFromModule(modulePath, interfacePath,
-      stubPath, compileWorkDir, scratchDir, requireStub = false,
-      consumerRoot = projectRootForModule(modulePath))
+    let durable = tryLoadDurableSolverProviderArtifacts(modulePath,
+      compileWorkDir)
+    let artifact =
+      if durable.isSome:
+        durable.get().interfaceArtifact
+      else:
+        extractInterfaceFromModule(modulePath, interfacePath,
+          stubPath, compileWorkDir, scratchDir, requireStub = false,
+          consumerRoot = projectRootForModule(modulePath))
     # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.
@@ -52122,9 +52232,13 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       if useDef.packageSelector.len > 0 and
           useDef.packageSelector notin usesSelectors:
         usesSelectors.add(useDef.packageSelector)
-    let providerBinaryPath = scratchRoot / "provider" / "project-provider"
-    let provider = compileProviderBinary(modulePath, providerBinaryPath,
-      artifact.interfaceFingerprint, "", compileWorkDir, scratchDir)
+    let provider =
+      if durable.isSome:
+        durable.get().providerArtifact
+      else:
+        let providerBinaryPath = scratchRoot / "provider" / "project-provider"
+        compileProviderBinary(modulePath, providerBinaryPath,
+          artifact.interfaceFingerprint, "", compileWorkDir, scratchDir)
     let emitPath = scratchRoot / "solver-inputs.explain"
     let protocolRoot = scratchRoot / "protocol"
     let cwd = if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
@@ -52272,6 +52386,20 @@ proc mergeProviderSolverInputs(aggregate: var CompiledProviderSolverInputs;
     cmp(a.name, b.name))
   aggregate.packages.sort(proc(a, b: PackageDecl): int = cmp(a.name, b.name))
 
+proc sourceProviderRecipeDirForSolverFold*(
+    outcome: FromSourceResolveResult): string =
+  ## Solver-input extraction reads recipe metadata only. A missing artifact is
+  ## therefore not a reason to skip a bootstrap-floor recipe: no recursive
+  ## package build occurs here, and omitting the provider would let lock
+  ## generation ignore its dependency ranges.
+  case outcome.kind
+  of rrResolved:
+    outcome.profile.selectedStorePath
+  of rrNeedsBuild:
+    outcome.recipeDir
+  of rrSiblingMissing:
+    ""
+
 proc foldFromSourceProviderSolverInputs(projectDir: string;
                                         aggregate: var
                                           CompiledProviderSolverInputs) =
@@ -52291,16 +52419,7 @@ proc foldFromSourceProviderSolverInputs(projectDir: string;
     if useDef.executableName.len == 0:
       continue
     let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
-    var recipeDir = ""
-    case outcome.kind
-    of rrResolved:
-      recipeDir = outcome.profile.selectedStorePath
-    of rrNeedsBuild:
-      if useDef.executableName in fromSourceCycleBrokenTools:
-        continue
-      recipeDir = outcome.recipeDir
-    of rrSiblingMissing:
-      continue
+    var recipeDir = sourceProviderRecipeDirForSolverFold(outcome)
     if recipeDir.len == 0:
       continue
     recipeDir = absolutePath(recipeDir)

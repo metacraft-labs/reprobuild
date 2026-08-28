@@ -958,7 +958,7 @@ tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	5
 tests/integration/t_highest_satisfied_floor_wins.nim	nim	1
 tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	nim	6
 tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim	nim	1
-tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	17
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	18
 tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	1
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	6
@@ -1394,7 +1394,7 @@ tests/unit/t_m9r82_action_cache_cas_migration.nim	nim	8
 tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	3
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
-tests/unit/t_m9r9_auto_recurse.nim	nim	17
+tests/unit/t_m9r9_auto_recurse.nim	nim	19
 tests/unit/t_measurement_axes.nim	nim	14
 tests/unit/t_nix_propagated_store_paths.nim	nim	2
 tests/unit/t_run_consumes.nim	nim	3
