@@ -56389,7 +56389,23 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           fragmentExisted = true
         if plan.mintedFetch.len > 0:
           ensureRemoteEntry(target.abs, plan.remoteName, plan.mintedFetch)
-        discard appendFragmentInclude(target.abs, fragmentRel)
+        # Same rule as the repo-set branch above: the membership key is read
+        # off what the name resolves to, and the array is located BY ITS KEY.
+        #
+        # This used to call `appendFragmentInclude`, which inserts before the
+        # first line that is a lone `]`. A project manifest declares
+        # `member_sets` before `member_repos`, so the fragment path landed in
+        # `member_sets` and the whole project stopped resolving — not just the
+        # added repo: "member set 'repos/<name>.toml' does not exist (looked
+        # for 'repo-sets/repos/<name>.toml.toml')".
+        let memberKey = membershipKeyFor(manifestRoot, repo)
+        if memberKey != memberReposKey:
+          stderr.writeLine("repro workspace repos add: '" & repo &
+            "' does not resolve to a repo fragment (" &
+            (manifestRoot / "repos" / (repo & ".toml")) &
+            "); refusing to guess which membership key it belongs under")
+          return 2
+        discard editSetMember(target.abs, memberKey, repo, add = true)
         paths.add(target.rel)
         remoteNames.add(target.name & "=" & plan.remoteName &
           (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
@@ -56461,7 +56477,19 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           return 2
         dropped = editSetMember(target.abs, memberKey, repo, add = false)
       of mkProject:
-        dropped = removeFragmentInclude(target.abs, fragmentRel)
+        # Mirrors the add path: the entry is a NAME under `member_repos`, not a
+        # fragment path under `includes`, so removing it has to use the same
+        # key-located edit or `remove` cannot undo what `add` wrote.
+        let memberKey = membershipKeyFor(manifestRoot, repo)
+        if memberKey.len == 0:
+          stderr.writeLine("repro workspace repos remove: '" & repo &
+            "' resolves to neither a repo fragment nor a repo-set (looked " &
+            "for " & (manifestRoot / "repos" / (repo & ".toml")) & " and " &
+            (manifestRoot / "repo-sets" / (repo & ".toml")) &
+            "); refusing to guess which membership key to edit in " &
+            target.rel)
+          return 2
+        dropped = editSetMember(target.abs, memberKey, repo, add = false)
       if dropped:
         droppedFrom.add(project)
         paths.add(target.rel)
