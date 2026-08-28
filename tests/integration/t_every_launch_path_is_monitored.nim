@@ -860,7 +860,16 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                   "pollMonitor", "finishMonitor"],
       inert: @["appendLauncherEventLoss", "completeness",
                "records", "monitorLifecycleCounts", "live", "hasExited",
-               "rootPid"]),
+               "rootPid",
+               # Moved to `io_mon/shim_discovery.nim` by the same refactor
+               # that motivated `sourceRels`, and re-exported from
+               # `fs_snoop`. Inert: it resolves a path and starts nothing.
+               # Adding `shim_discovery.nim` to `sourceRels` made the audit
+               # SEE the file; classifying the name is the other half, and
+               # it was missed — the case reported `unclassified.len == 1`
+               # until this line, which is the audit doing its job on an
+               # incomplete fix to itself.
+               "findShimLibrary"]),
     # The escape hatches, and the rewrite templates that warn about the
     # stdlib names. The templates are pattern rewrites, but they are also
     # ordinary exported templates that can be called by name, so they are
