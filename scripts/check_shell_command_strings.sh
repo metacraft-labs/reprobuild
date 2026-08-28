@@ -81,6 +81,70 @@ normalized_baseline() {
   tr -d '\r' < "$BASELINE" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' | sort -u
 }
 
+if [[ "${1:-}" == "--self-test" ]]; then
+  # PROOF OF POWER. A gate nobody has tried to defeat is an assertion, not a
+  # check. `scripts/shell-command-strings-probes/` holds one complete Nim file
+  # per shape; the filename prefix states the expected verdict and this asserts
+  # it in BOTH directions, so a documented blind spot cannot close silently and
+  # a closed one cannot re-open silently. See that directory's README.md.
+  PROBES="scripts/shell-command-strings-probes"
+  if [[ ! -d "$PROBES" ]]; then
+    echo "FAIL: $PROBES not found." >&2
+    exit 2
+  fi
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' EXIT
+  probe_failures=0
+  probe_total=0
+  for probe in "$PROBES"/*.nim.probe; do
+    base="$(basename "$probe" .nim.probe)"
+    # One probe per scratch directory: the scanner reports per file, and a
+    # shared directory would let one probe's rows answer for another's.
+    mkdir -p "$work/$base"
+    tr -d '\r' < "$probe" > "$work/$base/$base.nim"
+    rows="$("$PYTHON_BIN" "$SCANNER" "$work/$base" || true)"
+    count="$(printf '%s\n' "$rows" | grep -c . || true)"
+    probe_total=$((probe_total + 1))
+    case "$base" in
+      caught_*)
+        if [[ "$count" -lt 1 ]]; then
+          echo "FAIL: $base is a real defect the scanner MUST report, and it reported nothing." >&2
+          probe_failures=$((probe_failures + 1))
+        fi
+        ;;
+      missed_*)
+        if [[ "$count" -ge 1 ]]; then
+          echo "FAIL: $base is a DOCUMENTED BLIND SPOT and the scanner now reports it." >&2
+          echo "      That is an improvement — rename the probe to caught_… and delete its" >&2
+          echo "      row from $PROBES/README.md so the gate's honesty stays current." >&2
+          probe_failures=$((probe_failures + 1))
+        fi
+        ;;
+      exempt_*)
+        if [[ "$count" -ge 1 ]]; then
+          echo "FAIL: $base is NOT a defect and the scanner reported it:" >&2
+          printf '%s\n' "$rows" | sed 's/^/        /' >&2
+          probe_failures=$((probe_failures + 1))
+        fi
+        ;;
+      *)
+        echo "FAIL: $base has no verdict prefix (caught_/missed_/exempt_)." >&2
+        probe_failures=$((probe_failures + 1))
+        ;;
+    esac
+  done
+  if [[ "$probe_failures" -gt 0 ]]; then
+    echo "shell-command-strings self-test: $probe_failures of $probe_total probes disagree" >&2
+    exit 1
+  fi
+  caught=$(ls "$PROBES"/caught_*.nim.probe 2>/dev/null | wc -l | tr -d ' ')
+  missed=$(ls "$PROBES"/missed_*.nim.probe 2>/dev/null | wc -l | tr -d ' ')
+  exempt=$(ls "$PROBES"/exempt_*.nim.probe 2>/dev/null | wc -l | tr -d ' ')
+  echo "shell-command-strings self-test: $probe_total probes agree" \
+       "($caught caught, $missed documented blind spots, $exempt exemptions held)"
+  exit 0
+fi
+
 if [[ "${1:-}" == "--write-baseline" ]]; then
   {
     echo "# shell-command-strings baseline — see scripts/check_shell_command_strings.sh"

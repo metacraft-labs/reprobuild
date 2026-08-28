@@ -39553,10 +39553,29 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       let slash = upstream.output.strip().find('/')
       if slash > 0:
         agreedRemoteName = upstream.output.strip()[0 ..< slash]
+  # ``--current-repo`` is optional; ``--workspace-root`` is the caller's
+  # explicit target either way. Every other use of ``parsed.currentRepo``
+  # above is guarded by ``len > 0``, but this one was passed through bare —
+  # and an empty repo root makes ``push_hook_protocol``'s ``runGit`` omit its
+  # ``-C``, so ``rev-parse --show-object-format``, ``rev-parse HEAD^{commit}``,
+  # ``cat-file`` and ``merge-base --is-ancestor`` all answered from THE
+  # PROCESS WORKING DIRECTORY's repository. The gate then decided an
+  # unrelated repository's pre-push protocol validity and "independently
+  # observed HEAD" — from a non-repository cwd it refused with "unsupported
+  # or unreadable Git object format" (exit 2), and from any git checkout it
+  # read that checkout's HEAD instead of the workspace's.
+  #
+  # Use the same fallback ``runCheckCommand`` already applies to the SAME
+  # stream a few frames up. That is not a new risk: if the fallback root were
+  # not a readable repository, that earlier ``parsePrePushRefStream`` would
+  # already have refused this invocation with exit 2 before reaching here.
+  let protocolRepoRoot =
+    if parsed.currentRepo.len > 0: parsed.currentRepo
+    else: parsed.workspaceRoot
   let outgoing =
     if parsed.pushedRefsPath.len > 0:
       evaluateOutgoingCurrent(identity.binaryPath,
-        parsed.currentRepo, parsed.pushedRefsPath, parsed.hookRemoteName,
+        protocolRepoRoot, parsed.pushedRefsPath, parsed.hookRemoteName,
         parsed.hookRemoteLocation, agreedRemoteName, agreedRemoteLocation)
     else:
       OutgoingCurrentDecision(protocolOk: true)
@@ -39565,7 +39584,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       repo: currentRepoPath,
       property: "pre-push-protocol",
       remediation: "reinstall the managed hooks with 'repro hooks ensure --vcs " &
-        parsed.currentRepo & "' and retry the push",
+        protocolRepoRoot & "' and retry the push",
       evidence: outgoing.diagnostic))
     result.exitCode = 2
     return

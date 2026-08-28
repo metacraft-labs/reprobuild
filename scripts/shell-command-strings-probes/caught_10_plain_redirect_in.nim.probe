@@ -1,0 +1,7 @@
+## The W10 defect itself: a payload handed to a verifier through `<`. On
+## Windows the child reads EOF and reports every valid signature as bad.
+import std/[os, osproc]
+
+proc verifySignature(payload, sig: string): int =
+  execCmdEx("ssh-keygen -Y verify -s " & quoteShell(sig) &
+            " < " & quoteShell(payload)).exitCode

@@ -226,9 +226,18 @@ import git_actions
 import git_tool
 import shared_clones
 
+const ReprobuildRepoRoot =
+  currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory. `currentSourcePath()` is
+  ## absolute on both platforms (measured on the stock Windows 2.2.8 and on
+  ## the `nix develop` fork 2.3.1, whose canonical *assertion* locations are a
+  ## different mechanism and do not reach this one), so `reproBinary` below
+  ## names the same file from every cwd.
+
 const reproBinary =
-  when defined(windows): "./build/bin/repro.exe"
-  else: "./build/bin/repro"
+  when defined(windows): ReprobuildRepoRoot / "build/bin/repro.exe"
+  else: ReprobuildRepoRoot / "build/bin/repro"
   ## Spelled with the literal path IN THE SOURCE on both branches, and that
   ## spelling is load-bearing rather than stylistic.
   ##
@@ -248,7 +257,9 @@ const reproBinary =
   ## CONTAINS `reproBin`, and `runShell` appears below. Renaming this constant
   ## would have turned the flag silently false. Written out in full, the FIRST
   ## trigger fires on the literal itself and the flag no longer depends on
-  ## what this identifier happens to be called.
+  ## what this identifier happens to be called. Anchoring the value on
+  ## `ReprobuildRepoRoot` above keeps that property: the `build/bin/repro`
+  ## literal is still present verbatim in both branches.
 
 proc requireReproBinary(): string =
   ## The engine-built CLI, or a hard FAILURE.

@@ -1,0 +1,9 @@
+## `when defined(linux) or defined(windows):` INCLUDES Windows. The old test
+## matched a prefix and never read the rest of the condition.
+import std/[osproc]
+
+proc probeVersion(tool, log: string): string =
+  when defined(linux) or defined(windows):
+    execCmdEx(tool & " --version > " & log).output
+  else:
+    ""

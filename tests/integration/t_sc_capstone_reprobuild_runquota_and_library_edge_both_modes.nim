@@ -87,7 +87,18 @@ import std/[os, osproc, strutils, unittest]
 
 import repro_lock
 
-const reproBinary = "./build/bin/" & addFileExt("repro", ExeExt)
+const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory.
+  ##
+  ## The previous spelling (``"./build/bin/" & addFileExt("repro", ExeExt)``)
+  ## made the working directory an unstated fixture input: from the repo root
+  ## the case ran, from any other directory ``fileExists`` was false and it
+  ## SKIPPED, and from a scratch directory that happened to carry a staged
+  ## ``build/bin/repro`` it ran against THAT binary and reported failures that
+  ## read as product refusals. ``currentSourcePath()`` is absolute on both
+  ## platforms, so this constant is the same from every cwd.
+const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
 
 # The executable producer's UNIQUE stamp — the built ``exeprod`` binary echoes
 # exactly this. It cannot appear unless the sibling was built from source AND its
@@ -228,7 +239,12 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   flushFile(stdout)
   let process = startProcess(shBin,
     args = ["-c", shellLine],
-    workingDir = (if cwd.len > 0: cwd else: getCurrentDir()),
+    # Every call site below passes an explicit `cwd`, so this default is not
+    # reached today — but it is the last place in this file where the process
+    # working directory could become a fixture input, and a future caller that
+    # omits the argument should get THIS CHECKOUT rather than wherever the
+    # runner was launched.
+    workingDir = (if cwd.len > 0: cwd else: ReprobuildRepoRoot),
     options = {poUsePath})
   var elapsedMs = 0
   while true:
@@ -320,7 +336,10 @@ suite "SC-7: capstone — consume sibling exe AND lib from source in BOTH modes"
       checkpoint("skipped — cc/sh/git missing on PATH or repro unbuilt")
       skip()
     else:
-      let repoRoot = getCurrentDir()
+      let repoRoot = ReprobuildRepoRoot
+        ## NOT `getCurrentDir()`: the repo root is a property of
+        ## THIS CHECKOUT, not of the directory the runner happened
+        ## to be launched from.
       let reproAbs = absolutePath(reproBinary)
       let scratch = getTempDir() / "sc7-" & $getCurrentProcessId()
       removeDir(scratch)

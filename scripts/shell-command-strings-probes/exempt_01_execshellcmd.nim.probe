@@ -1,0 +1,6 @@
+## `execShellCmd` is a real shell on both platforms (`system()` on POSIX,
+## `cmd /c` on Windows). A redirect in its argument is correct, not a defect.
+import std/[os, osproc]
+
+proc detach(command, log: string): int =
+  execShellCmd("( " & command & " ) </dev/null >> " & quoteShell(log) & " 2>&1 &")

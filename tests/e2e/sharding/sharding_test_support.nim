@@ -18,15 +18,27 @@ const
   # wrong in two independent ways.
   ReproBinRelative* = "build/bin/" & addFileExt("repro", ExeExt)
 
+const SourceAnchoredRepoRoot =
+  currentSourcePath().parentDir().parentDir().parentDir().parentDir()
+  ## ``tests/e2e/sharding/sharding_test_support.nim`` -> the checkout root.
+  ## ``currentSourcePath()`` is absolute on both platforms, so this is the
+  ## repo that CONTAINS this file, not the repo the launcher happened to be
+  ## standing in.
+
 proc repoRoot*(): string =
   ## The reprobuild repo root, irrespective of the test's working
-  ## directory.  Falls back to ``getCurrentDir()`` when the path lookup
-  ## fails (e.g. a sandbox without the source tree, in which case the
-  ## test would fail at the binary-existence check anyway).
+  ## directory.
+  ##
+  ## The walk used to START at ``getCurrentDir()``, which made the process
+  ## working directory an unstated fixture input: launched from a scratch
+  ## directory carrying a staged ``build/bin/repro`` it returned THAT
+  ## directory, and every case below then drove a binary the test did not
+  ## build. Anchor on the source path instead and keep the walk only as the
+  ## answer to "did somebody move this file", not to "where was the shell".
   let env = getEnv("REPRO_REPO_ROOT")
   if env.len > 0 and dirExists(env):
     return env
-  result = getCurrentDir()
+  result = SourceAnchoredRepoRoot
   # Walk up until we find the repro binary or a sentinel.
   for _ in 0 .. 6:
     if fileExists(result / ReproBinRelative):
@@ -35,6 +47,9 @@ proc repoRoot*(): string =
     if parent.len == 0 or parent == result:
       break
     result = parent
+  # The walk found nothing: the source-anchored root is still the honest
+  # answer, and the binary-existence check below reports the real problem.
+  result = SourceAnchoredRepoRoot
 
 proc reproBin*(): string =
   repoRoot() / ReproBinRelative

@@ -1,0 +1,7 @@
+## `startProcess` with an argv and no `poEvalCommand`. There is no command
+## string, so there is nothing for a shell operator to be misread from — the
+## `>` here is an ordinary argument the child receives exactly as written.
+import std/[osproc]
+
+proc spawn(tool, log: string): Process =
+  startProcess(tool, args = ["--version", ">", log], options = {poStdErrToStdOut})

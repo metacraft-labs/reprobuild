@@ -1,0 +1,20 @@
+## The operator arrives through a same-file `const` that is a TERM in the
+## concatenation at the call site, rather than being the whole command
+## expression.
+##
+## `resolve_binding` is reached only for a bare identifier that IS the command
+## expression — `execCmdEx(FullCmd)` resolves and reports. Here the argument
+## text is `"mytool --flag" & Redirect`, so the scanner sees one literal that
+## carries no operator and an identifier it never expands, and stays silent.
+##
+## This is ONE level deep, so it is not the `missed_05` chain-of-two shape; and
+## the const IS in this file, so it is not the `missed_09` cross-module shape.
+## It is its own blind spot, found by probing the W14 correction that said a
+## same-file `const` is always resolved. It is not — it is resolved in the
+## whole-expression position only.
+import std/[os, osproc]
+
+const Redirect = " > out.log"
+
+proc runIt(): string =
+  execCmdEx("mytool --flag" & Redirect).output

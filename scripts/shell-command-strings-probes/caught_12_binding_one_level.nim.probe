@@ -1,0 +1,8 @@
+## One level of local binding, plus a later `&=`. This is the depth the
+## scanner does resolve, and it must keep resolving it.
+import std/[os, osproc]
+
+proc runQuiet(tool: string): string =
+  var cmd = tool & " --version"
+  cmd &= " 2>&1"
+  execCmdEx(cmd).output

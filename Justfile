@@ -433,6 +433,13 @@ lint:
     # from a shell operator inside a command string that Windows never gives
     # to a shell; see scripts/check_shell_command_strings.sh.
     bash ./scripts/check_shell_command_strings.sh 2>&1 | tee -a test-logs/lint.log
+    # …and the proof that it still has the power it claims. Every exemption in
+    # that scanner is a licence to ignore a real defect, so each is probed with
+    # a complete, genuine instance and each documented blind spot is PINNED —
+    # a blind spot cannot close silently and a closed one cannot re-open
+    # silently. Runs here rather than in the suite for the same reason as the
+    # gate itself: it compiles nothing.
+    bash ./scripts/check_shell_command_strings.sh --self-test 2>&1 | tee -a test-logs/lint.log
     # The suite case-count gate. Deliberately here and not only in the test
     # suite: it reads the sources and needs nothing compiled, so it is the
     # one coverage check that can answer before a six-hour build phase.
