@@ -550,6 +550,129 @@ proc runquotaEndpointReachable*(endpoint: string): bool =
   else:
     fileExists(endpoint)
 
+const ReprobuildRepoRoot* =
+  currentSourcePath().parentDir().parentDir().parentDir().parentDir()
+  ## ``libs/repro_test_support/src/repro_test_support.nim`` -> the checkout
+  ## root. ``currentSourcePath()`` is absolute on both compilers (measured in
+  ## W14 on stock 2.2.8 and on the codetracer fork, from two working
+  ## directories, with the source given both relatively and absolutely), so
+  ## this is the repository that CONTAINS this file — never the directory the
+  ## test process happened to be launched from.
+
+type HostBinaryFormat* = enum
+  ## Machine format of a file on disk, decided by its magic bytes.
+  ##
+  ## This exists because neither the NAME nor the mode bit answers the
+  ## question a test actually needs answered before it executes something.
+  ## ``build/`` is gitignored and shared between this host's Windows
+  ## checkout (``M:\m\dev\reprobuild``) and the WSL view of the same tree
+  ## (``/mnt/m/m/dev/reprobuild``), so a ``nix develop`` build drops an ELF
+  ## beside the PE and 12 names exist in both forms. An extension-less path
+  ## therefore names *whichever platform built last*, and on Windows
+  ## ``fileExists`` says true, ``executableFile`` says true, and the exec
+  ## then fails with "%1 is not a valid Win32 application" — a product-shaped
+  ## error with a filesystem-residue cause.
+  hbfMissing    ## no such file
+  hbfUnknown    ## a file, but not a machine image this repo produces
+  hbfElf
+  hbfPe
+  hbfMachO
+
+proc binaryFormatOf*(path: string): HostBinaryFormat =
+  ## Classify ``path`` by its header bytes. Reads at most 68 bytes.
+  if path.len == 0 or not fileExists(path):
+    return hbfMissing
+  var f: File
+  if not open(f, path, fmRead):
+    return hbfUnknown
+  defer: f.close()
+  var head: array[64, uint8]
+  let n = f.readBuffer(addr head[0], head.len)
+  if n < 4:
+    return hbfUnknown
+  if head[0] == 0x7f'u8 and head[1] == uint8('E') and
+      head[2] == uint8('L') and head[3] == uint8('F'):
+    return hbfElf
+  let magic32 = uint32(head[0]) or (uint32(head[1]) shl 8) or
+    (uint32(head[2]) shl 16) or (uint32(head[3]) shl 24)
+  case magic32
+  of 0xfeedface'u32, 0xfeedfacf'u32, 0xcefaedfe'u32, 0xcffaedfe'u32,
+     0xcafebabe'u32, 0xbebafeca'u32:
+    return hbfMachO
+  else: discard
+  if head[0] == uint8('M') and head[1] == uint8('Z'):
+    # A DOS stub is not a PE image. The PE signature sits at the offset
+    # stored in the little-endian uint32 at 0x3C; a bare ``MZ`` (a truncated
+    # copy, or a DOS-era stub) must NOT be accepted as this platform's
+    # artefact just because the first two bytes look right.
+    if n < 0x40:
+      return hbfUnknown
+    let lfanew = int(uint32(head[0x3c]) or (uint32(head[0x3d]) shl 8) or
+      (uint32(head[0x3e]) shl 16) or (uint32(head[0x3f]) shl 24))
+    if lfanew <= 0 or lfanew > int(getFileSize(f)) - 4:
+      return hbfUnknown
+    f.setFilePos(int64(lfanew))
+    var sig: array[4, uint8]
+    if f.readBuffer(addr sig[0], sig.len) != 4:
+      return hbfUnknown
+    if sig[0] == uint8('P') and sig[1] == uint8('E') and
+        sig[2] == 0'u8 and sig[3] == 0'u8:
+      return hbfPe
+    return hbfUnknown
+  hbfUnknown
+
+func hostBinaryFormat*(): HostBinaryFormat =
+  ## The machine format an executable must have to run on THIS host.
+  when defined(windows): hbfPe
+  elif defined(macosx): hbfMachO
+  else: hbfElf
+
+func hostBinaryName*(stem: string): string =
+  ## ``stem`` with the host's executable suffix. The one spelling.
+  stem.addFileExt(ExeExt)
+
+proc reproBinaryPath*(stem = "repro"): string =
+  ## The single supported way for a test to name a binary that
+  ## ``scripts/build_apps.sh`` / the ``apps`` collection produced.
+  ##
+  ## Source-anchored (not cwd-relative) and extension-correct. W14 fixed
+  ## 69 files that each spelled ``build/bin/repro`` their own way; this is
+  ## the helper it recommended so there is ONE spelling left to search for.
+  ## The literal ``build/bin/repro`` below is load-bearing for
+  ## ``scripts/generate_test_edges.nim``'s ``detectReproBinaryUsage``, which
+  ## substring-scans sources to decide ``requiresReproBinary``.
+  ReprobuildRepoRoot / "build" / "bin" / hostBinaryName(stem)
+
+proc describeBinaryFormat*(path: string): string =
+  ## A diagnostic that names what is actually on disk, for the failure
+  ## message of ``requireHostBinary``.
+  case binaryFormatOf(path)
+  of hbfMissing: "missing"
+  of hbfUnknown: "not a recognised executable image"
+  of hbfElf: "ELF (Linux)"
+  of hbfPe: "PE (Windows)"
+  of hbfMachO: "Mach-O (macOS)"
+
+proc requireHostBinary*(path: string): string {.discardable.} =
+  ## Prove the binary about to be executed is THIS platform's — presence is
+  ## not the property. Deliberately ``doAssert`` and not ``check``: this is
+  ## called from helper procs, and on stock Nim 2.2.8 (the Windows pin) a
+  ## ``check`` outside a ``test`` body prints and then reports ``[OK]``.
+  let actual = binaryFormatOf(path)
+  doAssert actual != hbfMissing,
+    "required binary not found: " & path &
+    "\n  build it with `just bootstrap` (or `bash scripts/build_apps.sh`)."
+  doAssert actual == hostBinaryFormat(),
+    "wrong machine format for this host: " & path &
+    "\n  on disk: " & describeBinaryFormat(path) &
+    "\n  required: " & (case hostBinaryFormat()
+                        of hbfPe: "PE (Windows)"
+                        of hbfMachO: "Mach-O (macOS)"
+                        else: "ELF (Linux)") &
+    "\n  `build/` is gitignored and shared across platforms on this host," &
+    " so an artefact of the other platform can occupy this path."
+  path
+
 proc executableFile*(path: string): bool =
   if path.len == 0 or not fileExists(path):
     return false

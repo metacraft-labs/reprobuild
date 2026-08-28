@@ -8,6 +8,9 @@
 
 import std/[json, os, osproc, streams, strutils, tables]
 
+from repro_test_support import requireHostBinary, binaryFormatOf,
+  hostBinaryFormat, describeBinaryFormat, HostBinaryFormat
+
 const
   # The executable extension has to be resolved HERE, not at the use site:
   # this constant is both the sentinel `repoRoot` walks up looking for and
@@ -53,6 +56,26 @@ proc repoRoot*(): string =
 
 proc reproBin*(): string =
   repoRoot() / ReproBinRelative
+
+proc reprobuildRepoRoot*(): string =
+  ## Readable alias for ``repoRoot()`` at call sites that bind the result to
+  ## a local also called ``repoRoot``. Added by W15 when
+  ## ``t_e2e_repro_test_shard_workspace_integration.nim`` stopped carrying its
+  ## own private, differently-broken copy of the root walk.
+  repoRoot()
+
+proc requireShardingReproBinary*(): string {.discardable.} =
+  ## Prove the binary this family is about to execute is THIS platform's.
+  ##
+  ## ``fileExists`` was the only check here, and it is not the property:
+  ## ``build/`` is gitignored and shared between this host's Windows checkout
+  ## and the WSL view of the same tree, so ``build/bin/repro`` can be a Linux
+  ## ELF while ``build/bin/repro.exe`` is the PE, and an extension-less
+  ## spelling picks up whichever platform built last. ``doAssert`` rather than
+  ## ``check`` on purpose: this is a helper proc, and on the Windows toolchain
+  ## pin (stock Nim 2.2.8) a ``check`` outside a ``test`` body prints its
+  ## failure and still reports ``[OK]``.
+  requireHostBinary(reproBin())
 
 proc writeTrueScript*(path: string; exitCode = 0) =
   ## Writes a tiny POSIX shell script that exits with ``exitCode``.
@@ -178,9 +201,11 @@ proc runRepro*(args: openArray[string]; cwd: string):
     tuple[code: int; output: string] =
   ## Invoke the built ``repro`` binary with ``args``, capturing merged
   ## stdout+stderr.  ``cwd`` is the workspace the test created.
-  let bin = reproBin()
-  doAssert fileExists(bin), "repro binary missing at " & bin &
-    "; run ``just build`` in the reprobuild repo before this test."
+  # W15: presence was the only check, and presence is not the property — an
+  # artefact of the OTHER platform satisfies ``fileExists`` and then fails at
+  # exec with "%1 is not a valid Win32 application", which reads as a product
+  # refusal. Prove the machine format instead.
+  let bin = requireShardingReproBinary()
   let p = startProcess(bin,
     workingDir = cwd,
     args = @args,

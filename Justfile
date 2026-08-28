@@ -9,27 +9,36 @@ build:
     mkdir -p test-logs
     bash ./scripts/build_apps.sh 2>&1 | tee test-logs/build.log
 
-# Bootstrap-And-Self-Build B5: materialise ./build/bin/repro from nim
-# when not already on disk. Idempotent — no-op when the binary already
-# exists; otherwise drives scripts/build_apps.sh to compile every
+# Bootstrap-And-Self-Build B5: materialise the host's ./build/bin/repro
+# artefact from nim when it is not already on disk, of this platform's
+# machine format, and newer than the sources the bootstrap build reads.
+# Idempotent; otherwise drives scripts/build_apps.sh to compile every
 # entrypoint in apps/entrypoints.txt (including ``repro``) via the
 # same path the engine-built ``apps`` collection uses. The ``test``
 # recipe + ``scripts/run_tests.sh`` call this first so a fresh checkout
 # without a pre-built engine binary still boots.
+#
+# The decision lives in scripts/bootstrap_guard.sh, not here. It used to
+# be inline and it named ``./build/bin/repro`` on every platform — the
+# LINUX artefact — so on Windows, where ``build/`` is shared with a WSL
+# checkout of the same tree, it tested the wrong file for existence AND
+# compared source freshness against the wrong file's mtime. Moving it out
+# is what makes it testable: tests/integration/
+# t_bootstrap_guard_names_the_host_artefact.nim drives the script against
+# staged fixture trees, so a guard that silently does nothing is a red
+# case rather than a quiet full rebuild (or a quiet skipped one).
 bootstrap:
-    @needs_bootstrap=0; \
-    if [ ! -x ./build/bin/repro ]; then \
-        needs_bootstrap=1; \
-    elif find apps libs config.nims flake.nix repro.nim -type f -newer ./build/bin/repro -print -quit | grep -q .; then \
-        needs_bootstrap=1; \
-    fi; \
-    if [ "${needs_bootstrap}" -eq 1 ]; then \
-        echo "bootstrapping ./build/bin/repro from nim..."; \
-        mkdir -p test-logs; \
-        bash ./scripts/build_apps.sh 2>&1 | tee test-logs/bootstrap.log; \
-    else \
-        echo "./build/bin/repro already exists; skipping bootstrap"; \
-    fi
+    @decision="$(bash ./scripts/bootstrap_guard.sh decide .)"; \
+    case "${decision}" in \
+        bootstrap*) \
+            echo "bootstrapping $(bash ./scripts/bootstrap_guard.sh host-exe ./build/bin/repro) from nim (${decision#bootstrap })..."; \
+            mkdir -p test-logs; \
+            bash ./scripts/build_apps.sh 2>&1 | tee test-logs/bootstrap.log; \
+            ;; \
+        *) \
+            echo "$(bash ./scripts/bootstrap_guard.sh host-exe ./build/bin/repro) already built; skipping bootstrap (${decision#skip })"; \
+            ;; \
+    esac
 
 test:
     mkdir -p test-logs

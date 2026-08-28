@@ -795,7 +795,7 @@ tests/e2e/sharding/t_e2e_repro_test_shard_balances_wall_time.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_emit_plan_then_consume.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_lan_peer_cache_not_implemented.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_partition_total_coverage.nim	nim	1
-tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim	nim	1
+tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim	nim	2
 tests/e2e/t_m54_verified_tarball_profile.nim	nim	1
 tests/e2e/watch/t_e2e_repro_watch.nim	nim	8
 tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim	nim	2
@@ -827,6 +827,7 @@ tests/integration/t_b5_bootstrap_idempotent.nim	nim	2
 tests/integration/t_b5_full_suite_through_repro_test.nim	nim	2
 tests/integration/t_b5_repro_test_replaces_run_tests_sh.nim	nim	2
 tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	nim	5
+tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	8
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	14
@@ -906,6 +907,7 @@ tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	5
 tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	nim	6
 tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim	nim	1
 tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	1
+tests/integration/t_host_binary_format_is_proven_before_execution.nim	nim	7
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18
 tests/integration/t_integration_build_report_target_resolution_kind.nim	nim	5

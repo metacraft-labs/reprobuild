@@ -6566,6 +6566,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_bootstrap_guard_names_the_host_artefact.nim",
+    binary: "build/test-bin/t_bootstrap_guard_names_the_host_artefact",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_branch_fork_clones_root_submodules.nim",
     binary: "build/test-bin/t_branch_fork_clones_root_submodules",
     defines: @[],
@@ -7192,6 +7200,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
     binary: "build/test-bin/t_hooks_noop_outside_initialized_workspace",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_host_binary_format_is_proven_before_execution.nim",
+    binary: "build/test-bin/t_host_binary_format_is_proven_before_execution",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
