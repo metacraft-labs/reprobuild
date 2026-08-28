@@ -1537,11 +1537,16 @@ suite "F2 filesystem-facts conformance — the OS table":
       expectFact(osSubject, "symlinkCreationIsPrivileged", declared.value,
                  (if created: tnNo else: tnYes), detail)
     else:
-      record(osSubject, "symlinkCreationIsPrivileged", coPartial,
+      # The declared value is indefinite, so this host's observation
+      # constrains it without being able to falsify it in either
+      # direction — the framework's ``coPartial`` shape. ``partiallyChecked``
+      # records that outcome (and the observed detail) into the ledger the
+      # coverage report reads, which is the honest statement here; a bare
+      # ``check true`` would have claimed a verification that did not happen.
+      partiallyChecked(osSubject, "symlinkCreationIsPrivileged",
              "the declared value is `" & $declared.value &
              "` (Developer Mode flips it on Windows), so this host's " &
              "answer cannot contradict it. Observed: " & detail)
-      check true
 
   test "the maximum command line is declared but not driven here":
     # Driving it means spawning a process with a 32767-character command
@@ -1558,7 +1563,12 @@ suite "F2 filesystem-facts conformance — the OS table":
 
   test "the linking and cloning APIs named by the OS table are the ones that run":
     # The OS table names an API; the filesystem table says which
-    # filesystems answer it. This check closes the loop between them.
+    # filesystems answer it. This check closes the loop between them:
+    # every present filesystem that DECLARES the capability must actually
+    # deliver it through the named API. ``expectFact`` asserts exactly
+    # that — a declaring filesystem whose named API fails to produce a
+    # second name (or a clone) records a contradiction and fails the run,
+    # rather than being silently swallowed as "not exercised".
     var linkExercised = false
     var cloneExercised = false
     for id in presentFilesystems():
@@ -1566,32 +1576,36 @@ suite "F2 filesystem-facts conformance — the OS table":
       let dir = caseDir(v, "osapi")
       let src = dir / "src.bin"
       writeFile(extendedPath(src), "payload")
-      if FilesystemTable[id].hardlinks.value == tnYes and
-         attemptHardlink(src, dir / "second.bin").outcome == loOk and
-         hardlinkCount(src) == 2:
+      if FilesystemTable[id].hardlinks.value == tnYes:
+        let linked = attemptHardlink(src, dir / "second.bin").outcome == loOk and
+                     hardlinkCount(src) == 2
+        expectFact(osSubject, "hardlinkApi", tnYes,
+                   (if linked: tnYes else: tnNo),
+                   facts.hardlinkApi.value & " on " & subjectOf(v) &
+                   (if linked: " created a second name and the inode's " &
+                    "link count rose to 2"
+                    else: " did NOT create a second name with link count 2"))
         linkExercised = true
-      if FilesystemTable[id].reflink.value == tnYes and
-         attemptReflink(src, dir / "clone.bin").outcome == loOk:
+      if FilesystemTable[id].reflink.value == tnYes:
+        let cloned = attemptReflink(src, dir / "clone.bin").outcome == loOk
+        expectFact(osSubject, "reflinkApi", tnYes,
+                   (if cloned: tnYes else: tnNo),
+                   facts.reflinkApi.value & " on " & subjectOf(v) &
+                   (if cloned: " produced a clone of the source bytes"
+                    else: " did NOT produce a clone"))
         cloneExercised = true
       removeDir(extendedPath(dir))
     checkpoint(osSubject & ": hardlinkApi=" & facts.hardlinkApi.value &
                " exercised=" & $linkExercised & "; reflinkApi=" &
                facts.reflinkApi.value & " exercised=" & $cloneExercised)
-    if linkExercised:
-      record(osSubject, "hardlinkApi", coVerified,
-             facts.hardlinkApi.value & " created a second name and the " &
-             "inode's link count rose to 2")
-      check true
-    else:
+    # Preserve the ledger-coverage invariant: if no present filesystem
+    # declared the capability, the API was never driven here, and the
+    # fact is recorded untested rather than left as a coverage hole.
+    if not linkExercised:
       untestedHere(osSubject, "hardlinkApi",
                    "no host filesystem both declares hardlinks and " &
                    "produced one, so the named API was not exercised")
-    if cloneExercised:
-      record(osSubject, "reflinkApi", coVerified,
-             facts.reflinkApi.value & " produced a clone holding the " &
-             "source bytes")
-      check true
-    else:
+    if not cloneExercised:
       untestedHere(osSubject, "reflinkApi",
                    "no host filesystem declares reflink support, so the " &
                    "named API was not exercised")
