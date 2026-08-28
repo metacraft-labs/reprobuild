@@ -837,6 +837,7 @@ tests/e2e/watch/t_e2e_repro_watch.nim	nim	8
 tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim	nim	2
 tests/e2e/watch/t_repro_watch_infers_tool_provisioning.nim	nim	2
 tests/e2e/watch/t_repro_watch_unknown_target_diagnostic.nim	nim	1
+tests/integration/t_a_repo_not_in_develop_mode_is_not_substituted.nim	nim	1
 tests/integration/t_action_cache_concurrent_same_edge_converges_atomically.nim	nim	1
 tests/integration/t_action_cache_fingerprint_policies.nim	nim	1
 tests/integration/t_action_cache_per_edge_multifile_preserves_concurrent_path_sets.nim	nim	1
@@ -938,9 +939,12 @@ tests/integration/t_e2e_cross_compilation_aarch64.nim	nim	2
 tests/integration/t_e2e_engine_shim_removed.nim	nim	2
 tests/integration/t_e2e_selectable_toolchain_fixture.nim	nim	5
 tests/integration/t_e2e_variant_feature_flag_drops_tls.nim	nim	5
+tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	nim	1
+tests/integration/t_emitted_overrides_match_the_develop_set.nim	nim	1
 tests/integration/t_entrypoints.nim	nim	1
 tests/integration/t_enumerated_directory_evidence_producers.nim	nim	5
 tests/integration/t_env_inheritance_census_is_reported.nim	nim	4
+tests/integration/t_envrc_needs_no_override_env_vars.nim	nim	1
 tests/integration/t_every_launch_path_is_monitored.nim	nim	8
 tests/integration/t_evidence_publish_verb_and_lock_flag_on_test_sharding.nim	nim	1
 tests/integration/t_execute_edge_gives_tests_a_usable_path.nim	nim	3
@@ -1369,7 +1373,7 @@ tests/unit/t_m9r23_1_installer_state_install_sequence.nim	nim	6
 tests/unit/t_m9r2_typed_cli_surfaces.nim	nim	18
 tests/unit/t_m9r2b_typed_value_layer.nim	nim	15
 tests/unit/t_m9r2c_artifact_slot_typed.nim	nim	8
-tests/unit/t_m9r30_transitive_rpath_propagation.nim	nim	11
+tests/unit/t_m9r30_transitive_rpath_propagation.nim	nim	13
 tests/unit/t_m9r33_2_qt6_module_path_walker.nim	nim	11
 tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim	nim	8
 tests/unit/t_m9r3_library_api_block.nim	nim	8

@@ -303,6 +303,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n       " &
           programName &
+      " flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|<develop selectors>] [--flake=DIR] [--strip-suffix=LIST] [--workspace-root=PATH] [--json]\n       " &
+          programName &
       " debug io monitor [inspect <depfile> | [options] -- <command> [args...]]\n       " &
           programName &
       " debug artifact <path> [--format=text|json]\n       " &
@@ -54585,6 +54587,9 @@ const reproTopLevelCommands = [
   "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
   "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
+  # Nix-Flake-Coexistence NF-1 — ``repro flake <sub>``: the override
+  # arguments an `.envrc` needs, computed from the workspace's develop set.
+  "flake",
   # Binary-Caches.md §"Client CLI Surface" — ``repro cache <sub>`` folds
   # in the retired standalone ``repro-binary-cache-client`` toolset.
   "cache",
@@ -54765,6 +54770,470 @@ proc runReproLockingCommand*(args: openArray[string]): int =
   else:
     stderr.writeLine("repro locking: error: unknown verb '" & args[0] &
       "' (one of: explain, adopt-manifest)")
+    return 2
+
+# ---------------------------------------------------------------------------
+# NF-1 — `repro flake override-args`: the flake override arguments come from
+# the workspace, not from six environment variables.
+#
+# Spec: reprobuild-specs/Nix-Flake-Coexistence.md §2 (the correspondence), §2b
+# (path 1: direnv still activates, a flake is still what gets activated, only
+# the SOURCE of the override arguments moves) and §5 (subsuming the plugin);
+# reprobuild-specs/Nix-Flake-Coexistence.milestones.org §NF-1;
+# reprobuild-specs/CLI/develop.md §"Command Surface" for the flag surface this
+# reuses rather than re-invents.
+#
+#   > a verb that **emits the override arguments** for the current workspace,
+#   > so `.envrc` becomes a single call rather than six environment variables
+#   > and a content-pinned dependency
+#
+# ## What replaces what
+#
+# Today an `.envrc` carries six knobs — `NIX_FLAKE_OVERRIDE_AUTO`,
+# `_AUTO_STRIP_SUFFIXES`, `_INPUTS`, `_FLAKES`, `_SIBLINGS`, `_SIBLINGS_ROOT` —
+# read by a `direnv` plugin loaded by content hash. That arrangement failed in
+# the way content-pinned behaviour fails: a pinned revision that did not
+# implement `AUTO` made the knob INERT, so the shell built against pins while
+# `.envrc` said it built against siblings, silently, for weeks.
+#
+# The replacement is one call:
+#
+#   _fo_args="$(repro flake override-args --all)" || exit 1
+#   eval "use flake '.?submodules=1' $_fo_args"
+#
+# ## Why the SELECTION is `repro develop`'s and not a new vocabulary
+#
+# `AUTO` is all-or-nothing: it substitutes every input whose stripped name
+# matches a directory beside the repo, or none. `repro develop` already
+# resolves a SET — `--all` / `--only` / `--except` / `--tier` composing in a
+# fixed, argv-order-independent order over the workspace lock set — and
+# NF-1's rule is that **the develop set IS the override set**. So this verb
+# parses the develop set-form argv verbatim (``parseDevelopAllArgs``) and runs
+# the same composer through its QUERY path (``list = true``), which mutates
+# nothing: no clone, no checkout, no override file, no receipt. Adding a second
+# selection vocabulary here would leave two answers to one question, which is
+# the state §5 objects to.
+#
+# ## Why the flake's inputs are parsed rather than asked of `nix`
+#
+# `nix flake metadata` would name the inputs authoritatively, but it evaluates
+# the flake — which fetches, needs the network, and is the very thing whose
+# arguments we are computing. `.envrc` runs this on every directory entry, so
+# it has to be offline and instantaneous. The parse below is therefore a
+# brace-depth scan of `flake.nix` with no nix evaluation at all, and it is
+# LOUD about matching nothing: a parser that quietly found no inputs is
+# indistinguishable from a flake with nothing to override, which is the exact
+# failure `scripts/check_dev_shell_env.sh` documents for its own scans.
+# ---------------------------------------------------------------------------
+
+const
+  flakeOverrideArgsLabel = "repro flake override-args"
+  defaultFlakeInputStripSuffixes = @["-src"]
+    ## The metacraft naming convention `.envrc` configures as
+    ## `NIX_FLAKE_OVERRIDE_AUTO_STRIP_SUFFIXES=-src`: an input named
+    ## `runquota-src` is backed by the repo `runquota`. It is a DEFAULT rather
+    ## than a hardcode — `--strip-suffix=<list>` replaces it, and
+    ## `--strip-suffix=` (empty) turns suffix stripping off — because the
+    ## convention belongs to the projects that use it, not to the tool.
+
+proc flakeDeclaredInputNames*(source: string): seq[string] =
+  ## Every input name a `flake.nix` declares, in declaration order, without
+  ## duplicates and WITHOUT evaluating anything.
+  ##
+  ## Both spellings an input can be written in are recognised:
+  ##
+  ##   * inside the `inputs = { … }` block — `nixpkgs.url = "…";`,
+  ##     `nixpkgs.follows = "…";`, and the attribute-set form
+  ##     `bundlers = { url = "…"; inputs.nixpkgs.follows = "nixpkgs"; };`
+  ##   * flattened at the top level — `inputs.nixpkgs.url = "…";`
+  ##
+  ## An input with no `url` at all (a pure `follows`) IS returned: the
+  ## question this answers is "what names can `--override-input` address",
+  ## which is a property of the name, not of how it is resolved.
+  ##
+  ## The scan tracks brace depth so a nested `inputs.<x>.follows` inside an
+  ## attribute-set input cannot be mistaken for a top-level input called
+  ## `inputs`, and it skips comments and both string forms so a `{` inside a
+  ## URL or a `#` inside a string cannot move the depth.
+  var
+    i = 0
+    depth = 0
+    inputsDepth = -1     ## brace depth INSIDE the `inputs = { … }` block
+    path: seq[string]    ## the dotted attribute path being accumulated
+    seen = initHashSet[string]()
+    awaitingInputsBrace = false
+    names: seq[string]
+      ## Accumulated locally rather than into ``result`` because the nested
+      ## ``record`` closure below cannot capture ``result`` (Nim refuses it as
+      ## a memory-safety violation).
+  proc isIdentChar(c: char): bool =
+    c in {'a'..'z', 'A'..'Z', '0'..'9', '_', '-', '\''}
+  proc record() =
+    ## An `=` closed an attribute path. Decide whether it names an input.
+    if path.len == 0: return
+    var name = ""
+    if depth == 1 and path.len >= 2 and path[0] == "inputs":
+      name = path[1]
+    elif inputsDepth >= 0 and depth == inputsDepth:
+      name = path[0]
+    if name.len > 0 and name notin seen:
+      seen.incl(name)
+      names.add(name)
+  while i < source.len:
+    let c = source[i]
+    if c == '#':
+      while i < source.len and source[i] != '\n': inc i
+      continue
+    if c == '/' and i + 1 < source.len and source[i + 1] == '*':
+      i += 2
+      while i + 1 < source.len and not (source[i] == '*' and source[i + 1] == '/'):
+        inc i
+      i += 2
+      continue
+    if c == '"':
+      inc i
+      while i < source.len and source[i] != '"':
+        if source[i] == '\\': inc i
+        inc i
+      inc i
+      continue
+    if c == '\'' and i + 1 < source.len and source[i + 1] == '\'' and
+        (i == 0 or not isIdentChar(source[i - 1])):
+      # Nix's indented-string form ``''…''``. Guarded on the preceding
+      # character because ``'`` is also a legal identifier character, so a
+      # trailing prime inside a name (``foo''``) must not open a string.
+      i += 2
+      while i + 1 < source.len and not (source[i] == '\'' and source[i + 1] == '\''):
+        inc i
+      i += 2
+      continue
+    if c == '{':
+      inc depth
+      if awaitingInputsBrace:
+        inputsDepth = depth
+        awaitingInputsBrace = false
+      path.setLen(0)
+      inc i
+      continue
+    if c == '}':
+      if inputsDepth >= 0 and depth == inputsDepth:
+        inputsDepth = -1
+      dec depth
+      path.setLen(0)
+      inc i
+      continue
+    if c == '=':
+      # ``==`` is a comparison, not an assignment; it cannot close a path.
+      if i + 1 < source.len and source[i + 1] == '=':
+        i += 2
+        path.setLen(0)
+        continue
+      record()
+      # ``inputs = {`` opens the block whose members are input names. The
+      # brace may be several tokens away (whitespace, a comment), so the
+      # decision is deferred to whichever `{` comes next.
+      awaitingInputsBrace = depth == 1 and path == @["inputs"]
+      path.setLen(0)
+      inc i
+      continue
+    if c == ';' or c == ',':
+      path.setLen(0)
+      awaitingInputsBrace = false
+      inc i
+      continue
+    if c == '.':
+      inc i
+      continue
+    if isIdentChar(c):
+      var j = i
+      while j < source.len and isIdentChar(source[j]): inc j
+      path.add(source[i ..< j])
+      i = j
+      continue
+    if c notin {' ', '\t', '\r', '\n'}:
+      # Anything else (`:`, `[`, `(`, an operator) ends the attribute path
+      # without recording it.
+      path.setLen(0)
+      awaitingInputsBrace = false
+    inc i
+  names
+
+proc stripFlakeInputSuffix*(name: string; suffixes: openArray[string]): string =
+  ## The repo name an input name is a spelling of: the LONGEST declared suffix
+  ## the name ends with, removed. Same rule as
+  ## `dev_shell_strip_input_suffix` in `scripts/lib/dev_shell_overrides.sh`,
+  ## so an `.envrc` migrating from the six-variable form resolves the same
+  ## siblings it did before.
+  var best = ""
+  for suffix in suffixes:
+    if suffix.len == 0: continue
+    if not name.endsWith(suffix): continue
+    if suffix.len > best.len: best = suffix
+  if best.len == 0: name else: name[0 ..< name.len - best.len]
+
+proc flakeOverrideWorkspaceRoot(explicit: string): string =
+  ## The workspace whose develop set backs this flake's overrides.
+  ##
+  ## NOT ``resolveInvokedWorkspaceRoot`` on its own, and the difference is
+  ## load-bearing rather than cosmetic. That helper stops at the nearest
+  ## ancestor satisfying ``isInitializedWorkspace``, which is true of a
+  ## directory carrying **either** a workspace shell (``.repro/workspace.toml``)
+  ## **or**, by MO-2, a committed ``repro.lock`` of its own. A participating
+  ## repo of a multi-repo workspace normally has both a committed lock and
+  ## siblings one level up — so the generic ascent stops at the REPO, resolves
+  ## that repo's own build-solve lock (whose only entry is the repo itself),
+  ## and answers "the develop set is empty".
+  ##
+  ## Measured, not hypothetical: run in this repository, that ascent stopped at
+  ## `reprobuild/` because `reprobuild/repro.lock` exists, and the command
+  ## reported `0 override(s) … 0 repo(s) selected` for a workspace whose lock
+  ## set holds 138 repos and whose flake declares 23 inputs. Emitting nothing
+  ## while the workspace is full of develop-mode siblings is precisely §5's
+  ## inert knob, arrived at from a different direction.
+  ##
+  ## So the workspace SHELL wins when there is one: walk up looking for
+  ## ``.repro/workspace.toml`` first, and only fall back to the generic marker
+  ## when no ancestor carries one (the manifest-optional, single-repo case that
+  ## MO-2 marker exists for).
+  if explicit.len > 0:
+    return absolutePath(explicit)
+  var dir = absolutePath(getCurrentDir())
+  while true:
+    if fileExists(workspaceTomlPath(dir)):
+      return dir
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  resolveInvokedWorkspaceRoot("")
+
+proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
+  ## ``repro flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|
+  ## …every other `repro develop` set-form selector] [--flake=DIR]
+  ## [--strip-suffix=LIST] [--workspace-root=PATH] [--json]``.
+  ##
+  ## Prints, on ONE line of stdout, the `--override-input <name> path:<dir>`
+  ## arguments that bind each of the flake's inputs to the workspace checkout
+  ## of the repo it names — for exactly the repos the develop-set selection
+  ## picked, and no others.
+  ##
+  ## Contract, and it is the whole point of the milestone: **an empty override
+  ## list and a failure must not look alike**. Success is exit 0 with the
+  ## arguments on stdout (possibly none) and a one-line account on stderr;
+  ## failure is exit 2 with **nothing at all on stdout** and the reason plus a
+  ## remedy on stderr. `.envrc` splices stdout into a `use flake` line, so a
+  ## diagnostic printed there would become a flake argument and the resulting
+  ## error would name a nix parse failure instead of the real cause.
+  var
+    flakeDir = ""
+    stripSpec = ""
+    stripGiven = false
+    asJson = false
+    explicitRoot = ""
+    passthrough: seq[string]
+    i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--flake" or arg.startsWith("--flake="):
+      flakeDir = valueFromFlag(args, i, "--flake")
+    elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
+      stripSpec = valueFromFlag(args, i, "--strip-suffix")
+      stripGiven = true
+    elif arg == "--json":
+      asJson = true
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      explicitRoot = valueFromFlag(args, i, "--workspace-root")
+      passthrough.add("--workspace-root=" & explicitRoot)
+    else:
+      passthrough.add(arg)
+    inc i
+
+  var refusals: seq[string]
+  proc refuse(): int =
+    ## One exit path for every refusal, so "stdout stays empty" is a property
+    ## of the code rather than of each call site remembering it.
+    for line in refusals:
+      stderr.writeLine(flakeOverrideArgsLabel & ": " & line)
+    stderr.writeLine(flakeOverrideArgsLabel &
+      ": REFUSING — nothing was printed to stdout. An empty argument list " &
+      "would have been indistinguishable from a workspace with no overrides, " &
+      "and `use flake` would then have built from the PINNED inputs while " &
+      "the .envrc that called this said it builds from the workspace " &
+      "checkouts. That is the silent-inert-knob failure this command exists " &
+      "to remove, so it exits non-zero instead. In .envrc, branch on it: " &
+      "`_fo_args=\"$(repro flake override-args --all)\" || exit 1`.")
+    2
+
+  # ---- the develop set, through `repro develop`'s own composer ------------
+  #
+  # `--list` is appended rather than `--all` so no selector is REQUIRED (a
+  # query has no destructive edge, per CLI/develop.md §"Default behavior") and
+  # so the composer takes its read-only path: `executeDevelopAll` returns
+  # before it touches the override file, the engine cache, the receipts
+  # directory or any checkout.
+  var developArgs: DevelopAllArgs
+  try:
+    var forDevelop = passthrough
+    forDevelop.add("--list")
+    developArgs = parseDevelopAllArgs(forDevelop)
+  except CatchableError as err:
+    refusals.add("the selection could not be parsed: " & err.msg)
+    return refuse()
+  developArgs.list = true
+  developArgs.json = false
+  # `.envrc` runs in the REPO, not at the workspace root, so the workspace is
+  # found by walking up — the same ascent `repro branch` / `repro switch` use.
+  developArgs.workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
+
+  let developed = executeDevelopAll(developArgs)
+  if developed.exitCode != 0:
+    for n in developed.notices: refusals.add(n)
+    for o in developed.outcomes:
+      if o.diagnostic.len > 0: refusals.add(o.diagnostic)
+    refusals.add("the workspace lock set at " & developArgs.workspaceRoot &
+      " could not be resolved, so which repos are in develop mode is UNKNOWN.")
+    return refuse()
+  # Non-fatal notices (a warned personal-tier backend, an omitted repo, a
+  # behind-key ancestry note) are carried through to stderr: a narrowed set
+  # that is not named is indistinguishable from a complete one.
+  var report: seq[string]
+  for n in developed.notices: report.add(n)
+
+  var checkoutOf = initTable[string, string]()
+  var selectedNames: seq[string]
+  for row in developed.rows:
+    if row.state == "evidence-only":
+      # No obtainable source by construction, so there is no directory a
+      # `path:` override could name.
+      report.add("not substitutable: '" & row.name &
+        "' is evidence-only (it publishes an evidence triple and never its " &
+        "source), so no flake input can be bound to a checkout of it")
+      continue
+    selectedNames.add(row.name)
+    checkoutOf[row.name] = row.path
+
+  # ---- the flake's declared inputs ---------------------------------------
+  let flakeRoot =
+    if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
+  let flakePath = flakeRoot / "flake.nix"
+  if not fileExists(flakePath):
+    refusals.add("there is no flake.nix at " & flakePath &
+      ". This command binds a FLAKE's inputs to workspace checkouts, so " &
+      "without one it cannot know what the input names are and every " &
+      "override it emitted would be a guess. Remedy: run it from the " &
+      "directory holding the flake, or pass --flake=<dir>.")
+    return refuse()
+  var flakeSource = ""
+  try:
+    flakeSource = readFile(flakePath)
+  except CatchableError as err:
+    refusals.add(flakePath & " exists but could not be read (" & err.msg &
+      "). A flake that cannot be read must not degrade into a flake that " &
+      "declares no inputs: that answer is an empty override list, which is " &
+      "exactly what an unreadable file must never produce. Remedy: fix the " &
+      "file's permissions (`chmod +r " & flakePath & "`).")
+    return refuse()
+  let inputNames = flakeDeclaredInputNames(flakeSource)
+  if inputNames.len == 0:
+    # Positive by construction, the rule `scripts/check_dev_shell_env.sh`
+    # states for its own scans: "a scan that matched nothing fails rather than
+    # passing quietly". A flake really declaring no inputs and a parser that
+    # stopped recognising the file's shape produce the same empty answer, and
+    # the second one silently stops overriding everything.
+    refusals.add("no flake input could be parsed out of " & flakePath &
+      ". A flake with no inputs has nothing to override, and a parse that " &
+      "matched nothing looks exactly the same — so this refuses rather than " &
+      "reporting an empty override set that might mean either. Remedy: if " &
+      "the flake genuinely declares no inputs, it needs no override " &
+      "arguments and .envrc should not call this; otherwise report the " &
+      "flake's input syntax as unparsed.")
+    return refuse()
+
+  let suffixes =
+    if stripGiven: parseCommaList(stripSpec)
+    else: defaultFlakeInputStripSuffixes
+
+  # ---- bind inputs to develop-set checkouts ------------------------------
+  var emitted: seq[tuple[input, path: string]]
+  for name in inputNames:
+    let repo = stripFlakeInputSuffix(name, suffixes)
+    if repo notin checkoutOf:
+      # Either the flake input names no repo of this workspace at all, or the
+      # selection deliberately left that repo out. Both keep the input on its
+      # `flake.lock` pin, which is the NF-1 behaviour that distinguishes this
+      # from `NIX_FLAKE_OVERRIDE_AUTO`'s all-or-nothing substitution.
+      continue
+    let dir = checkoutOf[repo]
+    if dir.len == 0 or not dirExists(extendedPath(dir)):
+      # A `path:` override onto a directory that is not there is not an
+      # override; it is a flake that fails to evaluate. NAMED, because
+      # dropping it quietly is the shape of the defect this campaign removes.
+      report.add("NOT substituted: flake input '" & name & "' names repo '" &
+        repo & "', which is in the develop set but has no checkout at " &
+        dir & " — it keeps its flake.lock pin. Remedy: `repro develop " &
+        "--only=" & repo & "` places it.")
+      continue
+    if not fileExists(dir / "flake.nix"):
+      # The same requirement the plugin enforces (`_nfo_emit_sibling` refuses
+      # a sibling with no `flake.nix`), for the same reason: `--override-input
+      # <n> path:<dir>` requires the directory to be a flake.
+      report.add("NOT substituted: flake input '" & name & "' resolves to " &
+        dir & ", which has no flake.nix, so nix cannot take it as an input. " &
+        "It keeps its flake.lock pin.")
+      continue
+    emitted.add((input: name, path: dir))
+
+  emitted.sort(proc (a, b: tuple[input, path: string]): int =
+    cmp(a.input, b.input))
+
+  if asJson:
+    var arr = newJArray()
+    for e in emitted:
+      arr.add(%*{"input": e.input, "path": e.path,
+                 "repo": stripFlakeInputSuffix(e.input, suffixes)})
+    var noticeArr = newJArray()
+    for n in report: noticeArr.add(%n)
+    stdout.writeLine(pretty(%*{
+      "schemaId": "reprobuild.flake-override-args.v1",
+      "workspaceRoot": developArgs.workspaceRoot,
+      "flake": flakePath,
+      "developSet": %selectedNames,
+      "declaredInputs": %inputNames,
+      "overrides": arr,
+      "notices": noticeArr}, indent = 2))
+  else:
+    var words: seq[string]
+    for e in emitted:
+      words.add("--override-input")
+      words.add(quoteShell(e.input))
+      words.add(quoteShell("path:" & e.path))
+    # One line, `eval`-ready. Empty when nothing was bound — and that emptiness
+    # is accounted for on stderr below, never left to be inferred.
+    stdout.writeLine(words.join(" "))
+
+  for line in report:
+    stderr.writeLine(flakeOverrideArgsLabel & ": " & line)
+  stderr.writeLine(flakeOverrideArgsLabel & ": " & $emitted.len &
+    " override(s) from the develop set (" & $selectedNames.len &
+    " repo(s) selected; " & flakePath & " declares " & $inputNames.len &
+    " input(s)" &
+    (if suffixes.len > 0: "; stripping " & suffixes.join(",") else: "") & ")")
+  0
+
+proc runReproFlakeCommand*(args: openArray[string]): int =
+  ## Top-level dispatcher for ``repro flake <verb> …``. NF-1 ships
+  ## ``override-args``; NF-2's lock refresh and NF-3's drift report belong in
+  ## the same namespace.
+  if args.len == 0:
+    stderr.writeLine("repro flake: error: missing verb (one of: override-args)")
+    return 2
+  let rest = if args.len > 1: args[1 .. ^1] else: @[]
+  case args[0]
+  of "override-args":
+    return runFlakeOverrideArgsCommand(rest)
+  else:
+    stderr.writeLine("repro flake: error: unknown verb '" & args[0] &
+      "' (one of: override-args)")
     return 2
 
 proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
@@ -56807,6 +57276,25 @@ proc runThinAppDispatch(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro locking: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len > 0 and args[0] == "flake":
+    # NF-1 (Nix-Flake-Coexistence.md §5) — ``repro flake <verb>``. Ships
+    # ``override-args``, which emits the ``--override-input`` arguments for the
+    # current workspace so an ``.envrc`` becomes a single call instead of six
+    # ``NIX_FLAKE_OVERRIDE_*`` variables plus a content-pinned direnv plugin.
+    #
+    # Exit 2 rather than 1 on an unexpected error, deliberately: this verb's
+    # whole contract is that a failure and an empty override list are
+    # DISTINGUISHABLE, and the exit status is the thing `.envrc` branches on.
+    try:
+      let flakeArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runReproFlakeCommand(flakeArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro flake: error: " & err.msg)
+      return 2
   if programName == "repro" and args.len > 0 and args[0] == "cache":
     # Binary-Caches.md §"Client CLI Surface (`repro cache`)" — the
     # single-entry binary-cache client. Folds in the retired standalone
