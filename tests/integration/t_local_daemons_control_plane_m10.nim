@@ -162,20 +162,34 @@ proc buildCommand(projectRoot, tempRoot, workName: string;
     "--no-runquota"
   ] & @extra, daemonEnv(tempRoot))
 
-proc waitForStatsStore(projectRoot: string; timeoutSeconds = 20.0) =
-  let storePath = projectRoot / ".repro" / "stats" / "observations.jsonl"
-  let summaryPath = projectRoot / ".repro" / "stats" / "summary.json"
+proc daemonCaptureLine(tempRoot: string): string =
+  ## THE STATE ARTIFACT THIS TEST WATCHES ACROSS A SELF-RESTART (M18).
+  ##
+  ## It used to watch ``.repro/stats/summary.json``; that path is retired
+  ## (``Retired-Names.md``) because raw rows are RunQuota's now. The
+  ## property is unchanged -- daemon-hosted work recorded BEFORE a dev
+  ## self-restart must still be there AFTER it -- so the witness moves to
+  ## the artifact the surviving capture path does produce: the daemon's
+  ## own per-session capture line, written into the state dir the restart
+  ## is required not to corrupt.
+  if not fileExists(daemonLogPath(tempRoot)):
+    return ""
+  for line in readFile(daemonLogPath(tempRoot)).splitLines:
+    if line.contains("stats discarded session=") or
+        line.contains("stats flushed session="):
+      return line
+  ""
+
+proc waitForDaemonCapture(tempRoot: string; timeoutSeconds = 20.0): string =
   let deadline = epochTime() + timeoutSeconds
   while epochTime() < deadline:
-    if fileExists(storePath) and readFile(storePath).contains(
-        "reprobuild.daemon.stats-observation.v1") and fileExists(summaryPath):
+    result = daemonCaptureLine(tempRoot)
+    if result.len > 0:
       return
     sleep(50)
-  if fileExists(storePath):
-    checkpoint(readFile(storePath))
-  if fileExists(summaryPath):
-    checkpoint(readFile(summaryPath))
-  raise newException(IOError, "timed out waiting for stats store")
+  if fileExists(daemonLogPath(tempRoot)):
+    checkpoint(readFile(daemonLogPath(tempRoot)))
+  raise newException(IOError, "timed out waiting for daemon-hosted capture")
 
 suite "Local daemons/control-plane M10 development self-restart":
   test "launchd ownership environment is absent unless runner supplied it":
@@ -316,7 +330,10 @@ suite "Local daemons/control-plane M10 development self-restart":
 
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
         ["--stats-groups=timing,cache,runquota,deps,sessions"]), repoRoot())
-      waitForStatsStore(projectRoot)
+      let captureBefore = waitForDaemonCapture(tempRoot)
+      # NON-VACUITY: capture really produced something before the restart,
+      # so the survival assertion below is about a real artifact.
+      check captureBefore.contains("session=")
       let sessionsBefore = requireSuccess(shellCommand(@[
         publicReproBin(), "daemon", "sessions"
       ] & daemonArgs(tempRoot)), repoRoot())
@@ -329,7 +346,9 @@ suite "Local daemons/control-plane M10 development self-restart":
         publicReproBin(), "daemon", "sessions"
       ] & daemonArgs(tempRoot)), repoRoot())
       check sessionsAfter.contains("succeeded")
-      check fileExists(projectRoot / ".repro" / "stats" / "summary.json")
+      # THE PRE-RESTART CAPTURE RECORD SURVIVED THE RESTART, byte for
+      # byte. The retired ``summary.json`` used to stand here.
+      check daemonCaptureLine(tempRoot) == captureBefore
       check dirExists(tempRoot / "action-cache")
 
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work-after"),

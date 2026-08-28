@@ -33,10 +33,17 @@
 ## widened diagnostic is exercised by simulating the connect failure
 ## via the build-engine entry-point's documented exception shape.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, unittest]
 
 import repro_cli_support
-from repro_test_support import executableFromEnvOrPath
+when defined(posix):
+  from repro_test_support import executableFromEnvOrPath
+
+const AutoDaemonLifetimeRunnerFlag = "--auto-daemon-lifetime-runner"
+
+if paramCount() >= 1 and paramStr(1) == AutoDaemonLifetimeRunnerFlag:
+  sleep(30_000)
+  quit(0)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -142,10 +149,14 @@ suite "DSL-port M9.R.11 — runquota daemon discovery + recovery":
     # responsible for surfacing the diagnostic — keeping discovery side-
     # effect-free lets multiple call sites probe cheaply.
     putEnv("RUNQUOTAD_BIN", "")
-    # We can't easily clear PATH or fake the sibling-repo away, but the
-    # tautology + the absence-of-exception check pins the contract.
-    discard findRunQuotaDaemonBin()
-    check true
+    # The previous shape discarded the result and asserted ``true``, which
+    # could not fail and so pinned nothing -- a helper that started raising,
+    # or one deleted and stubbed out, both passed. Totality is about the
+    # RETURNED VALUE, so bind it and assert on it: either the empty string
+    # (nothing discoverable on this host) or a path that actually exists.
+    # A helper that returned a stale or invented path fails here.
+    let found = findRunQuotaDaemonBin()
+    check found.len == 0 or fileExists(found)
 
   test "sibling-repo discovery finds runquotad in the canonical layout":
     # When the test runs inside the metacraft workspace (D:/metacraft/
@@ -202,3 +213,20 @@ suite "DSL-port M9.R.11 — runquota daemon discovery + recovery":
       putEnv("REPROBUILD_AUTO_RUNQUOTA", value)
       check getEnv("REPROBUILD_AUTO_RUNQUOTA").normalize == value.normalize
     resetEnv()
+
+  when defined(windows):
+    test "releasing a shared Windows auto-daemon leaves it running":
+      var daemon = startProcess(getAppFilename(),
+        args = [AutoDaemonLifetimeRunnerFlag],
+        options = {poParentStreams})
+      let pid = daemon.processID
+      try:
+        releaseAutoRunQuotaProcess(daemon)
+        check daemon == nil
+        sleep(100)
+        let listing = execProcess("tasklist", args = [
+          "/FI", "PID eq " & $pid, "/FO", "CSV", "/NH"],
+          options = {poUsePath, poStdErrToStdOut})
+        check listing.contains(",\"" & $pid & "\",")
+      finally:
+        discard execCmdEx("taskkill /PID " & $pid & " /T /F")

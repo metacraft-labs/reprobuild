@@ -8,14 +8,23 @@
 ##     when defined(windows):
 ##       "chocolatey"
 ##
-## The guard is required because the DSL cannot express "this package exists
-## only on Windows" — platform is declarable per provisioning arm, never for the
-## package — so an unguarded `uses:` is accepted at authoring time and fails on
-## Linux with `adapter chain exhausted`, whose remediation text then advises
-## adding a catalog entry or putting the executable on PATH. Both are impossible
-## here. See reprobuild-specs Package-Model.md, "GAP: a package cannot declare
-## the platforms it exists on", which proposes a package-level `platforms:`
-## declaration that would make this guard unnecessary.
+## The guard is still required, but it is no longer the only thing standing
+## between an unguarded `uses:` and a wrong answer. Since PMC-1 the package
+## itself declares `platforms: [windows]`, and resolution consults that BEFORE
+## the adapter chain: an unguarded `uses: "chocolatey"` on Linux now fails
+## naming the reason ("chocolatey is declared for windows only; this host is
+## linux") instead of exhausting the chain and advising remediations —
+## catalogue it, put it on PATH — that are impossible for a Windows package
+## manager. It also no longer reaches the `cakPath` adapter, so a Linux host
+## carrying some unrelated `chocolatey` binary can no longer resolve to it.
+##
+## The guard remains because availability and conditionality are different
+## questions, which is why Nix keeps `meta.platforms` alongside
+## `lib.optionals stdenv.isLinux` and Spack keeps `requires(...)` alongside
+## `depends_on(..., when=...)`. `platforms:` says where this package CAN exist;
+## `when defined(windows):` says whether this recipe NEEDS it here. See
+## reprobuild-specs Package-Model.md, "GAP: a package cannot declare the
+## platforms it exists on".
 ##
 ## WHAT CONSUMES THIS. The ``codetracer-*-recorder`` repos publish a Chocolatey
 ## package per release: ``packaging/chocolatey/`` holds the ``.nuspec`` and the
@@ -61,6 +70,10 @@
 import repro_project_dsl
 
 package chocolatey:
+  platforms:
+    [windows]
+    msg = "Chocolatey is a Windows package manager; it has no POSIX " &
+      "build, so there is nothing to catalogue for Linux or macOS."
   provisioning:
     tarball url = "https://community.chocolatey.org/api/v2/package/chocolatey/2.4.3",
       sha256 = "d4998ca928a85a484507dcaa39c30948a6516de0d1469b0511931d44a53456c3",

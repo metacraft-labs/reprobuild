@@ -40,7 +40,7 @@
 ##    reference the manifest mechanism (so existing M9.R.14f.2 tests
 ##    still pass).
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_dsl_stdlib/types/package_result
 
@@ -93,6 +93,61 @@ suite "DSL-port M9.R.30.2 — transitive RPATH propagation":
     check script.contains("[ -f ")
     # Lines are folded into rpath with dedup via case-pattern match.
     check script.contains("case \":$rpath:\" in")
+
+  test "active recipes root remaps stale install mirror paths":
+    let script = m9r14fEmitRpathPatchScript(
+      "/active/current/.repro/output/install/usr", @[],
+      depManifestPaths = @[
+        "/active/direct/.repro/output/install/.m9r30_propagated_libdirs.txt"],
+      ownManifestPath = "/active/current/.repro/output/install/" &
+        ".m9r30_propagated_libdirs.txt",
+      packageName = "current",
+      recipesRoot = "/active")
+    check script.contains("m9r14f_old_recipe=${line%%/.repro/output/install/*}")
+    check script.contains(
+      "m9r14f_active=\"/active/$m9r14f_dep/.repro/output/install/$m9r14f_rel\"")
+
+  when defined(linux):
+    test "stale propagated path is rewritten before its existence check":
+      let scratch = createTempDir("repro-m9r30-relocate-", "")
+      defer: removeDir(scratch)
+      let recipesRoot = scratch / "active"
+      let activeLib = recipesRoot / "transitive" / ".repro" / "output" /
+        "install" / "usr" / "lib"
+      let directRoot = recipesRoot / "direct" / ".repro" / "output" /
+        "install"
+      let currentRoot = recipesRoot / "current" / ".repro" / "output" /
+        "install"
+      let depManifest = directRoot / m9r30PropagatedManifestName
+      let ownManifest = currentRoot / m9r30PropagatedManifestName
+      createDir(activeLib)
+      createDir(directRoot)
+      createDir(currentRoot / "usr")
+      writeFile(depManifest,
+        "/retired/catalog/transitive/.repro/output/install/usr/lib\n")
+
+      let fakeBin = scratch / "bin"
+      let fakePatchelf = fakeBin / "patchelf"
+      createDir(fakeBin)
+      writeFile(fakePatchelf, "#!/bin/sh\nexit 0\n")
+      setFilePermissions(fakePatchelf, {fpUserRead, fpUserWrite, fpUserExec})
+      let emitted = scratch / "relocate.sh"
+      writeFile(emitted, m9r14fEmitRpathPatchScript(
+        currentRoot / "usr", @[],
+        depManifestPaths = @[depManifest],
+        ownManifestPath = ownManifest,
+        packageName = "current",
+        recipesRoot = recipesRoot))
+      let priorPath = getEnv("PATH")
+      putEnv("PATH", fakeBin & ":" & priorPath)
+      try:
+        let run = startProcess("/bin/sh", args = @[emitted],
+          options = {poUsePath, poParentStreams})
+        check waitForExit(run) == 0
+      finally:
+        putEnv("PATH", priorPath)
+
+      check readFile(ownManifest).strip() == activeLib
 
   test "own_manifest_path_is_truncated_then_written":
     let script = m9r14fEmitRpathPatchScript(

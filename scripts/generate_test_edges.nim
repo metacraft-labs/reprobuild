@@ -25,6 +25,17 @@
 ## generator emits the define directly in each ``TestSpec`` entry's
 ## ``defines`` field — no path-based shell carry-forward needed.
 ##
+## ``requiresReproBinary`` (helper reachability)
+## --------------------------------------------
+## Whether a test's EXECUTE edge declares ``build/bin/repro`` as a typed
+## input is decided by ``scripts/repro_binary_reachability.nim``, which
+## follows the test's transitive in-repo import closure. It replaced a
+## substring scan of the test file alone; that scan could not see a test
+## that reaches the CLI through a shared helper, so ~70 execute edges did
+## not declare the binary they run and could not be invalidated by a
+## rebuild of it. Read that module's header before changing anything
+## here — it also lists the failure modes the analysis still has.
+##
 ## Migration history (M6)
 ## ----------------------
 ## Before M6 this generator emitted a ``build:`` block directly, which
@@ -36,6 +47,7 @@
 ## now emits a data table and iteration happens at the call site.
 
 import std/[algorithm, os, strutils, sets]
+import repro_binary_reachability
 
 const
   GeneratedFile = "repro_tests.nim"
@@ -149,14 +161,20 @@ type
     needsProviderMode: bool
     needsSsl: bool        # M6: carries --define:ssl (HTTPS transport gate)
     requiresReproBinary: bool
-      ## Bootstrap-And-Self-Build B3: ``true`` when the test spawns
-      ## ``./build/bin/repro`` as a subprocess. The generator detects
-      ## this by scanning the test source for the ``build/bin/repro``
-      ## literal. When set, ``repro.nim`` declares the engine-built
-      ## ``build/bin/repro`` artifact as a typed input on the test's
-      ## EXECUTE edge so (a) the engine builds ``repro`` before the
-      ## test runs and (b) touching a source under ``libs/repro_*/``
-      ## invalidates the test's execute-edge cache.
+      ## Bootstrap-And-Self-Build B3: ``true`` when running the test
+      ## ends up executing ``./build/bin/repro``. When set, ``repro.nim``
+      ## declares the engine-built ``build/bin/repro`` artifact as a
+      ## typed input on the test's EXECUTE edge so (a) the engine builds
+      ## ``repro`` before the test runs and (b) a change to the binary
+      ## invalidates the test's execute-edge cache entry instead of
+      ## letting the engine serve the test as up to date against a
+      ## stale CLI.
+      ##
+      ## Detection follows the test's transitive in-repo import closure
+      ## (``scripts/repro_binary_reachability.nim``) rather than reading
+      ## the test file alone, because roughly thirty tests reach the CLI
+      ## only through ``repro_test_support.prepareMonitorTools`` and the
+      ## ``tests/e2e`` helper modules and spell no path of their own.
     extraPassC: seq[string]
       ## Bootstrap-And-Self-Build B4: per-test ``--passC:`` flags. The
       ## generator emits one entry per ``--passC:<value>`` flag the
@@ -169,6 +187,7 @@ type
       ## same shape and semantics as ``extraPassC`` but for the
       ## linker side.
     targetOs: TargetOs
+    selfInterposes: bool
       ## Bootstrap-And-Self-Build B4: per-test target-OS guard for the
       ## ``extraPassC`` / ``extraPassL`` activation. See ``TargetOs``.
 
@@ -217,6 +236,7 @@ proc isProviderModePath(path: string): bool =
     "tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim",
     "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
     "tests/unit/t_configure_build_tree_cleanup.nim",
+    "tests/unit/t_constructor_fetch_tool_refs.nim",
     "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
     "tests/unit/t_library_stage_alias.nim",
   ]:
@@ -286,15 +306,26 @@ proc walkRoot(repoRoot, dir: string;
     if accept(rel):
       result.add(rel)
 
-proc detectReproBinaryUsage(repoRoot, rel: string): bool =
-  ## Bootstrap-And-Self-Build B3: returns ``true`` when the test source
-  ## at ``repoRoot/rel`` contains the literal ``build/bin/repro`` (or
-  ## the ``reproBin`` convention used by the integration suite). The
-  ## scan is a cheap substring match against the test file — false
-  ## positives (e.g. tests that reference the path in a string only
-  ## for diagnostics) are acceptable here: declaring an unused typed
-  ## input on the execute edge is harmless beyond a small action-cache
-  ## key change.
+proc legacySingleFileScan(repoRoot, rel: string): bool =
+  ## The pre-existing per-file substring scan, kept ONLY as a superset
+  ## guard on top of the reachability analysis.
+  ##
+  ## It is not the primary signal any more, and it is demonstrably
+  ## imprecise in both directions. It misses every test that reaches the
+  ## CLI through a helper (that is the hole this file's caller now
+  ## closes), and it over-fires on tests that merely NAME the path in a
+  ## comment, or that name a DIFFERENT binary whose path happens to have
+  ## ``build/bin/repro`` as a prefix (``build/bin/repro_test_runner``).
+  ##
+  ## It is retained because the two error directions are not symmetric.
+  ## Over-declaring a typed input costs a slightly larger action-cache
+  ## key on one edge. UNDER-declaring means the execute edge is not
+  ## invalidated when ``build/bin/repro`` is rebuilt, so the engine
+  ## serves the test from the action cache as up to date while the
+  ## binary it exercises changed underneath it. Dropping this scan would
+  ## require proving, one by one, that each test it alone classifies
+  ## does not use the CLI; ORing it in costs 5 over-declared edges out of
+  ## 1374 and cannot introduce a stale serve.
   let abs = repoRoot / rel
   try:
     let content = readFile(abs)
@@ -306,6 +337,42 @@ proc detectReproBinaryUsage(repoRoot, rel: string): bool =
              "runWithRunquotaOnPath" in content))
   except IOError, OSError:
     return false
+
+const SelfInterposingTestStems = [
+  "t_stackable_hooks_extracted_process_tree",
+  "t_m9r40_1_probe_clean_env"
+]
+  ## Tests that perform ``LD_PRELOAD`` interposition THEMSELVES, and so cannot
+  ## be observed by the engine's io-monitor: two interposers on the same libc
+  ## entry points re-enter each other and livelock. Their execute edges get a
+  ## GENERATED DEPFILE (``fs.unmonitorableActionDepfile`` feeding
+  ## ``makeDepfilePolicy``) as their dependency evidence instead of monitoring.
+  ## See the long note at the execute-edge call site in ``repro.nim`` for the
+  ## obligation this carries and for the intended end state.
+  ##
+  ## Deliberately an explicit list rather than sniffed from source text: a
+  ## heuristic matching any file mentioning "LD_PRELOAD" would silently opt
+  ## tests OUT of dependency tracking as a side effect of a comment. Four
+  ## other test files mention it without injecting a shim and must keep
+  ## normal monitoring. Adding a stem here should be justified in review.
+
+proc isSelfInterposingTestStem(stem: string): bool =
+  for candidate in SelfInterposingTestStems:
+    if candidate == stem:
+      return true
+  false
+
+proc detectReproBinaryUsage(reach: Reachability; repoRoot, rel: string): bool =
+  ## Bootstrap-And-Self-Build B3: ``true`` when running this test ends up
+  ## executing the engine-built ``build/bin/repro``.
+  ##
+  ## The answer comes from ``scripts/repro_binary_reachability.nim``,
+  ## which follows the test's transitive in-repo import closure and the
+  ## symbol references inside it, so a test that reaches the CLI only
+  ## through a shared helper (``prepareMonitorTools``, the ``tests/e2e``
+  ## helper modules) is classified correctly. See that module's header
+  ## for the algorithm and for the failure modes it still has.
+  reach.needsReproBinary(rel) or legacySingleFileScan(repoRoot, rel)
 
 proc isHcrTestStem(stem: string): bool =
   for known in HcrTestStems:
@@ -394,6 +461,11 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
   # cleanly across runs.
   candidates.sort()
 
+  # One whole-closure reachability pass, seeded with the discovered test
+  # files. Everything they import (transitively, inside this repo) is
+  # parsed once and shared by every classification below.
+  let reach = analyze(repoRoot, candidates)
+
   for rel in candidates:
     if rel in bundled:
       # Folded into a shared binary; the bundle's own spec carries its cases.
@@ -414,6 +486,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
     var extraPassC: seq[string] = @[]
     var extraPassL: seq[string] = @[]
     var targetOs = soAny
+    let selfInterposes = isSelfInterposingTestStem(stem)
     if isHcrTestStem(stem):
       extraPassC = @[HcrExtraPassC]
       extraPassL = @[HcrExtraPassL]
@@ -424,10 +497,11 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
       identName: identFromBasename(stem),
       needsProviderMode: isProviderModePath(rel),
       needsSsl: needsSslDefine(rel),
-      requiresReproBinary: detectReproBinaryUsage(repoRoot, rel),
+      requiresReproBinary: detectReproBinaryUsage(reach, repoRoot, rel),
       extraPassC: extraPassC,
       extraPassL: extraPassL,
-      targetOs: targetOs))
+      targetOs: targetOs,
+      selfInterposes: selfInterposes))
 
 proc acceptPythonTest(rel: string): bool =
   ## Bootstrap-And-Self-Build B4: discover Python tests participating in
@@ -519,11 +593,14 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
   result.add("    ## ``binary`` is the repo-relative output binary path;\n")
   result.add("    ## ``defines`` is the per-test ``-d:`` flag list passed\n")
   result.add("    ## through to ``buildNimUnittest.build``.\n")
-  result.add("    ## ``requiresReproBinary`` (B3): the test spawns\n")
-  result.add("    ## ``./build/bin/repro`` as a subprocess, so the engine-\n")
+  result.add("    ## ``requiresReproBinary`` (B3): running the test ends\n")
+  result.add("    ## up executing ``./build/bin/repro``, so the engine-\n")
   result.add("    ## built ``repro`` artifact is declared as a typed input\n")
   result.add("    ## on the EXECUTE edge (build edge stays purely a Nim\n")
-  result.add("    ## compile).\n")
+  result.add("    ## compile). The flag is computed by following the\n")
+  result.add("    ## test's transitive import closure, so a test that\n")
+  result.add("    ## reaches the CLI only through a shared helper carries\n")
+  result.add("    ## it too; see ``scripts/repro_binary_reachability.nim``.\n")
   result.add("    ## ``extraPassC`` / ``extraPassL`` (B4): per-test\n")
   result.add("    ## ``--passC:`` / ``--passL:`` flag lists, activated by\n")
   result.add("    ## the ``targetOs`` guard.\n")
@@ -535,6 +612,14 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
   result.add("    extraPassC*: seq[string]\n")
   result.add("    extraPassL*: seq[string]\n")
   result.add("    targetOs*: TargetOs\n")
+  result.add("    selfInterposes*: bool\n")
+  result.add("      ## HAZARDOUS opt-out: this test performs LD_PRELOAD\n")
+  result.add("      ## interposition itself and cannot be observed by the\n")
+  result.add("      ## engine's own interposer. Its execute edge takes its\n")
+  result.add("      ## dependency evidence from a GENERATED DEPFILE instead\n")
+  result.add("      ## of from the monitor, and is denied the monitor shim\n")
+  result.add("      ## env seed. See the note at the execute-edge call site\n")
+  result.add("      ## in ``repro.nim``.\n")
   result.add("\n")
   result.add("const reprobuildTestSpecs*: seq[TestSpec] = @[\n")
   for i, edge in edges:
@@ -556,7 +641,9 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     result.add("    requiresReproBinary: " & reqLit & ",\n")
     result.add("    extraPassC: " & seqLiteral(edge.extraPassC) & ",\n")
     result.add("    extraPassL: " & seqLiteral(edge.extraPassL) & ",\n")
-    result.add("    targetOs: " & targetOsLit & ")" & sep & "\n")
+    result.add("    targetOs: " & targetOsLit & ",\n")
+    result.add("    selfInterposes: " & (if edge.selfInterposes: "true"
+                                         else: "false") & ")" & sep & "\n")
   result.add("]\n")
   result.add("\n")
   result.add("## Bootstrap-And-Self-Build B4: Python tests discovered\n")

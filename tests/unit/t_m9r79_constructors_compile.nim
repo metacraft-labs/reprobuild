@@ -21,9 +21,14 @@ import repro_project_dsl
 suite "t_m9r79_constructors_compile":
 
   test "meson_package + autotools_package + cmake_package importable":
-    # The imports above are the assertion.  A regression that broke
-    # the constructor's compile would fail this file's build.
-    check true
+    # ``check true`` could not fail, so "the imports above are the assertion"
+    # was the whole of it -- and an import that resolves says nothing about
+    # whether the constructor is still CALLABLE at its documented arity.
+    # ``compiles`` says exactly that, and is false the moment a required
+    # parameter appears or the symbol stops being exported.
+    check compiles(meson_package(srcDir = "./src"))
+    check compiles(cmake_package(srcDir = "./src"))
+    check compiles(autotools_package(srcDir = "./src"))
 
   test "cmake runtime paths exclude propagated Nix glibc":
     let glibcLib = "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
@@ -51,4 +56,10 @@ suite "t_m9r79_constructors_compile":
     setRegisteredActionDeclaredOutputs("m9r79-fake-id", @["/tmp/x"])
     setRegisteredActionReadOnlyRoots("m9r79-fake-id", @["/tmp/y"])
     setRegisteredActionCwd("m9r84-fake-id", acwdBuild, "/tmp/build")
-    check true
+    # ``check true`` could not fail, so it did not record the property this
+    # case is named for. ``compiles`` does: it goes false the moment a mutator
+    # stops being exported or changes arity, which is the regression the
+    # "compile-time gate" wording was reaching for.
+    check compiles(setRegisteredActionDeclaredOutputs("id", @["/tmp/x"]))
+    check compiles(setRegisteredActionReadOnlyRoots("id", @["/tmp/y"]))
+    check compiles(setRegisteredActionCwd("id", acwdBuild, "/tmp/build"))

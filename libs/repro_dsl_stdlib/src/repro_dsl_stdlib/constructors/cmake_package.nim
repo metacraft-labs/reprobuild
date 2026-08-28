@@ -89,6 +89,10 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     case spec.hashAlg
     of dshaSha256: "sha256"
     of dshaBlake3: "blake3"
+  let hashTools =
+    case spec.hashAlg
+    of dshaSha256: @["sha256sum"]
+    of dshaBlake3: @["b2sum", "blake3sum"]
   # M9.R.15q.5.4 — support relative ``file:./vendor/...`` URL form so
   # recipes that vendor a tarball can reference it without baking the
   # host's absolute path into the recipe (mirrors the equivalent
@@ -99,11 +103,15 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     let absPath = projectRoot / relPath
     let posixAbs = absPath.replace("\\", "/")
     resolvedUrl = "file://" & posixAbs
+  let fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
+    copiesDataFile = spec.kind == dfkDataFile,
+    archiveUrl = resolvedUrl)
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
+  let staged = extracted & ".repro-extract-" & spec.hashHex
+  let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
@@ -124,8 +132,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     script.add("cp \"" & escapedTarball & "\" \"" &
       escapedStaged & "/source\"; ")
   else:
-    script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+    script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
   script.add(": > \"" & escapedStamp & "\"")
@@ -138,7 +145,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     pool = "fetch",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.fetch." & hashAlgTag,
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = fetchToolRefs)
   some(act)
 
 proc cmake_package*(srcDir: string;
@@ -216,6 +223,7 @@ proc cmake_package*(srcDir: string;
     if raw.len > 0: raw else: "src"
   let fetchActOpt = maybeEmitFetchAction(pkgName, projectRoot, extractedRel)
   var configureAfter: seq[BuildActionDef] = @[]
+  var patchActionId = ""
   if fetchActOpt.isSome:
     configureAfter.add(fetchActOpt.get())
   # M9.R.15q.10.5 — when ``srcPatches`` is non-empty, emit a per-recipe
@@ -249,6 +257,7 @@ proc cmake_package*(srcDir: string;
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "cmake_package.patch",
       toolIdentityRefs = @["sh"])
+    patchActionId = patchEdge.id
     configureAfter.add(patchEdge)
   # M9.R.15i.1 — auto-thread Qt6 component cmake-config dirs from every
   # ``qt6-*`` dep's install-mirror so KF6 / Plasma recipes consuming
@@ -485,6 +494,9 @@ proc cmake_package*(srcDir: string;
       if extra notin cmakeBuildRefs:
         cmakeBuildRefs.add(extra)
   let cmakeDepRefs = cmakeNativeRefs & cmakeBuildRefs
+  if patchActionId.len > 0:
+    appendRegisteredActionToolIdentityRefs(patchActionId, cmakeDepRefs)
+    classifyRegisteredActionToolIdentityRefs(patchActionId, cmakeBuildRefs)
 
   # CMake records its generator and toolchain in the build tree. Reusing a
   # directory configured by another generator makes a fresh source build fail
@@ -525,7 +537,7 @@ proc cmake_package*(srcDir: string;
       # invalidate this cleanup edge on every warm build.
       dependencyPolicy = automaticMonitorPolicy(@[buildDirAbs]),
       commandStatsId = "cmake_package.clean_build_dir",
-      toolIdentityRefs = @["sh"])
+      toolIdentityRefs = @["sh", "rm"])
     configureAfter = @[cleanEdge]
 
   var configureIdentityInputs: seq[string] = @[]

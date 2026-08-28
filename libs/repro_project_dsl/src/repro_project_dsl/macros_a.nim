@@ -275,6 +275,8 @@ proc parseCommandDependencyPolicy(node: NimNode;
     result = automaticMonitorPolicy()
   of "makedepfile":
     result = makeDepfilePolicy()
+  of "iomonreport", "iomon":
+    result = iomonReportPolicy("")
   else:
     result = fallback
   for i in 2 ..< node.len:
@@ -291,6 +293,18 @@ proc parseCommandDependencyPolicy(node: NimNode;
     let ignoredValue = namedValue(node[i], "ignoredInputPrefixes")
     if not ignoredValue.isNil:
       result.ignoredInputPrefixes = stringSeqLiteral(ignoredValue)
+    let captureNonDeterminismValue =
+      namedValue(node[i], "captureNonDeterminism")
+    if not captureNonDeterminismValue.isNil:
+      result.captureNonDeterminism =
+        boolLiteral(captureNonDeterminismValue, result.captureNonDeterminism)
+    let captureIpcValue = namedValue(node[i], "captureIpc")
+    if not captureIpcValue.isNil:
+      result.captureIpc = boolLiteral(captureIpcValue, result.captureIpc)
+    let suppressSeedValue = namedValue(node[i], "suppressMonitorShimSeed")
+    if not suppressSeedValue.isNil:
+      result.suppressMonitorShimSeed =
+        boolLiteral(suppressSeedValue, result.suppressMonitorShimSeed)
 
 type
   NonDeterminismDecl = tuple[policy: NonDeterminismPolicy; justification: string]
@@ -607,6 +621,30 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
   if not isRoot:
     commands.add(result)
 
+proc parseLockFileDesignation(stmt: NimNode; owner: string): string =
+  ## Named-Lock-Files NLF-M7 (§4.3) — the one-line designation
+  ## ``lockFile <name>`` written at an artifact or at a package.
+  ##
+  ## The argument is a bare identifier, not a string, and §4.9 says why that
+  ## is the design and not a preference: "Being a bare **symbol** rather than
+  ## a string is what makes this diagnostic possible … strings are for names
+  ## that cross a boundary and cannot be checked; symbols are for names the
+  ## compiler can verify."
+  ##
+  ## Both spellings the parser meets are accepted: ``lockFile hostTools``
+  ## (Command, argument at [1]) and ``lockFile: hostTools`` (Call with a
+  ## synthetic StmtList), the same unwrap ``name:`` already needs.
+  if stmt.len < 2:
+    error("lockFile expects a declared lock-file name, e.g. " &
+      "`lockFile hostTools` (" & owner & ")", stmt)
+  var nameNode = stmt[1]
+  if nameNode.kind == nnkStmtList and nameNode.len == 1:
+    nameNode = nameNode[0]
+  if nameNode.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    error("lockFile expects a bare identifier naming a declared lock file, " &
+      "not " & $nameNode.kind & " (" & owner & ")", nameNode)
+  identText(nameNode)
+
 proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
   let loc = lineFile(node)
   result.exportName = identText(node[1])
@@ -629,6 +667,9 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       if nameNode.kind == nnkStmtList and nameNode.len == 1:
         nameNode = nameNode[0]
       result.binaryName = stringLiteral(nameNode)
+    of "lockfile":
+      result.lockFile = parseLockFileDesignation(stmt,
+        "executable " & result.exportName)
     of "cli":
       let cliBody = stmt[1]
       var commands: seq[CliCommandDef] = @[]
@@ -788,6 +829,9 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
     return
   for stmt in body:
     case calleeName(stmt).normalize
+    of "lockfile":
+      result.lockFile = parseLockFileDesignation(stmt,
+        "library " & result.name)
     of "kind":
       if stmt.len < 2:
         error("library kind: requires a value", stmt)
@@ -1158,9 +1202,32 @@ proc collectUsesGated(node: NimNode; policyPath: seq[string];
   else:
     discard
 
+const
+  DepKindTarget* = "target"
+    ## ``uses:`` / ``buildDeps:`` — HOST-platform libraries the produced
+    ## binaries link against.
+  DepKindNative* = "native"
+    ## ``nativeBuildDeps:`` — BUILD-platform tools and code generators.
+  DepKindRuntime* = "runtime"
+    ## ``runtimeDeps:`` — HOST-platform tools/libraries needed at run time.
+
 proc collectUses(node: NimNode; policyPath: seq[string];
-                 output: var seq[PackageUseDef]) =
+                 output: var seq[PackageUseDef];
+                 depKind = DepKindTarget) =
+  ## Named-Lock-Files NLF-M7 (§4.6): every entry is tagged with the list it
+  ## was written in, AFTER the recursive walk rather than through it.
+  ##
+  ## Tagging on the way out rather than threading a parameter down eleven
+  ## recursive call sites is deliberate: the tag is a property of the BLOCK
+  ## the walk was entered for, not of any node inside it, so a parameter
+  ## threaded through the recursion would be eleven places for a future arm
+  ## to forget it and one place for the tag to be silently wrong. §4.6's whole
+  ## finding is that this distinction gets erased somewhere downstream; not
+  ## adding eleven new places to erase it is the point.
+  let before = output.len
   collectUsesGated(node, policyPath, "", "", output)
+  for i in before ..< output.len:
+    output[i].depKind = depKind
 
 proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
   let loc = lineFile(node)
@@ -1681,6 +1748,235 @@ proc m9r15pAutoInjectQt6Transitive(pkg: var PackageDef) =
       gateVariant: "",
       gateValue: ""))
 
+proc platformTokenText(node: NimNode): string =
+  ## The spelling of one ``platforms:`` entry.
+  ##
+  ## Three node shapes reach here and all three are the SAME token to a
+  ## reader:
+  ##
+  ##   * ``[windows]``            — an ident; the form the milestone writes;
+  ##   * ``[x86_64-windows]``     — Nim parses the hyphen as an infix ``-``,
+  ##     so the node is an ``nnkInfix`` tree that has to be folded back into
+  ##     the spelling the author typed. Refusing it would mean the paired
+  ##     form could only ever be written quoted, which reads worse than the
+  ##     bare form beside it and would be a trap nobody expects;
+  ##   * ``["x86_64-windows"]``   — a string literal; the escape hatch for
+  ##     any token that is not a legal Nim expression.
+  case node.kind
+  of nnkStrLit..nnkTripleStrLit: node.strVal
+  of nnkIdent, nnkSym: $node
+  of nnkInfix:
+    if node.len == 3 and node[0].eqIdent("-"):
+      let lhs = platformTokenText(node[1])
+      let rhs = platformTokenText(node[2])
+      if lhs.len > 0 and rhs.len > 0: lhs & "-" & rhs else: ""
+    else:
+      ""
+  else: ""
+
+proc concatenatedStrLit(node: NimNode): tuple[ok: bool; text: string] =
+  ## A string literal, or a chain of them joined with ``&``.
+  ##
+  ## ``requireStrLit`` alone would be right in principle — the macro reads the
+  ## text at compile time and cannot evaluate an expression — but it would
+  ## force every ``msg =`` onto one unwrapped line, and a diagnostic message
+  ## is exactly the field an author wants to write in prose. Folding a
+  ## literal-only ``&`` chain here keeps the compile-time guarantee and lets
+  ## the source wrap.
+  if node.isStrLit:
+    return (true, node.strVal)
+  if node.kind == nnkInfix and node.len == 3 and node[0].eqIdent("&"):
+    let lhs = concatenatedStrLit(node[1])
+    if lhs.ok:
+      let rhs = concatenatedStrLit(node[2])
+      if rhs.ok:
+        return (true, lhs.text & rhs.text)
+  (false, "")
+
+proc parsePlatformsSection(stmt: NimNode; pkg: var PackageDef) =
+  ## PMC-1 — parse a package-level ``platforms:`` declaration.
+  ##
+  ## Three shapes are accepted, all of which reach here as the ``platforms``
+  ## section head:
+  ##
+  ##   platforms: [windows]
+  ##   platforms: [x86_64-windows, aarch64-windows]
+  ##   platforms:
+  ##     [windows]
+  ##     msg = "Chocolatey is a Windows package manager; it has no " &
+  ##       "POSIX build."
+  ##   platforms [windows], msg = "…"
+  ##
+  ## ``msg`` mirrors Spack's ``requires(…, msg=…)``: it lets the author state
+  ## the reason, which is the one thing the resolver cannot infer and the
+  ## reason PMC-1's diagnostic exists at all.
+  var bracket: NimNode = nil
+  var message = ""
+  var sawMessage = false
+
+  proc takeMessage(valueNode: NimNode) =
+    if sawMessage:
+      error("platforms: msg may be given only once", valueNode)
+    let folded = concatenatedStrLit(valueNode)
+    if not folded.ok:
+      error("platforms: msg must be a string literal (or a `&` chain of " &
+        "them): it is baked into the diagnostic at compile time and the " &
+        "macro cannot evaluate an expression here", valueNode)
+    message = folded.text
+    sawMessage = true
+
+  proc consume(node: NimNode) =
+    case node.kind
+    of nnkBracket:
+      if not bracket.isNil:
+        error("platforms: expects exactly one [...] list", node)
+      bracket = node
+    of nnkPrefix:
+      # ``@[windows]`` — accepted so the list reads the same as every other
+      # seq literal in the DSL.
+      if node.len == 2 and node[0].eqIdent("@"):
+        consume(node[1])
+      else:
+        error("unsupported platforms: entry: " & node.repr, node)
+    of nnkExprEqExpr, nnkAsgn:
+      if identText(node[0]).normalize in ["msg", "message", "reason"]:
+        takeMessage(node[1])
+      else:
+        error("platforms: accepts only `msg = \"...\"` alongside the list; " &
+          "got `" & identText(node[0]) & "`", node)
+    of nnkStmtList:
+      for child in node:
+        if child.kind == nnkCommentStmt:
+          continue
+        consume(child)
+    of nnkCommentStmt:
+      discard
+    else:
+      error("platforms: expects a [...] list of platform tokens, e.g. " &
+        "`platforms: [windows]`; got " & node.repr, node)
+
+  for i in 1 ..< stmt.len:
+    consume(stmt[i])
+  if bracket.isNil:
+    error("platforms: requires a list, e.g. `platforms: [windows]`", stmt)
+
+  pkg.platformsDeclared = true
+  pkg.platformsMessage = message
+  for entry in bracket:
+    let token = platformTokenText(entry)
+    if token.len == 0:
+      error("platforms: entries must be identifiers or string literals " &
+        "(the macro reads them at compile time and cannot evaluate an " &
+        "expression here); got " & entry.repr, entry)
+    let parsed = parsePlatformConstraintToken(token)
+    if not parsed.ok:
+      error("unknown platform token '" & token & "' in platforms:. " &
+        "Expected an OS (" & KnownPlatformOsTokens.join(" | ") & "), a CPU " &
+        "family (" & KnownPlatformCpuTokens.join(" | ") & "), or a " &
+        "<cpu>-<os> pair such as x86_64-windows. Microarchitecture levels " &
+        "(x86-64-v2, …) are not part of this axis.", entry)
+    var constraint = PlatformConstraintDef(cpu: parsed.cpu, os: parsed.os)
+    let entryLoc = lineFile(entry)
+    constraint.sourceFile = entryLoc.file
+    constraint.sourceLine = entryLoc.line
+    for existing in pkg.declaredPlatforms:
+      if existing.cpu == constraint.cpu and existing.os == constraint.os:
+        error("duplicate platform '" & token & "' in platforms:", entry)
+    pkg.declaredPlatforms.add(constraint)
+  if pkg.declaredPlatforms.len == 0:
+    error("platforms: must name at least one platform. An empty list would " &
+      "declare a package that can exist nowhere, which is never what an " &
+      "author means; delete the block to leave availability inferred from " &
+      "the provisioning arms.", stmt)
+
+proc lintArmsAgainstDeclaredPlatforms(body: NimNode; pkg: PackageDef) =
+  ## PMC-1 lint: an arm whose ``os =`` / ``cpu =`` falls outside the declared
+  ## ``platforms:`` is a typo, and before PMC-1 nothing could catch it — a
+  ## Windows-only package carrying an ``os = "linux"`` tarball produced no
+  ## diagnostic anywhere, it just silently offered an arm no consumer of that
+  ## package could ever legitimately select.
+  ##
+  ## Only LITERAL ``cpu`` / ``os`` values are checked. An expression is not
+  ## knowable at macro time and is skipped rather than rejected, the same rule
+  ## ``litText`` documents for every other macro-time whitelist.
+  if not pkg.platformsDeclared:
+    return
+
+  proc declaredCovers(cpuText, osText: string): bool =
+    let constraint = PlatformConstraintDef(
+      cpu: canonicalPlatformCpuToken(cpuText),
+      os: canonicalPlatformOsToken(osText))
+    # An arm is inside the declaration when SOME declared coordinate covers
+    # it. ``platformConstraintMatchesHost`` asks the same question with the
+    # roles swapped (does this host fall inside this coordinate?), and the
+    # arm's own (cpu, os) is exactly a host coordinate.
+    for declared in pkg.declaredPlatforms:
+      if platformConstraintMatchesHost(declared, constraint.cpu, constraint.os):
+        return true
+    false
+
+  proc describeDeclared(): string =
+    var parts: seq[string] = @[]
+    for declared in pkg.declaredPlatforms:
+      if declared.cpu == "any" and declared.os == "any": parts.add("any")
+      elif declared.cpu == "any": parts.add(declared.os)
+      elif declared.os == "any": parts.add(declared.cpu)
+      else: parts.add(declared.cpu & "-" & declared.os)
+    "[" & parts.join(", ") & "]"
+
+  proc checkEntry(entry: NimNode; what: string) =
+    var cpuText = ""
+    var osText = ""
+    for i in 1 ..< entry.len:
+      let cpuValue = namedValue(entry[i], "cpu")
+      if not cpuValue.isNil: cpuText = litText(cpuValue)
+      let osValue = namedValue(entry[i], "os")
+      if not osValue.isNil: osText = litText(osValue)
+      # ``tarball(url = …, os = "linux")`` reaches here as a call whose
+      # arguments are nnkExprEqExpr children of a nnkPar / nnkCall node.
+      if entry[i].kind in {nnkPar, nnkCall, nnkCommand}:
+        for j in 0 ..< entry[i].len:
+          let nestedCpu = namedValue(entry[i][j], "cpu")
+          if not nestedCpu.isNil: cpuText = litText(nestedCpu)
+          let nestedOs = namedValue(entry[i][j], "os")
+          if not nestedOs.isNil: osText = litText(nestedOs)
+    if cpuText.len == 0 and osText.len == 0:
+      return
+    if declaredCovers(cpuText, osText):
+      return
+    let armDesc =
+      (if cpuText.len > 0: "cpu = \"" & cpuText & "\"" else: "") &
+      (if cpuText.len > 0 and osText.len > 0: ", " else: "") &
+      (if osText.len > 0: "os = \"" & osText & "\"" else: "")
+    error("package '" & pkg.packageName & "' declares platforms: " &
+      describeDeclared() & ", but this " & what & " arm targets " & armDesc &
+      ", which is outside it. Either widen platforms: or fix the arm — an " &
+      "arm no declared platform can select is unreachable, and before PMC-1 " &
+      "nothing said so.", entry)
+
+  for stmt in body:
+    if calleeName(stmt).normalize != "provisioning":
+      continue
+    if stmt.len < 2:
+      continue
+    let armBody = stmt[stmt.len - 1]
+    if armBody.kind != nnkStmtList:
+      continue
+    for entry in armBody:
+      let armName = calleeName(entry).normalize
+      case armName
+      of "tarball":
+        checkEntry(entry, "tarball")
+      of "scoopapp", "scooppackage":
+        # A Scoop arm is Windows by construction; it carries no ``os =``.
+        if not declaredCovers("", "windows"):
+          error("package '" & pkg.packageName & "' declares platforms: " &
+            describeDeclared() & ", but a scoopApp arm is Windows-only by " &
+            "construction. Either widen platforms: to include windows or " &
+            "drop the arm.", entry)
+      else:
+        discard
+
 proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   let loc = lineFile(name)
   result.packageName = identText(name)
@@ -1707,6 +2003,19 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       if provisioning.normalize notin ["path", "nix", "tarball", "scoop", "from-source"]:
         error("defaultToolProvisioning must be one of: path, nix, tarball, scoop, from-source", stmt[1])
       result.defaultToolProvisioning = provisioning
+    elif calleeName(stmt).normalize == "lockfile":
+      # §4.3's package-level rung: "A **package-level** `lockFile` remains
+      # available as a default that artifacts inherit and may override."
+      result.lockFile = parseLockFileDesignation(stmt,
+        "package " & result.packageName)
+    elif calleeName(stmt).normalize == "platforms":
+      # PMC-1: package-level declared availability. Parsed here so the
+      # ``platforms:`` fields land on the same ``PackageDef`` the registry
+      # already carries; the arm lint runs once at the end, after every
+      # provisioning arm has been collected.
+      if result.platformsDeclared:
+        error("platforms: may be declared only once per package", stmt)
+      parsePlatformsSection(stmt, result)
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
         collectUses(stmt[i], @[], result.toolUses)
@@ -1728,14 +2037,14 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       # ``PackageDef`` so it does NOT leak into ``toolUses`` (the
       # downstream solver / cross-project surface).
       for i in 1 ..< stmt.len:
-        collectUses(stmt[i], @[], result.nativeBuildDeps)
+        collectUses(stmt[i], @[], result.nativeBuildDeps, DepKindNative)
     elif calleeName(stmt).normalize == "runtimedeps":
       # DSL-port M9.R.1: ``runtimeDeps:`` carries HOST-platform
       # tools/libraries consumers need at runtime or link time.
       # Parsed with the same minispec grammar as ``uses:`` /
       # ``buildDeps:``; stored in a separate slot on ``PackageDef``.
       for i in 1 ..< stmt.len:
-        collectUses(stmt[i], @[], result.runtimeDeps)
+        collectUses(stmt[i], @[], result.runtimeDeps, DepKindRuntime)
     elif calleeName(stmt).normalize == "provisioning":
       if stmt.len < 2:
         error("provisioning expects a body", stmt)
@@ -1832,6 +2141,11 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       # ``$out-doc`` / ``$out-dev``). Empty / absent ``outputs:``
       # keeps legacy single-output behavior.
       parseOutputsBlock(result.packageName, stmt, result.outputs)
+  # PMC-1 lint: every provisioning arm must fall inside the declared
+  # ``platforms:``. Runs after the section loop so it sees every arm
+  # regardless of the order the author wrote the blocks in. Inert for the
+  # ~262 stdlib entries that declare nothing.
+  lintArmsAgainstDeclaredPlatforms(body, result)
   # DSL-port M9.R.15p.0.1 — after all user-declared deps are
   # collected, auto-inject the Qt6Gui transitive ``find_dependency``
   # targets (``libxkbcommon`` + ``mesa``) into ``toolUses`` so every
@@ -1880,18 +2194,49 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
       result.add(escForCode(path))
     result.add("]")
 
+  proc captureParts(): seq[string] =
+    # Only emit when set (default false), so a regenerated recipe that never
+    # opted in stays byte-identical to a fresh one.
+    if policy.captureNonDeterminism:
+      result.add("captureNonDeterminism = true")
+    if policy.captureIpc:
+      result.add("captureIpc = true")
+
   case policy.kind
   of bdpDefault:
-    "defaultDependencyPolicy(" & ignoredCode() & ")"
+    var parts: seq[string] = @[]
+    if policy.ignoredInputPrefixes.len > 0:
+      parts.add(ignoredCode())
+    parts.add(captureParts())
+    "defaultDependencyPolicy(" & parts.join(", ") & ")"
   of bdpAutomaticMonitor:
-    "automaticMonitorPolicy(" & ignoredCode() & ")"
+    var parts: seq[string] = @[]
+    if policy.ignoredInputPrefixes.len > 0:
+      parts.add(ignoredCode())
+    parts.add(captureParts())
+    "automaticMonitorPolicy(" & parts.join(", ") & ")"
   of bdpMakeDepfile:
     var parts: seq[string] = @[]
     if policy.depfiles.len > 0:
       parts.add(depfilesCode())
     if policy.ignoredInputPrefixes.len > 0:
       parts.add(ignoredCode())
+    parts.add(captureParts())
+    # ``makeDepfilePolicy`` is the only constructor that accepts this, and it
+    # is only emitted when set, so an edge that never opted in regenerates
+    # byte-identically.
+    if policy.suppressMonitorShimSeed:
+      parts.add("suppressMonitorShimSeed = true")
     "makeDepfilePolicy(" & parts.join(", ") & ")"
+  of bdpIomonReport:
+    # First positional arg is the produced ``.iomon`` path; capture flags are
+    # named. ``iomonReportPolicy`` carries the path on ``depfiles``.
+    let pathLit =
+      if policy.depfiles.len > 0: escForCode(policy.depfiles[0])
+      else: escForCode("")
+    var parts = @[pathLit]
+    parts.add(captureParts())
+    "iomonReportPolicy(" & parts.join(", ") & ")"
 
 proc packageUseSeqLiteral(uses: seq[PackageUseDef]): string =
   ## DSL-port M9.R.1: shared serializer for ``seq[PackageUseDef]``
@@ -1915,13 +2260,32 @@ proc packageUseSeqLiteral(uses: seq[PackageUseDef]): string =
     result.add("], sourceFile: " & escForCode(useDef.sourceFile) &
       ", sourceLine: " & $useDef.sourceLine &
       ", gateVariant: " & escForCode(useDef.gateVariant) &
-      ", gateValue: " & escForCode(useDef.gateValue) & ")")
+      ", gateValue: " & escForCode(useDef.gateValue) &
+      # Named-Lock-Files NLF-M7 (§4.6): the platform tag rides ALONG WITH the
+      # entry, so the concatenation below no longer erases which of the three
+      # lists it came from.
+      ", depKind: " & escForCode(useDef.depKind) & ")")
   result.add("]")
 
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
+    ", lockFile: " & escForCode(pkg.lockFile) &
     ", defaultToolProvisioning: " & escForCode(pkg.defaultToolProvisioning) &
-    ", nixProvisioning: @["
+    # PMC-1: declared availability. A package that wrote no ``platforms:``
+    # emits ``platformsDeclared: false`` + ``@[]`` + ``""``, which is the
+    # zero value of every field — so the registered record for the ~262
+    # existing stdlib entries is unchanged in everything the resolver reads.
+    ", platformsDeclared: " & $pkg.platformsDeclared &
+    ", platformsMessage: " & escForCode(pkg.platformsMessage) &
+    ", declaredPlatforms: @["
+  for platformIndex, constraint in pkg.declaredPlatforms:
+    if platformIndex > 0:
+      result.add(", ")
+    result.add("PlatformConstraintDef(cpu: " & escForCode(constraint.cpu) &
+      ", os: " & escForCode(constraint.os) &
+      ", sourceFile: " & escForCode(constraint.sourceFile) &
+      ", sourceLine: " & $constraint.sourceLine & ")")
+  result.add("], nixProvisioning: @[")
   for provisioningIndex, provisioning in pkg.nixProvisioning:
     if provisioningIndex > 0:
       result.add(", ")
@@ -2001,30 +2365,25 @@ proc packageLiteral(pkg: PackageDef): string =
     # convention layer's tool-PATH setup (the convention reads only
     # ``projectInterface.toolUses`` for PATH prepending — see the
     # consumers at ``libs/repro_cli_support/src/repro_cli_support.nim``
-    # lines 3213, 5050, 10492, 14161). The per-kind separation is
-    # preserved at the ``registeredBuildDeps`` /
-    # ``registeredNativeBuildDeps`` / ``registeredRuntimeDeps``
-    # accessors (M9.R.1) and at the M9.R.7 ``cachePlatformTagFor``
-    # site where the resolver caller threads the right ``DepKind``;
-    # this fold only affects the surface the convention's PATH
-    # builder sees, which is exactly what M9.R.5a needs. The
-    # ``nativeBuildDeps:`` slot below still emits the kind-tagged
-    # seq so any downstream consumer that needs the BUILD-platform
-    # subset can read it directly.
+    # NLF-M8 (Named-Lock-Files, third criterion folded in from NLF-M7) —
+    # **the three lists are no longer concatenated here.**
     #
-    # M9.R.53: the same fold widens to include ``runtimeDeps``.
-    # Recipes that shell out to a build-time driver script (e.g.
-    # ``recipes/reproos-image``) declare the tools the script invokes
-    # in ``runtimeDeps:`` — semantically correct for a shell action
-    # since the tools are the SCRIPT's runtime — but that slot didn't
-    # reach the resolver until now, so callers had to duplicate every
-    # entry into ``uses:`` to get M9.N Batch B path-mode resolution
-    # to fire.  Widening the fold to include ``pkg.runtimeDeps``
-    # collapses the twin declaration.  Backward-compatible: existing
-    # from-source recipes use ``runtimeDeps: discard`` (empty seq)
-    # so the union is byte-identical to pre-M9.R.53 for them.
-    ", toolUses: " &
-      packageUseSeqLiteral(pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps) &
+    # M9.R.5a and M9.R.53 widened this slot to the union of ``pkg.toolUses``,
+    # ``pkg.nativeBuildDeps`` and ``pkg.runtimeDeps`` so the convention
+    # layer's tool-PATH builder would see every declared tool. The need was
+    # real; the place was wrong. Merging at SERIALIZATION made a runtime
+    # ``PackageDef.toolUses`` hold something different from the macro-time
+    # one of the same name, and §4.6 measured the cost: "the platform
+    # distinction the recipe expressed is **erased before the solver ever
+    # sees it**."
+    #
+    # The union now has a name — ``PackageDef.allToolUses`` — and every site
+    # that wanted it asks for it, in the same order, so nothing downstream
+    # sees a different sequence. ``ProjectInterface.toolUses`` in particular
+    # is byte-identical: ``repro_interface_artifacts`` takes the union when
+    # it builds the interface, which is where the ~14 tool-PATH readers get
+    # theirs.
+    ", toolUses: " & packageUseSeqLiteral(pkg.toolUses) &
     # DSL-port M9.R.1: emit the two new package-level dep slots.
     # Empty seqs serialize as ``@[]`` so legacy recipes that don't
     # declare either block round-trip byte-identically to their
@@ -2038,6 +2397,7 @@ proc packageLiteral(pkg: PackageDef): string =
       result.add(", ")
     result.add("ExecutableDef(exportName: " & escForCode(exe.exportName) &
       ", binaryName: " & escForCode(exe.binaryName) &
+      ", lockFile: " & escForCode(exe.lockFile) &
       ", hasImplicitTargetNameHook: " & $exe.hasImplicitTargetNameHook &
       ", implicitTargetNameHookCallType: " &
         escForCode(exe.implicitTargetNameHookCallType) &
@@ -2113,6 +2473,7 @@ proc packageLiteral(pkg: PackageDef): string =
       if lib.exportedPath.len == 0: "\"\"" else: lib.exportedPath
     result.add("LibraryDef(name: " & escForCode(lib.name) &
       ", kind: " & $lib.kind &
+      ", lockFile: " & escForCode(lib.lockFile) &
       ", exportedPath: " & exportedPathCode &
       ", sourceFile: " & escForCode(lib.sourceFile) &
       ", sourceLine: " & $lib.sourceLine & ")")
@@ -3520,28 +3881,21 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
           "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &
           "stdout.write(emitResourceContractAccessors(c))\n"
         writeFile(genPath, genSrc)
-        # ``staticExec`` executes a program directly on Windows, so shell
-        # composition must be passed to an explicit platform shell. The CWD is
-        # significant because ``config.nims`` contains sibling paths relative
-        # to the repository root.
+        # The CWD is significant because ``config.nims`` contains sibling paths
+        # relative to the repository root, so the generator compile has to be
+        # composed rather than handed to ``staticExec`` bare.
+        #
+        # ``compileTimeShellCommand`` owns HOW that composition is spelled, and
+        # it matters: this ``staticExec`` runs inside a Nim compile ACTION whose
+        # ``PATH`` is exactly ``<nim>/bin:<gcc-wrapper>/bin``, and neither
+        # directory holds a shell. The composition names no executable that has
+        # to be searched for. See that module's header.
         let nimCmd =
           quoteShell(compilerExe) &
           " c -r --hints:off --warnings:off " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
-        let genCmd =
-          if repoRoot.len == 0:
-            nimCmd
-          else:
-            let cdAndCompile =
-              when defined(windows):
-                "cd /d " & quoteShell(repoRoot) & " && " & nimCmd
-              else:
-                "cd " & quoteShell(repoRoot) & " && exec " & nimCmd
-            when defined(windows):
-              "cmd.exe /d /c " & quoteShell(cdAndCompile)
-            else:
-              "sh -c " & quoteShell(cdAndCompile)
+        let genCmd = compileTimeShellCommand(repoRoot, nimCmd)
         let genOut = staticExec(genCmd)
         # Split the framed output: first ``IFP:<hex>`` line, then the accessor
         # source. A generator that failed / was killed returns empty/partial
@@ -3683,6 +4037,8 @@ proc dependencyPolicyLiteral(node: NimNode;
       automaticMonitorPolicy()
   of "makedepfile":
     makeDepfilePolicy()
+  of "iomonreport", "iomon":
+    iomonReportPolicy("")
   else:
     fallback
 
@@ -3703,6 +4059,18 @@ proc parseInterfaceDependencyPolicy(node: NimNode;
       for path in stringSeqLiteral(depfilesValue):
         if path.len > 0 and path notin result.depfiles:
           result.depfiles.add(path)
+    let captureNonDeterminismValue =
+      namedValue(node[i], "captureNonDeterminism")
+    if not captureNonDeterminismValue.isNil:
+      result.captureNonDeterminism =
+        boolLiteral(captureNonDeterminismValue, result.captureNonDeterminism)
+    let captureIpcValue = namedValue(node[i], "captureIpc")
+    if not captureIpcValue.isNil:
+      result.captureIpc = boolLiteral(captureIpcValue, result.captureIpc)
+    let suppressSeedValue = namedValue(node[i], "suppressMonitorShimSeed")
+    if not suppressSeedValue.isNil:
+      result.suppressMonitorShimSeed =
+        boolLiteral(suppressSeedValue, result.suppressMonitorShimSeed)
 
 proc collectParamGroup(node: NimNode): tuple[name: string,
                                             statements: seq[NimNode]] =

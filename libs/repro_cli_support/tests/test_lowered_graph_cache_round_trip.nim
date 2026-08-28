@@ -32,7 +32,8 @@ suite "lowered graph cache action round trip":
       outputs: @["mirror.stamp"],
       argv: @["sh", "-c", "true"],
       cwd: "/recipe/zlib",
-      env: @["A=B"],
+      env: @["A=B", "PATH=/tool/bin"],
+      envPassthrough: @["PATH"],
       pool: "compile",
       poolUnits: 2,
       cpuMilli: 1500,
@@ -42,7 +43,9 @@ suite "lowered graph cache action round trip":
       weakFingerprint: testFingerprint(),
       actionCachePolicy: ffpHybrid,
       dependencyPolicy: DependencyGatheringPolicy(
-        kind: dgAutomaticMonitor, completeness: decComplete),
+        kind: dgAutomaticMonitor, completeness: decComplete,
+        captureNonDeterminism: true, captureIpc: true,
+        suppressMonitorShimSeed: true),
       targetNames: @["zlib"],
       typedOutputs: @[EngineTypedOutput(
         fieldName: "library", types: @["Library"], path: "usr/lib")],
@@ -83,6 +86,37 @@ suite "lowered graph cache action round trip":
     check roundTrip.nonDeterminismJustification == "temp names only"
     check roundTrip.requiresElevation
 
+    # The declared/passthrough CLASSIFICATION must survive the cache, and
+    # this is not a formality. Before it was serialised, a warm build
+    # decoded every action with an empty passthrough set: the stage-2
+    # census reported 1391 actions naming a passthrough variable cold and
+    # 0 warm, and `launchChildEnv`'s passthrough resolution was dead on
+    # any warm build. The weak fingerprint is stored explicitly so keys
+    # did not move, which is exactly why nothing noticed.
+    check roundTrip.env == action.env
+    check roundTrip.envPassthrough == action.envPassthrough
+    check roundTrip.envPassthrough == @["PATH"]
+    # And the classification must survive as a DISTINCTION, not just as
+    # two non-empty seqs: `PATH` is declared AND passthrough here, `A` is
+    # declared only.
+    check "A=B" in roundTrip.env
+    check "A" notin roundTrip.envPassthrough
+
+    # Feature 1: the event-interest opt-ins on the dependency-gathering
+    # policy must survive the lowered-graph-cache round trip. Before they
+    # were serialised, a warm build decoded every action with both flags
+    # false, so an edge that opted into non-determinism / IPC capture lost
+    # that interest on any cache hit.
+    check roundTrip.dependencyPolicy.captureNonDeterminism
+    check roundTrip.dependencyPolicy.captureIpc
+
+    # Same argument for the shim-seed opt-out, with a sharper consequence: an
+    # edge that must not receive `REPRO_MONITOR_SHIM_LIB` is one that performs
+    # library interposition itself, so a warm build that decoded the flag as
+    # false would hand it a second interposer and livelock — the failure this
+    # flag exists to prevent, reappearing only on cache hits.
+    check roundTrip.dependencyPolicy.suppressMonitorShimSeed
+
   test "an UNBLESSED action round-trips unblessed":
     ## The distinguishing direction for M6. The case above round-trips a
     ## blessing, and a decoder that answered "blessed" unconditionally would
@@ -109,9 +143,16 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 6'u8
+    check encoded[versionOffset] == 9'u8
     check encoded[versionOffset + 1] == 0'u8
-    encoded[versionOffset] = 5'u8
+    # An older version could not carry the newer per-action fields (v5:
+    # `envPassthrough`; v6: the dependency-policy event-interest opt-ins;
+    # v8: the dependency-policy shim-seed opt-out; v9: the tool's entropy
+    # blessing). Decoding such a record under the current layout would
+    # silently return defaults for every action rather than failing, so the
+    # rejection below is what makes a field's absence impossible instead of
+    # invisible.
+    encoded[versionOffset] = 8'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)

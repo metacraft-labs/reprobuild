@@ -372,6 +372,14 @@ while read -r name path extra_flags; do
   )
 done < apps/entrypoints.txt
 
+# Keep the standalone bootstrap byte-for-byte aligned with the graph's
+# ``reprobuild.apps.reprobuild-nix-daemon`` edge. The daemon is a shipped
+# executable support artifact rather than a Nim entrypoint, so it is not
+# listed in apps/entrypoints.txt and must be staged explicitly.
+cp -f tools/reprobuild-nix-daemon/reprobuild-nix-daemon \
+  build/bin/reprobuild-nix-daemon
+chmod +x build/bin/reprobuild-nix-daemon
+
 # Build the shared DSL runtime DLL — the Tier 1 artifact described in
 # reprobuild-specs/Provider-Compile-Tiering.md. Per-project provider
 # compiles eventually link against this library instead of statically

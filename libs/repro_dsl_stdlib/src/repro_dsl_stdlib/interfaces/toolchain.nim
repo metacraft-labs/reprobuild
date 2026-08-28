@@ -60,6 +60,23 @@ type
     name*: string
       ## Adapter identity, e.g. ``"gcc-13"``, ``"clang-17"``,
       ## ``"cross-aarch64-linux-gnu"``.
+    compilerFamily*: string
+      ## Named-Lock-Files NLF-M7 (§4.4). The compiler FAMILY this adapter
+      ## drives — ``"gcc"``, ``"clang"``, ``"msvc"`` — as distinct from its
+      ## ``name``, which is an adapter identity and is not parseable.
+      ##
+      ## It exists so that the mid-level operation dispatcher
+      ## (``operations/toolchain.currentCompiler``) can read the family OFF
+      ## THE ACTIVE BUILD CONTEXT instead of making its own second read of
+      ## the solved variant table. §4.4 names those two parallel reads a
+      ## prerequisite to remove before a lock-file slot is added, "or the
+      ## slot is honoured by some typed-tool calls and silently ignored by
+      ## others — precisely the §4.9 failure shape, and worse because it
+      ## would be intermittent."
+      ##
+      ## Empty is legal and means "this adapter does not claim a family";
+      ## the dispatcher then falls back to the single shared resolver. That
+      ## keeps the field additive for out-of-tree adapters.
     cCompilerPath*: string
       ## Resolved C compiler binary path. Empty when the adapter
       ## hasn't resolved provisioning yet (defaults answer the binary
@@ -99,7 +116,8 @@ proc newToolchain*(
                   flags: seq[string]): BuildAction;
     link: proc(objects: seq[string]; output: string;
                flags: seq[string]): BuildAction;
-    archiveExecutable: proc(binary: string; archive: string): BuildAction
+    archiveExecutable: proc(binary: string; archive: string): BuildAction;
+    compilerFamily = ""
     ): Toolchain =
   ## Builder for a fully populated ``Toolchain``. Adapter packages
   ## invoke this rather than constructing the object literally so the
@@ -107,6 +125,7 @@ proc newToolchain*(
   ## constructor sites.
   Toolchain(
     name: name,
+    compilerFamily: compilerFamily,
     cCompilerPath: cCompilerPath,
     cxxCompilerPath: cxxCompilerPath,
     linkerPath: linkerPath,

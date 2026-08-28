@@ -400,6 +400,13 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # from this list is not silently ignored — it is a compile
                  # error at the call site — so the failure is at least loud.
                  "runtimelibrary",
+                 # PMC-1 (Platform-And-Microarchitecture-Constraints): the
+                 # package-level ``platforms:`` availability declaration.
+                 # Must be listed here or the partition treats it as ordinary
+                 # user code and emits `platforms: [windows]` verbatim at
+                 # module top level, where `windows` is an undeclared
+                 # identifier.
+                 "platforms",
                  "devenv", "uses", "usesimportpath", "defaulttoolprovisioning",
                  "toolprovisioning", "provisioning", "versions", "config",
                  "depends_on", "dependson",

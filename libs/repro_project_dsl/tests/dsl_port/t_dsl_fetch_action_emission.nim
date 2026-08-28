@@ -102,6 +102,14 @@ suite "DSL-port M9.K — fetch action emission from registry":
     check argvJoined.contains(".tar.part")
     check argvJoined.contains("mv -f")
     check argvJoined.contains("rm -f")
+    check action.toolIdentityRefs ==
+      @["sh", "rm", "mkdir", "curl", "mv", "sha256sum", "tar", "gzip"]
+    when defined(windows):
+      check argvJoined.count("tar --force-local -xf") == 2
+      check argvJoined.contains("if ! tar --force-local -xf")
+    else:
+      check argvJoined.count("tar -xf") == 1
+      check not argvJoined.contains("--force-local")
 
   test "registered data file lowers to a copy action":
     let spec = registeredFetchSpec("dataFileActionPkg")
@@ -123,3 +131,5 @@ suite "DSL-port M9.K — fetch action emission from registry":
     check argvJoined.contains(CurlFetchRetryArgs)
     check argvJoined.contains(".tar.part")
     check not argvJoined.contains("tar -xf")
+    check action.toolIdentityRefs ==
+      @["sh", "rm", "mkdir", "curl", "mv", "sha256sum", "cp"]

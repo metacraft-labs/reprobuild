@@ -28,6 +28,10 @@
 ## snapshot includes ``/proc/partitions``, ``ls /dev/<diskBase>*``,
 ## ``ls /sys/class/block``, and an ``udevadm settle --timeout=10`` exit
 ## code.
+##
+## Partition-table tools can return before devtmpfs exposes the new partition
+## nodes. The apply path therefore waits for every expected node before
+## entering the filesystem/encryption steps.
 
 import std/[algorithm, options, os, osproc, sequtils, strutils, tables, times]
 
@@ -56,6 +60,11 @@ type
       ## + "." + partition name (e.g. "main.luks"). Tests supply
       ## "swordfish" for every key.
     result: DiskApplyResult
+
+const
+  PartitionDeviceWaitTimeoutMs* = 10_000
+  PartitionDevicePollMs* = 50
+  PartitionDeviceStablePolls* = 2
 
 # ---------------------------------------------------------------------
 # Top-level public entry point.
@@ -177,6 +186,51 @@ proc tryUmountDevice(ctx: ApplyContext; device: string) =
   ex.output = output
   ctx.recordOperation(ex)
 
+proc pathEntryExists(path: string): bool =
+  try:
+    discard getFileInfo(path, followSymlink = true)
+    true
+  except OSError:
+    false
+
+type PartitionDeviceProbe* = proc(path: string): bool {.closure.}
+
+proc waitForPartitionDevicesWithProbe*(devices: openArray[string];
+    timeoutMs: int; pollMs: int; stablePolls: int;
+    probe: PartitionDeviceProbe): seq[string] =
+  ## Return nodes that do not remain ready for consecutive observations.
+  ## Requiring stability avoids accepting stale nodes while the kernel and
+  ## udev replace devices from the previous partition-table generation.
+  let intervalMs = max(1, pollMs)
+  let checks = max(1, timeoutMs div intervalMs + 1)
+  let requiredStablePolls = max(1, stablePolls)
+  var consecutiveReady = 0
+  for attempt in 0 ..< checks:
+    result.setLen(0)
+    for device in devices:
+      if not probe(device):
+        result.add(device)
+    if result.len == 0:
+      inc consecutiveReady
+      if consecutiveReady >= requiredStablePolls:
+        return
+    else:
+      consecutiveReady = 0
+    if attempt + 1 < checks:
+      sleep(intervalMs)
+  if result.len == 0 and consecutiveReady < requiredStablePolls:
+    for device in devices:
+      result.add(device)
+
+proc waitForPartitionDevices*(devices: openArray[string];
+                              timeoutMs = PartitionDeviceWaitTimeoutMs;
+                              pollMs = PartitionDevicePollMs;
+                              stablePolls = PartitionDeviceStablePolls): seq[string] =
+  ## ``getFileInfo`` accepts block devices as well as regular files, which
+  ## keeps the readiness primitive deterministic in unit tests.
+  waitForPartitionDevicesWithProbe(devices, timeoutMs, pollMs, stablePolls,
+    pathEntryExists)
+
 proc applyDiskLayout*(layout: DiskLayout;
                      passphrases: Table[string, string] =
                        initTable[string, string]()): DiskApplyResult =
@@ -248,6 +302,23 @@ proc applyDiskLayout*(layout: DiskLayout;
         ctx.recordOperation(execTool("partprobe",
           @["partprobe", d.device]))
         diagSnapshot("after-partprobe-" & diskName, d.device)
+      if findExe("udevadm").len > 0:
+        ctx.recordOperation(execTool("udevadm",
+          @["udevadm", "settle", "--timeout=10"]))
+      if not isDryRun():
+        var expectedPartitions: seq[string]
+        for partNum in 1 .. d.partitions.len:
+          expectedPartitions.add(partitionDevicePath(d.device, partNum))
+        let missing = waitForPartitionDevices(expectedPartitions)
+        if missing.len > 0:
+          let msg = "partition devices did not appear within " &
+            $PartitionDeviceWaitTimeoutMs & " ms: " & missing.join(", ")
+          var e = newException(DiskToolError, msg)
+          e.tool = "partition-ready"
+          e.argv = missing
+          e.exit = 1
+          e.output = msg
+          raise e
 
     # Step 5 + 6 + 7 + 8: walk each partition's content recursively.
     for diskName, d in ctx.layout.disks:

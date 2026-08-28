@@ -7,12 +7,16 @@
 # script is the equivalent on Windows, providing the toolchain
 # `bash scripts/build_apps.sh` and `just test` need:
 #
-#   * Nim 2.2.x + a working C compiler (gcc/clang/cl)         -- via
+#   * Nim 2.2.x + the pinned WinLibs gcc                       -- via
 #     windows/bootstrap-toolchain.ps1 (Ensure-Nim + Ensure-Gcc), which
 #     lives in THIS repo: no sibling checkout of any other repo is needed
-#     to bootstrap. `just`, `gh`, `python3`, `gpg` and `git-repo` are NOT
-#     provisioned -- none is required to build repro, and the gpg step in
-#     particular used to trigger a UAC elevation prompt.
+#     to bootstrap. Both are version+sha256 pins in
+#     windows/toolchain-versions.env, downloaded and verified rather than
+#     discovered on the host -- gcc is a toolchain dependency like any
+#     other, and `nim c` shells out to it for every module. `just`, `gh`,
+#     `python3`, `gpg` and `git-repo` are NOT provisioned -- none is
+#     required to build repro, and the gpg step in particular used to
+#     trigger a UAC elevation prompt.
 #   * bash                                                    -- resolved from
 #     git's own installation and put AHEAD of the WSL launcher that Windows
 #     puts on PATH by default. Both build entry points below are bash scripts,
@@ -29,6 +33,17 @@
 #     imports `bearssl/ec`)                                   -- via
 #     windows/ensure-nim-bearssl.ps1, the Windows counterpart of the
 #     flake's `bearssl-src` input, pinned to the same revision.
+#   * OpenSSL import libraries + runtime DLLs (`repro`,
+#     `repro-binary-cache` and `repro-harvest-apt` are `--define:ssl`
+#     entry points, and the catalog's nim typed-tool links them with
+#     `-lssl -lcrypto`)                                     -- via
+#     windows/ensure-openssl.ps1. Note this is a LINK dependency, and is
+#     unrelated to the nix-only `openssl` CLI entry in the builtin
+#     catalog. The flake devShell carries the equivalent search path in
+#     `NIX_LDFLAGS`; this script exports it as `LIBRARY_PATH`, which gcc
+#     consults for `-l` lookup, so both the shell route
+#     (`scripts/build_apps.sh`) and the graph route (`repro build .#apps`)
+#     link without either of them naming OpenSSL.
 #   * Sibling repos checked out alongside `reprobuild/`:
 #       - codetracer/                  (libs/nim-stew, libs/nim-faststreams,
 #                                       libs/nim-serialization, libs/nimcrypto
@@ -42,7 +57,11 @@
 # Knobs (unchanged from the framework these scripts came from):
 #   $env:WINDOWS_DIY_SYNC = "0"            skip all toolchain downloads
 #   $env:WINDOWS_DIY_SKIP_NIM = "1"        skip the nim step
-#   $env:WINDOWS_DIY_SKIP_GCC = "1"        skip the gcc step
+#   $env:WINDOWS_DIY_SKIP_GCC = "1"        skip the gcc step. `nim c` then
+#       uses whatever gcc the host has on PATH, and fails with
+#       `Requested command not found: 'gcc.exe ...'` if there is none. Same
+#       caveat as the clingo/bearssl skips below: it is for hosts that
+#       provision a C toolchain independently, not a way to opt out of one.
 #   $env:WINDOWS_DIY_INSTALL_ROOT = <dir>  where toolchains land
 #   (the JUST / GH / PYTHON / REPO / GPG skips are gone with the steps
 #   themselves -- see the nim/gcc note above)
@@ -57,6 +76,13 @@
 #       build then fails with `cannot open file: bearssl/ec` unless
 #       $BEARSSL_SRC or a `../nim-bearssl` sibling supplies it. Same
 #       caveat as clingo: for hosts that provision it independently.
+#   $env:WINDOWS_DIY_SKIP_OPENSSL = "1" skip the OpenSSL step. The build
+#       then fails to link `repro`, `repro-binary-cache` and
+#       `repro-harvest-apt` with `ld.exe: cannot find -lssl` unless
+#       $LIBRARY_PATH already names a directory holding
+#       `libssl.dll.a`/`libcrypto.dll.a` built against a UCRT mingw
+#       toolchain. Same caveat as clingo: for hosts that provision it
+#       independently, not a way to opt out of the dependency.
 #   $env:STACKABLE_HOOKS_SRC = <path>  override `../nim-stackable-hooks/src`.
 #   $env:RUNQUOTA_SRC     = <path>  override `../runquota`.
 #   $env:NIMCRYPTO_SRC    = <path>  override `../codetracer/libs/nimcrypto`.
@@ -126,6 +152,49 @@ if (Test-BootstrapStepEnabled "NIM_BEARSSL") {
     # candidates, so exporting it makes the pinned checkout win over any stale
     # hand-cloned `../nim-bearssl` a developer may still have lying around.
     $env:BEARSSL_SRC = $bearsslDir
+}
+
+# --- 1d. OpenSSL link artefacts (reprobuild-specific) ------------------------
+# `repro`, `repro-binary-cache` and `repro-harvest-apt` are compiled with
+# `--define:ssl`, and for any such entry point the builtin catalog's nim
+# typed-tool appends the portable linker names `-lssl -lcrypto`
+# (`packages/nim.nim`, `opensslPassLForSsl`). It deliberately bakes NO search
+# path into them -- `t_nim_ssl_dependency.nim` asserts that an ambient path
+# never reaches `passL` -- so supplying the search directory is this script's
+# job. On Linux/macOS the flake devShell does it via `NIX_LDFLAGS`; without a
+# Windows counterpart, `just test` built 15 of its 18 apps and failed the
+# other three with `ld.exe: cannot find -lssl`.
+#
+# Fatal like the two steps above, and for the same reason: a build that
+# proceeds without it does not degrade, it fails later in the C link stage
+# with a message that reads as a broken checkout.
+$openSslDir = ""
+if (Test-BootstrapStepEnabled "OPENSSL") {
+    . (Join-Path $scriptDir "windows\ensure-openssl.ps1")
+    $reproToolchain = Read-KeyValueFile -Path (Join-Path $scriptDir "windows\toolchain-versions.env")
+    $openSslDir = Ensure-OpenSsl -Root $installRoot -Arch (Get-WindowsArch) -Toolchain $reproToolchain
+
+    # LIBRARY_PATH rather than a --passL, because it has to reach BOTH build
+    # routes: `bash scripts/build_apps.sh` (which sets its own nim flags) and
+    # `repro build .#apps` (whose actions the build engine spawns, and which
+    # therefore never observe build_apps.sh's variables). gcc consults
+    # LIBRARY_PATH natively for `-l` lookup, so neither route needs to know
+    # this step exists. Prepend rather than overwrite: a developer may already
+    # be carrying a LIBRARY_PATH for another toolchain.
+    $openSslLibDir = Join-Path $openSslDir "lib"
+    if ($env:LIBRARY_PATH) {
+        $env:LIBRARY_PATH = $openSslLibDir + [IO.Path]::PathSeparator + $env:LIBRARY_PATH
+    } else {
+        $env:LIBRARY_PATH = $openSslLibDir
+    }
+    # The import libraries above only get the link to succeed. `libssl-3-x64.dll`
+    # and `libcrypto-3-x64.dll` must also be findable at RUN time, or every ssl
+    # binary starts and immediately dies in the loader -- including the ones the
+    # test suite builds and executes.
+    Add-PathEntry -Dir (Join-Path $openSslDir "bin")
+    # Named explicitly as well, so a consumer that needs the directory (release
+    # staging, a diagnostic) does not have to parse LIBRARY_PATH back apart.
+    $env:REPRO_WINDOWS_OPENSSL_DIR = $openSslDir
 }
 
 # --- 2. Sibling repo discovery -----------------------------------------------
@@ -274,14 +343,39 @@ function Get-CommandSource {
     return $cmd.Source
 }
 
+function Get-ToolPathWithVersion {
+    # Report the version the binary ITSELF claims, not the one implied by the
+    # directory it happens to sit in.
+    #
+    # Provisioning now verifies the two against each other, so they should
+    # agree -- but this line is what would show it if they ever stopped. The
+    # failure it was added for: `GCC_VERSION` used to name a directory that a
+    # `winget install` (which takes no version argument) had filled with
+    # whatever release was current, producing
+    # `D:\metacraft-dev-deps\gcc\15.2.0\bin\gcc.exe` over a compiler reporting
+    # 16.1.0. Every log line and every status summary repeated 15.2.0, which is
+    # the sort of thing discovered months later while bisecting a miscompile.
+    param([string]$Name)
+    $source = Get-CommandSource $Name
+    if ($source -eq "(not on PATH)") { return $source }
+    try {
+        $line = & $source --version 2>&1 | Select-Object -First 1
+        if ("$line" -match '([0-9]+\.[0-9]+(\.[0-9]+)?)') {
+            return "$source  (reports $($Matches[1]))"
+        }
+    } catch {}
+    return $source
+}
+
 Write-Host ""
 Write-Host "reprobuild dev environment ready."
 Write-Host "  nim          = $(Get-CommandSource 'nim')"
-Write-Host "  gcc          = $(Get-CommandSource 'gcc')"
+Write-Host "  gcc          = $(Get-ToolPathWithVersion 'gcc')"
 Write-Host "  just         = $(Get-CommandSource 'just')"
 Write-Host "  bash         = $(if ($bashPath) { $bashPath } else { '(missing -- the build scripts cannot run)' })"
 Write-Host "  clingo       = $(if ($clingoDir) { Join-Path $clingoDir 'clingo.dll' } else { '(skipped -- repro.exe will not start)' })"
 Write-Host "  nim-bearssl  = $(if ($bearsslDir) { $bearsslDir } else { '(skipped -- repro will not build)' })"
+Write-Host "  openssl      = $(if ($openSslDir) { Join-Path $openSslDir 'lib' } else { '(skipped -- the --define:ssl apps will not link)' })"
 Write-Host "  codetracer   = $(if ($codetracerDir) { $codetracerDir } else { '(missing -- see warning)' })"
 Write-Host "  runquota     = $(if ($runquotaDir) { $runquotaDir } else { '(missing -- see warning)' })"
 Write-Host "  stackable-hooks = $(if ($stackableHooksDir) { $stackableHooksDir } else { '(missing -- see warning)' })"

@@ -14,6 +14,72 @@ Tool implementation files are not project inputs: the engine removes monitored
 paths below resolved tool roots because those paths are already represented by
 the tool identity.
 
+### Who runs the monitor
+
+By default the engine launches a monitored action through a separate
+`repro internal io monitor` process, which hosts the monitor and spawns the
+command. The engine can instead host the monitor itself, with the command as
+its own direct child and no process in between; this is off by default and is
+requested per build.
+
+Hosting in-process removes one process spawn per monitored action, but it moves
+the monitor's end-of-action work onto the scheduler's single loop, where it is
+paid one action at a time instead of concurrently. Measured on Linux, that
+trade is a win only when actions are launched one at a time: at the default
+parallelism it costs roughly 2x for very short actions, about 20% for actions
+doing ~100 ms of work, and nothing measurable for actions doing ~500 ms or
+more. Prefer the default unless you have measured your own workload.
+
+One operational difference is worth knowing before enabling it. Through the
+default path, an action's captured `stdout` and `stderr` are bounded in memory
+while it runs — output past the limit is read and discarded, so a runaway
+action costs no disk. The in-process host redirects the child's output straight
+into `<cacheRoot>/actions/` instead, and a redirected file has no such bound: it
+is truncated to the limit only once the action finishes. An action that writes
+gigabytes therefore writes gigabytes into the cache root before anything
+truncates it. If `cacheRoot` is on a small filesystem, that peak is the thing to
+watch.
+
+Not every launch path can host. The engine can only be the monitor's host when
+the engine is the process that spawns the command, and two of the launch paths
+are not: the RunQuota helper path starts the action from a separate helper
+process, and the inline RunQuota path spawns it inside RunQuota as part of
+binding it to a granted lease. Asking for hosting normally leaves those paths on
+the default `repro internal io monitor` path, which monitors them exactly the
+same way. Asking for it in the stricter "hosting is required" form instead
+**fails** such an action with a diagnostic naming the launch path. That is
+deliberate: a hosted command carries no monitor wrapper, so a hosted plan
+arriving at a launch site that starts no host would run with nothing watching
+it, publish a cache entry against an empty dependency set, and report no error.
+The engine refuses that state rather than producing it.
+
+### How the dependency record file is published
+
+Each monitored action leaves a record of what it touched at
+`<cacheRoot>/monitor-depfiles/<action>.iomon`. It is a debugging surface and a CI
+artefact. Whether the build reads it back depends on who ran the monitor: with
+the separate monitor process — the default — the file is how an action's record
+reaches the build, so it is read once per monitored action; when the build hosts
+the monitor itself it already holds the record and never opens the file.
+
+The file appears **atomically**: it is written to a scratch sibling in the same
+directory and renamed into place, so a tool watching that directory sees either
+no file or a complete one, never a partial write. Nothing else creates or
+modifies a `.iomon`.
+
+When the engine hosts the monitor itself, that rename happens **behind the
+build** — the action's result is reported and the next actions start before the
+file lands, and the build waits for any outstanding ones before it finishes. A
+publication that fails (a full disk, a read-only cache root) does not fail the
+action, whose result never depended on the file; it means the action's cache
+entry is not published, so the next build re-runs that action instead of
+reusing it. You will see this as an action that keeps re-executing, with the
+reason recorded on its result.
+
+Files named `.<action>.iomon.flush-*` in that directory are scratch. A build
+removes its own; leftovers mean a build was killed mid-flight and they can be
+deleted.
+
 Package definitions may declare additional monitored input prefixes that should
 not participate in the action cache key:
 

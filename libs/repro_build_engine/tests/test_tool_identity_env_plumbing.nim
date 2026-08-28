@@ -29,6 +29,7 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/writer
+from io_mon import findShimLibrary, ShimLibOverrideEnv
 from repro_test_support import testCaseScratchSlug
 
 # One scratch root PER CASE, not per binary.
@@ -183,12 +184,12 @@ proc passthroughMonitorCli(cacheRoot: string): string =
   ## "injection failure MUST fail the monitored action or make it
   ## non-cacheable"). This test is about env plumbing, not monitor
   ## evidence, so it wires a passthrough fake-monitor: parse ``--depfile``,
-  ## copy a pre-built empty-but-valid RMDF there (the engine's evidence
+  ## copy a pre-built empty-but-valid iomon there (the engine's evidence
   ## read then succeeds with a complete, zero-record dependency set), then
   ## ``exec`` the real action argv unchanged (preserving the inherited
-  ## environment the test asserts on). The RMDF template is produced via
+  ## environment the test asserts on). The iomon template is produced via
   ## io-mon's own ``encodeCanonical(@[])`` so the wrapper stays decoupled
-  ## from the RMDF wire format.
+  ## from the iomon wire format.
   let dir = cacheRoot / "monitor-cli"
   createDir(dir)
   let rmdfTemplate = dir / "empty.rmdf"
@@ -197,7 +198,7 @@ proc passthroughMonitorCli(cacheRoot: string): string =
     result = dir / "passthrough-monitor.cmd"
     # ``%1 %2`` are ``--depfile`` and the depfile path; ``%3`` is ``--``;
     # ``%4`` onward is the real argv. Create the depfile's directory, copy
-    # the RMDF template there, then invoke the real argv.
+    # the iomon template there, then invoke the real argv.
     writeFile(result,
       "@echo off\r\n" &
       "for %%I in (\"%~2\") do if not exist \"%%~dpI\" mkdir \"%%~dpI\"\r\n" &
@@ -241,7 +242,9 @@ proc runnerCfg(cacheRoot: string;
   result.monitorCliPath = passthroughMonitorCli(cacheRoot)
   result.toolIdentityResolver = resolver
 
-proc makeDepfilePolicy(path: string): DependencyGatheringPolicy =
+proc makeDepfilePolicy(path: string;
+                       suppressMonitorShimSeed = false):
+    DependencyGatheringPolicy =
   DependencyGatheringPolicy(
     kind: dgRecognizedFormat,
     completeness: decComplete,
@@ -255,7 +258,16 @@ proc makeDepfilePolicy(path: string): DependencyGatheringPolicy =
             required: false)
         ],
         completeness: decComplete)
-    ])
+    ],
+    suppressMonitorShimSeed: suppressMonitorShimSeed)
+
+proc shimSeedProbeArgv(): seq[string] =
+  ## Print the child's ``REPRO_MONITOR_SHIM_LIB`` so the test can read it back
+  ## out of the bypass path's captured stdout.
+  when defined(windows):
+    @["cmd", "/D", "/C", "echo", "[%REPRO_MONITOR_SHIM_LIB%]"]
+  else:
+    @["sh", "-c", "printf '[%s]' \"$REPRO_MONITOR_SHIM_LIB\""]
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -491,6 +503,71 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     # ``nonexistent`` ref contributed nothing but did NOT block the
     # other refs from contributing.
     check captured.startsWith(mesonBin)
+
+  test "the shim-library env seed is withheld only from edges that opt out":
+    ## The second half of the self-interposing-edge fix, measured at the child
+    ## process rather than argued from the source.
+    ##
+    ## Declining to WRAP an action in the io-monitor does not keep it
+    ## shim-free: io-mon's preload runtime propagates whatever
+    ## ``REPRO_MONITOR_SHIM_LIB`` names into the processes the action starts,
+    ## so an action that builds its own interposer on top of that runtime
+    ## re-injects our shim alongside its own and the two livelock on the same
+    ## libc entry points. ``suppressMonitorShimSeed`` is what withholds the
+    ## variable.
+    ##
+    ## Both arms are ``dgRecognizedFormat`` — an ordinary ``makeDepfilePolicy``
+    ## edge — and differ ONLY in that flag, which is the point: the opt-out is
+    ## per-edge, so the whole existing depfile population keeps the seed it has
+    ## today. The default arm asserting the seed PRESENT is what makes the
+    ## suppressed arm's absence meaningful rather than a vacuous pass on a
+    ## machine where no shim can be found at all.
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-shim-seed"
+    createDir(cacheRoot)
+    let depfilePath = TmpDir / "shim-seed.d"
+
+    # The child INHERITS this process's environment and the engine's seed is
+    # layered over it, so a variable already present in the parent would show
+    # up in both arms and prove nothing. Under the suite the test binary is
+    # itself a monitored action, which is exactly when the parent has it.
+    let savedShimEnv = getEnv(ShimLibOverrideEnv)
+    delEnv(ShimLibOverrideEnv)
+    defer:
+      if savedShimEnv.len > 0:
+        putEnv(ShimLibOverrideEnv, savedShimEnv)
+
+    # With the override unset this is pure discovery, and it is the same call
+    # the engine makes at launch time.
+    let discovered = findShimLibrary()
+    check discovered.len > 0
+
+    let seeded = action("shim-seed-default",
+      shimSeedProbeArgv(),
+      cwd = getCurrentDir(),
+      cacheable = false,
+      dependencyPolicy = makeDepfilePolicy(depfilePath),
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    let seededRes = runBuild(graph(@[seeded], newSeq[BuildPool]()),
+      runnerCfg(cacheRoot, nil))
+    check seededRes.results.len == 1
+    check seededRes.results[0].status == asSucceeded
+    let seededOut = readBypassStdout(cacheRoot, "shim-seed-default")
+    check discovered in seededOut
+
+    let suppressed = action("shim-seed-suppressed",
+      shimSeedProbeArgv(),
+      cwd = getCurrentDir(),
+      cacheable = false,
+      dependencyPolicy = makeDepfilePolicy(depfilePath,
+        suppressMonitorShimSeed = true),
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    let suppressedRes = runBuild(graph(@[suppressed], newSeq[BuildPool]()),
+      runnerCfg(cacheRoot, nil))
+    check suppressedRes.results.len == 1
+    check suppressedRes.results[0].status == asSucceeded
+    let suppressedOut = readBypassStdout(cacheRoot, "shim-seed-suppressed")
+    check discovered notin suppressedOut
 
   test "non-cacheable recognized-report actions execute even when outputs exist":
     resetTmp()

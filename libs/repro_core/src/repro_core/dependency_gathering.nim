@@ -7,8 +7,11 @@ type
     dgPostBuildConverter
     dgRecognizedFormatValidatedByMonitor
     dgPostBuildConverterValidatedByMonitor
+
     # NOTE: there is intentionally NO "declared-only" / "no runtime
-    # dependencies" gathering kind. A mode that tracked only the
+    # dependencies" gathering kind, in any form — narrow ones included.
+    #
+    # A mode that tracked only the
     # statically declared inputs and marked the action complete/cacheable
     # — silently letting depended-on files change without a rebuild — was
     # re-introduced more than once by agents without approval (first as
@@ -23,6 +26,27 @@ type
     # fail the monitored action or make it non-cacheable"), never marked
     # complete-on-declared-inputs. See
     # reprobuild-specs/Reprobuild-Development.milestones.org M17.
+    #
+    # A FOURTH form, ``dgTrustedDeclaredInputs``, was added and has now been
+    # removed too. It was pitched as a narrow exception — the author writes
+    # the input list and a justification inline, the engine trusts both — but
+    # it was the same shape as the other three: ``decComplete``, cacheable,
+    # outside ``MonitorPolicyKinds``, and nothing anywhere able to recompute
+    # or re-check the list. The specs ban the idea by name (Domain-Types.md
+    # "there is intentionally NO declared-only / no-runtime-dependencies",
+    # "There is deliberately no 'declared inputs only' mode", "there is
+    # intentionally NO ``dgpDeclaredOnly``") and were never amended.
+    #
+    # THE SANCTIONED ROUTE for an action that genuinely cannot be monitored
+    # (today: one that performs library interposition itself, so the engine's
+    # interposer and the action's re-enter each other on the same libc entry
+    # points) is a DEPFILE — ``dgRecognizedFormat`` via ``makeDepfilePolicy``.
+    # It is likewise unmonitored, but the input set is DERIVED rather than
+    # ASSERTED: it lives in a file that some edge produces, that can be
+    # regenerated, and that the engine reads back as real evidence, so the
+    # listed paths do invalidate the action cache when their content changes.
+    # The DSL helper ``unmonitorableActionDepfile`` generates such a file as a
+    # graph output; see its docstring in repro_project_dsl/runtime_core.nim.
 
   DependencyEvidenceCompleteness* = enum
     decComplete
@@ -101,6 +125,45 @@ type
     recognizedReports*: seq[RecognizedDependencyReportSpec]
     postBuildConverters*: seq[PostBuildDependencyConverterSpec]
     ignoredInputPrefixes*: seq[string]
+    # Event-interest opt-ins for automatic monitoring. A build edge's
+    # reproducibility hinges on the files/binaries/libraries it reads, NOT on the
+    # clock, environment, sysctls, entropy, or IPC peers a tool happens to touch,
+    # so the engine monitors an action with io-mon's ecFileDeps+ecProcessTree+
+    # ecLibraryLoads categories only (see `monitorHostRequest`). io-mon then skips
+    # installing/recording the non-determinism and IPC observations, which it
+    # would otherwise spend resources on. An edge that genuinely depends on such
+    # an input sets the matching flag to add the category back. Kept as bools (not
+    # a `set[EventCategory]`) so repro_core carries no io_mon dependency; the
+    # engine translates them. Default false = off.
+    captureNonDeterminism*: bool  ## add io-mon's ecNonDeterminism
+    captureIpc*: bool             ## add io-mon's ecIpc
+    suppressMonitorShimSeed*: bool
+      ## Withhold the launch-time ``REPRO_MONITOR_SHIM_LIB`` environment seed
+      ## from this action (see ``launchChildEnv`` in the build engine).
+      ##
+      ## Default false, so every edge that exists today — monitored or not —
+      ## keeps the seed it gets today. Only an edge that asks for it loses the
+      ## variable.
+      ##
+      ## An edge asks for it when the action performs library interposition
+      ## ITSELF. Declining to WRAP such an action is not enough to keep it
+      ## shim-free: io-mon's preload runtime propagates whatever this variable
+      ## names into the processes it starts, so an action that builds its own
+      ## interposer on top of that runtime re-injects our shim into its own
+      ## children and the two interposers re-enter each other on the same libc
+      ## entry points. "Do not monitor this action" therefore has to also mean
+      ## "do not hand this action the means to monitor itself".
+      ##
+      ## Requested from a recipe with
+      ## ``makeDepfilePolicy(..., suppressMonitorShimSeed = true)``.
+
+const IomonFormatName* = "iomon"
+  ## Recognized-report format name for an edge whose command PRODUCES its own
+  ## io-mon ``.iomon`` dependency capture, which the engine then consumes as
+  ## the edge's evidence (read via ``foldMonitorDepFileEvidence`` in the build
+  ## engine) instead of monitoring the orchestrator process itself. Kept as a
+  ## plain string constant so ``repro_core`` stays free of any io_mon
+  ## dependency; the build engine routes on ``DependencyFormatName(this)``.
 
 proc `$`*(name: DependencyFormatName): string =
   string(name)

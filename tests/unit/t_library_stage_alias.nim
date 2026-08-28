@@ -80,6 +80,8 @@ suite "library stage aliases":
 
       check stage.outputs == @[expectedOutput]
       check stage.deps == @["autotools-la-cleanup-libraryAliasPkg-build"]
+      check stage.toolIdentityRefs == @[
+        "sh", "mkdir", "cp", "ls", "sort", "head"]
       check mirror.id.len > 0
       when defined(windows):
         check "build/out/usr/bin/upstream-runtime.dll" in script
@@ -178,6 +180,7 @@ suite "executable stage aliases":
           let executable = build.executableAlias(
             "toolAlias", "upstream-tool")
           check executable.cli.executableName == "toolAlias"
+          discard build.executable("regularTool")
         finally:
           clearCurrentOwningPackageOverride(),
         includeDefault = false)
@@ -185,8 +188,17 @@ suite "executable stage aliases":
       let actions = extractActions(fragment)
       let stage = findById(actions,
         "autotools-stage-alias-executableAliasPkg-toolAlias")
+      let regularStage = findById(actions,
+        "autotools-stage-executable-executableAliasPkg-regularTool")
       let script = stage.inlineScriptOf()
       let outputDir = projectRoot / ".repro" / "output" / "toolAlias"
+
+      when defined(windows):
+        check stage.toolIdentityRefs == @["sh", "mkdir", "cp"]
+      else:
+        check stage.toolIdentityRefs == @[
+          "sh", "mkdir", "cp", "chmod", "ln"]
+      check regularStage.toolIdentityRefs == @["sh", "mkdir", "cp", "chmod"]
 
       when defined(windows):
         check stage.outputs == @[

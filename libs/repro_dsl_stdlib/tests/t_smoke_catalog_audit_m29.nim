@@ -7,11 +7,14 @@
 ##      deletes one of these the harness fails before the runtime
 ##      ``ModuleNotFoundError`` / ``cargo: command not found`` surfaces
 ##      at a downstream M9 fixture.
-##   2. Every catalog file mentions a ``nixPackage "nixpkgs#`` selector
-##      AND a ``nixpkgsRev`` pin AND a ``nixpkgsNarHash`` pin (the
-##      provisioning shape every existing entry already follows). This
-##      keeps the Nix CI gate's parser (``scripts/verify-nix-catalog-attrs.sh``)
-##      able to extract every entry's selector + rev tuple.
+##   2. Every catalog file declares SOME provisioning shape —
+##      ``nixPackage``, a harvested ``VersionedProvisioning`` catalog,
+##      or a ``tarball url`` arm. Entries that take the ``nixPackage
+##      "nixpkgs#"`` route additionally carry a ``nixpkgsRev`` +
+##      ``nixpkgsNarHash`` pin, which keeps the Nix CI gate's parser
+##      (``scripts/verify-nix-catalog-attrs.sh``) able to extract every
+##      such entry's selector + rev tuple; that gate skips the other
+##      two shapes by design.
 ##   3. Every catalog file's nixpkgsRev + NarHash matches the canonical
 ##      pin used by the rest of the toolchain — so an entry isn't
 ##      pinned to a divergent revision by accident. (This is a design
@@ -141,13 +144,27 @@ suite "M29 Part B — catalog audit":
     #     a ``"nixpkgs#..."`` selector OR a local ``expressionFile``);
     #   * ``VersionedProvisioning`` (the M63/M67 catalog shape harvested
     #     from Scoop bucket manifests; the M64+ ``cakBuiltin`` adapter
-    #     consumes it on Windows hosts).
-    # Either shape is valid provisioning; the audit just requires
+    #     consumes it on Windows hosts);
+    #   * a ``tarball url = ...`` arm (the pinned-URL + sha256 shape;
+    #     94 entries already carry one, and PMC-1's ``chocolatey.nim``
+    #     is the first to carry ONLY one, because a Windows package
+    #     manager has no nixpkgs attribute and no Scoop manifest to
+    #     harvest).
+    # Any of the three is valid provisioning; the audit just requires
     # SOMETHING is there. (M67 introduced files like ``maven.nim`` /
     # ``gradle.nim`` / ``zig.nim`` that ship ONLY the M63 catalog
     # because Maven / Gradle / Zig have no existing Nix entry to
     # co-host. ``ruby.nim`` carries both — see the hand-merge note in
     # that file.)
+    #
+    # A tarball-only entry is a shape the project already anticipates
+    # elsewhere, not a hole this audit is papering over:
+    # ``scripts/verify-nix-catalog-attrs.sh`` skips such files by name
+    # ("no nixpkgs# selector or rev (likely tarball/scoop)"), and the
+    # DSL accepts ``tarball`` as one of its five provisioning arms
+    # (``macros_a.nim``: ``["path", "nix", "tarball", "scoop",
+    # "from-source"]``). The audit simply had never met an entry whose
+    # only arm was ``tarball`` before.
     var seen = 0
     for entry in catalogFiles():
       let body = readCatalog(entry.path)
@@ -155,7 +172,8 @@ suite "M29 Part B — catalog audit":
       let hasNixPackage = "nixPackage " in body
       let hasVersionedProvisioning = "VersionedProvisioning(" in body or
         "initVersionedProvisioning(" in body
-      check hasNixPackage or hasVersionedProvisioning
+      let hasTarball = "tarball url" in body
+      check hasNixPackage or hasVersionedProvisioning or hasTarball
       inc seen
     # Sanity: the catalog can't have shrunk to nothing.
     check seen >= 60

@@ -340,7 +340,11 @@ suite "windows strategy 1: native launcher + sidecar + CAS":
   when not defined(windows):
     test "skipped (non-Windows host)":
       echo "[platform N/A] suite: windows native launcher (host is not Windows)"
-      check true
+      # The `[platform N/A]` marker above IS this case's statement: it is the
+      # repository's structured, greppable declaration that the coverage does
+      # not apply to this host. A `check true` beside it added nothing and
+      # taught the shape that an assertion which cannot fail is acceptable
+      # filler, so it is gone.
   else:
     test "launcher compiles and depends only on KERNEL32 + CRT API set":
       let tmp = createTempDir("repro-m57-launcher-build-", "")

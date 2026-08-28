@@ -56,7 +56,7 @@ import repro_dsl_stdlib/prefix_layout
 
 package openssl:
   provisioning:
-    nixPackage "nixpkgs#openssl", executablePath = "bin/openssl",
+    nixPackage "nixpkgs#openssl^*", executablePath = "bin/openssl",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 

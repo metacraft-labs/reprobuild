@@ -160,7 +160,8 @@ proc startRunQuota(repoRoot: string): tuple[process: owned(Process);
   let daemonBin = runquotaRoot / "build" / "bin" / "runquotad"
   if not fileExists(daemonBin):
     raise newException(OSError, "missing runquotad; run scripts/run-m23-benchmark.sh")
-  let socketPath = "/tmp/repro-m23-rq-" & $getCurrentProcessId() & ".sock"
+  let socketPath = runquotaEndpointPath(
+    "repro-m23-rq-" & $getCurrentProcessId())
   if pathExists(socketPath):
     removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [
@@ -316,7 +317,7 @@ proc runMonitorWorkload(repoRoot, app, workRoot: string): MonitorBenchResult =
     let outDir = workRoot / "monitor" / "out"
     let baselineOutput = outDir / "baseline.txt"
     let monitoredOutput = outDir / "monitored.txt"
-    let depfile = workRoot / "monitor" / "monitor.rdep"
+    let depfile = workRoot / "monitor" / "monitor.iomon"
     let eventStream = workRoot / "monitor" / "events.jsonl"
     createDir(outDir)
     writeFile(outDir / "seed.txt", "seed\n")
@@ -335,7 +336,7 @@ proc runMonitorWorkload(repoRoot, app, workRoot: string): MonitorBenchResult =
 
     let dep = readMonitorDepFile(depfile)
     if dep.records.len == 0:
-      raise newException(ValueError, "monitor benchmark produced no RMDF records")
+      raise newException(ValueError, "monitor benchmark produced no iomon records")
     let overheadPct =
       if baselineMs <= 0.001: 0.0 else: ((monitoredMs - baselineMs) /
           baselineMs) * 100.0
@@ -346,15 +347,15 @@ proc runMonitorWorkload(repoRoot, app, workRoot: string): MonitorBenchResult =
     result.metrics.addMetric("monitor-overhead", "io-monitor wall time",
       "ms", monitoredMs, tdLessOrEqual, 60_000.0,
       "actual repro internal io monitor with macOS shim",
-      ["io-monitor", "repro_monitor_shim", "RMDF reader"])
+      ["io-monitor", "repro_monitor_shim", "iomon reader"])
     result.metrics.addMetric("monitor-overhead", "monitor overhead",
       "percent", max(overheadPct, 0.0), tdLessOrEqual, 1_000_000.0,
       "validation threshold only; tightened after stable baseline",
-      ["io-monitor", "repro_monitor_shim", "RMDF reader"])
+      ["io-monitor", "repro_monitor_shim", "iomon reader"])
     result.metrics.addMetric("monitor-overhead", "monitor records captured",
       "count", float(dep.records.len), tdGreaterOrEqual, 1.0,
-      "RMDF records decoded from real monitor depfile",
-      ["io-monitor", "repro_monitor_shim", "RMDF reader"])
+      "iomon records decoded from real monitor depfile",
+      ["io-monitor", "repro_monitor_shim", "iomon reader"])
     result.advisory = %*{
       "suite": "monitor-overhead",
       "status": "measured",

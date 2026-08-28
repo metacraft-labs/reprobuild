@@ -49,6 +49,30 @@ package app:
     discard aggregate("app-aggregate", actions = @[])
 """
 
+const fromSourceConsumerRecipe = """
+import repro_project_dsl
+
+package app:
+  defaultToolProvisioning "from-source"
+  uses:
+    "producer"
+    "leaf"
+  build:
+    discard aggregate("app-aggregate", actions = @[])
+"""
+
+const fromSourceProducerRecipe = """
+import repro_project_dsl
+
+package producerSource:
+  buildDeps:
+    "leaf >=10.34"
+  library producer:
+    discard
+  build:
+    discard aggregate("producer-aggregate", actions = @[])
+"""
+
 # A STALE sidecar that pins a DIFFERENT version (``nim 2.2.0``).
 const staleSidecar = """
 package app
@@ -103,3 +127,42 @@ suite "MO-12: lock refresh sources solver inputs from the compiled provider":
 
       # The two locks genuinely differ: the default lock is provider-sourced.
       check lockBody != sidecarBody
+
+  test "lock refresh folds constraints from selected from-source producers":
+    if not fileExists(reproBinary):
+      skip()
+    else:
+      let scratch = getTempDir() / "mo12-source-closure-" &
+        $getCurrentProcessId()
+      let projectDir = scratch / "consumer"
+      let sourceRoot = scratch / "source-catalog"
+      let producerDir = sourceRoot / "producer"
+      removeDir(scratch)
+      createDir(projectDir)
+      createDir(producerDir)
+      defer: removeDir(scratch)
+
+      writeFile(projectDir / "repro.nim", fromSourceConsumerRecipe)
+      writeFile(producerDir / "repro.nim", fromSourceProducerRecipe)
+
+      let previousSourceRoot = getEnv("REPRO_FROM_SOURCE_ROOT")
+      putEnv("REPRO_FROM_SOURCE_ROOT", sourceRoot)
+      defer:
+        if previousSourceRoot.len > 0:
+          putEnv("REPRO_FROM_SOURCE_ROOT", previousSourceRoot)
+        else:
+          delEnv("REPRO_FROM_SOURCE_ROOT")
+
+      let refresh = run(reproBinary & " lock refresh " & q(projectDir))
+      checkpoint("from-source closure refresh exit=" & $refresh.code)
+      checkpoint(refresh.output)
+      check refresh.code == 0
+      let lockBody = readFile(projectDir / "repro.lock")
+
+      # The root declares `leaf` without a range (synthetic 1.0.0), while the
+      # selected producer requires >=10.34. Reverting the source-closure fold
+      # makes this assertion fail with the stale 1.0.0 pin ReproOS observed.
+      check "name = \"leaf\", version = \"10.34.0\"" in lockBody
+      check "name = \"leaf\", version = \"1.0.0\"" notin lockBody
+      # Lock refresh is metadata-only; it must not execute the producer graph.
+      check not dirExists(producerDir / ".repro" / "output")

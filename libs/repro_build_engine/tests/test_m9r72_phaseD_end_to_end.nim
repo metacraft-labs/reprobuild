@@ -3,13 +3,13 @@
 ##
 ## Phase C1's unit test (test_m9r72_monitor_loss_classifier.nim)
 ## exercises the classifier in isolation. This Phase D test constructs
-## a synthetic RMDF file with real io-mon-encoded records including
+## a synthetic iomon file with real io-mon-encoded records including
 ## a mrEventLoss entry, then runs it through
 ## foldMonitorDepFileEvidence to verify the returned status matches
 ## the classifier's mapping AND that path-set evidence is still
 ## folded from the trustworthy portion of the depfile.
 ##
-## The load-bearing assertion: an RMDF with kill-before-flush loss +
+## The load-bearing assertion: an iomon with kill-before-flush loss +
 ## real file-read records must produce mesKnownScopeLoss, NOT
 ## mesMonitorUnavailable, and the monitorReads MUST still contain the
 ## trustworthy paths — because the M9.R.60.D / M9.R.68 / M9.R.70
@@ -32,7 +32,7 @@ proc resetTmp() =
 suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
 
   test "kill-before-flush + real reads yields Level 1, path set preserved":
-    ## Build an RMDF with:
+    ## Build an iomon with:
     ##   * a real file-read record on /some/valid/input.h
     ##   * a mrEventLoss with detail = kill-before-flush prefix
     ## The engine's foldMonitorDepFileEvidence should:
@@ -42,7 +42,7 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
     ## observations survive the kill-before-flush event-loss and can
     ## still contribute to the strong fingerprint.
     resetTmp()
-    let rmdfPath = TmpDir / "kill-before-flush.rdep"
+    let rmdfPath = TmpDir / "kill-before-flush.iomon"
 
     let realRead = MonitorRecord(
       kind: mrFileRead,
@@ -62,7 +62,7 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
     let encoded = encodeCanonical(@[realRead, killLoss])
     writeFile(rmdfPath, cast[string](encoded))
 
-    # The engine consumes the RMDF via collectEvidence -> the same
+    # The engine consumes the iomon via collectEvidence -> the same
     # foldMonitorDepFileEvidence proc. Verify the return code matches
     # the classifier's mapping and the good read survived.
     var evidence: PathSetEvidence
@@ -77,11 +77,11 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
     check found
 
   test "unmonitored subtree yields Level 2":
-    ## An RMDF with only a Level-2 loss and no real reads must
+    ## An iomon with only a Level-2 loss and no real reads must
     ## still return mesUnknownScopeLoss (Level 2). Path-set is empty
     ## because the fixture doesn't add any file records.
     resetTmp()
-    let rmdfPath = TmpDir / "unmonitored-subtree.rdep"
+    let rmdfPath = TmpDir / "unmonitored-subtree.iomon"
 
     let subtreeLoss = MonitorRecord(
       kind: mrEventLoss,
@@ -98,11 +98,11 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
     let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
     check status == mesUnknownScopeLoss
 
-  test "complete RMDF yields Level 0":
+  test "complete iomon yields Level 0":
     ## No loss records -> mesComplete. Baseline: the engine must not
-    ## treat a healthy RMDF as anything other than complete.
+    ## treat a healthy iomon as anything other than complete.
     resetTmp()
-    let rmdfPath = TmpDir / "complete.rdep"
+    let rmdfPath = TmpDir / "complete.iomon"
 
     let read1 = MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
       osPid: 1, threadId: 1, path: "/a.h", detail: "")
@@ -119,12 +119,12 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
     check evidence.monitorReads.len == 2
 
   test "worst-status wins across mixed loss records":
-    ## An RMDF with BOTH kill-before-flush (Level 1) AND
+    ## An iomon with BOTH kill-before-flush (Level 1) AND
     ## unmonitored-subtree (Level 2) records must return the WORSE of
     ## the two — mesUnknownScopeLoss (Level 2) — so the caller's
     ## downstream logic uses the more conservative handling.
     resetTmp()
-    let rmdfPath = TmpDir / "mixed-loss.rdep"
+    let rmdfPath = TmpDir / "mixed-loss.iomon"
 
     let killLoss = MonitorRecord(kind: mrEventLoss,
       observationKind: moEventLoss,
@@ -142,3 +142,74 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
     var seen: EvidenceSeenSets
     let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
     check status == mesUnknownScopeLoss
+
+  test "benign raw-syscall loss alone yields Level 0 and keeps the path set":
+    ## The `t_zero_output_edge_is_cacheable` execute edge's real iomon
+    ## contains 13 `libc raw syscall unsupported nr=436` records and
+    ## nothing else. Before the benign-syscall allowlist those records
+    ## folded to Level 2 and the edge never published a cache record, so
+    ## it re-executed on every build forever. Folding them must now yield
+    ## Level 0 with the recorded reads intact.
+    resetTmp()
+    let rmdfPath = TmpDir / "benign-syscall.iomon"
+
+    let read1 = MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+      osPid: 1, threadId: 1, path: "/a.h", detail: "")
+    # The ``run=<id>`` stamp is what `stampRunId` appends to every Linux
+    # record; these details are the shape a real iomon carries, not a
+    # simplified one. See the classifier suite's "the detail shape a REAL
+    # iomon carries" case for why that distinction is load-bearing.
+    let closeRange = MonitorRecord(kind: mrEventLoss,
+      observationKind: moEventLoss,
+      osPid: 1, threadId: 1,
+      detail: "libc raw syscall unsupported nr=436 run=1787695082.5534084")
+    let getPid = MonitorRecord(kind: mrEventLoss,
+      observationKind: moEventLoss,
+      osPid: 1, threadId: 1,
+      detail: "libc raw syscall unsupported nr=39 run=1787695082.5534084")
+
+    let encoded = encodeCanonical(@[read1, closeRange, getPid])
+    writeFile(rmdfPath, cast[string](encoded))
+
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
+    when defined(linux) and defined(amd64):
+      check status == mesComplete
+    check evidence.monitorReads.len == 1
+
+  test "benign raw syscall does not rescue an iomon that also lost a subtree":
+    ## THE NEGATIVE CONTROL, at the fold level.
+    ##
+    ## `t_monitor_fault_fails_the_action_not_the_daemon`'s execute edge
+    ## carries BOTH 3 benign `nr=436` records AND 2 genuine
+    ## unmonitored-subtree records. The subtree loss is a real Level 2
+    ## blind spot and must keep the whole session fail-closed: the
+    ## benign-syscall allowlist must not soften it.
+    ##
+    ## This is the gate that `worseMonitorStatus` provides inside the
+    ## fold. The classifier-level suite cannot fail if that fold rule is
+    ## inverted (verified by mutation); this test can.
+    resetTmp()
+    let rmdfPath = TmpDir / "benign-plus-subtree.iomon"
+
+    let closeRange = MonitorRecord(kind: mrEventLoss,
+      observationKind: moEventLoss,
+      osPid: 1, threadId: 1,
+      detail: "libc raw syscall unsupported nr=436 run=1787695082.5534084")
+    let subtreeLoss = MonitorRecord(kind: mrEventLoss,
+      observationKind: moEventLoss,
+      osPid: 0, threadId: 0,
+      detail: "unmonitored subtree/peer (un-injectable spawn child, " &
+        "SETEXEC into a hardened image, or IPC connect to an out-of-tree " &
+        "breakaway daemon)")
+
+    # Both record orders, so the result cannot depend on which record the
+    # fold happens to see last.
+    for records in [@[closeRange, subtreeLoss], @[subtreeLoss, closeRange]]:
+      let encoded = encodeCanonical(records)
+      writeFile(rmdfPath, cast[string](encoded))
+      var evidence: PathSetEvidence
+      var seen: EvidenceSeenSets
+      check foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen) ==
+        mesUnknownScopeLoss

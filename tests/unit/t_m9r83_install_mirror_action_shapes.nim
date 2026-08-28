@@ -85,10 +85,15 @@ suite "M9.R.83 install mirror emitted action shape":
         ".install.stamp"]
       check stamp in mirror.outputs
       check sidecar in mirror.outputs
-      check "sh" in mirror.toolIdentityRefs
+      for toolName in InstallMirrorCoreToolNames:
+        check toolName in mirror.toolIdentityRefs
+      check "sed" in mirror.toolIdentityRefs
+      check "chmod" in mirror.toolIdentityRefs
       check InstallMirrorPublishToolName in mirror.toolIdentityRefs
       when defined(linux):
-        check "patchelf" in mirror.toolIdentityRefs
+        for toolName in ["find", "head", "od", "tr", "sort", "grep",
+                         "dirname", "basename", "wc", "patchelf"]:
+          check toolName in mirror.toolIdentityRefs
       check "rm -rf" in script
       check "build/dest/usr" in script
       check "cp -a --" in script
@@ -102,7 +107,9 @@ suite "M9.R.83 install mirror emitted action shape":
       check "--source \"" & (projectRoot / ".repro" / "output" /
         "install").replace("\\", "/") & "\"" in script
       check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
-        "\"; : > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
+        "\"; : > \"" & sidecar.replace("\\", "/") in script
+      check "printf '%s\\n' 'platform=" & currentRealizationPlatformTag() &
+        "' > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
     else:
       check true
 
@@ -145,8 +152,13 @@ suite "M9.R.83 install mirror emitted action shape":
       let script = inlineScriptOf(mirror)
 
       check actions.len == 3
+      for shellAction in actions[0 .. 1]:
+        for toolName in ["sh", "mkdir", "touch"]:
+          check toolName in shellAction.toolIdentityRefs
       check mirror.deps == @["from-source-custom-shell-2-" & PackageName]
-      check "sh" in mirror.toolIdentityRefs
+      for toolName in InstallMirrorCoreToolNames:
+        check toolName in mirror.toolIdentityRefs
+      check "sed" in mirror.toolIdentityRefs
       check InstallMirrorPublishToolName in mirror.toolIdentityRefs
       check sidecar in mirror.outputs
       check InstallMirrorPublishToolName in script
@@ -156,6 +168,76 @@ suite "M9.R.83 install mirror emitted action shape":
       check "--package \"" & PackageName & "\"" notin script
       check "--version \"8.3.0\"" in script
       check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
-        "\"; : > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
+        "\"; : > \"" & sidecar.replace("\\", "/") in script
+      check "printf '%s\\n' 'platform=" & currentRealizationPlatformTag() &
+        "' > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
+    else:
+      check true
+
+  test "distinct packages each get their own mirror gate":
+    # The mirror gate is keyed per PACKAGE, not per process: two packages
+    # realised in the same process must EACH emit their own
+    # ``install-mirror-<package>`` action, while a repeat of the SAME
+    # package must not emit a second one.
+    #
+    # Home of this case: it previously lived in
+    # ``t_m9r14e_2_install_tree_mirror.nim``, which builds without
+    # ``reproProviderMode``. There ``activeProviderProjectRoot()`` is the
+    # empty string by construction, ``emitInstallTreeMirror`` early-returns
+    # before touching the gate, and the case could assert nothing. It moved
+    # here because this file already compiles in provider mode and drives
+    # the gate through the real ``buildPackageFragment`` entry point.
+    when defined(reproProviderMode):
+      let scratch = getTempDir() / "m9r83-per-package-mirror-gate"
+      if dirExists(scratch):
+        removeDir(scratch)
+      defer:
+        if dirExists(scratch):
+          removeDir(scratch)
+
+      proc actionIdsFor(packageName: string): seq[string] =
+        ## Realise ``packageName`` as its own fragment and return the ids
+        ## of every action the fragment emitted.
+        let projectRoot = scratch / packageName
+        createDir(projectRoot)
+        let pkg = PackageDef(
+          packageName: packageName,
+          sourceFile: projectRoot / "repro.nim",
+          hasDevEnv: false,
+          devEnvBodyHash: "",
+          toolUses: @[])
+        let fragment = buildPackageFragment(pkg, dummyRequest(projectRoot),
+          proc() =
+            registerVersion(packageName, DslVersionInfo(version: "1.0.0"))
+            let installEdge = buildAction(
+              id = "gate-install-" & packageName,
+              call = inlineExecCall(@["sh", "-c", "true"], projectRoot),
+              outputs = @[projectRoot / "build" / "dest" /
+                ".install.stamp"],
+              pool = "compile",
+              toolIdentityRefs = @["sh"])
+            emitInstallTreeMirror(installEdge, "build", "dest", packageName,
+              "autotools"),
+          includeDefault = false)
+        for action in extractActions(fragment):
+          result.add(action.id)
+
+      let alphaIds = actionIdsFor("m9r83GatePkgAlpha")
+      let betaIds = actionIdsFor("m9r83GatePkgBeta")
+      let alphaRepeatIds = actionIdsFor("m9r83GatePkgAlpha")
+
+      # Each package emitted ITS OWN mirror ...
+      check "install-mirror-m9r83GatePkgAlpha" in alphaIds
+      check "install-mirror-m9r83GatePkgBeta" in betaIds
+      # ... and neither leaked into the other's fragment.
+      check "install-mirror-m9r83GatePkgBeta" notin alphaIds
+      check "install-mirror-m9r83GatePkgAlpha" notin betaIds
+      # The gate state is process-wide, which is what makes the two
+      # assertions above load-bearing: realising alpha a SECOND time
+      # emits no further mirror. Were the gate keyed per process rather
+      # than per package, beta would have been suppressed exactly like
+      # this repeat is.
+      check "gate-install-m9r83GatePkgAlpha" in alphaRepeatIds
+      check "install-mirror-m9r83GatePkgAlpha" notin alphaRepeatIds
     else:
       check true

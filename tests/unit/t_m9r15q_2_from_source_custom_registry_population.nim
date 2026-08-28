@@ -98,6 +98,17 @@ package m9r15q21NoBuildFixture:
 
 suite "DSL-port M9.R.15q.2.1 — from-source-custom registry population":
 
+  test "per-project shell placeholders use POSIX paths":
+    let resolved = dslPortSubstituteShellPlaceholders(
+      "cp -r $extracted/mesonbuild $out/share/meson && echo $fetch",
+      r"D:\repo\meson\fetch\meson.tar.gz",
+      r"D:\repo\meson\src",
+      r"D:\repo\meson\.repro\out")
+    check resolved ==
+      "cp -r D:/repo/meson/src/mesonbuild " &
+      "D:/repo/meson/.repro/out/share/meson && " &
+      "echo D:/repo/meson/fetch/meson.tar.gz"
+
   test "shell-action registry is non-empty after module init":
     # The fixture declared three ``shell()`` calls inside its
     # ``library: build:`` body. After module init the registry MUST

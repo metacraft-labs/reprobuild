@@ -252,8 +252,8 @@ suite "e2e_debug_io_monitor_reads_monitor_depfile":
     let fixtureBin = binDir / "io-monitor-fixture"
     let inputPath = tempRoot / "input.txt"
     let childInputPath = tempRoot / "child-input.txt"
-    let depfile = tempRoot / "basic.rdep"
-    let debugDepfile = tempRoot / "debug.rdep"
+    let depfile = tempRoot / "basic.iomon"
+    let debugDepfile = tempRoot / "debug.iomon"
     let eventsPath = tempRoot / "events.jsonl"
     let debugEventsPath = tempRoot / "debug.events.txt"
 
@@ -279,7 +279,7 @@ suite "e2e_debug_io_monitor_reads_monitor_depfile":
     let dep = readMonitorDepFile(depfile)
     let canonicalInputPath = expandFilename(inputPath)
     let canonicalChildInputPath = expandFilename(childInputPath)
-    check readFile(depfile)[0 .. 3] == "RMDF"
+    check readFile(depfile)[0 .. 3] == "IOMN"
     check dep.records.len > 0
     check hasRecord(dep.records, proc(record: MonitorRecord): bool =
       record.kind == mrFileRead and record.path == canonicalInputPath)

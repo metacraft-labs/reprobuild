@@ -97,6 +97,28 @@
 import std/[algorithm, atomics, json, locks, os, osproc, parseopt, streams,
             strtabs, strutils, tables, tempfiles, times]
 
+# RunQuota-Observation-Store M19: the ``HistoryReporter`` write path.
+#
+# THE RUNNER DOES NOT OPEN A DATABASE, AND THERE IS NO ``.nimtest/history.db``.
+# ``Nim-Parallel-Test-Framework.md`` §17.3 §"How these read": "The runner MUST
+# NOT open the store's database file directly: ``runquotad`` is the only
+# sanctioned reader". §17.1.2 replaced the per-runner history backend with
+# RunQuota's shared observation store outright — the old path is retired, not
+# migrated, because nothing reads it.
+import ct_test_history
+
+# RunQuota-Observation-Store M20: the READ side, §17.3's ``stats flaky`` and
+# ``stats duration``.
+#
+# IT IS A SEPARATE LIBRARY FROM THE REPORTER ABOVE, AND THE SEPARATION IS THE
+# POINT. The queries read ``ext_test_execution`` and nothing else, so they
+# answer identically for every runner that writes the generic layer — which is
+# what OS-8's "populated by at least two different runners" is worth only if
+# the reading side is neutral too. A query hosted inside CodeTracer's reporter
+# would make every other runner's statistics reachable only by linking
+# CodeTracer's write path.
+import repro_test_stats
+
 when defined(posix):
   import std/posix
 elif defined(windows):
@@ -254,6 +276,14 @@ type
       ## yields the bare ``testname``, which that binary's ``--run``
       ## matcher rejects with "test not found" (exit 1, reported FAIL).
       ## Empty for whole-binary cases, which take no ``--run``.
+    timeoutSec: int
+      ## RunQuota-Observation-Store M21 / §17.4: this case's ADAPTIVE
+      ## timeout, computed from the shared store before the run starts.
+      ##
+      ## Zero means "no per-case value", and the run-wide
+      ## ``--test-timeout`` applies — which is what every case carries
+      ## with ``--adaptive-timeout`` off, so an unconfigured run behaves
+      ## exactly as it did before this field existed.
     meta: CatalogEntry
       ## The case's ``--list-json`` row, retained whole. See
       ## ``CatalogEntry`` for the retention rule and for which of its
@@ -396,6 +426,16 @@ type
     ## "two workers race on ``putEnv``" hazard called out in the
     ## Test-Edges-And-Parallel-Runner milestones.
     baseEnv: ptr seq[tuple[key, value: string]]
+    ## M19: the shared ``HistoryReporter``. A POINTER to one object on
+    ## the main thread's frame, not one reporter per worker: the daemon
+    ## opens exactly one ``runs`` row per registered session, so a
+    ## session per worker would shatter a single test run into N run
+    ## records and every cross-run query in §17.3 would count them as N
+    ## runs. ``nil`` (and a reporter whose ``open`` returned false) means
+    ## capture is off, which is the ordinary no-daemon case and not an
+    ## error.
+    history: ptr HistoryReporter
+    memoryLimitBytes: uint64
 
   TestProcess = object
     process: Process
@@ -2011,16 +2051,170 @@ proc spawnedProcess(binary: string; args: openArray[string];
       sleep(ParentSpawnRetryDelayMs * attempt)
   raise lastError
 
+const CpuUnavailable = -1.0
+  ## Sentinel returned by ``processGroupCpuSeconds`` for "this host (or
+  ## this moment) cannot tell me how much CPU the test's process group
+  ## has consumed". It is NOT zero: zero means "measured, and the group
+  ## burned nothing", which is the signature of a genuine wedge. Folding
+  ## the two together would turn every non-Linux host into a host that
+  ## believes every test is deadlocked.
+
+when defined(linux):
+  let ClockTicksPerSec = block:
+    ## ``/proc/<pid>/stat`` reports CPU in clock ticks, not seconds.
+    let raw = sysconf(SC_CLK_TCK)
+    if raw > 0: raw.float else: 100.0
+
+  proc procStatFields(statText: string): seq[string] =
+    ## Split one ``/proc/<pid>/stat`` line into its fields *after* the
+    ## comm field. Field 2 (``comm``) is parenthesised and may itself
+    ## contain spaces and parentheses — ``t (weird) name`` is a legal
+    ## thread name — so a naive ``splitWhitespace`` of the whole line
+    ## silently shifts every later index. Scanning from the LAST ``)``
+    ## is the documented-safe parse.
+    ##
+    ## Index 0 of the result is field 3 (``state``); so field N is at
+    ## index N - 3: pgrp (5) at 2, utime (14) at 11, stime (15) at 12,
+    ## cutime (16) at 13, cstime (17) at 14.
+    let closeParen = statText.rfind(')')
+    if closeParen < 0:
+      return @[]
+    statText[closeParen + 1 .. ^1].splitWhitespace()
+
+  proc processGroupCpuSeconds(processGroup: int): float =
+    ## Cumulative CPU (user + system) consumed by every live process in
+    ## ``processGroup``, including the CPU of descendants those processes
+    ## have already reaped (``cutime``/``cstime``).
+    ##
+    ## This is the liveness signal the idle deadline needs and stdout
+    ## cannot provide. A test starved of CPU by fifteen sibling workers
+    ## — or by unrelated load on a shared CI runner — is *silent* while
+    ## still advancing; a deadlocked test is silent and NOT advancing.
+    ## Output alone cannot separate those two, and treating silence as a
+    ## hang is what made a 16-worker sweep kill 28 live cases at ~600 s
+    ## and fail seven tests that pass at one worker.
+    ##
+    ## Including ``cutime``/``cstime`` keeps the sum monotone across a
+    ## fork-heavy test: when a member is reaped its own time does not
+    ## vanish from the total, it moves into its parent's child-time
+    ## counters, and the parent is in the same group. Without that, a
+    ## test that spawns and reaps compilers would appear to *lose* CPU
+    ## between samples.
+    ##
+    ## Membership is by process group, matching the unit the runner
+    ## already owns and kills (``TestProcess.processGroup``, established
+    ## by the wrapper's ``setpgid``). A descendant that calls ``setsid``
+    ## leaves the group and stops contributing to the signal — such a
+    ## case degrades to the old output-only behaviour rather than
+    ## misreporting, and the owner-token cleanup path still reaps it.
+    ##
+    ## Matching by PGID cannot pick up a stranger: the supervisor anchor
+    ## is deliberately kept alive (and reaped only after cleanup) so the
+    ## kernel cannot recycle this PGID while the case is running — the
+    ## same invariant ``signalProcessGroup`` relies on to make a negative
+    ## -PID signal safe.
+    if processGroup <= 0 or not dirExists("/proc"):
+      return CpuUnavailable
+    var total = 0.0
+    var members = 0
+    for kind, path in walkDir("/proc"):
+      if kind != pcDir:
+        continue
+      let base = path.lastPathPart
+      if base.len == 0 or base[0] notin {'0' .. '9'}:
+        continue
+      var statText = ""
+      try:
+        statText = readFile(path / "stat")
+      except CatchableError:
+        # The process exited between readdir and open. Not an error:
+        # its CPU is already accounted for in its parent's child-time.
+        continue
+      let fields = procStatFields(statText)
+      if fields.len < 15:
+        continue
+      var ticks = 0.0
+      try:
+        if parseInt(fields[2]) != processGroup:
+          continue
+        for idx in 11 .. 14:
+          ticks += parseFloat(fields[idx])
+      except ValueError:
+        continue
+      total += ticks
+      inc members
+    if members == 0:
+      # No live member found. Report "unavailable" rather than 0.0 so a
+      # momentarily-empty scan cannot be mistaken for measured idleness.
+      return CpuUnavailable
+    total / ClockTicksPerSec
+
+  proc cpuLivenessAvailable(processGroup: int): bool =
+    ## Cheap "is the signal usable at all" probe, kept separate from the
+    ## sampler so the poll loop does not pay for a full ``/proc`` walk on
+    ## a case that finishes in 40 ms. The suite has 1200+ such cases.
+    processGroup > 0 and dirExists("/proc")
+
+else:
+  proc processGroupCpuSeconds(processGroup: int): float =
+    ## No portable per-process-group CPU accounting is wired up outside
+    ## Linux yet. Returning the sentinel makes ``drainAndWaitWithTimeout``
+    ## fall back to the previous output-only idle deadline verbatim, so
+    ## non-Linux hosts keep exactly the behaviour they had — including
+    ## the starvation false-kill. That gap is real and deliberate: an
+    ## unverified ``proc_pid_rusage`` path would be worse than a
+    ## documented fallback.
+    discard processGroup
+    CpuUnavailable
+
+  proc cpuLivenessAvailable(processGroup: int): bool =
+    discard processGroup
+    false
+
+const CpuProgressFloorSec = 0.25
+  ## Absolute floor for "the group did some work". One clock tick is
+  ## 10 ms on every host we run on, so 0.25 s is 25 ticks — far above
+  ## sampling quantisation, and unreachable by a group that is genuinely
+  ## blocked (a wedged group accrues exactly zero).
+
+const CpuProgressMinFraction = 0.01
+  ## …and the floor is scaled up with the idle window, so the rule reads
+  ## "the group must consume at least 1% of one core over the window".
+  ## At the 1800 s default that is 18 s of CPU per 1800 s. A test that is
+  ## merely starved clears this by orders of magnitude even at extreme
+  ## oversubscription; a test that is deadlocked clears nothing.
+
+proc cpuProgressThresholdSec(timeoutSec: int): float =
+  max(CpuProgressFloorSec, CpuProgressMinFraction * timeoutSec.float)
+
+proc cpuSampleIntervalSec(timeoutSec: int): float =
+  ## Scanning ``/proc`` is cheap but not free, and N workers scan it
+  ## concurrently. Sampling ~10x per idle window keeps the resolution
+  ## far finer than the decision it feeds while bounding the cost; the
+  ## clamp keeps short windows (the regression tests use 3-6 s) responsive
+  ## and long ones (the 1800 s default) inexpensive.
+  clamp(timeoutSec.float / 10.0, 1.0, 15.0)
+
 const AbsoluteTimeoutMultiplier = 4
-  ## The per-test ``--test-timeout`` is interpreted as an *idle*
-  ## deadline (no output produced for that long ⇒ kill), not a fixed
-  ## wall-clock budget. ``AbsoluteTimeoutMultiplier × testTimeoutSec`` is
-  ## the hard ceiling: a test that keeps emitting output but never
-  ## finishes is still killed once total wall time crosses it, so a
-  ## chatty-but-genuinely-stuck test (e.g. a busy spin that logs every
-  ## iteration) cannot run forever. With the default 600 s idle deadline
-  ## this caps any single test at 40 min, well inside the 4 h runner-
-  ## phase backstop.
+  ## The per-test ``--test-timeout`` is interpreted as a *no-progress*
+  ## deadline (neither output nor CPU advance for that long ⇒ kill), not
+  ## a fixed wall-clock budget. ``AbsoluteTimeoutMultiplier ×
+  ## testTimeoutSec`` is the hard ceiling, and BOTH conditions must
+  ## exist:
+  ##
+  ##   * no-progress kills a test that is genuinely wedged (silent and
+  ##     burning no CPU);
+  ##   * the absolute ceiling kills a test that keeps *making* progress
+  ##     by the liveness signal but never finishes — a chatty stuck loop,
+  ##     or a livelock like the real ``t_stackable_hooks_extracted_
+  ##     process_tree`` spin that held 94% CPU for 19 hours. Progress-
+  ##     based liveness alone would let that run forever, which is
+  ##     precisely why the ceiling is not optional.
+  ##
+  ## The two are reported with distinct ``timeoutDescription`` prefixes
+  ## (``IDLE TIMEOUT`` vs ``ABSOLUTE TIMEOUT``) so a log line alone says
+  ## which rule fired. With the default 600 s window this caps any single
+  ## test at 40 min, well inside the 4 h runner-phase backstop.
 
 proc drainAndWait(testProcess: TestProcess):
     tuple[output: string; exitCode: int] =
@@ -2221,61 +2415,160 @@ proc finalDrainNonBlocking(p: Process; output: var string) =
     # If bytes are still flowing we keep looping the fixed number of
     # passes; we never extend the loop based on EOF.
 
-proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
-    tuple[output: string; exitCode: int; timedOut: bool;
-          timeoutDescription: string] =
-  ## Deadline-aware variant of ``drainAndWait``. When ``timeoutSec <= 0``
-  ## the call delegates to ``drainAndWait`` (preserving M3 behaviour).
+type ChildRunOutcome = object
+  ## What the wait loop observed about one child process.
   ##
-  ## ``timeoutSec`` is interpreted as an **idle** deadline, not a fixed
-  ## wall-clock budget: the test is killed only after it has produced no
-  ## new output for ``timeoutSec`` seconds. A polling loop drains the
-  ## pipe non-blockingly every ~``TimeoutPollIntervalMs`` and resets the
-  ## idle clock whenever bytes arrive. A genuinely-slow-but-alive heavy
-  ## e2e test under shared-runner contention keeps emitting progress
-  ## output, so it is *not* killed; a truly hung test (silent on its
-  ## output stream — exactly the D6 ``sleep(60_000)`` shape, and the
-  ## real ``t_local_daemons_control_plane_m11`` leaked-daemon stall)
-  ## produces nothing and is killed once the idle window elapses.
+  ## Introduced by M19 because ``termination`` needs facts an exit code
+  ## cannot carry: RunQuota's spine distinguishes ``oom_killed`` from
+  ## ``exited``, and both of those are non-zero exits. ``memoryExceeded``
+  ## is the only field that can make that distinction, and it is TRUE
+  ## ONLY WHEN THIS RUNNER ITSELF KILLED THE CHILD for crossing its
+  ## declared memory reservation — an observation, never an inference
+  ## over a status byte.
+  output: string
+  exitCode: int
+  timedOut: bool
+  timeoutDescription: string
+  memoryExceeded: bool
+  peakRssBytes: uint64
+
+proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
+                             memoryLimitBytes = 0'u64): ChildRunOutcome =
+  ## Deadline-aware variant of ``drainAndWait``. When ``timeoutSec <= 0``
+  ## and no memory ceiling is configured the call delegates to
+  ## ``drainAndWait`` (preserving M3 behaviour).
+  ##
+  ## ``memoryLimitBytes`` (M19, 0 = OFF and the default) is the resident
+  ## size the test's whole process tree may reach. Crossing it kills the
+  ## group through exactly the same bounded TERM → grace → KILL path a
+  ## timeout uses, and reports ``memoryExceeded``. The ceiling is the
+  ## same figure the RunQuota lease reserved for this test, so "the test
+  ## exceeded its reservation" and "the runner killed it" are one event
+  ## rather than two that have to be correlated afterwards.
+  ##
+  ## ``timeoutSec`` is interpreted as a **no-progress** deadline, not a
+  ## fixed wall-clock budget: the test is killed only after it has shown
+  ## no sign of forward progress for ``timeoutSec`` seconds. Two
+  ## independent signals count as progress, and either one resets the
+  ## clock:
+  ##
+  ##   1. **Output.** A polling loop drains the pipe non-blockingly every
+  ##      ~``TimeoutPollIntervalMs``; any new bytes are progress.
+  ##   2. **CPU consumed by the test's process group.** Sampled from
+  ##      ``/proc`` (see ``processGroupCpuSeconds``) every
+  ##      ``cpuSampleIntervalSec``; an advance of at least
+  ##      ``cpuProgressThresholdSec`` since the last recorded progress
+  ##      point is progress.
+  ##
+  ## Signal 2 is the one that is correct at any parallelism, and it is
+  ## why this proc no longer equates silence with a hang. A heavy e2e
+  ## test starved by fifteen sibling workers (or by unrelated load on
+  ## this shared CI runner) can be quiet for many minutes while running
+  ## perfectly well; the pure output heuristic killed 28 such cases at
+  ## ~600 s in one 16-worker sweep and turned seven 1-worker passes into
+  ## 16-worker failures. A genuinely wedged test — the D6
+  ## ``sleep(60_000)`` shape, or the real
+  ## ``t_local_daemons_control_plane_m11`` leaked-daemon stall — is silent
+  ## AND burns no CPU, so it is still killed on the same deadline it was
+  ## killed on before.
   ##
   ## An absolute ceiling of ``AbsoluteTimeoutMultiplier × timeoutSec``
-  ## still applies so a chatty-but-stuck test (keeps logging, never
-  ## finishes) cannot run forever — this is the "sane upper bound" that
-  ## keeps the progress heuristic from masking a real hang.
+  ## still applies, and is now load-bearing rather than a backstop: a
+  ## livelock (a spin loop at 94% CPU) satisfies the CPU-progress signal
+  ## forever, so only the ceiling can end it. See
+  ## ``AbsoluteTimeoutMultiplier``.
   ##
-  ## On expiry (idle or absolute) the child is SIGTERM'd, given
+  ## Both kill paths report which rule fired and the numbers behind it —
+  ## elapsed, group CPU consumed, CPU advance since the last progress
+  ## point, and the age of the last output — so a timeout in a CI log is
+  ## diagnosable without a live process to inspect.
+  ##
+  ## On expiry (no-progress or absolute) the child is SIGTERM'd, given
   ## ``TimeoutKillGraceSec`` to exit, then SIGKILL'd.
   ##
-  ## Why the idle semantics matter: the M3 fixed-budget timeout false-
-  ## killed live heavy e2e tests (``t_e2e_local_reprobuild_project_build``
-  ## et al.) when the shared box was oversubscribed — they were making
-  ## progress, just slowly. The original D6 hang it was built to defeat
-  ## (a test that left ``repro-daemon`` children holding the inherited
-  ## pipe open after exec returned) is *silent*, so the idle deadline
-  ## still catches it without masking it.
+  ## On non-POSIX hosts ``drainAvailable`` is a no-op and
+  ## ``processGroupCpuSeconds`` reports ``CpuUnavailable``, so the loop
+  ## degrades to the original fixed-budget behaviour — acceptable since
+  ## Windows is not a supported runner host today. On macOS the output
+  ## signal works and the CPU signal does not; that host keeps the
+  ## pre-existing output-only semantics.
   ##
-  ## On non-POSIX hosts ``drainAvailable`` is a no-op, so the loop
-  ## degrades to the original fixed-budget behaviour (no mid-flight
-  ## drain, idle clock never resets) — acceptable since Windows is not a
-  ## supported runner host today.
-  if timeoutSec <= 0:
+  ## A memory ceiling is reason enough to poll on its own: with
+  ## ``timeoutSec <= 0`` but ``memoryLimitBytes`` set, the loop still
+  ## runs and both time deadlines become infinite rather than the loop
+  ## being skipped (see ``idleDeadlineSec``).
+  if timeoutSec <= 0 and memoryLimitBytes == 0'u64:
     let (output, exitCode) = drainAndWait(testProcess)
-    return (output, exitCode, false, "")
+    return ChildRunOutcome(output: output, exitCode: exitCode)
 
   let p = testProcess.process
   var output = ""
   let start = epochTime()
   var lastProgress = start
-  let absoluteDeadlineSec = timeoutSec.float * AbsoluteTimeoutMultiplier.float
+    ## Last moment EITHER signal showed forward progress. This is the
+    ## clock the no-progress deadline measures against.
+  var lastOutput = start
+    ## Last moment bytes arrived. Reported in the diagnostic so a kill
+    ## line distinguishes "quiet but working" from "quiet and dead".
+  let processGroup =
+    when defined(posix): testProcess.processGroup
+    else: 0
+  # A memory ceiling on its own must still poll, so an absent idle
+  # deadline becomes an infinite one rather than turning the loop off.
+  let idleDeadlineSec =
+    if timeoutSec <= 0: Inf else: timeoutSec.float
+  let absoluteDeadlineSec =
+    if timeoutSec <= 0: Inf
+    else: timeoutSec.float * AbsoluteTimeoutMultiplier.float
+  let cpuThreshold = cpuProgressThresholdSec(timeoutSec)
+  let cpuInterval = cpuSampleIntervalSec(timeoutSec)
+  var cpuSeen = CpuUnavailable
+    ## Highest group-CPU total observed so far (``CpuUnavailable`` until
+    ## the first sample lands). Tracked as a running maximum: a scan that
+    ## races a member's exit can read low, and a transient dip must never
+    ## be mistaken for regression.
+  var cpuAtLastProgress = CpuUnavailable
+    ## The reading ``cpuSeen`` is compared against. Re-based whenever
+    ## EITHER signal shows progress, so the required advance is always
+    ## measured from the most recent progress point.
+  var lastCpuSample = start
+    ## No sample is taken at t=0 on purpose: the first one lands a whole
+    ## ``cpuInterval`` in, so a case that finishes quickly never touches
+    ## ``/proc`` at all.
+  let cpuTracked = cpuLivenessAvailable(processGroup)
   var timedOut = false
   var timeoutDescription = ""
+  var memoryExceeded = false
+  var peakRssBytes = 0'u64
+  let childPid = uint64(max(p.processID, 0))
+
+  proc observedNumbers(now: float): string =
+    ## The evidence line that accompanies every kill.
+    let cpuText =
+      if cpuSeen == CpuUnavailable: "unavailable"
+      else: formatFloat(cpuSeen, ffDecimal, 2) & "s"
+    let advanceText =
+      if cpuSeen == CpuUnavailable or cpuAtLastProgress == CpuUnavailable:
+        "unavailable"
+      else:
+        formatFloat(cpuSeen - cpuAtLastProgress, ffDecimal, 2) & "s"
+    "elapsed=" & formatFloat(now - start, ffDecimal, 1) &
+      "s group-cpu=" & cpuText &
+      " cpu-since-last-progress=" & advanceText &
+      " last-output-age=" & formatFloat(now - lastOutput, ffDecimal, 1) &
+      "s last-progress-age=" & formatFloat(now - lastProgress, ffDecimal, 1) &
+      "s cpu-progress-threshold=" &
+      formatFloat(cpuThreshold, ffDecimal, 2) & "s"
+
   while true:
     when defined(posix):
       if interruptedSignal.load(moAcquire) != 0:
         output.add(
           "\nrepro_test_runner: interrupted; owned process group killed.\n")
         discard finishInterruptedTestProcess(testProcess, output)
-        return (output, TimeoutExitCode, true, "INTERRUPTED")
+        return ChildRunOutcome(output: output, exitCode: TimeoutExitCode,
+          timedOut: true, timeoutDescription: "INTERRUPTED",
+          peakRssBytes: peakRssBytes)
     when defined(posix):
       var code = -1
       var childComplete = false
@@ -2316,28 +2609,91 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
       else:
         finalDrainNonBlocking(p, output)
         close(p)
-      return (output, code, false, "")
+      return ChildRunOutcome(output: output, exitCode: code,
+        peakRssBytes: peakRssBytes)
     # Drain whatever the live child has emitted since the last poll.
     # Non-blocking, so this never parks on a silent test. Any new bytes
-    # are forward progress and reset the idle clock.
+    # are forward progress and reset the no-progress clock.
     if drainAvailable(p, output) > 0:
-      lastProgress = epochTime()
-    let now = epochTime()
-    if (now - lastProgress) > timeoutSec.float:
-      output.add("\nrepro_test_runner: no output for " & $timeoutSec &
-        "s (idle deadline); treating as hung.\n")
+      lastOutput = epochTime()
+      lastProgress = lastOutput
+      # Rebase the CPU comparison too: the required advance is measured
+      # from the most recent progress point, whichever signal produced it.
+      cpuAtLastProgress = cpuSeen
+    # M19: sample the resident size of the child's WHOLE PROCESS TREE.
+    #
+    # The tree, not the direct child: on POSIX the direct child is the
+    # process-group supervisor and the test itself is its descendant, so
+    # sampling only the child would read the supervisor's few hundred KiB
+    # and the ceiling would never fire — a check that cannot fail.
+    #
+    # Sampled through RunQuota's own host backend rather than a ``ps``
+    # subprocess: ``ps -o rss`` is entitlement-gated on current macOS and
+    # fails outright there, which would have made this a Linux-only
+    # mechanism that read green on macOS.
+    if memoryLimitBytes > 0'u64 and childPid > 0'u64:
+      let rss = sampleProcessTreeRss(childPid)
+      if rss > peakRssBytes:
+        peakRssBytes = rss
+      if rss > memoryLimitBytes:
+        output.add("\nrepro_test_runner: resident set of the test process " &
+          "tree reached " & $rss & " bytes, above the " &
+          $memoryLimitBytes & "-byte reservation; killing it as an " &
+          "out-of-memory kill.\n")
+        memoryExceeded = true
+        timeoutDescription =
+          "MEMORY LIMIT EXCEEDED: " & $rss & " > " & $memoryLimitBytes &
+          " bytes"
+        break
+    var now = epochTime()
+    # Second signal: has the process group burned CPU? A starved test is
+    # quiet but advancing; a deadlocked one is quiet and flat.
+    if cpuTracked and (now - lastCpuSample) >= cpuInterval:
+      lastCpuSample = now
+      let sample = processGroupCpuSeconds(processGroup)
+      if sample != CpuUnavailable and sample > cpuSeen:
+        cpuSeen = sample
+        if cpuAtLastProgress == CpuUnavailable:
+          # First successful reading: it establishes the baseline and
+          # claims nothing. CPU burned before it is not evidence of
+          # progress *since the last progress point*.
+          cpuAtLastProgress = cpuSeen
+        elif cpuSeen - cpuAtLastProgress >= cpuThreshold:
+          cpuAtLastProgress = cpuSeen
+          lastProgress = now
+      now = epochTime()
+    if (now - lastProgress) > idleDeadlineSec:
+      let evidence = observedNumbers(now)
+      # Never claim a signal that was not actually read. "no CPU
+      # progress" is a measurement; "CPU unmeasured" is an admission.
+      let cpuMeasured = cpuTracked and cpuSeen != CpuUnavailable
+      let signals =
+        if cpuMeasured: "no output and no CPU progress"
+        elif cpuTracked: "no output; the CPU signal never returned a reading"
+        else: "no output; the CPU signal is unavailable on this host"
+      output.add("\nrepro_test_runner: no progress for " & $timeoutSec &
+        "s (idle deadline; " & signals & "); treating as hung. " &
+        evidence & "\n")
       timedOut = true
+      # The leading clause is stable text other tooling greps for; the
+      # bracketed evidence is what makes a timeout diagnosable from the
+      # log alone.
       timeoutDescription =
-        "IDLE TIMEOUT after " & $timeoutSec & "s without output"
+        "IDLE TIMEOUT after " & $timeoutSec & "s without output" &
+        (if cpuMeasured: " or CPU progress" else: "") &
+        " [" & evidence & "]"
       break
     if (now - start) > absoluteDeadlineSec:
+      let evidence = observedNumbers(now)
       output.add("\nrepro_test_runner: exceeded absolute ceiling of " &
         $absoluteDeadlineSec.int & "s (" & $AbsoluteTimeoutMultiplier &
-        "x the idle deadline) while still producing output; treating " &
-        "as stuck.\n")
+        "x the no-progress deadline) while still showing progress; " &
+        "treating as stuck (livelock or an unbounded loop). " &
+        evidence & "\n")
       timedOut = true
       timeoutDescription =
-        "ABSOLUTE TIMEOUT after " & $absoluteDeadlineSec.int & "s"
+        "ABSOLUTE TIMEOUT after " & $absoluteDeadlineSec.int & "s" &
+        " [" & evidence & "]"
       break
     sleep(TimeoutPollIntervalMs)
 
@@ -2389,14 +2745,192 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
   close(p)
   when defined(posix):
     cleanupProcessGroupPaths(testProcess)
-  result = (output, TimeoutExitCode, timedOut, timeoutDescription)
+  result = ChildRunOutcome(output: output, exitCode: TimeoutExitCode,
+    timedOut: timedOut, timeoutDescription: timeoutDescription,
+    memoryExceeded: memoryExceeded, peakRssBytes: peakRssBytes)
+
+# ---------------------------------------------------------------------------
+# RunQuota-Observation-Store M19 — the reporter's runner-side glue
+# ---------------------------------------------------------------------------
+
+const DefaultLeaseMemoryBytes = 128'u64 * 1024'u64 * 1024'u64
+  ## What a test reserves when no ceiling is configured. Matches the
+  ## reprobuild engine's own per-action default, so a test and a compile
+  ## are admitted against the same units.
+
+proc leaseMemoryBytes(memoryLimitBytes: uint64): uint64 =
+  ## THE CEILING IS THE RESERVATION, not a second number beside it.
+  ##
+  ## A runner that reserved one figure from RunQuota and enforced a
+  ## different one would be reporting ``oom_killed`` for a process that
+  ## never exceeded what the store says it was admitted for, and no
+  ## reader of the two rows could reconcile them.
+  if memoryLimitBytes > 0'u64: memoryLimitBytes else: DefaultLeaseMemoryBytes
+
+proc historyStatus(res: TestResult; outcome: ChildRunOutcome;
+                   groupRefused: bool): TestHistoryStatus =
+  ## Map the runner's verdict onto the framework-neutral vocabulary.
+  ##
+  ## THE VOCABULARY IS THE SPECIFICATION'S, NOT THIS RUNNER'S, which is
+  ## why the mapping lives here rather than the enum being widened to
+  ## fit: ``timeout`` and ``leak`` are outcomes any parallel runner
+  ## produces, and ``xfail``/``xpass`` are read from the case's own
+  ## catalog row rather than invented.
+  if groupRefused:
+    # A case whose processes outlived a bounded kill. ``leak`` is the
+    # vocabulary's name for exactly this and nothing else.
+    return thsLeak
+  if outcome.timedOut:
+    return thsTimeout
+  case res.status
+  of tsSkip: thsSkip
+  of tsPass:
+    if res.testCase.protocolAware and res.testCase.meta.xfail.len > 0: thsXpass
+    else: thsPass
+  else:
+    if res.testCase.protocolAware and res.testCase.meta.xfail.len > 0: thsXfail
+    else: thsFail
+
+proc reportExecution(history: ptr HistoryReporter; testLease: var TestLease;
+                     res: TestResult; outcome: ChildRunOutcome;
+                     groupRefused = false) =
+  ## Close the lease and write both extension rows for one execution.
+  ##
+  ## A HARNESS ERROR WRITES NO EXTENSION ROW, DELIBERATELY. ``tsHarnessError``
+  ## means the runner obtained no verdict about the code under test; the
+  ## generic layer's ``status`` vocabulary has no member for that and
+  ## inventing one — or borrowing ``fail`` — would put a statement about
+  ## the RUN into a column every flake and pass-rate query reads as a
+  ## statement about the TREE. The lease is still finished, so the spine
+  ## keeps an execution row whose ``termination`` is ``refused``, which is
+  ## the honest record that something was admitted and produced nothing.
+  if not testLease.captured:
+    return
+  let harnessFault = res.status == tsHarnessError
+  # SIGNAL, INFERRED FROM THE 128+N CONVENTION AND SAID TO BE INFERRED.
+  # The process-group wrapper records a status integer, not a raw wait
+  # status word, so 128+N is the only signal evidence the runner has —
+  # the same evidence, and the same caveat, as ``describeChildExit``.
+  var signalNumber = 0
+  if not outcome.timedOut and not outcome.memoryExceeded and
+      outcome.exitCode > 128 and outcome.exitCode <= 128 + 64:
+    signalNumber = outcome.exitCode - 128
+  history.finishExecution(testLease, TestExecutionOutcome(
+    exitCode:
+      if outcome.exitCode < 0: 1 else: outcome.exitCode,
+    signal: signalNumber,
+    # A timeout or a ceiling kill IS a signalled death — the runner sent
+    # the SIGKILL itself — but ``memoryLimitExceeded`` is checked ahead of
+    # it by the daemon, so the OOM arm is not swallowed by the signal arm.
+    signalled: signalNumber != 0 or outcome.timedOut or
+      outcome.memoryExceeded,
+    peakRssBytes: outcome.peakRssBytes,
+    processCount: 0'u32,
+    memoryLimitExceeded: outcome.memoryExceeded,
+    timedOut: outcome.timedOut,
+    launchFailed: harnessFault))
+  if not harnessFault:
+    var generic = GenericTestFacts(
+      testId:
+        if res.testCase.qualifiedName.len > 0: res.testCase.qualifiedName
+        else: res.testCase.binaryStem,
+      suite: res.testCase.suite,
+      status: historyStatus(res, outcome, groupRefused),
+      durationMs: res.durationMs,
+      durationKnown: true,
+      # ONE ATTEMPT. This runner does not retry, so every row is the
+      # first and ``retry_of`` is NULL. Recording a fixed 1 is a
+      # measurement, not a placeholder: the ordinal is known.
+      attempt: 1,
+      retryOf: "",
+      errorMessage: res.exception,
+      skipReason: res.skipReason,
+      # The runner spawns children with ``poStdErrToStdOut``, so what it
+      # holds is the MERGED stream. ``stderr_len`` is therefore unknown
+      # rather than zero; see the column note in the schema module.
+      stdoutLen: res.stdout.len,
+      stdoutKnown: true,
+      stderrLen: 0,
+      stderrKnown: false)
+    if generic.errorMessage.len == 0 and res.checkpoints.len > 0:
+      generic.errorMessage = res.checkpoints[0]
+    let specific = CodetracerTestFacts(
+      # The trace columns §17.1.2 names are absent for a test that
+      # records nothing, which is every test in reprobuild's own suite.
+      # They are declared so a CodeTracer run does not need a migration.
+      protocolAware: res.testCase.protocolAware,
+      runName: res.testCase.runName,
+      bodyHash: res.testCase.meta.bodyHash,
+      checkpointCount: res.checkpointCount,
+      statusDisagreement: res.statusDisagreement,
+      harnessError: res.harnessError)
+    history.recordRows(testLease, generic, specific)
+  history.releaseLease(testLease)
+
+const WholeBinarySkipMarker = "[SKIPPED] "
+  ## The console formatter's own status marker for a skipped case
+  ## (``lib/pure/unittest.nim``: ``ConsoleOutputFormatter.testEnded``
+  ## prints ``[", $status, "] ", testName``). This is the ONLY channel a
+  ## whole-binary run has for a skip.
+  ##
+  ## Why there is no other channel. ``unittest``'s result document and
+  ## its exit-code-2 convention both live behind ``protocolMode ==
+  ## pmRun`` — i.e. behind ``--run <case>``. A binary executed whole is
+  ## ``pmDefault``: it writes no document, and its exit code is 1 if any
+  ## case FAILED and 0 otherwise. A skipped case therefore exits 0 and is
+  ## indistinguishable, by exit code alone, from a case that passed.
+  ##
+  ## This is NOT the failure-text sniffing this codebase has been
+  ## removing. It reads the harness's own structured status marker for a
+  ## status it already computed, not free-form diagnostic prose, and it
+  ## can only move an outcome from PASS to SKIP — never from FAIL to
+  ## anything.
+
+proc wholeBinarySkippedCases(output: string): seq[string] =
+  ## Names of the cases a whole-binary run reported as skipped.
+  ##
+  ## Anchored to the start of the (indented) line, because that is where
+  ## the formatter puts the marker: a case inside a ``suite`` is printed
+  ## with a two-space prefix and a suite-less one with none. Anchoring
+  ## rejects a mid-line mention (``… saw "[SKIPPED] foo" …``).
+  ##
+  ## It does NOT reject a line-anchored one. A whole binary that prints
+  ## its own line beginning ``[SKIPPED] `` — most plausibly a test that
+  ## echoes a nested unittest log, which carries the formatter's own
+  ## two-space indent — is read as a skip, and no parse of free-form
+  ## child stdout can tell that apart from the real thing. Measured: a
+  ## one-case fixture that passes and echoes ``  [SKIPPED] x`` is
+  ## reported SKIP.
+  ##
+  ## That residue is bounded by the caller, and bounded on the safe
+  ## side. Only a PASS is ever re-read, so the worst outcome is a
+  ## passing binary reported as skipped — which a zero-skip gate turns
+  ## RED and names. A failure can never be absorbed. Recovering the
+  ## remaining fidelity needs the binary to become enumerable, so that
+  ## the skip arrives on the result-document channel instead of on
+  ## stdout; it does not need a cleverer pattern.
+  result = @[]
+  for rawLine in output.splitLines():
+    let line = rawLine.strip()
+    if line.startsWith(WholeBinarySkipMarker):
+      result.add(line[WholeBinarySkipMarker.len .. ^1].strip())
 
 proc runWholeBinary(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]];
-                    testTimeoutSec: int): TestResult =
+                    testTimeoutSec: int;
+                    history: ptr HistoryReporter = nil;
+                    memoryLimitBytes = 0'u64): TestResult =
   result.testCase = tc
   result.status = tsFail
   let t0 = epochTime()
+  # M19: one RunQuota lease around this execution. Acquired BEFORE the
+  # spawn and finished AFTER the wait, so the spine row's start, finish
+  # and duration describe the test rather than the bookkeeping around it.
+  var testLease = history.acquireLease(
+    (if tc.qualifiedName.len > 0: tc.qualifiedName else: tc.binaryStem),
+    memoryBytes = leaseMemoryBytes(memoryLimitBytes))
+  var childOutcome: ChildRunOutcome
+  var groupRefused = false
   # Wrap the whole spawn-drain-wait sequence so a sporadic
   # ``Bad file descriptor [OSError]`` from the residual fork hazard
   # documented above is reported instead of tearing down the worker
@@ -2409,18 +2943,41 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
     var childEnv = newStringTable(modeCaseSensitive)
     for (k, v) in baseEnv:
       childEnv[k] = v
+    # The skip census below reads the console formatter's status markers,
+    # so the two knobs that can suppress them are pinned rather than
+    # inherited. ``NIMTEST_OUTPUT_LVL=PRINT_FAILURES`` in an ambient
+    # environment would print nothing for a skipped case and silently
+    # restore the exact blind spot this exists to close;
+    # ``NIMTEST_COLOR=always`` would wrap the marker in escapes. Both
+    # values are ``unittest``'s own defaults for a piped child, so
+    # pinning them changes no output that was already being produced.
+    childEnv["NIMTEST_OUTPUT_LVL"] = "PRINT_ALL"
+    childEnv["NIMTEST_COLOR"] = "never"
+    history.markStarting(testLease)
     let p = spawnedProcess(tc.binary, args = [], env = childEnv)
+    history.markRunning(testLease, uint64(max(p.process.processID, 0)),
+      when defined(posix): uint64(max(p.processGroup, 0)) else: 0'u64)
     # Past this point the child exists, so a fault is a collection
     # failure and must not be reported as a spawn failure — mislabelling
     # the phase is what sent the first investigation of this defect at
     # the wrong code.
     whichPhase = "child started but its result could not be collected"
-    let (output, exitCode, timedOut, timeoutDescription) =
-      drainAndWaitWithTimeout(p, testTimeoutSec)
-    if timedOut:
+    childOutcome = drainAndWaitWithTimeout(p, testTimeoutSec,
+      memoryLimitBytes)
+    let output = childOutcome.output
+    let exitCode = childOutcome.exitCode
+    if childOutcome.memoryExceeded:
+      # A FAIL, and one that the spine row will label ``oom_killed``
+      # rather than ``exited`` — which is the whole point of recording a
+      # termination kind beside an exit status.
       result.status = tsFail
       result.stdout =
-        "repro_test_runner: " & timeoutDescription &
+        "repro_test_runner: " & childOutcome.timeoutDescription &
+        "; SIGKILLed\n" & output
+    elif childOutcome.timedOut:
+      result.status = tsFail
+      result.stdout =
+        "repro_test_runner: " & childOutcome.timeoutDescription &
         "; SIGKILLed\n" & output
     else:
       result.stdout = output
@@ -2433,6 +2990,22 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
           "child reported harness exit " & $HarnessErrorExitCode &
           " (could not start the test)"
       else: result.status = tsFail
+      if result.status == tsPass:
+        # A whole binary exits 0 whether every case passed or some case
+        # called ``skip()`` — the exit-code-2 skip convention is
+        # ``--run``-only (see ``WholeBinarySkipMarker``). Reporting PASS
+        # here made ``skip=0`` in the run summary mean "no PER-CASE skip",
+        # not "no skip", so a zero-skip gate read green while the console
+        # log carried ``[SKIPPED]`` lines nobody was counting.
+        #
+        # Only PASS is reclassified. A binary that also FAILED stays
+        # FAILED: a skip must never be able to absorb a failure.
+        let skipped = wholeBinarySkippedCases(output)
+        if skipped.len > 0:
+          result.status = tsSkip
+          result.skipReason =
+            "whole-binary run: " & $skipped.len &
+            " unittest case(s) skipped: " & skipped.join(", ")
   except ProcessGroupRefusal as e:
     # A verdict WAS reached: the case leaked processes that outlived
     # bounded cleanup. That is a defect in the tree, so it is FAIL and it
@@ -2440,6 +3013,7 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
     # ``harness_errors``, which is a statement about the run.
     result.status = tsFail
     result.stdout = e.msg
+    groupRefused = true
   except OSError as e:
     # NOT a test failure: nothing was observed about the code under test.
     # See ``TestStatus.tsHarnessError``.
@@ -2453,6 +3027,7 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
       "repro_test_runner: " & whichPhase & " (i/o): " & e.msg & "\n"
   result.durationMs = int((epochTime() - t0) * 1000)
   result.stderr = ""
+  history.reportExecution(testLease, result, childOutcome, groupRefused)
 
 proc signalName(sig: int): string =
   ## Name for a signal number, or "" when it is not one this runner can
@@ -2529,7 +3104,9 @@ proc missingDocumentDiagnostic(resultFile: string; exitCode: int;
 
 proc runOneProtocol(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]];
-                    testTimeoutSec: int): TestResult =
+                    testTimeoutSec: int;
+                    history: ptr HistoryReporter = nil;
+                    memoryLimitBytes = 0'u64): TestResult =
   result.testCase = tc
   result.status = tsFail
   let resultFile = resultsDir / (tc.binaryStem & "__" &
@@ -2579,11 +3156,20 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   var phase = ""
   var childStarted = false
   var p: TestProcess
+  # M19: the lease spans the execution, so the spine row's start, finish
+  # and duration describe the test rather than the queueing around it.
+  var testLease = history.acquireLease(
+    (if tc.qualifiedName.len > 0: tc.qualifiedName else: tc.binaryStem),
+    memoryBytes = leaseMemoryBytes(memoryLimitBytes))
+  var childOutcome: ChildRunOutcome
   try:
+    history.markStarting(testLease)
     # ``runName`` is the catalog's own ``name``, never a reconstruction.
     p = spawnedProcess(
       tc.binary, args = ["--run", tc.runName], env = childEnv)
     childStarted = true
+    history.markRunning(testLease, uint64(max(p.process.processID, 0)),
+      when defined(posix): uint64(max(p.processGroup, 0)) else: 0'u64)
   except OSError as e:
     spawnFailed = true
     phase = "spawn failed: " & e.msg
@@ -2592,8 +3178,12 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     phase = "spawn failed (i/o): " & e.msg
   if childStarted:
     try:
-      (output, exitCode, timedOut, timeoutDescription) =
-        drainAndWaitWithTimeout(p, testTimeoutSec)
+      childOutcome = drainAndWaitWithTimeout(p, testTimeoutSec,
+        memoryLimitBytes)
+      output = childOutcome.output
+      exitCode = childOutcome.exitCode
+      timedOut = childOutcome.timedOut
+      timeoutDescription = childOutcome.timeoutDescription
     except ProcessGroupRefusal as e:
       # Named before the harness-fault handlers so a leaked process group
       # can never be re-absorbed into ERROR.
@@ -2610,7 +3200,7 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     result.harnessError = phase
     output = "repro_test_runner: " & phase & "\n" & output
   result.durationMs = int((epochTime() - t0) * 1000)
-  if timedOut:
+  if timedOut or childOutcome.memoryExceeded:
     result.stdout =
       "repro_test_runner: " & timeoutDescription &
       "; SIGKILLed\n" & output
@@ -2631,7 +3221,10 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     # case leaked processes past a bounded kill — so this is a defect in
     # the tree and belongs in ``failed``.
     result.status = tsFail
-  elif timedOut:
+  elif timedOut or childOutcome.memoryExceeded:
+    # A ceiling kill is a FAIL for the same reason a timeout is: the
+    # runner observed the case misbehaving. What separates the two on the
+    # spine is ``termination``, not the status.
     result.status = tsFail
   else:
     case exitCode
@@ -2673,7 +3266,11 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   # manufacture a bogus ``status_disagreement``).
   let documentPresent = fileExists(resultFile)
   var documentUnreadable = false
-  if not spawnFailed and not timedOut and not groupRefused and
+  # A memory-killed child is excluded for exactly the reason a timed-out
+  # one is: its document, if any, predates the kill and must not be
+  # allowed to overturn the runner's own verdict with a stale PASS.
+  if not spawnFailed and not timedOut and not childOutcome.memoryExceeded and
+      not groupRefused and
       result.status != tsHarnessError and documentPresent:
     try:
       let doc = parseJson(readFile(resultFile))
@@ -2753,7 +3350,8 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   # Scoped to exactly the branch that would have read the document, so a
   # timeout, a refusal and a spawn fault — each of which already writes
   # its own account — are untouched.
-  if not spawnFailed and not timedOut and not groupRefused and
+  if not spawnFailed and not timedOut and not childOutcome.memoryExceeded and
+      not groupRefused and
       result.status != tsHarnessError and result.status != tsPass and
       (not documentPresent or documentUnreadable):
     result.runnerDiagnosis =
@@ -2762,6 +3360,7 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   if result.statusDisagreement.len > 0:
     result.stdout.add("\nrepro_test_runner: protocol disagreement: " &
       result.statusDisagreement & "\n")
+  history.reportExecution(testLease, result, childOutcome, groupRefused)
 
 proc nextCase(queue: ptr Queue; failFast: bool;
               out_case: var TestCase): bool =
@@ -2789,7 +3388,120 @@ const
     ## the case's own result document keep every line; this bound exists
     ## so one pathological case cannot bury the other 6800 in the log.
 
+  DefaultHeartbeatIntervalSec = 60
+    ## How often the heartbeat restates where the run is. Sixty seconds is
+    ## short enough that a stall is visible within a minute and long enough
+    ## that a multi-hour log gains a couple of hundred lines, not thousands.
+    ## Override with ``REPRO_TEST_RUNNER_HEARTBEAT_SEC`` when watching a run
+    ## interactively (and so the runner's own regression can observe a
+    ## heartbeat without waiting a minute for one).
+
+  HeartbeatIntervalEnv = "REPRO_TEST_RUNNER_HEARTBEAT_SEC"
+
+  HeartbeatPollMs = 250
+    ## Sleep granularity of the heartbeat thread. It wakes often so the run
+    ## can join it promptly at the end; it only PRINTS once per configured
+    ## interval (see ``heartbeatIntervalSec``).
+
+# ---------------------------------------------------------------------------
+# Live progress ledger
+# ---------------------------------------------------------------------------
+#
+# A full run takes hours, and until this existed the only progress signal was
+# the per-case line: no denominator, no elapsed, no running failure count, and
+# nothing at all while a single slow case held a worker. A run that hit the
+# outer ``timeout`` therefore yielded NOTHING a reader could act on — the
+# summary JSON is written once, at the end, so a killed run had neither a
+# summary nor any way to tell 20% done from 90% done.
+#
+# Everything below goes to STDERR. Stdout is the machine-readable side of the
+# runner's contract (``--list-json`` catalogs and anything a caller pipes), so
+# human progress must never be written there.
+var
+  progressTotal: Atomic[int]
+    ## Cases scheduled for this run. Published once, before the first case.
+  progressDone: Atomic[int]
+  progressFailed: Atomic[int]
+    ## Failures AND harness errors: from the console's point of view both are
+    ## "this run is not going to be green", which is what a reader watching a
+    ## long run needs to know without waiting for the summary.
+  progressActive: Atomic[int]
+  progressStartEpoch: float
+  heartbeatStop: Atomic[bool]
+
+proc formatElapsed(seconds: float): string =
+  let total = int(seconds)
+  let h = total div 3600
+  let m = (total mod 3600) div 60
+  let s = total mod 60
+  if h > 0:
+    $h & "h" & align($m, 2, '0') & "m" & align($s, 2, '0') & "s"
+  else:
+    $m & "m" & align($s, 2, '0') & "s"
+
+proc progressPrefix(done, total: int): string =
+  ## ``[123/1183 10%]`` — the denominator is the whole point: a bare running
+  ## count cannot distinguish a run that is nearly finished from one that has
+  ## barely started.
+  if total > 0:
+    "[" & $done & "/" & $total & " " & $(done * 100 div total) & "%] "
+  else:
+    "[" & $done & "] "
+
+proc emitHeartbeat() =
+  let done = progressDone.load(moRelaxed)
+  let total = progressTotal.load(moRelaxed)
+  let failed = progressFailed.load(moRelaxed)
+  let active = progressActive.load(moRelaxed)
+  let elapsed = epochTime() - progressStartEpoch
+  var msg = "repro_test_runner: " & progressPrefix(done, total) &
+    "elapsed=" & formatElapsed(elapsed) &
+    " running=" & $active & " failed=" & $failed
+  if done > 0 and total > done:
+    # A projection, explicitly labelled as one. It assumes the remaining
+    # cases cost what the finished ones did, which they will not exactly —
+    # but "about two more hours" is the difference between waiting and
+    # killing the run, and that judgement is impossible without a number.
+    let projected = elapsed / done.float * (total - done).float
+    msg.add(" eta~" & formatElapsed(projected))
+  msg.add("\n")
+  stderr.write(msg)
+  stderr.flushFile()
+
+proc heartbeatIntervalSec(): int =
+  ## A non-numeric or non-positive override is ignored rather than treated as
+  ## "off": losing the heartbeat is exactly the failure mode it exists to
+  ## remove, so it must not be switchable by a typo.
+  let configured = getEnv(HeartbeatIntervalEnv, "")
+  if configured.len == 0:
+    return DefaultHeartbeatIntervalSec
+  try:
+    let parsed = parseInt(configured)
+    if parsed > 0: parsed else: DefaultHeartbeatIntervalSec
+  except ValueError:
+    DefaultHeartbeatIntervalSec
+
+proc heartbeatMain(intervalSec: int) {.thread.} =
+  ## Restates the ledger on a fixed interval so a run that is slow, stalled or
+  ## about to be killed by the outer ``timeout`` still says where it got to.
+  ## Without it a single long case (the suite has one worth ~81 minutes) makes
+  ## the log indistinguishable from a wedge.
+  var sinceLastMs = 0
+  while not heartbeatStop.load(moAcquire):
+    sleep(HeartbeatPollMs)
+    sinceLastMs += HeartbeatPollMs
+    if sinceLastMs >= intervalSec * 1000:
+      sinceLastMs = 0
+      if not heartbeatStop.load(moAcquire):
+        emitHeartbeat()
+
 proc emitProgress(quiet: bool; res: TestResult) =
+  # The ledger is maintained even under ``--quiet``: the heartbeat and the
+  # end-of-run accounting must not depend on whether per-case lines are being
+  # printed, or a quiet run would report zero progress.
+  let done = progressDone.fetchAdd(1, moRelaxed) + 1
+  if res.status in {tsFail, tsHarnessError}:
+    discard progressFailed.fetchAdd(1, moRelaxed)
   if quiet:
     return
   let label = "[" & $res.status & "]"
@@ -2811,7 +3523,8 @@ proc emitProgress(quiet: bool; res: TestResult) =
   # ``writeLine`` calls would interleave with other workers' lines at
   # ``--threads=8`` and stop being readable as a unit — which is the same
   # way the diagnosis gets lost that this block exists to prevent.
-  var msg = label & " " & name & " (" & $res.durationMs & "ms)" &
+  var msg = progressPrefix(done, progressTotal.load(moRelaxed)) &
+    label & " " & name & " (" & $res.durationMs & "ms)" &
     reason & "\n"
   if res.statusDisagreement.len > 0:
     msg.add("  ! protocol disagreement: " & res.statusDisagreement & "\n")
@@ -2861,6 +3574,7 @@ proc workerLoop(args: WorkerArgs) =
     if not nextCase(args.queue, args.failFast, tc):
       break
     discard atomicInc(args.activeCount[])
+    discard progressActive.fetchAdd(1, moRelaxed)
     var res: TestResult
     # Defence in depth: ``runOneProtocol`` and ``runWholeBinary`` both
     # catch the spawn-time ``OSError``/``IOError`` paths internally,
@@ -2871,12 +3585,17 @@ proc workerLoop(args: WorkerArgs) =
     # exception escaping the per-case drivers is the harness failing,
     # not the case.
     try:
+      # THE PER-CASE VALUE WINS WHEN THERE IS ONE. ``tc.timeoutSec`` is
+      # zero unless §17.4's adaptive computation put something there, so
+      # this reduces to ``args.testTimeoutSec`` on every ordinary run.
+      let caseTimeoutSec =
+        if tc.timeoutSec > 0: tc.timeoutSec else: args.testTimeoutSec
       if tc.protocolAware:
         res = runOneProtocol(tc, args.resultsDir, args.baseEnv[],
-          args.testTimeoutSec)
+          caseTimeoutSec, args.history, args.memoryLimitBytes)
       else:
         res = runWholeBinary(tc, args.resultsDir, args.baseEnv[],
-          args.testTimeoutSec)
+          caseTimeoutSec, args.history, args.memoryLimitBytes)
     except CatchableError as e:
       res = TestResult(
         testCase: tc,
@@ -2885,6 +3604,7 @@ proc workerLoop(args: WorkerArgs) =
         harnessError: "worker exception: " & e.msg,
         stdout: "repro_test_runner: worker exception: " & e.msg & "\n")
     discard atomicDec(args.activeCount[])
+    discard progressActive.fetchSub(1, moRelaxed)
 
     acquire(args.resultsLock[])
     args.results[].add(res)
@@ -2907,7 +3627,9 @@ proc countStatusDisagreements(results: seq[TestResult]): int =
 
 proc writeSummary(summaryPath: string; results: seq[TestResult];
                   wallTimeMs: int; threadsUsed: int;
-                  selection: SelectionDecision; deselectedCases: int) =
+                  selection: SelectionDecision; deselectedCases: int;
+                  historyCaptured: bool; historyUncaptured: int;
+                  scheduling: JsonNode = nil) =
   var total = results.len
   var passed = 0
   var failed = 0
@@ -3026,6 +3748,17 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
   summary["status_disagreements"] = %countStatusDisagreements(results)
   summary["wall_time_ms"] = %wallTimeMs
   summary["threads"] = %threadsUsed
+  # M19: whether this run's executions reached RunQuota's observation
+  # store. Recorded because a reader of this artifact otherwise cannot
+  # tell "the store has no rows for this run because there was no daemon"
+  # from "the store lost them" — and an absent history that reads as a
+  # complete one is the failure OS-2 is about.
+  summary["runquota_history"] = %historyCaptured
+  # OS-2: how many executions ran with no lease behind them, because the
+  # daemon queued or denied the candidate. A run whose history is thin
+  # says how thin rather than presenting the rows it did get as the
+  # whole picture.
+  summary["runquota_history_uncaptured"] = %historyUncaptured
   # Why this run's case set is the size it is. Without this a reader of
   # the artifact cannot tell a deliberately selected subset from a run
   # that lost cases — the two produce the same shape of document and the
@@ -3042,6 +3775,19 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
   if selection.reason.len > 0:
     sel["fell_back_because"] = %selection.reason
   summary["selection"] = sel
+  # M21: what the shared store did to this run's schedule, and — where it
+  # did nothing — WHY. A shard that fell back from ``duration`` to
+  # ``count`` and a shard that was asked for ``count`` produce the same
+  # case set; only this record tells them apart, and the difference is
+  # whether the split was informed by anything.
+  #
+  # ABSENT WHEN NEITHER FEATURE WAS ASKED FOR, rather than present and
+  # empty: a reader finding no ``scheduling`` key knows nothing was
+  # scheduled from history, which is not the same as a plan that read the
+  # store and found nothing.
+  if scheduling != nil and scheduling.kind == JObject and
+      scheduling.len > 0:
+    summary["scheduling"] = scheduling
   doc["summary"] = summary
   doc["tests"] = arr
   ensureDir(parentDir(summaryPath))
@@ -3066,6 +3812,44 @@ type
       ## ``--catalog-read PATH``: consult this catalog and skip cases
       ## whose ``bodyHash`` it positively vouches for. Empty means "run
       ## everything", which is the default and always remains available.
+    historyEnabled: bool
+      ## M19. ON by default and turned off by ``--no-runquota-history``
+      ## / ``REPRO_TEST_NO_RUNQUOTA_HISTORY=1``. "On" means "record if a
+      ## daemon answers": with no daemon the reporter's ``open`` returns
+      ## false and the run proceeds unchanged, because OS-4 says a
+      ## missing daemon MUST NOT be reported as an error.
+      ##
+      ## THIS FLAG DOES NOT GATE THE RUNNER'S CONCURRENCY. See
+      ## ``HistoryReporter.acquireLease``: a candidate the daemon queues
+      ## is abandoned rather than waited for, so admission never
+      ## reorders or delays a test. OS-1 is the reason — "Recording an
+      ## observation MUST NOT block ... Losing an observation is always
+      ## preferable to perturbing the work being observed" — and the
+      ## decision about whether RunQuota should also SCHEDULE this
+      ## runner belongs to a later milestone, not to a reporter.
+    adaptiveTimeout: bool
+      ## RunQuota-Observation-Store M21 / §17.4 ``adaptive-timeout``.
+      ## OFF by default: a per-test timeout derived from history changes
+      ## when a test is killed, and turning that on for every existing
+      ## caller without being asked would be a scheduling change smuggled
+      ## in with a query.
+    adaptiveMetric: string
+    adaptiveMultiplier: float
+    adaptiveMinimumSec: int
+    adaptiveRuns: int
+    partitionIndex: int
+      ## ``--partition=slice:I/N``, 1-based. Zero means "no partition",
+      ## which is the default and runs every case.
+    partitionCount: int
+    shardStrategy: string
+      ## ``--shard-strategy=count|duration`` (§17.5). Only meaningful
+      ## with ``--partition``.
+    memoryLimitMb: int
+      ## ``--test-memory-limit-mb=N`` (env ``REPRO_TEST_MEMORY_LIMIT_MB``),
+      ## 0 = off and the default. The resident size a test's whole
+      ## process tree may reach, which is ALSO the memory it reserves
+      ## from RunQuota. A test that crosses it is killed and its spine
+      ## row reads ``termination = oom_killed`` rather than ``exited``.
 
 proc defaultThreads(): int =
   let env = getEnv("REPRO_TEST_THREADS")
@@ -3091,6 +3875,28 @@ proc parseArgs(): RunnerOpts =
   result.testTimeoutSec = 0
   result.catalogWritePath = ""
   result.catalogReadPath = ""
+  result.historyEnabled = getEnv("REPRO_TEST_NO_RUNQUOTA_HISTORY", "") notin
+    ["1", "true", "yes"]
+  # §17.4's own defaults, taken from the specification's example profile
+  # rather than restated: metric p99, multiplier 3.0, minimum 5s, runs 20.
+  # ``fallback`` is NOT a separate knob here — the runner already has one
+  # ("the profile's global timeout", i.e. ``--test-timeout``) and adding a
+  # second default would mean a test with no history could time out at a
+  # value the caller never set.
+  let defaults = defaultAdaptiveTimeoutConfig()
+  result.adaptiveTimeout = false
+  result.adaptiveMetric = $defaults.metric
+  result.adaptiveMultiplier = defaults.multiplier
+  result.adaptiveMinimumSec = defaults.minimumMs div 1000
+  result.adaptiveRuns = defaults.runs
+  result.partitionIndex = 0
+  result.partitionCount = 0
+  result.shardStrategy = $ssCount
+  result.memoryLimitMb = 0
+  let memoryLimitEnv = getEnv("REPRO_TEST_MEMORY_LIMIT_MB", "")
+  if memoryLimitEnv.len > 0:
+    try: result.memoryLimitMb = max(0, parseInt(memoryLimitEnv))
+    except ValueError: discard
   var p = initOptParser(commandLineParams())
   while true:
     p.next()
@@ -3125,9 +3931,86 @@ proc parseArgs(): RunnerOpts =
           quit(2)
         if result.testTimeoutSec < 0:
           result.testTimeoutSec = 0
+      of "no-runquota-history": result.historyEnabled = false
+      of "runquota-history": result.historyEnabled = true
+      of "adaptive-timeout": result.adaptiveTimeout = true
+      of "adaptive-timeout-metric":
+        if p.val notin ["mean", "median", "p90", "p99"]:
+          stderr.writeLine "repro_test_runner: --adaptive-timeout-metric " &
+            "must be one of mean, median, p90, p99"
+          quit(2)
+        result.adaptiveMetric = p.val
+      of "adaptive-timeout-multiplier":
+        try:
+          result.adaptiveMultiplier = parseFloat(p.val)
+        except ValueError:
+          stderr.writeLine "repro_test_runner: " &
+            "--adaptive-timeout-multiplier requires a number"
+          quit(2)
+        if result.adaptiveMultiplier <= 0.0:
+          stderr.writeLine "repro_test_runner: " &
+            "--adaptive-timeout-multiplier must be positive"
+          quit(2)
+      of "adaptive-timeout-minimum":
+        try:
+          result.adaptiveMinimumSec = parseInt(p.val)
+        except ValueError:
+          stderr.writeLine "repro_test_runner: --adaptive-timeout-minimum " &
+            "requires an integer (seconds)"
+          quit(2)
+        if result.adaptiveMinimumSec < 0:
+          result.adaptiveMinimumSec = 0
+      of "adaptive-timeout-runs":
+        try:
+          result.adaptiveRuns = parseInt(p.val)
+        except ValueError:
+          stderr.writeLine "repro_test_runner: --adaptive-timeout-runs " &
+            "requires an integer"
+          quit(2)
+        if result.adaptiveRuns < 0:
+          result.adaptiveRuns = 0
+      of "partition":
+        # §17.5's own spelling: ``--partition slice:1/4``.
+        let value = p.val
+        let body =
+          if value.startsWith("slice:"): value["slice:".len .. ^1] else: ""
+        let parts = body.split('/')
+        var ok = parts.len == 2
+        if ok:
+          try:
+            result.partitionIndex = parseInt(parts[0])
+            result.partitionCount = parseInt(parts[1])
+          except ValueError:
+            ok = false
+        if not ok or result.partitionCount < 1 or
+            result.partitionIndex < 1 or
+            result.partitionIndex > result.partitionCount:
+          stderr.writeLine "repro_test_runner: --partition requires " &
+            "slice:I/N with 1 <= I <= N"
+          quit(2)
+      of "shard-strategy":
+        if p.val notin ["count", "duration"]:
+          stderr.writeLine "repro_test_runner: --shard-strategy must be " &
+            "count or duration"
+          quit(2)
+        result.shardStrategy = p.val
+      of "test-memory-limit-mb":
+        try:
+          result.memoryLimitMb = parseInt(p.val)
+        except ValueError:
+          stderr.writeLine "repro_test_runner: --test-memory-limit-mb " &
+            "requires an integer (megabytes)"
+          quit(2)
+        if result.memoryLimitMb < 0:
+          result.memoryLimitMb = 0
       of "help", "h":
         echo "repro_test_runner — protocol-level parallel test runner"
-        echo "  --threads N         worker count (default $NPROC)"
+        # The old text said "default $NPROC". It never was: an absent or
+        # non-positive --threads has always been clamped to 1 twenty lines
+        # below. Callers that want a host-derived value compute it themselves
+        # (scripts/test_parallelism.sh), which is where the nested-build
+        # budget lives.
+        echo "  --threads N         worker count (default 1)"
         echo "  --bin-dir DIR       scan DIR for test binaries"
         echo "  --no-build          skip ``repro build test`` step"
         echo "  --summary-json P    write per-run JSON summary to P"
@@ -3143,9 +4026,48 @@ proc parseArgs(): RunnerOpts =
         echo "                      hashes cover compiled sources only, " &
           "not data files read at run"
         echo "                      time, env vars or external tools"
-        echo "  --quiet             suppress per-test progress lines"
-        echo "  --test-timeout=N    per-test idle timeout; output resets it; " &
-          "hard ceiling 4xN (seconds, 0=off)"
+        echo "  --quiet             suppress per-test progress lines " &
+          "(the periodic heartbeat stays)"
+        echo "  --test-timeout=N    per-test idle timeout; output resets it, " &
+          "as does process-group CPU"
+        echo "                      progress (so a CPU-starved test is not " &
+          "mistaken for a hung one);"
+        echo "                      hard ceiling 4xN still kills a livelock " &
+          "(seconds, 0=off)"
+        echo "  --no-runquota-history"
+        echo "                      do not record executions into " &
+          "RunQuota's observation store"
+        echo "  --test-memory-limit-mb=N"
+        echo "                      resident ceiling per test tree, and " &
+          "the RunQuota memory reservation;"
+        echo "                      a test that crosses it is killed and " &
+          "recorded as oom_killed (0=off)"
+        echo "  --adaptive-timeout  derive each case's timeout from the " &
+          "shared observation store"
+        echo "                      (metric x multiplier, floored at the " &
+          "minimum, capped at --test-timeout);"
+        echo "                      a case with no history keeps " &
+          "--test-timeout rather than a derived one"
+        echo "  --adaptive-timeout-metric=mean|median|p90|p99   (default p99)"
+        echo "  --adaptive-timeout-multiplier=F                 (default 3.0)"
+        echo "  --adaptive-timeout-minimum=N                    (seconds, " &
+          "default 5)"
+        echo "  --adaptive-timeout-runs=N                       (per-test " &
+          "window, default 20; 0=all)"
+        echo "  --partition=slice:I/N"
+        echo "                      run only shard I of N"
+        echo "  --shard-strategy=count|duration"
+        echo "                      how --partition splits: equal case " &
+          "count, or equal estimated"
+        echo "                      time from the shared store; duration " &
+          "falls back to count when"
+        echo "                      no case in this run has history"
+        echo ""
+        echo "stats subcommands (query the shared observation store, no " &
+          "test run):"
+        echo "  stats flaky | duration | new-failures [--runs N] [--json] " &
+          "[--scope=host]"
+        echo "  stats last-pass TEST_ID [--json] [--scope=host]"
         quit(0)
       else:
         stderr.writeLine "repro_test_runner: unknown option --" & p.key
@@ -3304,6 +4226,61 @@ proc ensureWorkspaceSourceEnv(repoRoot: string) =
     if bearssl.len > 0:
       putEnv("BEARSSL_SRC", bearssl)
 
+# ---------------------------------------------------------------------------
+# M21: the revision a run is of.
+#
+# **IT LIVES HERE AND NOT IN ``ct_test_history``, AND THE REASON IS A
+# REPOSITORY RULE RATHER THAN TASTE.** ``scripts/check_ambient_execution.sh``
+# is a ratchet over ``libs/``, ``apps/`` and ``repro.nim``: a library that
+# acquires a ``findExe``/``execCmdEx``-class call resolves an arbitrary host
+# binary through ambient PATH and records nothing, which
+# ``Package-Model.md`` §"Executables, Libraries, And Package Collections"
+# forbids outside a declared execution profile. Shelling out to ``git`` from
+# ``ct_test_history`` put a new offender on that list.
+#
+# It also contradicted the library's own contract: ``open`` documents the
+# revision as "THE CALLER'S TO RESOLVE" and takes it as two parameters. A
+# library that says the caller resolves it and then ships the resolver is
+# answering the question twice. The runner is the caller, it already spawns
+# processes for a living, and ``tools/`` is outside the ratchet's scan for
+# exactly that reason.
+# ---------------------------------------------------------------------------
+
+proc gitRevisionOf*(directory: string): tuple[commit, branch: string] =
+  ## The revision ``directory`` is checked out at, or empty strings.
+  ##
+  ## TOTAL, AND EMPTY IS A REAL ANSWER. A directory that is not a working
+  ## copy, a host with no ``git``, a repository with no commit yet: all
+  ## three answer "" and the caller writes SQL NULL. Inventing a
+  ## placeholder here would make ``last-pass`` report a revision that no
+  ## execution ever ran at, which is worse than reporting none.
+  ##
+  ## ``stderr`` IS FOLDED INTO THE CAPTURE rather than left to the
+  ## console: the ordinary "not a git repository" case is not an error
+  ## worth telling a test-runner user about, and OS-4's rule that a
+  ## degraded capture is not an error is the same rule one level down.
+  for probe in [(command: "rev-parse HEAD", slot: 0),
+                (command: "rev-parse --abbrev-ref HEAD", slot: 1)]:
+    let command = probe.command
+    let slot = probe.slot
+    var text = ""
+    var code = 1
+    try:
+      let answer = execCmdEx("git " & command,
+        options = {poStdErrToStdOut, poUsePath}, workingDir = directory)
+      text = answer.output.strip()
+      code = answer.exitCode
+    except CatchableError:
+      code = 1
+    if code != 0 or text.len == 0 or '\n' in text:
+      continue
+    if slot == 0: result.commit = text else: result.branch = text
+  # A detached HEAD answers ``HEAD`` to ``--abbrev-ref``, which is the
+  # NAME OF NO BRANCH. Stored as absent rather than as a branch called
+  # "HEAD", which is a name a reader would take literally.
+  if result.branch == "HEAD":
+    result.branch = ""
+
 proc main() =
   let opts = parseArgs()
   let cwd = getCurrentDir()
@@ -3431,6 +4408,132 @@ proc main() =
         opts.catalogWritePath & " (" & e.msg & ")"
       quit(2)
 
+  # ---- M21: history-fed scheduling (§17.4, §17.5) ------------------------
+  #
+  # BOTH READ THE SHARED OBSERVATION STORE THROUGH ``repro_test_stats``,
+  # which is the same reader ``stats flaky`` / ``duration`` / ``last-pass``
+  # / ``new-failures`` use. §17.3 §"How these read": the query interface
+  # "serves the runner's *adaptive timeouts* (§17.4) and RunQuota's own
+  # admission estimates — the same rows at a different aggregation." A
+  # scheduler with its own store would be a second thing to keep correct,
+  # and a second thing that could disagree with what the queries report.
+  #
+  # NEITHER READS AT ALL UNLESS ASKED. With no ``--adaptive-timeout`` and
+  # no ``--partition`` the block below issues no query, so an ordinary run
+  # neither depends on a daemon nor pays for one.
+  var scheduling = newJObject()
+  block historyFedScheduling:
+    let wantsTimeouts = opts.adaptiveTimeout
+    let wantsDurationShards = opts.partitionCount > 1 and
+      opts.shardStrategy == $ssDuration
+    if not wantsTimeouts and not wantsDurationShards and
+        opts.partitionCount == 0:
+      break historyFedScheduling
+
+    var historyRows: seq[GenericTestRow] = @[]
+    var historyAnswered = false
+    if wantsTimeouts or wantsDurationShards:
+      let read = readSchedulingHistory()
+      historyRows = read.rows
+      historyAnswered = read.answered
+      if not historyAnswered:
+        # OS-4: a missing daemon is not an error. It IS a fact about the
+        # plan, so it is stated rather than swallowed — the alternative is
+        # a run whose timeouts silently came from nowhere.
+        stderr.writeLine "repro_test_runner: no runquotad answered; " &
+          "history-fed scheduling falls back to its configured defaults"
+    scheduling["historyAvailable"] = %historyAnswered
+    scheduling["historyRows"] = %historyRows.len
+
+    if opts.partitionCount > 1:
+      var testIds: seq[string] = @[]
+      for tc in queue.items:
+        testIds.add(tc.qualifiedName)
+      let requested =
+        if opts.shardStrategy == $ssDuration: ssDuration else: ssCount
+      let estimates =
+        if wantsDurationShards: durationEstimates(historyRows)
+        else: initTable[string, int]()
+      let plan = planShards(testIds, estimates, opts.partitionCount, requested)
+      var kept: seq[TestCase] = @[]
+      for i, tc in queue.items:
+        if plan.assignment[i] == opts.partitionIndex - 1:
+          kept.add(tc)
+      scheduling["shard"] = %*{
+        "index": opts.partitionIndex,
+        "count": opts.partitionCount,
+        "requestedStrategy": $plan.requested,
+        "appliedStrategy": $plan.applied,
+        "fellBack": plan.fellBack,
+        "reason": plan.reason,
+        "casesWithHistory": plan.withHistory,
+        "casesWithoutHistory": plan.withoutHistory,
+        "casesBefore": queue.items.len,
+        "casesAfter": kept.len,
+        "shardEstimateMs": plan.shardEstimateMs
+      }
+      stderr.writeLine "repro_test_runner: partition slice:" &
+        $opts.partitionIndex & "/" & $opts.partitionCount & " (" &
+        $plan.applied & (if plan.fellBack: ", fell back from " &
+          $plan.requested else: "") & ") selected " & $kept.len & " of " &
+        $queue.items.len & " cases"
+      queue.items = kept
+      totalCases = kept.len
+
+    if wantsTimeouts:
+      var config = defaultAdaptiveTimeoutConfig()
+      config.enabled = true
+      config.metric = parseEnum[TimeoutMetric](opts.adaptiveMetric)
+      config.multiplier = opts.adaptiveMultiplier
+      config.minimumMs = opts.adaptiveMinimumSec * 1000
+      config.runs = opts.adaptiveRuns
+      # THE FALLBACK IS THE RUNNER'S OWN GLOBAL TIMEOUT, not a second
+      # default invented here. §17.4 step 3 ("If a test has no history
+      # ... the ``fallback`` timeout is used") and step 5 (the cap) both
+      # resolve to ``--test-timeout``, so a case with no history is
+      # timed exactly as it would have been without this flag.
+      config.fallbackMs = opts.testTimeoutSec * 1000
+      config.globalTimeoutMs = opts.testTimeoutSec * 1000
+      var testIds: seq[string] = @[]
+      for tc in queue.items:
+        testIds.add(tc.qualifiedName)
+      let answers = adaptiveTimeouts(historyRows, testIds, config)
+      var fromHistory = 0
+      var fromFallback = 0
+      var cases = newJArray()
+      for i in 0 ..< queue.items.len:
+        let answer = answers[i]
+        # ZERO IS NOT WRITTEN BACK. ``timeoutSec == 0`` already means "no
+        # per-case value" in ``TestCase``, so a computed zero — which is
+        # what a fallback of ``--test-timeout=0`` produces — must leave
+        # the field alone rather than round-trip through a sentinel.
+        let seconds = answer.timeoutMs div 1000
+        if seconds > 0:
+          queue.items[i].timeoutSec = seconds
+        if answer.source == tsFallback: inc fromFallback
+        else: inc fromHistory
+        cases.add(%*{
+          "testId": answer.testId,
+          "timeoutSec": seconds,
+          "source": $answer.source,
+          "samples": answer.samples,
+          "metricMs": answer.metricMs
+        })
+      scheduling["adaptiveTimeout"] = %*{
+        "enabled": true,
+        "metric": $config.metric,
+        "multiplier": config.multiplier,
+        "minimumSec": opts.adaptiveMinimumSec,
+        "runs": config.runs,
+        "fallbackSec": opts.testTimeoutSec,
+        "fromHistory": fromHistory,
+        "fromFallback": fromFallback,
+        "cases": cases
+      }
+      stderr.writeLine "repro_test_runner: adaptive timeouts — " &
+        $fromHistory & " from history, " & $fromFallback &
+        " from the configured fallback"
+
   stderr.writeLine "repro_test_runner: " & $protocolBinaries &
     " protocol-aware, " & $opaqueBinaries & " whole-binary, " &
     $totalCases & " test cases, " & $opts.threads & " threads"
@@ -3442,6 +4545,11 @@ proc main() =
     else:
       stderr.writeLine "repro_test_runner: hash-difference selection " &
         "deselected 0 cases (catalog unusable)"
+
+  # Publish the denominator BEFORE the first case runs. Every progress line
+  # from here on carries "done of total", which is the difference between a
+  # log a reader can act on and one that only says work is happening.
+  progressTotal.store(totalCases, moRelaxed)
 
   var resultsLock: Lock
   initLock(resultsLock)
@@ -3532,7 +4640,43 @@ proc main() =
       {fpUserRead, fpUserWrite, fpUserExec})
     var interruptThread = startInterruptWaiter()
 
+  # ---- M19: open the observation reporter --------------------------------
+  #
+  # OPENED HERE, ON THE MAIN THREAD, BEFORE ANY WORKER OR EXCLUSIVE CASE
+  # RUNS, and closed after every one of them has finished. One session
+  # for the whole invocation, so the daemon opens one ``runs`` row for
+  # this run rather than one per worker.
+  #
+  # A FAILURE TO OPEN IS NOT AN ERROR AND IS NOT ANNOUNCED AS ONE (OS-4:
+  # "a missing daemon MUST NOT be reported as an error"). The run
+  # proceeds with capture off and the summary says so, which is the
+  # difference between a quiet degradation and a silent one.
+  let memoryLimitBytes =
+    if opts.memoryLimitMb > 0: uint64(opts.memoryLimitMb) * 1024'u64 * 1024'u64
+    else: 0'u64
+  var history: HistoryReporter
+  var historyPtr: ptr HistoryReporter = nil
+  if opts.historyEnabled:
+    # M21: the REVISION this run is of, resolved ONCE here and recorded
+    # against every execution, so ``stats last-pass`` can answer "did it
+    # work before my change" and not only "did it work before now".
+    #
+    # RESOLVED FROM THE RUNNER'S OWN WORKING DIRECTORY, which is the
+    # checkout the tests were built from. A tree that is not a working
+    # copy answers empty, no row is written, and ``last-pass`` reports
+    # the revision as unknown — never as a fabricated one.
+    let revision = gitRevisionOf(cwd)
+    if open(addr history, gitCommit = revision.commit,
+            gitBranch = revision.branch):
+      historyPtr = addr history
+
   let wallT0 = epochTime()
+  progressStartEpoch = wallT0
+  # Started before the exclusive phase, not before the worker pool: the
+  # exclusive cases are the slowest in the suite and run one at a time, so
+  # they are exactly the stretch where the log would otherwise go quiet.
+  var heartbeatThread: Thread[int]
+  createThread(heartbeatThread, heartbeatMain, heartbeatIntervalSec())
   var exclusiveFailed = false
 
   if exclusiveItems.len > 0 and not (failFast and queue.failFastTriggered):
@@ -3540,14 +4684,17 @@ proc main() =
       when defined(posix):
         if interruptedSignal.load(moAcquire) != 0:
           break
+      discard progressActive.fetchAdd(1, moRelaxed)
       var res: TestResult
       try:
+        let caseTimeoutSec =
+          if tc.timeoutSec > 0: tc.timeoutSec else: opts.testTimeoutSec
         if tc.protocolAware:
           res = runOneProtocol(tc, opts.resultsDir, baseEnv,
-            opts.testTimeoutSec)
+            caseTimeoutSec, historyPtr, memoryLimitBytes)
         else:
           res = runWholeBinary(tc, opts.resultsDir, baseEnv,
-            opts.testTimeoutSec)
+            caseTimeoutSec, historyPtr, memoryLimitBytes)
       except CatchableError as e:
         res = TestResult(
           testCase: tc,
@@ -3556,6 +4703,7 @@ proc main() =
           harnessError: "exclusive worker exception: " & e.msg,
           stdout: "repro_test_runner: exclusive worker exception: " &
             e.msg & "\n")
+      discard progressActive.fetchSub(1, moRelaxed)
       results.add(res)
       emitProgress(opts.quiet, res)
       if failFast and res.status in {tsFail, tsHarnessError}:
@@ -3571,7 +4719,9 @@ proc main() =
     failFast: failFast,
     testTimeoutSec: opts.testTimeoutSec,
     activeCount: addr activeCount,
-    baseEnv: addr baseEnv)
+    baseEnv: addr baseEnv,
+    history: historyPtr,
+    memoryLimitBytes: memoryLimitBytes)
 
   let nThreads =
     if queue.items.len == 0 or (failFast and exclusiveFailed):
@@ -3582,6 +4732,11 @@ proc main() =
   for i in 0 ..< nThreads:
     createThread(threads[i], workerMain, args)
   joinThreads(threads)
+
+  # Joined before the cleanup barrier below so no heartbeat line can interleave
+  # with the fatal-cleanup diagnostics or the final summary.
+  heartbeatStop.store(true, moRelease)
+  joinThread(heartbeatThread)
 
   when defined(posix):
     # `interruptedSignal` is stored before the waiter starts cleanup. Retaining
@@ -3600,8 +4755,15 @@ proc main() =
 
   let wallMs = int((epochTime() - wallT0) * 1000)
 
+  # Closed only after every worker and every exclusive case has finished,
+  # so no thread can be holding the socket while the session is torn down.
+  let historyCaptured = historyPtr.capturing()
+  let historyUncaptured = historyPtr.uncaptured()
+  historyPtr.close()
+
   writeSummary(opts.summaryPath, results, wallMs, nThreads,
-    selection, deselectedCases)
+    selection, deselectedCases, historyCaptured, historyUncaptured,
+    scheduling)
 
   var passed = 0
   var failed = 0
@@ -3664,5 +4826,52 @@ when defined(posix):
   if internalParams.len > 0 and
       internalParams[0] == ProcessGroupWrapperFlag:
     quit(processGroupWrapperMain(internalParams[1 .. ^1]))
+
+# RunQuota-Observation-Store M20 / §17.3: ``stats flaky`` and
+# ``stats duration``, answered from the shared observation store.
+#
+# DISPATCHED BEFORE ``main()`` BECAUSE IT IS NOT A TEST RUN: it starts no
+# workers, scans no bin dir and builds nothing. Routing it through the run
+# parser would make a query fail on a host with no test binaries, which is the
+# ordinary case for somebody asking what has been flaky lately.
+#
+# THE ANSWER IS RUNNER-BLIND, WHICH IS THE WHOLE REASON IT IS HERE RATHER THAN
+# INSIDE THE HISTORY REPORTER. It reads ``ext_test_execution`` and no other
+# table, so a row this runner wrote and a row another runner wrote are the
+# same input to it — M20's "query indistinguishably", as a property of the
+# implementation rather than of the fixture.
+block statsDispatch:
+  let statsParams = commandLineParams()
+  if statsParams.len < 2 or statsParams[0] != "stats":
+    break statsDispatch
+  var asJson = false
+  var hostScope = false
+  var target = ""
+  var runs = 0
+  for arg in statsParams[2 .. ^1]:
+    if arg.startsWith("--runs="):
+      try:
+        runs = parseInt(arg["--runs=".len .. ^1])
+      except ValueError:
+        stderr.writeLine "repro_test_runner stats: --runs needs an integer"
+        quit(2)
+      if runs < 0: runs = 0
+      continue
+    case arg
+    of "--json", "--output-format=json": asJson = true
+    of "--scope=host": hostScope = true
+    else:
+      # A BARE WORD IS THE SUBJECT, NOT A TYPO TO IGNORE. ``stats
+      # last-pass`` takes a test id, and silently discarding it would
+      # have the query answer about a different test than the caller
+      # named — which is worse than refusing.
+      if arg.startsWith("-") or target.len > 0:
+        stderr.writeLine "repro_test_runner stats: unknown argument " & arg
+        quit(2)
+      target = arg
+  let answer = runTestStatsQuery(statsParams[1], asJson, hostScope,
+    target = target, runs = runs)
+  stdout.write(answer.text)
+  quit(answer.exitCode)
 
 main()

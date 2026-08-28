@@ -179,6 +179,28 @@ for libName in [
   "ct_test_interface",
   "ct_test_nim_unittest",
   "ct_test_unittest_parallel",
+  # RunQuota-Observation-Store M19: the ``HistoryReporter`` write path.
+  # It is NOT part of the three above and must not be: those are linked
+  # into test binaries and into ``repro.nim``'s DSL, while this one
+  # links the RunQuota client. Only ``tools/test-runner`` imports it.
+  "ct_test_history",
+  # RunQuota-Observation-Store M20: the SECOND write path into the same
+  # generic table, and the query that reads both runners' rows.
+  #
+  # ``repro_generic_test_recorder`` is deliberately not a mode of
+  # ``ct_test_history``: that library declares ``ext_codetracer_test``
+  # unconditionally and takes a ``CodetracerTestFacts``, so reusing it
+  # would have made the second runner declare a framework it is not. Only
+  # ``tools/tap-test-runner`` imports it.
+  #
+  # ``repro_test_stats`` is likewise NOT hosted inside
+  # ``ct_test_history``: putting the framework-neutral query inside
+  # CodeTracer's reporter would make every other runner's statistics
+  # reachable only by linking CodeTracer's write path — the capture OS-8
+  # forbids, by the back door. ``tools/test-runner`` and
+  # ``tools/tap-test-runner`` both read through it.
+  "repro_generic_test_recorder",
+  "repro_test_stats",
   "repro_core",
   "repro_platform",
   "repro_diagnostics",
@@ -276,6 +298,22 @@ for libName in [
   # lock consumption. Separate from the manifest-repo SHA lock
   # (``repro_workspace_manifests/lock_writer.nim``).
   "repro_lock",
+  # Named-Lock-Files NLF-M7: declared lock-file NAMES, their doc comments,
+  # the designation stack and precedence chain, the `--lock <name>=<path>`
+  # binding, and §4.1/§4.6 propagation down the closure. A `std`-only LEAF:
+  # the project DSL's macros, the stdlib build context, the CLI and the
+  # lock-generation path all depend on it, and a leaf is the only shape all
+  # four can take. Deliberately holds no lock IDENTITY type — §6.2 forbids
+  # the name from entering a key, and keeping the name library and the
+  # identity library disjoint is how that is made structural.
+  "repro_lock_files",
+  # Named-Lock-Files NLF-M5: lock GENERATION as build-graph edges —
+  # metadata-fetch edges upstream, the solve as a rule-generator edge
+  # downstream, the lock as its rule-set artifact. A leaf ABOVE both the
+  # engine and the solver: the engine must not import the solver (clingo
+  # dynlib at module-init, see ``repro_lock/identity.nim``) and the solver
+  # must not import the engine, so the path that needs both lives here.
+  "repro_lock_gen",
   # Workspace-Manifest-Optional MO-8: self-describing, algorithm-tagged
   # content digests (``<alg>:<digest>`` multihash) + the BLAKE3 own-file
   # NAR-style tree hash. ``repro_lock`` (the committed-lock integrity) and

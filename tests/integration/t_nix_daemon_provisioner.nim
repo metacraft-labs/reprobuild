@@ -22,6 +22,8 @@ import std/[unittest, os, osproc, strutils, tempfiles]
 import repro_core
 import repro_core/dependency_gathering
 import repro_build_engine
+import repro_interface_artifacts
+import repro_tool_profiles
 
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
@@ -121,6 +123,84 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       check "REPROBUILD_NIX_DAEMON_BIN exists but is not executable" in
         res.stderr
       check not fileExists(receiptFile)
+
+    test "direct all-output fallback strips provisioned loader paths":
+      let repoRoot = findRepoRoot()
+      let daemonPath = findNixDaemon(repoRoot)
+      let tempRoot = createTempDir("repro-nix-direct-loader-env-", "")
+      defer: removeDir(tempRoot)
+
+      let shellPath = getEnv("SHELL")
+      if not shellPath.startsWith("/nix/store/") or
+          not fileExists(shellPath) or parentDir(shellPath).extractFilename != "bin":
+        skip()
+      else:
+        let shellStore = parentDir(parentDir(shellPath))
+        let executablePath = relativePath(shellPath, shellStore)
+        let executableName = shellPath.extractFilename
+        let fakeBin = tempRoot / "bin"
+        let record = tempRoot / "nix-env.txt"
+        createDir(fakeBin)
+        let fakeNix = fakeBin / "nix"
+        writeFile(fakeNix, @[
+          "#!/bin/sh",
+          "printf 'LD_LIBRARY_PATH=[%s]\\n' \"${LD_LIBRARY_PATH:-}\" >> " &
+            quoteShell(record),
+          "if printf '%s\\n' \"$*\" | grep -Fq '^*'; then",
+          "  printf '%s\\n' " & quoteShell(shellStore),
+          "else",
+          "  printf '%s\\n' " & quoteShell(tempRoot),
+          "fi",
+          ""
+        ].join("\n"))
+        setFilePermissions(fakeNix, {fpUserRead, fpUserWrite, fpUserExec})
+
+        let uniqueUser = "repro-nix-direct-loader-" & $getCurrentProcessId()
+        let socketPath = "/tmp/reprobuild-nix-daemon-" & uniqueUser & ".sock"
+        let daemonWrapper = tempRoot / "reprobuild-nix-daemon"
+        writeFile(daemonWrapper, "#!/bin/sh\nexec " & quoteShell(daemonPath) &
+          " \"$@\" --socket-path=" & quoteShell(socketPath) & "\n")
+        setFilePermissions(daemonWrapper,
+          {fpUserRead, fpUserWrite, fpUserExec})
+
+        let previousPath = getEnv("PATH")
+        let previousLoaderPath = getEnv("LD_LIBRARY_PATH")
+        let previousDaemonBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+        let previousUser = getEnv("USER")
+        putEnv("PATH", fakeBin & PathSep & previousPath)
+        putEnv("LD_LIBRARY_PATH", tempRoot / "target-libraries")
+        putEnv("REPROBUILD_NIX_DAEMON_BIN", daemonWrapper)
+        putEnv("USER", uniqueUser)
+        defer:
+          putEnv("PATH", previousPath)
+          if previousLoaderPath.len > 0:
+            putEnv("LD_LIBRARY_PATH", previousLoaderPath)
+          else:
+            delEnv("LD_LIBRARY_PATH")
+          putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemonBin)
+          putEnv("USER", previousUser)
+          discard execCmd("pkill -f -u $USER " & quoteShell(socketPath) &
+            " || true")
+          removeFile(socketPath)
+
+        var useDef = InterfaceToolUse(
+          rawConstraint: "loader-fallback",
+          packageSelector: "loader-fallback@1.0.0",
+          executableName: executableName,
+          location: SourceLocation(file: "fixture", line: 1))
+        useDef.nixProvisioning = @[InterfaceNixProvisioning(
+          packageName: "loader-fallback",
+          selector: "fake#loader-fallback",
+          executablePath: executablePath,
+          packageId: "loader-fallback.1.0.0",
+          lockIdentity: "fake#loader-fallback",
+          location: SourceLocation(file: "fixture", line: 2))]
+
+        let profile = resolveNixTool(useDef)
+        check profile.resolvedExecutablePath == shellPath
+        let recorded = readFile(record)
+        check recorded.count("LD_LIBRARY_PATH=[]") == 2
+        check "target-libraries" notin recorded
 
   test "Scenario 3.1 & 3.2: Cold start, resolution, and dependency tracking":
     let repoRoot = findRepoRoot()

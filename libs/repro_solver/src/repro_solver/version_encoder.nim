@@ -45,6 +45,13 @@
 ##    Y, contributes a forced assignment against a matching variant in
 ##    Y. The ``depends_on(Y, X)`` predicate gates the propagation so
 ##    independent packages remain decoupled.
+## 7. **Selection.** ``package_selected("p").`` records whether anything
+##    required ``p`` — the Named-Lock-Files §5.6 fact (owner decision
+##    2026-08-21). Seeded on the packages nothing depends on and
+##    propagated along dependency edges, with a conditional edge's
+##    ``variant_assigned`` gate in the body so a DORMANT arm propagates
+##    nothing. See ``encodeSelectionRoots`` for why this is derived in the
+##    ASP rather than post-computed in Nim.
 ##
 ## ## Why a separate encoder
 ##
@@ -53,7 +60,7 @@
 ## its own (the existing M2b tests don't pull in the version surface).
 ## The unified entry point lives at the boundary in ``encodeUnified``.
 
-import std/[options, strutils, tables, sets]
+import std/[algorithm, options, strutils, tables, sets]
 
 import variant_encoder
 import version_constraints
@@ -126,6 +133,72 @@ type
       ## remain solved — owner decision Q-4, and the reason this is a field on
       ## the package rather than the package's removal from the program.
       ## ``versions`` must hold exactly one entry when this is set.
+    instanceOf*: string
+      ## Named-Lock-Files NLF-M8 (§9.1) — the BASE package this decl is one
+      ## instance of, or ``""`` when ``name`` is itself the base.
+      ##
+      ## §9 is "two edges under different lock files feeding one artifact",
+      ## and the encoder before NLF-M8 could not represent that at all: one
+      ## ``package_chosen/2`` per NAME means one instance per package, so two
+      ## irreconcilable demanders were a bare UNSAT — the exact failure §9.4
+      ## forbids ("It MUST NOT report a bare unsat").
+      ##
+      ## An instance is an ordinary package in every other respect: same
+      ## candidate universe, same cardinality rule, same range constraints.
+      ## What ``instanceOf`` adds is the join the unification OBJECTIVE is
+      ## written over (``encodeUnificationObjective``), so the solver prefers
+      ## to land every instance of a base on ONE version and introduces a
+      ## second only when the constraints leave it no choice. That is §9.1's
+      ## "unification is therefore an optimisation objective, not a
+      ## precondition" — Spack's ``when_possible`` objective without Spack's
+      ## round structure, which §14.3.1 rejects for making the outcome
+      ## history-dependent.
+      ##
+      ## A package set with no instances emits NO objective and NO join
+      ## facts, so its program text is byte-for-byte what it was. That is
+      ## NLF-STAT-4, and it is why this is a field rather than a mode.
+
+  VersionPreference* = enum
+    ## Named-Lock-Files NLF-M6 (§5.5) — the *version-selection rule* a solve
+    ## runs under, as the SOLVER sees it.
+    ##
+    ## This is deliberately not `repro_lock_gen.LockStrategy`. A lock strategy
+    ## is a user-facing rule for producing a lock file; a version preference is
+    ## an objective function over `package_chosen/2`. The generation path maps
+    ## one onto the other. Keeping them apart is what lets the solver stay a
+    ## leaf below the generation path — the layering `repro_lock_gen`'s header
+    ## records as structural rather than tidy.
+    ##
+    ## `vpNone` emits NOTHING, so the program text of every pre-NLF-M6 caller
+    ## is byte-unchanged and no fingerprint moves. That is a requirement, not
+    ## an optimisation: NLF-STAT-4 freezes the default path.
+    ##
+    ## ## Why this is an ASP objective rather than candidate narrowing
+    ##
+    ## NLF-M5 implemented `lowest`/`highest` by narrowing each package's
+    ## candidate universe to its extreme published version before encoding.
+    ## That is wrong as soon as a declared range is involved, and the failure
+    ## is not subtle: `libfoo` publishing 1.0 … 1.9 under `uses: ">=1.2 <2.0"`
+    ## narrows to `{1.0}` under `lowest`, and the solve then reports UNSAT for
+    ## a workspace that has a perfectly good answer at 1.2. A preference is a
+    ## soft objective over the FULL universe, so the hard range constraints
+    ## still decide what is admissible and the objective only orders what
+    ## remains. This is the "interaction with declared ranges" NLF-M5 left
+    ## open.
+    ##
+    ## ## `vpLowestDirect`
+    ##
+    ## Direct dependencies take the lowest admissible version; everything
+    ## reached only transitively takes the highest. That is Cargo's
+    ## `-Z direct-minimal-versions` shape, and the asymmetry is the point: a
+    ## workspace's own declared lower bounds are what it is responsible for and
+    ## what `lowest` exists to falsify, while a transitive package's bounds
+    ## belong to the intermediate package's author. `lowest` fails on THEIR
+    ## under-declaration; `lowest-direct` does not.
+    vpNone = "none"
+    vpLowest = "lowest"
+    vpHighest = "highest"
+    vpLowestDirect = "lowest-direct"
 
 # ---------------------------------------------------------------------------
 # Constructors (terse construction for tests / lib code)
@@ -146,9 +219,19 @@ proc newPackage*(name: string;
                  versions: openArray[string];
                  depends: openArray[DependencyDecl] = @[];
                  variants: openArray[VariantDecl] = @[];
-                 pinned = false): PackageDecl =
+                 pinned = false; instanceOf = ""): PackageDecl =
   PackageDecl(name: name, versions: @versions, depends: @depends,
-              variants: @variants, pinned: pinned)
+              variants: @variants, pinned: pinned, instanceOf: instanceOf)
+
+proc newInstance*(instanceName, baseName: string;
+                  versions: openArray[string];
+                  depends: openArray[DependencyDecl] = @[];
+                  variants: openArray[VariantDecl] = @[]): PackageDecl =
+  ## Named-Lock-Files NLF-M8 — one INSTANCE of ``baseName``. See
+  ## ``PackageDecl.instanceOf``. ``instanceName`` must be unique across the
+  ## declaration set, because it is the ``package_chosen/2`` key.
+  newPackage(instanceName, versions, depends, variants,
+             pinned = false, instanceOf = baseName)
 
 proc newPinnedPackage*(name, version: string;
                        depends: openArray[DependencyDecl] = @[];
@@ -306,6 +389,62 @@ proc encodeDependencyEdges*(p: PackageDecl): string =
     body.add("package_chosen(" & child & ", V)")
     body.add("not version_in_range(" & child & ", V, " & rangeAtom & ")")
     lines.add(":- " & body.join(", ") & ".")
+    # NLF-M9 (§5.6) — selection propagates along the edge, gated by the SAME
+    # ``variant_assigned`` atom that gates the range constraint. One gate, two
+    # consequences: if the arm is dormant the range does not fire AND nothing
+    # downstream of it is selected.
+    #
+    # The body is ``package_selected(parent)``, not ``package_chosen(parent, _)``:
+    # every declared package is ``package_active`` and therefore chooses a
+    # version, so gating on ``package_chosen`` would make every edge propagate
+    # and the fact would be vacuously true everywhere. Selection is reachability
+    # from a root, which is transitive, and this is what makes it so.
+    var selBody = newSeq[string]()
+    selBody.add("package_selected(" & parent & ")")
+    if d.conditional.isSome:
+      let g = d.conditional.get
+      selBody.add("variant_assigned(\"" & aspQuote(g.variantName) &
+                  "\", \"" & aspQuote(g.triggerValue) & "\")")
+    lines.add("package_selected(" & child & ") :- " &
+              selBody.join(", ") & ".")
+  lines.join("\n")
+
+# ---------------------------------------------------------------------------
+# Selection roots (NLF-M9, design §5.6)
+# ---------------------------------------------------------------------------
+
+proc encodeSelectionRoots*(packages: openArray[PackageDecl]): string =
+  ## Seed the selection relation: every declared package that NOTHING declares
+  ## a dependency on is selected by the request itself.
+  ##
+  ## §5.6 defines the fact as "whether any non-dormant edge required it". A
+  ## root has no incoming edge at all, so read literally the definition would
+  ## report the very package the solve was asked for as unselected — a false
+  ## report, and the one that would make the fact useless. The request is the
+  ## edge; it is simply not spelled in the package set. This seeds it.
+  ##
+  ## "Nothing depends on it" is a STATIC property of the declaration set, not
+  ## a solver outcome, so the seed is grounded here rather than derived through
+  ## negation inside the program. That keeps the ASP free of negation-as-failure
+  ## over a recursive predicate — ``package_selected`` is defined by positive
+  ## rules only, so its least model is its unique answer and no stratification
+  ## question arises.
+  ##
+  ## **Why the relation is derived in the ASP at all**, rather than post-computed
+  ## in Nim from ``sol.variants`` plus the declarations: the gate a dormant arm
+  ## turns on is `variant_assigned/2`, the exact atom the range constraint is
+  ## gated on. Recomputing "was this arm taken" in Nim would be a second
+  ## implementation of the gate, free to drift from the one the solver enforced
+  ## — and drift between them is invisible, because both would still produce a
+  ## plausible answer.
+  var depended: HashSet[string]
+  for p in packages:
+    for d in p.depends:
+      depended.incl(d.name)
+  var lines: seq[string] = @[]
+  for p in packages:
+    if p.name notin depended:
+      lines.add("package_selected(\"" & aspQuote(p.name) & "\").")
   lines.join("\n")
 
 # ---------------------------------------------------------------------------
@@ -357,14 +496,237 @@ proc encodeCrossPackagePropagation*(packages: openArray[PackageDecl]): string =
   lines.join("\n")
 
 # ---------------------------------------------------------------------------
+# Version preference (NLF-M6, §5.5)
+# ---------------------------------------------------------------------------
+
+proc rootPackageNames*(packages: openArray[PackageDecl]): HashSet[string] =
+  ## The packages nothing in the declaration set depends on.
+  ##
+  ## The same "no incoming edge" predicate `encodeSelectionRoots` seeds
+  ## selection from, exported because NLF-M6 needs it twice more (the
+  ## `lowest-direct` objective and the materiality interval derivation) and a
+  ## second definition of "root" is a second thing to drift.
+  var depended: HashSet[string]
+  for p in packages:
+    for d in p.depends:
+      depended.incl(d.name)
+  for p in packages:
+    if p.name notin depended:
+      result.incl(p.name)
+
+proc directDependencyNames*(packages: openArray[PackageDecl]): HashSet[string] =
+  ## The packages a ROOT package declares a dependency on.
+  ##
+  ## "Direct" is relative to the request, so it is the roots' `depends` and
+  ## nothing deeper. A package reachable both directly and transitively counts
+  ## as direct — the workspace does declare a bound on it, so the workspace is
+  ## answerable for that bound, which is the whole basis of the split.
+  ##
+  ## Conditional (variant-gated) arms are INCLUDED, for the same
+  ## over-approximation reason `fetchPlan` includes them: which arm is live is
+  ## the solve's own output, so a gate-respecting walk here would need the
+  ## answer it is helping to produce. Over-approximating "direct" costs a
+  ## dormant package a preference term that never fires, because the term is
+  ## conditioned on `package_chosen` and a dormant package still chooses.
+  ## Measured consequence, stated rather than implied: a dormant direct arm
+  ## does get a term, and it is harmless because §5.7's interval derivation
+  ## records nothing for an UNSELECTED package.
+  let roots = rootPackageNames(packages)
+  for p in packages:
+    if p.name notin roots: continue
+    for d in p.depends:
+      result.incl(d.name)
+
+proc encodeVersionRanks*(packages: openArray[PackageDecl]): string =
+  ## Emit `version_rank("pkg", "version", N).` — the position of each candidate
+  ## in that package's semver-ascending order.
+  ##
+  ## The rank is per-package and dense from 0, so the objective's weight is
+  ## bounded by the candidate count rather than by the version numbers, and two
+  ## packages contribute comparable magnitudes. Encoding the version itself as
+  ## a weight would let a package that happens to number its releases in the
+  ## thousands outvote every other package in the sum.
+  ##
+  ## A candidate whose string does not parse as semver keeps its raw-string
+  ## position in the order rather than aborting the encode: the registry's
+  ## naming is not the encoder's to police, and the resulting order is still
+  ## total and still deterministic.
+  ##
+  ## A PINNED package gets no ranks. Its `package_chosen` atom is a fact, so a
+  ## preference term over it could only ever evaluate to a constant, and
+  ## emitting one would put a constant in the objective sum that a reader would
+  ## reasonably mistake for a live choice.
+  var lines: seq[string] = @[]
+  for p in packages:
+    if p.pinned: continue
+    var sorted = p.versions
+    sorted.sort(proc(a, b: string): int =
+      try:
+        cmpSemver(parseSemver(a), parseSemver(b))
+      except ESemverParse:
+        cmp(a, b))
+    for i, v in sorted:
+      lines.add("version_rank(\"" & aspQuote(p.name) & "\", \"" &
+                aspQuote(v) & "\", " & $i & ").")
+  lines.join("\n")
+
+proc instanceBases*(packages: openArray[PackageDecl]):
+    OrderedTable[string, seq[string]] =
+  ## Base package name → the instance names declared for it, in declaration
+  ## order. Only bases with at least ONE instance appear; a base with exactly
+  ## one instance is kept, because "one instance today, two tomorrow" is a
+  ## property of the workspace and not of the encoder, and a table that
+  ## silently dropped singletons would make the two cases encode differently
+  ## for a reason nobody wrote down.
+  result = initOrderedTable[string, seq[string]]()
+  for p in packages:
+    if p.instanceOf.len == 0: continue
+    if not result.hasKey(p.instanceOf):
+      result[p.instanceOf] = @[]
+    result[p.instanceOf].add(p.name)
+
+proc hasUnificationChoice*(packages: openArray[PackageDecl]): bool =
+  ## Whether any base has TWO OR MORE instances — the only case in which
+  ## unification is a question at all, and therefore the only case in which
+  ## anything is emitted.
+  for _, instances in instanceBases(packages).pairs:
+    if instances.len >= 2:
+      return true
+  false
+
+proc encodeUnificationObjective*(packages: openArray[PackageDecl]): string =
+  ## Named-Lock-Files NLF-M8, design §9.1 — **unify first, and only then
+  ## diverge**, as a soft objective over the full instance set.
+  ##
+  ## The encoding is two rules and one directive per base:
+  ##
+  ## ```
+  ## instance_version("libfoo", V) :- package_chosen("libfoo@hostTools", V).
+  ## instance_version("libfoo", V) :- package_chosen("libfoo@targetRuntime", V).
+  ## #minimize { 1@-1, B, V : instance_version(B, V) }.
+  ## ```
+  ##
+  ## `instance_version/2` is a SET: two instances that choose the same version
+  ## contribute one tuple, two that disagree contribute two. Minimising its
+  ## cardinality is therefore exactly "use as few distinct versions of each
+  ## library as the constraints permit", which is §9.1's three consequences —
+  ## shared dependencies collapse, divergence is confined to what genuinely
+  ## could not agree, and nothing needs to coordinate for content-derived
+  ## identity to share the rest.
+  ##
+  ## ## Why an objective and not a constraint
+  ##
+  ## A hard constraint saying "all instances agree" would turn every genuine
+  ## disagreement back into the bare UNSAT §9.4 forbids. A soft objective
+  ## finds the split, and the split is what the §9.4 diagnostic is written
+  ## about. This is the difference the corpus draws between NLF-DIA-6 (ranges
+  ## overlap: one instance) and NLF-DIA-2 (ranges do not: two instances and an
+  ## error naming both) — one encoder answers both.
+  ##
+  ## ## The priority level, and why it is above the version preference
+  ##
+  ## `@-1`, with `encodeVersionPreference` moved down to `@-2`/`@-3` whenever
+  ## this fires. clingo optimises higher levels first, so unification
+  ## outranks `--strategy lowest`/`highest`. That ordering is §9.1's
+  ## "divergence is a fallback, not a starting point" made mechanical: a
+  ## version preference that outranked unification could split a library the
+  ## constraints permitted to unify, purely to reach a lower or higher
+  ## version, and the split would be invisible in the answer.
+  ##
+  ## Variant priorities keep `@0` and still outrank both, so a `prForce`
+  ## contribution is never overturned to save an instance.
+  ##
+  ## Emits `""` when no base has two instances, so every pre-NLF-M8 program
+  ## is byte-unchanged (NLF-STAT-4).
+  if not hasUnificationChoice(packages):
+    return ""
+  var lines: seq[string] = @[]
+  let bases = instanceBases(packages)
+  for base, instances in bases.pairs:
+    if instances.len < 2: continue
+    for inst in instances:
+      lines.add("instance_version(\"" & aspQuote(base) & "\", V) :- " &
+        "package_chosen(\"" & aspQuote(inst) & "\", V).")
+  lines.add("#minimize { 1@-1, B, V : instance_version(B, V) }.")
+  lines.join("\n")
+
+proc encodeVersionPreference*(packages: openArray[PackageDecl];
+                              preference: VersionPreference;
+                              levelBase = -1): string =
+  ## The objective directives for `preference`, or `""` for `vpNone`.
+  ##
+  ## ## The priority level, and why it is negative
+  ##
+  ## `variant_encoder`'s priority objective sits at clingo's DEFAULT level
+  ## (`@0`). Version preference is emitted at `@-1` (and `@-2`), which clingo
+  ## optimises AFTER level 0. So a variant priority always outranks a version
+  ## preference, and a `--strategy lowest` invocation cannot silently overturn
+  ## a `prForce` contribution. Sharing level 0 would have summed unrelated
+  ## weights — a variant band (1…4) against a candidate rank (0…N) — and made
+  ## the trade-off between them depend on how many versions a registry
+  ## happened to publish.
+  ##
+  ## ## `vpLowestDirect` is two directives, at two levels
+  ##
+  ## Direct packages minimise at `@-1`; everything else maximises at `@-2`. Two
+  ## levels rather than one summed level, because at one level a single direct
+  ## package's rank could be traded against a transitive package's rank and the
+  ## answer would depend on candidate counts. Lexicographic levels make "direct
+  ## minimal, then transitive maximal" mean exactly that.
+  ##
+  ## ## `levelBase`, and why it is a parameter rather than a constant
+  ##
+  ## NLF-M8 adds a unification objective (§9.1), which must outrank the
+  ## version preference — see `encodeUnificationObjective`. It takes `@-1`,
+  ## and this one steps down to `@-2`/`@-3` when it does. The step is a
+  ## PARAMETER so that a program with no unification choice keeps `@-1`/`@-2`
+  ## and stays byte-identical to every pre-NLF-M8 program: NLF-STAT-4 freezes
+  ## the default path, and a renumbering applied unconditionally would move
+  ## the text of every existing `--strategy` invocation for no reason.
+  if preference == vpNone:
+    return ""
+  let l1 = "@" & $levelBase
+  let l2 = "@" & $(levelBase - 1)
+  var sections: seq[string] = @[]
+  let ranks = encodeVersionRanks(packages)
+  if ranks.len > 0:
+    sections.add(ranks)
+  case preference
+  of vpNone:
+    discard
+  of vpLowest:
+    sections.add("#minimize { R" & l1 & ", P : package_chosen(P, V), " &
+      "version_rank(P, V, R) }.")
+  of vpHighest:
+    sections.add("#maximize { R" & l1 & ", P : package_chosen(P, V), " &
+      "version_rank(P, V, R) }.")
+  of vpLowestDirect:
+    var directFacts: seq[string] = @[]
+    var directs: seq[string] = @[]
+    for name in directDependencyNames(packages):
+      directs.add(name)
+    directs.sort()
+    for name in directs:
+      directFacts.add("version_direct(\"" & aspQuote(name) & "\").")
+    if directFacts.len > 0:
+      sections.add(directFacts.join("\n"))
+    sections.add("#minimize { R" & l1 & ", P : package_chosen(P, V), " &
+      "version_rank(P, V, R), version_direct(P) }.")
+    sections.add("#maximize { R" & l2 & ", P : package_chosen(P, V), " &
+      "version_rank(P, V, R), not version_direct(P) }.")
+  sections.join("\n")
+
+# ---------------------------------------------------------------------------
 # Show directive
 # ---------------------------------------------------------------------------
 
 proc encodeUnifiedShow(): string =
-  ## Surface both ``variant_assigned`` and ``package_chosen`` atoms so
-  ## the unified driver can parse a single model into the unified
-  ## solution. Other predicates stay hidden to keep the parse simple.
-  "#show variant_assigned/2.\n#show package_chosen/2."
+  ## Surface ``variant_assigned``, ``package_chosen`` and (NLF-M9)
+  ## ``package_selected`` atoms so the unified driver can parse a single
+  ## model into the unified solution. Other predicates stay hidden to keep
+  ## the parse simple.
+  "#show variant_assigned/2.\n#show package_chosen/2.\n" &
+    "#show package_selected/1."
 
 # ---------------------------------------------------------------------------
 # Public entry points
@@ -389,10 +751,16 @@ proc encodePackages*(packages: openArray[PackageDecl]): string =
   let ranges = groundVersionInRange(packages)
   if ranges.len > 0:
     sections.add(ranges)
+  # NLF-M9 — the selection seed. Emitted after the edges so the whole
+  # ``package_selected`` block reads together in a dumped program.
+  let roots = encodeSelectionRoots(packages)
+  if roots.len > 0:
+    sections.add(roots)
   sections.join("\n") & "\n"
 
 proc encodeUnified*(variants: openArray[VariantDecl];
-                    packages: openArray[PackageDecl]): string =
+                    packages: openArray[PackageDecl];
+                    preference: VersionPreference = vpNone): string =
   ## Emit the combined variant + package encoding. The variant section
   ## comes from the M2b ``encodeVariants`` (sans its ``#show`` line
   ## which is replaced by the unified version), the package section
@@ -482,5 +850,21 @@ proc encodeUnified*(variants: openArray[VariantDecl];
     sections.add(packageText)
   if propagation.len > 0:
     sections.add(propagation)
+  # NLF-M8 (§9.1) — unification, as an objective, BEFORE the version
+  # preference both in the text and in the priority lattice. Empty unless
+  # some base carries two instances, which is what keeps every pre-NLF-M8
+  # program byte-identical (NLF-STAT-4).
+  let unificationText = encodeUnificationObjective(packages)
+  if unificationText.len > 0:
+    sections.add(unificationText)
+  # NLF-M6 — the version-selection objective. Emitted LAST among the rule
+  # sections and empty for `vpNone`, so every pre-NLF-M6 program is byte-for-
+  # byte what it was. NLF-M8 steps its levels down by one when the
+  # unification objective is present, so unification outranks it — see
+  # `encodeVersionPreference`'s `levelBase`.
+  let preferenceText = encodeVersionPreference(packages, preference,
+    levelBase = (if unificationText.len > 0: -2 else: -1))
+  if preferenceText.len > 0:
+    sections.add(preferenceText)
   sections.add(encodeUnifiedShow())
   sections.join("\n") & "\n"

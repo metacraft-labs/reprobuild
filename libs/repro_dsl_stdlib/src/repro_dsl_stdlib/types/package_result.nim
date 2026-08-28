@@ -391,7 +391,8 @@ proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
   ## ``<recipeRoot>/<depName>/.repro/output/install/usr/lib``. The
   ## returned strings are POSIX-style with forward slashes so the
   ## emitted shell script does not need additional escaping. Order is
-  ## (nativeBuildDeps, then buildDeps) in source-declaration order —
+  ## (nativeBuildDeps, then buildDeps, then runtimeDeps) in
+  ## source-declaration order —
   ## deterministic across runs.
   ##
   ## **Direct-only** — this helper enumerates ONLY the package's
@@ -409,6 +410,8 @@ proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
     m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
   for raw in registeredBuildDeps(packageName):
     m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
+  for raw in registeredRuntimeDeps(packageName):
+    m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
 
 # ---------------------------------------------------------------------------
 # M9.R.30.2 — transitive RPATH propagation via per-recipe manifest file.
@@ -417,9 +420,8 @@ proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
 # The architectural gap surfaced by M9.R.29 (DE binaries' RPATH missing
 # transitive libs — sway → wlroots → libdrm gap; kwin → libz; mutter →
 # libGLESv2; plasmashell → libmount) was that ``m9r14fCollectDepMirrorLibDirs``
-# walks only DIRECT buildDeps + nativeBuildDeps. The recipes'
-# ``runtimeDeps:`` blocks all carry the M9.R.5b TODO (empty `discard`)
-# so they cannot serve as the propagation channel.
+# previously walked only DIRECT buildDeps + nativeBuildDeps. Runtime
+# dependencies now use the same direct and propagated-library channels.
 #
 # M9.R.30.2 closes the gap with the same mechanism Nix uses for
 # ``propagatedBuildInputs``: each recipe's install-mirror writes a
@@ -456,7 +458,8 @@ proc m9r30CollectDepPropagatedManifestPaths*(projectRoot, packageName: string):
   ## that hasn't been built yet contributes nothing) and folds every
   ## line into the consumer's RPATH.
   ##
-  ## Order: (nativeBuildDeps, then buildDeps) in source-declaration
+  ## Order: (nativeBuildDeps, then buildDeps, then runtimeDeps) in
+  ## source-declaration
   ## order — same as ``m9r14fCollectDepMirrorLibDirs`` so the resulting
   ## RPATH preserves a deterministic "direct first, then propagated"
   ## structure.
@@ -477,6 +480,8 @@ proc m9r30CollectDepPropagatedManifestPaths*(projectRoot, packageName: string):
   for raw in registeredNativeBuildDeps(packageName):
     appendManifestPath(result, raw)
   for raw in registeredBuildDeps(packageName):
+    appendManifestPath(result, raw)
+  for raw in registeredRuntimeDeps(packageName):
     appendManifestPath(result, raw)
 
 proc m9r30ReadPropagatedLibDirs*(manifestPaths: openArray[string]):
@@ -1124,7 +1129,8 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
                                  depMirrorLibDirs: seq[string];
                                  depManifestPaths: seq[string] = @[];
                                  ownManifestPath: string = "";
-                                 packageName: string = ""): string =
+                                 packageName: string = "";
+                                 recipesRoot: string = ""): string =
   ## DSL-port M9.R.14f.2 — emit a POSIX shell snippet that walks every
   ## ELF under ``<mirror>/lib`` + ``<mirror>/lib64`` + ``<mirror>/bin`` +
   ## ``<mirror>/sbin``
@@ -1134,6 +1140,10 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   ## DSL-port M9.R.30.2 — when ``depManifestPaths`` is non-empty, the
   ## script reads each dep's ``.m9r30_propagated_libdirs.txt`` manifest
   ## file (if it exists on disk) and appends every line to the RPATH.
+  ## Standard install-mirror paths from a moved producer checkout are remapped
+  ## under ``recipesRoot`` when the equivalent active mirror exists. This keeps
+  ## restored package outputs from retaining historical checkout locations while
+  ## leaving genuine external/federated dependency paths intact.
   ## When ``ownManifestPath`` is non-empty, the script ALSO writes the
   ## consumer's final RPATH lines to that path so downstream consumers
   ## (recipes that buildDep this one) can read the closure transitively.
@@ -1218,7 +1228,18 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     let escapedManifest = manifestPath.replace("\"", "\\\"")
     script.add("if [ -f \"" & escapedManifest & "\" ]; then ")
     script.add("while IFS= read -r line || [ -n \"$line\" ]; do ")
-    script.add("if [ -z \"$line\" ] || ! [ -d \"$line\" ]; then continue; fi; ")
+    script.add("if [ -z \"$line\" ]; then continue; fi; ")
+    if recipesRoot.len > 0:
+      let escapedRecipesRoot = recipesRoot.replace("\"", "\\\"")
+      script.add("case \"$line\" in */.repro/output/install/*) ")
+      script.add("m9r14f_old_recipe=${line%%/.repro/output/install/*}; ")
+      script.add("m9r14f_dep=${m9r14f_old_recipe##*/}; ")
+      script.add("m9r14f_rel=${line#*/.repro/output/install/}; ")
+      script.add("m9r14f_active=\"" & escapedRecipesRoot &
+        "/$m9r14f_dep/.repro/output/install/$m9r14f_rel\"; ")
+      script.add("if [ -d \"$m9r14f_active\" ]; then line=$m9r14f_active; fi;; ")
+      script.add("esac; ")
+    script.add("if ! [ -d \"$line\" ]; then continue; fi; ")
     # A dependency's Nix runtime dirs belong on that dependency's ELFs, not
     # on every downstream consumer. The stage closure walks every ELF, so
     # propagating these paths only multiplies unrelated store outputs.
@@ -1324,6 +1345,20 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("fi; ")
     script.add("done; ")
     script.add("fi; ")
+  # A Nix-provisioned compiler gives executables a Nix dynamic interpreter.
+  # When the package explicitly depends on a source-built libc, the RPATH
+  # assembled above can then select that libc under the old interpreter. That
+  # loader/libc combination is unsupported and, among other things, crashes as
+  # soon as the io-monitor shim is preloaded. Select the first declared runtime
+  # loader in RPATH order and move executable ELFs to it together with the
+  # libraries that RPATH already selected. Shared libraries have no interpreter
+  # and are left alone by the print-interpreter guard below.
+  script.add("m9r14f_runtime_loader=; OLD_IFS=$IFS; IFS=':'; ")
+  script.add("for rp in $rpath; do ")
+  script.add("case \"$rp\" in '$ORIGIN'*) continue;; esac; ")
+  script.add("for candidate in \"$rp\"/ld-linux-*.so.* \"$rp\"/ld-musl-*.so.*; do ")
+  script.add("if [ -f \"$candidate\" ]; then m9r14f_runtime_loader=$candidate; break 2; fi; ")
+  script.add("done; done; IFS=$OLD_IFS; ")
   # DSL-port M9.R.30.2 — write the consumer's own propagated-libdirs
   # manifest BEFORE walking the ELFs so a parallel build pass that
   # races against this consumer's downstream recipe can read the
@@ -1375,6 +1410,10 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # pollute the log with errors. ``\\177ELF`` is the 4-byte magic.
   script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
   script.add("case \"$magic\" in 177ELF*) ")
+  script.add("if [ -n \"$m9r14f_runtime_loader\" ]; then ")
+  script.add("m9r14f_old_interpreter=$(patchelf --print-interpreter \"$f\" 2>/dev/null || true); ")
+  script.add("if [ -n \"$m9r14f_old_interpreter\" ]; then ")
+  script.add("patchelf --set-interpreter \"$m9r14f_runtime_loader\" \"$f\"; fi; fi; ")
   script.add("patchelf --set-rpath \"$rpath\" \"$f\" 2>/dev/null || true; ")
   script.add(";; esac; ")
   script.add("done; ")
@@ -1653,7 +1692,8 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   script.add(m9r14fEmitRpathPatchScript(escapedDstUsr, depMirrorLibDirs,
     depManifestPaths = depManifestPaths,
     ownManifestPath = ownManifestPath,
-    packageName = packageName))
+    packageName = packageName,
+    recipesRoot = recipesRoot))
   script.add("touch \"" & escapedStamp & "\"; ")
   script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
     publishVersion, dstUsrRoot))
@@ -1680,17 +1720,30 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # folds every existing dir into the embedded RPATH so nix-stub-resolved
   # deps (libltdl, hwdata, libxdmcp, ...) reach the patched ELF without
   # the install-mirror having to enumerate ``/nix/store`` paths itself.
-  var mirrorToolRefs = @["sh"]
+  var mirrorToolRefs = @InstallMirrorCoreToolNames
+  for generatedTool in ["sed", "chmod"]:
+    if generatedTool notin mirrorToolRefs:
+      mirrorToolRefs.add(generatedTool)
   if InstallMirrorPublishToolName notin mirrorToolRefs:
     mirrorToolRefs.add(InstallMirrorPublishToolName)
   when defined(linux):
-    if "patchelf" notin mirrorToolRefs:
-      mirrorToolRefs.add("patchelf")
+    for generatedTool in ["find", "head", "od", "tr", "sort", "grep",
+                          "dirname", "basename", "wc", "patchelf"]:
+      if generatedTool notin mirrorToolRefs:
+        mirrorToolRefs.add(generatedTool)
+    if packageName == "glibcSource":
+      for generatedTool in ["readlink", "ln"]:
+        if generatedTool notin mirrorToolRefs:
+          mirrorToolRefs.add(generatedTool)
   for raw in registeredNativeBuildDeps(packageName):
     let dep = m9r14fStripDepConstraint(raw)
     if dep.len > 0 and dep notin mirrorToolRefs:
       mirrorToolRefs.add(dep)
   for raw in registeredBuildDeps(packageName):
+    let dep = m9r14fStripDepConstraint(raw)
+    if dep.len > 0 and dep notin mirrorToolRefs:
+      mirrorToolRefs.add(dep)
+  for raw in registeredRuntimeDeps(packageName):
     let dep = m9r14fStripDepConstraint(raw)
     if dep.len > 0 and dep notin mirrorToolRefs:
       mirrorToolRefs.add(dep)
@@ -2271,6 +2324,10 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(
       packageName) &
     "-" & sanitizeStageCopyName(name)
+  let stageToolRefs =
+    if kind == "library": @[
+      "sh", "mkdir", "cp", "ls", "sort", "head"]
+    else: @["sh", "mkdir", "cp", "chmod"]
   discard buildAction(
     id = stageId,
     call = inlineExecCall(argv),
@@ -2280,7 +2337,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.stage." & kind,
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = stageToolRefs)
 
 proc emitStageCopyAlias(installEdge: BuildActionDef;
                         buildDir, destdir, packageName, aliasName,
@@ -2384,6 +2441,9 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-alias-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(aliasName)
+  let aliasToolRefs =
+    when defined(windows): @["sh", "mkdir", "cp"]
+    else: @["sh", "mkdir", "cp", "chmod", "ln"]
   discard buildAction(
     id = stageId,
     call = inlineExecCall(argv),
@@ -2393,7 +2453,7 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.stage.executable_alias",
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = aliasToolRefs)
 
 # ---------------------------------------------------------------------------
 # Slicing methods — AutotoolsPackageResult

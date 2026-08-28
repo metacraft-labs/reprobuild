@@ -680,7 +680,8 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
         r"requiresReproBinary:\s*(true|false),\s*"
         r"extraPassC:\s*@\[(.*?)\],\s*"
         r"extraPassL:\s*@\[(.*?)\],\s*"
-        r"targetOs:\s*(\w+)\)",
+        r"targetOs:\s*(\w+),\s*"
+        r"selfInterposes:\s*(true|false)\)",
         re.S,
     )
     nim_specs = [
@@ -693,6 +694,41 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
         )
         for m in spec_re.finditer(text)
     ]
+
+    # A silent under-parse is the dangerous failure here, not a crash. The
+    # regex pins every field of the TestSpec literal, so ADDING a field to the
+    # generated table stops it matching — and the caller then writes a baseline
+    # containing whatever few entries still matched, which reads as "coverage
+    # lost" for every test that did not. That is how a field addition once
+    # emptied the checked-in baseline from 1357 rows to 18.
+    #
+    # `TestSpec(` occurrences are counted independently of the field-level
+    # regex, so the two disagree exactly when the literal's shape has drifted
+    # from this parser. Fail with the specific numbers rather than proceeding.
+    declared = text.count("TestSpec(")
+    # EXACT, because a tolerance of one is a blind spot exactly one entry wide
+    # and something walked through it. This read `< declared - 1`, justified as
+    # "the type definition itself contains one `TestSpec(`-free declaration" --
+    # but a declaration containing no `TestSpec(` is not counted by
+    # `text.count("TestSpec(")` in the first place, so the slack was subtracting
+    # for something it never added.
+    #
+    # What it cost: a hand-written entry that omitted the trailing
+    # `selfInterposes` field did not match the regex, and because `re.S` makes
+    # the lazy `.*?` cross newlines, the match that started at that entry ran on
+    # and swallowed the NEXT one whole. One entry in, one entry lost -- the
+    # shortfall was exactly 1, the guard stayed silent, and the vanished test
+    # then surfaced downstream as "COVERAGE LOST" against a baseline that was
+    # right all along.
+    if declared and len(nim_specs) != declared:
+        raise SystemExit(
+            f"parse_repro_tests: matched {len(nim_specs)} TestSpec literals but "
+            f"repro_tests.nim contains {declared}. The literal's field list has "
+            f"changed and this parser's regex no longer matches it. Update the "
+            f"regex in parse_repro_tests to match the generated shape — do NOT "
+            f"regenerate the baseline from a partial parse, which silently "
+            f"discards coverage for every test that failed to match."
+        )
 
     py_specs: list[TestSpec] = []
     py_match = re.search(r"const\s+pythonTestPaths\*:\s*seq\[string\]\s*=\s*@\[(.*?)\]", text, re.S)

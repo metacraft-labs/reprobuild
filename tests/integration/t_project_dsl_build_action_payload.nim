@@ -132,6 +132,93 @@ suite "project DSL build action payload":
     check makeDepfile.commandStatsId == "compile-stats"
     check makeDepfile.actionCachePolicy == acfpChecksum
 
+  test "version 24 payloads still decode after the removed trusted-inputs fields":
+    # v24 appended two fields to the dependency policy (an input seq and a
+    # reason string) for the removed ``bdpTrustedDeclaredInputs`` kind. v25
+    # replaced them with a single ``suppressMonitorShimSeed`` byte.
+    #
+    # The encoding is append-only WITH per-version gates, not self-describing:
+    # a reader that simply stopped consuming the v24 fields would leave the
+    # cursor eight bytes short and misparse EVERY field after the policy —
+    # target names, typed outputs, env, the cwd declaration — rather than fail.
+    # So this pins that a v24 record on disk is still read correctly.
+    let probe = "deps/v24-probe.d"
+    var encoded = encodeBuildActionPayload(
+      sampleAction(makeDepfilePolicy(probe)))
+
+    # Locate the policy's ``depfiles`` entry: its 4-byte length prefix
+    # followed by the path bytes. Unique in this payload — the sample action
+    # carries no legacy ``depfile`` and no argument with this value.
+    var probeBytes: seq[byte] = @[]
+    probeBytes.writeString(probe)
+    var found = -1
+    for start in 0 .. encoded.len - probeBytes.len:
+      var matches = true
+      for i in 0 ..< probeBytes.len:
+        if encoded[start + i] != probeBytes[i]:
+          matches = false
+          break
+      if matches:
+        check found == -1
+        found = start
+    check found >= 0
+
+    # After the path: the 4-byte ``ignoredInputPrefixes`` count, then the
+    # single v25 ``suppressMonitorShimSeed`` byte. Swap that byte for v24's
+    # empty input seq + empty reason string.
+    let flagAt = found + probeBytes.len + 4
+    check encoded[flagAt] == 0'u8
+    var legacyTail: seq[byte] = @[]
+    legacyTail.writeStringSeq([])
+    legacyTail.writeString("")
+    var v24: seq[byte] = @[]
+    for i in 0 ..< flagAt:
+      v24.add(encoded[i])
+    v24.add(legacyTail)
+    for i in flagAt + 1 ..< encoded.len:
+      v24.add(encoded[i])
+    # Header: version word at offset 4, payload length at offset 6.
+    v24[4] = 24'u8
+    v24[5] = 0'u8
+    var lengthBytes: seq[byte] = @[]
+    lengthBytes.writeU32Le(uint32(v24.len - 10))
+    for i in 0 ..< 4:
+      v24[6 + i] = lengthBytes[i]
+
+    let decoded = decodeBuildActionPayload(v24)
+    check decoded.id == "compile"
+    check decoded.dependencyPolicy.kind == bdpMakeDepfile
+    check decoded.dependencyPolicy.depfiles == @[probe]
+    check not decoded.dependencyPolicy.suppressMonitorShimSeed
+    # The fields AFTER the policy are the ones a short read would corrupt.
+    check decoded.commandStatsId == "compile-stats"
+    check decoded.inputs == @["src/main.c"]
+    check decoded.outputs == @["build/main.o"]
+    check decoded.call.arguments.len == 4
+
+  test "the removed trusted-declared-inputs policy kind is refused":
+    # ``bdpTrustedDeclaredInputs`` used to be ordinal 4, one past
+    # ``bdpIomonReport``. A stored graph that still names it must fail closed
+    # rather than decode as some surviving kind.
+    var encoded = encodeBuildActionPayload(
+      sampleAction(makeDepfilePolicy("deps/generated.d")))
+    var probeBytes: seq[byte] = @[]
+    probeBytes.writeString("deps/generated.d")
+    var found = -1
+    for start in 0 .. encoded.len - probeBytes.len:
+      var matches = true
+      for i in 0 ..< probeBytes.len:
+        if encoded[start + i] != probeBytes[i]:
+          matches = false
+          break
+      if matches and found == -1:
+        found = start
+    check found >= 0
+    # The kind byte sits immediately before the depfiles count.
+    encoded[found - 5] = 4'u8
+    expect BuildActionPayloadError:
+      discard decodeBuildActionPayload(encoded)
+
   test "version 3 payloads decode with ordinary CLI argument roles":
     let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
       sampleAction(makeDepfilePolicy("deps/generated.d")), 3'u16))

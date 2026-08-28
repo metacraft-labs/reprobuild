@@ -6,7 +6,7 @@
 ## and idle self-reaping behavior.
 
 import std/[unittest, os, osproc, json, strutils, net, nativesockets, times,
-  streams, tempfiles]
+  streams, tempfiles, strtabs]
 
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
@@ -95,6 +95,71 @@ suite "Python Nix Evaluation Daemon IPC Integration Tests":
       finally:
         putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemonBin)
         removeFile(sentinel)
+
+    test "host Nix process strips provisioned dynamic-loader paths":
+      let repoRoot = findRepoRoot()
+      let daemonPath = findNixDaemon(repoRoot)
+      let fixtureRoot = createTempDir("repro-nix-daemon-loader-env-", "")
+      defer: removeDir(fixtureRoot)
+      writeFile(fixtureRoot / "flake.nix", "{ outputs = _: {}; }\n")
+
+      let fakeBin = fixtureRoot / "bin"
+      createDir(fakeBin)
+      let fakeNix = fakeBin / "nix"
+      writeFile(fakeNix, """#!/bin/sh
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+  echo "LD_LIBRARY_PATH leaked into host nix" >&2
+  exit 42
+fi
+printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
+""")
+      setFilePermissions(fakeNix, {fpUserRead, fpUserWrite, fpUserExec})
+
+      let socketPath = fixtureRoot / "nix-daemon.sock"
+      var childEnv = newStringTable(modeCaseSensitive)
+      for key, value in envPairs():
+        childEnv[key] = value
+      childEnv["PATH"] = fakeBin & PathSep & childEnv.getOrDefault("PATH")
+      childEnv["LD_LIBRARY_PATH"] = fixtureRoot / "target-libraries"
+
+      let daemonProcess = startProcess(daemonPath,
+        args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
+        env = childEnv, options = {})
+      defer:
+        if daemonProcess.running:
+          daemonProcess.terminate()
+        daemonProcess.close()
+        removeFile(socketPath)
+
+      var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+        protocol = IPPROTO_IP)
+      var connected = false
+      for i in 0 .. 40:
+        sleep(50)
+        try:
+          sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+            protocol = IPPROTO_IP)
+          sock.connectUnix(socketPath)
+          connected = true
+          break
+        except CatchableError:
+          discard
+      check connected
+
+      let req = %*{
+        "action": "resolve",
+        "selector": ".#fake",
+        "workspaceRoot": fixtureRoot
+      }
+      sock.send($req & "\n")
+      var respLine = ""
+      sock.readLine(respLine)
+      sock.close()
+      check respLine.len > 0
+      let resp = parseJson(respLine)
+      check resp["status"].getStr() == "success"
+      check resp["paths"][0].getStr() ==
+        "/tmp/reprobuild-nix-daemon-fake-store"
 
   test "Scenario 1.1, 1.2, 1.3, 1.4, 1.5: Cold Start, IPC Exchange, Warm Cache, and Dependencies":
     let repoRoot = findRepoRoot()

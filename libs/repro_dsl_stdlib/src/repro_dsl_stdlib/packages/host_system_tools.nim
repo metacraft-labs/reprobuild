@@ -95,6 +95,36 @@ package `awk`:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+package `cmp`:
+  provisioning:
+    nixPackage "nixpkgs#diffutils", executablePath = "bin/cmp",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `diff`:
+  provisioning:
+    nixPackage "nixpkgs#diffutils", executablePath = "bin/diff",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `head`:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/head",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `ln`:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/ln",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `sort`:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/sort",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package `sha256sum`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/sha256sum",
@@ -134,6 +164,12 @@ package `cp`:
 package `rm`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/rm",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `find`:
+  provisioning:
+    nixPackage "nixpkgs#findutils", executablePath = "bin/find",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 

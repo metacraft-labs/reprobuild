@@ -54,7 +54,7 @@
 ## ``reprobuild.test_execute.<stem>`` action it built + ran in the
 ## current process tree.
 
-import std/[json, os, osproc, strtabs, strutils, unittest]
+import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
 
@@ -261,3 +261,40 @@ suite "Bootstrap-And-Self-Build B3: repro test runs through engine":
           # both shapes are valid evidence that the engine drove the
           # execute edge through its scheduler.
           check status.len > 0
+
+  test "alias forwards ordinary build flags to the test collection":
+    let repoRoot = findRepoRoot()
+    let reproBin = repoRoot / "build" / "bin" /
+      addFileExt("repro", ExeExt)
+
+    if not fileExists(reproBin):
+      checkpoint("skipped - " & reproBin &
+        " is missing; run `repro build apps` first")
+      skip()
+    else:
+      let scratch = createTempDir("repro-test-build-flags-", "")
+      defer: removeDir(scratch)
+      let reportPath = scratch / "report.json"
+      let diagnosticsPath = scratch / "diagnostics"
+      let selector = ".#test#" & TargetTest
+      let args = @[
+        reproBin.quoteShell,
+        "test",
+        selector,
+        "--no-certify",
+        "--tool-provisioning=path",
+        "--daemon=off",
+        "--no-runquota",
+        "--progress=quiet",
+        "--log=summary",
+        "--measure=all",
+        "--write-report=" & reportPath.quoteShell,
+        "--write-diagnostics=" & diagnosticsPath.quoteShell,
+      ]
+      let (output, exitCode) = runWithRunquotaOnPath(args.join(" "), repoRoot)
+
+      if exitCode != 0:
+        checkpoint(output)
+      check exitCode == 0
+      check "unsupported repro test flag" notin output
+      check fileExists(reportPath)

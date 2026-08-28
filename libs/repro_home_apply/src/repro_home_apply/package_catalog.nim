@@ -117,6 +117,20 @@ type
     adapter*: CatalogAdapterKind
     outcome*: ChainStepOutcome
     reason*: string
+    capabilityShortfall*: bool
+      ## PMC-4 — this adapter had the package and REFUSED it because the host
+      ## cannot execute what it offers (``breMicroarchFloorNotSatisfied``), as
+      ## opposed to not having it at all.
+      ##
+      ## The distinction is the whole point. "I don't have it" is a reason to
+      ## try the next adapter. "I have it and this machine cannot run it" is
+      ## not: the next adapters include ``cakPath``, which probes PATH for a
+      ## SAME-NAMED executable, and resolving to that looks like success while
+      ## delivering a binary nobody declared. That is PMC-1's
+      ## silent-fallthrough hazard in new clothing, and it is why this is a
+      ## typed field rather than a substring of ``reason`` -- a diagnostic
+      ## string is not a control-flow signal, and sniffing one would break the
+      ## first time the wording changed.
 
   CatalogResolution* = object
     ## The production catalog's verdict for one package reference.
@@ -134,6 +148,65 @@ type
     # carry the realization inputs forward so `realizeBuiltinPackage`
     # does not need to re-resolve the slice.
     builtinVersion*: string          ## VersionedProvisioning.version
+    builtinCpuLevel*: MicroarchLevel
+                                     ## PMC-2: the microarchitecture FLOOR of
+                                     ## the arm that was selected, or
+                                     ## ``mlNone`` when it declared none
+                                     ## (every catalog entry today). Recorded
+                                     ## because "which target did this
+                                     ## resolve for" stops being a property
+                                     ## of the host alone once selection
+                                     ## depends on it.
+                                     ##
+                                     ## Deliberately NOT wired into any lock
+                                     ## identity or cache key here — that is
+                                     ## PMC-4's named deliverable and doing
+                                     ## it early would change key material
+                                     ## without the tests that make the
+                                     ## change safe. This field is the datum
+                                     ## PMC-4 will read.
+    builtinCpuFeatures*: set[CpuFeature]
+                                     ## PMC-3: the extra extensions the
+                                     ## selected arm declared beyond its
+                                     ## floor, or ``{}`` (every catalog entry
+                                     ## today). Recorded for the same reason
+                                     ## ``builtinCpuLevel`` is, and under the
+                                     ## same restriction: NOT wired into any
+                                     ## lock identity or cache key here — that
+                                     ## is PMC-4's named deliverable.
+                                     ##
+                                     ## The arm's DECLARED set, not its
+                                     ## expansion: what the author wrote is
+                                     ## what a lock entry should record, and
+                                     ## the expansion is recoverable from it
+                                     ## via ``requiredFeatures``.
+    resolvedTarget*: string
+                                     ## PMC-4: ``builtinCpuLevel`` and
+                                     ## ``builtinCpuFeatures`` rendered as
+                                     ## ONE string by
+                                     ## ``renderResolvedTarget`` — the exact
+                                     ## value that goes into a lock entry
+                                     ## (``LockedPackage.target``) and into a
+                                     ## binary-cache key
+                                     ## (``PlatformTriple.microarch``).
+                                     ##
+                                     ## A derived field rather than a fourth
+                                     ## source of truth: it is a pure
+                                     ## function of the two above, computed
+                                     ## HERE so that the lock writer and the
+                                     ## cache-key deriver cannot each invent
+                                     ## their own spelling of the same
+                                     ## resolution. Two spellings would
+                                     ## separate entries that are in fact
+                                     ## interchangeable, which is a silent
+                                     ## cache miss — quieter than the SIGILL
+                                     ## this milestone prevents, and just as
+                                     ## hard to attribute.
+                                     ##
+                                     ## ``""`` for every catalog entry today,
+                                     ## which is what makes the whole change
+                                     ## byte-neutral for existing keys and
+                                     ## identities.
     urlUsed*: string                 ## PlatformBinary.url chosen for host
     digestAlgorithm*: string         ## "sha256" | "sha512"
     digestValue*: string             ## hex digest (lowercase)
@@ -195,6 +268,26 @@ type
     chain*: seq[CatalogAdapterKind]
     chainTrace*: seq[ChainStep]
 
+  EPackageUnavailableOnPlatform* = object of CatchableError
+    ## PMC-1 (Platform-And-Microarchitecture-Constraints): the package
+    ## DECLARED, via a package-level ``platforms:`` block, that it cannot
+    ## exist on this host.
+    ##
+    ## Distinct from ``EAdapterChainExhausted`` on purpose, and that is the
+    ## whole milestone. Chain-exhausted means "no adapter could supply this
+    ## package HERE, YET" and its remediation — catalogue it, put it on PATH,
+    ## reorder ``adapter_preference:`` — is advice a reader can act on. For a
+    ## Windows package manager on Linux every one of those is impossible, and
+    ## the old message sent the reader to add a Linux arm for a tool that has
+    ## no POSIX build. This error names the reason instead, and carries the
+    ## author's own ``msg`` when the declaration supplied one.
+    packageId*: string
+    declaredPlatforms*: string
+      ## Rendered form of the declaration, e.g. ``windows only``.
+    hostTarget*: string
+      ## Rendered form of the host, on the same axes, e.g. ``linux``.
+    authorMessage*: string
+
   ProductionCatalog* = object
     ## Per-apply catalog handle. Built once; the installed-app table
     ## and the bucket inventory are memoized so a multi-package apply
@@ -217,6 +310,619 @@ proc raiseUnknownPackage*(packageId: string;
     "adapter binding.")
   e.packageId = packageId
   e.searchedCatalogs = searched
+  raise e
+
+# ---------------------------------------------------------------------------
+# Host target detection
+# ---------------------------------------------------------------------------
+#
+# Declared here rather than beside the M64 built-in resolver because BOTH
+# resolution entry points (the legacy ``resolvePackage`` below and M65's
+# ``chainResolvePackage``) take the host target as a DEFAULTED PARAMETER, and
+# a default expression can only name something already declared. Keeping that
+# seam is a hard requirement of the Platform-And-Microarchitecture-Constraints
+# campaign: every platform test passes a SYNTHETIC host through these
+# parameters, so the suite runs identically on any machine. Do not convert
+# them into a global lookup.
+
+proc detectHostCpu*(): PlatformCpu =
+  ## Map the Nim `hostCPU` token to the schema's `PlatformCpu` enum.
+  ## Unknown CPUs fall through to `pcAny` (the realize loop will then
+  ## look for an arch-independent slice; if none exists,
+  ## `selectPlatformBinary` reports `found=false`).
+  when defined(amd64) or defined(x86_64):
+    pcX86_64
+  elif defined(arm64) or defined(aarch64):
+    pcAArch64
+  elif defined(i386) or defined(i686) or defined(x86):
+    pcX86
+  else:
+    pcAny
+
+proc detectHostOs*(): PlatformOs =
+  when defined(windows):
+    poWindows
+  elif defined(linux):
+    poLinux
+  elif defined(macosx) or defined(osx):
+    poMacos
+  else:
+    poAny
+
+const HostMicroarchLevelEnvVar* = "REPRO_HOST_MICROARCH_LEVEL"
+  ## PMC-2 deliverable 2, the override half: the microarchitecture level
+  ## this host DECLARES it provides.
+  ##
+  ## An environment variable rather than a probe because the authority for
+  ## "what may this machine be given" is the fleet, not the silicon. This
+  ## org's CI already labels runners ``x86-64-v2`` / ``x86-64-v3``; that
+  ## label is the thing an operator can reason about, audit and change,
+  ## and it is what a shared binary cache must agree with. It also
+  ## satisfies the milestone's requirement that a build be able to target
+  ## a floor BELOW the builder — PMC-4 depends on being able to say "this
+  ## build resolves as a v1 host" on a v3 machine, and a cpuid probe
+  ## cannot be talked down.
+  ##
+  ## Accepts the same vocabulary as ``parseMicroarchLevelToken``
+  ## (``x86-64-v3``, ``v3``, ``none``). An UNPARSEABLE value is refused
+  ## loudly rather than ignored: silently falling back to the baseline
+  ## would turn a typo in a runner label into a fleet that thinks it is
+  ## v1 and quietly stops using every optimised artifact.
+
+proc baselineMicroarchLevel*(family: PlatformCpu): MicroarchLevel =
+  ## The level a CPU family provides BY DEFINITION, with no probing.
+  ##
+  ## ``x86_64`` is exactly ``x86-64-v1``: v1 is the psABI baseline every
+  ## amd64 chip implements, so claiming it needs no detection. Anything
+  ## above it does — v2/v3/v4 are feature-set questions and host FEATURE
+  ## DETECTION is PMC-3's named deliverable, not this one's. Until then a
+  ## host that can run more says so through
+  ## ``REPRO_HOST_MICROARCH_LEVEL``.
+  ##
+  ## Defaulting low rather than high is the same decision Package-Model.md
+  ## §"Two hazards specific to this project" reaches for the cache: Spack
+  ## optimises for the build host and its binaries famously do not run
+  ## elsewhere. A conservative floor costs peak performance and buys cache
+  ## entries that are actually reusable across a fleet.
+  case family
+  of pcX86_64: mlX86_64_v1
+  of pcAny, pcAArch64, pcX86: mlNone
+
+const DefaultTargetFloorEnvVar* = "REPRO_DEFAULT_TARGET_FLOOR"
+  ## PMC-4 deliverable 3, the central half: the floor an artifact is BUILT to
+  ## target when its package does not say.
+  ##
+  ## Read this alongside ``HostMicroarchLevelEnvVar`` and note they are
+  ## opposites, because conflating them is the whole hazard. That one declares
+  ## what a host may be GIVEN (a ceiling, read on the consuming side). This one
+  ## declares what an artifact is BUILT FOR (a floor, chosen on the producing
+  ## side). Raising the ceiling lets a machine accept more; raising the floor
+  ## makes what you produce run on fewer machines.
+
+proc defaultTargetFloor*(): MicroarchLevel =
+  ## PMC-4: the fleet-wide default floor. **Conservative, and deliberately so.**
+  ##
+  ## Spack optimises for the BUILD host by default, which is exactly why Spack
+  ## binaries famously fail to run elsewhere: every artifact silently inherits
+  ## the capabilities of whichever machine happened to build it, and the
+  ## failure surfaces as a SIGILL on a different machine much later. A
+  ## cache-oriented system wants the opposite trade — a floor low enough that
+  ## one cached artifact serves the whole fleet, with higher levels taken
+  ## EXPLICITLY by the packages that can justify losing that reuse.
+  ##
+  ## So the default is ``mlNone``: no floor, runs anywhere. It is not an
+  ## absence of policy — it IS the policy, and the constant exists so that
+  ## changing it is one obvious edit rather than an archaeology exercise
+  ## across call sites.
+  ##
+  ## The per-package opt-in override is ``cpu_level`` on the arm itself
+  ## (``effectiveTargetFloor`` below), which is where a package that genuinely
+  ## needs AVX-512 says so and accepts the narrower audience.
+  ##
+  ## Same refusal discipline as the host override: an unreadable value is an
+  ## error, never a silent default. A typo here would otherwise lower the
+  ## fleet's floor without anyone noticing, and "we shipped v1 artifacts for a
+  ## month" is discovered by benchmark, not by error.
+  let raw = getEnv(DefaultTargetFloorEnvVar, "")
+  if raw.len == 0:
+    return mlNone
+  let parsed = parseMicroarchLevelToken(raw)
+  if not parsed.ok:
+    raise newException(ValueError,
+      DefaultTargetFloorEnvVar & "='" & raw & "' is not a microarchitecture " &
+      "level. Expected one of x86-64-v1 / x86-64-v2 / x86-64-v3 / " &
+      "x86-64-v4 (or the bare v1..v4, or 'none' for no floor). This " &
+      "variable declares what artifacts are BUILT FOR; an unreadable value " &
+      "is refused rather than defaulted, because defaulting it would " &
+      "silently change which machines can run what this fleet produces.")
+  parsed.level
+
+proc effectiveTargetFloor*(declared: MicroarchLevel;
+                           fleetDefault = mlNone): MicroarchLevel =
+  ## Resolve a package's floor: its own declaration if it made one, else the
+  ## fleet default.
+  ##
+  ## ``fleetDefault`` is a DEFAULTED PARAMETER rather than a call to
+  ## ``defaultTargetFloor()`` in the body, for the same reason ``hostLevel``
+  ## is: a test must be able to name a synthetic fleet policy without setting
+  ## a process-wide environment variable, and a pure function of its arguments
+  ## is the only shape that allows it.
+  ##
+  ## A package that declares ``mlNone`` explicitly is indistinguishable from
+  ## one that declared nothing, and that is correct: ``mlNone`` means "no
+  ## floor", so there is nothing for it to be overriding.
+  if declared != mlNone: declared else: fleetDefault
+
+proc detectHostMicroarchLevel*(family = detectHostCpu()): MicroarchLevel =
+  ## PMC-2: what does this host provide?
+  ##
+  ## ``REPRO_HOST_MICROARCH_LEVEL`` when set, else the family baseline.
+  ##
+  ## Note the shape: this is a PROC WITH A DEFAULTED PARAMETER, called
+  ## from the default-parameter expressions of the resolution entry
+  ## points. It is never consulted when a caller supplies a level, so the
+  ## env read cannot reach a test that passes a synthetic host — which is
+  ## precisely the seam the campaign's testability note protects.
+  let raw = getEnv(HostMicroarchLevelEnvVar, "")
+  if raw.len == 0:
+    return baselineMicroarchLevel(family)
+  let parsed = parseMicroarchLevelToken(raw)
+  if not parsed.ok:
+    raise newException(ValueError,
+      HostMicroarchLevelEnvVar & "='" & raw & "' is not a microarchitecture " &
+      "level. Expected one of x86-64-v1 / x86-64-v2 / x86-64-v3 / " &
+      "x86-64-v4 (or the bare v1..v4, or 'none' for an unstated host). " &
+      "This variable declares what the host may be GIVEN; an unreadable " &
+      "value is refused rather than defaulted, because defaulting it " &
+      "would silently change which artifacts this machine accepts.")
+  parsed.level
+
+const HostCpuFeaturesEnvVar* = "REPRO_HOST_CPU_FEATURES"
+  ## PMC-3 deliverable 1, the declaration half: the CPU extensions this host
+  ## DECLARES it provides, on top of whatever ``REPRO_HOST_MICROARCH_LEVEL``
+  ## says.
+  ##
+  ## Accepts a list in the psABI spellings, separated by ``,`` / ``+`` /
+  ## whitespace (``avx512vl,avx512vnni``), or the single word ``auto`` to run
+  ## the real ``cpuid`` probe. An UNPARSEABLE value is refused loudly rather
+  ## than ignored — exactly the rule ``REPRO_HOST_MICROARCH_LEVEL`` follows,
+  ## and for the sharper version of the same reason: a dropped feature would
+  ## silently change which artifacts this machine accepts with no error
+  ## anywhere pointing back at the typo.
+  ##
+  ## **Unset means "declared nothing", NOT "probe".** That is a policy
+  ## decision, not an omission, and it is the same one PMC-2 made for the
+  ## level: the authority for "what may this machine be given" is the fleet,
+  ## not the silicon. A probe cannot be talked DOWN, and "target a floor below
+  ## the builder" is a requirement PMC-4 depends on. So a machine that can
+  ## demonstrably run more still declares nothing until an operator says
+  ## otherwise, and the conservative floor survives PMC-3 intact.
+
+when defined(amd64) and not defined(js) and not defined(nimscript):
+  # PMC-3: the ``cpuid`` / ``xgetbv`` primitives, as two tiny C statics.
+  #
+  # Emitted into the INCLUDESECTION so they are defined before any Nim-
+  # generated code that calls them. ``__get_cpuid_count`` (GCC/Clang) and
+  # ``__cpuidex`` (MSVC) both bounds-check the leaf against CPUID's own
+  # maximum, so an unsupported leaf answers zeroes rather than garbage.
+  # XGETBV is spelled as its raw opcode bytes to avoid depending on the
+  # assembler's ISA level.
+  {.emit: """/*INCLUDESECTION*/
+#if defined(_MSC_VER)
+#  include <intrin.h>
+static void repro_cpuidex(unsigned int leaf, unsigned int sub,
+                          unsigned int *out) {
+  int regs[4];
+  __cpuidex(regs, (int)leaf, (int)sub);
+  out[0] = (unsigned int)regs[0]; out[1] = (unsigned int)regs[1];
+  out[2] = (unsigned int)regs[2]; out[3] = (unsigned int)regs[3];
+}
+static unsigned long long repro_xgetbv0(void) { return _xgetbv(0); }
+#else
+#  include <cpuid.h>
+static void repro_cpuidex(unsigned int leaf, unsigned int sub,
+                          unsigned int *out) {
+  unsigned int a = 0, b = 0, c = 0, d = 0;
+  if (!__get_cpuid_count(leaf, sub, &a, &b, &c, &d)) { a = b = c = d = 0; }
+  out[0] = a; out[1] = b; out[2] = c; out[3] = d;
+}
+static unsigned long long repro_xgetbv0(void) {
+  unsigned int eax = 0, edx = 0;
+  __asm__ __volatile__(".byte 0x0f, 0x01, 0xd0"
+                       : "=a"(eax), "=d"(edx) : "c"(0));
+  return (((unsigned long long)edx) << 32) | (unsigned long long)eax;
+}
+#endif
+""".}
+
+  proc cpuidEx(leaf, sub: uint32; outRegs: ptr uint32)
+    {.importc: "repro_cpuidex", nodecl.}
+  proc xgetbv0(): uint64 {.importc: "repro_xgetbv0", nodecl.}
+
+proc probeHostCpuFeatures*(): set[CpuFeature] =
+  ## PMC-3 deliverable 1, the probe half: what this silicon ACTUALLY has,
+  ## from ``cpuid``.
+  ##
+  ## Reached only through ``REPRO_HOST_CPU_FEATURES=auto`` (see above), and
+  ## living here rather than in ``packages_schema`` because it is a host read
+  ## and the schema stays pure on that axis — the campaign's testability note
+  ## makes that a requirement, not a preference.
+  ##
+  ## Two gates, both of which exist because the CPUID bit alone is not the
+  ## question a caller is asking:
+  ##
+  ##   * ``avx`` is reported only when the OS enabled the extended register
+  ##     state for it (``OSXSAVE`` plus ``XCR0[2:1]``). AVX instructions fault
+  ##     on a kernel that did not, so a probe that answered from the raw
+  ##     feature bit would report a capability this machine does not have —
+  ##     the exact wrong direction for this campaign;
+  ##   * the AVX-512 family is gated behind ``avx`` and ``XCR0[7:5]`` for the
+  ##     same reason.
+  ##
+  ## Answers ``{}`` on anything that is not amd64: a probe with no
+  ## implementation must not report a partial one.
+  when defined(amd64) and not defined(js) and not defined(nimscript):
+    var regs: array[4, uint32]
+    template bitOf(word: uint32; bit: int): bool =
+      (word and (1'u32 shl uint32(bit))) != 0'u32
+    cpuidEx(0'u32, 0'u32, addr regs[0])
+    let maxLeaf = regs[0]
+    if maxLeaf < 1'u32:
+      return {}
+    cpuidEx(1'u32, 0'u32, addr regs[0])
+    let leaf1Ecx = regs[2]
+    let leaf1Edx = regs[3]
+    if bitOf(leaf1Edx, 15): result.incl(cfCmov)
+    if bitOf(leaf1Edx, 8): result.incl(cfCx8)
+    if bitOf(leaf1Edx, 0): result.incl(cfFpu)
+    if bitOf(leaf1Edx, 23): result.incl(cfMmx)
+    if bitOf(leaf1Edx, 24): result.incl(cfFxsr)
+    if bitOf(leaf1Edx, 25): result.incl(cfSse)
+    if bitOf(leaf1Edx, 26): result.incl(cfSse2)
+    # OSFXSR is a CR4 bit, not a CPUID one — unreadable from user mode. Every
+    # OS that runs SSE code sets it, and SSE is reported above, so deriving it
+    # from FXSR+SSE is the honest reading rather than a guess: if the OS had
+    # not enabled FXSAVE state, nothing compiled for amd64 would run at all.
+    if cfFxsr in result and cfSse in result: result.incl(cfOsfxsr)
+    if bitOf(leaf1Ecx, 0): result.incl(cfSse3)
+    if bitOf(leaf1Ecx, 1): result.incl(cfPclmulqdq)
+    if bitOf(leaf1Ecx, 9): result.incl(cfSsse3)
+    if bitOf(leaf1Ecx, 13): result.incl(cfCx16)
+    if bitOf(leaf1Ecx, 19): result.incl(cfSse4_1)
+    if bitOf(leaf1Ecx, 20): result.incl(cfSse4_2)
+    if bitOf(leaf1Ecx, 22): result.incl(cfMovbe)
+    if bitOf(leaf1Ecx, 23): result.incl(cfPopcnt)
+    if bitOf(leaf1Ecx, 25): result.incl(cfAes)
+    if bitOf(leaf1Ecx, 29): result.incl(cfF16c)
+    if bitOf(leaf1Ecx, 30): result.incl(cfRdrnd)
+    let osxsave = bitOf(leaf1Ecx, 27)
+    if osxsave: result.incl(cfOsxsave)
+    # XGETBV faults with #UD unless OSXSAVE is set, so it is read only inside
+    # this guard.
+    var xcr0: uint64 = 0'u64
+    if osxsave:
+      xcr0 = xgetbv0()
+    let ymmEnabled = osxsave and ((xcr0 and 0x6'u64) == 0x6'u64)
+    let zmmEnabled = ymmEnabled and ((xcr0 and 0xe0'u64) == 0xe0'u64)
+    if ymmEnabled and bitOf(leaf1Ecx, 28): result.incl(cfAvx)
+    if cfAvx in result and bitOf(leaf1Ecx, 12): result.incl(cfFma)
+    # Extended leaf: SYSCALL/SYSRET (the psABI's "sce"), LAHF/SAHF in long
+    # mode, and LZCNT.
+    cpuidEx(0x80000000'u32, 0'u32, addr regs[0])
+    if regs[0] >= 0x80000001'u32:
+      cpuidEx(0x80000001'u32, 0'u32, addr regs[0])
+      if bitOf(regs[3], 11): result.incl(cfSce)
+      if bitOf(regs[2], 0): result.incl(cfLahfSahf)
+      if bitOf(regs[2], 5): result.incl(cfLzcnt)
+    if maxLeaf >= 7'u32:
+      cpuidEx(7'u32, 0'u32, addr regs[0])
+      let ebx = regs[1]
+      let ecx = regs[2]
+      let edx = regs[3]
+      if bitOf(ebx, 3): result.incl(cfBmi1)
+      if bitOf(ebx, 8): result.incl(cfBmi2)
+      if bitOf(ebx, 18): result.incl(cfRdseed)
+      if bitOf(ebx, 19): result.incl(cfAdx)
+      if bitOf(ebx, 29): result.incl(cfSha)
+      if cfAvx in result and bitOf(ebx, 5): result.incl(cfAvx2)
+      if cfAvx in result and bitOf(ecx, 8): result.incl(cfGfni)
+      if cfAvx in result and bitOf(ecx, 9): result.incl(cfVaes)
+      if cfAvx in result and bitOf(ecx, 10): result.incl(cfVpclmulqdq)
+      if zmmEnabled and cfAvx in result and bitOf(ebx, 16):
+        result.incl(cfAvx512f)
+        if bitOf(ebx, 17): result.incl(cfAvx512dq)
+        if bitOf(ebx, 21): result.incl(cfAvx512Ifma)
+        if bitOf(ebx, 28): result.incl(cfAvx512cd)
+        if bitOf(ebx, 30): result.incl(cfAvx512bw)
+        if bitOf(ebx, 31): result.incl(cfAvx512vl)
+        if bitOf(ecx, 1): result.incl(cfAvx512Vbmi)
+        if bitOf(ecx, 6): result.incl(cfAvx512Vbmi2)
+        if bitOf(ecx, 11): result.incl(cfAvx512Vnni)
+        if bitOf(ecx, 12): result.incl(cfAvx512Bitalg)
+        if bitOf(ecx, 14): result.incl(cfAvx512Vpopcntdq)
+        if bitOf(edx, 8): result.incl(cfAvx512Vp2intersect)
+        if bitOf(edx, 23): result.incl(cfAvx512Fp16)
+        cpuidEx(7'u32, 1'u32, addr regs[0])
+        if bitOf(regs[0], 5): result.incl(cfAvx512Bf16)
+  else:
+    result = {}
+
+proc detectHostCpuFeatures*(family = detectHostCpu()): set[CpuFeature] =
+  ## PMC-3: what CPU extensions does this host provide, beyond its level?
+  ##
+  ## ``REPRO_HOST_CPU_FEATURES`` when set (``auto`` routes to
+  ## ``probeHostCpuFeatures``), else ``{}`` — a host that has declared
+  ## nothing.
+  ##
+  ## Same shape as ``detectHostMicroarchLevel`` and for the same reason: a
+  ## PROC WITH A DEFAULTED PARAMETER, called from the default-parameter
+  ## expressions of the resolution entry points. It is never consulted when a
+  ## caller supplies a feature set, so the env read cannot reach a test that
+  ## names a synthetic host.
+  ##
+  ## Both refusals below are the ``REPRO_HOST_MICROARCH_LEVEL`` rule applied
+  ## to a set: an unreadable TOKEN is refused, and so is a feature belonging
+  ## to another family — the latter could never be satisfied and would present
+  ## as an unexplained refusal far from the variable that caused it.
+  let raw = getEnv(HostCpuFeaturesEnvVar, "")
+  if raw.strip().len == 0:
+    return {}
+  if raw.strip().toLowerAscii() == "auto":
+    # A probe request for a family that is not the compiled one answers {}
+    # rather than handing this machine's x86 features to an aarch64
+    # resolution — the same dependence on ``family`` that
+    # ``detectHostMicroarchLevel`` has.
+    if family != detectHostCpu():
+      return {}
+    return probeHostCpuFeatures()
+  let parsed = parseCpuFeatureSet(raw)
+  if not parsed.ok:
+    raise newException(ValueError,
+      HostCpuFeaturesEnvVar & "='" & raw & "' names an unknown CPU feature '" &
+      parsed.badToken & "'. Expected psABI spellings (avx2, avx512vl, " &
+      "avx512vnni, sha, ...) separated by ',' / '+' / whitespace, or the " &
+      "single word 'auto' to probe this machine. This variable declares " &
+      "what the host may be GIVEN; an unreadable value is refused rather " &
+      "than defaulted, because dropping a feature would silently change " &
+      "which artifacts this machine accepts.")
+  for f in parsed.features:
+    if cpuFeatureFamily(f) != family:
+      raise newException(ValueError,
+        HostCpuFeaturesEnvVar & "='" & raw & "' names '" & $f &
+        "', which belongs to cpu family " & $cpuFeatureFamily(f) &
+        ", but this resolution's host family is " & $family &
+        ". A feature the host family cannot have is never satisfiable and " &
+        "would present as an unexplained refusal far from this variable.")
+  parsed.features
+
+# ---------------------------------------------------------------------------
+# PMC-4/PMC-6 — the BUILD machine and the HOST target are two different things
+#
+# Everything above answers questions about "the host", and until now that word
+# carried two meanings that happen to coincide today. They stop coinciding the
+# moment a cross build exists, and the failure is silent: artifacts built with
+# instructions the target machine cannot execute, discovered as a SIGILL far
+# from here.
+#
+# The vocabulary is Nix's, because the build engine already uses it
+# (`repro_build_engine/platform.nim`: `buildPlatformTriple()` vs
+# `resolvedTargetTriple()`, `dkNative` vs `dkBuild`/`dkRuntime`, with `"native"`
+# as the BUILD == HOST sentinel). Adding a second, parallel vocabulary here is
+# the mistake PMC-3 avoided when it made the psABI level sugar over feature
+# sets rather than a rival source of truth.
+#
+#   BUILD machine  the machine running `repro` right now. A MEASURED FACT --
+#                  cpuid says what it says. Tools that RUN during the build
+#                  (`nativeBuildDeps:`, `dkNative`) must satisfy this one:
+#                  a compiler that traps on this machine is useless no matter
+#                  what it is producing.
+#
+#   HOST target    what the produced artifacts must RUN on. A DECISION, not a
+#                  measurement. `buildDeps:` / `runtimeDeps:` (`dkBuild`,
+#                  `dkRuntime`) and every published artifact must satisfy this
+#                  one. It is what belongs in the lock identity and the cache
+#                  key, because it is the thing that makes two artifacts
+#                  genuinely different.
+#
+# Why the existing REPRO_HOST_* variables are already the right seam: they say
+# what the RUN target provides, which is exactly the host axis. Setting them
+# BELOW the build machine is a cross build in miniature -- "produce something
+# that runs on less than this machine" -- and it is the shape a real cross
+# build takes. That is why they had to refuse an unparseable value rather than
+# defaulting: a silently-defaulted override is a cross build quietly resolving
+# as native, which is precisely the failure this section exists to prevent.
+#
+# The asymmetry to keep hold of: the host target may be LOWER than the build
+# machine (build conservative artifacts on a capable machine -- the normal,
+# desirable case). It being HIGHER is not automatically wrong either
+# (cross-compiling for a more capable machine), but it means native tools and
+# produced artifacts no longer share a floor, so they must be resolved
+# separately. Either way the two must never be silently substituted for one
+# another, which is what a single "host" concept guarantees will eventually
+# happen.
+# ---------------------------------------------------------------------------
+
+type
+  TargetRole* = enum
+    ## Which of the two targets a resolution is asking about.
+    trBuildMachine = "build"
+      ## The machine running the build. Satisfied by `nativeBuildDeps:`.
+    trHostTarget = "host"
+      ## What the produced artifacts must run on. Satisfied by `buildDeps:` /
+      ## `runtimeDeps:`, and what the lock identity and cache key carry.
+
+proc buildMachineTarget*(): PlatformTarget =
+  ## What the machine running `repro` actually provides. A MEASUREMENT:
+  ## `cpuid` / `xgetbv`, never an override.
+  ##
+  ## Deliberately not overridable. The REPRO_HOST_* variables describe the
+  ## target you are building FOR; letting them also rewrite what this machine
+  ## IS would make a cross build unable to resolve its own compiler -- you
+  ## would be telling reprobuild that the machine executing gcc lacks
+  ## instructions gcc's binary actually uses. When cross compilation lands,
+  ## the build machine stays measured and only the host target moves.
+  let family = detectHostCpu()
+  initPlatformTarget(family, baselineMicroarchLevel(family),
+    probeHostCpuFeatures())
+
+type
+  HostTargetResolver* = proc(): PlatformTarget {.gcsafe, closure.}
+    ## PMC-6 — the seam that makes the microarchitecture host target and the
+    ## engine's `targetTriple` ONE input instead of two.
+    ##
+    ## ## Why a closure and not a direct read
+    ##
+    ## `targetTriple` is a SOLVER VARIANT. Resolving it needs the solver, and
+    ## this module must not import it -- the same layering rule that made the
+    ## build engine take a `TargetTripleResolver` closure rather than reaching
+    ## for `repro_dsl_stdlib` itself (`repro_build_engine/platform.nim`).
+    ##
+    ## So the CLI, which is the only layer that can see both, wires a closure
+    ## here exactly as it already wires one there. This module stays a leaf,
+    ## and the two axes acquire a single decision point instead of two
+    ## independent ones that agree only by coincidence of defaults.
+    ##
+    ## `nil` means "nobody wired one", which is the library and test case: the
+    ## environment-based default below applies, and behaviour is what it was
+    ## before PMC-6.
+
+var hostTargetResolverHook: HostTargetResolver = nil
+  ## Deliberately private. A caller SETS it through `setHostTargetResolver`
+  ## and can never read it back, so no code path can start branching on
+  ## "was a resolver wired?" -- which would reintroduce the two-answers
+  ## problem in a new shape.
+
+proc setHostTargetResolver*(resolver: HostTargetResolver) =
+  ## Wire the single host-target authority. Called once by the CLI driver.
+  ##
+  ## Passing `nil` restores the environment-based default; that is what tests
+  ## do to get back to a known state, and it is why this is idempotent rather
+  ## than a one-shot install.
+  hostTargetResolverHook = resolver
+
+proc environmentHostTarget*(): PlatformTarget =
+  ## The host target as described by `REPRO_HOST_MICROARCH_LEVEL` /
+  ## `REPRO_HOST_CPU_FEATURES` alone, ignoring any wired resolver.
+  ##
+  ## Exposed so the CLI's resolver can COMPOSE it -- read the variant, fall
+  ## back to the environment -- rather than reimplementing the parsing and
+  ## refusal rules and letting the two copies drift.
+  let family = detectHostCpu()
+  initPlatformTarget(family, detectHostMicroarchLevel(family),
+    detectHostCpuFeatures(family))
+
+proc hostTarget*(): PlatformTarget =
+  ## What the produced artifacts must run on.
+  ##
+  ## The wired resolver when there is one; otherwise the environment, which
+  ## itself defaults to the build machine -- the `"native"` sentinel the build
+  ## engine already uses, and why one "host" concept worked for so long.
+  if hostTargetResolverHook != nil:
+    return hostTargetResolverHook()
+  environmentHostTarget()
+
+proc isCrossTargeted*(buildT, hostT: PlatformTarget): bool =
+  ## True when the two targets have diverged, i.e. this is no longer a
+  ## `"native"` build in the build engine's sense.
+  ##
+  ## Exposed because the interesting diagnostics and cache decisions hang off
+  ## this being observable, rather than each caller re-deriving it from a
+  ## comparison it might get subtly wrong.
+  # An UNSTATED host feature set is not a disagreement.
+  #
+  # PMC-3 made features DECLARED rather than probed: `detectHostCpuFeatures`
+  # answers `{}` unless `REPRO_HOST_CPU_FEATURES` says otherwise, while
+  # `buildMachineTarget` genuinely measures the silicon. Comparing those two
+  # raw values reported CROSS on an ordinary native machine with no
+  # configuration at all -- the host had said nothing and the build machine
+  # had said everything.
+  #
+  # So a divergence requires the host to have STATED something different.
+  # Family and level always count (both always have a value); features count
+  # only once the host has named some, which is exactly when a caller has
+  # taken a position on what the target provides.
+  buildT.family != hostT.family or
+    buildT.level != hostT.level or
+    (hostT.features != {} and hostT.features != buildT.features)
+
+proc targetRoleForDepKind*(kind: string): TargetRole =
+  ## PMC-6 — route a dependency to the target that must satisfy it, keyed on
+  ## the engine's own `DepKind` spelling.
+  ##
+  ## Takes the kind as a STRING rather than importing `repro_build_engine`.
+  ## That import would be a layering inversion (the engine deliberately does
+  ## not depend on this side either), and the vocabulary here is three fixed
+  ## tokens that the engine already serialises.
+  ##
+  ##   * `nativeBuildDeps:` / `dkNative` -- tools that RUN during the build.
+  ##     They execute on the BUILD machine, so a compiler that traps here is
+  ##     useless no matter what it is producing.
+  ##   * `buildDeps:` / `dkBuild` and `runtimeDeps:` / `dkRuntime` -- libraries
+  ##     the produced binaries link or load. They must satisfy the HOST target,
+  ##     because that is where those binaries will run.
+  ##
+  ## The default is the HOST target, and that direction is deliberate: an
+  ## unrecognised kind that resolved against the build machine could let an
+  ## artifact silently inherit capabilities the target lacks, which is a SIGILL
+  ## on someone else's machine. Resolving against the host target instead can
+  ## only ever be too conservative -- it may refuse something that would have
+  ## worked, loudly, here.
+  case kind
+  of "dkNative", "native", "nativeBuildDeps": trBuildMachine
+  else: trHostTarget
+
+proc targetForRole*(role: TargetRole; buildT, hostT: PlatformTarget):
+    PlatformTarget =
+  ## Route a dependency to the target that must satisfy it.
+  ##
+  ## Pure and fully parameterised on purpose: a test names both targets and
+  ## asks the routing question directly, with no machine involved. That is the
+  ## same seam `hostCpu`/`hostOs`/`hostLevel`/`hostFeatures` keep on the
+  ## resolution entry points, and it is what makes cross-compilation behaviour
+  ## testable on hardware that can only ever be one of the two.
+  case role
+  of trBuildMachine: buildT
+  of trHostTarget: hostT
+
+proc detectHostTarget*(): PlatformTarget =
+  ## The HOST target -- what produced artifacts must run on.
+  ##
+  ## Retained as the established name (the binary-cache compat check and the
+  ## PMC-2/PMC-3 tests call it). `hostTarget()` is the same value under a name
+  ## that says which of the two axes it is; prefer that in new code, and reach
+  ## for `buildMachineTarget()` when you mean the machine doing the work.
+  hostTarget()
+
+proc raisePackageUnavailableOnPlatform*(packageId: string;
+                                        availability: PackageAvailability;
+                                        hostCpu: PlatformCpu;
+                                        hostOs: PlatformOs) {.noreturn.} =
+  ## PMC-1: the package declared where it can exist and this host is not in
+  ## that set. The message NAMES the reason — "chocolatey is declared for
+  ## windows only; this host is linux" — because the remediation for a
+  ## declared unavailability is categorically different from the remediation
+  ## for a missing catalog entry, and the reader cannot tell the two apart
+  ## from a chain trace.
+  ##
+  ## The advice deliberately does NOT mention PATH. Putting a same-named
+  ## binary on PATH is exactly the silent-wrong-thing this milestone closes:
+  ## it would resolve to something nobody declared.
+  let declared = availability.describeDeclaredPlatforms()
+  let host = availability.describeHostTarget(hostCpu, hostOs)
+  var text = packageId & " is declared for " & declared &
+    "; this host is " & host & "."
+  if availability.message.len > 0:
+    text.add(" " & availability.message)
+  text.add(" This is a declared platform constraint (`platforms:` on the " &
+    "package), not a missing catalog entry: no adapter can supply it here. " &
+    "Guard the dependency at the point of use (`when defined(windows):` " &
+    "around the `uses:` entry) if it is genuinely optional, or widen the " &
+    "package's `platforms:` if it really does exist on this platform.")
+  var e = newException(EPackageUnavailableOnPlatform, text)
+  e.packageId = packageId
+  e.declaredPlatforms = declared
+  e.hostTarget = host
+  e.authorMessage = availability.message
   raise e
 
 # ---------------------------------------------------------------------------
@@ -588,7 +1294,10 @@ proc resolvePathPackage(packageId: string; searched: var seq[string];
   (true, r)
 
 proc resolvePackage*(cat: var ProductionCatalog; packageId: string;
-                     binaries: seq[string] = @[]):
+                     binaries: seq[string] = @[];
+                     hostCpu = detectHostCpu();
+                     hostOs = detectHostOs();
+                     availability = none(PackageAvailability)):
     CatalogResolution =
   ## Resolve one `PlannedPackage` reference against the production
   ## catalog. Raises `EUnknownPackage` (naming the package and the
@@ -597,6 +1306,30 @@ proc resolvePackage*(cat: var ProductionCatalog; packageId: string;
   ## Resolution order on Windows:
   ##   1. installed Scoop app (`scoop list`) — cache-hit candidate.
   ##   2. available in a configured Scoop bucket — realize via Scoop.
+  ##
+  ## PMC-1: raises ``EPackageUnavailableOnPlatform`` first when the package
+  ## declared a ``platforms:`` set this host is not in. This entry point
+  ## needs the gate as much as ``chainResolvePackage`` does — arguably more.
+  ## It is the LEGACY path the realize dispatcher takes for a package with no
+  ## built-in catalog registration (``useChain`` is false in
+  ## ``realizeViaProductionCatalog``), which is exactly the shape a
+  ## DSL-``tarball`` package like ``chocolatey`` has; and both of its exits
+  ## end at ``resolvePathPackage``. Gating only the chain would have left the
+  ## fallthrough-to-PATH hole open on the path that a declared-unavailable
+  ## package actually takes.
+  ##
+  ## PMC-2 deliberately did NOT give this entry point a ``hostLevel``
+  ## parameter. It resolves through Scoop and PATH only — neither consults a
+  ## ``PlatformBinary``, so there is no microarchitecture floor to compare
+  ## against, and a parameter here would be decoration a reader would
+  ## reasonably expect to do something. ``chainResolvePackage`` and
+  ## ``resolveBuiltinPackage``, which DO select arms, carry it.
+  let declaredAvailability =
+    if availability.isSome: availability.get
+    else: packageAvailability(packageId)
+  if not declaredAvailability.isAvailableOn(hostCpu, hostOs):
+    raisePackageUnavailableOnPlatform(packageId, declaredAvailability,
+      hostCpu, hostOs)
   result.packageId = packageId
   result.adapter = cakPath
   result.app = packageId
@@ -712,8 +1445,37 @@ type
     brePlatformNotSupported = "platform-not-supported"
       ## A matching version was found but it has no `PlatformBinary`
       ## entry for the current (cpu, os) tuple.
+    breMicroarchFloorNotSatisfied = "microarch-floor-not-satisfied"
+      ## PMC-2: a `PlatformBinary` DOES exist for the host's (cpu, os),
+      ## but every such arm declares a microarchitecture floor above what
+      ## the host provides. Distinct from `brePlatformNotSupported`
+      ## because the remediation is different — the artifact exists and
+      ## the host is below it — and because the alternative to reporting
+      ## it is resolving an arm that traps at `SIGILL` on first use, far
+      ## from anything that points back here. `errorDetail` names the
+      ## shortfall ("needs x86-64-v3, host provides x86-64-v2").
     breSchemaInvalid = "schema-invalid"
       ## The selected slice failed `validateVersionedProvisioning`.
+    breLockedTargetNotSatisfied = "locked-target-not-satisfied"
+      ## PMC-4: the caller supplied a `lockedTarget` — the microarchitecture
+      ## a LOCK FILE says this package resolved for — and this host cannot
+      ## run it.
+      ##
+      ## Distinct from `breMicroarchFloorNotSatisfied`, and the distinction
+      ## is the whole of `t_lock_from_a_v3_host_resolves_on_a_v2_host`. That
+      ## error means "the catalog offers nothing this host can run"; this one
+      ## means "the catalog might well offer something, but the lock already
+      ## named a different answer and re-resolving would silently substitute
+      ## it". A lock that quietly re-resolves is worse than one that fails:
+      ## the build succeeds, the artifact is not the pinned one, and nothing
+      ## anywhere says so. The remediations differ too — get a host that
+      ## satisfies the lock, or refresh the lock on this host and commit the
+      ## new pin — so collapsing the two would send the reader to the wrong
+      ## one.
+      ##
+      ## Appended at the END of the enum on purpose: nothing serializes
+      ## `BuiltinResolveError` by ordinal today, and keeping the existing
+      ## members' ordinals fixed means nothing can start to.
 
   BuiltinResolveResult* = object
     found*: bool
@@ -721,39 +1483,34 @@ type
     error*: BuiltinResolveError
     errorDetail*: string
 
-proc detectHostCpu*(): PlatformCpu =
-  ## Map the Nim `hostCPU` token to the schema's `PlatformCpu` enum.
-  ## Unknown CPUs fall through to `pcAny` (the realize loop will then
-  ## look for an arch-independent slice; if none exists,
-  ## `selectPlatformBinary` reports `found=false`).
-  when defined(amd64) or defined(x86_64):
-    pcX86_64
-  elif defined(arm64) or defined(aarch64):
-    pcAArch64
-  elif defined(i386) or defined(i686) or defined(x86):
-    pcX86
-  else:
-    pcAny
-
-proc detectHostOs*(): PlatformOs =
-  when defined(windows):
-    poWindows
-  elif defined(linux):
-    poLinux
-  elif defined(macosx) or defined(osx):
-    poMacos
-  else:
-    poAny
-
 proc resolveBuiltinPackage*(packageId: string;
                             catalog: openArray[VersionedProvisioning];
                             version = "";
                             hostCpu = detectHostCpu();
-                            hostOs = detectHostOs()):
+                            hostOs = detectHostOs();
+                            hostLevel = detectHostMicroarchLevel(hostCpu);
+                            hostFeatures = detectHostCpuFeatures(hostCpu)):
     BuiltinResolveResult =
   ## Probe a checked-in VersionedProvisioning catalog for a satisfying
   ## (version, platform) tuple and produce a `CatalogResolution`
   ## carrying every input the M64 realize loop needs.
+  ##
+  ## PMC-2: ``hostLevel`` is what the host PROVIDES on the
+  ## microarchitecture axis, and it is a DEFAULTED PARAMETER for the same
+  ## reason ``hostCpu`` / ``hostOs`` are — a test names a synthetic v2 or
+  ## v3 host and never needs the hardware. Its default reads the
+  ## environment (``detectHostMicroarchLevel``), and that read happens
+  ## only when no caller supplied a value, so the seam stays hermetic.
+  ## Note the default's dependence on ``hostCpu``: a caller that says
+  ## "resolve as if this were aarch64" gets aarch64's baseline, not the
+  ## real machine's.
+  ##
+  ## PMC-3: ``hostFeatures`` is the FOURTH such parameter and is ADDITIVE on
+  ## top of ``hostLevel`` — this host provides its level's set UNION whatever
+  ## it declares here. Its default is ``detectHostCpuFeatures(hostCpu)``,
+  ## which is the only place ``REPRO_HOST_CPU_FEATURES`` can reach selection:
+  ## a caller that supplies a set is never affected by the environment, which
+  ## is what keeps the whole campaign's test suite hermetic.
   result.found = false
   result.error = breOk
   result.resolution.packageId = packageId
@@ -786,8 +1543,28 @@ proc resolveBuiltinPackage*(packageId: string;
     result.errorDetail = "selected slice failed validation: " &
       schemaErrors.join("; ")
     return
-  let pb = selectPlatformBinary(picked, hostCpu, hostOs)
+  let pb = selectPlatformBinaryEx(picked,
+    initPlatformTarget(hostCpu, hostLevel, hostFeatures), hostOs)
   if not pb.found:
+    if pb.refusedForLevel:
+      # PMC-2 deliverable 4, widened by PMC-3 deliverable 3. An arm EXISTS for
+      # this (cpu, os); the host simply cannot run it. Say so, and say by how
+      # much — the generic "no platform slice" message would send the reader
+      # looking for a missing build that is right there in the catalog.
+      #
+      # ``describeCapabilityShortfall`` rather than
+      # ``describeMicroarchShortfall``: an arm requiring x86-64-v3 + avx512vl
+      # refused on a v3 host has NO level shortfall, so the PMC-2 sentence
+      # would be empty here — and if it were emitted anyway it would read
+      # "needs x86-64-v3, host provides x86-64-v3", contradicting the refusal.
+      result.error = breMicroarchFloorNotSatisfied
+      result.errorDetail = "builtin catalog for '" & packageId &
+        "' version '" & picked.version & "' has a slice for cpu=" &
+        $hostCpu & " os=" & $hostOs &
+        ", but this host cannot run it: " & describeCapabilityShortfall(pb) &
+        ". Selecting it anyway would resolve cleanly and then trap at " &
+        "SIGILL on the first instruction the host lacks."
+      return
     result.error = brePlatformNotSupported
     result.errorDetail = "no platform slice for cpu=" & $hostCpu &
       " os=" & $hostOs & " in builtin catalog for '" & packageId &
@@ -797,6 +1574,8 @@ proc resolveBuiltinPackage*(packageId: string;
   result.found = true
   result.resolution.resolvedVersion = picked.version
   result.resolution.builtinVersion = picked.version
+  result.resolution.builtinCpuLevel = pb.binary.cpu_level
+  result.resolution.builtinCpuFeatures = pb.binary.cpu_features
   result.resolution.urlUsed = pb.binary.url
   if pb.binary.sha256.len > 0:
     result.resolution.digestAlgorithm = "sha256"
@@ -942,6 +1721,8 @@ proc tryResolveBuiltin(packageId: string;
                        version: string;
                        hostCpu: PlatformCpu;
                        hostOs: PlatformOs;
+                       hostLevel: MicroarchLevel;
+                       hostFeatures: set[CpuFeature];
                        step: var ChainStep):
     tuple[found: bool; resolution: CatalogResolution] =
   ## M65: the cakBuiltin branch of the chain. Looks the tool up in the
@@ -964,15 +1745,33 @@ proc tryResolveBuiltin(packageId: string;
     step.outcome = csoCatalogMiss
     step.reason = "built-in catalog for '" & packageId & "' is empty"
     return (false, CatalogResolution())
-  let res = resolveBuiltinPackage(packageId, cat, version, hostCpu, hostOs)
+  let res = resolveBuiltinPackage(packageId, cat, version, hostCpu, hostOs,
+    hostLevel, hostFeatures)
   if not res.found:
     step.outcome = csoSchemaError
+    # PMC-2: ``res.errorDetail`` carries the microarchitecture shortfall for
+    # ``breMicroarchFloorNotSatisfied``, and the chain-exhausted diagnostic
+    # concatenates every step's ``reason`` — so "needs x86-64-v3, host
+    # provides x86-64-v2" survives all the way to the message a user reads,
+    # rather than stopping at this frame.
     step.reason = "resolveBuiltinPackage: " & $res.error & " (" &
       res.errorDetail & ")"
+    # PMC-4: mark a CAPABILITY refusal so the chain can refuse to fall through
+    # to ``cakPath``. See ``ChainStep.capabilityShortfall``.
+    step.capabilityShortfall = res.error == breMicroarchFloorNotSatisfied
     return (false, CatalogResolution())
   step.outcome = csoResolved
+  # The SUCCESS reason is left byte-identical to its pre-PMC-2 text. Every
+  # host now has a microarchitecture level (x86_64 baselines at v1), so
+  # appending it would rewrite this string on every successful resolution of
+  # every existing package — a gratuitous compatibility event for a line that
+  # says nothing new when the selected arm declares no floor. The level is
+  # reported where it is load-bearing: the refusal.
   step.reason = "matched version '" & res.resolution.builtinVersion &
     "' for " & $hostCpu & "-" & $hostOs
+  if res.resolution.builtinCpuLevel != mlNone:
+    step.reason.add(" (" & describeMicroarchLevel(
+      res.resolution.builtinCpuLevel) & ")")
   (true, res.resolution)
 
 proc tryResolveNix(packageId: string; step: var ChainStep):
@@ -1136,7 +1935,10 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
                           version = "";
                           binaries: seq[string] = @[];
                           hostCpu = detectHostCpu();
-                          hostOs = detectHostOs()):
+                          hostOs = detectHostOs();
+                          availability = none(PackageAvailability);
+                          hostLevel = detectHostMicroarchLevel(hostCpu);
+                          hostFeatures = detectHostCpuFeatures(hostCpu)):
     CatalogResolution =
   ## M65: the production adapter selection chain. Walks ``chain`` in
   ## order, returning the first adapter's resolution. When ``chain`` is
@@ -1146,21 +1948,74 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
   ## Raises ``EAdapterChainExhausted`` if every adapter in the chain
   ## was tried and none resolved.
   ##
+  ## PMC-1: raises ``EPackageUnavailableOnPlatform`` BEFORE walking the
+  ## chain when the package declared a ``platforms:`` set this host is not
+  ## in. ``availability`` overrides the registry lookup; leave it ``none``
+  ## in production and pass a synthetic value in tests that need a
+  ## declaration without a registered recipe.
+  ##
   ## The returned ``CatalogResolution.chainTrace`` carries one entry
   ## per adapter consulted, in order, with the per-adapter outcome +
   ## skip reason (the final entry on a hit has
   ## ``outcome == csoResolved`` — the others are skip reasons).
+  ##
+  ## PMC-2: ``hostLevel`` says what this host provides on the
+  ## microarchitecture axis. It is a DEFAULTED PARAMETER for the same
+  ## reason ``hostCpu`` / ``hostOs`` are, and the campaign's testability
+  ## note makes that a requirement rather than a convenience: a v2/v3
+  ## test names its host here and needs no such hardware.
+  ##
+  ## PMC-3: ``hostFeatures`` is the fourth such parameter, additive on top of
+  ## ``hostLevel``. Supplying one changes NOTHING for the standard library —
+  ## every stdlib arm requires ``{}`` and ``{} ⊆ anything`` — which is the
+  ## check that PMC-3 did not move every existing package by adding a field
+  ## nobody uses.
+  ##
+  ## When the builtin catalog holds an arm the host cannot run, the
+  ## cakBuiltin step SKIPS (as it already did for an unsupported
+  ## platform) and the chain continues. That is deliberate — PMC-2 does
+  ## not change chain control flow — but it means the shortfall must
+  ## survive into the eventual ``EAdapterChainExhausted`` message, and it
+  ## does: ``raiseAdapterChainExhausted`` renders every step's reason.
+  ## Note the consequence for a chain ending in ``cakPath``: an
+  ## unsatisfiable floor can still fall through to a same-named PATH
+  ## binary, exactly as an unsupported platform always could. PMC-1
+  ## closed that hole only for a package with an explicit ``platforms:``
+  ## declaration; closing it for a microarchitecture shortfall is a
+  ## behaviour change to the chain, not to selection, and is left to
+  ## PMC-4/PMC-5 rather than smuggled in here.
+  # PMC-1: declared availability is consulted BEFORE the adapter chain.
+  #
+  # Ordering is the substance of the deliverable, not a detail. The last
+  # adapter in every default chain is ``cakPath``, which probes the host's
+  # PATH for a same-named executable — so a package that cannot exist here
+  # did not merely fail with a confusing message, it could RESOLVE, to an
+  # undeclared binary that happened to share the name. That looks like
+  # success. Gating in front of the loop is what makes ``cakPath``
+  # unreachable for a package known to be unavailable.
+  let declaredAvailability =
+    if availability.isSome: availability.get
+    else: packageAvailability(packageId)
+  if not declaredAvailability.isAvailableOn(hostCpu, hostOs):
+    raisePackageUnavailableOnPlatform(packageId, declaredAvailability,
+      hostCpu, hostOs)
   let effective =
     if chain.len == 0: defaultAdapterChain()
     else: chain
   var trace: seq[ChainStep] = @[]
+  # PMC-4: has some adapter already said "I have this and this host cannot run
+  # it"? See the ``cakPath`` arm below for why that is not the same as "I do
+  # not have it", and why only ``cakPath`` is poisoned by it.
+  var capabilityRefusal = ""
   for adapter in effective:
     var step = ChainStep(adapter: adapter, outcome: csoAdapterUnavailable,
       reason: "")
     case adapter
     of cakBuiltin:
       let outcome = tryResolveBuiltin(packageId, version, hostCpu, hostOs,
-        step)
+        hostLevel, hostFeatures, step)
+      if step.capabilityShortfall and capabilityRefusal.len == 0:
+        capabilityRefusal = step.reason
       trace.add(step)
       if outcome.found:
         var resolution = outcome.resolution
@@ -1181,6 +2036,34 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
         resolution.chainTrace = trace
         return resolution
     of cakPath:
+      # PMC-4 — the silent-wrong-thing gate, and the reason this whole flag
+      # exists.
+      #
+      # ``cakPath`` probes the host's PATH for a SAME-NAMED executable. If an
+      # earlier adapter refused because the host cannot execute what the
+      # catalog offers, probing PATH does not recover from that: it resolves
+      # a DIFFERENT, undeclared binary that merely shares a name, and reports
+      # success. The user asked for a package with an x86-64-v3 floor and got
+      # whatever ``foo.exe`` was first on PATH.
+      #
+      # This is exactly the hazard PMC-1 closed for declared availability
+      # (`Package-Model.md`: "``cakPath`` stops being reachable for a package
+      # known to be unavailable"), reappearing on the capability axis. PMC-1
+      # could gate in front of the loop because availability is known before
+      # any adapter runs; a floor shortfall is only discovered by ASKING the
+      # builtin adapter, so the gate has to live here instead.
+      #
+      # Only ``cakPath`` is poisoned. ``cakNix`` and ``cakScoop`` resolve
+      # genuinely different artifacts that may well satisfy this host, and
+      # refusing them would turn a safety fix into an outage.
+      if capabilityRefusal.len > 0:
+        step.outcome = csoAdapterUnavailable
+        step.reason = "refused: the builtin catalog has this package but " &
+          "this host cannot run it, and resolving a same-named executable " &
+          "from PATH would substitute an undeclared binary for the one that " &
+          "was refused (" & capabilityRefusal & ")"
+        trace.add(step)
+        continue
       let outcome = tryResolvePath(packageId, binaries, step)
       trace.add(step)
       if outcome.found:

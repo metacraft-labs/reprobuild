@@ -64,6 +64,10 @@ type
       ## Open handle into ``<root>/store`` — the same content store
       ## the rest of reprobuild uses. Payload bytes ride on
       ## ``storeCasBlob`` / ``readCasBlob``.
+    payloadFootprintBytes*: int64
+      ## Cached sum of payload bytes in the CAS. Reconciled from disk once
+      ## when the daemon starts, then updated after each newly stored blob so
+      ## hard-cap checks do not rescan the complete cache on every publish.
     info*: CacheInfoRecord
       ## Cached ``CacheInfoRecord`` returned from ``GET /cache-info``.
       ## Updated when the producer key rotates.
@@ -222,9 +226,12 @@ proc openBinaryCacheServer*(root: string;
     if pinListPath.len > 0: loadPinList(pinListPath)
     else: initHashSet[string]()
 
+  let payloadStore = openStore(root / PayloadCasSubdir)
+
   result = BinaryCacheServerState(
     root: root,
-    store: openStore(root / PayloadCasSubdir),
+    store: payloadStore,
+    payloadFootprintBytes: currentFootprintBytes(payloadStore),
     info: newCacheInfoRecord(advertisedStoreDir),
     producerKeypair: PeerKeypair(),
     evictionPolicy: newLruEvictionPolicy(

@@ -1,4 +1,8 @@
 import std/[json, os, strutils, tables, times]
+when defined(posix):
+  # ``finishSignal`` decodes the raw wait status the process backend keeps
+  # but does not interpret on its deadline branch. See the note there.
+  import std/posix
 from repro_core/paths import extendedPath
 
 # Windows: the sibling runquota repository now ships a Windows port
@@ -14,6 +18,7 @@ import runquota_protocol
 
 type
   ReproRunQuotaError* = object of CatchableError
+  ReproRunQuotaDeadlockError* = object of ReproRunQuotaError
 
   ReproRunQuotaSession* = ref object
     client: RunQuotaClient
@@ -129,6 +134,7 @@ const
   # the first wait after a fresh candidate's initial denial.
   denialBackoffStartMs = 100
   denialBackoffMaxMs = 5000
+  denialDeadlockTimeoutMsDefault = 30_000
 
 proc nextDenialBackoff(backoffMs: int): int =
   if backoffMs <= 0: denialBackoffStartMs
@@ -189,6 +195,9 @@ proc envIntMs(name: string; fallback: int): int =
     if parsed > 0: parsed else: fallback
   except ValueError:
     fallback
+
+proc denialDeadlockTimeoutMs*(): int =
+  envIntMs("REPRO_RUNQUOTA_DENIAL_TIMEOUT", denialDeadlockTimeoutMsDefault)
 
 proc grantHeartbeatMs*(): int =
   envIntMs("REPRO_RUNQUOTA_GRANT_HEARTBEAT", grantHeartbeatMsDefault)
@@ -341,6 +350,33 @@ proc reportDenialRetry(label, statsId, diagnostic: string;
   except IOError, OSError:
     discard
 
+proc waitAfterDenial(label, statsId, diagnostic: string;
+                     attempt: int; firstDeniedMs: var int;
+                     backoffMs: var int) =
+  ## A daemon denial is distinct from normal queue pressure. Current
+  ## runquotad versions deny requests that cannot fit their static machine or
+  ## named-pool capacity and queue requests that merely do not fit *now*.
+  ## Keep the policy's retry window for compatibility with authorities that
+  ## can produce transient denials, but surface the required static-capacity
+  ## deadlock instead of retrying forever.
+  let nowMs = int(epochTime() * 1000.0)
+  if firstDeniedMs < 0:
+    firstDeniedMs = nowMs
+  backoffMs = nextDenialBackoff(backoffMs)
+  reportDenialRetry(label, statsId, diagnostic, attempt, backoffMs)
+  let waitedMs = nowMs - firstDeniedMs
+  let timeoutMs = denialDeadlockTimeoutMs()
+  if waitedMs >= timeoutMs:
+    let id = if statsId.len > 0: statsId else: label
+    raise newException(ReproRunQuotaDeadlockError,
+      "runquota static-capacity deadlock for '" & id & "' after " &
+      $attempt & " denied offers over " & $waitedMs & "ms: " & diagnostic &
+      ". The request cannot be admitted by the current daemon configuration. " &
+      "Adjust the action resource request or restart runquotad with matching " &
+      "CPU, memory, IO, and named-pool capacities. Raise " &
+      "REPRO_RUNQUOTA_DENIAL_TIMEOUT if the authority can deny transiently.")
+  sleep(backoffMs)
+
 proc reportGrantedAfterRetry(label, statsId: string; attempts: int) =
   if attempts <= 1:
     return
@@ -360,6 +396,7 @@ proc waitForQueuedGrant(session: var RunQuotaSession;
   # hard failure (raises) — denial is distinct from "daemon crashed".
   var attempts = 0
   var backoffMs = 0
+  var firstDeniedMs = -1
   while true:
     inc attempts
     let firstDecisions = session.offerCandidates(
@@ -379,10 +416,8 @@ proc waitForQueuedGrant(session: var RunQuotaSession;
         denied = true
         denialMessage = decision.diagnostic.diagnosticText()
     if denied:
-      backoffMs = nextDenialBackoff(backoffMs)
-      reportDenialRetry(request.label, request.commandStatsId,
-        denialMessage, attempts, backoffMs)
-      sleep(backoffMs)
+      waitAfterDenial(request.label, request.commandStatsId,
+        denialMessage, attempts, firstDeniedMs, backoffMs)
       continue
     if not sawQueued:
       raise newException(ReproRunQuotaError,
@@ -463,21 +498,165 @@ proc waitForQueuedGrant(session: var RunQuotaSession;
     if awaited.granted:
       reportGrantedAfterRetry(request.label, request.commandStatsId, attempts)
       return awaited.lease
-    backoffMs = nextDenialBackoff(backoffMs)
-    reportDenialRetry(request.label, request.commandStatsId,
-      awaited.denialMessage, attempts, backoffMs)
-    sleep(backoffMs)
+    waitAfterDenial(request.label, request.commandStatsId,
+      awaited.denialMessage, attempts, firstDeniedMs, backoffMs)
     continue
 
-proc finishOutcome(completion: ProcessCompletion): LeaseFinishOutcome =
-  if completion.cancelled or completion.timedOut:
-    leaseFinishCancelled
-  elif completion.signaled:
-    leaseFinishCrashed
-  elif completion.exited and completion.exitCode == 0:
-    leaseFinishSucceeded
+proc finishSignal(completion: ProcessCompletion;
+                  child: LaunchedProcess): uint32 =
+  ## NOT EXPORTED, and that is a decision rather than an omission.
+  ## `t_every_launch_path_is_monitored` audits this module's FULL export
+  ## surface, so an export here is a claim that the engine may call it —
+  ## and nothing outside this file has any business deciding what a finish
+  ## says. The gate for both helpers is end-to-end
+  ## (`t_finish_outcome_reaches_the_spine`), which reads the rows back out
+  ## of a real store rather than calling the mapping directly.
+  ##
+  ## The signal the child actually died of — INCLUDING the case the process
+  ## backend records and does not decode.
+  ##
+  ## ``buildCompletion`` fills ``signaled``/``signal`` only when the wait
+  ## was not bounded by a deadline; on its timeout branch it stores the raw
+  ## ``waitStatus`` and leaves both fields at zero. The kill is still in
+  ## there, undecoded, and this is the one place that needs it: a
+  ## ``LeaseFinished`` claiming a deadline kill beside ``exit_status = 0``
+  ## AND ``signal = 0`` is a finish whose own evidence disagrees, and
+  ## ``runquotad`` REFUSES to store any row made of it. Reporting the
+  ## deadline without the kill would trade a mislabelled execution for an
+  ## absent one, which is the worse of the two.
+  ##
+  ## READ FROM THE KERNEL'S RECORD, NOT ASSUMED FROM THE CODE PATH. The
+  ## deadline branch escalates SIGTERM to SIGKILL, so "it must have been 9"
+  ## is nearly always right and is exactly the kind of nearly-right that
+  ## this store must not contain: a child that honours the SIGTERM inside
+  ## the one-second grace dies of 15. ``waitStatus`` says which, and when
+  ## it says nothing (``WIFSIGNALED`` false — a status never filled in)
+  ## this returns 0 and the caller degrades rather than inventing one.
+  if completion.signaled:
+    return uint32(max(completion.signal, 0))
+  when defined(posix):
+    if completion.timedOut:
+      let status = cint(child.waitStatus)
+      if WIFSIGNALED(status):
+        return uint32(max(int(WTERMSIG(status)), 0))
+  0'u32
+
+proc deadlineKill(completion: ProcessCompletion; child: LaunchedProcess;
+                  kill: var KillEvidence): bool =
+  ## The evidence for a DEADLINE kill, or false when this supervisor holds
+  ## none.
+  ##
+  ## NOT EXPORTED, for the reason ``finishSignal`` above is not.
+  ##
+  ## ``lfTimedOut`` DEMANDS EVIDENCE, WHERE THE OLD WIRE MERELY INVITED
+  ## IT. A deadline claim used to travel beside a signal field the client
+  ## was free to leave at zero, and ``runquotad`` refused the resulting row
+  ## after the fact; ``KillEvidence`` asks for it up front, so this is the
+  ## proc that decides whether the deadline may be claimed at all.
+  ##
+  ## AND WINDOWS CAN NOW ANSWER. ``finishSignal``'s decode is POSIX-only
+  ## because it reads a wait status; on Windows ``waitStatus`` holds the
+  ## raw EXIT CODE of the killed child, which is evidence of exactly the
+  ## same kind and which ``killedWithExitCode`` accepts. Before
+  ## ``KillEvidence`` there was nowhere to put it, so every timed-out
+  ## execution on Windows degraded to ``cancelled`` and ``timeout`` was a
+  ## termination no Windows run could reach.
+  if not completion.timedOut:
+    return false
+  when defined(posix):
+    killEvidence(0'u32, finishSignal(completion, child), kill)
+  elif defined(windows):
+    killEvidence(
+      if child.waitStatus > 0: uint32(child.waitStatus) else: 0'u32,
+      0'u32, kill)
   else:
-    leaseFinishFailed
+    false
+
+proc finishOutcome(completion: ProcessCompletion;
+                   child: LaunchedProcess): LeaseFinish =
+  ## What this supervisor saw, said in the vocabulary the spine records.
+  ##
+  ## THE DEADLINE IS TESTED FIRST, AND NOT FOLDED INTO ``cancelled``.
+  ## ``waitForCompletion`` reaches its deadline by calling ``terminate()``,
+  ## which sets ``cancelSent`` — so a timed-out completion carries BOTH
+  ## ``cancelled`` and ``timedOut``, and testing ``cancelled`` first would
+  ## make the deadline unreachable rather than merely under-reported.
+  ##
+  ## WHAT THE OLD COLLAPSE ACTUALLY PRODUCED, MEASURED RATHER THAN
+  ## ASSUMED: ``cancelled`` beside no signal, which the daemon's mapping
+  ## resolved past its OOM, deadline and signal tests to ``refused`` — and
+  ## every timed-out execution landed on the spine as work that never ran.
+  ## The deadline is the most specific fact available here and the only one
+  ## no other party can reconstruct — RunQuota imposes no deadlines, so if
+  ## this client does not say it, the store can never learn it.
+  ##
+  ## AND NOT OTHERWISE. A cancel the child honoured promptly carries
+  ## ``cancelled`` and NOT ``timedOut``; only ``timedOut`` produces
+  ## ``lfTimedOut``, so ``timeout`` on the spine means a deadline fired and
+  ## nothing else.
+  ##
+  ## THE SIGNAL TEST NOW SITS ABOVE THE CANCEL TEST, WHICH REVERSES THE
+  ## OLD ORDER AND PRESERVES THE OLD ANSWER. ``terminate()`` sets
+  ## ``cancelSent``, so a child that dies of the SIGTERM arrives here with
+  ## BOTH ``cancelled`` and ``signaled``; the old code called that
+  ## ``leaseFinishCancelled`` and put the signal in a SEPARATE wire field,
+  ## and the daemon's mapping — which tested that field before it read the
+  ## outcome — recorded ``signalled``. ``cancelled()`` now has no field to
+  ## carry a signal in, so the same execution has to be NAMED ``crashed``
+  ## here to land on the same word there. ``t_finish_outcome_reaches_the
+  ## _spine``'s middle arm is exactly this case and is what caught it.
+  ##
+  ## WHICH DEADLINE, SPELLED OUT RATHER THAN LEFT TO THE READER. Nothing
+  ## in reprobuild passes a ``timeout`` to ``waitForCompletion`` — the
+  ## three leased wait sites in this file all use the unbounded default —
+  ## so the ONLY producer of ``timedOut`` reachable from here is
+  ## ``cancelAndWait``'s three-second SIGTERM grace: an action asked to
+  ## stop that had to be SIGKILLed when the grace expired. That is a
+  ## deadline the supervisor held and the supervisor alone observed, and
+  ## ``timeout`` is the most specific of the five terminations that is
+  ## true of it. It is NOT a per-action time budget; reprobuild has none,
+  ## and a reader who needs that distinction has the build's own abort to
+  ## look at. Recording it here rather than letting a future reader infer
+  ## a budget that does not exist.
+  ##
+  ## WIRE SKEW, RECORDED RATHER THAN GUARDED. ``leaseFinishFromWire``
+  ## bounds the wire ordinal by the RECEIVER's ``high(LeaseFinishKind)``,
+  ## and the finish's whole shape changed with RQSP major 2 — so a daemon
+  ## built against major 1 does not merely misread this frame, it refuses
+  ## the HELLO and no lease is taken at all. That is the honest failure and
+  ## it needs no guard here: reprobuild builds ``runquotad`` from
+  ## ``../runquota`` in the same tree that supplies these types
+  ## (``scripts/run_tests.sh`` step 2), so client and daemon share one
+  ## definition by construction.
+  ##
+  ## AND THE DEADLINE IS ONLY CLAIMED WHEN THE FINISH CAN CARRY IT. This
+  ## used to be a rule the daemon enforced after the fact: ``lfTimedOut``
+  ## is a kill claim, a kill claim with no evidence was refused outright,
+  ## and a client that made one lost the row. It is now a rule the TYPE
+  ## enforces — ``timedOut`` takes a ``KillEvidence`` and there is no way
+  ## to build one out of nothing — so a timed-out completion whose kill
+  ## could not be recovered degrades to ``cancelled()``, which is true of
+  ## it and storable. A LOST EXECUTION IS WORSE THAN A COARSE ONE: the
+  ## coarse row still carries the duration, the peak RSS and the profile,
+  ## and a reader can see that something ended it.
+  var kill: KillEvidence
+  let killSignal = finishSignal(completion, child)
+  if deadlineKill(completion, child, kill):
+    timedOut(kill)
+  elif completion.signaled and killSignal != 0'u32:
+    crashed(killSignal)
+  elif completion.cancelled or completion.timedOut:
+    cancelled()
+  elif completion.exited and completion.exitCode > 0:
+    failed(uint32(completion.exitCode))
+  elif completion.exited:
+    succeeded()
+  else:
+    # NEITHER EXITED NOR SIGNALLED NOR CANCELLED: the wait came back with
+    # no verdict at all. The old code called this ``leaseFinishFailed``
+    # with exit status 0 — a clean exit reported as a failure, which is
+    # the same shape of untruth these types exist to prevent.
+    cancelled()
 
 proc acquireCliArgs*(request: ReproResourceRequest;
                      command: ReproCommandSpec): seq[string] =
@@ -747,11 +926,10 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         processGroupId = child.info.processGroupId,
         cleanupRegistered = true)
       let completion = child.waitForCompletion()
+      let outcome = finishOutcome(completion, child)
       child.close()
       lease.finish(
-        outcome = finishOutcome(completion),
-        exitCode = if completion.exited: uint32(max(completion.exitCode, 0)) else: 0'u32,
-        signal = if completion.signaled: uint32(max(completion.signal, 0)) else: 0'u32,
+        outcome = outcome,
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount)
       result = ReproRunQuotaExecution(
@@ -771,7 +949,7 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         leaseFinishedSent: true)
     except CatchableError:
       if lease.active and lease.state == leaseClientStarting:
-        lease.finish(outcome = leaseFinishLaunchFailed)
+        lease.finish(outcome = launchFailed())
         result.leaseFinishedSent = true
       raise
     finally:
@@ -780,6 +958,8 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         result.leaseReleased = true
       if session.active:
         session.closeSession()
+  except ReproRunQuotaDeadlockError:
+    raise
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
   finally:
@@ -888,6 +1068,55 @@ proc openRunQuotaSession*(name = "reprobuild action";
     result.client.close()
     raise newException(ReproRunQuotaError, err.msg)
 
+# ---------------------------------------------------------------------------
+# Domain extensions (M17)
+# ---------------------------------------------------------------------------
+#
+# Reprobuild attaches its own per-execution facts as an extension on
+# RunQuota's execution spine (OS-5). It does NOT open RunQuota's database:
+# `runquotad` is the only sanctioned reader and the only writer, so both
+# the declaration and every row travel over the socket the session is
+# already holding.
+
+proc extNull*(): ExtensionCellWire = wireNull()
+proc extText*(value: string): ExtensionCellWire = wireText(value)
+proc extInt*(value: int64): ExtensionCellWire = wireInt(value)
+proc extReal*(value: float64): ExtensionCellWire = wireReal(value)
+
+proc declareRunQuotaExtension*(session: ReproRunQuotaSession;
+                               extensionId, owner: string;
+                               schemaVersion: int64;
+                               migrations: openArray[string]): string =
+  ## Registers the extension, returning "" on acceptance and the daemon's
+  ## refusal otherwise.
+  ##
+  ## A REFUSAL IS RETURNED, NOT RAISED. Capture must degrade rather than
+  ## fail (OS-4): a daemon that will not store this schema is a reason to
+  ## write no rows, never a reason to fail a build.
+  if session.isNil or not session.active:
+    return "runquota session is not active"
+  try:
+    session.session.declareExtension(extensionId, owner, schemaVersion,
+      migrations)
+  except CatchableError as err:
+    err.msg
+
+proc recordRunQuotaExtensionRow*(session: ReproRunQuotaSession;
+                                 leaseId: uint64; extensionId: string;
+                                 schemaVersion: int64;
+                                 columns: openArray[string];
+                                 values: openArray[ExtensionCellWire]) =
+  ## One row, one buffered write, no reply. Silent on every failure for
+  ## the same reason ``lease.observe`` is: losing an observation is always
+  ## preferable to perturbing the work being observed.
+  if session.isNil or not session.active:
+    return
+  try:
+    session.session.recordExtensionRow(leaseId, extensionId, schemaVersion,
+      columns, values)
+  except CatchableError:
+    discard
+
 proc close*(session: ReproRunQuotaSession) =
   if session.isNil:
     return
@@ -924,7 +1153,7 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
       completed: false)
   except CatchableError:
     if lease.active and lease.state == leaseClientStarting:
-      lease.finish(outcome = leaseFinishLaunchFailed)
+      lease.finish(outcome = launchFailed())
     if lease.active:
       lease.release()
     raise
@@ -938,22 +1167,23 @@ proc startWithRunQuota*(session: ReproRunQuotaSession;
   try:
     let lease = session.session.waitForQueuedGrant(request.toRunQuotaRequest())
     return session.startGrantedWithRunQuota(lease, command)
+  except ReproRunQuotaDeadlockError:
+    raise
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
 
-proc offerWithRunQuota*(session: ReproRunQuotaSession;
-                        request: ReproResourceRequest;
-                        command: ReproCommandSpec): ReproRunQuotaOffer =
-  ## Per docs/runquota-policy.md a denied lease MUST delay-and-retry; it
-  ## must never surface as a build-stopping error.  We loop in place,
-  ## re-offering the candidate with backoff until the daemon either
-  ## grants it (returns ``rqokStarted``) or queues it (returns
-  ## ``rqokQueued``).  Protocol-level failures still raise.
+proc offerWithRunQuotaRetry(session: ReproRunQuotaSession;
+                            request: ReproResourceRequest;
+                            command: ReproCommandSpec;
+                            attempts: var int;
+                            backoffMs: var int;
+                            firstDeniedMs: var int): ReproRunQuotaOffer =
+  ## A denied lease is retried with backoff until the daemon grants or queues
+  ## it, bounded by the static-capacity deadlock deadline. Protocol failures
+  ## and requests that remain impossible beyond that deadline raise.
   if not session.active:
     raise newException(ReproRunQuotaError, "runquota session is not active")
   let rqRequest = request.toRunQuotaRequest()
-  var attempts = 0
-  var backoffMs = 0
   while true:
     inc attempts
     let candidateId = session.nextCandidateId
@@ -991,14 +1221,22 @@ proc offerWithRunQuota*(session: ReproRunQuotaSession;
       denied = true
       denialMessage = decision.diagnostic.diagnosticText()
     if denied:
-      backoffMs = nextDenialBackoff(backoffMs)
-      reportDenialRetry(rqRequest.label, rqRequest.commandStatsId,
-        denialMessage, attempts, backoffMs)
-      sleep(backoffMs)
+      waitAfterDenial(rqRequest.label, rqRequest.commandStatsId,
+        denialMessage, attempts, firstDeniedMs, backoffMs)
       continue
     if not sawDecision:
       raise newException(ReproRunQuotaError,
         "runquota did not return a decision for the offered lease")
+
+proc offerWithRunQuota*(session: ReproRunQuotaSession;
+                        request: ReproResourceRequest;
+                        command: ReproCommandSpec): ReproRunQuotaOffer =
+  ## Offer one process, retrying denials up to the static-capacity deadline.
+  var attempts = 0
+  var backoffMs = 0
+  var firstDeniedMs = -1
+  session.offerWithRunQuotaRetry(request, command, attempts, backoffMs,
+    firstDeniedMs)
 
 proc maxOfferBatchSize*(session: ReproRunQuotaSession): int =
   ## Maximum number of candidates the daemon will accept in a single
@@ -1081,15 +1319,17 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
           # so unrelated work keeps flowing in parallel.
           var deniedRetryBackoff = 0
           var deniedRetryAttempts = 1
+          var firstDeniedMs = -1
           let deniedMessage = decision.diagnostic.diagnosticText()
-          deniedRetryBackoff = nextDenialBackoff(deniedRetryBackoff)
-          reportDenialRetry(requests[inputIndex].label,
-            requests[inputIndex].commandStatsId,
-            deniedMessage, deniedRetryAttempts, deniedRetryBackoff)
-          sleep(deniedRetryBackoff)
-          result[inputIndex] = session.offerWithRunQuota(
-            requests[inputIndex], commands[inputIndex])
+          waitAfterDenial(requests[inputIndex].label,
+            requests[inputIndex].commandStatsId, deniedMessage,
+            deniedRetryAttempts, firstDeniedMs, deniedRetryBackoff)
+          result[inputIndex] = session.offerWithRunQuotaRetry(
+            requests[inputIndex], commands[inputIndex], deniedRetryAttempts,
+            deniedRetryBackoff, firstDeniedMs)
       processed += chunk
+  except ReproRunQuotaDeadlockError:
+    raise
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
 
@@ -1146,14 +1386,13 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
     if not running.child.pollCompletion():
       discard running.child.waitForCompletion()
     let completion = running.child.completion
+    let outcome = finishOutcome(completion, running.child)
     running.child.close()
     var leaseFinishedSent = false
     var leaseReleased = false
     try:
       running.lease.finish(
-        outcome = finishOutcome(completion),
-        exitCode = if completion.exited: uint32(max(completion.exitCode, 0)) else: 0'u32,
-        signal = if completion.signaled: uint32(max(completion.signal, 0)) else: 0'u32,
+        outcome = outcome,
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount)
       leaseFinishedSent = true
@@ -1181,14 +1420,13 @@ proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
     raise newException(ReproRunQuotaError, "runquota process is not active")
   try:
     let completion = running.child.cancelAndWait()
+    let outcome = finishOutcome(completion, running.child)
     running.child.close()
     var leaseFinishedSent = false
     var leaseReleased = false
     try:
       running.lease.finish(
-        outcome = finishOutcome(completion),
-        exitCode = if completion.exited: uint32(max(completion.exitCode, 0)) else: 0'u32,
-        signal = if completion.signaled: uint32(max(completion.signal, 0)) else: 0'u32,
+        outcome = outcome,
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount)
       leaseFinishedSent = true

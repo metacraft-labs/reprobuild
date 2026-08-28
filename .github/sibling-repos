@@ -95,7 +95,13 @@ reprobuild-ct-test-runner=main
 # job. The cherry-pick resolves the platform from `$OSTYPE`/`$HOSTTYPE` (bash
 # builtins — no fork for a monitoring shim to interpose) with uname as fallback.
 io-mon=75de6f292f3df7303662915988874ac310012406
-nim-stackable-hooks=c6cf6ad1ac95201288825970b6ca53f630ea8996
+# Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
+# that input to THIS clone, so a divergent revision here silently substitutes a
+# different stackable_hooks for the one the flake pins. c6cf6ad, which stood
+# here until 2026-08-26, was not even an ancestor of the flake pin — it sat on
+# a branch that never merged, so the release build and every other build
+# compiled the monitor shim from different sources.
+nim-stackable-hooks=41ab1b987aba67e8bcc34a5945ac33e17b6418ed
 runquota=dev
 nim-shm-queue=08d87d26067568e980f4356c4abcf2a0d841a310
 nim-shm-gset=8a9f2f13beb24ab7949ff93c14fb34ae753bbe48

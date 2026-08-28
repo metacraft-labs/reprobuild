@@ -56,7 +56,7 @@ import io_mon/writer
 # through the engine and therefore needs a monitor CLI. This mirrors the
 # fix bd68d952 applied to ``test_tool_identity_env_plumbing.nim``: wire a
 # REAL passthrough monitor (parse ``--depfile``, drop a valid empty-record
-# RMDF there so the engine's evidence read succeeds with a complete,
+# iomon there so the engine's evidence read succeeds with a complete,
 # zero-record dependency set, then ``exec`` the real argv unchanged). The
 # action genuinely runs + materialises its output under real monitoring —
 # this is not a stub, mock, or skip.

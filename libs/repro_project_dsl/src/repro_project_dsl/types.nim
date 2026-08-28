@@ -180,6 +180,17 @@ type
       ## code at every typed-tool call site that constructs an instance of
       ## ``<T>`` from the call's actual flag values and passes it to
       ## ``implicitTargetNameFor<TitleExportName>``.
+    lockFile*: string
+      ## Named-Lock-Files NLF-M7 (§4.3) — the lock file designated at this
+      ## artifact by a ``lockFile <name>`` line in its body. Empty means
+      ## INHERIT, which §4.6's table makes the default for an ordinary
+      ## artifact: "Built under whatever lock file its consumer is under;
+      ## once per distinct consuming lock file."
+      ##
+      ## §4.3 puts the designation here rather than on the package because
+      ## "a package routinely declares both a host build tool and a shipped
+      ## binary … so package-level designation would be too coarse to express
+      ## the motivating case".
     sourceFile*: string
     sourceLine*: int
 
@@ -192,6 +203,10 @@ type
   LibraryDef* = object
     name*: string
     kind*: LibraryKind
+    lockFile*: string
+      ## Named-Lock-Files NLF-M7 (§4.3). See ``ExecutableDef.lockFile``; a
+      ## library designating one is §4.6's PINNED row and is the unusual
+      ## case — "a library's architecture is a property of who is using it".
     exportedPath*: string
       ## Cross-Repo-Source-Consumption SC-11 (§4.2a.4): the producer-relative
       ## directory a Nim library-consumer threads onto its ``nim c --path:``.
@@ -249,6 +264,36 @@ type
       ## compiler.value: of "gcc": "gcc >=12 <15"`` this is ``"gcc"``;
       ## for ``if enableTLS.value: "openssl >=3.3 <4.0"`` this is
       ## ``"true"`` (bool variants encode triggers as the string form).
+    depKind*: string
+      ## Named-Lock-Files NLF-M7 (§4.6) — WHICH of the three approved
+      ## dependency lists this entry was written in: ``"target"``
+      ## (``uses:`` / ``buildDeps:``), ``"native"`` (``nativeBuildDeps:``) or
+      ## ``"runtime"`` (``runtimeDeps:``).
+      ##
+      ## §4.6 is where this comes from and why it matters. The approved DSL
+      ## already declares the host/target split at list granularity —
+      ## "``nativeBuildDeps:`` resolves under the ``hostTools`` lock file;
+      ## ``buildDeps:`` and ``runtimeDeps:`` resolve under the consuming
+      ## artifact's lock file" — but §4.6 MEASURED that the distinction is
+      ## "erased before the solver ever sees it", because the three lists are
+      ## concatenated at serialization
+      ## (``pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps``).
+      ##
+      ## Tagging the entry is what un-erased it for NLF-M7: the platform tag
+      ## survived the concatenation and reached the solver through
+      ## ``registerSolverDependency``.
+      ##
+      ## NLF-M8 then removed the concatenation itself (``allToolUses``), so
+      ## ``toolUses`` now holds what its name says at run time as well as at
+      ## macro-expansion time. The tag stays, and is now the ANSWER rather
+      ## than a repair: a consumer that needs to know which list an entry
+      ## came from reads it here instead of inferring it from a position in a
+      ## merged seq, and `repro_lock_files`'s propagation reads it to decide
+      ## which lock file the edge resolves under (§4.6).
+      ##
+      ## Empty means untagged, which no in-tree collection site produces; it
+      ## is the zero value and is treated as ``"target"`` by consumers so a
+      ## `PackageUseDef` built by hand keeps its former meaning.
 
   NixPackageProvisioningDef* = object
     selector*: string
@@ -408,9 +453,56 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  PlatformConstraintDef* = object
+    ## PMC-1 (Platform-And-Microarchitecture-Constraints) — one entry of a
+    ## package-level ``platforms:`` declaration:
+    ##
+    ##   package chocolatey:
+    ##     platforms: [windows]
+    ##
+    ## Availability, NOT provisioning. ``TarballProvisioningDef.cpu`` / ``.os``
+    ## say "here is the artifact for this host"; this says "the package can
+    ## exist on this host at all". Conflating the two is the gap PMC-1 closes:
+    ## before it, a package's availability was whatever set of arms happened to
+    ## be written, so "Windows-only by nature" was unstatable and unlintable.
+    ##
+    ## Same token vocabulary as the arm setters — ``any`` / ``x86_64`` /
+    ## ``aarch64`` / ``x86`` for ``cpu``, ``any`` / ``windows`` / ``linux`` /
+    ## ``macos`` (``darwin``) for ``os``. Empty means "any". The COARSE axis
+    ## only: microarchitecture levels (``x86-64-v3``) and feature sets are
+    ## PMC-2 / PMC-3 and have no representation here.
+    cpu*: string
+    os*: string
+    sourceFile*: string
+    sourceLine*: int
+
   PackageDef* = object
     packageName*: string
+    lockFile*: string
+      ## Named-Lock-Files NLF-M7 (§4.3) — the PACKAGE-level default, which
+      ## "remains available as a default that artifacts inherit and may
+      ## override". One rung below the artifact in the precedence chain.
     defaultToolProvisioning*: string
+    platformsDeclared*: bool
+      ## PMC-1: true ONLY when the package body wrote an explicit
+      ## ``platforms:`` block. The resolver's availability gate keys off this
+      ## flag, not off ``declaredPlatforms.len``, because "declared as the
+      ## empty set" and "never declared" are different facts and only the
+      ## second one must resolve exactly as it did before PMC-1.
+    declaredPlatforms*: seq[PlatformConstraintDef]
+      ## PMC-1: the declared coordinates, in source order. Empty for the ~262
+      ## stdlib entries that have not been converted yet, and nothing derives
+      ## a default for those — an undeclared package resolves exactly as it
+      ## did before PMC-1. PMC-1 did ship an "infer from whichever arms
+      ## exist" helper here, but it had no caller and could not see the
+      ## harvested ``VersionedProvisioning`` catalogs where most of the
+      ## platform truth lives, so it was removed rather than left as a trap
+      ## for PMC-5's catalog-wide lint to fall into.
+    platformsMessage*: string
+      ## PMC-1: optional author-supplied reason, Spack's ``msg=``. Reproduced
+      ## verbatim in the unavailable-package diagnostic. The whole point is
+      ## that the author knows WHY ("Chocolatey is a Windows package manager
+      ## and has no POSIX build") and the resolver does not.
     executables*: seq[ExecutableDef]
     libraries*: seq[LibraryDef]
     runtimeLibraries*: seq[RuntimeLibraryDef]
@@ -491,6 +583,16 @@ type
     bdpDefault
     bdpAutomaticMonitor
     bdpMakeDepfile
+    bdpIomonReport
+      ## The edge's command PRODUCES its own io-mon ``.iomon`` dependency
+      ## capture (e.g. ``ct test`` writing the record set of the files it
+      ## actually read). The engine consumes THAT file as the edge's
+      ## evidence, folding it via the monitor-evidence reader, instead of
+      ## monitoring the orchestrator process. Declared with
+      ## ``iomonReportPolicy`` / the ``iomonReport`` keyword, giving the
+      ## produced file's path. Modelled on ``bdpMakeDepfile`` but routed to
+      ## a distinct engine ``formatName`` because the file is io-mon's
+      ## binary record format, not a make-format text depfile.
     # NOTE: there is intentionally NO ``bdpDeclaredOnly``. A recipe-facing
     # "declared-only" policy (track only statically declared inputs, no
     # runtime monitoring, mark the action complete/cacheable anyway) is an
@@ -499,6 +601,15 @@ type
     # opaque tools use ``bdpAutomaticMonitor``, and actions with no
     # monitorable evidence are made non-cacheable per Monitor-Hook-Shim.md:501.
     # See Reprobuild-Development.milestones.org M17.
+    #
+    # ``bdpTrustedDeclaredInputs`` — "declare the edge's inputs inline and
+    # have the engine trust them", added for self-interposing test edges — was
+    # the same idea in a narrower wrapper and has been REMOVED as well. An
+    # action that cannot be monitored declares its inputs through a DEPFILE
+    # (``bdpMakeDepfile``) instead: the list then lives in a file some edge
+    # produces, can be regenerated, and is read back by the engine as real
+    # evidence, so the paths in it actually invalidate the action cache.
+    # ``unmonitorableActionDepfile`` in ``runtime_core.nim`` generates one.
 
   BuildActionDependencyPolicy* = object
     kind*: BuildActionDependencyPolicyKind
@@ -513,6 +624,30 @@ type
       ## ``depfile: string`` field has been removed; recipes that need
       ## one depfile pass a one-element ``depfiles`` seq.
     ignoredInputPrefixes*: seq[string]
+    suppressMonitorShimSeed*: bool
+      ## Withhold the launch-time ``REPRO_MONITOR_SHIM_LIB`` environment seed
+      ## from this edge's action. Lowered onto the engine
+      ## ``DependencyGatheringPolicy`` field of the same name, where the full
+      ## rationale lives.
+      ##
+      ## Default false, so no existing edge changes. Set it ONLY for an action
+      ## that performs library interposition itself: leaving the engine's
+      ## monitor un-wrapped is not sufficient to keep such an action shim-free,
+      ## because io-mon's preload runtime propagates whatever this variable
+      ## names into the processes the action starts, re-injecting our shim
+      ## alongside the action's own. Requested with
+      ## ``makeDepfilePolicy(..., suppressMonitorShimSeed = true)``.
+    captureNonDeterminism*: bool
+      ## Opt into io-mon's non-determinism event category for this edge's
+      ## automatic monitoring (clock/env/sysctl/entropy reads). Default
+      ## false: reproducibility hinges on files read, not on such inputs, so
+      ## the engine skips the category unless an edge genuinely depends on
+      ## it. Lowered onto the engine ``DependencyGatheringPolicy`` of the
+      ## same name.
+    captureIpc*: bool
+      ## Opt into io-mon's IPC event category for this edge's automatic
+      ## monitoring. Default false; lowered onto the engine
+      ## ``DependencyGatheringPolicy`` of the same name.
 
   ActionCacheFingerprintPolicy* = enum
     acfpTimestamp
@@ -956,6 +1091,34 @@ type
     sourceFile*: string
     sourceLine*: int
 
+proc allToolUses*(pkg: PackageDef): seq[PackageUseDef] =
+  ## Every dependency entry a TOOL-PATH consumer needs, in one seq:
+  ## ``uses:``/``buildDeps:``, then ``nativeBuildDeps:``, then
+  ## ``runtimeDeps:``.
+  ##
+  ## Named-Lock-Files NLF-M8, the third criterion folded in from NLF-M7 —
+  ## **un-merge the three dependency lists at serialization.** Until this,
+  ## `packageLiteral` emitted `pkg.toolUses & pkg.nativeBuildDeps &
+  ## pkg.runtimeDeps` into the `toolUses:` slot, so a RUNTIME `PackageDef`'s
+  ## `toolUses` meant something different from a MACRO-TIME one's: the same
+  ## field name, two contents, one of them the union. §4.6 measured the
+  ## consequence — "the platform distinction the recipe expressed is **erased
+  ## before the solver ever sees it**".
+  ##
+  ## M9.R.5a and M9.R.53 widened that fold for a real reason: the convention
+  ## layer's PATH builder needs the union, and recipes that declare a tool in
+  ## `nativeBuildDeps:` or `runtimeDeps:` must still get it on PATH. So the
+  ## union does not go away — it becomes EXPLICIT at each site that wants it,
+  ## and the field stops lying about what it holds. Every call site that used
+  ## to read the merged field now reads this, so the union is byte-identical
+  ## wherever it was before and absent wherever it never should have been.
+  ##
+  ## The order is the concatenation order the merge used, and that is
+  ## load-bearing rather than tidy: `buildPackageDevEnv` hashes this sequence
+  ## into the implicit dev-env floor, and a reordering would move that hash
+  ## for every package — a fingerprint change with no change behind it.
+  pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps
+
 proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
   ## Windows-dev-env M1: a package exposes a ``gpkDevEnvIntrospection``
   ## entry point — so ``repro exec`` / ``repro shell`` / the direnv hook
@@ -971,4 +1134,4 @@ proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
   ##   the dev-env result's tool requirements for BOTH cases, so the
   ##   implicit case reuses the exact same derivation with an empty
   ##   "extra" dev-env body.
-  pkg.hasDevEnv or pkg.toolUses.len > 0
+  pkg.hasDevEnv or pkg.allToolUses().len > 0

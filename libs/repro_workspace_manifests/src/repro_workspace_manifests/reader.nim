@@ -95,11 +95,21 @@ proc decodeStrict[T](path, content, expectedSchema: string;
   ## deliberately NOT set: any unknown top-level key (or unknown key under
   ## one of the declared sub-tables) raises a `TomlError` whose message we
   ## scrape for the offending key path.
+  ##
+  ## The unknown-field arm is the one failure whose raw parser text points at
+  ## the wrong culprit, so it — and nothing else — is restated as tool /
+  ## manifest version skew by `schemaSkewMessage`. See that proc for why.
   try:
     result = Toml.decode(content, RecordType)
   except TomlError as e:
-    let inner = if e.msg.len > 0: e.msg else: fallbackTomlMessage()
     let keyPath = extractStrictModeKeyPath(e.msg)
+    let inner =
+      if keyPath.len > 0:
+        schemaSkewMessage(path, keyPath, extractStrictModeRecordName(e.msg))
+      elif e.msg.len > 0:
+        e.msg
+      else:
+        fallbackTomlMessage()
     raiseManifestError(path, keyPath, expectedSchema, expectedSchema, inner)
   except CatchableError as e:
     let inner = if e.msg.len > 0: e.msg else: fallbackTomlMessage()

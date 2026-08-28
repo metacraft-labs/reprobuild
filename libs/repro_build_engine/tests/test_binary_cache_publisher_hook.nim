@@ -18,7 +18,7 @@
 ## ``BuildAction.cacheEntryIdentity`` / ``BuildEngineConfig.
 ## binaryCachePublisher`` for the seam under test.
 
-import std/[options, os, unittest]
+import std/[options, os, strutils, unittest]
 
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
@@ -233,6 +233,30 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
     check recorder.invocations.len == 1
     check recorder.invocations[0].publishPrefix == prefix
     check recorder.invocations[0].identity.packageName == "materialized-pkg"
+
+  test "materialized backfill rejects a prefix without action outputs":
+    resetTmp()
+    let prefix = absolutePath(TmpDir / "incomplete-materialized-prefix")
+    let outputPath = prefix / "completion.stamp"
+    createDir(prefix)
+    let recorder = newRecorder()
+    let identity = stubIdentity(
+      "incomplete-materialized-pkg", "2.0", "incomplete-materialized-rev")
+    let g = oneAction(
+      outputPath, "would complete the prefix\n",
+      publish = true,
+      identity = some(identity),
+      fingerprintToken = "incomplete-materialized",
+      publishPrefix = prefix)
+
+    let backfill = publishMaterializedBinaryCacheEntries(
+      g, makePublisher(recorder))
+    check backfill.results.len == 1
+    check backfill.results[0].status == asFailed
+    check backfill.results[0].stderr.startsWith(
+      "materialized binary-cache action outputs are incomplete:")
+    check outputPath in backfill.results[0].stderr
+    check recorder.invocations.len == 0
 
   test "materialized backfill fails when the graph has no tagged entries":
     resetTmp()

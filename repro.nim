@@ -69,6 +69,15 @@ proc sanitizeStaticExec(val: string): string =
       cleanLines.add(s)
   if cleanLines.len > 0: cleanLines[^1] else: ""
 
+# The POSIX arm names NO executable. `staticExec` on POSIX already runs its
+# argument through `/bin/sh -c` (`execCmdEx` + `poEvalCommand`), and `printf`
+# is a shell builtin, so the whole read happens inside the shell the compiler
+# started. The previous spelling wrapped this in a BARE `sh -c '…'`, which
+# stopped resolving once a compile action's `PATH` became exactly
+# `<nim>/bin:<gcc-wrapper>/bin` — the same defect, and the same fix, as the
+# DSL's resource-accessor generator (see
+# `repro_project_dsl/compile_time_shell.nim`). Windows keeps its explicit
+# shell because there `staticExec` executes the program directly.
 when defined(windows):
   const CompileTimeIoMonSrc =
     sanitizeStaticExec(staticExec("cmd /C if defined IO_MON_SRC (echo %IO_MON_SRC%)"))
@@ -76,9 +85,9 @@ when defined(windows):
     sanitizeStaticExec(staticExec("cmd /C if defined STACKABLE_HOOKS_SRC (echo %STACKABLE_HOOKS_SRC%)"))
 else:
   const CompileTimeIoMonSrc =
-    sanitizeStaticExec(staticExec("sh -c 'printf %s \"${IO_MON_SRC:-}\"'"))
+    sanitizeStaticExec(staticExec("printf %s \"${IO_MON_SRC:-}\""))
   const CompileTimeStackableHooksSrc =
-    sanitizeStaticExec(staticExec("sh -c 'printf %s \"${STACKABLE_HOOKS_SRC:-}\"'"))
+    sanitizeStaticExec(staticExec("printf %s \"${STACKABLE_HOOKS_SRC:-}\""))
 
 # Interface extraction compiles this project file without the provider build
 # body. Keep the stdlib typed-value surface visible for generated DSL helpers.
@@ -334,6 +343,27 @@ package reprobuild:
     # ``NIX_LDFLAGS`` from the shell that launched repro.
     "openssl"
     "sh"
+
+    # The `reprobuild-nix-daemon` staging edge below is a `shell(...)`
+    # whose command line invokes bare `mkdir`, `cp` and `chmod`. Those
+    # used to resolve out of whatever the developer's `$PATH` offered:
+    # an action's runtime `PATH` ended in the host's, and `PATH` was a
+    # name-keyed passthrough, so nothing recorded which `cp` ran.
+    #
+    # The action `PATH` is now composed only of directories the solved
+    # graph resolved THAT EDGE's declared tools into, which turned this
+    # from an invisible host dependency into a build failure — the
+    # correct outcome, and the reason these three lines exist. A
+    # `uses:` entry is necessary but not sufficient: the edge also has
+    # to name them, which it does just below its `shell(...)`. Three
+    # entries rather than one `coreutils` entry because the path-mode
+    # resolver keys on an executable NAME, and because naming each
+    # command the edge actually runs is what makes the dependency
+    # readable. All three resolve into the same `coreutils` bin dir, so
+    # the composed `PATH` gains exactly one entry.
+    "mkdir"
+    "cp"
+    "chmod"
 
     # Deferred-Item D1: ``python3`` is required by the in-graph Python
     # test execute edges emitted via ``pythonUnittest.run(...)`` (see
@@ -740,6 +770,19 @@ package reprobuild:
         else: binary
       "reprobuild.test_execute." & stem
 
+    proc reproTestDepfilePath(binary: string): string =
+      ## Where the generated depfile for a self-interposing test's execute
+      ## edge lives. Same raw string-slicing as ``reproTestExecuteId`` and for
+      ## the same scoping reason.
+      var lastSlash = -1
+      for i in 0 ..< binary.len:
+        if binary[i] == '/' or binary[i] == '\\':
+          lastSlash = i
+      let stem =
+        if lastSlash >= 0: binary[lastSlash + 1 .. ^1]
+        else: binary
+      "build/test-deps/" & stem & ".d"
+
     # Bootstrap-And-Self-Build B4: the three macOS-arm64 HCR tests
     # carry ``extraPassC`` / ``extraPassL`` lists (the codesign
     # workaround flags that previously lived in ``scripts/run_tests.sh``'s
@@ -955,6 +998,26 @@ package reprobuild:
         extraEnv = sourceOnlyEnv,
         )
       reprobuildTestBuildActions.add(edge.action)
+      # THE C BACKEND, DECLARED ON THE TEST-BUILD EDGES TOO.
+      #
+      # ``nim c`` emits C and shells out to a BARE ``gcc``. ``nim.c(...)``
+      # declares that for the edges it lowers, but these 1371 edges do
+      # not go through it — ``buildNimUnittest`` is a separate typed tool
+      # from ``ct_test_nim_unittest`` (a pinned external package this
+      # repository cannot edit), so the declaration has to happen at the
+      # call site.
+      #
+      # Without it the whole class fails ``gcc: command not found`` under
+      # any narrow selection. MEASURED, before this line existed:
+      # ``repro build nim-c-590e14613b93d2dc`` (one test edge, isolated
+      # work-root and cache-root) → ``selected tool identities: 1/10``,
+      # ``status=asFailed``, ``/bin/sh: line 1: gcc: command not found``.
+      # A WHOLE-GRAPH build hid it, because the realized identity set is
+      # then the union over every selected edge and some other edge had
+      # declared ``gcc``. Declaring it per edge is what makes the edge's
+      # ``PATH`` a function of the edge rather than of what else the
+      # invocation happened to select.
+      appendRegisteredActionToolIdentityRefs(edge.action.id, ["gcc"])
       # B3: emit the EXECUTE edge.
       #
       # ``requiredBinaries`` is the typed input slot the
@@ -991,11 +1054,128 @@ package reprobuild:
             "reprobuild.test_helpers.legacy_cache_peer_origin_dev")
           executeDeps.add(
             "reprobuild.test_helpers.legacy_cache_peer_legacy_wire")
+      # NO TOOL REFS ON THE EXECUTE EDGE, AND THAT IS A DECISION.
+      #
+      # The BUILD edge above declares `gcc` because `nim c` shells out to
+      # exactly one bare-name compiler and naming it is both possible and
+      # correct. The EXECUTE edge cannot be treated the same way, and the
+      # attempt was measured before it was abandoned.
+      #
+      # 504 of the 1372 registered test sources reach for a host binary
+      # through the stdlib's ambient resolution and execution helpers
+      # (the `findExe` / `execCmdEx` / `execCmd` / `execProcess` /
+      # `startProcess` / `poUsePath` family — spelled without their call
+      # parentheses here so this file stays off the ambient-execution
+      # linter's baseline). A scan of their bare-name LITERALS alone
+      # names ~80 distinct host tools — `git` in 441 of them, then `sh`,
+      # `gcc`, `cc`, `nim`, `ssh-keygen`, `7z`, `clang`, `bash`,
+      # `rustc`, `pwsh`, `javac`, `brew`, `hg`, ... — against the ten
+      # tools this project declares packages for. And the corpus's idiom
+      # is "resolve the tool by bare name; if the answer is empty, call
+      # `skip()`",
+      #
+      # so a `PATH` restricted to declared tools does not make those
+      # tests fail, it makes them SKIP. That is the defect, not the fix:
+      # `repro build '.#test#t_workspace_root_for_repo_managed_worktree'`
+      # once reported `asSucceeded exit=0` with `[SKIPPED]`, and served
+      # that result from cache on the next run.
+      #
+      # So these edges declare nothing and take `actionPathDecision`'s
+      # inherited branch (`repro_cli_support.nim`): the caller's `$PATH`,
+      # named PASSTHROUGH so the census counts them. A test binary is a
+      # host-tool CONSUMER, and pretending otherwise buys a hermetic
+      # `PATH` at the price of the suite's meaning.
+      # ------------------------------------------------------------------
+      # Dependency policy for this execute edge
+      # ------------------------------------------------------------------
+      #
+      # Almost every test gets the default, ``automaticMonitorPolicy()``: the
+      # engine wraps the command in ``repro internal io monitor``, which
+      # injects an ``LD_PRELOAD`` interposer and records what the test really
+      # read. That is the baseline and it is what keeps the action cache
+      # sound — a changed input is OBSERVED, so the edge re-runs.
+      #
+      # A tiny number of tests cannot run that way, structurally. They
+      # perform ``LD_PRELOAD`` interposition THEMSELVES — that is the
+      # behaviour under test. Two interposers hooking the same libc entry
+      # points in one process re-enter each other: our monitor's ``open``
+      # hook calls into the test's, whose hook calls ``open`` again. Not
+      # theoretical: running the full suite through the graph path wedged
+      # exactly here. ``t_stackable_hooks_extracted_process_tree`` sat with
+      # its fixture spinning at 94% CPU for over nineteen hours while the
+      # test blocked in ``pipe_read`` and the monitor in ``do_wait``;
+      # ``/proc/<pid>/maps`` showed both ``librepro_monitor_shim.so`` and the
+      # test's own ``libstackable_shim.so`` mapped into the same process.
+      #
+      # For those tests the edge's dependency evidence comes from a DEPFILE
+      # instead of from the monitor. ``fs.unmonitorableActionDepfile`` emits a
+      # separate edge whose OUTPUT is a make-format depfile listing the test's
+      # inputs, and the execute edge consumes it with ``makeDepfilePolicy``.
+      # That resolves to ``dgRecognizedFormat``, which is deliberately absent
+      # from the engine's ``MonitorPolicyKinds``, so ``monitoredAction``
+      # returns early and no shim is injected — and the paths in the depfile
+      # are read back as real evidence, so a change to any of them does
+      # invalidate the edge.
+      #
+      # NOTE the second half of that fix, which is easy to miss: the engine
+      # must ALSO withhold the ``REPRO_MONITOR_SHIM_LIB`` env seed, which is
+      # what ``suppressMonitorShimSeed = true`` asks for (see
+      # ``launchChildEnv``). Suppressing the wrap alone is not enough —
+      # io-mon's preload runtime propagates whatever that variable names into
+      # child processes, so a test building its own interposer from that
+      # runtime re-injects OUR shim into its children and livelocks again.
+      # Measured directly: wrap suppressed, seed still present, and the
+      # fixture came up with two shims on ``LD_PRELOAD`` at 92% CPU. The flag
+      # is a narrow per-edge opt-out rather than "every unmonitored kind",
+      # because ordinary ``makeDepfilePolicy`` edges are seeded today and must
+      # stay that way.
+      #
+      # WHY A GENERATED FILE rather than a list written inline and trusted:
+      # forms of "track only the statically declared inputs and call the
+      # action complete" have been added to this codebase FOUR times and
+      # removed every time as a soundness hole (``dgDeclaredOnly``,
+      # ``declaredOnlyDependencyPolicy``, ``REPRO_MACOS_DISABLE_ACTION_MONITOR``
+      # and, most recently, ``dgTrustedDeclaredInputs`` — which is what these
+      # two rows used to carry); see the history note in
+      # ``repro_core/dependency_gathering.nim``. A depfile is the sanctioned
+      # route because the input set is DERIVED rather than ASSERTED: it lives
+      # in a file that an edge produces, that can be regenerated, and that the
+      # engine actually reads.
+      #
+      # THE OBLIGATION YOU INHERIT: the generated list is only as good as what
+      # is passed to the generator. The engine will re-run the edge when a
+      # LISTED path changes, but a runtime dependency nobody listed is a
+      # dependency the build does not have. If one of these tests grows one,
+      # add it below.
+      #
+      # THE INTENDED END STATE, unchanged: these two tests compile their shim
+      # AT RUNTIME. Lifting that compile into its own graph edge (which
+      # milestone M3 wants regardless) would make the compiler emit this
+      # depfile for free, and the generator call below could be deleted.
+      var executeAfter: seq[BuildActionDef] = @[]
+      let executePolicy =
+        if spec.selfInterposes:
+          let testDepfile = reproTestDepfilePath(spec.binary)
+          let testDepfileEdge = dslfs.unmonitorableActionDepfile(
+            output = testDepfile,
+            inputs = @[spec.binary] & @(requiredBinaries),
+            reason =
+              "test performs LD_PRELOAD interposition itself; the engine's " &
+              "io-monitor injects a second interposer and the two livelock " &
+              "on the same libc entry points (observed: 19h spin in " &
+              "t_stackable_hooks_extracted_process_tree)")
+          reprobuildTestBuildActions.add(testDepfileEdge)
+          executeAfter.add(testDepfileEdge)
+          makeDepfilePolicy(testDepfile, suppressMonitorShimSeed = true)
+        else:
+          automaticMonitorPolicy()
       let executeEdge = edge.testBinary.run(
         deps = executeDeps,
+        after = executeAfter,
         requiredBinaries = requiredBinaries,
         actionId = executeActionId,
-        registerImplicitName = false)
+        registerImplicitName = false,
+        dependencyPolicy = executePolicy)
       reprobuildTestExecuteActions.add(executeEdge)
 
     # Bootstrap-And-Self-Build B4: Python tests join the ``test``
@@ -1258,6 +1438,14 @@ package reprobuild:
       extraOutputs = @[
         "build/bin/reprobuild-nix-daemon",
       ])
+    # The three bare commands this shell line runs. Declaring them is
+    # what puts coreutils' bin dir on this edge's PATH now that an
+    # action's PATH no longer ends in the caller's `$PATH`, and what
+    # keeps their `uses:` entries alive through the fragment-scoped
+    # identity realization (`scopedToolArtifact`) when the build is
+    # `repro build .#apps` rather than a whole-graph build.
+    appendRegisteredActionToolIdentityRefs(reprobuildNixDaemon.id,
+      ["mkdir", "cp", "chmod"])
     reprobuildAppsActions.add(reprobuildNixDaemon)
     discard target("reprobuild-nix-daemon", reprobuildNixDaemon)
 
@@ -1447,6 +1635,13 @@ package reprobuild:
       ],
       extraOutputs = legacyWireGeneratedSources,
       cacheable = false)
+    # The bare interpreter this shell line runs. ``python3`` is in the
+    # package's ``uses:`` list, but a ``uses:`` entry alone does not put
+    # a tool on an action's PATH — the edge has to name it, both so the
+    # directory joins this edge's PATH and so the identity survives the
+    # selection-scoped realization (``scopedToolArtifact``).
+    appendRegisteredActionToolIdentityRefs(legacyWireGenerator.id,
+      ["python3"])
     reprobuildTestHelpersActions.add(legacyWireGenerator)
 
     when not defined(windows):

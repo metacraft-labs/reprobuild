@@ -125,6 +125,26 @@ suite "daemon carried environment":
     for (key, value) in settings:
       check carried.hasEnvPair(key, value)
 
+  test "project-defined action passthroughs follow daemon-hosted builds":
+    const settings = [
+      ("REPRO_E2E_CUSTOM_ACTION_STATE_DIR", "/tmp/custom-action-state"),
+      ("GUI_ASSERT_ROOT", "/workspace/gui-assert"),
+    ]
+    var previous: seq[tuple[key: string; value: string; present: bool]]
+    for (key, value) in settings:
+      previous.add((key: key, value: getEnv(key), present: existsEnv(key)))
+      putEnv(key, value)
+    defer:
+      for item in previous:
+        if item.present:
+          putEnv(item.key, item.value)
+        else:
+          delEnv(item.key)
+
+    let carried = daemonCarriedEnvironment()
+    for (key, value) in settings:
+      check carried.hasEnvPair(key, value)
+
   test "private runner ownership is excluded without changing unrelated env":
     const
       OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"

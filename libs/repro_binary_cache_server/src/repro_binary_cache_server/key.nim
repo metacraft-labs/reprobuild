@@ -52,11 +52,42 @@ proc writeDigest(buf: var seq[byte]; digest: Blake3Hash) =
 # Canonical encoder.
 # ---------------------------------------------------------------------------
 
+const MicroarchFieldMarker* = 0xFFFFFFFF'u32
+  ## Platform-And-Microarchitecture-Constraints PMC-4 — the tag that
+  ## introduces the OPTIONAL ``PlatformTriple.microarch`` field.
+  ##
+  ## The constraint this exists to satisfy: an entry with no declared floor
+  ## must encode to the SAME BYTES it did before PMC-4. Every entry the fleet
+  ## has already published is such an entry, so an unconditional new field
+  ## would invalidate all of them simultaneously. The field is therefore
+  ## emitted only when non-empty — but "emit nothing when default" is not by
+  ## itself a safe extension of a flat length-prefixed format: with the field
+  ## absent, the next bytes are ``toolchain.name``'s length prefix, so a
+  ## reader has to decide what it is looking at from the bytes alone.
+  ##
+  ## The marker makes that decision total. ``0xFFFFFFFF`` is not a length any
+  ## string in this encoding can have (it would be a 4 GiB field name), so a
+  ## u32 at this position is either the marker or a string length, never
+  ## ambiguously both. The encoding stays injective — two ``CacheEntryKey``
+  ## values that differ anywhere still encode to different byte sequences —
+  ## which is what ``Binary-Caches.md`` §"Cache Entry Identity" needs for
+  ## "two entries that are not interchangeable at runtime MUST NOT share one
+  ## cache key" to follow from the digest.
+  ##
+  ## The alternative considered and rejected was bumping
+  ## ``BinaryCacheFormatVersion``: correct, but it moves every key in the
+  ## fleet, which is the outcome this whole shape exists to avoid.
+
 proc encodePlatform(buf: var seq[byte]; p: PlatformTriple) =
   writeString(buf, p.cpu)
   writeString(buf, p.os)
   writeString(buf, p.abi)
   writeString(buf, p.libcVariant)
+  # PMC-4: zero bytes when there is no floor, so every pre-PMC-4 entry keeps
+  # the key it was published under. See ``MicroarchFieldMarker``.
+  if p.microarch.len > 0:
+    writeU32LE(buf, MicroarchFieldMarker)
+    writeString(buf, p.microarch)
 
 proc encodeToolchain(buf: var seq[byte]; t: ToolchainIdentity) =
   writeString(buf, t.name)

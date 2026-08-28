@@ -287,9 +287,14 @@ proc substitutePlaceholders*(command, fetchPath, extractedPath,
   ## match — but at present all three placeholders share a leading ``$``
   ## and no two are substrings of each other, so the order is just for
   ## defensive symmetry.
-  result = command.replace("$extracted", extractedPath)
-  result = result.replace("$fetch", fetchPath)
-  result = result.replace("$out", outPath)
+  # Commands run through a POSIX shell on every host. Normalize Windows
+  # paths so backslashes are not interpreted as shell escapes.
+  let shellFetchPath = fetchPath.replace("\\", "/")
+  let shellExtractedPath = extractedPath.replace("\\", "/")
+  let shellOutPath = outPath.replace("\\", "/")
+  result = command.replace("$extracted", shellExtractedPath)
+  result = result.replace("$fetch", shellFetchPath)
+  result = result.replace("$out", shellOutPath)
 
 # ---------------------------------------------------------------------------
 # Action emission
@@ -564,7 +569,8 @@ proc emitInstallMirrorPublishAction(projectRoot, dslPackageName, outPath,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-custom.mirror",
-    toolIdentityRefs = @["sh", InstallMirrorPublishToolName],
+    toolIdentityRefs = @InstallMirrorCoreToolNames &
+      @[InstallMirrorPublishToolName],
     declaredOutputs = @[mirrorRoot, sidecar])
 
 # ---------------------------------------------------------------------------

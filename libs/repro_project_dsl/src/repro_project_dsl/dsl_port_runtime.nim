@@ -4004,13 +4004,14 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
                                    stamp: string): string =
   ## Compose the fetch-script body. Mirrors the autotools / cmake /
   ## meson constructors' fetch-script shape: curl → hash-verify → tar
-  ## --force-local extract → touch stamp. ``file://`` URLs work natively
+  ## extract → touch stamp. ``file://`` URLs work natively
   ## via curl.
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
+  let staged = extracted & ".repro-extract-" & spec.hashHex
+  let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
@@ -4028,22 +4029,24 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
     script.add("cp \"" & escapedTarball & "\" \"" &
       escapedStaged & "/source\"; ")
   else:
-    script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+    script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
-  script.add("touch \"" & escapedStamp & "\"")
+  script.add(": > \"" & escapedStamp & "\"")
   script
 
-proc dslPortSubstituteShellPlaceholders(command, fetchPath, extractedPath,
-                                       outPath: string): string =
+proc dslPortSubstituteShellPlaceholders*(command, fetchPath, extractedPath,
+                                        outPath: string): string =
   ## Replace ``$fetch`` / ``$extracted`` / ``$out`` in ``command``.
   ## Mirrors ``from_source_custom.substitutePlaceholders`` byte-for-byte
   ## so a recipe routed through the per-project provider gets the same
   ## substituted argv as one routed through the standard provider.
-  result = command.replace("$extracted", extractedPath)
-  result = result.replace("$fetch", fetchPath)
-  result = result.replace("$out", outPath)
+  let shellFetchPath = fetchPath.replace("\\", "/")
+  let shellExtractedPath = extractedPath.replace("\\", "/")
+  let shellOutPath = outPath.replace("\\", "/")
+  result = command.replace("$extracted", shellExtractedPath)
+  result = result.replace("$fetch", shellFetchPath)
+  result = result.replace("$out", shellOutPath)
 
 proc dslPortSanitizeIdPart(value: string): string =
   for ch in value:
@@ -4073,7 +4076,7 @@ proc dslPortCustomShellToolIdentityRefs*(packageName: string):
   ## Attach every declared dependency profile to custom shell actions.
   ## This supplies PATH and the auxiliary CPATH/LIBRARY_PATH channels
   ## while preserving the shell as the command interpreter identity.
-  result = @["sh"]
+  result = @["sh", "mkdir", "touch"]
   for raw in registeredNativeBuildDeps(packageName):
     let dep = dslPortStripDepConstraint(raw)
     if dep.len > 0 and dep notin result:
@@ -4132,6 +4135,13 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       of dshaBlake3: "blake3"
     let fetchScript = dslPortCustomFetchScriptShell(spec, fetchPath,
       extracted, fetchStamp)
+    let hashTools =
+      case spec.hashAlg
+      of dshaSha256: @["sha256sum"]
+      of dshaBlake3: @["b2sum", "blake3sum"]
+    let fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
+      copiesDataFile = spec.kind == dfkDataFile,
+      archiveUrl = spec.url)
     fetchId = "ccpp-fetch-" & dslPortSanitizeIdPart(packageName)
     discard buildAction(
       id = fetchId,
@@ -4141,7 +4151,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       pool = "fetch",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.fetch." & hashAlgTag,
-      toolIdentityRefs = @["sh"])
+      toolIdentityRefs = fetchToolRefs)
   # Shell-action chain: action[0] depends on the fetch action (or no
   # deps when no fetch); action[i>0] depends on action[i-1].
   var prevId = ""
@@ -4278,7 +4288,8 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       commandStatsId = "from-source-custom.mirror",
       publishToBinaryCache = true,
       cacheEntryIdentity = some(cacheIdentity),
-      toolIdentityRefs = @["sh", InstallMirrorPublishToolName],
+      toolIdentityRefs = @InstallMirrorCoreToolNames &
+        @["sed", InstallMirrorPublishToolName],
       declaredOutputs = @[mirrorRoot])
 
 # ---------------------------------------------------------------------------
@@ -4293,6 +4304,14 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
 ##   * ``pkgConfig "<name>"``                — pkg-config module name.
 ##   * ``soname "<name>"`` / ``sover "<v>"`` — shared-object metadata.
 ##   * ``linkKind static | shared | both``    — consumer link mode.
+##   * ``multiVersion forbidden | allowed``   — Named-Lock-Files §9.3: may
+##                                              two versions of this library
+##                                              be linked into one binary?
+##                                              Omitted means the answer is
+##                                              INHERITED from the language
+##                                              convention (Q-11), and the
+##                                              terminus of that inheritance
+##                                              is ``forbidden``.
 ##   * ``languageStandard <feature>``         — minimum language standard
 ##                                              (e.g. ``cxx_std_17``,
 ##                                              ``c_std_11``); always
@@ -4392,6 +4411,28 @@ type
       ## How consumers link against this library — static archive,
       ## shared object, or both. ``llkUnset`` when ``linkKind`` was
       ## omitted from the ``api:`` block.
+    multiVersion*: MultiVersionPolicy
+      ## Named-Lock-Files NLF-M8 (§9.3) — whether several versions of THIS
+      ## library may be linked into one binary.
+      ##
+      ## It lives in `api:` beside `linkKind` / `soname` / `sover` because it
+      ## is consumption metadata of exactly that kind, and it belongs to the
+      ## library rather than to the linkage site because "whether two versions
+      ## of it can share one binary is a fact only its author knows" (§9.5,
+      ## closing Q-2).
+      ##
+      ## `mvUnset` — the default — is NOT `mvAllowed`. §9.3: "the property is
+      ## named such that **silence means safe**: a library that declares
+      ## nothing is `forbidden`". The resolution from `mvUnset` to an
+      ## effective answer runs through the per-language conventions (Q-11) in
+      ## `repro_lock_files/diamond.resolveMultiVersion`, and the diagnostic
+      ## says which convention it came from.
+    multiVersionSourceFile*: string
+      ## §9.4 requires the co-linking error to cite "the declaration's
+      ## file:line". Captured at macro-expansion time from the `multiVersion`
+      ## line's own position, not the library's, because the line the author
+      ## has to change is the one that made the claim.
+    multiVersionSourceLine*: int
     languageStandard*: string
       ## CMake ``target_compile_features``-equivalent minimum language
       ## standard (e.g. ``cxx_std_17``, ``c_std_11``). Always

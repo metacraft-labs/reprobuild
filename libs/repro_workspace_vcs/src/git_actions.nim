@@ -172,6 +172,15 @@ type
     headSha*: string
     isClean*: bool
     isPublished*: bool
+    publishedScope*: string
+      ## For ``gqkIsPublished`` / ``gqkExtendedStatus``: which remote the
+      ## ``isPublished`` answer was actually scoped to. A remote NAME means
+      ## only ``<name>/*`` tracking refs were considered; ``""`` means EVERY
+      ## remote-tracking branch was accepted — which is also what a caller
+      ## gets back when it named a remote this checkout does not have (see
+      ## ``remoteBranchContainsHead``). Callers must word an "unpublished"
+      ## diagnostic from this field rather than from the name they passed in,
+      ## or the refusal describes a narrower search than the one performed.
     diagnostic*: string
     stashCount*: int
     aheadCount*: int
@@ -592,7 +601,9 @@ proc workingTreeIsClean(payload: GitVcsPayload; repoPath: string): tuple[ok: boo
         res.output.trimmed)
   (ok: true, clean: res.output.strip.len == 0, diagnostic: "")
 
-proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string): tuple[ok: bool; published: bool; diagnostic: string] =
+proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
+    tuple[ok: bool; published: bool; scopedRemote: string;
+          diagnostic: string] =
   ## Is HEAD contained in a remote-tracking branch?
   ##
   ## ``remote`` scopes the answer to one remote's refs (``<remote>/…``). Pass
@@ -606,6 +617,13 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
   ## degrades to the any-remote answer rather than a confident falsehood; see
   ## the comment on the lookup below.
   ##
+  ## ``scopedRemote`` reports which question was ACTUALLY answered: the remote
+  ## name when scoping applied, and ``""`` when the answer covers every
+  ## remote-tracking branch. Callers word their diagnostic from this and not
+  ## from what they asked for — a refusal that names a remote the checkout does
+  ## not have sends the operator to look for a publication on a remote that
+  ## cannot hold one, and hides the fact that EVERY remote was already checked.
+  ##
   ## The distinction is not academic: a repo checked out by the `repo` tool
   ## names its remote after the org (``metacraft-labs``), not ``origin``. A
   ## caller that hardcoded ``origin`` against such a worktree saw every commit
@@ -614,7 +632,7 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
   let lookup = runGit(payload,
     ["-C", repoPath, "branch", "-r", "--contains", "HEAD"])
   if lookup.exitCode != 0:
-    return (ok: false, published: false,
+    return (ok: false, published: false, scopedRemote: remote,
       diagnostic: "git branch -r --contains HEAD failed (" &
         $lookup.exitCode & "): " & lookup.output.trimmed)
   # A named remote that this checkout does not actually have is a GUESS, not a
@@ -637,6 +655,10 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
           break
       if not found:
         anyRemote = true
+  # What the answer below is actually scoped to. Empty means "every
+  # remote-tracking branch was accepted" — either because the caller asked for
+  # that, or because the name it asked for is not a remote of this checkout.
+  let answeredScope = if anyRemote: "" else: remote
   let needle = remote & "/"
   proc matches(candidate: string): bool =
     if anyRemote:
@@ -657,11 +679,13 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
     if arrowIndex >= 0:
       let tail = normalized[arrowIndex + 4 .. ^1].strip()
       if matches(tail):
-        return (ok: true, published: true, diagnostic: "")
+        return (ok: true, published: true, scopedRemote: answeredScope,
+          diagnostic: "")
       continue
     if matches(normalized):
-      return (ok: true, published: true, diagnostic: "")
-  (ok: true, published: false, diagnostic: "")
+      return (ok: true, published: true, scopedRemote: answeredScope,
+        diagnostic: "")
+  (ok: true, published: false, scopedRemote: answeredScope, diagnostic: "")
 
 proc writeReceipt(receiptPath, content: string) =
   createDir(receiptPath.splitPath.head)
@@ -1891,10 +1915,11 @@ proc queryGitState*(query: GitQueryAction;
     let res = remoteBranchContainsHead(payload, query.repoPath,
       query.remoteName)
     if res.ok:
-      result = GitQueryResult(status: gqsOk, isPublished: res.published)
+      result = GitQueryResult(status: gqsOk, isPublished: res.published,
+        publishedScope: res.scopedRemote)
     else:
       result = GitQueryResult(status: gqsFailed,
-        diagnostic: res.diagnostic)
+        publishedScope: res.scopedRemote, diagnostic: res.diagnostic)
   of gqkExtendedStatus:
     var headSha = ""
     var isClean = true
@@ -1947,6 +1972,7 @@ proc queryGitState*(query: GitQueryAction;
 
     # 3. Published Check
     let pubRes = remoteBranchContainsHead(payload, query.repoPath, query.remoteName)
+    var publishedScope = pubRes.scopedRemote
     if pubRes.ok:
       isPublished = pubRes.published
     else:
@@ -2003,6 +2029,7 @@ proc queryGitState*(query: GitQueryAction;
       headSha: headSha,
       isClean: isClean,
       isPublished: isPublished,
+      publishedScope: publishedScope,
       diagnostic: if diagnostic.startsWith("; "): diagnostic[2..^1] else: diagnostic,
       stashCount: stashCount,
       aheadCount: aheadCount,

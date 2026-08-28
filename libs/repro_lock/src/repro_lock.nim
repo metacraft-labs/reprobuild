@@ -26,7 +26,7 @@
 ## optimal = true
 ## inputs_digest = "fnv1a64:0123abcd..."
 ## variants = [{ name = "compiler", value = "clang" }]
-## packages = [{ name = "nim", version = "2.2.0", source = "nim" }]
+## packages = [{ name = "nim", version = "2.2.0", source = "nim", selection = "selected" }]
 ## deps = []
 ## ```
 ##
@@ -68,6 +68,7 @@ import repro_multihash
 import repro_lock/identity
 
 export UnifiedSolution
+export SelectionStatus
 export repro_multihash
 export identity
 
@@ -106,9 +107,42 @@ type
     ## repository/source identity the solver keyed the definition on
     ## (MO-1: the package-definition name); ``version`` is the concrete
     ## resolved version.
+    ##
+    ## ``selection`` is the Named-Lock-Files §5.6 fact (owner decision
+    ## 2026-08-21, NLF-M9): whether anything in the solve required this
+    ## instance. **It is PERSISTED rather than recomputed**, and the reason is
+    ## structural: a lock document records the solve's OUTPUT — versions,
+    ## variant assignments, source identities — and carries no dependency
+    ## edges and no variant-conditioned gates. Selection is a property of
+    ## those edges, so it cannot be recovered from a lock alone; recovering it
+    ## would mean re-reading the solver INPUTS, which is precisely the step a
+    ## pinned lock exists to avoid, and would make the answer depend on inputs
+    ## that may have moved since the lock was written.
+    ##
+    ## The field records a fact and decides no policy. It is not read by
+    ## ``canonicalSolvedGraph`` (so it does not enter ``lockIdentity``), it
+    ## does not filter ``packages``, and it does not affect materiality.
+    ##
+    ## ``target`` is Platform-And-Microarchitecture-Constraints PMC-4: the
+    ## microarchitecture the instance RESOLVED FOR, in
+    ## ``packages_schema.renderResolvedTarget``'s spelling. Unlike
+    ## ``selection`` it IS projected into ``lockIdentity``, and the
+    ## difference is not arbitrary — ``selection`` is a fact about which
+    ## instances the solve required, while ``target`` is a fact about WHICH
+    ## ARTIFACT the instance is. Two locks that name the same package at the
+    ## same version resolved for two different microarchitectures are two
+    ## different answers, and §6.2's rule ("anything that legitimately
+    ## distinguishes two lock files must be something the key already
+    ## captures") admits it for exactly that reason.
+    ##
+    ## Written only when non-empty and read with a default, so a lock
+    ## committed before PMC-4 round-trips byte-identically and keeps the
+    ## identity it had.
     name*: string
     version*: string
     source*: string
+    selection*: SelectionStatus
+    target*: string
 
   SolvedGraphLock* = object
     ## In-memory shape of the committed lock. Round-trips through
@@ -236,21 +270,29 @@ proc solutionToLock*(sol: UnifiedSolution; platform: string;
   pnames.sort()
   for name in pnames:
     result.packages.add(LockedPackage(
-      name: name, version: sol.packages[name], source: name))
+      name: name, version: sol.packages[name], source: name,
+      # NLF-M9 — carry the fact through. ``ssSelected`` for a solution that
+      # recorded nothing (an empty ``selected`` table) is the status-quo
+      # reading: every consumer treated every instance as required before the
+      # fact existed, and this milestone changes no policy.
+      selection: sol.selected.getOrDefault(name, ssSelected)))
 
 proc lockToSolution*(lock: SolvedGraphLock): UnifiedSolution =
   ## Reconstruct the ``UnifiedSolution`` a build path consumes from a
   ## loaded lock. This is the deterministic counterpart of
   ## ``solutionToLock``: a write→read round-trip yields the same
-  ## variant/package assignments and the same ``optimal`` flag.
+  ## variant/package assignments, the same ``optimal`` flag, and (NLF-M9) the
+  ## same per-instance selection statuses.
   result = UnifiedSolution(
     variants: initTable[string, string](),
     packages: initTable[string, string](),
+    selected: initTable[string, SelectionStatus](),
     optimal: lock.optimal)
   for v in lock.variants:
     result.variants[v.name] = v.value
   for p in lock.packages:
     result.packages[p.name] = p.version
+    result.selected[p.name] = p.selection
 
 # ---------------------------------------------------------------------------
 # Named-Lock-Files §6.2 — the canonical solved graph a lock identity hashes
@@ -271,6 +313,13 @@ proc canonicalSolvedGraph*(lock: SolvedGraphLock): CanonicalSolvedGraph =
   ## package and a `store` / `registry:<name>` descriptor for the lifted ones
   ## (see the MO-11 note below); whichever it is, it is what the lock records
   ## about WHERE the instance comes from, so it is what enters the key.
+  ##
+  ## `LockedPackage.selection` (NLF-M9) is deliberately NOT projected. Whether
+  ## an unselected instance enters `lockIdentity` is one of the three
+  ## downstream policy questions §5.6 leaves open, and NLF-M9 answers none of
+  ## them: it establishes the fact and stops. Reading the field here would
+  ## move every identity of every graph containing an unselected instance,
+  ## which is a policy change wearing a fact's clothes.
   result = CanonicalSolvedGraph(
     platform: lock.platform, packages: @[], graphVariants: @[])
   for v in lock.variants:
@@ -279,7 +328,9 @@ proc canonicalSolvedGraph*(lock: SolvedGraphLock): CanonicalSolvedGraph =
   for p in lock.packages:
     result.packages.add(SolvedPackageInstance(
       name: p.name, version: p.version, sourceIdentity: p.source,
-      variants: @[]))
+      variants: @[],
+      # PMC-4: projected, unlike `selection` above. See `LockedPackage`.
+      resolvedTarget: p.target))
 
 proc canonicalSolvedGraph*(sol: UnifiedSolution;
                            platform: string): CanonicalSolvedGraph =
@@ -310,7 +361,19 @@ proc canonicalSolvedGraph*(sol: UnifiedSolution;
   for name in pnames:
     result.packages.add(SolvedPackageInstance(
       name: name, version: sol.packages[name], sourceIdentity: name,
-      variants: @[]))
+      variants: @[],
+      # PMC-4: **[MEASURED]** left empty here, deliberately. A
+      # `UnifiedSolution` is the SOLVER's answer and the solver carries no
+      # microarchitecture coordinate — the target is decided later, when
+      # `resolveBuiltinPackage` picks a `PlatformBinary` arm. Writing the
+      # reading host's own target into this field would be a fact this value
+      # does not contain, and it would make the identity of a live solution
+      # depend on where it was computed rather than on what it says. The
+      # honest value is "no floor", which is also what every instance in the
+      # tree actually resolves to today. A caller that HAS resolved arms —
+      # `repro lock refresh` — populates `LockedPackage.target`, which the
+      # lock-side overload above does project.
+      resolvedTarget: ""))
 
 proc lockIdentityOf*(lock: SolvedGraphLock): LockIdentity =
   ## §6.2's key for a loaded lock. The lock-file NAME is not a parameter and
@@ -326,6 +389,12 @@ proc sameSolution*(a, b: UnifiedSolution): bool =
   ## package assignments and the same optimality flag. ``repro lock
   ## validate`` uses this to detect a tampered or stale lock (the lock no
   ## longer matches a fresh solve of the current inputs).
+  ##
+  ## NLF-M9 deliberately does NOT add `selected` to the comparison. What makes
+  ## a lock stale is a policy question with its own consequences — a lock
+  ## written before the fact was recorded would start reporting as stale on
+  ## every validate — and §5.6 assigns the policy questions to their own
+  ## milestones. The fact is recorded; nothing yet acts on it.
   if a.optimal != b.optimal: return false
   if a.variants.len != b.variants.len: return false
   if a.packages.len != b.packages.len: return false
@@ -466,7 +535,26 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
         result.packages.add(LockedPackage(
           name: fields.getOrDefault("name", ""),
           version: fields.getOrDefault("version", ""),
-          source: fields.getOrDefault("source", "")))
+          source: fields.getOrDefault("source", ""),
+          # NLF-M9 — an ABSENT `selection` key reads as `selected`. The key is
+          # absent exactly in a v2 document written before the fact was
+          # recorded, and in such a document every instance was treated as
+          # required by every consumer; reading it as `selected` reproduces
+          # that behaviour byte-for-byte instead of retroactively inventing
+          # the unusual claim for locks that never made it.
+          selection:
+            if fields.getOrDefault("selection", "") == $ssUnselected:
+              ssUnselected
+            else:
+              ssSelected,
+          # PMC-4 — an ABSENT `target` key reads as "" ("no floor"), which is
+          # what every lock written before this milestone meant and the only
+          # reading that keeps such a lock's identity where it was. It is NOT
+          # read as the reading host's target: a lock records the answer the
+          # SOLVE reached, and substituting the reader's own capability here
+          # is precisely the silent re-resolution
+          # `t_lock_from_a_v3_host_resolves_on_a_v2_host` exists to forbid.
+          target: fields.getOrDefault("target", "")))
     else: discard
   if not sawSchema or result.schema != SolvedGraphLockSchemaV2:
     # A ``…v1`` tag is named specifically: it is not a typo but a lock
@@ -730,7 +818,15 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
     if i > 0: result.add(", ")
     result.add("{ name = \"" & tomlEscape(p.name) & "\", version = \"" &
                tomlEscape(p.version) & "\", source = \"" &
-               tomlEscape(p.source) & "\" }")
+               tomlEscape(p.source) & "\", selection = \"" &
+               $p.selection & "\"")
+    # PMC-4: emitted ONLY when the instance resolved against a declared
+    # floor. Every lock in the tree today has none, so every one of them
+    # re-serializes byte-identically — the same discipline PMC-2 applied to
+    # `cpu_level` and PMC-3 to `cpu_features`, for the same reason.
+    if p.target.len > 0:
+      result.add(", target = \"" & tomlEscape(p.target) & "\"")
+    result.add(" }")
   result.add("]\n")
   # deps — the MO-8 unified set (coordinates + integrity per dependency).
   var sorted = ld.deps

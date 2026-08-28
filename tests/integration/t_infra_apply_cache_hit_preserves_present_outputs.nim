@@ -12,11 +12,14 @@
 ##
 ## With the flag set, an all-outputs-present hit is served by the
 ## engine's whole-graph fast no-op scan (``tryFastNoopCacheHits``, which
-## is itself gated on this flag) and reported as ``asCacheHit`` without
-## the scheduler ever running; if that scan declines, the per-action
-## outputs-present branch reports ``asUpToDate``. Neither path calls
-## ``restoreOutputs``, so the tests below accept either status and rely
-## on the inode/mtime assertion for the real claim.
+## is itself gated on this flag) without the scheduler ever running; if
+## that scan declines, the per-action outputs-present branch handles it.
+## Both now report the same thing for the same state -- ``asUpToDate``
+## with reason ``outputs-present`` -- and neither calls
+## ``restoreOutputs``. The tests below still accept ``asCacheHit`` too,
+## because that is the honest answer for the DIFFERENT state where the
+## outputs were missing and had to be materialized from the CAS; the
+## inode/mtime assertion carries the real claim either way.
 ##
 ## Three properties are pinned here:
 ##   1. a cache hit with outputs present does not rewrite them,
@@ -142,9 +145,9 @@ suite "integration_infra_apply_cache_hit_preserves_present_outputs":
       let second = runBuild(g, applyCfg(cacheRoot))
       check second.results.len == 1
       # Either short-circuit is acceptable and both mean "hit, nothing
-      # rebuilt": the whole-graph fast no-op scan reports asCacheHit,
-      # the per-action outputs-present branch reports asUpToDate. What
-      # must NOT happen is asSucceeded, which would mean the action was
+      # rebuilt": the whole-graph fast no-op scan and the per-action
+      # outputs-present branch both report asUpToDate. What must NOT
+      # happen is asSucceeded, which would mean the action was
       # relaunched. The inode assertion below is the load-bearing one.
       check second.results[0].status in {asCacheHit, asUpToDate}
       check readFile(outputPath) == payload

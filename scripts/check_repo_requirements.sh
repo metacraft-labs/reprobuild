@@ -81,7 +81,11 @@ require_contains flake.nix "devShells.default"
 require_contains flake.nix "packages.default"
 require_contains flake.nix "checks ="
 require_contains flake.nix "git-hooks.lib"
-require_contains flake.nix "shellHook = pre-commit-check.shellHook"
+# The dev shell must still run git-hooks.nix's installer. It is no longer the
+# WHOLE shellHook: Reprobuild's own hook reconciliation runs after it, and the
+# pre-commit hook handoff runs on both sides of it, so the requirement is that
+# the installer is composed in — not that nothing else is.
+require_contains flake.nix "+ pre-commit-check.shellHook"
 
 # CodeTracer's canonical native target imports span_stream. The trace-format
 # pin and every Nix execution surface must therefore agree on one immutable

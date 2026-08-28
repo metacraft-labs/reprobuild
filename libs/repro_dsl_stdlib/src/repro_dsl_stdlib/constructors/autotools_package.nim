@@ -95,6 +95,28 @@ import ../packages/pkg_config as pkg_config_module
 
 const FetchScratchSubdir = ".repro/fetch"
 
+const AutotoolsWindowsInstallArgConversionExclusions* =
+  "prefix=;exec_prefix=;bindir=;sbindir=;libdir=;includedir=;" &
+  "datarootdir=;datadir=;mandir=;infodir=;DESTDIR="
+
+proc addWindowsInstallArgConversionExclusions(
+    env: var seq[(string, string)]) =
+  ## Recursive Automake installs pass POSIX install directories back to a
+  ## native make executable. MSYS must leave those VAR=/path arguments intact.
+  when defined(windows):
+    for i, entry in env:
+      if entry[0] == "MSYS2_ARG_CONV_EXCL":
+        var merged = entry[1]
+        for exclusion in AutotoolsWindowsInstallArgConversionExclusions.split(';'):
+          if exclusion.len > 0 and exclusion notin merged.split(';'):
+            if merged.len > 0 and not merged.endsWith(";"):
+              merged.add(';')
+            merged.add(exclusion)
+        env[i] = (entry[0], merged)
+        return
+    env.add(("MSYS2_ARG_CONV_EXCL",
+      AutotoolsWindowsInstallArgConversionExclusions))
+
 proc sanitizedPackageName(packageName: string): string =
   ## Lower the package name to the limited character set the build
   ## engine's action-id slot accepts (alphanumerics + ``-``/``_``/``.``).
@@ -144,6 +166,10 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     case spec.hashAlg
     of dshaSha256: "sha256"
     of dshaBlake3: "blake3"
+  let hashTools =
+    case spec.hashAlg
+    of dshaSha256: @["sha256sum"]
+    of dshaBlake3: @["b2sum", "blake3sum"]
   # M9.R.15q.5.4 — support a relative ``file:./vendor/...`` URL form so
   # recipes that vendor a tarball can reference it without baking the
   # host's absolute path into the recipe. The relative path is resolved
@@ -157,11 +183,15 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     let absPath = projectRoot / relPath
     let posixAbs = absPath.replace("\\", "/")
     resolvedUrl = "file://" & posixAbs
+  let fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
+    copiesDataFile = spec.kind == dfkDataFile,
+    archiveUrl = resolvedUrl)
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
+  let staged = extracted & ".repro-extract-" & spec.hashHex
+  let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
@@ -193,13 +223,11 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # only on Windows, where the MSYS2/Git GNU tar needs it. Linux GNU tar would
   # accept it but does not need it either, so gating on Windows keeps the
   # emitted script minimal and portable across all three host tar flavours.
-  let tarForceLocal = when defined(windows): "--force-local " else: ""
   if spec.kind == dfkDataFile:
     script.add("cp \"" & escapedTarball & "\" \"" &
       escapedStaged & "/source\"; ")
   else:
-    script.add("tar " & tarForceLocal & "-xf \"" & escapedTarball & "\" -C \"" &
-      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+    script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
   script.add(": > \"" & escapedStamp & "\"")
@@ -226,7 +254,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.fetch." & hashAlgTag,
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = fetchToolRefs)
   some(act)
 
 # ---------------------------------------------------------------------------
@@ -251,6 +279,7 @@ proc autotools_package*(srcDir: string;
                         installMakeVars: seq[string] = @[];
                         srcPatches: seq[string] = @[];
                         postConfigureCommands: seq[string] = @[];
+                        postInstallCommands: seq[string] = @[];
                         extraEnv: seq[(string, string)] = @[]):
                         AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
@@ -274,9 +303,12 @@ proc autotools_package*(srcDir: string;
   ## the compile and install invocations; ``installMakeVars`` adds assignments
   ## used only by the install invocation. ``postConfigureCommands`` supplies
   ## shell commands that run from the configured build directory after a
-  ## successful configure and before the make edge. ``extraEnv`` supplies
-  ## recipe-specific environment overrides to the configure, compile, and
-  ## install actions. The values are kept outside the typed call identity,
+  ## successful configure and before the make edge. ``postInstallCommands``
+  ## supplies shell commands that run after ``make install`` and before the
+  ## terminal libtool-archive cleanup. Those commands receive the absolute
+  ## staged install path in ``REPRO_AUTOTOOLS_INSTALL_ROOT``. ``extraEnv``
+  ## supplies recipe-specific environment overrides to the configure, compile,
+  ## and install actions. The values are kept outside the typed call identity,
   ## matching the other package constructors.
   # M9.R.15a.3 — accept a custom prefix flag format (openssl's
   # ``./Configure`` uses ``--prefix=`` like autotools, but Configure
@@ -680,6 +712,7 @@ proc autotools_package*(srcDir: string;
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
   for envVar in extraEnv:
     installEnv.add(envVar)
+  addWindowsInstallArgConversionExclusions(installEnv)
   let installDestdir = (block:
     if providerProjectRoot.len > 0:
       providerProjectRoot / buildDir / destdir
@@ -741,9 +774,13 @@ proc autotools_package*(srcDir: string;
   # the multi-output install tree, so libcanberra (and any future
   # autotools recipe that consumes a sibling autotools recipe's
   # libraries) never sees the broken .la references.
-  let laCleanupScript =
+  var laCleanupScript =
+    "set -e; export REPRO_AUTOTOOLS_INSTALL_ROOT=\"" & installDestdir & "\"; "
+  for command in postInstallCommands:
+    laCleanupScript.add("( " & command & " ); ")
+  laCleanupScript.add(
     "find \"" & installDestdir & "\" -name '*.la' -type f -delete 2>/dev/null; " &
-    "true"
+    "true")
   let laCleanupArgv = @["sh", "-c", laCleanupScript]
   let laCleanupCall = inlineExecCall(laCleanupArgv)
   # A package may legitimately configure the same source tree for more than

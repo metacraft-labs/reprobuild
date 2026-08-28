@@ -161,6 +161,26 @@ proc noticeMentioning(report: JsonNode; needle: string): bool =
       return true
   false
 
+proc noticeText(report: JsonNode; needle: string): string =
+  for n in report["notices"]:
+    if n.getStr().contains(needle):
+      return n.getStr()
+  ""
+
+proc namedReproCommands(message: string): seq[string] =
+  ## The ``repro …`` invocations a message tells the operator to run, parsed
+  ## out of its backticks. Naming a command is a promise that it runs; the
+  ## caller keeps that promise honest by running it.
+  var i = 0
+  while true:
+    let a = message.find('`', i)
+    if a < 0: break
+    let b = message.find('`', a + 1)
+    if b < 0: break
+    let cmd = message[(a + 1) ..< b].strip()
+    if cmd.startsWith("repro ") and cmd notin result: result.add(cmd)
+    i = b + 1
+
 suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
 
   test "t_pre_push_warns_and_allows_on_unreachable_personal_backend":
@@ -235,7 +255,28 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
 
         # WARN: a notice names the personal backend + ``repro lock refresh``.
         check noticeMentioning(report, "personal lock backend")
-        check noticeMentioning(report, "repro lock refresh")
+
+        # The notice tells the operator to run something "when it is
+        # reachable". Pin the property rather than the wording: whatever
+        # command the notice names must EXIST and RUN — from the directory the
+        # pre-push hook speaks from (the pushed repo), once the backend is
+        # back. This used to name `repro lock refresh`, which re-pins the
+        # committed solved-graph `repro.lock` and exits 1 with "no solver
+        # inputs found" here; the record that went unrecorded is a WORKSPACE
+        # lock entry in the personal backend.
+        let named = namedReproCommands(noticeText(report, "personal lock backend"))
+        checkpoint("notice names: " & named.join(" | "))
+        check named.len >= 1
+        # Make the personal backend reachable again — the precondition the
+        # notice itself states.
+        discard requireGit(q(gitBin) & " init -q --bare -b main " &
+          q(personalBare))
+        for cmd in named:
+          let res = run(absolutePath(reproBinary) & cmd["repro".len .. ^1],
+            cwd = ws / "core")
+          checkpoint("ran `" & cmd & "` -> exit " & $res.code & "\n" & res.output)
+          check res.code == 0
+          check not res.output.contains("no solver inputs found")
 
       # =================================================================
       # Case B — manifest-LESS workspace publishes its routed personal

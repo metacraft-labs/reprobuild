@@ -77,6 +77,29 @@ type
     os*: string                 ## ``linux`` | ``darwin`` | ``windows``
     abi*: string                ## ``gnu`` | ``musl`` | ``msvc`` | ``""``
     libcVariant*: string        ## ``glibc-2.42`` | ``musl-1.2.5`` | ``""``
+    microarch*: string
+      ## Platform-And-Microarchitecture-Constraints PMC-4 — the RESOLVED
+      ## TARGET this entry was built against, in the rendering
+      ## ``packages_schema.renderResolvedTarget`` produces:
+      ## ``x86-64-v3``, ``x86-64-v3+avx512vl,avx512vnni``, or ``""``.
+      ##
+      ## On an ENTRY this is a FLOOR: the minimum a consuming host must
+      ## provide for the payload not to trap. ``Package-Model.md``
+      ## §"Two hazards specific to this project": "A key that omits the
+      ## level will serve a v3-optimised binary to a v2 host. The failure
+      ## is ``SIGILL`` at some later instruction, not a resolution error."
+      ## So it is in the key (``key.encodePlatform``) AND gated before any
+      ## payload byte is fetched (``compat_check.checkCompat``) — the key
+      ## keeps a v2 host from ever naming the entry, the gate covers the
+      ## keys a client did not derive itself (a lock, a closure walk over
+      ## ``depReferences``, a hand-run ``lookup <hex>``).
+      ##
+      ## **The empty string is the default and encodes to ZERO BYTES.**
+      ## Every entry published before PMC-4 carries no floor, and adding an
+      ## unconditional field to the canonical encoding would move every key
+      ## in the fleet at once — a mass cache-miss event, not a safety fix.
+      ## See ``key.encodePlatform`` for how the optional field stays
+      ## unambiguous without costing the default case a single byte.
 
   ToolchainIdentity* = object
     ## ``Binary-Caches.md`` § "Cache Entry Identity": compiler or

@@ -135,21 +135,27 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     check table["LIBRARY_PATH"].startsWith("/synth/proto/lib")
     check table["LD_LIBRARY_PATH"].startsWith("/synth/proto/lib")
 
-  test "source Perl module roots reach both action launch paths":
+  test "source Perl module roots do not leak into foreign interpreters":
     let perlLib =
       "/workspace/recipes/packages/source/perl/.repro/output/install/usr/lib"
-    let moduleRoot = perlLib & "/perl5"
     let paths = ResolvedAuxPaths(libDirs: @[perlLib, "/synth/other/lib"])
 
     let argvResult = applyResolvedAuxPathsArgv(
-      @["PERL5LIB=/inherited/perl"], paths)
-    check envValue(argvResult, "PERL5LIB") ==
-      moduleRoot & Sep & "/inherited/perl"
+      @["PERL5LIB=/inherited/perl", "LD_LIBRARY_PATH=/inherited/lib"], paths)
+    check envValue(argvResult, "PERL5LIB") == "/inherited/perl"
+    check envValue(argvResult, "LIBRARY_PATH").startsWith(perlLib)
+    check envValue(argvResult, "LD_LIBRARY_PATH") ==
+      "/synth/other/lib" & Sep & "/inherited/lib"
+    check envValue(applyResolvedAuxPathsArgv(@[], paths), "PERL5LIB") == ""
 
     let table = newStringTable(modeCaseSensitive)
     table["PERL5LIB"] = "/inherited/perl"
+    table["LD_LIBRARY_PATH"] = "/inherited/lib"
     applyResolvedAuxPathsTable(table, paths)
-    check table["PERL5LIB"] == moduleRoot & Sep & "/inherited/perl"
+    check table["PERL5LIB"] == "/inherited/perl"
+    check table["LIBRARY_PATH"].startsWith(perlLib)
+    check table["LD_LIBRARY_PATH"] ==
+      "/synth/other/lib" & Sep & "/inherited/lib"
 
   test "empty paths leave env untouched":
     let env = @["PATH=/usr/bin", "USER=alice"]
@@ -213,7 +219,7 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     test "monitor-wrapped shell actions defer runtime paths":
       let argv = @[
         "/opt/repro/bin/repro", "internal", "io", "monitor",
-        "--depfile", "/tmp/action.rdep", "--",
+        "--depfile", "/tmp/action.iomon", "--",
         "/nix/store/bash/bin/bash", "-lc", "run-build"]
       let env = @[
         "LD_LIBRARY_PATH=/source/lib",
@@ -228,7 +234,7 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     test "monitor-wrapped direct actions defer runtime paths":
       let argv = @[
         "/opt/repro/bin/repro", "internal", "io", "monitor",
-        "--depfile", "/tmp/action.rdep", "--",
+        "--depfile", "/tmp/action.iomon", "--",
         "/nix/store/cmake/bin/cmake", "-S", ".", "-B", "build"]
       let env = @[
         "PATH=/usr/bin",
@@ -272,7 +278,7 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     test "StringTable launcher defers monitored direct runtime paths":
       let argv = @[
         "/opt/repro/bin/repro", "internal", "io", "monitor",
-        "--depfile", "/tmp/action.rdep", "--", "/usr/bin/cmake"]
+        "--depfile", "/tmp/action.iomon", "--", "/usr/bin/cmake"]
       let table = newStringTable(modeCaseSensitive)
       table["LD_LIBRARY_PATH"] = "/source/sqlite/lib"
       let deferredArgv = deferRuntimeLibraryEnvForShell(argv, table)
@@ -410,13 +416,13 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     let linuxRoot = "/source/linux/usr/include"
     let argv = @[
       "/opt/repro/bin/repro", "internal", "io", "monitor",
-      "--depfile", "/tmp/action.rdep", "--",
+      "--depfile", "/tmp/action.iomon", "--",
       "/source/gcc/bin/x86_64-linux-gnu-g++-14", "-c", "input.cc"]
     let result = applyCompilerSystemIncludeArgs(argv,
       @[glibcRoot, linuxRoot])
     check result == @[
       "/opt/repro/bin/repro", "internal", "io", "monitor",
-      "--depfile", "/tmp/action.rdep", "--",
+      "--depfile", "/tmp/action.iomon", "--",
       "/source/gcc/bin/x86_64-linux-gnu-g++-14",
       "-idirafter", glibcRoot, "-idirafter", linuxRoot,
       "-c", "input.cc"]

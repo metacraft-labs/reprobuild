@@ -81,6 +81,10 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     case spec.hashAlg
     of dshaSha256: "sha256"
     of dshaBlake3: "blake3"
+  let hashTools =
+    case spec.hashAlg
+    of dshaSha256: @["sha256sum"]
+    of dshaBlake3: @["b2sum", "blake3sum"]
   # M9.R.15q.5.4 — support relative ``file:./vendor/...`` URL form so
   # recipes that vendor a tarball can reference it without baking the
   # host's absolute path into the recipe (mirrors the equivalent
@@ -91,11 +95,15 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     let absPath = projectRoot / relPath
     let posixAbs = absPath.replace("\\", "/")
     resolvedUrl = "file://" & posixAbs
+  let fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
+    copiesDataFile = spec.kind == dfkDataFile,
+    archiveUrl = resolvedUrl)
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
+  let staged = extracted & ".repro-extract-" & spec.hashHex
+  let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
@@ -116,8 +124,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     script.add("cp \"" & escapedTarball & "\" \"" &
       escapedStaged & "/source\"; ")
   else:
-    script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+    script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
   script.add(": > \"" & escapedStamp & "\"")
@@ -130,7 +137,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     pool = "fetch",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "meson_package.fetch." & hashAlgTag,
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = fetchToolRefs)
   some(act)
 
 # ---------------------------------------------------------------------------
@@ -258,6 +265,7 @@ proc meson_package*(srcDir: string;
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "meson_package.patch",
       toolIdentityRefs = @["sh"])
+    m9r14eThreadRecipeDepsAsToolRefs(patchEdge.id, pkgName)
     setupAfter.add(patchEdge)
   if projectRoot.len > 0:
     let cleanStamp = projectRoot / ".repro" / "build" / "meson-clean.stamp"
@@ -297,7 +305,7 @@ proc meson_package*(srcDir: string;
       # invalidate this cleanup edge on every warm build.
       dependencyPolicy = automaticMonitorPolicy(@[buildDirAbs]),
       commandStatsId = "meson_package.clean_build_dir",
-      toolIdentityRefs = @["sh"])
+      toolIdentityRefs = @["sh", "rm"])
     setupAfter = @[cleanEdge]
 
   var setupIdentityInputs: seq[string] = @[]

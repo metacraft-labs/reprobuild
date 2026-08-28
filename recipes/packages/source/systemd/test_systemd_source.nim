@@ -29,7 +29,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[unittest, strutils]
 
 import repro_project_dsl
 
@@ -38,6 +38,12 @@ import repro_project_dsl
 # artifacts under ``systemdSource`` at module init time.
 import ./repro
 
+# Test-support helpers that read the recipe's ``build:`` block off
+# the DSL's ``registeredBuildActions`` registry -- the surface the
+# per-channel build flags moved to when M9.R.6.1 retired
+# ``registeredBuildFlags``.
+import ../recipe_build_block
+
 const ExpectedUrl =
   "https://github.com/systemd/systemd/archive/refs/tags/v257.tar.gz"
 
@@ -45,20 +51,30 @@ const ExpectedHash =
   "14f6907eb5e289d8c39cbe1ef891ca54d8a0e3582c986a9ef5844b3f29add43b"
 
 const ExpectedMesonOptions = @[
-  "-Dmode=release",
-  "-Dtests=false",
-  "-Dman=disabled",
-  "-Dtranslations=false",
-  "-Dxdg-autostart=false",
-  "-Dnetworkd=false",
-  "-Dresolve=false",
-  "-Dtimesyncd=false",
-  "-Dhomed=false",
-  "-Duserdb=false",
-  "-Dimportd=false",
-  "-Dportabled=false",
-  "-Dpolkit=false",
-  "--buildtype=release",
+  "mode=release",
+  "tests=false",
+  "man=disabled",
+  "translations=false",
+  "xdg-autostart=false",
+  "networkd=false",
+  "resolve=false",
+  "timesyncd=false",
+  "homed=false",
+  "userdb=false",
+  "importd=false",
+  "portabled=false",
+  "polkit=false",
+  "pam=true",
+  "mount-path=/usr/bin/mount",
+  "umount-path=/usr/bin/umount",
+  "kmod-path=/usr/bin/kmod",
+  "kexec-path=/usr/sbin/kexec",
+  "sulogin-path=/usr/sbin/sulogin",
+  "loadkeys-path=/usr/bin/loadkeys",
+  "setfont-path=/usr/bin/setfont",
+  "nologin-path=/usr/sbin/nologin",
+  "quotaon-path=/usr/sbin/quotaon",
+  "quotacheck-path=/usr/sbin/quotacheck",
 ]
 
 suite "systemdSource — from-source recipe smoke test":
@@ -87,11 +103,31 @@ suite "systemdSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "mesonOptions registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # M9.R.6.1 retired the ``registeredBuildFlags`` runtime registry this
+    # assertion used to read. The property outlived the registry: the flags
+    # moved into this recipe's explicit ``build:`` block, where they are
+    # handed to the Layer-1 ``meson_package(...)`` constructor. The DSL's M4
+    # emitter records that block verbatim and ``registeredBuildActions``
+    # exposes it -- see ``recipes/packages/source/recipe_build_block.nim``.
+    let declared = declaredBuildOptions("systemdSource")
+    check declared.found
+    # Every element is a string literal, so this is the WHOLE
+    # sequence the recipe declares, in declared order.
+    check declared.complete
+    check declared.values == ExpectedMesonOptions
+    check buildBlockConstructors("systemdSource") == @["meson_package"]
   test "mesonOptions does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the cmake channel would
+    # surface as a ``cmake_package(...)`` call here.
+    check "cmake_package" notin buildBlockConstructors("systemdSource")
   test "mesonOptions does not leak into the configure channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    # Channel isolation: a recipe drives exactly ONE upstream build
+    # system, so its ``build:`` block calls exactly one Layer-1
+    # constructor. Options leaking into the configure channel would
+    # surface as a ``autotools_package(...)`` call here.
+    check "autotools_package" notin buildBlockConstructors("systemdSource")
   test "artifacts register four executables + two libraries with correct kinds":
     # M3 artifact registry: ``systemdInit`` + ``systemctl`` +
     # ``journalctl`` + ``systemdLogind`` are tagged ``dakExecutable``

@@ -136,3 +136,34 @@ suite "M9.R.42.1: disk-apply kernel-state diag hook":
     let hasAfterPartprobe = body.contains(
       "label=after-partprobe-main")
     check hasBeforePartprobe == hasAfterPartprobe
+
+  test "Test#4: partition readiness reports only nodes still absent":
+    let dir = resetDir("test4")
+    let first = dir / "loop99p1"
+    let second = dir / "loop99p2"
+    writeFile(first, "")
+    writeFile(second, "")
+
+    check waitForPartitionDevices([first, second], timeoutMs = 0,
+      stablePolls = 1).len == 0
+    removeFile(second)
+    check waitForPartitionDevices([first, second], timeoutMs = 0,
+      stablePolls = 1) == @[second]
+
+  test "Test#5: partition readiness rejects a transient stale node":
+    var observations = @[true, false, true, true]
+    var observation = 0
+    let probe = proc(path: string): bool =
+      check path == "/dev/loop99p1"
+      result = observations[min(observation, observations.high)]
+      inc observation
+
+    check waitForPartitionDevicesWithProbe(["/dev/loop99p1"],
+      timeoutMs = 10, pollMs = 1, stablePolls = 2, probe = probe).len == 0
+    check observation == 4
+
+    observations = @[false, true]
+    observation = 0
+    check waitForPartitionDevicesWithProbe(["/dev/loop99p1"],
+      timeoutMs = 1, pollMs = 1, stablePolls = 2, probe = probe) ==
+        @["/dev/loop99p1"]

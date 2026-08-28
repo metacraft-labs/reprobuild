@@ -1,6 +1,41 @@
 import std/[algorithm, options, os, osproc, sequtils, sets, streams, strutils,
             tables, tempfiles, times]
 
+when defined(windows):
+  type
+    ProviderLockHandle = pointer
+    ProviderLockDword = uint32
+    ProviderLockWideString = WideCString
+
+  const
+    ProviderLockInvalidHandle = cast[ProviderLockHandle](-1'i64)
+    ProviderLockGenericRead = 0x80000000'u32
+    ProviderLockGenericWrite = 0x40000000'u32
+    ProviderLockOpenAlways = 4'u32
+    ProviderLockFileAttributeNormal = 0x80'u32
+    ProviderLockSharingViolation = 32'u32
+
+  proc providerLockCreateFileW(
+      path: ProviderLockWideString;
+      desiredAccess, shareMode: ProviderLockDword;
+      securityAttributes: pointer;
+      creationDisposition, flagsAndAttributes: ProviderLockDword;
+      templateFile: ProviderLockHandle): ProviderLockHandle
+    {.stdcall, dynlib: "kernel32", importc: "CreateFileW".}
+
+  proc providerLockCloseHandle(handle: ProviderLockHandle): int32
+    {.stdcall, dynlib: "kernel32", importc: "CloseHandle".}
+
+  proc providerLockGetLastError(): ProviderLockDword
+    {.stdcall, dynlib: "kernel32", importc: "GetLastError".}
+else:
+  import std/posix
+
+  const ProviderLockExclusive = 2.cint
+
+  proc providerLockFlock(fd: cint; operation: cint): cint
+    {.importc: "flock", header: "<sys/file.h>".}
+
 import cbor
 import repro_core
 import repro_core/paths as corepaths
@@ -19,6 +54,69 @@ proc sanitizeStaticExec(val: string): string =
 const BuiltNimCompilerPath = sanitizeStaticExec(staticExec("command -v nim"))
 const BuiltCCompilerPath =
   sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
+
+proc compileTimeSourceRoot(name: string): string {.compileTime.} =
+  ## Preserve source-only dependency roots from the environment that built
+  ## ``repro``. A Nix-built CLI can then compile out-of-tree providers after
+  ## leaving its dev shell; embedding the store paths also keeps those inputs
+  ## in the installed closure. Runtime overrides and live sibling checkouts
+  ## still take precedence at resolution time.
+  let root = getEnv(name)
+  if root.len == 0 or root.isAbsolute:
+    root
+  else:
+    # Nim VM cannot call the Windows current-directory API used by
+    # `absolutePath`. This module's source location is already known during
+    # compilation, so resolve build-environment paths against the reprobuild
+    # checkout without consulting ambient process state.
+    let reprobuildRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+    os.normalizedPath(reprobuildRoot / root)
+
+const BuiltSourcePackageRoots = [
+  ("REPRO_TEST_ADAPTERS_SRC", compileTimeSourceRoot("REPRO_TEST_ADAPTERS_SRC")),
+  ("FASTSTREAMS_SRC", compileTimeSourceRoot("FASTSTREAMS_SRC")),
+  ("NIM_STEW_SRC", compileTimeSourceRoot("NIM_STEW_SRC")),
+  ("NIM_SERIALIZATION_SRC", compileTimeSourceRoot("NIM_SERIALIZATION_SRC")),
+  ("NIM_JSON_SERIALIZATION_SRC", compileTimeSourceRoot("NIM_JSON_SERIALIZATION_SRC")),
+  ("NIM_TOML_SERIALIZATION_SRC", compileTimeSourceRoot("NIM_TOML_SERIALIZATION_SRC")),
+  ("SSZ_SERIALIZATION_SRC", compileTimeSourceRoot("SSZ_SERIALIZATION_SRC")),
+  ("NIMCRYPTO_SRC", compileTimeSourceRoot("NIMCRYPTO_SRC")),
+  ("BEARSSL_SRC", compileTimeSourceRoot("BEARSSL_SRC")),
+  ("RESULTS_SRC", compileTimeSourceRoot("RESULTS_SRC")),
+  ("STINT_SRC", compileTimeSourceRoot("STINT_SRC")),
+  ("IO_MON_SRC", compileTimeSourceRoot("IO_MON_SRC")),
+  ("STACKABLE_HOOKS_SRC", compileTimeSourceRoot("STACKABLE_HOOKS_SRC")),
+  ("VM_HARNESS_SRC", compileTimeSourceRoot("VM_HARNESS_SRC")),
+  ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
+  ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
+  ("REPRO_CT_TEST_RUNNER_SRC",
+    compileTimeSourceRoot("REPRO_CT_TEST_RUNNER_SRC")),
+  ("CODETRACER_SRC", compileTimeSourceRoot("CODETRACER_SRC")),
+  ("RUNQUOTA_SRC", compileTimeSourceRoot("RUNQUOTA_SRC")),
+]
+
+proc builtSourcePackageRoot(envName: string): string =
+  for entry in BuiltSourcePackageRoots:
+    if entry[0] == envName:
+      return entry[1]
+
+proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
+  ## Child compilers rebuild the interface-artifact module and therefore
+  ## cannot see its parent's compile-time constants. Export valid embedded
+  ## roots through the process environment so every nested extractor and
+  ## resource-accessor compile inherits the same source closure.
+  for (envName, root) in roots:
+    # A build-time relative path is anchored at the directory where the CLI
+    # happened to be compiled. Re-exporting it from a consumer or temp runner
+    # silently changes its meaning. New binaries normalize such roots while
+    # compiling; rejecting them here also keeps older binaries from poisoning
+    # cold out-of-tree interface extraction.
+    if not existsEnv(envName) and root.isAbsolute and
+        dirExists(extendedPath(root)):
+      putEnv(envName, root)
+
+proc ensureBuiltSourcePackageEnvironment*() =
+  seedSourcePackageEnvironment(BuiltSourcePackageRoots)
 
 type
   InterfaceEnvelopeKind* = enum
@@ -1395,7 +1493,12 @@ proc toProjectInterface*(pkg: PackageDef;
   result.defaultToolProvisioning = pkg.defaultToolProvisioning
   result.publicSignatureDependencies = pkg.publicSignatureDependencies
   result.location = SourceLocation(file: pkg.sourceFile, line: pkg.sourceLine)
-  for useDef in pkg.toolUses:
+  # NLF-M8 — `PackageDef.toolUses` is no longer the concatenation of the
+  # three dependency lists (`allToolUses` is), so the union is taken HERE.
+  # `ProjectInterface.toolUses` keeps exactly the content it had, byte for
+  # byte and in the same order, because the ~14 tool-PATH sites downstream
+  # read it and this change is not theirs.
+  for useDef in pkg.allToolUses():
     result.toolUses.add(toInterfaceToolUse(useDef, packages))
   for useDef in pkg.runtimeDeps:
     result.runtimeToolUses.add(toInterfaceToolUse(useDef, packages))
@@ -2471,24 +2574,28 @@ proc reprobuildLibsRootFromEnv(): string =
     return repoRoot / "libs"
   ""
 
+proc reprobuildSourceRootFromBinaryLocation*(exePath = ""): string =
+  ## Derive the source checkout containing a local
+  ## ``<reprobuild-root>/build/bin/repro`` binary. Installed binaries do not
+  ## have this layout and deliberately return an empty string; their wrapper
+  ## supplies ``REPROBUILD_SOURCE_ROOT`` instead.
+  let resolvedExe = if exePath.len > 0: exePath else: getAppFilename()
+  if resolvedExe.len == 0:
+    return ""
+  let candidateRoot = resolvedExe.parentDir.parentDir.parentDir
+  let marker = candidateRoot / "libs" / "repro_project_dsl" / "src" /
+    "repro_project_dsl.nim"
+  if fileExists(extendedPath(marker)):
+    return candidateRoot
+  ""
+
 proc reprobuildLibsRootFromBinaryLocation(): string =
   ## When the running ``repro`` binary lives inside a reprobuild source
-  ## checkout (``<reprobuild-root>/build/bin/repro``) we can derive the
-  ## reprobuild libs root from the binary's path. This is the sibling-
-  ## repo detection equivalent of how dev-shell scripts probe for
-  ## ``../reprobuild/libs/`` next to the consumer repo, but anchored
-  ## from the binary instead of the consumer's workdir so it stays
-  ## correct regardless of where ``repro`` was invoked from.
-  let exePath = getAppFilename()
-  if exePath.len == 0:
+  ## checkout, derive the libs root from the validated checkout root.
+  let sourceRoot = reprobuildSourceRootFromBinaryLocation()
+  if sourceRoot.len == 0:
     return ""
-  # exePath: <reprobuild-root>/build/bin/repro.exe
-  let candidateRoot = exePath.parentDir.parentDir.parentDir
-  let candidate = candidateRoot / "libs"
-  let marker = candidate / "repro_project_dsl" / "src" / "repro_project_dsl.nim"
-  if fileExists(extendedPath(marker)):
-    return candidate
-  ""
+  sourceRoot / "libs"
 
 proc siblingReprobuildLibsRoot(workDir: string): string =
   ## When a recorder repo is checked out as a sibling of reprobuild
@@ -2537,9 +2644,19 @@ proc reprobuildExternalLibsRoot(workDir: string): string =
   if result.len == 0:
     result = siblingReprobuildLibsRoot(workDir)
 
+proc markedPackageRoot(candidate, marker: string): string =
+  if candidate.len == 0:
+    return ""
+  if fileExists(extendedPath(candidate / marker)):
+    return candidate
+  let srcCandidate = candidate / "src"
+  if fileExists(extendedPath(srcCandidate / marker)):
+    return srcCandidate
+
 proc resolveBootstrapPackagePath*(envName: string;
                                   candidates: openArray[string];
-                                  marker: string): string =
+                                  marker: string;
+                                  builtCandidate = ""): string =
   ## MR14 — mirror ``config.nims``'s ``addPackagePath`` resolution shape
   ## so the recipe-compile (extract_runner) ``nim c`` invocation sees the
   ## same sibling source-only dependencies that reprobuild itself sees
@@ -2554,14 +2671,16 @@ proc resolveBootstrapPackagePath*(envName: string;
   ## Resolution order (mirrors ``config.nims:112-121``):
   ## 1. ``$<envName>`` environment variable (if set and contains marker)
   ## 2. each candidate path in declaration order (if it contains marker)
-  ## 3. "" (caller skips the ``--path:`` flag entirely)
-  let envPath = getEnv(envName)
-  if envPath.len > 0 and fileExists(extendedPath(envPath / marker)):
+  ## 3. the source root captured when ``repro`` was built
+  ## 4. "" (caller skips the ``--path:`` flag entirely)
+  let envPath = markedPackageRoot(getEnv(envName), marker)
+  if envPath.len > 0:
     return envPath
   for candidate in candidates:
-    if fileExists(extendedPath(candidate / marker)):
-      return candidate
-  ""
+    let resolved = markedPackageRoot(candidate, marker)
+    if resolved.len > 0:
+      return resolved
+  markedPackageRoot(builtCandidate, marker)
 
 proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
   let envRoot = getEnv("REPRO_CT_TEST_RUNNER_SRC")
@@ -2576,8 +2695,31 @@ proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
       return candidate
   ""
 
-proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string;
-                                      consumerParent = ""): seq[string] =
+proc resolveCtIncrementalAdapterPath(anchorRoot: string): string =
+  for codeTracerRoot in [getEnv("CODETRACER_SRC"),
+                         anchorRoot.parentDir / "codetracer" / "src"]:
+    let candidate = markedPackageRoot(
+      codeTracerRoot, "ct_incremental_adapter.nim")
+    if candidate.len > 0:
+      return candidate
+  for runnerRoot in [getEnv("REPRO_CT_TEST_RUNNER_SRC"),
+                     anchorRoot.parentDir / "reprobuild-ct-test-runner"]:
+    let candidate = runnerRoot / "libs" / "ct_incremental_adapter" / "src"
+    if fileExists(extendedPath(candidate / "ct_incremental_adapter.nim")):
+      return candidate
+  ""
+
+proc resolveRunquotaRoot(anchorRoot, consumerParent: string): string =
+  let marker = "libs" / "runquota_core" / "src" / "runquota_core.nim"
+  for candidate in [getEnv("RUNQUOTA_SRC"),
+                    anchorRoot.parentDir / "runquota",
+                    consumerParent / "runquota"]:
+    if candidate.len > 0 and fileExists(extendedPath(candidate / marker)):
+      return candidate
+  ""
+
+proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
+                                       consumerParent = ""): seq[string] =
   ## MR14 — produce the ``--path:`` flags for the source-only sibling
   ## dependencies that ``reprobuild/config.nims`` lines 126-192 register
   ## via ``addPackagePath``. The list MUST stay in sync with config.nims
@@ -2682,6 +2824,9 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string;
       ".." / "codetracer" / "libs" / "nimcrypto",
       ".." / "nimcrypto",
     ]), "nimcrypto" / "hash.nim"),
+    ("IO_MON_SRC", anchored([
+      ".." / "io-mon" / "src",
+    ]), "io_mon.nim"),
     ("BEARSSL_SRC", anchored([
       ".." / "nim-bearssl",
       "libs" / "nim-bearssl",
@@ -2729,12 +2874,22 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string;
   ]
   for spec in specs:
     let resolved = resolveBootstrapPackagePath(spec.envName, spec.candidates,
-                                               spec.marker)
+                                               spec.marker,
+                                               builtSourcePackageRoot(spec.envName))
     if resolved.len > 0:
       result.add("--path:" & resolved)
-  let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(reprobuildRoot)
-  if ctRunnerAdapter.len > 0:
-    result.add("--path:" & ctRunnerAdapter)
+  for adapterPath in [resolveCtTestRunnerAdapterPath(reprobuildRoot),
+                      resolveCtIncrementalAdapterPath(reprobuildRoot)]:
+    if adapterPath.len > 0:
+      result.add("--path:" & adapterPath)
+
+  let runquotaRoot = resolveRunquotaRoot(reprobuildRoot, consumerParent)
+  if runquotaRoot.len > 0:
+    var runquotaPaths: seq[string] = @[]
+    walkLibSrcPathsInto(runquotaRoot / "libs", runquotaPaths)
+    runquotaPaths.sort(system.cmp[string])
+    for path in runquotaPaths:
+      result.add("--path:" & path)
 
 proc declaredPackageDeps*(workDir: string): seq[string] =
   ## The package dependencies a project's ``repro.nim`` declares with a
@@ -4037,7 +4192,10 @@ proc providerNimcacheKey(outputBinaryPath: string): string =
   ## Retained for opt-in isolation via `REPRO_PROVIDER_NIMCACHE_MODE=per-binary`.
   fnvHex64([absolutePath(outputBinaryPath)])
 
-const ProviderNimcacheSessionEnv* = "REPRO_PROVIDER_NIMCACHE_SESSION"
+const
+  ProviderNimcacheSessionEnv* = "REPRO_PROVIDER_NIMCACHE_SESSION"
+  ProviderParallelBuildEnv* = "REPRO_PROVIDER_PARALLEL_BUILD"
+  ProviderParallelBuildMax* = 64
   ## Environment variable carrying the per-`repro`-invocation nimcache
   ## session token. The root `repro` process seeds this env var to its
   ## own pid (see `ensureProviderNimcacheSession`) and every child
@@ -4128,6 +4286,133 @@ proc sharedProviderNimcacheKey*(workDir: string;
 proc providerNimcacheMode(): string =
   let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
   if mode.len == 0: "shared" else: mode.toLowerAscii()
+
+proc providerParallelBuildCount(): int =
+  let raw = getEnv(ProviderParallelBuildEnv).strip()
+  if raw.len == 0:
+    return 1
+  try:
+    result = parseInt(raw)
+  except ValueError:
+    raise newException(ValueError,
+      ProviderParallelBuildEnv & " must be an integer between 1 and " &
+      $ProviderParallelBuildMax & "; got: " & raw)
+  if result < 1 or result > ProviderParallelBuildMax:
+    raise newException(ValueError,
+      ProviderParallelBuildEnv & " must be between 1 and " &
+      $ProviderParallelBuildMax & "; got: " & raw)
+
+proc boundedNimCompileCommand*(): seq[string] =
+  ## Provider and interface-runner compiles are nested build-engine work. Keep
+  ## their host-C waves under the same validated bound so either path cannot
+  ## independently exhaust a constrained builder.
+  @[
+    nimCompilerPath(),
+    "c",
+    "--parallelBuild:" & $providerParallelBuildCount()
+  ]
+
+type ReproFileLock* = object
+  held: bool
+  when defined(windows):
+    handle: ProviderLockHandle
+  else:
+    fd: cint
+
+proc providerNimcachePath(command: openArray[string]): string =
+  for arg in command:
+    if arg.startsWith("--nimcache:"):
+      return arg["--nimcache:".len .. ^1]
+  raise newException(ValueError,
+    "provider compiler command has no --nimcache path")
+
+proc acquireProviderFileLock(lockPath: string): ReproFileLock =
+  createDir(extendedPath(parentDir(lockPath)))
+  when defined(windows):
+    let wide = newWideCString(lockPath)
+    while true:
+      let handle = providerLockCreateFileW(
+        wide,
+        ProviderLockGenericRead or ProviderLockGenericWrite,
+        0,
+        nil,
+        ProviderLockOpenAlways,
+        ProviderLockFileAttributeNormal,
+        nil)
+      if cast[int](handle) != cast[int](ProviderLockInvalidHandle):
+        return ReproFileLock(held: true, handle: handle)
+      let error = providerLockGetLastError()
+      if error != ProviderLockSharingViolation:
+        raise newException(IOError,
+          "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
+      sleep(50)
+  else:
+    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT, Mode(0o600))
+    if fd < 0:
+      raise newException(IOError,
+        "open(" & lockPath & ") failed, errno=" & $errno)
+    while providerLockFlock(fd, ProviderLockExclusive) != 0:
+      if errno == EINTR:
+        continue
+      let lockError = errno
+      discard posix.close(fd)
+      raise newException(IOError,
+        "flock(" & lockPath & ") failed, errno=" & $lockError)
+    return ReproFileLock(held: true, fd: fd)
+
+proc acquireProviderNimcacheLock(command: openArray[string]):
+    ReproFileLock =
+  ## Nim's incremental cache is reusable across provider recipes but is not
+  ## safe for concurrent writers. Serialize commands that carry the same
+  ## ``--nimcache`` path while leaving independent sessions fully parallel.
+  acquireProviderFileLock(providerNimcachePath(command) & ".compile.lock")
+
+proc releaseProviderNimcacheLock(lock: var ReproFileLock) =
+  if not lock.held:
+    return
+  when defined(windows):
+    if cast[int](lock.handle) != cast[int](ProviderLockInvalidHandle):
+      discard providerLockCloseHandle(lock.handle)
+      lock.handle = ProviderLockInvalidHandle
+  else:
+    if lock.fd >= 0:
+      discard posix.close(lock.fd)
+      lock.fd = -1
+  lock.held = false
+
+proc acquireInterfaceArtifactLock*(artifactPath: string):
+    ReproFileLock =
+  ## Serialize independent Reprobuild sessions that evaluate the same
+  ## interface-extraction edge. The edge's monitor depfile and cache staging
+  ## paths are project-local shared outputs, so RunQuota resource admission
+  ## alone does not make concurrent writers safe.
+  acquireProviderFileLock(artifactPath & ".extract.lock")
+
+proc releaseInterfaceArtifactLock*(lock: var ReproFileLock) =
+  releaseProviderNimcacheLock(lock)
+
+proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = ""):
+    ProviderCompileExecutionResult =
+  ## Execute a compiler command under the lock for its shared Nim cache. The
+  ## lock is kernel-owned, so process termination releases it even though the
+  ## small lock file remains available for later sessions.
+  var lock = acquireProviderNimcacheLock(command)
+  try:
+    result = runCommand(command, cwd = cwd)
+  finally:
+    releaseProviderNimcacheLock(lock)
+
+proc runProviderCompilerCommand*(command: openArray[string]; cwd = ""):
+    ProviderCompileExecutionResult =
+  runSharedNimcacheCompilerCommand(command, cwd)
+
+proc runInterfaceCompilerCommand*(command: openArray[string]; cwd = ""):
+    ProviderCompileExecutionResult =
+  ## Interface runners reuse one cache for the same toolchain and library set.
+  ## Distinct extraction edges may run in separate Reprobuild processes, so
+  ## their compiler writes require the same cross-process serialization as
+  ## provider compiles.
+  runSharedNimcacheCompilerCommand(command, cwd)
 
 proc providerDynamicEnabled(): bool =
   ## Returns true when ``REPRO_PROVIDER_DYNAMIC`` selects the Tier 1
@@ -4329,7 +4614,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
       else:
         buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
           sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
-  var command = @[nimCompilerPath(), "c"]
+  var command = boundedNimCompileCommand()
   command.add(interfaceDefines)
   command.add(@[
     "--path:" & moduleDir,
@@ -4365,7 +4650,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # not a valid compiler working directory: Nim writes relative linker response
   # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
   # The runner scratch directory already owns every generated extractor file.
-  let compileExecution = runCommand(command, cwd = tempRoot)
+  let compileExecution = runInterfaceCompilerCommand(command, cwd = tempRoot)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
     # `runCommand` already raises on non-zero exit, so reaching this branch
@@ -4908,19 +5193,18 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
       nimcacheRoot / providerNimcacheKey(outputBinaryPath)
     else:
       nimcacheRoot / sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
-  result = @[
-    nimCompilerPath(), "c",
+  result = boundedNimCompileCommand()
+  result.add(@[
     # Provider compiles are often nested inside latency-sensitive graph
-    # construction paths. Keep Nim's C backend serial so one provider edge
-    # cannot fan out into a burst of host C compiler jobs; this also avoids
-    # observed GCC 15 vregs ICEs during concurrent generated-C compilation.
-    "--parallelBuild:1",
+    # construction paths. The default stays serial to avoid observed GCC 15
+    # vregs ICEs and unbounded nested compiler bursts. Hosts with a validated
+    # toolchain can opt into bounded concurrency through the environment.
     "--define:reproProviderMode",
     "--path:" & parentDir(modulePath),
     "--nimcache:" & nimcache,
     "--out:" & outputBinaryPath,
     modulePath
-  ]
+  ])
   result.insert(hostFlags, 2)
   result.insert(externalHashFlags(workDir), 2)
   result.insert(reproPackagePathFlags(workDir), 2)
@@ -5200,7 +5484,7 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   # Keep the immutable library lookup root (`workDir`) out of the write path.
   # Nim emits relative linker response files in CWD even though `--nimcache`
   # and `--out` are absolute.
-  let execution = runCommand(plan.compilerCommand, cwd = compilerCwd)
+  let execution = runProviderCompilerCommand(plan.compilerCommand, compilerCwd)
   if not fileExists(extendedPath(plan.outputBinaryPath)):
     raise newException(IOError,
       "provider compilation did not write binary: " & plan.outputBinaryPath &

@@ -73,14 +73,22 @@ path = "y"
 future_key = "forward-compat"
 """
 
-# RA-18 — copyfile/linkfile (inline-table arrays) + groups.
+# RA-18 — copyfile/linkfile (inline-table arrays) + tags.
+#
+# ``tags`` — not ``groups``. The subset filter was renamed when the
+# membership model reclaimed the word ``groups`` for the membership
+# concept (`Rename the repo subset filter from groups to tags`), and the
+# retired spelling now fails as an UNKNOWN KEY through ``decodeStrict``
+# rather than warning. That the old spelling is rejected is pinned by
+# ``t_workspace_membership_model_retired_names_fail_as_unknown.nim``;
+# this fixture is the round-trip of the CURRENT one.
 const ra18Toml = """
 schema = "reprobuild.workspace.repo.v1"
 
 [repo]
 name = "lib"
 path = "lib"
-groups = ["default", "tools"]
+tags = ["default", "tools"]
 copyfile = [{ src = "build/config.default.toml", dest = "config.toml" }]
 linkfile = [{ src = "scripts/dev.sh", dest = "dev.sh" }]
 """
@@ -150,10 +158,10 @@ suite "M5 — RepoFragment round-trip":
     check r.repo.name == "x"
     check r.extensions.isPresent
 
-  test "RA-18 copyfile/linkfile/groups round-trip":
+  test "RA-18 copyfile/linkfile/tags round-trip":
     let path = writeFixture(dir, "repo-ra18.toml", ra18Toml)
     let r = readRepoFragment(path)
-    check r.repo.groups == @["default", "tools"]
+    check r.repo.tags == @["default", "tools"]
     check r.repo.copyfile.len == 1
     check r.repo.copyfile[0].src == "build/config.default.toml"
     check r.repo.copyfile[0].dest == "config.toml"
@@ -166,4 +174,4 @@ suite "M5 — RepoFragment round-trip":
     let r = readRepoFragment(path)
     check r.repo.copyfile.len == 0
     check r.repo.linkfile.len == 0
-    check r.repo.groups.len == 0
+    check r.repo.tags.len == 0

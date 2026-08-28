@@ -105,7 +105,11 @@ when not defined(windows):
     when isNixSupported:
       test "platform N/A":
         echo "[platform N/A] t_integration_production_package_catalog: requires Windows and the Scoop production adapter"
-        check true
+        # The `[platform N/A]` marker above IS this case's statement: it is the
+        # repository's structured, greppable declaration that the coverage does
+        # not apply to this host. A `check true` beside it added nothing and
+        # taught the shape that an assertion which cannot fail is acceptable
+        # filler, so it is gone.
 else:
   suite "M72 gate 1: integration_production_package_catalog":
     when isNixSupported:

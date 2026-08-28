@@ -1,6 +1,6 @@
 ## DSL-port M9.R.9 — auto-recurse + stdlib fall-through tests.
 ##
-## Pins the M9.R.9 surface in three layers:
+## Pins the M9.R.9 surface in four layers:
 ##
 ##   1. ``tryResolveFromSourceTool`` returns a discriminated outcome
 ##      (``rrResolved`` / ``rrNeedsBuild`` / ``rrSiblingMissing``) so
@@ -18,17 +18,91 @@
 ##      module-level state in ``repro_cli_support``. We exercise them
 ##      directly here by manipulating the guard state — a full
 ##      end-to-end auto-recurse test would require synthesising a real
-##      recipe + driving a sub-build, which the test framework already
-##      covers via the live smoke (Gap A wayland / meson chains).
+##      recipe + driving a sub-build.
+##
+##   4. A black-box synthetic consumer drives that real sub-build under
+##      ``--prepare-only``. The source producer must be materialized while
+##      the requested consumer action remains unexecuted.
 ##
 ## The unit-test fixtures use ``createTempDir`` so nothing in the
 ## production ``recipes/packages/source/`` checkout is touched.
 
-import std/[os, sets, strutils, tempfiles, unittest]
+import std/[os, osproc, sets, strutils, tempfiles, unittest]
 
 import repro_cli_support
 import repro_tool_profiles
 import repro_interface_artifacts
+
+const reproBinary = "./build/bin/repro"
+
+const prepareOnlyProducerRepro = """
+import repro_project_dsl
+
+package ninjaSource:
+  build:
+    let materialize = buildAction(
+      id = "ninja-source.materialize",
+      call = inlineExecCall(@[
+        "sh", "-c",
+        "mkdir -p .repro/output/ninja && " &
+          "printf '#!/bin/sh\\necho synthetic-ninja\\n' > " &
+          ".repro/output/ninja/ninja && " &
+          "chmod +x .repro/output/ninja/ninja"
+      ]),
+      outputs = @[".repro/output/ninja/ninja"],
+      cacheable = false)
+    defaultTarget(target("ninja", [materialize]))
+"""
+
+const prepareOnlyConsumerRepro = """
+import repro_project_dsl
+import repro_dsl_stdlib/packages/ninja
+
+package consumer:
+  defaultToolProvisioning "from-source"
+
+  uses:
+    "ninja"
+
+  build:
+    let consumerAction = buildAction(
+      id = "consumer.run",
+      call = inlineExecCall(@[
+        "sh", "-c", "mkdir -p build && printf ran > build/consumer-ran.txt"
+      ]),
+      outputs = @["build/consumer-ran.txt"],
+      cacheable = false,
+      toolIdentityRefs = @["ninja"])
+    defaultTarget(target("consumer", [consumerAction]))
+"""
+
+const graphBootstrapConsumerRepro = """
+import repro_project_dsl
+import repro_dsl_stdlib/packages/autoconf
+
+package consumer:
+  defaultToolProvisioning "from-source"
+
+  uses:
+    "autoconf"
+
+  build:
+    let consumerAction = buildAction(
+      id = "consumer.inspect",
+      call = inlineExecCall(@[
+        "sh", "-c", "mkdir -p build && printf ran > build/consumer-ran.txt"
+      ]),
+      outputs = @["build/consumer-ran.txt"],
+      cacheable = false,
+      toolIdentityRefs = @["autoconf"])
+    defaultTarget(target("consumer", [consumerAction]))
+"""
+
+proc q(value: string): string = quoteShell(value)
+
+proc run(command, cwd: string): tuple[code: int; output: string] =
+  let res = execCmdEx(command, workingDir = cwd)
+  (code: res.exitCode, output: res.output)
 
 proc makeRecipeFile(root, name: string) =
   let recipeDir = root / name
@@ -97,6 +171,110 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
     check outcome.recipeDir == scratch / "fake-tool"
     check outcome.expectedArtifact.contains("fake-tool")
     check outcome.expectedArtifact.contains(".repro")
+
+  test "test_m9r9_prepare_only_materializes_source_producer":
+    let shBin = findExe("sh")
+    if shBin.len == 0:
+      checkpoint("skipped - sh is unavailable")
+      skip()
+    elif not fileExists(reproBinary):
+      checkpoint("missing " & reproBinary & "; run `repro build` first")
+      fail()
+    else:
+      let reproAbs = absolutePath(reproBinary)
+      let scratch = createTempDir("repro-m9r9-prepare-", "")
+      defer: removeDir(scratch)
+      let catalogRoot = scratch / "catalog"
+      let producerRoot = catalogRoot / "ninja"
+      let consumerRoot = scratch / "consumer"
+      let cacheRoot = scratch / "action-cache"
+      createDir(catalogRoot)
+      createDir(producerRoot)
+      createDir(consumerRoot)
+      createDir(cacheRoot)
+      writeFile(producerRoot / "repro.nim", prepareOnlyProducerRepro)
+      writeFile(consumerRoot / "repro.nim", prepareOnlyConsumerRepro)
+
+      let savedSourceRoot = getEnv(FromSourceRootEnvVar)
+      let savedNoRunquota = getEnv("REPROBUILD_NO_RUNQUOTA")
+      putEnv(FromSourceRootEnvVar, catalogRoot)
+      putEnv("REPROBUILD_NO_RUNQUOTA", "1")
+      defer:
+        if savedSourceRoot.len > 0:
+          putEnv(FromSourceRootEnvVar, savedSourceRoot)
+        else:
+          delEnv(FromSourceRootEnvVar)
+        if savedNoRunquota.len > 0:
+          putEnv("REPROBUILD_NO_RUNQUOTA", savedNoRunquota)
+        else:
+          delEnv("REPROBUILD_NO_RUNQUOTA")
+
+      let producerArtifact =
+        producerRoot / ".repro" / "output" / "ninja" / "ninja"
+      let consumerMarker = consumerRoot / "build" / "consumer-ran.txt"
+      check not fileExists(producerArtifact)
+      check not fileExists(consumerMarker)
+
+      let prepareCmd = q(reproAbs) & " build --prepare-only" &
+        " --daemon=off --tool-provisioning=from-source" &
+        " --progress=quiet --log=quiet --measure=none" &
+        " --action-cache-root=" & q(cacheRoot)
+      let prepared = run(prepareCmd, consumerRoot)
+      checkpoint(prepared.output)
+      check prepared.code == 0
+      check fileExists(producerArtifact)
+      check not fileExists(consumerMarker)
+
+      let graphCmd = q(reproAbs) & " graph" &
+        " --tool-provisioning=from-source --format=json" &
+        " --action-cache-root=" & q(cacheRoot)
+      let graphed = run(graphCmd, consumerRoot)
+      checkpoint(graphed.output)
+      check graphed.code == 0
+
+  test "test_m9r9_graph_seeds_bootstrap_floor_in_fresh_process":
+    if not fileExists(reproBinary):
+      checkpoint("missing " & reproBinary & "; run `repro build` first")
+      fail()
+    else:
+      let reproAbs = absolutePath(reproBinary)
+      let scratch = createTempDir("repro-m9r9-graph-bootstrap-", "")
+      defer: removeDir(scratch)
+      let catalogRoot = scratch / "catalog"
+      let consumerRoot = scratch / "consumer"
+      let cacheRoot = scratch / "action-cache"
+      createDir(catalogRoot)
+      createDir(consumerRoot)
+      createDir(cacheRoot)
+      makeRecipeFile(catalogRoot, "autoconf")
+      writeFile(consumerRoot / "repro.nim", graphBootstrapConsumerRepro)
+
+      let savedSourceRoot = getEnv(FromSourceRootEnvVar)
+      let savedNoRunquota = getEnv("REPROBUILD_NO_RUNQUOTA")
+      putEnv(FromSourceRootEnvVar, catalogRoot)
+      putEnv("REPROBUILD_NO_RUNQUOTA", "1")
+      defer:
+        if savedSourceRoot.len > 0:
+          putEnv(FromSourceRootEnvVar, savedSourceRoot)
+        else:
+          delEnv(FromSourceRootEnvVar)
+        if savedNoRunquota.len > 0:
+          putEnv("REPROBUILD_NO_RUNQUOTA", savedNoRunquota)
+        else:
+          delEnv("REPROBUILD_NO_RUNQUOTA")
+
+      let sourceArtifact = catalogRoot / "autoconf" / ".repro" / "output" /
+        "autoconf" / "autoconf"
+      check not fileExists(sourceArtifact)
+
+      let graphCmd = q(reproAbs) & " graph" &
+        " --tool-provisioning=from-source --format=json" &
+        " --action-cache-root=" & q(cacheRoot)
+      let graphed = run(graphCmd, consumerRoot)
+      checkpoint(graphed.output)
+      check graphed.code == 0
+      check graphed.output.contains("\"actions\"")
+      check not fileExists(sourceArtifact)
 
   test "test_m9r9_dry_run_planned_recipe_synthesizes_profile":
     # A dry-run auto-recurse sub-build intentionally does not materialize
@@ -407,6 +585,52 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
     # or let runaway recursion go unbounded.
     check FromSourceMaxRecursionDepth >= 8
     check FromSourceMaxRecursionDepth <= 256
+
+  test "test_m9r9_self_hosting_build_drivers_are_not_bootstrap_floor":
+    # Ninja and CMake now have source recipes that terminate on the seeded
+    # compiler/scripting floor. Pre-seeding either name silently bypasses
+    # those recipes and leaves later graph-only processes without artifacts.
+    check "ninja" notin BootstrapCycleBreakTools
+    check "cmake" notin BootstrapCycleBreakTools
+    check "gcc" in BootstrapCycleBreakTools
+    check "python3" in BootstrapCycleBreakTools
+
+  test "test_m9r9_cache_substitution_precedes_bootstrap_cycle_break":
+    let scratch = createTempDir("repro-m9r9-bootstrap-cache-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "python3")
+
+    let useDef = syntheticUseDef("python3")
+    let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
+    check outcome.kind == rrNeedsBuild
+    check "python3" in BootstrapCycleBreakTools
+    check shouldTryFromSourceCacheSubstitution(outcome,
+      cacheConfigured = true,
+      prepareOnly = false,
+      dryRun = false,
+      forceRebuild = false)
+    check not shouldTryFromSourceCacheSubstitution(outcome,
+      cacheConfigured = false,
+      prepareOnly = false,
+      dryRun = false,
+      forceRebuild = false)
+    check not shouldTryFromSourceCacheSubstitution(outcome,
+      cacheConfigured = true,
+      prepareOnly = false,
+      dryRun = true,
+      forceRebuild = false)
+
+  test "test_m9r9_lock_fold_keeps_missing_bootstrap_provider_metadata":
+    let scratch = createTempDir("repro-m9r9-bootstrap-lock-fold-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "gcc")
+
+    let useDef = syntheticUseDef("gcc")
+    let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
+    check outcome.kind == rrNeedsBuild
+    check "gcc" in BootstrapCycleBreakTools
+    check sourceProviderRecipeDirForSolverFold(outcome) ==
+      absolutePath(scratch / "gcc")
 
   test "test_m9r9_resolved_recipes_cache_is_addressable":
     # The per-process resolution cache must be reachable from outside

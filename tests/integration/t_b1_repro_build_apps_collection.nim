@@ -110,6 +110,14 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
       check "cacheable = false" in appsBlock
       check "actionId = \"reprobuild.apps.repro-cache-daemon\"" in appsBlock
 
+  test "standalone bootstrap stages the Nix provisioning daemon":
+    let repoRoot = findRepoRoot()
+    let buildScript = readFile(repoRoot / "scripts" / "build_apps.sh")
+    check "cp -f tools/reprobuild-nix-daemon/reprobuild-nix-daemon" in
+      buildScript
+    check "build/bin/reprobuild-nix-daemon" in buildScript
+    check "chmod +x build/bin/reprobuild-nix-daemon" in buildScript
+
   test "graph-built repro retains the entrypoint HTTPS capability":
     let repoRoot = findRepoRoot()
     let entrypoints = readFile(repoRoot / "apps" / "entrypoints.txt")

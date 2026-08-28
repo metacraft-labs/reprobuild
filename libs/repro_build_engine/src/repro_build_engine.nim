@@ -1,10 +1,29 @@
 import std/[algorithm, json, options, os, osproc, net, nativesockets, sets, streams, strtabs,
     strutils, tables, times]
 
+# The OS is reached through a named symbol list on both platforms, never
+# wholesale. ``std/posix`` exports ``fork`` / ``execvp`` / ``posix_spawn``
+# and ``std/winlean`` exports ``createProcessW`` / ``shellExecuteW``, so a
+# blanket import puts a way to start an UNMONITORED child in scope
+# throughout this module. Every launch path here has to go through
+# ``monitoredAction`` and ``preparedRunQuotaCommand``; keeping the import
+# narrow is what makes that a property of the code rather than a
+# convention. ``tests/integration/t_every_launch_path_is_monitored.nim``
+# enforces both lists.
 when defined(windows):
-  import std/winlean
+  from std/winlean import Handle, DWORD, WINBOOL, SYNCHRONIZE,
+    MAXIMUM_WAIT_OBJECTS, WOHandleArray, openProcess, closeHandle,
+    waitForMultipleObjects
 elif defined(posix):
-  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid
+  # ``Mode`` / ``umask`` / ``dup`` / ``dup2`` / ``close`` are the
+  # In-Process-Monitor-Hosting HM-4 spawn context and nothing else. io-mon
+  # spawns with ``poParentStreams``, so a monitored child inherits THIS
+  # process's descriptors 1 and 2, and the canonical 0022 file-creation mask
+  # used to arrive through the ``/bin/sh -c 'umask 022 && …'`` wrapper the
+  # monitor CLI ran under. Both are re-established across the spawn instead —
+  # see ``beginMonitorSpawnContext``. None of the five starts a child.
+  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
+    dup, dup2, close
 
 import repro_core
 import repro_depfile
@@ -18,11 +37,33 @@ import repro_cas_store
 # (``MonitorDepFile`` / ``readMonitorDepFile`` / ``MonitorRecord`` / the
 # ``mr*`` / ``mo*`` enums / ``mcComplete`` / ``MonitorDepFileReaderError`` /
 # ``findShimLibrary``), so the call sites below are unchanged.
+# The depfile FORMAT is owned by io-mon; reprobuild consumes it through io-mon's
+# public API (`streamMonitorDepFileRecords` / `MonitorRecord` / the `mr*`/`mo*`
+# enums / `MonitorDepFileReaderError`), never by re-deriving the envelope layout.
+# The former `io_mon/codec` + `io_mon/writer` internal imports (the hand-rolled
+# iomon decoder reached into them) are gone.
 import io_mon
-import io_mon/codec as ioMonCodec
-import io_mon/writer as ioMonWriter
 import repro_platform
 import repro_runquota
+# M17: the ``ext_repro_action`` schema, the compatibility key, and the
+# row shape. A leaf module by construction — it imports only the hash
+# library — so the engine can build a row without the row's definition
+# reaching back into the engine.
+import repro_build_engine/action_extension
+
+# In-Process-Monitor-Hosting HM-5 — the asynchronous, atomic depfile
+# publication. A leaf module by construction: it takes two paths and an action
+# id, imports nothing that can start a child, and shares no GC'd structure with
+# the scheduler. Read its header before changing anything here that touches
+# ``depTempPath`` / ``depDestPath``.
+import repro_build_engine/monitor_flush
+# Engine-Threadpool TP-1: the flush above is one TENANT of the engine's worker
+# pool, not a thread of its own. The scheduler needs only the pool's
+# whole-pool drain here; every flush-shaped call goes through
+# ``monitor_flush``. Imported narrowly so the pool's shared-memory helpers
+# (``sharedDup`` / ``sharedFree``) do not enter this module's namespace.
+from repro_build_engine/worker_pool import awaitEnginePoolIdle
+export action_extension
 
 # M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
 # but is identity-agnostic — the convention populates the identity tuple
@@ -111,6 +152,53 @@ type
     bakBinaryCacheSubstitute
     # Provisioning task delegating to Nix Evaluation Daemon or other foreign provisioners
     bakForeignProvision
+    # Named-Lock-Files NLF-M5 (§5.6): one retrieved metadata object — a
+    # repository root manifest, an index shard, a package's version list.
+    # An explicitly NON-HERMETIC, cacheable fetch edge whose output is
+    # content-addressed by what it actually retrieved, and which exists on
+    # the lock-GENERATION path only. It carries ``netFetch`` (see
+    # ``NetworkMode``) so the non-hermeticity is visible in the graph
+    # before the action runs. Dispatched through the executor registered
+    # by ``repro_lock_gen``, which rides the in-process fetch path
+    # (``http_pool``) — a metadata fetch MUST NOT shell out to a solved
+    # tool, because that tool is an output of the solve the fetch
+    # precedes.
+    bakMetadataFetch
+    # Named-Lock-Files NLF-M5 (§5.6): THE SOLVE, as a **rule generator**
+    # in the sense of ``Package-Model.md`` §"Rule Generators And Dynamic
+    # Rule Discovery". Its generated rule-set artifact is the LOCK FILE,
+    # which the evaluator then expands into the concrete build actions of
+    # the second wave. It is not an ordinary peer edge of the actions it
+    # determines; see ``expandGraphInWaves``.
+    bakSolveLock
+
+  NetworkMode* = enum
+    ## Sandbox-And-Monitoring.md §"The Network Dimension" (NLF-M5
+    ## amendment, 2026-08-21) — the per-action half of the policy layer's
+    ## second dimension.
+    ##
+    ## ``netDenied`` is FIRST deliberately: it is the enum's zero value, so
+    ## an action that says nothing about the network is denied by
+    ## construction rather than by a defaulting rule somebody has to
+    ## remember to write. That is amendment rule 1 — "Default deny; silence
+    ## is denial. An action with no network policy is ``netDenied``. Adding
+    ## the dimension must not turn unclassified into permitted." — made
+    ## structural.
+    netDenied
+      ## The action is hermetic in the strict sense and reaches no
+      ## destination. Any attempt is a policy violation, handled exactly as
+      ## a denied-path access is.
+    netFetch
+      ## The action is an explicitly non-hermetic, cacheable fetch edge. It
+      ## may reach the destinations its policy classifies as tracked; its
+      ## output is content-addressed by what it actually retrieved; and its
+      ## cache behaviour is revalidation under a freshness policy, never an
+      ## assumption that a past result still holds.
+      ##
+      ## Amendment rule 2 — "Non-hermeticity is declared, not inferred" —
+      ## is why this lives in the action's DEFINITION: the fact is visible
+      ## in the graph before the action runs, and an attempted access under
+      ## ``netDenied`` is a violation, never a silent promotion to here.
 
   EngineTypedOutput* = object
     ## Typed-Outputs M1: engine-side mirror of
@@ -165,6 +253,22 @@ type
     argv*: seq[string]
     cwd*: string
     env*: seq[string]
+    envPassthrough*: seq[string]
+      ## Names of environment variables whose VALUE is the host's, not
+      ## Reprobuild's. BuildXL's `passThroughEnvironmentVariables`, with
+      ## BuildXL's semantics: the NAME is part of what the action is (it
+      ## records "this action reads the host's `PATH`") and enters the
+      ## weak fingerprint; the VALUE never does — including when `env`
+      ## above carries a declared value for the same name, which is
+      ## BuildXL's passthrough-with-value case (the process is launched
+      ## with that value, the fingerprint does not see it).
+      ##
+      ## This exists because keying on the environment BY VALUE is not
+      ## the fix for an unkeyed environment, it is a different defect.
+      ## An action's `PATH` is resolved tool directories prepended to
+      ## the host's; under `nix develop` that is not what it is in CI.
+      ## A key that read it would invalidate every edge of every graph
+      ## on any host difference.
     pool*: string
     poolUnits*: uint32
     cpuMilli*: uint32
@@ -322,6 +426,34 @@ type
       ## direct fork. The DSL's ``BuildActionDef.requiresElevation``
       ## field propagates here through ``lowerGraphAction`` so the
       ## engine consumes the same flag the build-graph author set.
+    networkMode*: NetworkMode
+      ## Sandbox-And-Monitoring.md §"The Network Dimension" — this
+      ## action's network mode. The zero value is ``netDenied``, so every
+      ## action that predates the dimension, and every action whose author
+      ## says nothing, is denied. There is no ambient or global "network
+      ## allowed" switch: a build in which some edge reaches the network
+      ## is a build in which THAT edge declared it.
+    netDestinations*: seq[string]
+      ## The destinations this action's policy classifies as **tracked
+      ## fetch destinations** — the only class that makes a
+      ## network-touching edge cacheable. A destination is named by
+      ## scheme, host, optional port and optional path prefix
+      ## (``https://index.example/pkgs/``), so "this edge may reach the
+      ## package index" is expressible without granting the host
+      ## generally.
+      ##
+      ## Empty under ``netDenied`` and non-empty under ``netFetch``; both
+      ## halves are enforced by ``auditNetworkPolicy`` from
+      ## ``validateGraph``, because a ``netFetch`` edge with no declared
+      ## destination is a permission with no subject, and a ``netDenied``
+      ## edge that names one is an author who believed they had granted
+      ## something and did not.
+      ##
+      ## The recorded destination set is HALF the evidence a ``netFetch``
+      ## edge produces; the other half is the content digest of what it
+      ## retrieved. Per the amendment this is deliberately NOT a sixth
+      ## observed-input class — a network access is not a filesystem fact
+      ## — so it is recorded alongside the path set, never inside it.
 
   BuildPool* = object
     name*: string
@@ -331,9 +463,60 @@ type
     actions*: seq[BuildAction]
     pools*: seq[BuildPool]
 
+  MonitorLaunchPath* = enum
+    ## In-Process-Monitor-Hosting P3 — the launch paths a ``bakProcess``
+    ## action can be started through, as ONE value.
+    ##
+    ## It exists so that "which launch path is this" and "may that launch
+    ## path host io-mon in-process" stop being two independent boolean
+    ## expressions that can drift apart. They used to be exactly that: the
+    ## hosting decision carried a bare ``bypassRunQuota`` conjunct and the
+    ## inline launch site never looked at the answer at all, so relaxing the
+    ## conjunct would have stripped the monitor wrapper from an action that
+    ## no site was going to host. See ``launchPathHostsMonitorInProcess``.
+    mlpBypassRunQuota
+      ## L1 — the engine spawns the child itself (`--no-runquota`, an
+      ## unreachable daemon, and every nested build in the test suite).
+    mlpInlineRunQuota
+      ## L3 / L3b — the engine holds the RunQuota session, but
+      ## ``offerWithRunQuotaBatch`` / ``startGrantedWithRunQuota`` spawn the
+      ## child themselves as an inseparable part of binding it to the
+      ## granted lease. This is what a normal ``repro build`` takes.
+    mlpRunQuotaHelper
+      ## L2 — a separate ``repro __repro-runquota-helper`` process spawns
+      ## the action, two processes deep.
+
+  MonitorHostingMode* = enum
+    ## How hard ``BuildEngineConfig`` asks for in-process monitor hosting.
+    ##
+    ## An enum rather than a bool because "host where you can, wrap
+    ## elsewhere" and "host or fail" are different requests and the
+    ## difference is load-bearing: the second one is what makes the launch
+    ## sites' refusal REACHABLE, and an unreachable refusal is a comment.
+    mhmNever
+      ## The shipped default (Nim's zero value, and it is meant to be).
+      ## Every monitored action is launched as
+      ## ``<repro> internal io monitor --depfile <f> -- <argv>``. HM-6
+      ## measured hosting as no faster at the default parallelism and
+      ## 1.5-2.4x slower on cheap actions; see the "who hosts the monitor"
+      ## block below ``preparedRunQuotaCommand``.
+    mhmWhereSupported
+      ## Host on the launch paths that CAN host and keep the CLI wrapper
+      ## everywhere else. The wrapper is not a degraded form — it is the
+      ## same io-mon code producing evidence nothing downstream can tell
+      ## apart — so this fallback is silent on purpose.
+    mhmRequired
+      ## Host wherever hosting is requested, and FAIL an action whose
+      ## launch path cannot host rather than falling back. Use it to
+      ## measure or audit hosting without a launch path quietly opting out.
+      ## On a platform where hosting is unsupported outright
+      ## (``InProcessMonitorHostSupported``) this mode still takes the
+      ## wrapper: that is a property of the host OS, not of a launch path
+      ## disagreeing with the plan, and the wrapper monitors correctly.
+
   BuildEngineConfig* = object
     # Project-local scratch root: holds `runquota-results/*.json`,
-    # `monitor-depfiles/*.rdep`, `dependency-evidence/*.rbar`, and per-build
+    # `monitor-depfiles/*.iomon`, `dependency-evidence/*.rbar`, and per-build
     # transient state. Cleaned by `repro clean`. Per-project by design.
     cacheRoot*: string
     # User-level shared action cache + CAS root. When empty, defaults to
@@ -411,6 +594,25 @@ type
     # launches child processes directly under leases instead of spawning a
     # `repro __repro-runquota-helper` process for every action.
     inlineRunQuota*: bool
+    # OPT-IN, and ``mhmNever`` by default because measurement says so. Above
+    # ``mhmNever`` the engine hosts io-mon's consumer itself on the launch
+    # paths it spawns (today only the RunQuota-bypass path) instead of putting
+    # a ``repro internal io monitor`` process in between. The mechanism works
+    # and is exercised by the suite; what does not hold is the LATENCY case for
+    # turning it on by default. See the "who hosts the monitor" block below
+    # ``preparedRunQuotaCommand`` for the numbers and for what would have to
+    # change before this becomes the default, and ``MonitorHostingMode`` for
+    # what the three settings mean.
+    #
+    # IT IS A PRODUCT OPTION, NOT A TEST SEAM (In-Process-Monitor-Hosting P1,
+    # option (b)). ``repro build --monitor-hosting=never|where-supported|
+    # required`` and ``REPROBUILD_MONITOR_HOSTING`` set it; both go through
+    # ``parseMonitorHostingMode`` below. The surface exists so the HM-6
+    # verdict above can be RE-MEASURED on other hardware without writing a
+    # harness — which is the only reason to move it off ``mhmNever``. Note
+    # that only L1 (``--no-runquota``) can host, so the experiment is
+    # ``--no-runquota --monitor-hosting=where-supported``.
+    monitorHosting*: MonitorHostingMode
     dryRun*: bool
     progressCallback*: BuildProgressCallback
     cancelCallback*: BuildCancelCallback
@@ -582,6 +784,25 @@ type
       ## platforms' shims recorded environment reads faithfully and the action
       ## cache ignored them, which is a false cache HIT whenever a build reads
       ## a variable whose value later changes.
+
+    monitorDirectoryEnumerations*: seq[string]
+      ## Directories the action ENUMERATED (`opendir`/`readdir`), as opposed
+      ## to merely probed for existence. The monitor reports the two as
+      ## distinct iomon record kinds (`mrDirectoryEnumerate` vs
+      ## `mrPathProbe`) and the engine used to collapse them into
+      ## `monitorProbes` one line after decoding them, which is where the
+      ## distinction was lost.
+      ##
+      ## It matters because the two imply different invalidation rules.
+      ## Existence is all a probe depends on, and a recorded directory
+      ## compares as "does it still exist" (`fingerprintMetadata` zeroes
+      ## size and mtime for `ffkDirectory`). An ENUMERATION depends on
+      ## MEMBERSHIP: Incremental-Invalidation.md §"Validation Criteria"
+      ## requires that "adding or removing a file in an enumerated directory
+      ## invalidates the action", and existence cannot express that.
+      ##
+      ## Entries also remain in `monitorProbes`, so every existing consumer
+      ## of that field keeps the exact set it had before.
     diagnostics*: seq[string]
     entropyObservations*: seq[EntropyObservation]
       ## M6 — one entry per distinct (source, origin) the capture recorded.
@@ -661,6 +882,21 @@ type
     runQuotaBackend*: string
     runQuotaSocket*: string
     evidence*: PathSetEvidence
+    strongFingerprintHex*: string
+      ## M17 (``ext_repro_action``): the ACTION-CACHE KEY the lookup
+      ## compared against, hex-encoded, or "" when the lookup found no
+      ## record at all and there was therefore no key to report. Recorded
+      ## here rather than recomputed later because a cache lookup is the
+      ## only moment at which it exists — and it is the quantity the
+      ## compatibility key must be COARSER than, so a row carrying one
+      ## without the other cannot show that the two diverge.
+    cacheMissReason*: string
+      ## Why the lookup did not hit, in the cache layer's own words
+      ## ("no cache record for weak fingerprint", "input changed: <path>",
+      ## …). Empty when there is nothing to say; stored as SQL NULL so
+      ## "no reason recorded" stays distinguishable from an empty reason.
+    outputBytes*: int64
+      ## Total size of the action's declared outputs after it settled.
 
   SchedulerTraceEvent* = object
     seq*: uint64
@@ -676,10 +912,80 @@ type
   BuildStats* = object
     metrics*: seq[BuildStatsMetric]
 
+  EnvironmentInheritanceCensus* = object
+    ## STAGE 2 — the denominator for the environment Reprobuild does not
+    ## control.
+    ##
+    ## Reprobuild passes an action's `env` as an OVERLAY: the launcher
+    ## layers those entries over the environment the build process
+    ## itself inherited, so an action that declares nothing runs with the
+    ## developer's or the CI runner's entire environment, and nothing
+    ## records that it did. That is not a cache-key defect — closing it
+    ## is a behaviour change that will break real edges — so this counts
+    ## the population first and changes nothing about it.
+    ##
+    ## PER VARIABLE, "OVERLAY" MEANS LAST-WRITE-WINS, NOT MERGE. A
+    ## variable the action declares REPLACES the inherited value; only a
+    ## variable it does not declare is inherited. For `PATH` specifically
+    ## that is spelled out in `prependPathDirsToArgvEnv` below, whose
+    ## `getEnv("PATH")` fallback is reached only when no `PATH` entry is
+    ## present. A blanket "declared entries overlay the environment, they
+    ## do not replace it" reading of this census is what let three
+    ## lowering sites emit `PATH=` — an empty `PATH` the action really
+    ## ran with — for 1372 of 2753 edges. `emptyPathActions` below is the
+    ## number that would have said so.
+    ##
+    ## This is deliberately a CENSUS and not a warning. PR #99's shm drop
+    ## was invisible for the same reason: nobody had put a number on it.
+    ## A number is what makes the next decision arguable.
+    totalActions*: int
+    declaringActions*: int
+      ## Actions carrying at least one `NAME=VALUE` Reprobuild chose.
+    passthroughActions*: int
+      ## Actions naming at least one variable whose value is the host's.
+      ## The name IS recorded (it is in the weak fingerprint); the value
+      ## is not, by design.
+    undeclaredActions*: int
+      ## Actions that declare NOTHING at all.
+      ##
+      ## Read this as "declares nothing", NOT as "inherits nothing".
+      ## EVERY process action inherits the build process environment,
+      ## because `env` is an overlay on it rather than a replacement —
+      ## so the population exposed to the host environment is
+      ## `totalActions`, and this narrower count is only the subset that
+      ## does not even overlay one variable on top.
+      ##
+      ## The distinction is the whole reason this is a census: on this
+      ## repository's own graph `undeclaredActions` is 0 while
+      ## `totalActions` is 1391, and a report that called the first
+      ## number "inheriting" would have said the channel was closed
+      ## when it is open for every edge.
+    hermeticPathActions*: int
+      ## Actions whose `PATH` is composed only of solved-graph tool
+      ## directories and is keyed BY VALUE — the edges for which a
+      ## prepended shadowing directory on the caller's `$PATH` is
+      ## unreachable rather than merely uninvalidating.
+    inheritedPathActions*: int
+      ## Actions whose `PATH` still carries the caller's, declared
+      ## PASSTHROUGH so the name is in the key and the value is not.
+      ## These are the edges that declare no tool refs; for them the host
+      ## `$PATH` remains an unkeyed input.
+    emptyPathActions*: int
+      ## THE ONE NUMBER THAT MUST BE ZERO. Actions carrying `PATH=` with
+      ## an empty value, i.e. actions that run with no `PATH` at all
+      ## because their declaration replaced the inherited one with
+      ## nothing. Not a portability question and not a key question — a
+      ## `findExe` inside such an action returns `""`, so a test that
+      ## probes for its tools skips itself into a green, cacheable pass.
+      ## Gated at zero by
+      ## `libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim`.
+
   BuildRunResult* = object
     results*: seq[ActionResult]
     trace*: seq[SchedulerTraceEvent]
     stats*: BuildStats
+    environmentInheritance*: EnvironmentInheritanceCensus
+      ## STAGE 2 census of this graph — see `EnvironmentInheritanceCensus`.
     traceEnabled: bool
     runQuotaBypassed*: bool
       ## RA-13: true when at least one action in this build launched without a
@@ -976,6 +1282,12 @@ type
     rpkInlineRunQuotaPending
     rpkInlineRunQuota
     rpkInlineRunQuotaFailed
+    rpkMonitorHost
+      ## In-Process-Monitor-Hosting HM-4. The engine is io-mon's HOST for this
+      ## action: there is no ``repro internal io monitor`` child in between,
+      ## and the monitored tree's root is a direct child of this process. The
+      ## handle that owns it lives in the scheduler's ``MonitorHostPool`` at
+      ## ``monitorSlot`` — see that type for why it is not a field here.
 
   RunningAction = object
     id: string
@@ -989,6 +1301,15 @@ type
     queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
     inlineFailure: ActionResult
     resultPath: string
+    monitorSlot: int
+      ## HM-4. Index into the scheduler's ``MonitorHostPool`` for an
+      ## ``rpkMonitorHost`` entry; ``-1`` for every other kind. An INDEX and
+      ## not the ``MonitorHandle`` itself: a handle is non-copyable by
+      ## construction (IoMon-Decomposed-Host-API DH-2 makes "two owners of one
+      ## consumer" unrepresentable), and embedding one here would propagate
+      ## that to ``RunningAction`` and to the scheduler's ``seq`` of them —
+      ## where ``var item = running[i]`` and ``running.delete(i)`` are both
+      ## copies.
     when defined(posix):
       processGroupPid: int
     when defined(windows):
@@ -1185,6 +1506,19 @@ proc addCounterMetric(stats: var BuildStats; name: string; count: int) =
   for _ in 0 ..< count:
     stats.addMetric(name, 0.0)
 
+proc addCountedMetric(stats: var BuildStats; name: string; count: int;
+                      totalUs: float) =
+  ## One metric carrying BOTH a call count and the summed duration, so
+  ## `totalUs / count` is a real per-call average. `addMetric` alone can only
+  ## express one sample at a time.
+  for metric in stats.metrics.mitems:
+    if metric.name == name:
+      metric.count += count
+      metric.totalUs += totalUs
+      return
+  stats.metrics.add(BuildStatsMetric(name: name, count: count,
+    totalUs: totalUs))
+
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
   for i, ch in text:
@@ -1192,6 +1526,213 @@ proc textBytes(text: string): seq[byte] =
 
 proc weakFingerprintFromText*(text: string): ContentDigest =
   blake3DomainDigest(text.textBytes(), hdActionFingerprint)
+
+proc keyedOnGoverningLock*(fingerprint: ContentDigest;
+                           governingLockIdentity: LockIdentity): ContentDigest =
+  ## Named-Lock-Files §7 — mix the governing lock identity into an action's
+  ## weak fingerprint.
+  ##
+  ## §7's requirement: "Every action for an edge, and for that edge's
+  ## transitive dependency closure, MUST key on the identity of the lock file
+  ## governing it (§6). An edge built under two lock files is two actions with
+  ## two cache entries. **Cross-lock reuse of a cache entry is a correctness
+  ## bug of the serve-a-stale-artifact class, not a performance regression.**"
+  ##
+  ## §7.1 records the design fork and its settlement: design **A**, key on the
+  ## lock file, rather than **B**, partition the output namespace. Q-7 was
+  ## settled on 2026-08-18 on a factual ground — B "requires every action's
+  ## outputs to sit under a root Reprobuild controls, and
+  ## `Foreign-Provisioner-Contracts.md` exists precisely because some package
+  ## instances are materialised by provisioners Reprobuild does not own. **B
+  ## is unsound here, not merely less convenient.**"
+  ##
+  ## ## Why this is applied in the CONSTRUCTOR and not at the call sites
+  ##
+  ## A's one real weakness is that it can be applied INCOMPLETELY, and §7.2 is
+  ## blunt about the consequence: "a single edge whose fingerprint forgets the
+  ## governing lock identity is a **silent** poisoning vector — it serves one
+  ## lock file's artifacts to another and reports success." §7.2 closes that
+  ## "by a **structural check**, not by care".
+  ##
+  ## So `action()` and `builtinAction()` apply this to whatever fingerprint
+  ## they are handed — the default derived from the id, or one the caller
+  ## computed itself. A caller cannot opt out by supplying its own
+  ## fingerprint, which is the shape "by construction" has to take here: every
+  ## `weakFingerprint =` argument in the tree is a caller who computed a
+  ## fingerprint over what its edge DOES, and none of them knows about lock
+  ## files.
+  ##
+  ## ## Why it is not simply `hash(text & identity)`
+  ##
+  ## The mix is over a length-framed two-field rendering, so no two distinct
+  ## (fingerprint, identity) pairs can collide by concatenation ambiguity.
+  ## §1.3 makes that a hard prerequisite for anything that becomes a key: a
+  ## non-canonical rendering "does not fail loudly. It produces two different
+  ## keys for one lock file — a silent cache miss and a duplicated build", and
+  ## the mirror-image collision serves one lock file's artifacts to another.
+  ##
+  ## ## When this MOVED the fingerprints
+  ##
+  ## NLF-M4 landed the carrier field and the whole-graph audit but deliberately
+  ## kept the identity OUT of the key, because NLF-STAT-4 required byte-
+  ## identical fingerprints across that milestone. NLF-M7 is where §7's keying
+  ## becomes effective, and the NLF-STAT-4 baseline fixture moves here — once,
+  ## uniformly, for every edge, because every edge acquires the same new
+  ## component. What does NOT move is the RELATIVE structure: two edges under
+  ## one lock file still key identically, which is NLF-STAT-3.
+  var framed = "action-fingerprint\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  let lock = string(governingLockIdentity)
+  framed.add($lock.len & "\x1f" & lock & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
+proc actionEnvironmentKeyText*(env: openArray[string];
+                               envPassthrough: openArray[string]): string =
+  ## The canonical rendering of an action's ENVIRONMENT DECLARATION, in
+  ## BuildXL's two classes.
+  ##
+  ## `Public/Src/Pips/Dll/Graph/PipFingerprinter.cs:360-375` is the whole
+  ## of BuildXL's environment fingerprinting, and it is a two-branch
+  ## order-independent collection over `Process.EnvironmentVariables`:
+  ##
+  ## ```csharp
+  ## if (env.IsPassThrough)
+  ##     fCollection.Add(env.Name.ToString(...), "Pass-through");
+  ## else
+  ##     AddPipData(fCollection, env.Name.ToString(...), env.Value);
+  ## ```
+  ##
+  ## so — declared contributes name AND value, passthrough contributes
+  ## name and a fixed marker. `Documentation/Wiki/Advanced-Features/
+  ## Build-Parameters-(Environment-variables).md:30-39` states the
+  ## consequence: for a passthrough variable "value is not tracked;
+  ## addition or removal is considered for caching", and that holds
+  ## "when the value of passthrough variables is explicitly set in
+  ## DScript to something other than what is in bxl.exe's environment.
+  ## The effect is the same in that the value will not be tracked."
+  ## `BaselineTests.cs:1696-1741` (`PerVariablePassThroughIsHonored`) is
+  ## the executable proof: same declared value, cache HIT iff passthrough.
+  ##
+  ## ## Where this rendering DIVERGES from BuildXL, deliberately
+  ##
+  ## BuildXL puts the literal string `"Pass-through"` in the value slot,
+  ## with no separate type tag. A DECLARED variable whose value happens
+  ## to render to exactly `Pass-through` therefore produces a
+  ## byte-identical contribution to a PASSTHROUGH variable of the same
+  ## name — two different actions, one key. That is a latent
+  ## serve-a-stale-artifact hole, and there is no reason to inherit it.
+  ## Here the class is its own framed field, so no value can impersonate
+  ## a class.
+  ##
+  ## BuildXL also gets order-independence by XOR-ing per-element hashes
+  ## and appends the element count to keep the function injective. A
+  ## sorted, length-framed rendering gets both properties directly and
+  ## stays readable, which matters because this text is what an operator
+  ## diffs when two hosts disagree about a key.
+  ##
+  ## ## Canonicalisation
+  ##
+  ## Duplicate declarations resolve LAST-WRITE-WINS, because that is what
+  ## the spawn-time overlay does (`prependPathDirsToArgvEnv` documents
+  ## the same rule: "Last-write-wins matches the StringTableRef merge").
+  ## A key that disagreed with the spawn would be keying on an
+  ## environment the action never experiences.
+  ##
+  ## Entries with no `=` or an empty name carry no environment and are
+  ## dropped; they cannot become part of a key by accident.
+  ##
+  ## Names are compared CASE-SENSITIVELY here, while Windows environment
+  ## variables are case-insensitive and the spawn path's `PATH` collapse
+  ## uses `cmpIgnoreCase`. On Windows, `Path=x` and `PATH=x` therefore
+  ## render as two records where the process sees one variable. That is
+  ## an OVER-invalidation (two keys for one environment: a redundant
+  ## rebuild) and never a false hit, so it is safe in the direction that
+  ## matters. Folding case here would have to match the spawn path's
+  ## collapse exactly or it would introduce the opposite error, which is
+  ## the unsafe one.
+  ##
+  ## ## This procedure reads NOTHING ambient, and that is load-bearing
+  ##
+  ## It is a pure function of its arguments. PR #96's `NIX_STORE_DIR`
+  ## defect was a transient ambient value entering a cache record
+  ## permanently because a key computation called `getEnv`. No `getEnv`
+  ## may appear here or in `keyedOnActionEnvironment` below; a test
+  ## asserts on the source text of both to keep it that way.
+  const US = "\x1f"
+  const RS = "\x1e"
+  var declared = initOrderedTable[string, string]()
+  for entry in env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    declared[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+  var passthrough = initHashSet[string]()
+  for name in envPassthrough:
+    if name.len > 0:
+      passthrough.incl(name)
+  var names: seq[string] = @[]
+  for name in declared.keys:
+    names.add(name)
+  for name in passthrough:
+    if not declared.hasKey(name):
+      names.add(name)
+  names.sort()
+  var records: seq[string] = @[]
+  for name in names:
+    if passthrough.contains(name):
+      # The declared value, if any, is deliberately NOT rendered.
+      records.add($name.len & US & name & US & "passthrough" & US & "0" & US)
+    else:
+      let value = declared[name]
+      records.add($name.len & US & name & US & "declared" & US &
+        $value.len & US & value)
+  result = records.join(RS)
+
+proc keyedOnActionEnvironment*(fingerprint: ContentDigest;
+                               env: openArray[string];
+                               envPassthrough: openArray[string]):
+    ContentDigest =
+  ## Mix an action's environment DECLARATION into its weak fingerprint.
+  ##
+  ## Applied in `action()` for the same reason `keyedOnGoverningLock` is
+  ## — "by a structural check, not by care". Every `weakFingerprint =`
+  ## argument in the tree is a caller who computed a fingerprint over
+  ## what its edge DOES, and none of them knows that the engine will
+  ## hand the process an environment. A call site that had to remember
+  ## to mix the environment in is a call site that will eventually
+  ## forget, and forgetting is silent: it serves one environment's
+  ## result to another and reports success.
+  ##
+  ## ## The empty declaration is the IDENTITY, and that is required
+  ##
+  ## An edge that declares no environment and no passthrough must
+  ## fingerprint to exactly what it fingerprinted before this existed.
+  ## Otherwise landing this invalidates every action-cache record ever
+  ## written — a correctness fix that ships as a total cache wipe. The
+  ## early return is the property; a test pins it.
+  if env.len == 0 and envPassthrough.len == 0:
+    return fingerprint
+  let text = actionEnvironmentKeyText(env, envPassthrough)
+  if text.len == 0:
+    return fingerprint
+  # Length-framed two-field mix, same shape and rationale as
+  # `keyedOnGoverningLock`: no two distinct (fingerprint, environment)
+  # pairs may collide by concatenation ambiguity.
+  var framed = "action-environment\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  framed.add($text.len & "\x1f" & text & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
+proc weakFingerprintFor*(id: string;
+                         governingLockIdentity: LockIdentity): ContentDigest =
+  ## The fingerprint `action()` / `builtinAction()` would compute for an edge
+  ## with this id under this lock. For the call sites that construct a
+  ## `BuildAction` object literally rather than through a constructor — §7.2's
+  ## `{.requiresInit.}` field reaches those, but the constructor's mixing
+  ## cannot, so they compose it here instead of re-deriving it.
+  keyedOnGoverningLock(weakFingerprintFromText(id), governingLockIdentity)
 
 proc legacyDepfileGatheringPolicy(depfile: string;
                                   ignoredInputPrefixes: openArray[string]):
@@ -1225,6 +1766,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              nonDeterminism = ndpUnblessed;
              nonDeterminismJustification = "";
              env: openArray[string] = [];
+             envPassthrough: openArray[string] = [];
              requiresElevation = false;
              governingLockIdentity: LockIdentity): BuildAction =
   ## Named-Lock-Files §7.2: `governingLockIdentity` has NO DEFAULT, and that
@@ -1248,13 +1790,21 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     argv: @argv,
     cwd: cwd,
     env: @env,
+    envPassthrough: @envPassthrough,
     pool: pool,
     poolUnits: poolUnits,
     cpuMilli: cpuMilli,
     memoryBytes: memoryBytes,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
-    weakFingerprint: weakFingerprint,
+    # The environment mix is INSIDE the lock mix, so the two compose in
+    # one fixed order for every edge in the tree. An edge that declares
+    # no environment is unaffected — `keyedOnActionEnvironment` is the
+    # identity on the empty declaration — so this does not move any
+    # fingerprint that existed before it.
+    weakFingerprint: keyedOnGoverningLock(
+      keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
+      governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
@@ -1272,7 +1822,13 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
                     weakFingerprint = weakFingerprintFromText(id);
                     actionCachePolicy = ffpTimestamp;
                     text = ""; entries: openArray[string] = [];
+                    networkMode = netDenied;
+                    netDestinations: openArray[string] = [];
                     governingLockIdentity: LockIdentity): BuildAction =
+  ## ``networkMode`` defaults to ``netDenied`` and ``netDestinations`` to the
+  ## empty set — Sandbox-And-Monitoring.md §"The Network Dimension" rule 1,
+  ## "silence is denial". A caller that wants a fetch edge must say so at the
+  ## call site, which is what makes the non-hermeticity greppable.
   if kind == bakProcess:
     raise newException(BuildEngineError, "builtinAction requires a built-in action kind")
   BuildAction(
@@ -1285,11 +1841,14 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     cwd: cwd,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
-    weakFingerprint: weakFingerprint,
+    weakFingerprint: keyedOnGoverningLock(weakFingerprint,
+      governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     dependencyPolicy: automaticMonitorGatheringPolicy(),
     builtinText: text,
-    builtinEntries: @entries)
+    builtinEntries: @entries,
+    networkMode: networkMode,
+    netDestinations: @netDestinations)
 
 proc pool*(name: string; capacity: uint32): BuildPool =
   BuildPool(name: name, capacity: capacity)
@@ -1434,6 +1993,189 @@ proc formatLockIdentityAudit*(findings: seq[LockIdentityAuditFinding]): string =
         break
       result.add("\n      " & id)
 
+# ---------------------------------------------------------------------------
+# Sandbox-And-Monitoring.md §"The Network Dimension" — the graph-level audit.
+# ---------------------------------------------------------------------------
+
+const NetworkFetchCapableKinds* = {bakMetadataFetch, bakBinaryCacheSubstitute,
+                                   bakForeignProvision}
+  ## The edge kinds that may carry ``netFetch``.
+  ##
+  ## The amendment's closing paragraph asks for exactly this: the
+  ## network-touching actions that already exist — ``bakBinaryCacheSubstitute``
+  ## (the `fetch:`-block / substituter shape) and ``bakForeignProvision``
+  ## (weak-fingerprinted, revalidated against self-reported observed inputs) —
+  ## "should be classified under this dimension rather than each carrying an
+  ## implicit per-kind exemption", and "the metadata-fetch edges of
+  ## `Named-Lock-Files.md` §5.6 are `netFetch` edges by construction".
+  ##
+  ## An allowlist rather than a free-for-all because rule 3 is a *structural*
+  ## claim — "a non-hermetic edge is never a silent input to a build that
+  ## believes itself pinned" — and a compile edge that could quietly be marked
+  ## ``netFetch`` would make that claim unenforceable.
+
+type
+  NetworkPolicyAuditFinding* = object
+    ## One action whose network policy is internally inconsistent, plus the
+    ## reason. Keyed per ACTION rather than per kind (unlike the lock-identity
+    ## audit) because the three failures below are authoring mistakes at a call
+    ## site, not a construction path that forgot a field.
+    actionId*: string
+    kind*: BuildActionKind
+    reason*: string
+
+proc auditNetworkPolicy*(g: BuildGraph): seq[NetworkPolicyAuditFinding] =
+  ## Assert the network dimension holds together across a whole graph.
+  ##
+  ## Three checks, one per way the dimension can be stated incoherently:
+  ##
+  ##   1. ``netFetch`` with no declared destination — a permission with no
+  ##      subject. The edge would be cacheable on evidence ("what I retrieved
+  ##      from where") whose second half is empty.
+  ##   2. ``netDenied`` with declared destinations — an author who believed
+  ##      they had granted something. Silence is denial, so this reads as a
+  ##      grant and behaves as a denial; that gap is the amendment's rule 1
+  ##      failing in the direction it cannot detect at run time.
+  ##   3. ``netFetch`` on an edge kind that is not fetch-capable. Rule 3 says
+  ##      network-touching edges exist on the generation path only; an
+  ##      arbitrary compile or copy edge promoting itself to ``netFetch``
+  ##      would put one inside a build that believes itself pinned.
+  result = @[]
+  for action in g.actions:
+    case action.networkMode
+    of netFetch:
+      if action.kind notin NetworkFetchCapableKinds:
+        result.add(NetworkPolicyAuditFinding(actionId: action.id,
+          kind: action.kind,
+          reason: "edge kind " & $action.kind & " may not declare netFetch"))
+      elif action.netDestinations.len == 0:
+        result.add(NetworkPolicyAuditFinding(actionId: action.id,
+          kind: action.kind,
+          reason: "netFetch declares no tracked destination"))
+    of netDenied:
+      if action.netDestinations.len > 0:
+        result.add(NetworkPolicyAuditFinding(actionId: action.id,
+          kind: action.kind,
+          reason: "netDenied action names " & $action.netDestinations.len &
+            " destination(s); silence is denial, so the grant would not hold"))
+
+proc formatNetworkPolicyAudit*(
+    findings: seq[NetworkPolicyAuditFinding]): string =
+  ## The audit's diagnostic. Rule 4 of the amendment requires the
+  ## classification be visible "in logs, debugging output, per-action explain
+  ## output"; this is the graph-construction end of that requirement.
+  if findings.len == 0:
+    return ""
+  result = "network policy is incoherent on " & $findings.len &
+    " action(s) — Sandbox-And-Monitoring.md §\"The Network Dimension\""
+  for f in findings:
+    result.add("\n      " & f.actionId & " (" & $f.kind & "): " & f.reason)
+
+# ---------------------------------------------------------------------------
+# Package-Model.md §"Rule Generators And Dynamic Rule Discovery" — explicit
+# wave expansion.
+# ---------------------------------------------------------------------------
+
+const DefaultMaxExpansionWaves* = 8
+  ## The bounded iteration policy's bound.
+  ##
+  ## The quoted requirement is "expand the graph in explicit waves until a
+  ## closed frontier is reached, **with cycle detection and a bounded
+  ## iteration policy**" — two separate obligations, and this constant is the
+  ## second. Cycle detection catches a generator that re-emits an action it
+  ## already emitted; the bound catches a generator that emits a NEW action
+  ## every wave and therefore never repeats itself, which no cycle detector
+  ## can see. Without the bound that case is an infinite loop that looks like
+  ## a hang.
+  ##
+  ## Eight rather than two, because the value has to admit the shapes the
+  ## corpus already contemplates (a rule generator producing rule generators)
+  ## while still terminating fast enough that a runaway is a failed build
+  ## rather than a wedged one. Named-Lock-Files §5.6's own expansion needs
+  ## exactly ONE wave — the over-approximated fetch is deliberately not a
+  ## fixpoint — so this bound is headroom for other generators, not for it.
+
+type
+  WaveExpansion* = object
+    ## The record of an explicit wave expansion. Kept as a value rather than
+    ## folded into one flat action list because "how many waves" is itself an
+    ## asserted property: Named-Lock-Files §5.6 resolves variant-conditioned
+    ## ``uses:`` by over-approximation and says so in terms — "One wave, no
+    ## iteration" — and a flat list cannot distinguish that from a fixpoint
+    ## that happened to converge after one step.
+    waves*: seq[seq[BuildAction]]
+    closed*: bool
+      ## True when expansion stopped because a wave produced nothing further
+      ## — the "closed frontier" of the quoted text. False is unreachable
+      ## today (both other outcomes raise); the field exists so a caller
+      ## reads the reason rather than inferring it from an absence.
+
+  WaveExpansionCycle* = object of BuildEngineError
+    ## A rule generator re-emitted an action id an earlier wave already
+    ## produced. Distinct from the bound so a caller — and a reader of the
+    ## failure — can tell "this generator is looping" from "this generator is
+    ## productive but deep".
+
+  WaveExpansionBoundExceeded* = object of BuildEngineError
+    ## Expansion did not reach a closed frontier within the bound.
+
+proc actionIds*(actions: seq[BuildAction]): seq[string] =
+  result = @[]
+  for a in actions: result.add(a.id)
+
+proc expandGraphInWaves*(seed: seq[BuildAction];
+                         expand: proc(previousWave: seq[BuildAction]):
+                           seq[BuildAction] {.closure.};
+                         maxWaves = DefaultMaxExpansionWaves): WaveExpansion =
+  ## Expand a graph in explicit waves until a closed frontier is reached.
+  ##
+  ## `Package-Model.md` §"Rule Generators And Dynamic Rule Discovery":
+  ## "Because the output changes graph shape, an action that depends on
+  ## generated rules must not run until the relevant rule-generator artifacts
+  ## have been materialized and stitched into the graph. If rule generators
+  ## can themselves produce more rule-generator actions, the engine should
+  ## expand the graph in explicit waves until a closed frontier is reached,
+  ## with cycle detection and a bounded iteration policy."
+  ##
+  ## `seed` is wave 1. `expand` is handed the wave that was just materialized
+  ## and returns the actions stitched in behind it; an empty return closes the
+  ## frontier. Both failure modes RAISE rather than truncating: a silently
+  ## truncated expansion produces a graph that is missing edges and reports
+  ## success, which is the silent-wrong-answer direction this campaign
+  ## designs against throughout.
+  if seed.len == 0:
+    raiseEngine("wave expansion requires a non-empty seed wave")
+  if maxWaves < 1:
+    raiseEngine("wave expansion bound must be at least 1, got " & $maxWaves)
+  result = WaveExpansion(waves: @[seed], closed: false)
+  var seen = initHashSet[string]()
+  for a in seed: seen.incl(a.id)
+  while true:
+    let next = expand(result.waves[^1])
+    if next.len == 0:
+      result.closed = true
+      return
+    for a in next:
+      if seen.contains(a.id):
+        raise newException(WaveExpansionCycle,
+          "rule-generator expansion cycle: action '" & a.id &
+          "' was emitted again in wave " & $(result.waves.len + 1) &
+          " after an earlier wave already produced it")
+      seen.incl(a.id)
+    if result.waves.len >= maxWaves:
+      raise newException(WaveExpansionBoundExceeded,
+        "rule-generator expansion did not reach a closed frontier within " &
+        $maxWaves & " wave(s); wave " & $(maxWaves + 1) &
+        " would have added " & $next.len & " action(s) (" &
+        next.actionIds.join(", ") & ")")
+    result.waves.add(next)
+
+proc allActions*(expansion: WaveExpansion): seq[BuildAction] =
+  ## Every action across every wave, in wave order then declaration order.
+  result = @[]
+  for wave in expansion.waves:
+    for a in wave: result.add(a)
+
 proc validateGraph(g: BuildGraph) =
   # Named-Lock-Files §7.2 — the second half of the structural check, and the
   # release gate. `{.requiresInit.}` on `BuildAction.governingLockIdentity` is
@@ -1449,6 +2191,15 @@ proc validateGraph(g: BuildGraph) =
   let lockFindings = auditGoverningLockIdentity(g)
   if lockFindings.len > 0:
     raiseEngine(formatLockIdentityAudit(lockFindings))
+
+  # Sandbox-And-Monitoring.md §"The Network Dimension" — the same shape of
+  # gate, for the same reason. An incoherent network policy is silent at run
+  # time in the dangerous direction: an author who wrote a grant that does not
+  # hold gets a hermetic action, and an author who wrote a fetch edge with no
+  # destination gets an edge cached on half its evidence.
+  let netFindings = auditNetworkPolicy(g)
+  if netFindings.len > 0:
+    raiseEngine(formatNetworkPolicyAudit(netFindings))
 
   var ids = initHashSet[string]()
   var byId = initTable[string, BuildAction]()
@@ -1576,12 +2327,24 @@ proc pathExists(path: string): bool =
 
 proc outputPathReady(action: BuildAction; path: string): bool =
   # M2: bakWorkspaceVcs receipts are plain files, same readiness rule.
-  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs, bakForeignProvision} and
+  # NLF-M5: a metadata-fetch object and a generated lock are plain files
+  # written by their executors, so they take the same readiness rule.
+  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs,
+                     bakForeignProvision, bakMetadataFetch, bakSolveLock} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
 
 proc allOutputsExist(action: BuildAction): bool =
+  ## "Is every DECLARED output still on disk?"
+  ##
+  ## Deliberately FALSE for an action that declares no outputs. Callers use
+  ## this answer to take the "the artifacts are already there, call it up to
+  ## date" shortcut WITHOUT consulting the action cache; inferring that from
+  ## an empty set would let a never-executed edge report itself up to date.
+  ## The separate question "may a cache RECORD be reused in place" is
+  ## answered by `cachedResultReusableInPlace` below — the two must not be
+  ## collapsed into one predicate.
   if action.outputs.len == 0:
     return false
   for output in action.outputs:
@@ -1589,6 +2352,48 @@ proc allOutputsExist(action: BuildAction): bool =
     if not action.outputPathReady(path):
       return false
   true
+
+proc declaresNoOutputs(action: BuildAction): bool {.inline.} =
+  action.outputs.len == 0
+
+proc cachedResultReusableInPlace(action: BuildAction;
+                                 declaredOutputsPresent: bool): bool =
+  ## "If the action cache says nothing this action reads has changed, can the
+  ## previous result be reused where it already is?"
+  ##
+  ## Takes `declaredOutputsPresent` rather than calling `allOutputsExist`
+  ## itself so the caller pays for exactly one output stat, and so an edge
+  ## that declares no outputs is never stat'd at all.
+  ##
+  ## For an edge that declares outputs, yes only when those outputs are still
+  ## present — otherwise `rebuildMissingOutputsOnCacheHit` has to re-execute
+  ## to put them back, and the revalidation added in "Revalidate declared
+  ## outputs before reusing an action result" still has something to compare
+  ## against.
+  ##
+  ## For an edge that declares NO outputs there is nothing to restore and
+  ## nothing to revalidate, so the hit is keyed on inputs alone. Reprobuild
+  ## invalidates coarsely: "no input changed since the recorded run" is by
+  ## itself a sufficient reason not to re-run, and a run that produces
+  ## nothing is not a reason to re-run it. This is what makes a `test` edge —
+  ## `ct_test_nim_unittest.run`, which declares `outputs = []` — benefit from
+  ## "action-cache reuse, incremental invalidation, named selection, and
+  ## watch" as required by Test-Edges-And-Parallel-Runner.milestones.org
+  ## initiative goal (1), and what satisfies Incremental-Invalidation.md
+  ## §"Validation Criteria": "a warm re-run of an unchanged graph still
+  ## executes zero actions".
+  ##
+  ## NOTE the asymmetry with `allOutputsExist`, and that it is intentional:
+  ## reuse here is gated on a cache RECORD whose inputs were just verified
+  ## unchanged. `allOutputsExist`'s callers have no such record.
+  ##
+  ## This is defence in depth rather than the sole barrier: `lookupActionResult`
+  ## independently revalidates declared outputs against the record
+  ## (`outputStateMismatch`), so forcing this predicate true does not by
+  ## itself let a missing or corrupted output be reused. It is what keeps the
+  ## engine from asking for a restore it cannot perform, and what keeps an
+  ## edge with nothing to restore from being treated as one that failed to.
+  action.declaresNoOutputs() or declaredOutputsPresent
 
 proc addUnique(values: var seq[string]; value: string) =
   if value.len == 0:
@@ -1715,6 +2520,16 @@ proc selfConsumedDeclaredPaths*(action: BuildAction): seq[string] =
     if declared and materialized notin result:
       result.add(materialized)
 
+proc isVolatileMonitorPath(path: string): bool =
+  ## Runtime pseudo-filesystems describe the monitored process or host at one
+  ## instant. They cannot be reopened reliably when the action is fingerprinted
+  ## and must never become cache inputs. Keep this aligned with
+  ## repro_local_store.isVolatileDevicePath.
+  let normalized = path.replace('\\', '/')
+  normalized == "/dev" or normalized.startsWith("/dev/") or
+    normalized == "/proc" or normalized.startsWith("/proc/") or
+    normalized == "/sys" or normalized.startsWith("/sys/") or
+    normalized == "/run" or normalized.startsWith("/run/")
 proc parseCreateActionRecord(payload, path: string; lineNo: int;
                              governingLockIdentity: LockIdentity): BuildAction =
   ## Decode an M25 ``create-action`` JSON payload into a BuildAction. The
@@ -1859,10 +2674,90 @@ proc converterSpecsForPolicy(action: BuildAction):
     return action.dependencyPolicy.postBuildConverters
   @[]
 
+type
+  MonitorShimPlatform* = enum
+    ## Which io-mon shim a build is running against. Present so the
+    ## library-load-floor question below can be answered for EVERY
+    ## platform on ANY host — see `monitorShimHasLibraryLoadFloor`.
+    mspLinux, mspMacos, mspWindows, mspUnsupported
+
+func monitorShimHasLibraryLoadFloor*(platform: MonitorShimPlatform): bool =
+  ## Does this platform's monitor shim emit `mrLibraryLoad` records?
+  ##
+  ## A FUNCTION OVER A PLATFORM rather than a bare `defined()` constant,
+  ## and that is the whole point. As a constant the Windows answer is
+  ## unreachable from a Linux test run — `defined(linux) or
+  ## defined(macosx)` and a plain `true` are indistinguishable there, so
+  ## a mutation that silently claimed a floor everywhere passed every
+  ## test. Measured: that exact mutation survived. As data, every
+  ## platform's answer is gradeable wherever the suite runs.
+  ##
+  ## The values come from counting `mrLibraryLoad` emission sites in the
+  ## io-mon sibling: `shim/linux_preload.nim` 2,
+  ## `shim/macos_interpose.nim` 2, `shim/windows_interpose.nim` 0.
+  case platform
+  of mspLinux, mspMacos: true
+  of mspWindows, mspUnsupported: false
+
+when defined(linux):
+  const HostMonitorShimPlatform* = mspLinux
+elif defined(macosx):
+  const HostMonitorShimPlatform* = mspMacos
+elif defined(windows):
+  const HostMonitorShimPlatform* = mspWindows
+else:
+  const HostMonitorShimPlatform* = mspUnsupported
+
+const MonitorHasLibraryLoadFloor* =
+  monitorShimHasLibraryLoadFloor(HostMonitorShimPlatform)
+  ## The host's answer to `monitorShimHasLibraryLoadFloor`.
+  ##
+  ## WHAT DEPENDS ON IT. On a platform WITH a floor, every process the
+  ## shim can inject reports at least the dynamic loader plus its own
+  ## dependent libraries, so "the monitor recorded no observation at all"
+  ## is not reachable for an injectable process — the zero-evidence guard
+  ## in `collectEvidence` is a backstop against a backend asserting a
+  ## completeness it has not earned. WITHOUT a floor, an ordinary
+  ## monitored action that performs no interposed read, probe or write
+  ## reaches the guard and stops publishing. That is still the correct,
+  ## fail-closed direction — it re-runs rather than serving a stale
+  ## result — but it is a live operational condition rather than an
+  ## unreachable one, so it has to announce itself. See
+  ## `zeroEvidenceDiagnostic`.
+
+proc zeroEvidenceDiagnostic*(actionId: string;
+                             hasLibraryLoadFloor: bool): string =
+  ## The diagnostic for an action whose monitor reported success while
+  ## recording nothing. Split out and exported so BOTH branches are
+  ## gradeable on any host: the no-floor branch is the one that matters
+  ## operationally and it is not reachable on the platform this is
+  ## usually built on, so a `when`-guarded string literal would ship
+  ## untested.
+  result = "action '" & actionId & "': monitor reported success but " &
+    "recorded no observation of any kind (no reads, writes, probes or " &
+    "enumerations). The recorded input set would be the declared inputs " &
+    "alone, which cannot be distinguished from 'the monitor observed " &
+    "nothing'. Action-cache publish skipped — an action with no " &
+    "monitorable evidence is NON-CACHEABLE per Monitor-Hook-Shim.md " &
+    "§\"Failure Semantics\" and Reprobuild-Development.milestones.org " &
+    "M17, never complete-on-declared-inputs."
+  if hasLibraryLoadFloor:
+    result.add(" This platform HAS a library-load floor, so an injectable " &
+      "process cannot normally reach this state; suspect the monitor " &
+      "backend rather than the action.")
+  else:
+    result.add(" This platform has NO library-load floor (its shim emits " &
+      "no library-load records), so an action that performs no interposed " &
+      "read, probe or write reaches this state legitimately and will " &
+      "re-run on EVERY build, permanently, until it gains observable " &
+      "evidence or is marked `cacheable = false`. If that is not what you " &
+      "want, the fix is a library-load floor in the platform's shim, not " &
+      "a weaker guard here.")
+
 proc monitorEvidenceRequired(action: BuildAction): bool =
-  ## Monitor evidence is required for monitored policies once an RMDF
+  ## Monitor evidence is required for monitored policies once an iomon
   ## (monitor depfile) has actually been wired up for the action. The only
-  ## way a monitored action ends up without an RMDF now is an engine config
+  ## way a monitored action ends up without an iomon now is an engine config
   ## that has no io-monitor wired (``monitorCliPath`` empty): the setup step
   ## emits a "requires an io-monitor driver" diagnostic and falls back to the
   ## statically declared inputs/outputs rather than claiming complete
@@ -1883,7 +2778,7 @@ type
     # fields on ``PathSetEvidence``. Threaded through the per-action evidence
     # aggregation so each ``addUnique`` lookup is O(1) instead of O(N).
     # M9.R.72.3: exported so end-to-end regression tests can drive
-    # ``foldMonitorDepFileEvidence`` directly against synthetic RMDFs.
+    # ``foldMonitorDepFileEvidence`` directly against synthetic iomon depfiles.
     depfileInputs*: HashSet[string]
     monitorReads*: HashSet[string]
     monitorWrites*: HashSet[string]
@@ -1893,6 +2788,8 @@ type
       ## are one variable. The shim already dedupes that way; this is the
       ## second line, for a merge of fragments from processes that spelled it
       ## differently.
+
+    monitorDirectoryEnumerations*: HashSet[string]
 
 proc monitorProfileEvidenceComplete(detail: string): bool =
   result = true
@@ -1985,6 +2882,171 @@ proc addEntropyObservation(evidence: var PathSetEvidence;
   evidence.entropyObservations.add(
     EntropyObservation(source: source, origin: origin))
 
+proc benignRawSyscallLoss*(detail: string): bool =
+  ## Recognise the io-mon "raw syscall unsupported" event-loss class and say
+  ## whether the syscall in question provably cannot affect the observed-input
+  ## set.
+  ##
+  ## io-mon's Linux preload shim intercepts the libc ``syscall(2)`` wrapper and
+  ## decodes inline ``SYSCALL`` traps out of its ring buffer. Numbers it can
+  ## model are handled by ``classifyRawFileSyscall``; everything else falls
+  ## through to ``recordRawSyscallClassification``, which emits
+  ##
+  ##     "libc raw syscall unsupported nr=<N> run=<id>"    (libc wrapper route)
+  ##     "inline raw syscall unsupported nr=<N> run=<id>"  (inline-trap route)
+  ##
+  ## (io-mon ``src/io_mon/shim/linux_preload.nim``, ``rawSyscallSourceName`` +
+  ## ``recordRawSyscallClassification``, then ``stampRunId`` on the way out of
+  ## ``emitRecord``.) Beyond the syscall NUMBER and the run stamp the detail
+  ## carries nothing — no arguments, no fds, no paths.
+  ##
+  ## Such a record means "the shim saw a syscall it does not model", which is
+  ## only a correctness problem when the syscall in question could open, read,
+  ## write, probe, rename or otherwise name a file. For a small set of numbers
+  ## that is decidable from the number alone, so the record carries no lost
+  ## filesystem information and the depfile is still Level 0 (complete).
+  ##
+  ## **This is an allowlist, not an inversion of the default.** Any number not
+  ## enumerated below keeps falling through to
+  ## ``classifyEventLossDetail``'s fail-closed ``mesUnknownScopeLoss``.
+  ##
+  ## SYSCALL NUMBERS ARE ARCHITECTURE-SPECIFIC AND THE DETAIL STRING CARRIES NO
+  ## ARCHITECTURE TAG. This is load-bearing, not pedantry: on the asm-generic
+  ## table used by aarch64/riscv64/loongarch64, nr=39 is ``umount2`` — a
+  ## filesystem-namespace mutation — where on x86_64 it is ``getpid``. The
+  ## table below is therefore selected by the architecture this engine is
+  ## COMPILED for, which is the architecture of the shim that produced the
+  ## iomon (iomon depfiles live in the local ``build-engine-cache/monitor-depfiles`` and
+  ## are never fetched cross-arch from the shared action cache). Architectures
+  ## without a verified table get an empty allowlist and keep failing closed.
+  ##
+  ## Per-entry justification — each number verified against the kernel uapi
+  ## headers (``asm/unistd_64.h`` for x86_64, ``asm-generic/unistd.h`` for
+  ## arm64), NOT from memory:
+  ##
+  ##   * ``getpid`` (x86_64 nr=39, arm64 nr=172) — takes no arguments, touches
+  ##     no descriptor and names no path; it copies the caller's pid out of the
+  ##     kernel and returns. It cannot introduce a filesystem dependency and it
+  ##     cannot hide one, because it mutates no shim state at all.
+  ##
+  ##   * ``close_range`` (x86_64 and arm64 nr=436) — closes a range of
+  ##     descriptors. Closing a descriptor cannot open, read, write or probe a
+  ##     path, so no new dependency can be introduced and no content can be
+  ##     consumed through it.
+  ##
+  ##     RESIDUAL, stated rather than waved through: the shim DOES keep fd→path
+  ##     state (``updateFdPath`` / ``removeFdPath`` / ``pathForFd`` in
+  ##     ``linux_preload.nim``), and a bulk close it does not observe leaves
+  ##     stale entries for the closed fds. The consequences of that staleness
+  ##     are bounded:
+  ##       - an fd number reused by a monitored ``open``/``openat`` is repaired,
+  ##         because ``recordOpen`` → ``updateFdPath`` overwrites the entry;
+  ##       - an fd number reused by an UNmonitored raw open already emits its
+  ##         own unsupported-nr event-loss and so still fails closed here;
+  ##       - an fd number reused by a non-path descriptor (socket/pipe/eventfd/
+  ##         dup) makes a later read on it attribute to the STALE path, which
+  ##         adds a spurious input — the over-approximating, cache-conservative
+  ##         direction.
+  ##     The one under-approximating corner is an fd that is simultaneously
+  ##     marked inherited-at-shim-init AND carries a stale in-tree path AND is
+  ##     reused by an opaque descriptor, which would suppress the
+  ##     ``recordExternalContent`` Level 2 signal in ``classifyEmptyFdRead``.
+  ##
+  ##     That corner is NOT closed by leaving nr=436 fail-closed, which is why
+  ##     the allowlist entry is still the right call: the shim has no
+  ##     ``close_range`` handling of ANY kind — no libc-symbol hook and no raw
+  ##     classifier arm (verified against the pinned io-mon revision this build
+  ##     links). A program calling glibc's ``close_range()`` SYMBOL produces the
+  ##     identical fd→path staleness and NO event-loss record at all, so the
+  ##     session stays cacheable today. The nr=436 record therefore covers only
+  ##     the minority ``syscall(2)`` route; as a soundness gate it is not
+  ##     exhaustive, and all it actually buys is permanent cache loss for the
+  ##     callers that happen to use the wrapper. The durable fix is an io-mon
+  ##     ``of LinuxSysCloseRange:`` arm that calls ``removeFdPath`` over the
+  ##     range plus a ``close_range`` symbol hook; io-mon is a pinned flake
+  ##     input here and cannot be changed from this repo. This is recorded as a
+  ##     known residual in
+  ##     ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``.
+  ##
+  ## Deliberately NOT allowlisted, having been considered individually:
+  ##   * ``io_uring_setup``/``io_uring_enter`` (x86_64 nr=425/426) — SQEs can
+  ##     carry real opens and reads, so the number alone does not decide it.
+  ##     io-mon makes its own documented tradeoff for these at the shim layer;
+  ##     the engine does not re-endorse it.
+  ##   * ``gettid`` (x86_64 nr=186) — provably benign by the same argument as
+  ##     ``getpid``, but the pinned io-mon already classifies it at the shim so
+  ##     it never reaches this classifier. Left out for lack of evidence that
+  ##     any iomon carries it.
+  when defined(linux) and defined(amd64):
+    const BenignRawSyscallNumbers: seq[int64] = @[
+      39'i64,    # getpid      — asm/unistd_64.h
+      436'i64,   # close_range — asm/unistd_64.h
+    ]
+  elif defined(linux) and defined(arm64):
+    const BenignRawSyscallNumbers: seq[int64] = @[
+      172'i64,   # getpid      — asm-generic/unistd.h
+      436'i64,   # close_range — asm-generic/unistd.h
+    ]
+  else:
+    const BenignRawSyscallNumbers: seq[int64] = @[]
+  const RawSyscallUnsupportedPrefixes = [
+    "libc raw syscall unsupported nr=",
+    "inline raw syscall unsupported nr=",
+  ]
+  # THE NUMBER IS NOT THE END OF THE STRING. Every record the Linux shim
+  # emits passes through ``stampRunId`` (io-mon ``linux_preload.nim``),
+  # which appends a whitespace-separated ``run=<id>`` token to ``detail``.
+  # A real iomon therefore carries
+  #
+  #     "libc raw syscall unsupported nr=436 run=1787695082.5534084"
+  #
+  # not "…nr=436". A first cut of this classifier required the remainder
+  # after the prefix to be a bare decimal and so matched nothing a real
+  # build ever produces: every synthetic unit test passed and the edge it
+  # was written to rescue kept re-executing. Parse the remainder as
+  # whitespace-separated FIELDS — field 0 is the syscall number, and each
+  # remaining field must be a stamping token named below.
+  #
+  # The trailing-token list is an allowlist for the same reason the number
+  # table is. A token this classifier has not reasoned about could carry
+  # meaning, so an unrecognised one fails closed. The cost of a future
+  # io-mon stamp landing here is cache loss, not unsoundness — and that is
+  # the direction this whole classifier is required to err in.
+  const BenignTrailingTokenPrefixes = [
+    "run=",   # linux_preload.nim `stampRunId` / macos_interpose.nim
+  ]
+  for prefix in RawSyscallUnsupportedPrefixes:
+    if not detail.startsWith(prefix):
+      continue
+    let fields = detail[prefix.len .. ^1].splitWhitespace()
+    if fields.len == 0:
+      # "nr=" with nothing after it.
+      return false
+    for i in 1 ..< fields.len:
+      var recognised = false
+      for tokenPrefix in BenignTrailingTokenPrefixes:
+        # ``len > tokenPrefix.len`` rejects a valueless "run=", which is
+        # not a shape the stamper produces.
+        if fields[i].startsWith(tokenPrefix) and fields[i].len > tokenPrefix.len:
+          recognised = true
+          break
+      if not recognised:
+        return false
+    # Require a bare unsigned decimal, which is the only shape io-mon's
+    # ``$number`` produces. ``parseInt`` alone is not enough: it accepts a
+    # leading '+' or '-', so "nr=+436" would otherwise reach the allowlist.
+    # A detail shape this classifier has not reasoned about fails closed.
+    for ch in fields[0]:
+      if ch notin {'0' .. '9'}:
+        return false
+    var number: int64
+    try:
+      # Rejects any value too large for ``int``; fails closed.
+      number = int64(parseInt(fields[0]))
+    except ValueError:
+      return false
+    return number in BenignRawSyscallNumbers
+  false
 proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
   ##
@@ -1996,7 +3058,7 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ##   * "process killed with an un-flushed read batch (kill-before-flush)"
   ##     — writer.nim:2205 / :2224. A subprocess died before flushing its
   ##     read-batch tail. The io-mon writer knows precisely which pid/tid
-  ##     it lost, and every OTHER record in the RMDF is trustworthy.
+  ##     it lost, and every OTHER record in the iomon is trustworthy.
   ##     Level 1 (known scope): downgrade the session to non-cacheable but
   ##     let the action succeed. Currently treated as Level 2 in this
   ##     initial implementation until the per-class narrow-invalidation of
@@ -2013,6 +3075,15 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ##   * "duplicate identity token in fragment record" — writer.nim:2034 /
   ##     :2068. A shim identity token appeared twice, so record-ordering
   ##     integrity is compromised. Level 2.
+  ##
+  ##   * "libc raw syscall unsupported nr=<N>" / "inline raw syscall
+  ##     unsupported nr=<N>" — linux_preload.nim
+  ##     ``recordRawSyscallClassification``. The shim saw a raw syscall it
+  ##     does not model. For the small, individually-justified set of
+  ##     numbers in ``benignRawSyscallLoss`` the number alone proves the
+  ##     call cannot name a path or move content, so the record represents
+  ##     no lost filesystem information: Level 0. Every other number stays
+  ##     Level 2 via the fail-closed default below.
   ##
   ## Every other unknown detail defaults to mesUnknownScopeLoss to fail
   ## closed conservatively — the spec's R3 general rule for ambiguous
@@ -2038,7 +3109,7 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
       ## Legacy alias retained for the M9.R.72.3 unit-test corpus and any
       ## pre-M9.R.73 depfile that might have been produced against an
       ## older io-mon revision. Level 2.
-    CorruptFragmentPrefix = "corrupt or partial RMDF fragment"
+    CorruptFragmentPrefix = "corrupt or partial iomon fragment"
       ## writer.nim:2158 — Level 2. Newly classified in M9.R.73.2.
     BreakawayReportPrefix = "breakaway-report"
       ## Reserved for the authenticated-daemon report Level 2 path;
@@ -2062,6 +3133,21 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
     return mesUnknownScopeLoss
   if detail.startsWith(BreakawayReportPrefix):
     return mesUnknownScopeLoss
+  # Benign raw-syscall class (Level 0). What makes this arm unable to downgrade
+  # a recognised loss class is that the two prefixes it matches are disjoint
+  # from every prefix above — not its position, which is defensive only. (No
+  # prefix in the const block above is a prefix of "libc raw syscall
+  # unsupported nr=" or "inline raw syscall unsupported nr=", nor the reverse,
+  # so the dispatch order over this chain is not observable.)
+  #
+  # The property that actually keeps a mixed iomon fail-closed lives one level
+  # up, in ``foldMonitorDepFileEvidence``'s ``worseMonitorStatus`` fold, and is
+  # pinned by ``test_m9r72_phaseD_end_to_end.nim``'s "benign raw syscall does
+  # not rescue an iomon that also lost a subtree". THIS suite cannot see that
+  # property: inverting the fold leaves every classifier check green
+  # (mutation-verified) while the phase-D case fails.
+  if benignRawSyscallLoss(detail):
+    return mesComplete
   # Unknown detail — fail closed conservatively.
   mesUnknownScopeLoss
 
@@ -2070,20 +3156,190 @@ proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
   ## mesMonitorUnavailable. Return whichever is more severe.
   if ord(a) >= ord(b): a else: b
 
-proc raiseMonitorDecodeError(kind: MonitorDepFileReaderErrorKind;
-                             message: string) {.noreturn.} =
-  raiseMonitorDepFileReaderError(kind, message)
+proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
+                          evidence: var PathSetEvidence;
+                          seen: var EvidenceSeenSets;
+                          status: var MonitorEvidenceStatus) =
+  ## Fold ONE decoded iomon record into the engine's path-set evidence.
+  ##
+  ## THE ONE IMPLEMENTATION OF THE FOLDING RULES, deliberately. Since HM-5
+  ## there are two SOURCES of records — the ``.iomon`` bytes on the wrapped
+  ## launch paths, and the records ``finishMonitor`` already returned in
+  ## memory on the hosted one — and the whole premise of hosting is that
+  ## nothing downstream can tell the two apart. Two copies of the rules would
+  ## be two chances for them to disagree about what the same observation
+  ## means, silently, in the dependency set. So the decode and the fold are
+  ## separated here and the fold is shared.
+
+  if record.kind == mrEventLoss or record.observationKind == moEventLoss:
+    # M9.R.72.3 — classify the loss instead of collapsing to a bool.
+    # ``classifyEventLossDetail`` maps io-mon's detail strings to Level
+    # 1 (known scope) or Level 2 (unknown scope); ``worseMonitorStatus``
+    # keeps the worst observed level across the whole depfile so the
+    # caller can decide session cache-skip vs hard-fail conservatively.
+    let recordStatus = classifyEventLossDetail(record.detail)
+    status = worseMonitorStatus(status, recordStatus)
+  elif record.kind == mrBackendProfile and
+      not monitorProfileEvidenceComplete(record.detail):
+    status = worseMonitorStatus(status, mesUnknownScopeLoss)
+
+  # M6 — entropy evidence and the capability declaration that says whether
+  # entropy COULD have been evidenced. Neither touches ``status``: an
+  # entropy read is not a monitoring loss (io-mon SAW it), and a
+  # non-determinism capability gap is not in ``InputEvidenceCapabilities``
+  # so it does not move the completeness floor. Both are carried out on
+  # ``evidence`` for ``collectEvidence`` to weigh against the invoked
+  # tool's blessing.
+  #
+  # Deliberately BEFORE the `materialPath` / volatile-path guard below:
+  # these records' `path` fields are capability ids and entropy source
+  # names, not filesystem paths, so nothing about them should be resolved
+  # against the action's cwd or tested for volatility.
+  case record.kind
+  of mrNonDeterministic:
+    addEntropyObservation(evidence, record.path,
+      entropyCallerOrigin(record.detail))
+  of mrBackendProfile:
+    # A gap record already seen wins: ``entNotObserved`` is the
+    # conservative answer and must not be relaxed by a profile parsed
+    # afterwards.
+    if evidence.entropyObservability != entNotObserved:
+      evidence.entropyObservability =
+        if monitorProfileSupportsNonDeterminism(record.detail): entObserved
+        else: entNotObserved
+  of mrCapabilityGap:
+    if capabilityGapIsNonDeterminism(record.path, record.detail):
+      evidence.entropyObservability = entNotObserved
+  of mrEnvRead:
+    # M10 — `record.path` here is a variable NAME, not a path. Resolving it
+    # against the action's cwd (as the `materialized` line below does for
+    # every other kind) would turn `SOURCE_DATE_EPOCH` into
+    # `<cwd>/SOURCE_DATE_EPOCH` and quietly key the cache on a file that
+    # does not exist. Handled here, above that line, for the same reason as
+    # the entropy arms.
+    if record.path.len > 0:
+      evidence.monitorEnvReads.addUnique(seen.monitorEnvReads,
+        record.path, envNameKey(record.path))
+  else:
+    discard
+
+  let materialized = materialPath(cwd, record.path)
+  if materialized.isVolatileMonitorPath():
+    return
+  case record.kind
+  of mrFileRead:
+    evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+  of mrLibraryLoad:
+    # A library the dynamic loader MAPPED into the action. This is a
+    # content dependency and nothing else: change the file, change what
+    # the action computes.
+    #
+    # It needs its own arm because it cannot arrive as an `mrFileRead`.
+    # `ld.so` resolves `DT_NEEDED` entries with its own internal open,
+    # before the preloaded shim's hooks exist, so a dependent DSO
+    # passes through no interposed `open` at all — io-mon emits it from
+    # the loaded-object enumeration instead, and the `else: discard`
+    # below swallowed every one. Measured on `env true`, a process that
+    # touches no file of its own: 18 `mrLibraryLoad` records covering
+    # 14 distinct PATHS and 9 distinct SONAMEs, `mesComplete`, and
+    # `monitorReads: 0`. The three counts differ for two separate
+    # reasons and both are worth knowing: four sonames are emitted
+    # twice under the identical path (duplicate records, deduped by
+    # `addUnique`), and five appear under two DIFFERENT store paths
+    # because `env` exec'd a second image linked against a different
+    # glibc. So the fold contributes 14 inputs here, not 18 and not 9.
+    #
+    # io-mon sets `observationKind = moFileRead` on these deliberately
+    # so every consumer keying on the observation kind treats them as
+    # content reads (io-mon `types.nim:36`); folding them into
+    # `monitorReads` is that contract's consumer half.
+    #
+    # WHAT ABOUT THE SHIM'S OWN LOAD CLOSURE? io-mon excludes the shim
+    # library itself (`shim/linux_preload.nim`, so that "upgrading
+    # io-mon would not invalidate every cached action") but not the
+    # libraries the shim's own `DT_NEEDED` pulls in, so it is fair to
+    # ask whether this fold now puts the monitor's libc into every
+    # action's key. Measured, and the answer is no in the case that
+    # matters, for a reason worth writing down: the loader maps ONE
+    # object per soname, so when the action has its own libc the shim
+    # binds to THAT one and adds nothing. On the real
+    # `reprobuild.test_execute.t_smoke_ct_test_interface` edge the six
+    # recorded libraries are all under the TEST BINARY's glibc
+    # (`…-glibc-2.42-51` reached via its own RPATH), none under the
+    # shim's separate glibc store path. The shim's closure shows up
+    # alone only when the action has no closure of its own — measured
+    # on a `-nostdlib` binary, where those six ARE the shim's.
+    #
+    # So DO NOT "fix" this by dropping the shim's closure by path. In
+    # the common case there is nothing there to drop, and on any host
+    # where repro and the toolchain resolve to the SAME glibc store
+    # path such a filter would drop the action's genuine libc — which
+    # is this defect, for the single most consequential library there
+    # is. The sound fix is attribution, not filtering: record whether a
+    # loaded object is reachable from the MAIN IMAGE's `DT_NEEDED`
+    # closure and let the consumer drop only the unreachable ones. That
+    # belongs in io-mon, which is the only side that can see the
+    # dependency graph. Until it exists, an action whose recorded libc
+    # is the shim's rather than its own pays a spurious cross-host
+    # cache MISS — an efficiency cost in the fail-closed direction, not
+    # a stale hit.
+    #
+    # UNCONDITIONALLY, with no allowlist for immutable package stores.
+    # Sandbox-And-Monitoring.md §"Open Design Questions" left "how much
+    # library-load information is required for correctness" open; the
+    # answer taken here is "all of it", because an allowlist is exactly
+    # what kept this invisible — on NixOS every loaded DSO is a store
+    # path, so exempting store paths would leave the fix asserting
+    # nothing while a host with a mutable `/usr/lib` still served stale
+    # results. Cost: one `lstat` per loaded DSO on the warm path.
+    # `cacheInputPaths` still drops the ones under the action's own
+    # tool roots, and `isVolatileMonitorPath` above still drops
+    # `/run`-resident driver libraries.
+    evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+  of mrFileOpen:
+    case record.observationKind
+    of moFileRead, moFileOpen:
+      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+    of moFileWrite:
+      evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+    else:
+      discard
+  of mrFileWrite:
+    evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+  of mrPathProbe:
+    evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+  of mrDirectoryEnumerate:
+    # Stays in `monitorProbes` (every existing consumer keeps its set) AND
+    # is recorded separately, because membership, not existence, is what
+    # an enumeration depends on. See `monitorDirectoryEnumerations`.
+    evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+    evidence.monitorDirectoryEnumerations.addUnique(
+      seen.monitorDirectoryEnumerations, materialized)
+  else:
+    discard
+
 
 proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
                                  seen: var EvidenceSeenSets):
                                  MonitorEvidenceStatus =
-  ## Fold RMDF records directly into build-engine evidence.
+  ## Fold depfile records directly into build-engine evidence.
   ##
-  ## `io_mon.readMonitorDepFile` materializes both the decoded record seq and a
-  ## `MonitorDepFile.records` copy. Provider compilation can emit large RMDFs
-  ## because the compiler touches many source/toolchain files, so avoid retaining
-  ## a full depfile object when the engine only needs path sets + completeness.
+  ## Consumes io-mon's `streamMonitorDepFileRecords`, which OWNS the format's
+  ## decode and validation (magic, version, count/length, trailer magic,
+  ## record-count agreement, body checksum, canonical 1..N sequence order) and
+  ## yields one record at a time without ever materializing the full record seq
+  ## — the memory-frugal read a large provider depfile needs (the compiler
+  ## touches many source/toolchain files). The engine keeps only path sets +
+  ## completeness.
+  ##
+  ## Reprobuild is a pure CONSUMER of io-mon's format here: it no longer
+  ## re-implements the depfile envelope parse or reaches into io-mon's
+  ## `codec`/`writer` internals. It only decides what each record MEANS for its
+  ## evidence, in `foldOneMonitorRecord`. A missing file, a truncated/corrupt
+  ## envelope, a bad checksum or a non-canonical sequence surfaces as io-mon's
+  ## `MonitorDepFileReaderError` exactly as before (the hand-rolled reader raised
+  ## the same type via `raiseMonitorDepFileReaderError`).
   ##
   ## M9.R.72.3: Returns the WORST-observed ``MonitorEvidenceStatus`` (Level 0-3)
   ## instead of a plain bool. Each ``mrEventLoss`` / ``moEventLoss`` record's
@@ -2093,134 +3349,44 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   ## Level 3 (monitor entirely unavailable) is asserted at ``collectEvidence``
   ## when the ``monitorDepfile`` path itself is empty.
   result = mesComplete
-  if not fileExists(extendedPath(path)):
-    raiseMonitorDecodeError(mrMissingFile, "RMDF file does not exist: " & path)
+  for record in streamMonitorDepFileRecords(path,
+      defaultMonitorDepFileReaderOptions()):
+    foldOneMonitorRecord(record, cwd, evidence, seen, result)
 
-  let options = defaultMonitorDepFileReaderOptions()
-  let raw = ioMonCodec.toBytes(readFile(extendedPath(path)))
-  if raw.len < 44:
-    raiseMonitorDecodeError(mrTruncated, "RMDF file is too short")
-  if ioMonCodec.fromBytes(raw.toOpenArray(0, 3)) != RmdfMagic:
-    raiseMonitorDecodeError(mrBadMagic, "unknown RMDF magic")
-
-  var pos = 4
-  let version = ioMonCodec.readU16Le(raw, pos)
-  if version != RmdfVersion:
-    raiseMonitorDecodeError(mrUnsupportedVersion, "unsupported RMDF version")
-  discard ioMonCodec.readU16Le(raw, pos)
-  let headerCount = ioMonCodec.readU64Le(raw, pos)
-  let bodyLen64 = ioMonCodec.readU64Le(raw, pos)
-  if headerCount > options.maxObservationCount:
-    raiseMonitorDecodeError(mrRecordLimitExceeded,
-      "RMDF record count exceeds configured limit")
-  if bodyLen64 > uint64(int.high):
-    raiseMonitorDecodeError(mrTruncated, "RMDF body is too large")
-  let bodyLen = int(bodyLen64)
-  if pos + bodyLen + 20 != raw.len:
-    raiseMonitorDecodeError(mrTruncated,
-      "RMDF body length/trailer mismatch")
-
-  let bodyStart = pos
-  let bodyEnd = bodyStart + bodyLen
-  pos = bodyEnd
-  if ioMonCodec.fromBytes(raw.toOpenArray(pos, pos + 3)) != RmdfTrailerMagic:
-    raiseMonitorDecodeError(mrTruncated, "missing RMDF trailer")
-  pos += 4
-  let trailerCount = ioMonCodec.readU64Le(raw, pos)
-  let trailerChecksum = ioMonCodec.readU64Le(raw, pos)
-  if trailerCount != headerCount:
-    raiseMonitorDecodeError(mrSemanticValidationFailed,
-      "RMDF record count mismatch")
-  if options.requireTrailerChecksum and
-      trailerChecksum != ioMonWriter.checksum(raw.toOpenArray(bodyStart, bodyEnd - 1)):
-    raiseMonitorDecodeError(mrChecksumMismatch, "RMDF checksum mismatch")
-
-  var framePos = bodyStart
-  var expectedSeq = 1'u64
-  var decodedCount = 0'u64
-  while framePos < bodyEnd:
-    var payloadPos = framePos
-    let length = int(ioMonCodec.readU32Le(raw, payloadPos))
-    if length <= 0 or payloadPos + length > bodyEnd:
-      raiseMonitorDecodeError(mrTruncated, "truncated RMDF record frame")
-    let record = ioMonWriter.decodeRecordPayload(
-      raw.toOpenArray(payloadPos, payloadPos + length - 1))
-    if record.seq != expectedSeq:
-      raiseMonitorDecodeError(mrRecordOrderInvalid,
-        "RMDF record sequence is not canonical")
-    inc expectedSeq
-    inc decodedCount
-
-    if record.kind == mrEventLoss or record.observationKind == moEventLoss:
-      # M9.R.72.3 — classify the loss instead of collapsing to a bool.
-      # ``classifyEventLossDetail`` maps io-mon's detail strings to Level
-      # 1 (known scope) or Level 2 (unknown scope); ``worseMonitorStatus``
-      # keeps the worst observed level across the whole depfile so the
-      # caller can decide session cache-skip vs hard-fail conservatively.
-      let recordStatus = classifyEventLossDetail(record.detail)
-      result = worseMonitorStatus(result, recordStatus)
-    elif record.kind == mrBackendProfile and
-        not monitorProfileEvidenceComplete(record.detail):
-      result = worseMonitorStatus(result, mesUnknownScopeLoss)
-
-    # M6 — entropy evidence and the capability declaration that says whether
-    # entropy COULD have been evidenced. Neither touches ``result``: an
-    # entropy read is not a monitoring loss (io-mon SAW it), and a
-    # non-determinism capability gap is not in
-    # ``InputEvidenceCapabilities`` so it does not move the completeness
-    # floor. Both are carried out on ``evidence`` for ``collectEvidence`` to
-    # weigh against the invoked tool's blessing.
-    case record.kind
-    of mrNonDeterministic:
-      addEntropyObservation(evidence, record.path,
-        entropyCallerOrigin(record.detail))
-    of mrBackendProfile:
-      # A gap record already seen wins: ``entNotObserved`` is the
-      # conservative answer and must not be relaxed by a profile parsed
-      # afterwards.
-      if evidence.entropyObservability != entNotObserved:
-        evidence.entropyObservability =
-          if monitorProfileSupportsNonDeterminism(record.detail): entObserved
-          else: entNotObserved
-    of mrCapabilityGap:
-      if capabilityGapIsNonDeterminism(record.path, record.detail):
-        evidence.entropyObservability = entNotObserved
-    else:
-      discard
-
-    let materialized = materialPath(cwd, record.path)
-    case record.kind
-    of mrFileRead:
-      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
-    of mrFileOpen:
-      case record.observationKind
-      of moFileRead, moFileOpen:
-        evidence.monitorReads.addUnique(seen.monitorReads, materialized)
-      of moFileWrite:
-        evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
-      else:
-        discard
-    of mrFileWrite:
-      evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
-    of mrPathProbe, mrDirectoryEnumerate:
-      evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
-    of mrEnvRead:
-      # `record.path` here is a variable NAME, not a path -- `materialized`
-      # above would have joined it to the action's cwd, which is why this arm
-      # uses `record.path` directly. Getting that wrong would turn
-      # `SOURCE_DATE_EPOCH` into `<cwd>/SOURCE_DATE_EPOCH` and quietly key the
-      # cache on a file that does not exist.
-      if record.path.len > 0:
-        evidence.monitorEnvReads.addUnique(seen.monitorEnvReads,
-          record.path, envNameKey(record.path))
-    else:
-      discard
-
-    framePos = payloadPos + length
-
-  if decodedCount != headerCount:
-    raiseMonitorDecodeError(mrSemanticValidationFailed,
-      "RMDF frame count mismatch")
+proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
+                                 cwd: string;
+                                 evidence: var PathSetEvidence;
+                                 seen: var EvidenceSeenSets):
+                                 MonitorEvidenceStatus =
+  ## In-Process-Monitor-Hosting HM-5 — the same fold, over records the engine
+  ## ALREADY HAS instead of over a file it has to read back.
+  ##
+  ## WHY THIS EXISTS, and it corrects the milestone's own premise. HM-5 is
+  ## written on the claim that the ``.iomon`` is "a write-only artefact from the
+  ## engine's perspective", evidenced by ``readMonitorDepFile`` having zero call
+  ## sites. That is true of ``readMonitorDepFile`` and false of the file: the
+  ## engine re-reads and re-decodes the ``.iomon`` on every monitored action
+  ## through ``foldMonitorDepFileEvidence`` above, which is a hand-rolled iomon
+  ## reader written precisely so the depfile object is not retained. So the
+  ## flush could not have been made asynchronous on its own — a build that
+  ## renamed the file into place behind the scheduler would have raced its own
+  ## evidence collection and failed with ``mrMissingFile``.
+  ##
+  ## On the hosted path ``finishMonitor`` already returns the canonical,
+  ## ordered records (``MonitorDepFile.records``, produced by
+  ## ``depFileFromOwnedRecords`` from the very seq ``writeCanonicalInPlace``
+  ## just wrote), so folding from them is FREE and the read-back is pure waste.
+  ## Measured on this machine, a real ``nim c`` action's depfile — 97 217
+  ## records, 18 MB — costs ~193 ms to read and decode, per action, on the
+  ## scheduler's serial path. A trivial action's 140-record depfile costs
+  ## ~0.4 ms.
+  ##
+  ## The records are borrowed, not retained: the caller drops them as soon as
+  ## this returns, so the engine's "path sets + completeness, never a retained
+  ## depfile" rule is unchanged.
+  result = mesComplete
+  for record in records:
+    foldOneMonitorRecord(record, cwd, evidence, seen, result)
 
 proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
                 pathSet: DependencyPathSet; recognized: bool) =
@@ -2234,6 +3400,18 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
       evidence.monitorWrites.addUnique(seen.monitorWrites, output)
     for probe in pathSet.probes:
       evidence.monitorProbes.addUnique(seen.monitorProbes, probe)
+    for enumerated in pathSet.enumerations:
+      # Mirrors the ``mrDirectoryEnumerate`` arm of
+      # ``foldMonitorDepFileEvidence``: an enumeration is BOTH an
+      # existence dependency (so it stays in ``monitorProbes``, which
+      # every existing consumer reads) AND a membership dependency (so it
+      # is recorded separately for ``cacheEnumeratedDirectories``). A
+      # converter-reported enumeration must land in exactly the same two
+      # places as a monitor-reported one, or the two evidence sources
+      # would disagree about what the same observation means.
+      evidence.monitorProbes.addUnique(seen.monitorProbes, enumerated)
+      evidence.monitorDirectoryEnumerations.addUnique(
+        seen.monitorDirectoryEnumerations, enumerated)
   for diagnostic in pathSet.diagnostics:
     evidence.diagnostics.add(diagnostic)
 
@@ -2340,7 +3518,149 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
     collection.disableCacheHits = true
 
-proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
+proc applyMonitorEvidenceStatus(action: BuildAction;
+                                status: MonitorEvidenceStatus;
+                                col: var EvidenceCollection) =
+  ## Fold a monitor-evidence ``status`` (Level 0-3) into ``col``. Extracted
+  ## so that two producers of monitor evidence share ONE mapping into
+  ## ``monitorStatus`` / ``publishable`` / ``disableCacheHits`` /
+  ## ``invalidatedPaths`` / diagnostics: the wrapped-or-hosted monitor path
+  ## (which reads ``action.monitorDepfile`` or in-memory hosted records) and
+  ## the ``iomon``-recognized-report path (an edge whose command PRODUCES its
+  ## own ``.iomon`` dependency capture, consumed as the edge's evidence).
+  col.monitorStatus = worseMonitorStatus(col.monitorStatus, status)
+  case status
+  of mesComplete:
+    # An action that observed NOTHING is not cacheable, even though
+    # the monitor reported success.
+    #
+    # This is the engine predicate that
+    # `repro_core/dependency_gathering.nim` has documented since M17
+    # ("actions with no monitorable evidence ... are made
+    # NON-CACHEABLE, never marked complete-on-declared-inputs") and
+    # that nothing enforced. It was documentation plus two
+    # hand-applied `cacheable = false` call sites; an action that
+    # reached this point with an empty observation set published a
+    # record keyed on its declared inputs alone and was reused
+    # against every change to everything else it touched.
+    #
+    # WHY IT MATTERS NOW. A zero-output edge used to be an
+    # unconditional cache miss, so such an action re-ran regardless
+    # of what its record said. Once test-execute edges became
+    # cacheable on their recorded inputs alone, the record became the
+    # only thing standing between the edge and a stale skip.
+    #
+    # WHY `disableCacheHits` AND NOT `publishable = false`.
+    # Monitor-Hook-Shim.md:501 offers two arms — "fail the monitored
+    # action OR make it non-cacheable, depending on policy". Failing
+    # a successful, exit-0 action to punish its monitor is the wrong
+    # one: it breaks builds for a soundness property that the
+    # cheaper arm secures completely. Skipping the publish means the
+    # action succeeds now and re-executes next time, which IS
+    # non-cacheable.
+    #
+    # WHY NO "THIS ACTION DECLARES IT READS NOTHING" ESCAPE HATCH.
+    # Three reasons, in order of weight. (a) The declaration is
+    # unfalsifiable exactly where it is load-bearing: it only takes
+    # effect when the evidence is empty, i.e. when the monitor cannot
+    # corroborate it. (b) No such concept exists in the specs, and
+    # its nearest neighbour — a declared-only gathering mode — is
+    # explicitly prohibited and has been re-introduced by agents more
+    # than once (see the note in
+    # `repro_core/dependency_gathering.nim`). (c) On a platform with
+    # a library-load floor it is not needed: measured on this host,
+    # every process the shim can inject reports at least the loader
+    # plus its dependent libraries (6 records for a `-nostdlib`
+    # dynamic binary; 18 records naming 14 distinct paths / 9
+    # distinct sonames for `env true`), and a process the shim CANNOT
+    # inject — a static binary — already trips `mrEventLoss` and
+    # lands on the Level 2 arm below. An edge that genuinely needs to
+    # run without evidence already has a sanctioned answer with no
+    # new soundness surface: `cacheable = false`.
+    #
+    # READ (c) NARROWLY — it is platform-conditional and the
+    # condition is real. `MonitorHasLibraryLoadFloor` is false on
+    # Windows, whose shim emits no library-load records at all, so
+    # there an ordinary monitored action that performs no interposed
+    # read, probe or write DOES reach this branch and stops
+    # publishing for good. The guard is deliberately NOT scoped away
+    # from such platforms: scoping it off would hand exactly the
+    # platform with no floor the original soundness hole AND no
+    # signal that it has it. Instead the diagnostic says which regime
+    # it is in — see `zeroEvidenceDiagnostic` — so the outcome is a
+    # report rather than a silent permanent non-publish. The
+    # behaviour is the fail-closed direction on every platform; only
+    # its reachability differs.
+    #
+    # The test is deliberately narrow — no observation of ANY kind
+    # from ANY source, including a recognized report's
+    # `depfileInputs`. An action with one recorded probe has said
+    # something about the world and keeps its record.
+    if action.cacheable and
+        col.evidence.monitorReads.len == 0 and
+        col.evidence.monitorWrites.len == 0 and
+        col.evidence.monitorProbes.len == 0 and
+        col.evidence.monitorDirectoryEnumerations.len == 0 and
+        col.evidence.depfileInputs.len == 0:
+      col.evidence.diagnostics.add(
+        zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
+      col.disableCacheHits = true
+  of mesKnownScopeLoss:
+    # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
+    # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
+    # sole class io-mon currently emits at Level 1 is
+    # kill-before-flush, whose invalidated-path predicate is the
+    # action's own declared outputs (the soundness proof in the
+    # memo). Populate ``invalidatedPaths`` with the materialized
+    # output paths and let the scheduler fold them into a
+    # session-scoped accumulator that gates DOWNSTREAM cache
+    # lookups. The current action still publishes its own cache
+    # entry — the narrow invalidation covers downstream consumers
+    # of its outputs, not the action itself.
+    col.evidence.diagnostics.add(
+      "monitor depfile has known-scope loss; downstream cache " &
+      "lookups intersecting this action's outputs will be skipped " &
+      "this session per Failure-Semantics.md §Monitoring Failures " &
+      "and Monitor-Loss-Path-Invalidation.md")
+    if action.cacheable:
+      for output in action.outputs:
+        col.invalidatedPaths.incl(materialPath(action.cwd, output))
+  of mesUnknownScopeLoss:
+    # Spec Level 2: session cache-skip, action succeeds. Diagnostic
+    # preserved for ``repro why``. ``publishable`` stays true so the
+    # scheduler does NOT flip status to asFailed; ``disableCacheHits``
+    # tells the scheduler to skip THIS action's
+    # ``cache.recordActionResult`` publish. The unknown-scope
+    # semantic is fully realized by the scheduler by observing this
+    # ``mesUnknownScopeLoss`` status and flipping its own
+    # ``sessionCachePublishDisabled`` bit — see the scheduler.
+    col.evidence.diagnostics.add(
+      "monitor depfile is incomplete (unknown-scope loss); " &
+      "action-cache publish skipped this session per " &
+      "Failure-Semantics.md §Monitoring Failures")
+    if action.cacheable:
+      col.disableCacheHits = true
+  of mesMonitorUnavailable:
+    # Unreachable from foldMonitorDepFileEvidence today (Level 3 is
+    # asserted here only when the iomon path was empty), but future
+    # readers may promote decode errors to Level 3 — keep the branch.
+    col.evidence.diagnostics.add("monitor depfile is incomplete")
+    if action.cacheable:
+      col.publishable = false
+
+proc collectEvidence(action: BuildAction; strict: bool;
+                     hostedRecords: ptr seq[MonitorRecord] = nil):
+                     EvidenceCollection =
+  ## ``hostedRecords`` (HM-5) is the in-memory record set for an action the
+  ## engine hosted the monitor for. When it is non-nil the monitor evidence is
+  ## folded from it and the ``.iomon`` is NOT read back — which is what lets the
+  ## file be published asynchronously, behind this call. It is a ``ptr`` rather
+  ## than an ``openArray`` because the parameter has to be OPTIONAL: every
+  ## other caller is a launch path with no records in hand, and a default is
+  ## what keeps this one seam from spreading to all four of them. The pointee
+  ## is a scheduler local that outlives the call, and the engine has no worker
+  ## threads (see ``beginMonitorSpawnContext``), so there is no aliasing
+  ## question here.
   result.publishable = true
   result.evidence.declaredInputs = action.inputs
   result.evidence.declaredOutputs = action.outputs
@@ -2373,6 +3693,47 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
       "dependency policy requires a recognized report but none is declared")
     result.publishable = false
   for report in reports:
+    if report.formatName == DependencyFormatName(IomonFormatName):
+      # An edge whose command PRODUCES its own ``.iomon`` dependency
+      # capture — e.g. ``ct test`` writing the io-mon record set of the
+      # files it actually read — and the engine consumes THAT file as the
+      # edge's evidence instead of monitoring the orchestrator process.
+      # The text ``readRecognizedDependencyReport`` readers know nothing
+      # about io-mon's binary record format, so this branch folds the file
+      # through ``foldMonitorDepFileEvidence`` and maps the returned
+      # ``MonitorEvidenceStatus`` through the SAME handling the wrapped /
+      # hosted monitor path uses (``applyMonitorEvidenceStatus``). Path
+      # resolution (literal / glob / required-missing) mirrors the
+      # make-depfile branch below.
+      for output in report.outputs:
+        let path = action.expectedPath(output)
+        let isGlob = '*' in path or '?' in path or '[' in path
+        var resolvedPaths: seq[string] = @[]
+        if isGlob:
+          for resolved in walkPattern(path):
+            resolvedPaths.add(resolved)
+          if output.required and resolvedPaths.len == 0:
+            result.evidence.diagnostics.add(
+              "dependency report glob produced no matches: " & path)
+            result.publishable = false
+        elif output.required and not fileExists(extendedPath(path)):
+          result.evidence.diagnostics.add("dependency report missing: " & path)
+          result.publishable = false
+        elif fileExists(extendedPath(path)):
+          resolvedPaths.add(path)
+        for resolved in resolvedPaths:
+          try:
+            let status = foldMonitorDepFileEvidence(resolved, action.cwd,
+              result.evidence, seen)
+            applyMonitorEvidenceStatus(action, status, result)
+          except MonitorDepFileReaderError as err:
+            result.evidence.diagnostics.add(
+              "monitor depfile read failed: " & err.msg)
+            result.monitorStatus = worseMonitorStatus(result.monitorStatus,
+              mesMonitorUnavailable)
+            if action.cacheable:
+              result.publishable = false
+      continue
     for output in report.outputs:
       let path = action.expectedPath(output)
       # MR16: a depfile entry whose path contains a glob meta-character
@@ -2458,7 +3819,7 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
     #   Level 2 (mesUnknownScopeLoss): disable cache hits for the session.
     #                                 Same handling as Level 1: succeed
     #                                 without publishing.
-    #   Level 3 (mesMonitorUnavailable): fail closed. Only when the RMDF
+    #   Level 3 (mesMonitorUnavailable): fail closed. Only when the iomon
     #                                 path itself is absent OR the reader
     #                                 hits a decode error — genuine
     #                                 "monitoring unavailable" per spec.
@@ -2469,72 +3830,34 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
     # mrEventLoss record. See M9.R.60.D + M9.R.68 + M9.R.70 characterizations
     # and recipes/reproos-image/run-evidence/m9r72/m9r72_phaseB_gap_enumeration.txt
     # Gap I.
-    if action.monitorDepfile.len == 0:
-      result.evidence.diagnostics.add(
-        "dependency policy requires monitor evidence but no RMDF path is selected")
-      # Genuine Level 3: no monitoring output at all. Preserve the M9.R.60.2
-      # non-cacheable carve-out (workspace sync fetch on hosts without a
-      # monitor CLI wired).
-      result.monitorStatus = worseMonitorStatus(result.monitorStatus,
-        mesMonitorUnavailable)
-      if action.cacheable:
-        result.publishable = false
-      if strict and not result.publishable:
-        discard
-      return
+    # There is no `monitorDepfile.len == 0` arm here, and there must not
+    # be one: `monitorEvidenceRequired` — the condition guarding this
+    # whole block — already requires `monitorDepfile.len > 0`, so such a
+    # branch is unreachable. It existed and was dead. The Level 3
+    # "monitoring unavailable" case it claimed to cover is decided
+    # EARLIER and differently: `monitoredAction` returns a
+    # "requires an io-monitor driver" diagnostic for a cacheable action
+    # with no monitor CLI, and the scheduler turns a non-empty
+    # `plan.diagnostic` into `asFailed`. That is the FAIL arm, not the
+    # non-cacheable arm; do not describe it as the latter.
     try:
-      let status = foldMonitorDepFileEvidence(action.monitorDepfile,
-        action.cwd, result.evidence, seen)
-      result.monitorStatus = worseMonitorStatus(result.monitorStatus, status)
-      case status
-      of mesComplete:
-        discard
-      of mesKnownScopeLoss:
-        # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
-        # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
-        # sole class io-mon currently emits at Level 1 is
-        # kill-before-flush, whose invalidated-path predicate is the
-        # action's own declared outputs (the soundness proof in the
-        # memo). Populate ``invalidatedPaths`` with the materialized
-        # output paths and let the scheduler fold them into a
-        # session-scoped accumulator that gates DOWNSTREAM cache
-        # lookups. The current action still publishes its own cache
-        # entry — the narrow invalidation covers downstream consumers
-        # of its outputs, not the action itself.
-        result.evidence.diagnostics.add(
-          "monitor depfile has known-scope loss; downstream cache " &
-          "lookups intersecting this action's outputs will be skipped " &
-          "this session per Failure-Semantics.md §Monitoring Failures " &
-          "and Monitor-Loss-Path-Invalidation.md")
-        if action.cacheable:
-          for output in action.outputs:
-            result.invalidatedPaths.incl(materialPath(action.cwd, output))
-      of mesUnknownScopeLoss:
-        # Spec Level 2: session cache-skip, action succeeds. Diagnostic
-        # preserved for ``repro why``. ``publishable`` stays true so the
-        # scheduler does NOT flip status to asFailed; ``disableCacheHits``
-        # tells the scheduler to skip THIS action's
-        # ``cache.recordActionResult`` publish. The unknown-scope
-        # semantic is fully realized by the scheduler by observing this
-        # ``mesUnknownScopeLoss`` status and flipping its own
-        # ``sessionCachePublishDisabled`` bit — see the scheduler.
-        result.evidence.diagnostics.add(
-          "monitor depfile is incomplete (unknown-scope loss); " &
-          "action-cache publish skipped this session per " &
-          "Failure-Semantics.md §Monitoring Failures")
-        if action.cacheable:
-          result.disableCacheHits = true
-      of mesMonitorUnavailable:
-        # Unreachable from foldMonitorDepFileEvidence today (Level 3 is
-        # asserted here only when the RMDF path was empty), but future
-        # readers may promote decode errors to Level 3 — keep the branch.
-        result.evidence.diagnostics.add("monitor depfile is incomplete")
-        if action.cacheable:
-          result.publishable = false
+      # HM-5 — two SOURCES, one set of folding rules (``foldOneMonitorRecord``).
+      # The hosted arm never touches the filesystem, so the ``.iomon`` may still
+      # be in flight behind this call; the wrapped arm is byte-for-byte what it
+      # always was, because on that path the engine has no records — a separate
+      # ``repro internal io monitor`` process produced them.
+      let status =
+        if hostedRecords != nil:
+          foldMonitorRecordsEvidence(hostedRecords[], action.cwd,
+            result.evidence, seen)
+        else:
+          foldMonitorDepFileEvidence(action.monitorDepfile,
+            action.cwd, result.evidence, seen)
+      applyMonitorEvidenceStatus(action, status, result)
       applyEntropyBlessingPolicy(action, result)
     except MonitorDepFileReaderError as err:
       result.evidence.diagnostics.add("monitor depfile read failed: " & err.msg)
-      # A decode error means the RMDF file is corrupt — cannot classify the
+      # A decode error means the iomon file is corrupt — cannot classify the
       # loss scope, must fail closed on a cacheable action.
       result.monitorStatus = worseMonitorStatus(result.monitorStatus,
         mesMonitorUnavailable)
@@ -3032,6 +4355,29 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
       continue
     result.addUnique(seen, path)
 
+proc cacheEnumeratedDirectories(action: BuildAction;
+                                evidence: PathSetEvidence): seq[string] =
+  ## The subset of this action's recorded inputs that it ENUMERATED, in the
+  ## same materialised form `cacheInputPaths` produces, so the record side
+  ## can match them by path.
+  ##
+  ## Filtered by the same tool/ignored-root rules as `cacheInputPaths`: a
+  ## path excluded from the inputs must not be handed over as an enumerated
+  ## one either, or the record would carry membership for something it does
+  ## not record at all.
+  let toolRoots = action.toolInputRoots()
+  let ignoredRoots = action.ignoredInputRoots()
+  var declaredMaterialized = initHashSet[string]()
+  for input in evidence.declaredInputs:
+    declaredMaterialized.incl(
+      materialPath(action.cwd, input).replace('\\', '/'))
+  var seen = initHashSet[string]()
+  for dir in evidence.monitorDirectoryEnumerations:
+    let path = materialPath(action.cwd, dir)
+    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+      continue
+    result.addUnique(seen, path)
 proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSetEvidence =
   result.declaredInputs = action.inputs
   result.declaredOutputs = action.outputs
@@ -3158,8 +4504,29 @@ proc dependencyEvidencePath*(cacheRoot, actionId: string): string =
     (sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId) & ".rbar")
 
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
-                     cacheRoot: string): tuple[action: BuildAction;
-                                               diagnostic: string] =
+                     cacheRoot: string;
+                     hostInProcess: bool): tuple[action: BuildAction;
+                                                 diagnostic: string;
+                                                 hostInProcess: bool] =
+  ## SEAM 1 of two (the other is ``preparedRunQuotaCommand``): everything that
+  ## decides whether an action is monitored, and how, happens here.
+  ##
+  ## In-Process-Monitor-Hosting HM-4 — ``hostInProcess`` says the launch site
+  ## about to run this action is one the ENGINE spawns, so the engine can be
+  ## io-mon's host itself. When it is true the argv is left ALONE and only the
+  ## evidence path is selected; when it is false the historical
+  ## ``<repro> internal io monitor --depfile <f> -- <argv>`` wrapper is
+  ## prepended and a second ``repro`` process does the hosting.
+  ##
+  ## The caller decides, not this proc, because "which launch path" is not
+  ## knowable from an action: see the launch decision in ``runBuild``, which
+  ## is now taken BEFORE the monitor plan for exactly this reason.
+  ##
+  ## Both forms select the SAME depfile path and both produce the SAME
+  ## evidence — ``finishMonitor`` writes the canonical iomon that
+  ## ``foldMonitorDepFileEvidence`` reads, byte for byte what the CLI wrote
+  ## (IoMon-Decomposed-Host-API DH-4), so nothing downstream of
+  ## ``action.monitorDepfile`` can tell the two apart.
   result.action = action
   if action.dependencyPolicy.kind notin MonitorPolicyKinds:
     return
@@ -3170,7 +4537,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # nothing to gain from wrapping ``argv``. Their dependency evidence is the
   # statically declared inputs/outputs (and, for recognized/converter
   # policies, the post-build reports) — ``monitorEvidenceRequired`` already
-  # returns false for them because no RMDF is ever wired. ``builtinAction``
+  # returns false for them because no iomon is ever wired. ``builtinAction``
   # tags every such action with the default ``automaticMonitorGatheringPolicy``
   # (a ``MonitorPolicyKinds`` member), so without this guard a built-in would
   # incorrectly fall into the monitor wiring below and fail with a spurious
@@ -3180,7 +4547,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   if action.kind != bakProcess:
     return
   # Direct engine callers may provide a monitor depfile path for actions that
-  # produce RMDF evidence themselves. Preserve that prewired evidence path
+  # produce iomon evidence themselves. Preserve that prewired evidence path
   # instead of wrapping the command and overwriting it with monitor output.
   if action.monitorDepfile.len > 0:
     return
@@ -3211,10 +4578,28 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
         "automatic monitor dependency gathering requires an io-monitor driver"
       return
     let depfile = cacheRoot / "monitor-depfiles" /
-      (sanitizeActionId(action.id) & ".rdep")
+      (sanitizeActionId(action.id) & ".iomon")
     result.action.monitorDepfile = depfile
-    result.action.argv = @[monitorCli] & config.monitorCliArgs &
-      @["--depfile", depfile, "--"] & action.argv
+    if hostInProcess:
+      # HM-4 — the ENGINE is the host. The argv stays exactly what the recipe
+      # wrote, because io-mon spawns it directly; the wrapper below exists
+      # only to put a hosting process in between, and there no longer is one.
+      # ``monitorCliPath`` is still what gates monitoring on/off (an
+      # unconfigured driver still means "no monitor is wired"), so this branch
+      # changes WHO hosts and nothing about WHETHER an action is monitored —
+      # PROVIDED the launch site the caller had in mind actually hosts.
+      # Stripping the wrapper is half of a two-part handshake and this proc
+      # cannot check the other half, so the OTHER half is enforced at the
+      # launch site instead of being documented here: ``runBuild`` refuses a
+      # hosted plan that arrives at a launch path
+      # ``launchPathHostsMonitorInProcess`` does not cover, with
+      # ``monitorHostingRefusal``'s diagnostic. There is therefore no
+      # configuration in which this branch's unwrapped argv reaches a site
+      # that starts no host — it fails the action instead of running it.
+      result.hostInProcess = true
+    else:
+      result.action.argv = @[monitorCli] & config.monitorCliArgs &
+        @["--depfile", depfile, "--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
     # ``launchChildEnv`` (NOT here on ``result.action.env``). The seed
     # MUST NOT enter the action's fingerprint — the absolute path of
@@ -3358,6 +4743,55 @@ when defined(windows):
       return -1
     indices[signaled]
 
+type
+  ActionPathDeclaration* = enum
+    ## How one lowered action declared its ``PATH``, read back off the
+    ## ``BuildAction`` rather than off the lowering that produced it.
+    ##
+    ## Reading it back is the point. The lowering's own opinion is not
+    ## evidence — three sites held the opinion "an empty prefix falls
+    ## through to inheritance" while emitting an entry that did the
+    ## opposite. This classifies the ARTIFACT, so a census over it says
+    ## what the actions carry.
+    apdAbsent
+      ## No ``PATH`` entry and no ``PATH`` passthrough name. The launcher
+      ## falls back to ``getEnv("PATH")`` (see ``prependPathDirsToArgvEnv``
+      ## below), so the action inherits — silently, with nothing in the
+      ## key recording that it did.
+    apdInherited
+      ## ``PATH`` is named in ``envPassthrough``: the value is the
+      ## caller's, the name is keyed, the value is not.
+    apdHermetic
+      ## A non-empty ``PATH`` value that is NOT passthrough — composed
+      ## from solved-graph tool directories and keyed by value.
+    apdEmpty
+      ## ``PATH=`` with an empty value. The action runs with no ``PATH``.
+      ## Must never occur; see ``EnvironmentInheritanceCensus.emptyPathActions``.
+
+proc classifyActionPath*(action: BuildAction): ActionPathDeclaration =
+  ## Classify ``action``'s ``PATH`` declaration. Shared by the engine's
+  ## own census and by ``repro graph --view=env`` so the build header and
+  ## the graph instrument can never disagree about the same graph.
+  var pathValue = ""
+  var pathSeen = false
+  for entry in action.env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    if cmpIgnoreCase(entry[0 ..< eq], "PATH") == 0:
+      # Last-write-wins, matching ``prependPathDirsToArgvEnv``.
+      pathValue = entry[eq + 1 .. ^1]
+      pathSeen = true
+  var passthrough = false
+  for name in action.envPassthrough:
+    if cmpIgnoreCase(name, "PATH") == 0:
+      passthrough = true
+  if pathSeen and pathValue.len == 0:
+    return apdEmpty
+  if not pathSeen:
+    return if passthrough: apdInherited else: apdAbsent
+  if passthrough: apdInherited else: apdHermetic
+
 proc prependPathDirsToArgvEnv(env: seq[string];
                               binDirs: openArray[string]): seq[string] =
   ## Walk an argv-style ``KEY=VALUE`` env list, collapse any
@@ -3366,6 +4800,42 @@ proc prependPathDirsToArgvEnv(env: seq[string];
   ## spawn path (which carries env as ``seq[string]`` rather than a
   ## ``StringTableRef``) so the same M9.N Batch B behaviour applies
   ## to the daemon-backed launch as well as the bypass launch.
+  ##
+  ## ## AN ``action.env`` ``PATH`` REPLACES; IT DOES NOT MERGE
+  ##
+  ## The tail this proc appends after ``binDirs`` is ``pathValue`` — the
+  ## value the ACTION declared — whenever the action declared one, and
+  ## ``getEnv("PATH")`` only when it did not (the ``if pathSeen`` at the
+  ## bottom of the body). So:
+  ##
+  ##   * no ``PATH`` entry  -> the caller's ``$PATH`` is the tail;
+  ##   * ``PATH=<dirs>``    -> ``<dirs>`` is the tail, the caller's is gone;
+  ##   * ``PATH=``          -> the tail is EMPTY, and the child runs with
+  ##                           ``PATH=`` (or just ``binDirs``) — it does
+  ##                           NOT fall through to the caller's.
+  ##
+  ## The third row is worth stating because a lowering comment once
+  ## asserted the opposite ("the launcher layers ``action.env`` OVER the
+  ## inherited environment rather than replacing it") and emitted an
+  ## empty ``PATH`` on 1372 of this repository's 2753 process edges on
+  ## the strength of it. ``repro_cli_support.actionPathDecision`` is the
+  ## single place that can no longer produce that value.
+  ##
+  ## ## THE FIRST ROW IS NOW MOSTLY UNREACHABLE FROM THE LOWERING SITES
+  ##
+  ## The ``else: getEnv("PATH")`` fallback below is still correct and
+  ## still exercised — by any action that neither declares ``PATH`` nor
+  ## names it passthrough — but it is NOT how a lowered non-declaring
+  ## edge gets its ``PATH`` any more. ``actionPathDecision``'s inherited
+  ## branch names ``PATH`` in ``envPassthrough``, and ``launchChildEnv``
+  ## resolves value-less passthrough names out of the host BEFORE this
+  ## proc sees the list (the ``if action.envPassthrough.len > 0`` block
+  ## near the end of ``launchChildEnv``). By the time an inherited edge
+  ## reaches here the list already carries ``PATH=<host value>``, so
+  ## ``pathSeen`` is true and row two is what runs. Same bytes, same
+  ## launch-time read; different proc. Recorded because a comment in
+  ## this file citing a mechanism that no longer fires is exactly how
+  ## the empty-``PATH`` defect above shipped.
   let sep =
     when defined(windows): ";"
     else: ":"
@@ -3671,7 +5141,7 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
       if packageEnd < 0: normalized[packageStart .. ^1]
       else: normalized[packageStart ..< packageEnd]
     if packageName == "glibc" or packageName == "readline" or
-        packageName == "python3" or
+        packageName == "perl" or packageName == "python3" or
         packageName.startsWith("python3-"):
       return true
   const storePrefix = "/nix/store/"
@@ -3688,6 +5158,7 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
   let packageName = storeEntry[hashSeparator + 1 .. ^1]
   packageName == "glibc" or packageName.startsWith("glibc-") or
     packageName == "readline" or packageName.startsWith("readline-") or
+    packageName == "perl" or packageName.startsWith("perl-") or
     packageName == "python3" or packageName.startsWith("python3-")
 
 proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
@@ -3818,19 +5289,6 @@ proc applyCompilerSystemIncludeArgs*(argv: openArray[string];
   for i in base + 1 ..< argv.len:
     result.add(argv[i])
 
-proc sourcePerlModuleDirs(libDirs: openArray[string]): seq[string] =
-  ## A relocated source Perl keeps core modules under usr/lib/perl5, while
-  ## its compiled-in @INC still names the original host prefix.
-  var seen = initHashSet[string]()
-  const sourcePerlMarker = "/packages/source/perl/"
-  for libDir in libDirs:
-    if sourcePerlMarker notin libDir.replace('\\', '/'):
-      continue
-    let moduleDir = libDir / "perl5"
-    if moduleDir notin seen:
-      seen.incl(moduleDir)
-      result.add(moduleDir)
-
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
   ## StringTable-style env mutator. Used by the bypass-spawn path. Each
@@ -3882,7 +5340,6 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   # libc into the action process can cross GLIBC_PRIVATE ABIs.
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
-  prependEnvDirs(env, "PERL5LIB", sourcePerlModuleDirs(paths.libDirs))
   prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     # macOS' dynamic loader ignores LD_LIBRARY_PATH; DYLD_LIBRARY_PATH is the
@@ -3929,8 +5386,6 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
-  result = prependEnvDirsToArgvEnv(result, "PERL5LIB",
-    sourcePerlModuleDirs(paths.libDirs))
   result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", runtimeLibDirs)
@@ -4209,12 +5664,74 @@ proc launchChildEnv(action: BuildAction;
   ## unmanaged, outer measures the whole tree" model.
   ##
   ## The RunQuota process launcher layers these entries over the inherited
-  ## environment, so ``PATH`` and other host values survive. The value
+  ## environment, so a host value the action does not itself declare
+  ## survives. A value it DOES declare replaces the inherited one — for
+  ## ``PATH`` that is spelled out in ``prependPathDirsToArgvEnv``, and it
+  ## is why an edge that declares no tools must still be given a ``PATH``
+  ## it can use rather than an empty one. The value here
   ## is constant, so it does not perturb the action-cache fingerprint, and is
   ## inert for the ~99% of actions (plain ``nim c`` compiles) whose children
   ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
   ## after).
   result = @["REPROBUILD_NO_RUNQUOTA=1", "IO_MON_MUTE=1"]
+  # In-Process-Monitor-Hosting P6 — **``PWD`` is the action's working
+  # directory, on every launch path**, because otherwise the LAUNCHER's
+  # working directory leaks into the ACTION's dependency evidence.
+  #
+  # WHAT WAS MEASURED, and it is not what P6 guessed. The wrapped arm
+  # recorded the run root's whole ancestor chain in ``monitorProbes``
+  # (``/tmp``, each intermediate directory, the run root, the work root) and
+  # the hosted arm did not. It is NOT a directory-creation walk by the
+  # engine or by io-mon: ``createDir(depDest.parentDir)`` in
+  # ``startMonitorHost``, and io-mon's ``createLocalTempDir`` /
+  # ``ensureParentDir``, all run in a process that is OUTSIDE the monitored
+  # tree on BOTH paths, so none of them can be recorded at all (a monitored
+  # ``repro internal io monitor`` run over a one-``open`` C binary records
+  # zero probes, and with the shm set disabled every chain probe carries the
+  # monitored ROOT's pid, not the host's).
+  #
+  # The walk is the action's OWN root process — any POSIX shell, including
+  # the Nix ``gcc`` wrapper script — validating an inherited ``PWD`` that
+  # names its own working directory: bash resolves that path component by
+  # component (one stat per ancestor ⇒ one probe per ancestor). Two
+  # controls, both run: (a) an action whose root is a plain C binary records
+  # NO probes on either path, and (b) the HOSTED arm reproduces the whole
+  # chain, entry for entry, as soon as the ENGINE is invoked from the
+  # action's own work directory. What differed between the arms was never
+  # the monitor — it was ``PWD``: the wrapped path interposes
+  # ``umaskWrappedArgv``'s ``/bin/sh -c 'umask 022 && …'`` ABOVE the monitor
+  # and that shell exports ``PWD=<action cwd>``, while the hosted path has no
+  # wrapper shell and the child inherited the ENGINE's ``PWD``.
+  #
+  # So the same action recorded different evidence depending on which
+  # directory the user happened to run ``repro build`` from — a launcher
+  # fact reaching a cache-invalidation input — and the two launch paths
+  # disagreed for the same reason. Handing every action a ``PWD`` that
+  # agrees with its own ``cwd`` fixes both: it is what a POSIX shell would
+  # have set anyway, it is a function of the action rather than of the
+  # invocation, and it makes the hosted and wrapped forms produce the same
+  # probes. Pinned by ``evidence is identical across launch paths`` in
+  # ``tests/integration/t_every_launch_path_is_monitored.nim``, whose
+  # fixture now PRODUCES the walk instead of comparing two empty sets.
+  #
+  # Only when the action names a ``cwd``: with none, the child's working
+  # directory IS the engine's, so the inherited ``PWD`` already agrees with
+  # it and there is no chdir for a shell to notice. An explicit
+  # ``action.env`` entry still wins — it is appended after this one.
+  #
+  # ``OLDPWD`` travels with it, and for the same reason rather than for
+  # tidiness: a shell validates that one too, so the directory the engine's
+  # own parent shell happened to come FROM was landing in the action's probe
+  # set (measured: one ``prExistingOther`` for it, which disappears when
+  # ``OLDPWD`` is unset). It cannot be unset from here — this list is layered
+  # OVER the inherited environment, so there is no removal channel — so it is
+  # pointed at the same directory as ``PWD``, which costs the action nothing
+  # (``cd -`` returns where it already is) and puts no launcher path in the
+  # evidence.
+  if action.cwd.len > 0:
+    let actionPwd = absolutePath(action.cwd)
+    result.add("PWD=" & actionPwd)
+    result.add("OLDPWD=" & actionPwd)
   # M9.R.13c.2 — **shim-library env seed**. Inject
   # ``REPRO_MONITOR_SHIM_LIB`` at launch time so the daemon-spawned
   # ``repro internal io monitor`` subprocess deterministically locates
@@ -4229,9 +5746,42 @@ proc launchChildEnv(action: BuildAction;
   # An explicit ``action.env`` override wins because the action env is
   # appended after the seed and the process launcher's overlay is
   # last-write-wins.
-  let shimLib = findShimLibrary()
+  #
+  # NOT SEEDED when the edge's policy sets ``suppressMonitorShimSeed``.
+  # Suppressing the monitor WRAP is not sufficient on its own to keep an action
+  # shim-free: io-mon's preload runtime propagates itself to child processes by
+  # prepending the library named in ``REPRO_MONITOR_SHIM_LIB`` to their
+  # ``LD_PRELOAD``. An action that builds its own interposer from that same
+  # runtime therefore re-injects OUR shim into its children even though the
+  # engine never wrapped it — which is exactly how a self-interposing test ends
+  # up with two interposers again and livelocks.
+  #
+  # Measured: with the wrap suppressed but the seed still present, the
+  # stackable-hooks fixture came up with
+  # ``LD_PRELOAD=<monitor shim>:<test shim>`` and spun at 92% CPU. The two
+  # must be gated together — a policy that says "do not monitor this action"
+  # has to also mean "do not hand this action the means to monitor itself".
+  #
+  # The gate is an explicit per-edge OPT-OUT rather than "any kind outside
+  # ``MonitorPolicyKinds``". Several non-monitored kinds — ``dgRecognizedFormat``
+  # (every ``makeDepfilePolicy`` edge), ``dgPostBuildConverter`` — are seeded
+  # today, and withdrawing the variable from all of them would be a silent
+  # behaviour change across the whole depfile population. Only an edge that
+  # asks loses it; the default is false.
+  let shimLib =
+    if action.dependencyPolicy.suppressMonitorShimSeed: ""
+    else: findShimLibrary()
   if shimLib.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)
+    # Same event-interest as the hosted path (`monitorHostRequest`): a build edge
+    # wants file/process/library deps, not the clock/env/sysctl/entropy or IPC a
+    # tool incidentally touches, so io-mon skips those hooks unless the edge opts
+    # in. On this direct-spawn path the shim reads it from the action's env rather
+    # than io-mon's `childEnv`.
+    var interest = {ecFileDeps, ecProcessTree, ecLibraryLoads}
+    if action.dependencyPolicy.captureNonDeterminism: interest.incl ecNonDeterminism
+    if action.dependencyPolicy.captureIpc: interest.incl ecIpc
+    result.add("REPRO_MONITOR_INTEREST=" & interestToTokens(interest))
   # macOS monitoring needs NO env seed: the io-mon shim always runs BOTH
   # monitoring mechanisms (interpose + body-patch) by default — the
   # user-facing ``IO_MON_MACOS_BACKEND`` selector was removed (see
@@ -4246,6 +5796,45 @@ proc launchChildEnv(action: BuildAction;
   # those are for local A/B diagnosis, not something the engine seeds.)
   for entry in action.env:
     result.add(entry)
+  # BuildXL `PipEnvironment.GetEffectiveEnvironmentVariables`
+  # (`Public/Src/Engine/ProcessPipExecutor/PipEnvironment.cs:116-152`)
+  # resolves every passthrough variable that carries NO declared value
+  # by NAME out of the build engine's own process environment, and
+  # silently drops the ones the host does not have. That is what this
+  # does, and it is the half of the passthrough contract that lives at
+  # LAUNCH time rather than at key time:
+  #
+  #   * the NAME was recorded in the weak fingerprint by
+  #     `keyedOnActionEnvironment` when the graph was built;
+  #   * the VALUE is read HERE, from the host, per launch.
+  #
+  # A variable the action already declares is left alone — the declared
+  # value wins, exactly as in BuildXL's layering, where declared values
+  # are overridden onto the base set before the by-name passthrough
+  # resolution runs and only value-less passthroughs reach it.
+  #
+  # Today this is very nearly a no-op: the RunQuota launcher layers
+  # these entries OVER the inherited environment, so an undeclared
+  # passthrough already reaches the child by plain inheritance. It is
+  # written explicitly anyway because inheritance is the channel
+  # Reprobuild does not control and does not record, and when that
+  # channel is closed this is the mechanism that keeps a declared
+  # passthrough working.
+  if action.envPassthrough.len > 0:
+    var declaredNames = initHashSet[string]()
+    for entry in action.env:
+      let eq = entry.find('=')
+      if eq > 0:
+        declaredNames.incl(entry[0 ..< eq])
+    var emitted = initHashSet[string]()
+    for name in action.envPassthrough:
+      if name.len == 0 or declaredNames.contains(name) or
+          emitted.contains(name):
+        continue
+      emitted.incl(name)
+      if not existsEnv(name):
+        continue
+      result.add(name & "=" & getEnv(name))
 
 proc bypassActionLogDir(cacheRoot: string): string =
   ## **M1 milestone** (Windows-bypass-stdio-capture). Per-action log
@@ -4392,10 +5981,20 @@ proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
     for entry in argv: result.add(entry)
 
 proc preparedRunQuotaCommand(action: BuildAction;
-                             config: BuildEngineConfig): ReproCommandSpec =
+                             config: BuildEngineConfig;
+                             shellUmaskWrap = true): ReproCommandSpec =
   ## Build one argv/env contract for direct, helper, and inline launches.
   ## Sharing this prevents bypass execution from drifting away from normal
   ## RunQuota execution as tool-path and compiler flags evolve.
+  ##
+  ## In-Process-Monitor-Hosting HM-4 — ``shellUmaskWrap = false`` is the
+  ## in-process host's form. The 0022 mask still applies; it is set around the
+  ## spawn (``beginMonitorSpawnContext``) instead of by a wrapping
+  ## ``/bin/sh -c 'umask 022 && …'``. That matters for EVIDENCE and not for
+  ## tidiness: with the engine hosting, a wrapper shell would itself be inside
+  ## the monitored tree, and its own reads and probes would land in the
+  ## action's dependency set — where today the shell sits outside the monitor,
+  ## one process above it.
   when defined(macosx):
     if action.monitorDepfile.len > 0 and resolveNonSipShell().len == 0:
       raiseEngine("SIP-safe monitored launch requires a non-SIP shell; " &
@@ -4413,11 +6012,786 @@ proc preparedRunQuotaCommand(action: BuildAction;
     includePaths.systemDirs)
   let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
   ReproCommandSpec(
-    argv: umaskWrappedArgv(deferred.argv),
+    argv: (if shellUmaskWrap: umaskWrappedArgv(deferred.argv)
+           else: deferred.argv),
     cwd: action.cwd,
     env: deferred.env,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
+
+# ---------------------------------------------------------------------------
+# In-Process-Monitor-Hosting HM-4 — the engine hosts io-mon's consumer itself.
+#
+# WHAT THIS IS. A monitored action is normally launched as
+# ``<repro> internal io monitor --depfile <f> -- <argv>``: the engine spawns a
+# SECOND ``repro`` process whose only job is to be io-mon's host, and that
+# process spawns the real command. When ``BuildEngineConfig.monitorHosting``
+# is above ``mhmNever``, the launch paths the engine spawns skip that: the engine drives
+# io-mon's decomposed host API directly (``startMonitor`` -> ``pollMonitor`` ->
+# ``finishMonitor``, IoMon-Decomposed-Host-API DH-2) and the monitored tree's
+# root is a direct child of the engine.
+#
+# IT IS OFF BY DEFAULT, on measurement, and the measurement is at the bottom of
+# this block. Everything below describes what happens when it is ON.
+#
+# WHICH PATHS, AND WHY NOT ALL FOUR. io-mon OWNS the spawn — DH-4 says plainly
+# that "spawn supplied by the caller is not delivered and should not be
+# expected", because a host that owned the spawn would be back to the §4.1
+# hand-rolled-host hazard the whole decomposition exists to close. So a launch
+# path can host the monitor only if the ENGINE is the process that spawns:
+#
+#   * L1 bypass — the engine spawns. HOSTED.
+#   * L2 RunQuota helper — the engine spawns ``repro
+#     __repro-runquota-helper …`` and THAT process spawns the action, two
+#     processes deep. There is no spawn here to hand to io-mon, so this path
+#     keeps the CLI wrapper. ``repro internal io monitor`` is therefore still
+#     a PRODUCTION path and not only a debugging entry point.
+#   * L3 / L3b inline RunQuota — the engine spawns, but not directly:
+#     ``offerWithRunQuotaBatch`` and ``startGrantedWithRunQuota`` spawn the
+#     child THEMSELVES as part of binding it to the granted lease
+#     (``lease.markRunning(childProcessId, processGroupId, …)``). Hosting
+#     there needs a RunQuota lease that can adopt a child the caller already
+#     spawned, which is a change to the RunQuota adapter's contract and not to
+#     this file. They keep the CLI wrapper for now.
+#
+# A path that keeps the wrapper is NOT degraded — it is monitored exactly as
+# it was, by the same io-mon code, and ``evidence is identical across launch
+# paths`` in tests/integration/t_every_launch_path_is_monitored.nim is what
+# holds the two forms to the same evidence.
+#
+# AND THE LIST ABOVE IS NOT PROSE — it is ``launchPathHostsMonitorInProcess``,
+# an exhaustive ``case`` over ``MonitorLaunchPath`` that the hosting decision
+# in ``runBuild`` reads and that a new launch path does not compile without.
+# It used to be a bare ``bypassRunQuota`` conjunct on the decision line, with
+# this comment carrying the reasoning, and that arrangement had a dormant
+# cardinal-sin hazard in it: the inline launch site is staged and ``continue``s
+# before the branch that consults ``plan.hostInProcess``, so widening the
+# conjunct would have stripped the wrapper from an inline action that no site
+# was going to host — an unmonitored, successful, publishing action with an
+# empty dependency set and no diagnostic. In-Process-Monitor-Hosting P3 turned
+# that into a REFUSAL: ``runBuild`` fails any action whose plan says hosted and
+# whose launch path is not L1, with ``monitorHostingRefusal``'s sentence. The
+# unmonitored state is no longer reachable by widening a boolean; it takes a
+# launch site that actually starts a host.
+#
+# WHEN THE SCHEDULER FINISHES A MONITOR: on the poll pass that first observes
+# the root's exit, for EVERY monitor that has exited, not only the one the
+# scheduler goes on to reap. This is a deliberate choice with an evidence
+# consequence, measured by DH-4 (item 3 of its landing record): the §4.1
+# detached-descendant grace window OPENS when ``finishMonitor`` runs, so a
+# monitor left sitting in the queue grades a descendant that dies in the
+# interval ``mcComplete`` where the reference (batch) form grades it
+# ``mcIncomplete`` — on identical inputs, with nothing wrong. Finishing on the
+# observing pass pins the window's opening to root-exit DETECTION, so it is
+# one poll interval (~1 ms) after the real exit and does not vary with how
+# many other actions happen to be in flight. What it costs: a monitor whose
+# descendants are still alive blocks this loop for the grace window (500 ms by
+# default) where the spawned form blocked a separate process. That
+# serialisation is real, and it is the price of the evidence agreeing with the
+# reference rather than with the scheduler's queue depth.
+#
+# AND THIS IS WHY ``BuildEngineConfig.monitorHosting`` DEFAULTS TO ``mhmNever``.
+# The case for hosting is latency: one process spawn per monitored action
+# removed. That spawn IS removed and it IS worth something — but the monitor's
+# end-of-action work moves with it, out of N concurrent monitor processes and
+# into this one loop, where it is paid SERIALLY. Which of the two dominates is
+# a question about the workload, and it was measured rather than argued.
+#
+# Linux, 32 cores, ~850 live processes, hosted and wrapped arms compiled from
+# the same source and run INTERLEAVED so machine drift cancels. Milliseconds
+# per action, 3-5 samples per cell, spread shown:
+#
+#   40 trivial actions           hosted        wrapped
+#     parallelism 1              26-46         58-64      hosting ~2x FASTER
+#     parallelism 4              15-27         18-24      a wash
+#
+#   120 trivial actions          hosted        wrapped
+#     parallelism 8 (default)    14-18         6-11       hosting ~2x SLOWER
+#     parallelism 16             11-26         5-10       hosting ~2-3x SLOWER
+#     parallelism 32             13-26         4-11       hosting ~2-3x SLOWER
+#
+#   80 actions, parallelism 8, per-action work varied:
+#     ~0 ms of work              15-33         8-13       hosting ~2-3x SLOWER
+#     ~100 ms of work            26-35         21-23      hosting ~20% slower
+#     ~500 ms of work            76-82         72-81      indistinguishable
+#
+# The mechanism is arithmetic. `startMonitor` is cheap; `finishMonitor` costs
+# ~14 ms per action here, and a hosted build pays it one action at a time —
+# 120 actions x ~14 ms is the ~1.7 s the parallelism-8 row shows, and it does
+# not improve with more parallelism because nothing about it is parallel. The
+# wrapped form pays the same ~14 ms inside N concurrent processes. So hosting
+# wins whenever there is nothing to overlap (parallelism 1), and loses whenever
+# an action is cheaper than `parallelism x 14 ms` of real work.
+#
+# The absolute numbers belong to one machine at one moment and are NOT a
+# specification; the SHAPE is the finding, and the shape is that the default
+# parallelism is 8 and typical actions are cheaper than ~112 ms of work.
+#
+# WHAT WOULD CHANGE THE ANSWER: `finishMonitor` leaving the scheduler's serial
+# path. Its cost is already down an order of magnitude from where this
+# milestone started — the io-mon revision pinned in flake.nix cut the §4.1
+# descendant sweep from ~105 ms to ~6 ms, which is what turned a hard ceiling
+# of 5-6 actions/second into the ~70/second measured above. That was enough to
+# make hosting viable and not enough to make it preferable. An async flush, or
+# a finish that does not block the poll loop, is the remaining item; re-measure
+# at the parallelism the build actually uses before flipping the default.
+#
+# ---------------------------------------------------------------------------
+# In-Process-Monitor-Hosting HM-5 — the depfile flush, and WHAT IT COULD AND
+# COULD NOT MOVE.
+#
+# HM-5 asks for the `.iomon` to be written asynchronously and atomically so the
+# scheduler can hand an action's evidence onward before the file lands. Both
+# halves of its premise turned out to be wrong about this code, and both
+# corrections are load-bearing:
+#
+# 1. "THE `.iomon` IS A WRITE-ONLY ARTEFACT." It is not. `readMonitorDepFile`
+#    genuinely has zero call sites, but the engine reads the file anyway,
+#    through `foldMonitorDepFileEvidence` — a hand-rolled iomon reader written
+#    so the depfile OBJECT is not retained. Evidence collection therefore had a
+#    hard dependency on the file existing by the time the action was reaped, and
+#    an async flush alone would have raced it into `mrMissingFile`. The fix is
+#    `foldMonitorRecordsEvidence`: on the hosted path the engine folds the
+#    records `finishMonitor` already returned and never reads the file.
+#
+# 2. "THE FLUSH IS THE ENGINE'S TO MOVE." It is not. io-mon owns the canonical
+#    write inside `finishMonitor` (`collectMonitorEvidence` -> `mergeFragments`
+#    -> `writeCanonicalInPlace`) and exposes no way to obtain the records
+#    without it. What the engine can decide is WHERE that write goes and WHEN
+#    it becomes the published depfile — so io-mon is pointed at a scratch
+#    sibling of the destination and the flush worker publishes it with a
+#    rename.
+#
+# MEASURED (this machine, io-mon 30e5499, under load; absolute numbers are not
+# a specification, the ratios are the finding). Per monitored action:
+#
+#   depfile size            encode+write   of which real I/O   read-back+decode
+#   97 217 records / 18 MB  ~584 ms        ~114 ms             ~193 ms
+#      140 records / 25 KB  ~1.1 ms        negligible          ~0.4 ms
+#
+# The 97k-record row is a real `nim c` provider compile out of this repo's own
+# cache; the 140-record row is a trivial monitored action, which is the regime
+# HM-4's enable/disable measurement ran in.
+#
+# SO WHAT HM-5 CHANGES, exactly:
+#   * the ~193 ms decode leaves the serial path entirely (correction 1);
+#   * the publication leaves it (this milestone's mechanism);
+#   * the ~584 ms encode+write DOES NOT, because it is io-mon's.
+#
+# AND WHAT IT DOES NOT CHANGE: HM-4's verdict. In HM-4's regime the whole
+# encode+write is ~1.1 ms of a ~14 ms `finishMonitor`, i.e. under a tenth, and
+# the decode is ~0.4 ms. Removing all of it still leaves ~12 ms paid serially
+# per action, so hosting is still slower than the wrapper at parallelism 8.
+# `monitorHosting` stays `mhmNever` by default.
+#
+# THAT WAS ALSO MEASURED END TO END rather than only argued from the parts: 60
+# trivial actions at parallelism 8, hosted and wrapped arms interleaved, three
+# rounds, before and after this milestone. The HOSTED/WRAPPED RATIO is the
+# figure to read — the machine was at load average ~67 throughout (other work
+# on the same host), so the absolute numbers move by 2x between rounds while
+# the ratio does not. Before: 1.74, 1.25, 2.04. After: 2.08, 1.29, 1.54.
+# Indistinguishable. Re-measure on a quiet machine before HM-6 concludes
+# anything from the absolute numbers; the ratio is what carries.
+#
+# WHAT WOULD ACTUALLY MOVE THE NUMBER, for whoever takes HM-6: one field on
+# io-mon's `FsSnoopRequest` — "produce the evidence but do not write the file".
+# `writeCanonicalInPlace` is two `encodeFrame` passes over every record and it
+# is four fifths of the write; skipping it, with the engine already folding
+# from records and publishing asynchronously, would take a real action's
+# serial wrap-up from ~780 ms to the merge alone. That is an io-mon change, so
+# it is named here rather than worked around: pointing io-mon at `/dev/null`
+# and re-encoding on the flush worker was measured and rejected — it saves the
+# ~114 ms of I/O and spends ~470 ms of duplicated CPU per action to do it.
+# ---------------------------------------------------------------------------
+
+const InProcessMonitorHostSupported* = defined(linux) or defined(macosx)
+  ## Windows is deliberately excluded. ``pollMonitor`` BLOCKS on that arm
+  ## (DH-2: ``runWithMonitorShim`` spawns and waits in one call, so the first
+  ## poll performs the whole run), and an N-way poll loop over blocking polls
+  ## executes serially — hosting in-process there would turn a parallel build
+  ## into a sequential one. The wrapper stays on Windows until
+  ## nim-stackable-hooks grows a non-blocking spawn.
+
+func launchPathHostsMonitorInProcess*(path: MonitorLaunchPath): bool =
+  ## THE ONE TABLE that says which launch paths the engine can host io-mon
+  ## on, and the only thing the hosting decision in ``runBuild`` reads.
+  ##
+  ## Exhaustive ``case``, no ``else``: a launch path added to
+  ## ``MonitorLaunchPath`` does not compile until somebody classifies it,
+  ## which is the point — the old shape let a launch path exist without
+  ## anyone deciding whether it hosts.
+  ##
+  ## WIDENING A ROW HERE DOES NOT ENABLE HOSTING ON THAT PATH. The refusal in
+  ## ``runBuild`` is keyed on the launch variables that select the spawn, not
+  ## on this table, so a row flipped to ``true`` without teaching the
+  ## corresponding launch site to start a host makes the action FAIL with
+  ## ``monitorHostingRefusal``'s sentence instead of running unmonitored. See
+  ## In-Process-Monitor-Hosting P4 for what the inline row actually needs.
+  case path
+  of mlpBypassRunQuota: true
+  of mlpInlineRunQuota: false
+  of mlpRunQuotaHelper: false
+
+func monitorHostingRequested*(mode: MonitorHostingMode;
+                              path: MonitorLaunchPath): bool =
+  ## Whether ``mode`` asks for a hosted plan on ``path``. ``mhmRequired``
+  ## says yes on every path ON PURPOSE: that is what carries an impossible
+  ## request as far as the launch site, where it is refused with a
+  ## diagnostic, instead of being silently downgraded to the wrapper where
+  ## no test could ever see the difference.
+  case mode
+  of mhmNever: false
+  of mhmWhereSupported: launchPathHostsMonitorInProcess(path)
+  of mhmRequired: true
+
+func monitorHostingRefusal*(path: MonitorLaunchPath): string =
+  ## The diagnostic an action fails with when its monitor plan says the
+  ## engine hosts io-mon and the launch site about to start it does not.
+  ## Empty for a path that does host, so
+  ## ``monitorHostingRefusal(p).len > 0`` and
+  ## ``not launchPathHostsMonitorInProcess(p)`` are the same statement.
+  const Why =
+    "; refusing to launch it. A hosted plan carries the recipe's own argv " &
+    "with NO `repro internal io monitor` wrapper, so an action that reaches " &
+    "a launch site which starts no host runs completely unmonitored: no " &
+    "iomon, an empty dependency set, and a successful, cache-publishing " &
+    "action that reports nothing wrong. Teaching this path to host needs a " &
+    "RunQuota lease that can adopt an already-spawned child " &
+    "(In-Process-Monitor-Hosting P4), not a wider hosting decision."
+  case path
+  of mlpBypassRunQuota:
+    ""
+  of mlpInlineRunQuota:
+    "in-process monitor hosting was requested for an action on the inline " &
+    "RunQuota launch path, which binds the child to its granted lease by " &
+    "spawning it itself" & Why
+  of mlpRunQuotaHelper:
+    "in-process monitor hosting was requested for an action on the RunQuota " &
+    "helper launch path, which starts the action from a separate " &
+    "`repro __repro-runquota-helper` process" & Why
+
+const MonitorHostingEnvVar* = "REPROBUILD_MONITOR_HOSTING"
+  ## The environment spelling of ``--monitor-hosting``
+  ## (In-Process-Monitor-Hosting P1, option (b)). Same vocabulary, same
+  ## parser, same default — see ``configuredMonitorHostingMode``.
+
+func parseMonitorHostingMode*(value, source: string): MonitorHostingMode =
+  ## In-Process-Monitor-Hosting P1(b) — the OPERATOR SURFACE for
+  ## ``BuildEngineConfig.monitorHosting``.
+  ##
+  ## WHY IT LIVES HERE rather than beside the CLI's other flag parsers. The
+  ## default this decodes is a MEASURED verdict, not a UI preference, and
+  ## ``test_umask_wrap_both_spawn_paths``'s "in-process hosting is off in
+  ## every shipped configuration" pins it by scanning the shipped sources
+  ## for the field name. Keeping the ``mhm*`` literals in the module that
+  ## DECLARES them — the one module the scan exempts, because the first two
+  ## checks of that case pin its only construction site at RUNTIME instead —
+  ## means the CLI never has to spell an enabling mode to offer the flag.
+  ## ``--monitor-hosting`` is therefore plumbing, not a shipped enable, and
+  ## the pin can say so precisely.
+  ##
+  ## ``source`` is the spelling to blame in the diagnostic, exactly as
+  ## ``parseBuildDaemonMode(value, source)`` uses it: the flag on the command
+  ## line, the variable name in the environment.
+  case value.toLowerAscii()
+  of "never", "off":
+    mhmNever
+  of "where-supported", "wheresupported", "auto":
+    mhmWhereSupported
+  of "required", "require":
+    mhmRequired
+  else:
+    raise newException(ValueError,
+      "unsupported " & source & "=" & value &
+        " (expected never, where-supported, or required)")
+
+proc configuredMonitorHostingMode*(): MonitorHostingMode =
+  ## The environment default for ``--monitor-hosting``. ``mhmNever`` when
+  ## unset, which is the same value ``BuildEngineConfig``'s zero value gives,
+  ## so an operator who never heard of this knob gets byte-identical
+  ## behaviour to the pre-P1 engine.
+  let configured = getEnv(MonitorHostingEnvVar, "")
+  if configured.len == 0:
+    return mhmNever
+  parseMonitorHostingMode(configured, MonitorHostingEnvVar)
+
+type
+  MonitorHostRecord = object
+    ## Per-slot bookkeeping for one hosted monitor. Everything here is plain
+    ## data; the ``MonitorHandle`` itself lives in a parallel ``seq`` because
+    ## it is non-copyable and this record is not.
+    inUse: bool
+    finished: bool
+    handleLive: bool
+      ## This slot's ``MonitorHandle`` still owns a consumer and a monitored
+      ## tree — i.e. it has NOT been moved into ``finishMonitor`` and has not
+      ## been dropped.
+      ##
+      ## Tracked separately from ``finished`` because the two come apart on
+      ## the failure paths: ``pollMonitor`` raising marks the slot finished
+      ## WITHOUT consuming the handle, and so does ``rootPid`` raising after a
+      ## successful ``startMonitor``. Keying teardown off ``finished`` would
+      ## then free a slot whose handle is still live, and the next action to
+      ## recycle that slot would assign over it — running io-mon's drop
+      ## teardown, which WAITS for a monitored root nobody has killed. That is
+      ## a build that stops making progress, so the invariant "a slot is only
+      ## released once its handle is dead" is maintained explicitly here.
+    failure: string
+    exitCode: int
+    rootPid: int
+    stdoutPath: string
+    stderrPath: string
+    depTempPath: string
+      ## HM-5 — where io-mon was told to write this action's canonical iomon: a
+      ## scratch sibling of ``depDestPath``, never the destination itself and
+      ## never ``getTempDir()``. See ``monitorFlushTempPath``.
+    depDestPath: string
+      ## ``action.monitorDepfile`` — the published path. Nothing writes it
+      ## directly on this path; the flush worker renames ``depTempPath`` onto
+      ## it, which is the only way it ever appears or changes.
+    records: seq[MonitorRecord]
+      ## The canonical records ``finishMonitor`` returned, held only until the
+      ## scheduler has folded them into evidence and dropped them. This is the
+      ## engine's evidence source on the hosted path — see
+      ## ``foldMonitorRecordsEvidence`` for why the file cannot be.
+
+  MonitorHostPool = object
+    ## The scheduler's in-flight monitors.
+    ##
+    ## A ``seq[MonitorHandle]`` is legal and a copy out of one is not: DH-2
+    ## makes ``=copy`` a compile error so that "two owners of one consumer"
+    ## cannot be written down, and that propagates through ``seq``. Every
+    ## access below therefore either indexes in place or ``move``s out. Slots
+    ## are recycled but NEVER deleted — ``seq.delete`` shifts elements by
+    ## assignment, which is exactly the copy the type refuses.
+    handles: seq[MonitorHandle]
+    records: seq[MonitorHostRecord]
+    flushNonce: int
+      ## HM-5 — uniquifies the scratch file each action's depfile is written
+      ## to. A slot index would not: slots are RECYCLED, and a recycled slot
+      ## can be handed to the next action while the previous action's
+      ## publication is still in flight, which is exactly the overlap this
+      ## milestone exists to create.
+
+proc allocMonitorHostSlot(pool: var MonitorHostPool): int =
+  for i in 0 ..< pool.records.len:
+    if not pool.records[i].inUse:
+      pool.records[i] = MonitorHostRecord(inUse: true)
+      return i
+  pool.handles.add(MonitorHandle())
+  pool.records.add(MonitorHostRecord(inUse: true))
+  pool.records.len - 1
+
+proc monitorHostRequest(action: BuildAction;
+                        command: ReproCommandSpec;
+                        depFilePath: string): FsSnoopRequest =
+  ## Project the ONE argv+env contract every launch path shares onto io-mon's
+  ## request. Both sides layer over the hosting process's own environment
+  ## (``ReproCommandSpec.env`` through RunQuota's process backend,
+  ## ``FsSnoopRequest.env`` through io-mon's ``childEnv``), so the monitored
+  ## child sees the same variables it saw when a second ``repro`` process was
+  ## in between — which is what makes the two hosting forms comparable at all.
+  ##
+  ## ``depFilePath`` is the caller's, not ``action.monitorDepfile``. Since HM-5
+  ## the hosted path hands io-mon a SCRATCH sibling of the real depfile and
+  ## publishes it with a rename, so io-mon's write — which it owns, and which
+  ## no request field can switch off — never lands on the path anything else
+  ## reads. Passing it explicitly is what keeps that decision at the one call
+  ## site that makes it, instead of leaving a second proc quietly able to
+  ## write the destination in place.
+  # A build edge depends on the files it reads, the binaries it launches and the
+  # libraries they load — not on the clock/env/sysctl/entropy or IPC peers a tool
+  # incidentally touches. Ask io-mon for those three categories only, so it skips
+  # installing/recording the non-determinism + IPC observations it would
+  # otherwise spend resources on (io-mon/docs/contributors/event-interest-filter.md).
+  # An edge that genuinely depends on such an input opts the category back in via
+  # its dependency policy.
+  var interest = {ecFileDeps, ecProcessTree, ecLibraryLoads}
+  if action.dependencyPolicy.captureNonDeterminism: interest.incl ecNonDeterminism
+  if action.dependencyPolicy.captureIpc: interest.incl ecIpc
+  result = FsSnoopRequest(
+    command: command.argv,
+    depFilePath: depFilePath,
+    cwd: command.cwd,
+    streamMode: fsoNone,
+    interest: interest,
+    passthroughChildStdout: true,
+    passthroughChildStderr: true)
+  for entry in command.env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    result.env.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+
+when defined(posix):
+  type MonitorSpawnContext = object
+    savedIn: cint
+    savedOut: cint
+    savedErr: cint
+    nullFile: File
+    outFile: File
+    errFile: File
+    savedMask: Mode
+    active: bool
+
+  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
+    ## Re-establish, across io-mon's spawn, the three things the retired
+    ## ``/bin/sh -c 'umask 022 && <repro> internal io monitor …'`` wrapper and
+    ## RunQuota's process backend used to provide for free.
+    ##
+    ## STDIO. io-mon spawns with ``poParentStreams``, so the monitored child
+    ## inherits THIS process's descriptors 0, 1 and 2 — for the engine, the
+    ## user's terminal, not a per-action capture. Pointing 1 and 2 at two
+    ## per-action files across the spawn gives the engine back separate
+    ## ``stdout`` and ``stderr``, and does it WITHOUT the monitored tree
+    ## opening anything: the child inherits descriptors that are already open,
+    ## so no ``open`` of a log path enters its dependency evidence. (A shell
+    ## redirect inside the monitored command would have put both log paths
+    ## into ``monitorWrites`` — which is why this is done here and not there.)
+    ##
+    ## STDIN, and it is descriptor 0 that makes this a correctness fix rather
+    ## than a capture convenience. EVERY other launch path gives the child
+    ## ``/dev/null`` on descriptor 0 — RunQuota's POSIX backend opens it
+    ## explicitly before ``execvp`` (``runquota_process.nim``), so an action
+    ## that reads stdin sees immediate EOF. ``poParentStreams`` hands the child
+    ## the ENGINE's stdin instead, which in a normal ``repro build`` is the
+    ## user's terminal: a monitored action that reads stdin would block the
+    ## build waiting for a keystroke, or worse, eat one. Redirecting it here
+    ## makes the hosted path answer EOF like every other path.
+    ##
+    ## UMASK. ``umaskWrappedArgv`` (M9.R.36.3) pins every spawned tool to the
+    ## canonical 0022 mask by wrapping the argv in a shell. A hosted action has
+    ## no wrapper shell to carry it, and monitoring one would add the shell's
+    ## own reads to the action's evidence, so the mask is set here and restored
+    ## immediately; a child inherits it across ``fork``.
+    ##
+    ## SAFE BECAUSE THE SCHEDULER IS SINGLE-THREADED, AND BECAUSE THE ONLY
+    ## OTHER THREADS OPEN NOTHING. The engine runs N concurrent child
+    ## PROCESSES from one poll loop, not N threads, so no other SCHEDULER code
+    ## can observe the window between this call and
+    ## ``endMonitorSpawnContext``.
+    ##
+    ## The qualification is Engine-Threadpool TP-1's, and the previous version
+    ## of this comment — "``createThread`` has zero occurrences in this
+    ## library" — was already wrong when it was written: HM-5's flush worker
+    ## was in ``repro_build_engine/monitor_flush.nim``, inside this library.
+    ## The claim that MATTERS was never the thread count anyway, it is what
+    ## those threads do, and it is checked rather than assumed in
+    ## ``worker_pool.nim``'s header: a pool worker opens no file and creates
+    ## no file, so neither the ``dup2`` on 0/1/2 nor the ``umask`` can be
+    ## observed by one. A future pool tenant that opens or creates a file
+    ## re-opens both questions, and it breaks by interleaving one action's
+    ## output into another's.
+    flushFile(stdout)
+    flushFile(stderr)
+    result.savedIn = dup(cint(0))
+    result.savedOut = dup(cint(1))
+    result.savedErr = dup(cint(2))
+    if result.savedIn < 0 or result.savedOut < 0 or result.savedErr < 0:
+      if result.savedIn >= 0: discard close(result.savedIn)
+      if result.savedOut >= 0: discard close(result.savedOut)
+      if result.savedErr >= 0: discard close(result.savedErr)
+      raiseEngine("in-process monitor host: cannot duplicate stdio")
+
+    proc closeSaved(ctx: MonitorSpawnContext) =
+      discard close(ctx.savedIn)
+      discard close(ctx.savedOut)
+      discard close(ctx.savedErr)
+
+    if not open(result.nullFile, "/dev/null", fmRead):
+      closeSaved(result)
+      raiseEngine("in-process monitor host: cannot open /dev/null")
+    if not open(result.outFile, outPath, fmWrite):
+      close(result.nullFile)
+      closeSaved(result)
+      raiseEngine("in-process monitor host: cannot open stdout capture " &
+        outPath)
+    if not open(result.errFile, errPath, fmWrite):
+      close(result.nullFile)
+      close(result.outFile)
+      closeSaved(result)
+      raiseEngine("in-process monitor host: cannot open stderr capture " &
+        errPath)
+    discard dup2(cint(getFileHandle(result.nullFile)), cint(0))
+    discard dup2(cint(getFileHandle(result.outFile)), cint(1))
+    discard dup2(cint(getFileHandle(result.errFile)), cint(2))
+    result.savedMask = umask(Mode(0o022))
+    result.active = true
+
+  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
+    if not ctx.active:
+      return
+    ctx.active = false
+    discard umask(ctx.savedMask)
+    flushFile(stdout)
+    flushFile(stderr)
+    discard dup2(ctx.savedIn, cint(0))
+    discard dup2(ctx.savedOut, cint(1))
+    discard dup2(ctx.savedErr, cint(2))
+    discard close(ctx.savedIn)
+    discard close(ctx.savedOut)
+    discard close(ctx.savedErr)
+    close(ctx.nullFile)
+    close(ctx.outFile)
+    close(ctx.errFile)
+else:
+  type MonitorSpawnContext = object
+    active: bool
+
+  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
+    discard outPath
+    discard errPath
+
+  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
+    discard ctx
+
+proc monitorHostStdioStem(actionId: string): string =
+  sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId)
+
+proc releaseMonitorHostSlot(pool: var MonitorHostPool; slot: int) =
+  ## Return one slot to the pool, killing and dropping its monitor first if the
+  ## handle is still live.
+  ##
+  ## THE ONLY WAY A SLOT IS FREED. Every caller goes through here so the pool's
+  ## one invariant — a recyclable slot's handle is dead — cannot be broken by
+  ## adding another exit path. The root is killed BEFORE the handle is dropped
+  ## because dropping runs io-mon's teardown, which waits for the monitored
+  ## root before releasing the consumer (IoMon-Decomposed-Host-API DH-2): that
+  ## ordering is what makes an orphaned producer unrepresentable, and it is
+  ## also what would otherwise let a still-running child hold the build open
+  ## for as long as it liked.
+  if slot < 0 or slot >= pool.records.len: return
+  if pool.records[slot].handleLive:
+    when defined(posix):
+      let pid = pool.records[slot].rootPid
+      if pid > 0:
+        when defined(linux):
+          signalDescendants(pid, SIGKILL)
+        discard kill(Pid(pid), SIGKILL)
+    block:
+      let handle = move(pool.handles[slot])
+      discard handle.live
+  pool.records[slot] = MonitorHostRecord()
+
+proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
+                      config: BuildEngineConfig; cacheRoot: string): int =
+  ## Bring io-mon's consumer up and launch the monitored tree, returning the
+  ## pool slot that owns both. Raises like any other launch primitive; the
+  ## caller turns a raise into the same ``process launch failed`` result the
+  ## other paths produce.
+  let command = preparedRunQuotaCommand(action, config, shellUmaskWrap = false)
+  if command.argv.len == 0:
+    raiseEngine("in-process monitor host: action has empty argv: " & action.id)
+  let logDir = bypassActionLogDir(cacheRoot)
+  createDir(extendedPath(logDir))
+  let stem = monitorHostStdioStem(action.id)
+  let outPath = logDir / (stem & ".host.stdout")
+  let errPath = logDir / (stem & ".host.stderr")
+  # HM-5 — io-mon writes HERE, and the scheduler publishes it with a rename.
+  # ``createDir`` on the depfile's own directory is what makes the sibling
+  # placement work on the first action of a build; io-mon's own
+  # ``ensureParentDir`` would create it too, but only once it is about to
+  # write, and the temp path is decided before that.
+  inc pool.flushNonce
+  let depDest = action.monitorDepfile
+  let depTemp = monitorFlushTempPath(depDest, pool.flushNonce)
+  if depDest.len > 0:
+    createDir(extendedPath(depDest.parentDir))
+  var ctx = beginMonitorSpawnContext(outPath, errPath)
+  var slot = -1
+  try:
+    slot = allocMonitorHostSlot(pool)
+    pool.records[slot].stdoutPath = outPath
+    pool.records[slot].stderrPath = errPath
+    pool.records[slot].depTempPath = depTemp
+    pool.records[slot].depDestPath = depDest
+    pool.handles[slot] = startMonitor(monitorHostRequest(action, command,
+      depTemp))
+    pool.records[slot].handleLive = true
+    pool.records[slot].rootPid = int(rootPid(pool.handles[slot]))
+  except CatchableError:
+    if slot >= 0:
+      # Never release a slot whose handle is still live — see
+      # ``MonitorHostRecord.handleLive``. ``startMonitor`` may have succeeded
+      # and a later statement raised.
+      releaseMonitorHostSlot(pool, slot)
+    raise
+  finally:
+    endMonitorSpawnContext(ctx)
+  slot
+
+proc completeMonitorHost(pool: var MonitorHostPool; slot: int) =
+  ## Consume the handle and record the outcome. ``finishMonitor`` waits for the
+  ## root itself when it has not exited — exactly what ``runMonitored`` relies
+  ## on — so there is no spin here.
+  if slot < 0 or slot >= pool.records.len: return
+  if not pool.records[slot].inUse or pool.records[slot].finished: return
+  # ``finishMonitor`` consumes the handle whether it returns or raises, so the
+  # slot stops owning one the moment the ``move`` is evaluated.
+  pool.records[slot].handleLive = false
+  try:
+    var outcome = finishMonitor(move(pool.handles[slot]))
+    pool.records[slot].exitCode = outcome.exitCode
+    # HM-5 — take the canonical records ``finishMonitor`` already built. This
+    # is a MOVE, not a decode and not a copy: ``depFileFromOwnedRecords`` owns
+    # the very seq ``writeCanonicalInPlace`` just emitted, so the engine's
+    # evidence source costs nothing here and the ``.iomon`` stops being read
+    # back at all. ``outcome`` dies at the end of this statement list, so
+    # nothing retains the ``MonitorDepFile`` object — the rule
+    # ``foldMonitorDepFileEvidence``'s doc-comment states is unchanged.
+    pool.records[slot].records = move(outcome.depFile.records)
+  except CatchableError as err:
+    # A monitor fault must fail ONE action, never the host — see
+    # tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim,
+    # which states that as a property of the engine precisely so it keeps its
+    # meaning now that the process boundary is gone.
+    pool.records[slot].failure = "io-monitor host failed: " & err.msg
+  pool.records[slot].finished = true
+
+proc settleMonitorHost(pool: var MonitorHostPool; slot: int): bool =
+  ## Advance one hosted monitor without blocking, and FINISH it the moment its
+  ## root has exited. See the header for why finishing is not deferred to the
+  ## point where the scheduler reaps the action.
+  if slot < 0 or slot >= pool.records.len: return false
+  if not pool.records[slot].inUse: return false
+  if pool.records[slot].finished: return true
+  var exited = false
+  try:
+    exited = pollMonitor(pool.handles[slot])
+  except CatchableError as err:
+    pool.records[slot].failure = "io-monitor poll failed: " & err.msg
+    pool.records[slot].finished = true
+    return true
+  if not exited:
+    return false
+  completeMonitorHost(pool, slot)
+  true
+
+proc readCapturedStdio(path: string; limit: int): string =
+  ## Read back one of the in-process host's stdio captures, applying the same
+  ## HEAD truncation RunQuota's process backend applies while draining a pipe
+  ## (``runquota_process.appendBounded`` keeps the first ``limit`` bytes), and
+  ## then REWRITE the file at that size.
+  ##
+  ## The rewrite is not tidiness. RunQuota's capture is bounded in MEMORY while
+  ## the child runs — everything past the limit is drained and dropped — but a
+  ## redirected descriptor has no such bound, so an action that writes gigabytes
+  ## writes gigabytes into the cache root. Truncating on read bounds what
+  ## SURVIVES the action to ``limit``; what it cannot bound is the peak, and
+  ## that difference is a real one against the spawned form. A ``cacheRoot`` on
+  ## a small filesystem plus a runaway monitored action is the shape to watch.
+  if path.len == 0 or not fileExists(extendedPath(path)):
+    return ""
+  try:
+    result = readFile(extendedPath(path))
+  except CatchableError:
+    return ""
+  if limit > 0 and result.len > limit:
+    result = result[0 ..< limit]
+    try:
+      writeFile(extendedPath(path), result)
+    except CatchableError:
+      discard
+
+proc finishMonitorHostAction(pool: var MonitorHostPool; id: string; slot: int;
+                             config: BuildEngineConfig;
+                             cacheRoot: string;
+                             hostedRecords: var seq[MonitorRecord]):
+                             ActionResult =
+  ## Turn a hosted monitor into the same ``ActionResult`` shape the direct
+  ## RunQuota-bypass launch produces, including the historical per-action log
+  ## files diagnostics and focused engine tests read.
+  ##
+  ## HM-5 — this is the seam where the action's outcome and its evidence go
+  ## FORWARD and the ``.iomon`` goes SIDEWAYS. ``hostedRecords`` is moved out to
+  ## the caller (a scheduler local it drops as soon as evidence is collected)
+  ## and the publication is queued on the flush worker, so by the time this
+  ## returns the scheduler owns everything it needs and the file has not
+  ## necessarily landed.
+  completeMonitorHost(pool, slot)
+  hostedRecords = @[]
+  result = ActionResult(
+    id: id,
+    launched: true,
+    runQuotaBackend: "runquota-bypass")
+  if slot < 0 or slot >= pool.records.len:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = "in-process monitor host: no slot for " & id
+    return
+  # MOVE, never copy: a real ``nim c`` action's record set is ~97 000 records /
+  # 18 MB, and ``let record = pool.records[slot]`` used to copy the whole
+  # ``MonitorHostRecord``. Taking the records out first keeps that copy cheap
+  # again and leaves the slot's own seq empty for ``releaseMonitorHostSlot``.
+  hostedRecords = move(pool.records[slot].records)
+  let record = pool.records[slot]
+  # The flush is queued BEFORE the slot is released and before the caller
+  # collects evidence. The job owns copies of both paths, so recycling this
+  # slot into the next action — which the release below makes possible
+  # immediately — cannot disturb a publication still in flight.
+  #
+  # NOT queued when the monitor itself faulted: ``finishMonitor`` raised, so
+  # there is no canonical depfile at the scratch path to publish and queuing
+  # one would report a flush failure for a fault that has already failed the
+  # action on its own terms. The scratch file, if the fault left one, is
+  # removed here rather than left to accumulate in the depfile directory.
+  if record.depDestPath.len > 0 and record.failure.len == 0:
+    enqueueMonitorFlush(MonitorFlushJob(
+      actionId: id,
+      tempPath: record.depTempPath,
+      destPath: record.depDestPath))
+  elif record.depTempPath.len > 0:
+    try:
+      removeFile(extendedPath(record.depTempPath))
+    except CatchableError:
+      discard
+  # ``completeMonitorHost`` above normally leaves the handle dead, but not when
+  # ``settleMonitorHost`` already marked the slot finished on a POLL failure —
+  # that path never consumed it. ``releaseMonitorHostSlot`` is what closes that
+  # gap; going through it is why this is not a bare record reset.
+  releaseMonitorHostSlot(pool, slot)
+  let capturedOut = readCapturedStdio(record.stdoutPath, config.stdoutLimit)
+  let capturedErr = readCapturedStdio(record.stderrPath, config.stderrLimit)
+  try:
+    writeFile(extendedPath(bypassActionStdoutLogPath(cacheRoot, id)),
+      capturedOut)
+  except CatchableError:
+    discard
+  try:
+    writeFile(extendedPath(bypassActionStderrLogPath(cacheRoot, id)),
+      capturedErr)
+  except CatchableError:
+    discard
+  result.stdout = stripMonitorBanner(capturedOut)
+  result.stderr = stripMonitorBanner(capturedErr)
+  if record.failure.len > 0:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = [result.stderr, record.failure].join("\n").strip()
+  else:
+    result.exitCode = record.exitCode
+    result.status = if record.exitCode == 0: asSucceeded else: asFailed
+
+proc abandonMonitorHost(pool: var MonitorHostPool; slot: int) =
+  ## Tear a hosted monitor down on cancellation or shutdown. Kills the
+  ## monitored root and drops the handle — see ``releaseMonitorHostSlot``,
+  ## which owns that ordering and is the only place a slot is freed. This
+  ## exists as a named call site so the scheduler's shutdown path reads the
+  ## same as its helper-path neighbour, ``terminateRunningAction``.
+  ##
+  ## HM-5 — an abandoned action never reaches ``finishMonitorHostAction``, so
+  ## its scratch depfile was never queued for publication and nothing else will
+  ## ever look at it. Remove it here; a cancelled build must not leave the
+  ## depfile directory growing dot-files nobody collects.
+  if slot < 0 or slot >= pool.records.len: return
+  if not pool.records[slot].inUse: return
+  let temp = pool.records[slot].depTempPath
+  if temp.len > 0:
+    try:
+      removeFile(extendedPath(temp))
+    except CatchableError:
+      discard
+  releaseMonitorHostSlot(pool, slot)
 
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig):
@@ -4611,8 +6985,30 @@ type
     ## Indirect dispatch keeps the engine library free of a hard
     ## dependency on the client library.
 
+  MetadataFetchExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Named-Lock-Files NLF-M5: hook installed by ``repro_lock_gen``. The
+    ## engine routes every ``bakMetadataFetch`` action through the registered
+    ## executor, which retrieves the object over the IN-PROCESS fetch path
+    ## and writes it to the action's single output.
+    ##
+    ## Indirect dispatch is load-bearing here beyond the usual layering
+    ## reason. The generation path needs the solver (to know what to fetch
+    ## for) and the solver loads ``libclingo`` through a ``{.dynlib.}`` FFI at
+    ## module-init; making the engine dispatch directly would give every
+    ## engine binary a clingo runtime dependency, which
+    ## ``repro_lock/identity.nim``'s header exists to prevent.
+
+  SolveLockExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Named-Lock-Files NLF-M5: hook installed by ``repro_lock_gen`` for the
+    ## ``bakSolveLock`` rule-generator edge. The executor reads the metadata
+    ## its upstream ``bakMetadataFetch`` edges retrieved, runs the solve, and
+    ## writes the LOCK — the generated rule-set artifact — to the action's
+    ## single output.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
+var metadataFetchExecutor {.threadvar.}: MetadataFetchExecutor
+var solveLockExecutor {.threadvar.}: SolveLockExecutor
 
 proc registerWorkspaceVcsExecutor*(executor: WorkspaceVcsExecutor) =
   ## Register the per-thread executor for ``bakWorkspaceVcs`` actions.
@@ -4637,6 +7033,23 @@ proc registerBinaryCacheSubstituteExecutor*(
 
 proc clearBinaryCacheSubstituteExecutor*() =
   binaryCacheSubstituteExecutor = nil
+
+proc registerMetadataFetchExecutor*(executor: MetadataFetchExecutor) =
+  ## Register the per-thread executor for ``bakMetadataFetch`` actions
+  ## (NLF-M5). ``repro_lock_gen`` calls this; tests that drive the generation
+  ## path in-process call it explicitly.
+  metadataFetchExecutor = executor
+
+proc clearMetadataFetchExecutor*() =
+  metadataFetchExecutor = nil
+
+proc registerSolveLockExecutor*(executor: SolveLockExecutor) =
+  ## Register the per-thread executor for the ``bakSolveLock`` rule-generator
+  ## edge (NLF-M5).
+  solveLockExecutor = executor
+
+proc clearSolveLockExecutor*() =
+  solveLockExecutor = nil
 
 proc builtinPath(action: BuildAction; path: string): string =
   materialPath(action.cwd, path)
@@ -4951,6 +7364,40 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       result.runQuotaBackend = if subRes.runQuotaBackend.len > 0:
         subRes.runQuotaBackend else: "binary-cache-substitute"
       return
+    of bakMetadataFetch:
+      # NLF-M5 dispatch. Fail CLOSED when nothing is registered: a
+      # metadata-fetch edge that quietly no-ops would leave the solve edge
+      # downstream of it reading an empty version universe and reporting a
+      # lock, which is the silent-wrong-answer direction.
+      if metadataFetchExecutor.isNil:
+        raiseEngine(
+          "bakMetadataFetch action requires registerMetadataFetchExecutor " &
+          "before runBuild: " & action.id)
+      let mdRes = metadataFetchExecutor(action)
+      result.status = mdRes.status
+      result.exitCode = mdRes.exitCode
+      result.stdout = mdRes.stdout
+      result.stderr = mdRes.stderr
+      result.reason = mdRes.reason
+      result.launched = mdRes.launched
+      result.runQuotaBackend = if mdRes.runQuotaBackend.len > 0:
+        mdRes.runQuotaBackend else: "metadata-fetch"
+      return
+    of bakSolveLock:
+      if solveLockExecutor.isNil:
+        raiseEngine(
+          "bakSolveLock action requires registerSolveLockExecutor before " &
+          "runBuild: " & action.id)
+      let solveRes = solveLockExecutor(action)
+      result.status = solveRes.status
+      result.exitCode = solveRes.exitCode
+      result.stdout = solveRes.stdout
+      result.stderr = solveRes.stderr
+      result.reason = solveRes.reason
+      result.launched = solveRes.launched
+      result.runQuotaBackend = if solveRes.runQuotaBackend.len > 0:
+        solveRes.runQuotaBackend else: "solve-lock"
+      return
     of bakForeignProvision:
       when defined(windows):
         raiseEngine("bakForeignProvision is not supported on Windows")
@@ -5173,6 +7620,12 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       item.stderr = "binary-cache publisher is not configured"
       result.results.add(item)
       continue
+    if not action.allOutputsExist():
+      item.stderr =
+        "materialized binary-cache action outputs are incomplete: " &
+        (if action.outputs.len > 0: action.outputs.join(", ") else: "<none>")
+      result.results.add(item)
+      continue
     if prefix.len == 0 or
         (not fileExists(prefix) and not dirExists(prefix)):
       item.stderr = "materialized binary-cache prefix does not exist: " &
@@ -5215,7 +7668,116 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       reason: "materialized-binary-cache-no-entries",
       stderr: "no tagged materialized binary-cache entries in selected graph"))
 
+# ---------------------------------------------------------------------------
+# ``ext_repro_action`` (M17)
+# ---------------------------------------------------------------------------
+
+proc actionKindName(kind: BuildActionKind): string =
+  ($kind).replace("bak", "").toLowerAscii()
+
+proc measuredOutputBytes(action: BuildAction): int64 =
+  ## Total size of the action's declared outputs, MEASURED after the
+  ## action settled. Missing outputs contribute nothing rather than
+  ## failing the row: an observation must never fail the work.
+  for output in action.outputs:
+    let path =
+      if output.isAbsolute or action.cwd.len == 0: output
+      else: action.cwd / output
+    try:
+      if fileExists(extendedPath(path)):
+        result += int64(getFileSize(extendedPath(path)))
+    except CatchableError:
+      discard
+
+proc emitActionExtensionRows(session: ReproRunQuotaSession;
+                             runResult: BuildRunResult;
+                             actionsById: Table[string, BuildAction]) =
+  ## One ``ext_repro_action`` row per execution RunQuota admitted.
+  ##
+  ## ROWS EXIST FOR EXECUTIONS, NOT FOR ACTIONS, and the difference is
+  ## not a shortcut. RunQuota's spine records executions; a cache HIT is
+  ## precisely the case where nothing executed, so there is no spine row
+  ## for an extension row to be joined to. What the rows therefore carry
+  ## is the cache decision that LED TO a launch -- miss, refused,
+  ## not-cacheable, hybrid cutoff -- together with the reason, which is
+  ## the "why did this rebuild" question the store exists to answer.
+  ## A reader counting hits from this table alone would undercount them,
+  ## and ``docs/stats.md`` says so where a reader will find it.
+  ##
+  ## BEST EFFORT, ALWAYS. Nothing here may fail a build (OS-4), and
+  ## nothing here may block it (OS-1): the declaration is one round trip
+  ## made once per build after every action has settled, and each row is
+  ## a single buffered write with no reply.
+  if session.isNil or not session.active:
+    return
+  var declared = false
+  for item in runResult.results:
+    if not item.launched or item.leaseId == 0:
+      continue
+    if item.id notin actionsById:
+      continue
+    let action = actionsById[item.id]
+    if not declared:
+      # Declared lazily: a build that admitted nothing should not create
+      # a table for rows it will never write.
+      let refusal = session.declareRunQuotaExtension(
+        ReproActionExtensionId, ReproActionExtensionOwner,
+        ReproActionSchemaVersion, reproActionMigrations())
+      if refusal.len > 0:
+        return
+      declared = true
+    let toolIdentity = action.toolIdentityRefs.join(",")
+    let toolKind =
+      if action.toolIdentityRefs.len > 0: action.toolIdentityRefs[0]
+      else: ""
+    let cacheOutcome =
+      case item.cacheDecision
+      of cdNotCacheable: racNotCacheable
+      of cdMiss: racMiss
+      of cdHit: racHit
+      of cdHybridCutoff: racHybridCutoff
+      of cdRejected: racRefused
+    let compatibility = compatibilityKey(
+      actionKindName(action.kind), action.commandStatsId, toolKind,
+      toolIdentity, action.argv, action.outputs)
+    session.recordRunQuotaExtensionRow(
+      item.leaseId, ReproActionExtensionId, ReproActionSchemaVersion,
+      reproActionColumns(),
+      @[
+        extText(item.id),
+        extText(actionKindName(action.kind)),
+        extText(compatibility),
+        extText($cacheOutcome),
+        (if item.cacheMissReason.len > 0: extText(item.cacheMissReason)
+         else: extNull()),
+        extText(toHex(action.weakFingerprint.bytes)),
+        (if item.strongFingerprintHex.len > 0:
+           extText(item.strongFingerprintHex)
+         else: extNull()),
+        (if action.pool.len > 0: extText(action.pool) else: extNull()),
+        extInt(int64(action.poolUnits)),
+        extInt(measuredOutputBytes(action)),
+        # SUBSTITUTION IS A PROPERTY OF THE ACTION KIND, not a flag some
+        # other code path has to remember to set. The one launched form
+        # of substitution is the binary-cache substitute edge; a
+        # peer-cache install settles as a HIT and therefore has no
+        # execution row at all, so a boolean on the result would have
+        # been false on every row that exists.
+        extInt(if action.kind == bakBinaryCacheSubstitute: 1'i64 else: 0'i64),
+        (if toolKind.len > 0: extText(toolKind) else: extNull()),
+        (if toolIdentity.len > 0: extText(toolIdentity) else: extNull()),
+        extInt(int64(item.evidence.declaredInputs.len)),
+        extInt(int64(item.evidence.declaredOutputs.len)),
+        extInt(int64(item.evidence.depfileInputs.len)),
+        extInt(int64(item.evidence.monitorReads.len)),
+        extInt(int64(item.evidence.monitorWrites.len)),
+        extInt(int64(item.evidence.monitorProbes.len))
+      ])
+
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
+  # Process-global accumulators; zero them so this build reports its own cost
+  # rather than its own plus every earlier build in this process.
+  resetOutputStateCheckStats()
   var stats: BuildStats
   proc statStart(): float =
     if config.statsEnabled:
@@ -5226,9 +7788,36 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if config.statsEnabled:
       stats.addMetric(name, (epochTime() - started) * 1_000_000.0)
 
+  proc finishOutputStateCheckStats() =
+    ## Emit the TOTAL cost of output revalidation, counted inside
+    ## `outputStateMismatch` itself so it covers all three call sites (the
+    ## whole-build fast-noop scan and the two per-edge paths inside
+    ## repro_local_store) rather than the one that happens to sit in this
+    ## file. `dir walk` / `dir entries` make the O(tree-entries) cost of a
+    ## directory output visible instead of hidden inside the total.
+    if not config.statsEnabled:
+      return
+    let osc = outputStateCheckStats()
+    # count == calls and totalUs == the summed cost, so a per-call average is
+    # meaningful. Emitting one sample carrying the cumulative total (count=1)
+    # made every average wrong by a factor of `calls`.
+    stats.addCountedMetric("repro output revalidate", osc.calls,
+      float(osc.nanos) / 1000.0)
+    stats.addCounterMetric("repro output revalidate dir walks",
+      osc.revalidateDirWalks)
+    stats.addCounterMetric("repro output revalidate dir entries",
+      int(osc.revalidateDirEntries))
+    # Recording a directory output walks its tree too. That is EXECUTION cost,
+    # not revalidation cost, and keeping it in its own counter is what makes a
+    # cold build report zero revalidation walks.
+    stats.addCounterMetric("repro output record dir walks", osc.recordDirWalks)
+    stats.addCounterMetric("repro output record dir entries",
+      int(osc.recordDirEntries))
+
   proc finishMetadataCacheStats(cache: FileMetadataCache) =
     if not config.statsEnabled:
       return
+    finishOutputStateCheckStats()
     let metadataStats = cache.metadataStats()
     stats.addCounterMetric("repro file metadata current-run hit",
       metadataStats.currentRunHits)
@@ -5262,6 +7851,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
   runResult.traceEnabled = not config.suppressTrace
+  # STAGE 2 census — count, do not change. Taken over the graph as it
+  # will actually be scheduled, after dependency inference, so the number
+  # describes the build that runs rather than the graph as authored.
+  for censusAction in buildGraph.actions:
+    if censusAction.kind != bakProcess:
+      # Built-in actions do not fork, so they have no environment to
+      # inherit and do not belong in this denominator.
+      continue
+    inc runResult.environmentInheritance.totalActions
+    if censusAction.env.len > 0:
+      inc runResult.environmentInheritance.declaringActions
+    if censusAction.envPassthrough.len > 0:
+      inc runResult.environmentInheritance.passthroughActions
+    if censusAction.env.len == 0 and censusAction.envPassthrough.len == 0:
+      inc runResult.environmentInheritance.undeclaredActions
+    case classifyActionPath(censusAction)
+    of apdHermetic: inc runResult.environmentInheritance.hermeticPathActions
+    of apdInherited: inc runResult.environmentInheritance.inheritedPathActions
+    of apdEmpty: inc runResult.environmentInheritance.emptyPathActions
+    of apdAbsent: discard
   let validateStart = statStart()
   validateGraph(buildGraph)
   finishStat("repro graph validate", validateStart)
@@ -5452,6 +8061,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         "status=" & $res.statusCode & " bytes=" & $res.bytesUploaded)
     finishStat("repro binary-cache publish", publishStart)
 
+  proc fastNoopReuseReason(action: BuildAction): string =
+    ## The whole-graph fast scan and the regular scheduler decide the SAME
+    ## state — "the record revalidated and the declared outputs (if any)
+    ## are already on disk" — so they must report it the same way. The
+    ## scheduler calls that state `asUpToDate` / `cdHit` with reason
+    ## `outputs-present` or `no-declared-outputs` (see the `aclHit` /
+    ## `reusableInPlace` branch below). The fast scan used to call it
+    ## `asCacheHit` / `cdHit` with an EMPTY reason, which is the
+    ## scheduler's vocabulary for something else entirely: a record whose
+    ## outputs were MISSING and had to be materialized out of the CAS
+    ## (reason `restored`). Two different events wearing one label is
+    ## exactly what makes a status field unreadable.
+    if action.declaresNoOutputs(): "no-declared-outputs"
+    else: "outputs-present"
+
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
     # Backfill needs each full action-cache record so it can publish the
     # validated, materialized output. The regular scheduler already performs
@@ -5461,6 +8085,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
     if config.progressCallback != nil:
+      return none(BuildRunResult)
+    # A forced rebuild is a request to re-execute, and `config.forceRebuild`
+    # is read in exactly one place: the scheduler's per-action cache
+    # decision. A whole-graph short-circuit that returns before the
+    # scheduler runs therefore silently DISCARDS the request — every edge
+    # comes back `asCacheHit` / `cdHit` / `launched = false` and nothing
+    # re-runs. `repro build --force-rebuild` never exposed this only
+    # because rendering progress installs a callback, which the bail-out
+    # above already catches; an engine-API caller that renders nothing got
+    # the flag dropped on the floor.
+    if config.forceRebuild:
       return none(BuildRunResult)
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
@@ -5475,14 +8110,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       for action in buildGraph.actions:
         if (not action.cacheable) or action.dynamicDepsFile.len > 0:
           return none(BuildRunResult)
-        let outputStatStart = statStart()
-        let outputsPresent = action.allOutputsExist()
-        finishStat("repro output stat", outputStatStart)
-        if not outputsPresent:
-          return none(BuildRunResult)
+        # An edge that declares no outputs has nothing to stat and nothing
+        # to restore; its record is reusable on unchanged inputs alone
+        # (`cachedResultReusableInPlace`). Bailing out of the fast path for
+        # such an edge dragged every graph containing a `test` edge onto the
+        # slow scheduler.
+        if not action.declaresNoOutputs():
+          let outputStatStart = statStart()
+          let outputsPresent = action.allOutputsExist()
+          finishStat("repro output stat", outputStatStart)
+          if not outputsPresent:
+            return none(BuildRunResult)
         hotProbes.add(HotMetadataProbe(
           weakFingerprint: action.weakFingerprint,
-          policy: action.actionCachePolicy))
+          policy: action.actionCachePolicy,
+          outputRoot: action.cwd))
         hotEnvResolvers.add(action.actionEnvResolver())
       let lookupStart = statStart()
       let navigatorStart = statStart()
@@ -5496,14 +8138,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         for action in buildGraph.actions:
           fastResult.results.add(ActionResult(
             id: action.id,
-            status: asCacheHit,
+            status: asUpToDate,
             cacheDecision: cdHit,
+            reason: fastNoopReuseReason(action),
             dependencyPolicyKind: action.dependencyPolicy.kind))
         finishStat("repro cache hit result materialize", resultMaterializeStart)
         finishMetadataCacheStats(metadataCache)
         fastResult.stats = stats
         return some(fastResult)
-      of hmssMissingRecord, hmssInputChanged:
+      of hmssMissingRecord, hmssInputChanged, hmssOutputChanged:
+        # `hmssOutputChanged` is a declared output that no longer matches the
+        # record that claims to have produced it. Falling back to the full
+        # scheduler is the fail-closed answer: it re-consults each edge and
+        # re-executes the ones whose outputs were disturbed.
         return none(BuildRunResult)
       of hmssUnavailable, hmssCorrupt:
         discard
@@ -5514,16 +8161,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for action in buildGraph.actions:
       if (not action.cacheable) or action.dynamicDepsFile.len > 0:
         return none(BuildRunResult)
-      let outputStatStart = statStart()
-      let outputsPresent = action.allOutputsExist()
-      finishStat("repro output stat", outputStatStart)
-      if not outputsPresent:
-        return none(BuildRunResult)
+      # See the note above: no declared outputs means nothing to stat.
+      if not action.declaresNoOutputs():
+        let outputStatStart = statStart()
+        let outputsPresent = action.allOutputsExist()
+        finishStat("repro output stat", outputStatStart)
+        if not outputsPresent:
+          return none(BuildRunResult)
       let hotRecordLookupStart = statStart()
       let hotRecord = cache.lookupHotMetadataRecord(action.weakFingerprint,
         action.actionCachePolicy)
       finishStat("repro hot record lookup", hotRecordLookupStart)
       if hotRecord.isNone:
+        return none(BuildRunResult)
+      # Outputs exist, but "exists" is not "is the artifact this record
+      # describes" (Incremental-Invalidation.md §"Minimum check set"
+      # Step 3.3). Fall back to the full scheduler when it is not.
+      # Timing is accumulated inside `outputStateMismatch` and reported once
+      # as "repro output revalidate"; a timer here would have measured this
+      # call site only.
+      if outputStateMismatch(hotRecord.get(), action.cwd).len > 0:
         return none(BuildRunResult)
       hotRecords.add(hotRecord.get())
       hotRecordEnvResolvers.add(action.actionEnvResolver())
@@ -5543,8 +8200,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         else: hotRecords[i]
       fastResult.results.add(ActionResult(
         id: action.id,
-        status: asCacheHit,
+        status: asUpToDate,
         cacheDecision: cdHit,
+        reason: fastNoopReuseReason(action),
         dependencyPolicyKind: action.dependencyPolicy.kind,
         evidence: cacheHitEvidence(action, record)))
     finishStat("repro cache hit result materialize", resultMaterializeStart)
@@ -5698,6 +8356,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     cmp(idToIndex[a], idToIndex[b])
 
   var running: seq[RunningAction] = @[]
+  # In-Process-Monitor-Hosting HM-4 — the in-flight io-mon consumers this
+  # build hosts itself. A build-scoped local rather than a module global: the
+  # pool owns live consumers and live monitored trees, and its teardown is the
+  # ``finally`` below, so its lifetime has to be exactly this build's.
+  var monitorHosts = MonitorHostPool()
+  # HM-5 — every depfile publication that came back FAILED, by action id.
+  # Consulted before an action's cache entry is published and reported again at
+  # the end of the build for the publications that had not finished by then.
+  var monitorFlushFailures = initTable[string, string]()
   var launchedSucceeded = initHashSet[string]()
   var runQuotaDaemonReachable: Option[bool]
 
@@ -5861,7 +8528,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## entries, so cap its timeout while one is active.
     for item in running:
       if item.processKind in {rpkInlineRunQuota, rpkInlineRunQuotaPending,
-                              rpkInlineRunQuotaFailed, rpkBypassProcess}:
+                              rpkInlineRunQuotaFailed, rpkBypassProcess,
+                              rpkMonitorHost}:
         return true
     false
 
@@ -5911,6 +8579,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           failRunningAction(j, "runquota inline grant polling failed: " &
             err.msg)
           return j
+
+  proc recordCacheLookupFacts(id: string; lookup: ActionCacheLookup) =
+    ## M17: pin the ACTION-CACHE KEY and the miss reason at the only
+    ## moment they exist.
+    ##
+    ## ``reason`` alone will not do: ``completeSuccess`` overwrites it
+    ## with the settle detail, so for exactly the actions that go on to
+    ## LAUNCH -- the ones that get an ``ext_repro_action`` row -- the
+    ## reason the cache missed is gone by the time the row is built.
+    ## The strong fingerprint is worse still: it is not stored on the
+    ## action at all, only on the record the lookup compared against.
+    let idx = idToIndex.resultIndex(id)
+    runResult.results[idx].cacheMissReason = lookup.message
+    runResult.results[idx].strongFingerprintHex =
+      if lookup.record.strongFingerprint.bytes == default(array[32, byte]):
+        ""
+      else:
+        toHex(lookup.record.strongFingerprint.bytes)
 
   proc completeSuccess(id: string; status: ActionStatus; cacheDecision: CacheDecision;
                        launched: bool; detail = "") =
@@ -6133,9 +8819,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         runResult.trace(id, "dependency-policy", $action.dependencyPolicy.kind)
 
         var cacheMissInputChanged = false
+        # Set when the cache rejected the record because a DECLARED OUTPUT on
+        # disk no longer matches what the record says the action produced.
+        # It has to suppress the "outputs are present, call it up to date"
+        # shortcut further down: that shortcut only asks whether the paths
+        # exist, and here they exist and are wrong. Without this the reject
+        # would be recorded as `cdRejected` and then immediately overridden
+        # by `asUpToDate`, and the corrupt artifact would survive.
+        var cacheRejectedOutput = false
         var dependencyLaunched = false
         var outputsPresentBeforeLookup = false
         var outputsPresentKnown = false
+        # "May a cache record for this action be reused where its result
+        # already is?" — see `cachedResultReusableInPlace`. Distinct from
+        # `outputsPresentBeforeLookup`, which stays a pure statement about
+        # DECLARED outputs so the no-record "outputs-present" shortcut below
+        # cannot fire for an edge that declares none.
+        var reusableInPlace = false
         for dep in action.deps:
           if launchedSucceeded.contains(dep):
             dependencyLaunched = true
@@ -6164,18 +8864,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runResult.results[idToIndex.resultIndex(id)].reason)
         elif action.cacheable:
           if config.rebuildMissingOutputsOnCacheHit:
-            let outputStatStart = statStart()
-            outputsPresentBeforeLookup = action.allOutputsExist()
-            outputsPresentKnown = true
-            finishStat("repro output stat", outputStatStart)
+            if not action.declaresNoOutputs():
+              # Skipped entirely when nothing is declared: no declared output
+              # can be missing, and `outputsPresentBeforeLookup` must stay
+              # false so the no-record "outputs-present" shortcut below
+              # cannot fire for such an edge.
+              let outputStatStart = statStart()
+              outputsPresentBeforeLookup = action.allOutputsExist()
+              outputsPresentKnown = true
+              finishStat("repro output stat", outputStatStart)
+            reusableInPlace =
+              action.cachedResultReusableInPlace(outputsPresentBeforeLookup)
           let lookupStart = statStart()
           var lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy,
-            verifyOutputBlobs = not outputsPresentBeforeLookup,
+            verifyOutputBlobs = not reusableInPlace,
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
-              outputsPresentBeforeLookup,
+              reusableInPlace,
             metadataCache = addr fileMetadataCache,
-            envResolver = action.actionEnvResolver())
+            envResolver = action.actionEnvResolver(),
+            outputRoot = action.cwd)
           finishStat("repro cache lookup", lookupStart)
           # Peer-Cache M1: on local miss, consult the LAN peer cache.
           # `peerCacheActionFetcher` is nil when ``--peer-cache=…`` was
@@ -6201,12 +8909,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 let retryStart = statStart()
                 lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
                   action.actionCachePolicy,
-                  verifyOutputBlobs = not outputsPresentBeforeLookup,
+                  verifyOutputBlobs = not reusableInPlace,
                   allowMetadataOnlyHit =
                     config.rebuildMissingOutputsOnCacheHit and
-                    outputsPresentBeforeLookup,
+                    reusableInPlace,
                   metadataCache = addr fileMetadataCache,
-                  envResolver = action.actionEnvResolver())
+                  envResolver = action.actionEnvResolver(),
+                  outputRoot = action.cwd)
                 finishStat("repro peer-cache lookup-retry", retryStart)
                 runResult.trace(id, "peer-cache-hit", $lookup.status)
               else:
@@ -6214,16 +8923,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   install.reason)
           case lookup.status
           of aclHit:
-            var outputsPresent = true
-            if config.rebuildMissingOutputsOnCacheHit:
-              outputsPresent = outputsPresentBeforeLookup
-            if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
+            if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
-              completeSuccess(id, asUpToDate, cdHit, false, "outputs-present")
+              completeSuccess(id, asUpToDate, cdHit, false,
+                if action.declaresNoOutputs(): "no-declared-outputs"
+                else: "outputs-present")
               inc completed
               launchedAny = true
               continue
@@ -6247,17 +8955,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               launchedAny = true
               continue
           of aclHybridCutoff:
-            var outputsPresent = true
-            if config.rebuildMissingOutputsOnCacheHit:
-              outputsPresent = outputsPresentBeforeLookup
-            if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
+            if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
               completeSuccess(id, asUpToDate, cdHybridCutoff, false,
-                "outputs-present")
+                if action.declaresNoOutputs(): "no-declared-outputs"
+                else: "outputs-present")
               inc completed
               launchedAny = true
               continue
@@ -6284,15 +8990,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdRejected
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: "corrupt-output"
+            cacheRejectedOutput = true
+            runResult.trace(id, "cache-rejected",
+              runResult.results[idToIndex.resultIndex(id)].reason)
+            recordCacheLookupFacts(id, lookup)
           of aclMissInputChanged:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: "input-changed"
+            recordCacheLookupFacts(id, lookup)
             cacheMissInputChanged = true
           else:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: $lookup.status
+            recordCacheLookupFacts(id, lookup)
         elif not action.cacheable:
           runResult.results[idToIndex.resultIndex(id)].reason = "not-cacheable"
 
@@ -6304,6 +9016,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           outputsPresent = action.allOutputsExist()
           finishStat("repro output stat", outputStatStart)
         if outputsPresent and not cacheMissInputChanged and
+            not cacheRejectedOutput and
             not dependencyLaunched and
             not config.forceRebuild and
             not action.needsExecutionForPolicy():
@@ -6460,7 +9173,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 action.outputs, action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
-                envInputs = action.cacheEnvInputs(evidence.evidence))
+                envInputs = action.cacheEnvInputs(evidence.evidence),
+                # An elevated edge reaches this site instead of the
+                # monitored one, and it used to record every directory
+                # input with NO membership digest. That is not "less
+                # precise": a recorded `mtimeNs = 0` means "not
+                # membership-tracked", such a directory is never
+                # re-listed, and the hit path does not re-record — so the
+                # record was PERMANENTLY existence-only
+                # (Incremental-Invalidation.md:814-821). The evidence was
+                # already collected two lines up; only the hand-off was
+                # missing.
+                enumeratedDirectories =
+                  action.cacheEnumeratedDirectories(evidence.evidence))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, action.id), record)
@@ -6497,8 +9222,50 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           launchedAny = true
           continue
 
+        # In-Process-Monitor-Hosting HM-4 — the launch decision is taken HERE,
+        # before the monitor is planned, because only a path the ENGINE spawns
+        # can host io-mon in-process and the monitor plan is what records that
+        # choice. It used to sit just above the spawn, ~130 lines below.
+        #
+        # Guarded on ``bakProcess`` so nothing changes for a built-in action:
+        # ``tryEnsureInlineRunQuotaSession`` opens a real session, and a
+        # built-in never launches anything that would use one. The two
+        # variables are consumed unchanged at the spawn site; only the point
+        # at which they are computed moved.
+        var bypassRunQuota = false
+        var inlineRunQuota = false
+        if action.kind == bakProcess:
+          if config.inlineRunQuota and not effectiveBypassRunQuota:
+            inlineRunQuota = tryEnsureInlineRunQuotaSession()
+            bypassRunQuota = not inlineRunQuota
+          else:
+            bypassRunQuota = launchBypassesRunQuota()
+        # In-Process-Monitor-Hosting P3 — "which launch path" is now ONE
+        # value, and it is the only input to the hosting decision besides the
+        # config. It used to be a bare ``bypassRunQuota`` conjunct on the line
+        # below, which read like a scope note and was in fact the only thing
+        # standing between an inline action and a completely unmonitored run
+        # (see the refusal further down, and ``monitorHostingRefusal``).
+        let launchPath =
+          if bypassRunQuota: mlpBypassRunQuota
+          elif inlineRunQuota: mlpInlineRunQuota
+          else: mlpRunQuotaHelper
+        # Saying "hosted" here does two independent things: it tells
+        # ``monitoredAction`` to leave the argv ALONE (no
+        # ``repro internal io monitor`` wrapper), and it tells the launch
+        # site below to start an in-process host instead. Under
+        # ``mhmWhereSupported`` the two are matched by
+        # ``launchPathHostsMonitorInProcess``; under ``mhmRequired`` a plan
+        # is hosted on every path DELIBERATELY, so that a request the launch
+        # sites cannot satisfy fails loudly at the site instead of being
+        # silently downgraded where nothing could observe it.
+        let hostMonitorInProcess = InProcessMonitorHostSupported and
+          action.kind == bakProcess and
+          monitorHostingRequested(config.monitorHosting, launchPath)
+
         let monitorPlanStart = statStart()
-        let plan = monitoredAction(action, config, cacheRoot)
+        let plan = monitoredAction(action, config, cacheRoot,
+          hostMonitorInProcess)
         finishStat("repro monitor plan", monitorPlanStart)
         if plan.diagnostic.len > 0:
           statuses[id] = asFailed
@@ -6518,7 +9285,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishStat("repro builtin execute", builtinStart)
           let idx = idToIndex.resultIndex(id)
           let previousCacheDecision = runResult.results[idx].cacheDecision
+          # M17: the cache-lookup facts were recorded BEFORE the action
+          # ran and would be wiped by this assignment. They are carried
+          # for the same reason the cache decision is -- the settled
+          # result describes the execution, not the lookup that led to
+          # it, and the lookup is the only place either fact exists.
+          let previousMissReason = runResult.results[idx].cacheMissReason
+          let previousStrongFingerprint =
+            runResult.results[idx].strongFingerprintHex
           runResult.results[idx] = finished
+          runResult.results[idx].cacheMissReason = previousMissReason
+          runResult.results[idx].strongFingerprintHex =
+            previousStrongFingerprint
           runResult.results[idx].dependencyPolicyKind =
             plan.action.dependencyPolicy.kind
           runResult.results[idx].cacheDecision =
@@ -6575,7 +9353,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
-                envInputs = plan.action.cacheEnvInputs(evidence.evidence))
+                envInputs = plan.action.cacheEnvInputs(evidence.evidence),
+                # Same omission as the elevated site above, reached by
+                # builtin edges and by anything whose plan is not a
+                # `bakProcess`. A builtin cannot be wrapped in the
+                # io-monitor, so its enumeration evidence arrives either
+                # from a converter path set or from a monitor depfile a
+                # direct engine caller prewired — both of which
+                # `collectEvidence` has already folded by this point.
+                enumeratedDirectories =
+                  plan.action.cacheEnumeratedDirectories(evidence.evidence))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
@@ -6595,6 +9382,44 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           launchedAny = true
           continue
 
+        # In-Process-Monitor-Hosting P3 — A HOSTED PLAN MAY ONLY REACH A
+        # LAUNCH SITE THAT HOSTS. This is the enforcement half of the
+        # handshake ``monitoredAction`` cannot check from where it stands.
+        #
+        # ``monitoredAction`` strips the ``repro internal io monitor``
+        # wrapper when the plan says hosted, so a hosted plan arriving at a
+        # site that starts no host runs the recipe's argv NAKED: no wrapper,
+        # no host, no iomon, an empty dependency set, and a successful,
+        # cache-publishing action that reports nothing wrong. Only the L1
+        # branch below honours ``plan.hostInProcess``; an inline launch is
+        # staged and ``continue``s above that branch, and the helper path
+        # hands the whole argv to another process.
+        #
+        # THE CONDITION IS KEYED ON ``bypassRunQuota`` — the same variable
+        # that selects the spawn a few lines below — and NOT on
+        # ``launchPathHostsMonitorInProcess``. That is the difference
+        # between a guard and a restatement: flipping the inline row of that
+        # table to ``true`` in the hope of enabling hosting there does not
+        # walk past this check, it makes every inline action fail with the
+        # sentence below until the staging site has actually learned to
+        # start a host (In-Process-Monitor-Hosting P4).
+        if plan.hostInProcess and not bypassRunQuota:
+          let refusal = monitorHostingRefusal(launchPath)
+          statuses[id] = asFailed
+          let refusedIdx = idToIndex.resultIndex(id)
+          runResult.results[refusedIdx].status = asFailed
+          runResult.results[refusedIdx].dependencyPolicyKind =
+            plan.action.dependencyPolicy.kind
+          runResult.results[refusedIdx].monitorDepfilePath =
+            plan.action.monitorDepfile
+          runResult.results[refusedIdx].stderr = refusal
+          runResult.trace(id, "failed", refusal)
+          blockClosure(id, id)
+          emitProgress(bpkActionCompleted, id)
+          completed = terminalCount()
+          launchedAny = true
+          continue
+
         statuses[id] = asRunning
         let runningIdx = idToIndex.resultIndex(id)
         runResult.results[runningIdx].status = asRunning
@@ -6603,13 +9428,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         poolRunning[poolName] = used + units
         inc launchSeq
         let resultPath = runQuotaResultRoot / ($launchSeq & ".json")
-        var bypassRunQuota = false
-        var inlineRunQuota = false
-        if config.inlineRunQuota and not effectiveBypassRunQuota:
-          inlineRunQuota = tryEnsureInlineRunQuotaSession()
-          bypassRunQuota = not inlineRunQuota
-        else:
-          bypassRunQuota = launchBypassesRunQuota()
+        # ``bypassRunQuota`` / ``inlineRunQuota`` were decided above the
+        # monitor plan (HM-4). Their consumption is unchanged.
         # RA-13: record that this run launched at least one action with no
         # RunQuota lease so the build header + run report can surface the
         # unsafe-for-concurrent state (it never makes concurrent cross-
@@ -6624,6 +9444,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # already supports batched candidate decisions, so this turns
           # an O(N) chain of synchronous round-trips at parallel=N into
           # a single round-trip per wave.
+          #
+          # NOTE THE ``continue``: this path leaves before the launch
+          # branch below, so it never reaches the code that would start an
+          # in-process host. An unwrapped argv staged here would run
+          # completely unmonitored — which is why the guard above refuses a
+          # hosted plan on any path that is not L1, and why this assertion
+          # stands here as well.
+          #
+          # SECOND LINE OF DEFENCE, and it is not redundant with the guard.
+          # The guard's coverage of this site rests on nothing but source
+          # ORDER: move this staging block above it — which is exactly the
+          # shape this code had before P3 — and the guard silently stops
+          # covering the inline path. The assertion is attached to the
+          # staging itself, so it travels with the block and cannot be
+          # separated from it by moving code around. It is unreachable while
+          # the guard is in place; that is the intended state, not an excuse
+          # for leaving it out.
+          doAssert not plan.hostInProcess,
+            monitorHostingRefusal(mlpInlineRunQuota)
           stagedInlineLaunches.add(StagedInlineLaunch(
             id: id,
             pool: poolName,
@@ -6636,14 +9475,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let launchStart = statStart()
         var process: Process
         var directProcess: ReproDirectRunningProcess
+        var monitorSlot = -1
         var processKind =
-          if bypassRunQuota: rpkBypassProcess
+          if plan.hostInProcess: rpkMonitorHost
+          elif bypassRunQuota: rpkBypassProcess
           else: rpkHelperProcess
         let startEvent = "launched"
         let startDetail = "pool=" & poolName
         var launchFailure = ""
         try:
-          if bypassRunQuota:
+          if plan.hostInProcess:
+            # HM-4 — the engine IS io-mon's host for this action. Reached only
+            # when the monitor plan said so, which it only does for a launch
+            # path the engine spawns.
+            monitorSlot = startMonitorHost(monitorHosts, plan.action, config,
+              cacheRoot)
+          elif bypassRunQuota:
             directProcess = startBypassRunQuotaProcess(plan.action, config)
           else:
             process = startRunQuotaProcess(plan.action, config, resultPath)
@@ -6683,10 +9530,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           processKind: processKind,
           process: process,
           directProcess: directProcess,
-          resultPath: resultPath
+          resultPath: resultPath,
+          monitorSlot: monitorSlot
         )
         when defined(posix):
-          if not bypassRunQuota:
+          if not bypassRunQuota and not plan.hostInProcess:
             runningAction.processGroupPid = assignProcessGroup(process)
         running.add(runningAction)
         runResult.trace(id, startEvent, startDetail)
@@ -6710,6 +9558,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         var batchFailure = ""
         try:
           offers = offerWithRunQuotaBatch(inlineRunQuotaSession, requests, commands)
+        except ReproRunQuotaDeadlockError:
+          # A whole frontier blocked by requests the authority cannot ever
+          # admit is a build-level scheduler deadlock, not an action process
+          # failure. Preserve the typed outcome for the CLI diagnostic.
+          raise
         except CatchableError as err:
           batchFailure = err.msg
         finishStat("repro runquota launch", batchStart)
@@ -6766,7 +9619,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               processKind: processKind,
               runQuotaProcess: runQuotaProcess,
               queuedRunQuotaProcess: queuedRunQuotaProcess,
-              resultPath: staged.resultPath
+              resultPath: staged.resultPath,
+              monitorSlot: -1
             ))
             runResult.trace(staged.id, startEvent, startDetail)
             emitProgress(bpkActionStarted, staged.id)
@@ -6838,6 +9692,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           nextGrantPoll = epochTime() + 0.025
           if runIndex >= 0:
             break
+        # In-Process-Monitor-Hosting HM-4 — settle EVERY hosted monitor whose
+        # root has exited before choosing which action to reap, and settle
+        # them in their own pass so the choice cannot skip any.
+        #
+        # This is the timing decision the milestone asks to be made
+        # deliberately. ``settleMonitorHost`` runs ``finishMonitor`` as soon as
+        # ``pollMonitor`` answers true, and the §4.1 detached-descendant grace
+        # window opens at that call (DH-4). Doing it inside the selection loop
+        # below would leave every monitor after the first one in the pass
+        # unfinished until the scheduler got round to it, so a descendant that
+        # died in between would be graded ``mcComplete`` here and
+        # ``mcIncomplete`` by the reference form — a divergence produced by
+        # queue depth rather than by anything about the action.
+        for j in 0 ..< running.len:
+          if running[j].processKind == rpkMonitorHost:
+            discard settleMonitorHost(monitorHosts, running[j].monitorSlot)
         # Cheap inline-only checks first: queued/failed inline-runquota
         # entries are not handle-based and the OS won't wake us for them.
         # Inline-RunQuota processes do their own pipe / handle wait in
@@ -6846,6 +9716,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           case running[j].processKind
           of rpkInlineRunQuotaPending:
             discard
+          of rpkMonitorHost:
+            if monitorHosts.records[running[j].monitorSlot].finished:
+              runIndex = j
+              break
           of rpkInlineRunQuota:
             if running[j].runQuotaProcess.pollCompletion():
               runIndex = j
@@ -6892,6 +9766,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       finishStat("repro process wait", waitStart)
       var runningItem = running[runIndex]
       let finishStart = statStart()
+      # HM-5 — the hosted path's evidence, in memory, for exactly one
+      # iteration. Declared here and re-assigned per action so it is dropped
+      # (and its ~18 MB for a real provider compile freed) as soon as
+      # ``collectEvidence`` below has folded it.
+      var hostedMonitorRecords: seq[MonitorRecord] = @[]
       let finished =
         case runningItem.processKind
         of rpkInlineRunQuotaPending:
@@ -6904,6 +9783,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runningItem.runQuotaProcess)
         of rpkInlineRunQuotaFailed:
           runningItem.inlineFailure
+        of rpkMonitorHost:
+          finishMonitorHostAction(
+            monitorHosts,
+            runningItem.id,
+            runningItem.monitorSlot,
+            config,
+            cacheRoot,
+            hostedMonitorRecords)
         of rpkBypassProcess:
           finishBypassRunQuotaProcess(
             runningItem.id,
@@ -6932,7 +9819,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
       let idx = idToIndex.resultIndex(finished.id)
       let previousCacheDecision = runResult.results[idx].cacheDecision
+      # M17: see the built-in merge above. Recorded at lookup time,
+      # carried across the settle.
+      let previousMissReason = runResult.results[idx].cacheMissReason
+      let previousStrongFingerprint =
+        runResult.results[idx].strongFingerprintHex
       runResult.results[idx] = finished
+      runResult.results[idx].cacheMissReason = previousMissReason
+      runResult.results[idx].strongFingerprintHex = previousStrongFingerprint
       runResult.results[idx].dependencyPolicyKind =
         runningItem.action.dependencyPolicy.kind
       runResult.results[idx].monitorDepfilePath = runningItem.action.monitorDepfile
@@ -6962,8 +9856,47 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           continue
         let evidenceStart = statStart()
-        let evidence = collectEvidence(action, strict = true)
+        var evidence =
+          if runningItem.processKind == rpkMonitorHost:
+            # HM-5 — fold from the records the host already has. The ``.iomon``
+            # for this action may not exist yet; that is the point.
+            collectEvidence(action, strict = true,
+              hostedRecords = addr hostedMonitorRecords)
+          else:
+            collectEvidence(action, strict = true)
+        hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
+        # HM-5 — a publication that FAILED means this action's ``.iomon`` never
+        # landed. Nothing is wrong with the action or its evidence, which came
+        # from memory; what is missing is the artefact ``repro why`` and CI
+        # read for the cache entry about to be published. So the entry is not
+        # published and the next build MISSES and re-runs — the same "fail
+        # toward a re-execution" direction IM-3's missing-create case takes.
+        #
+        # A CACHEABLE hosted action WAITS for its own publication here, and
+        # that is the one place this milestone gives its asynchrony back on
+        # purpose. A non-blocking drain makes the conservative direction a
+        # RACE between a rename and this wrap-up — measured going both ways
+        # while mutation-checking, which is how it was found — and a
+        # conservative direction that holds "usually" is not one. What is
+        # waited for is a ``rename`` on a file io-mon finished writing before
+        # the action was reaped, after evidence collection and the converters
+        # have already run; see ``awaitMonitorFlush``. Everything else — every
+        # non-cacheable action, and every action's next edges up to this point
+        # — still proceeds without waiting.
+        let flushOutcomes =
+          if runningItem.processKind == rpkMonitorHost and action.cacheable:
+            awaitMonitorFlush(finished.id)
+          else:
+            drainMonitorFlushOutcomes()
+        for outcome in flushOutcomes:
+          if outcome.error.len == 0: continue
+          monitorFlushFailures[outcome.actionId] = outcome.error
+        if monitorFlushFailures.hasKey(finished.id):
+          evidence.disableCacheHits = true
+          evidence.evidence.diagnostics.add(
+            "monitor depfile flush failed; action-cache publish skipped so " &
+            "the next build re-executes: " & monitorFlushFailures[finished.id])
         runResult.results[idx].evidence = evidence.evidence
         if not evidence.publishable:
           runResult.results[idx].status = asFailed
@@ -6996,7 +9929,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             action.outputs, action.cwd,
             storeOutputBlobs = storeOutputBlobs,
             metadataCache = addr fileMetadataCache,
-            envInputs = action.cacheEnvInputs(evidence.evidence))
+            envInputs = action.cacheEnvInputs(evidence.evidence),
+            enumeratedDirectories =
+              action.cacheEnumeratedDirectories(evidence.evidence))
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)
@@ -7030,6 +9965,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           discard item.runQuotaProcess.cancelAndWait()
       of rpkInlineRunQuotaFailed:
         discard
+      of rpkMonitorHost:
+        # HM-4 — kill the monitored root, then let the handle go. Dropping it
+        # reaps the root before releasing the consumer, so no producer is ever
+        # left publishing into a released set (LF-2); killing first is what
+        # keeps that reap from blocking shutdown indefinitely.
+        abandonMonitorHost(monitorHosts, item.monitorSlot)
       of rpkBypassProcess:
         if item.directProcess.active and not item.directProcess.completed:
           discard item.directProcess.cancelAndWait()
@@ -7037,7 +9978,47 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         terminateRunningAction(item)
         item.process.close()
     if inlineRunQuotaSessionOpen:
+      emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       inlineRunQuotaSession.close()
+    # HM-5 — the build does not end while a depfile publication is still in
+    # flight. Not for correctness of the build (the evidence was folded from
+    # memory and every cacheable action already waited for its own
+    # publication before publishing); for the ARTEFACT. A process that exited
+    # with a rename queued would leave a dot-prefixed scratch file next to a
+    # depfile that never appeared, and the next build would find neither.
+    #
+    # What can still be learned only HERE is narrow and is named rather than
+    # rounded up: a NON-cacheable action's failure, which withholds nothing
+    # because there was no entry to withhold, and a cacheable action whose
+    # ``awaitMonitorFlush`` hit its 30-second guard — a filesystem that has
+    # stopped answering, where the build has larger problems than a missing
+    # debugging artefact.
+    for outcome in awaitMonitorFlushes():
+      if outcome.error.len == 0: continue
+      monitorFlushFailures[outcome.actionId] = outcome.error
+      let lateIdx = idToIndex.getOrDefault(outcome.actionId, -1)
+      if lateIdx >= 0 and lateIdx < runResult.results.len:
+        runResult.results[lateIdx].evidence.diagnostics.add(
+          "monitor depfile flush failed after the action-cache entry was " &
+          "published: " & outcome.error)
+      runResult.trace(outcome.actionId, "monitor-flush-failed", outcome.error)
+    # Engine-Threadpool TP-1 — and EVERY OTHER tenant of the engine's worker
+    # pool drains here too, not just the flush above.
+    #
+    # This is inside the ``finally``, which is the whole of the guarantee: an
+    # exception unwinding out of the scheduling loop — a raising
+    # ``progressCallback``, say — must not leave a worker mid-job while the
+    # process tears down around it. ``the pool drains when an exception
+    # unwinds out of the build`` pins that, and moving this line (or the
+    # flush drain above it) out of the ``finally`` is the mutation that
+    # reddens it — measured red on both of that case's assertions: the
+    # depfile never appeared and the dot-prefixed scratch file was left
+    # behind.
+    #
+    # A no-op today beyond the flush, because the flush is the pool's only
+    # tenant; it is here so that adding TP-2's monitor finish does not depend
+    # on someone remembering to add a drain.
+    awaitEnginePoolIdle()
   finishStat("repro scheduler total", totalStart)
   finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats

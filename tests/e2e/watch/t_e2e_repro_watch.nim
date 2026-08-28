@@ -1,7 +1,8 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 from repro_test_support import requireBinary, monitorShimPath,
-  requireCodeTracerSourceRoot, requireRunQuotaDaemonBin
+  requireCodeTracerSourceRoot, requireRunQuotaDaemonBin,
+  runquotaSocketEndpoint
 
 const GccProxySource = r"""
 #include <fcntl.h>
@@ -265,7 +266,8 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = "/tmp/repro-m31-rq-" & $getCurrentProcessId() & ".sock"
+  let socketPath = runquotaSocketEndpoint(
+    "repro-m31-rq-" & $getCurrentProcessId())
   if fileExists(socketPath):
     removeFile(socketPath)
   let daemon = startProcess(daemonBin, args = [

@@ -51,8 +51,22 @@ proc artifactBuildBodyName(nameNode: NimNode): string =
   else:
     ""
 
+proc artifactLockFileDesignation(artifactBody: NimNode): string =
+  ## Named-Lock-Files NLF-M7 (§4.3) — the ``lockFile <name>`` line, read
+  ## straight off the artifact body so the flattening pass can scope the
+  ## artifact's edges without re-running the ``macros_a`` parser.
+  for stmt in artifactBody:
+    if calleeName(stmt).normalize != "lockfile": continue
+    if stmt.len < 2: continue
+    var nameNode = stmt[1]
+    if nameNode.kind == nnkStmtList and nameNode.len == 1:
+      nameNode = nameNode[0]
+    if nameNode.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      return identText(nameNode)
+  ""
+
 proc wrapArtifactBuildBody(packageName, memberName: string;
-                           stmts: NimNode): NimNode =
+                           stmts: NimNode; lockFileName = ""): NimNode =
   ## Wrap one artifact's flattened ``build:`` statements in a
   ## ``beginBuildContext(package, member) / try body finally
   ## endBuildContext()`` block. This restores the M4 per-artifact
@@ -65,14 +79,39 @@ proc wrapArtifactBuildBody(packageName, memberName: string;
   ## The top-level (package-scoped) ``build:`` block is NOT wrapped —
   ## it carries no owning member, so its edges stay untagged (correct:
   ## they are not the package's declared public interface).
+  ##
+  ## Named-Lock-Files NLF-M7 (§4.3 / §4.4): when the artifact designates a
+  ## lock file, the same wrapper pushes the designation for the duration of
+  ## its edges. That is what makes designation a property of the ARTIFACT
+  ## even though every artifact's ``build:`` statements are flattened into one
+  ## package-level proc — without it the flattening would erase exactly the
+  ## distinction §4.3 exists to express, and the canonical example (a
+  ## ``hostTools`` tablegen and a ``targetRuntime`` app in one package) would
+  ## emit both under one lock file.
+  ##
+  ## Push and pop sit in the SAME ``try``/``finally`` as the build context,
+  ## for the reason §4.4 gives for `withLockFile`'s: a recipe that raises
+  ## inside one artifact's body must not leave the next artifact's edges
+  ## designated to a lock file nobody wrote.
   let pkgLit = newLit(packageName)
   let memberLit = newLit(memberName)
+  if lockFileName.len == 0:
+    return quote do:
+      block:
+        beginBuildContext(`pkgLit`, `memberLit`)
+        try:
+          `stmts`
+        finally:
+          endBuildContext()
+  let lockLit = newLit(lockFileName)
   result = quote do:
     block:
       beginBuildContext(`pkgLit`, `memberLit`)
+      pushLockFileScope(lskArtifact, `lockLit`)
       try:
         `stmts`
       finally:
+        popLockFileScope()
         endBuildContext()
 
 proc collectBuildStatements(pkgBody: NimNode; packageName = ""): NimNode =
@@ -113,7 +152,8 @@ proc collectBuildStatements(pkgBody: NimNode; packageName = ""): NimNode =
             artifactStmts.add(buildStmt)
       if artifactStmts.len > 0:
         if packageName.len > 0 and member.len > 0:
-          result.add(wrapArtifactBuildBody(packageName, member, artifactStmts))
+          result.add(wrapArtifactBuildBody(packageName, member, artifactStmts,
+            artifactLockFileDesignation(exeBody)))
         else:
           for s in artifactStmts: result.add(s)
     elif calleeName(stmt).normalize == "library":
@@ -132,7 +172,8 @@ proc collectBuildStatements(pkgBody: NimNode; packageName = ""): NimNode =
             artifactStmts.add(buildStmt)
       if artifactStmts.len > 0:
         if packageName.len > 0 and member.len > 0:
-          result.add(wrapArtifactBuildBody(packageName, member, artifactStmts))
+          result.add(wrapArtifactBuildBody(packageName, member, artifactStmts,
+            artifactLockFileDesignation(libBody)))
         else:
           for s in artifactStmts: result.add(s)
     elif calleeName(stmt).normalize == "files":
@@ -497,6 +538,50 @@ proc collectImplicitTargetNameHooks(pkgBody: NimNode): NimNode =
         indentBody(spec.bodyRepr)
       result.add(parseStmt(procSrc))
 
+proc emitLockFileDesignations(pkg: PackageDef; site: NimNode): NimNode =
+  ## Named-Lock-Files NLF-M7 — §4.9's compile error and §4.3's registration.
+  ##
+  ## Two calls per designation, and they are two rather than one on purpose:
+  ##
+  ##   * `requireDeclaredLockFile` runs at MACRO-EXPANSION time and is what
+  ##     makes an undeclared name "fail at **recipe compile time**" (§4.9's
+  ##     requirement, which also forbids "a runtime lookup miss" and any
+  ##     silent fall back to `default`);
+  ##   * `registerArtifactLockFile` runs at MODULE-INIT time and is what lets
+  ##     the compiled recipe report its own designations — to the propagation
+  ##     (§4.1), to `repro lock list`, and to `repro graph`, which §4.6 asks
+  ##     to "report pinned dependencies at the consumer".
+  ##
+  ## A designation is checked even when the artifact has no `build:` body.
+  ## An artifact designating a lock file that does not exist is an author
+  ## error regardless of whether the recipe currently emits an edge for it,
+  ## and checking only the ones that do would make the diagnostic appear and
+  ## disappear as a body is commented out.
+  result = newStmtList()
+  let pkgLit = newLit(pkg.packageName)
+  let fileLit = newLit(pkg.sourceFile)
+  var sites: seq[tuple[artifact, lockFileName: string; line: int]] = @[
+    (artifact: "", lockFileName: pkg.lockFile, line: pkg.sourceLine)]
+  for exe in pkg.executables:
+    sites.add((artifact: exe.exportName, lockFileName: exe.lockFile,
+      line: exe.sourceLine))
+  for lib in pkg.libraries:
+    sites.add((artifact: lib.name, lockFileName: lib.lockFile,
+      line: lib.sourceLine))
+  for entry in sites:
+    if entry.lockFileName.len == 0: continue
+    # `ident`, not `bindSym`: this is an ordinary proc called from the
+    # `package` macro rather than a macro itself, so the emitted names are
+    # resolved at the recipe. Both reach a recipe through
+    # `repro_project_dsl`, which re-exports them.
+    result.add(newCall(ident("requireDeclaredLockFile"),
+      newLit(entry.lockFileName), pkgLit, fileLit, newLit(entry.line),
+      newLit(0)))
+    result.add(newCall(ident("registerArtifactLockFile"),
+      pkgLit, newLit(entry.artifact), newLit(entry.lockFileName), fileLit,
+      newLit(entry.line)))
+  discard site
+
 proc emitVariantDeclarations(variants: seq[VariantDecl];
                               pkg: PackageDef): NimNode =
   ## Spec-Implementation M1/M2d: lower the parsed ``VariantDecl`` list
@@ -517,7 +602,8 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
   ## entire block — packages with no solver participation pay zero
   ## runtime cost.
   result = newStmtList()
-  if variants.len == 0 and pkg.toolUses.len == 0:
+  if variants.len == 0 and pkg.toolUses.len == 0 and
+      pkg.nativeBuildDeps.len == 0 and pkg.runtimeDeps.len == 0:
     return
   # Emit the import lazily so package files without variants OR
   # solver-bound dependencies don't get an unused import.
@@ -557,17 +643,44 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
   # pair is the M2c ``ConditionalGate``). Calls are emitted BEFORE
   # ``finalizeVariants()`` so the registry is populated when the
   # solver runs.
-  for useDef in pkg.toolUses:
-    if useDef.packageSelector.len == 0: continue
-    let parentLit = escForCode(pkg.packageName)
-    let depLit = escForCode(useDef.packageSelector)
-    let rngLit = escForCode(useDef.rawConstraint)
-    let gateVarLit = escForCode(useDef.gateVariant)
-    let gateValLit = escForCode(useDef.gateValue)
-    result.add(parseStmt(
-      "registerSolverDependency(" & parentLit & ", " & depLit & ", " &
-      rngLit & ", gateVariant = " & gateVarLit & ", gateValue = " &
-      gateValLit & ")\n"))
+  #
+  # Named-Lock-Files NLF-M7 (§4.6): all THREE dependency lists are emitted,
+  # each entry carrying the list it was written in.
+  #
+  # Before this, only `pkg.toolUses` reached the solver at all —
+  # `nativeBuildDeps:` and `runtimeDeps:` were parsed into their own slots and
+  # then never registered, so the BUILD-platform half of the approved
+  # host/target split was invisible to the solve. §4.6 measured the erasure
+  # one layer further down (the `toolUses & nativeBuildDeps & runtimeDeps`
+  # fold at serialization) and drew the same conclusion: "the platform
+  # distinction the recipe expressed is **erased before the solver ever sees
+  # it**." Both halves are fixed here and in `packageUseSeqLiteral`.
+  #
+  # The de-duplication is by (dep, kind), not by dep. §4.6 quotes
+  # `From-Source-Build-Recipes.md`: "A dependency that appears in more than
+  # one list must be written in each (reprobuild does not collapse them —
+  # explicit is better)", and a package that writes the same library in both
+  # `nativeBuildDeps:` and `buildDeps:` is asking for exactly the two
+  # instances NLF-PROP-4 asserts. Collapsing them here would silently answer
+  # "one".
+  var emitted: seq[string] = @[]
+  for (uses, kind) in [(pkg.toolUses, DepKindTarget),
+                       (pkg.nativeBuildDeps, DepKindNative),
+                       (pkg.runtimeDeps, DepKindRuntime)]:
+    for useDef in uses:
+      if useDef.packageSelector.len == 0: continue
+      let key = useDef.packageSelector & "\x1f" & kind & "\x1f" &
+        useDef.rawConstraint & "\x1f" & useDef.gateVariant & "\x1f" &
+        useDef.gateValue
+      if key in emitted: continue
+      emitted.add(key)
+      result.add(parseStmt(
+        "registerSolverDependency(" & escForCode(pkg.packageName) & ", " &
+        escForCode(useDef.packageSelector) & ", " &
+        escForCode(useDef.rawConstraint) &
+        ", gateVariant = " & escForCode(useDef.gateVariant) &
+        ", gateValue = " & escForCode(useDef.gateValue) &
+        ", depKind = " & escForCode(kind) & ")\n"))
   result.add(parseStmt("finalizeVariants()\n"))
 
 # ---------------------------------------------------------------------------
@@ -2903,6 +3016,25 @@ proc m9r3LinkKindLit(text: string; node: NimNode): NimNode =
           "(got '" & text & "')", node)
     ident("llkUnset")
 
+proc nlfM8MultiVersionLit(text: string; node: NimNode): NimNode =
+  ## Named-Lock-Files NLF-M8 (§9.3) — lower a ``multiVersion`` literal to a
+  ## ``MultiVersionPolicy`` enum value.
+  ##
+  ## The two spellings §9.3 writes are the only two accepted. In particular
+  ## there is no ``multiVersion unset``: writing the line is the act of making
+  ## a claim, so a spelling that means "I wrote a line that says nothing"
+  ## would be a way to look like an author who considered the question without
+  ## having answered it — which is the state §9.3's naming exists to keep
+  ## distinguishable from silence.
+  case text.normalize
+  of "forbidden": ident("mvForbidden")
+  of "allowed":   ident("mvAllowed")
+  else:
+    error("library api: multiVersion must be one of: forbidden, allowed " &
+          "(got '" & text & "'). See Named-Lock-Files.md §9.3 — omitting the " &
+          "line inherits `forbidden` from the language convention.", node)
+    ident("mvForbidden")
+
 proc m9r3IdentOrStrText(node: NimNode): tuple[ok: bool; text: string] =
   ## Project a single-token AST node onto the string the registry
   ## stores. Accepts string literals (use ``strVal``), bare identifiers
@@ -3269,6 +3401,28 @@ proc emitM9R3LibraryApis*(packageName: string;
         let kindLit = m9r3LinkKindLit(parsed.text, valueNode)
         setters.add(quote do:
           `apiSym`.linkKind = `kindLit`)
+      of "multiversion":
+        # Named-Lock-Files NLF-M8, design §9.3 — the per-library property,
+        # beside `linkKind` because it is consumption metadata of the same
+        # kind. The source position recorded is the `multiVersion` LINE's,
+        # because §9.4's diagnostic cites the declaration the author has to
+        # change and the library's own line is not that.
+        if fieldStmt.len < 2:
+          error("library api: multiVersion requires a value " &
+                "(forbidden | allowed)", fieldStmt)
+        let valueNode = fieldStmt[1]
+        let parsed = m9r3IdentOrStrText(valueNode)
+        if not parsed.ok:
+          error("library api: multiVersion must be one of: forbidden, allowed",
+                valueNode)
+        let policyLit = nlfM8MultiVersionLit(parsed.text, valueNode)
+        let info = fieldStmt.lineInfoObj
+        let fileLit = newLit(info.filename)
+        let lineLit = newLit(info.line)
+        setters.add(quote do:
+          `apiSym`.multiVersion = `policyLit`
+          `apiSym`.multiVersionSourceFile = `fileLit`
+          `apiSym`.multiVersionSourceLine = `lineLit`)
       of "headers":
         if fieldStmt.len >= 2:
           let body = fieldStmt[^1]
@@ -3660,6 +3814,8 @@ macro package*(name: untyped; body: untyped): untyped =
   # ``repro_dsl_stdlib/configurables/variants.nim``; the import below
   # is gated so packages without variants don't pull the stdlib in.
   let variantsEmission = emitVariantDeclarations(pkg.variants, pkg)
+  # ── Named-Lock-Files NLF-M7: §4.9's compile error, §4.3's registration ──
+  let lockFileEmission = emitLockFileDesignations(pkg, name)
   # ── M5: cross-project uses + cycle detection ─────────────────────
   var declaredUses: seq[string] = @[]
   for u in pkg.toolUses:
@@ -3711,6 +3867,7 @@ macro package*(name: untyped; body: untyped): untyped =
   # bindings + the trailing ``finalizeVariants()`` call at top-level
   # module scope (after the package wrapper code so the variant
   # accessor symbols are visible to ``build:`` code emitted below).
+  result.add(lockFileEmission)
   result.add(variantsEmission)
   # ── M5: cross-project storage / const / accessors ────────────────
   # `wrapperCode` and `toolActionWrapperCode` BOTH unconditionally

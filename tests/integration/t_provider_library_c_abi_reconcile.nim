@@ -266,10 +266,16 @@ suite "M4a: resource reconcile over the C-ABI library transport":
     # calls the callee-exported ``repro_provider_close`` and unloads the .so.
     # No manual close; a leaked dlopen / provider handle is hard to write.
     var scoped = loadResourceProviderLibrary(soPath)
-    discard digestViaLibrary(scoped, inst)
+    let beforeDrop = digestViaLibrary(scoped, inst)
     scoped = nil          # triggers =destroy (close + unload)
     GC_fullCollect()
-    check true            # reaching here without a crash proves clean teardown
+    # Same correction as in t_provider_library_c_abi_memory_ownership: not
+    # crashing is not evidence that ``=destroy`` ran. Re-loading the object
+    # and getting the same answer is.
+    var reloaded = loadResourceProviderLibrary(soPath)
+    check digestViaLibrary(reloaded, inst) == beforeDrop
+    reloaded = nil
+    GC_fullCollect()
 
     # ERROR path: a bad ABI version leaves the out-handle in a DEFINED empty
     # state (nil) and returns a negative status — NO exception crosses the ABI.

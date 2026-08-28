@@ -65,6 +65,21 @@ proc syntheticUseDef(name, constraint: string): InterfaceToolUse =
 
 suite "M9.R.8 dispatcher gate + buildDeps fallthrough":
 
+  test "standard provider graph identity follows binary content":
+    let scratch = createTempDir("repro-standard-provider-identity-", "")
+    defer: removeDir(scratch)
+    let first = scratch / "first-provider"
+    let same = scratch / "same-provider"
+    let changed = scratch / "changed-provider"
+    writeFile(first, "provider-a")
+    writeFile(same, "provider-a")
+    writeFile(changed, "provider-b")
+
+    let firstId = standardProviderArtifactIdForBinary(first)
+    check firstId.startsWith("repro-standard-provider.v1.")
+    check firstId == standardProviderArtifactIdForBinary(same)
+    check firstId != standardProviderArtifactIdForBinary(changed)
+
   test "test_m9r8_parse_tool_provisioning_from_source_canonical_form":
     # The CLI canonical spelling must round-trip — the env-var path
     # (``REPRO_TOOL_PROVISIONING=from-source``) and the
@@ -151,11 +166,13 @@ suite "M9.R.8 dispatcher gate + buildDeps fallthrough":
     except ValueError as exc:
       check exc.msg.contains("does not declare provisioning")
       check exc.msg.contains("tarball")
-    # And again for ``tpmNix`` to ensure the change didn't accidentally
-    # flip the nix path either.
-    try:
-      discard toolBuildIdentity(artifact, tpmNix, storeRoot = scratch)
-      check false
-    except ValueError as exc:
-      check exc.msg.contains("does not declare provisioning")
-      check exc.msg.contains("nixPackage")
+    # Nix provisioning is unavailable on Windows and rejects the host before
+    # inspecting package metadata. Exercise the metadata contract where the
+    # resolver itself is supported.
+    when not defined(windows):
+      try:
+        discard toolBuildIdentity(artifact, tpmNix, storeRoot = scratch)
+        check false
+      except ValueError as exc:
+        check exc.msg.contains("does not declare provisioning")
+        check exc.msg.contains("nixPackage")

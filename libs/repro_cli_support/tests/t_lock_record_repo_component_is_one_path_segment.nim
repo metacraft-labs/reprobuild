@@ -69,6 +69,22 @@ proc requireGit(gitBin, args: string; cwd = "") =
     checkpoint("git " & args & " failed (" & $res.code & "):\n" & res.output)
     doAssert false
 
+proc namedMigrateLocksCommands(message: string): seq[string] =
+  ## The ``repro workspace migrate-locks …`` invocations a refusal tells the
+  ## operator to run, parsed out of the single quotes it wraps them in. Naming
+  ## a command is a promise that it runs; the caller keeps that promise honest
+  ## by running exactly what was named.
+  var i = 0
+  while true:
+    let a = message.find('\'', i)
+    if a < 0: break
+    let b = message.find('\'', a + 1)
+    if b < 0: break
+    let cmd = message[(a + 1) ..< b].strip()
+    if cmd.startsWith("repro workspace migrate-locks") and cmd notin result:
+      result.add(cmd)
+    i = b + 1
+
 proc identityFor(gitBin: string): GitToolIdentity =
   GitToolIdentity(binaryPath: gitBin, version: "test", platformOs: "test",
     platformCpu: "test", installMethod: "path")
@@ -275,6 +291,30 @@ suite "RA-32 — a slash in a repo name must not deepen the lock path":
       check plan.steps.len == 1
       check plan.steps[0].oldPath == legacyRel
       check plan.steps[0].target == canonicalRel
+
+      # ...and "real" means the command the refusal PRINTS is the command that
+      # runs. Parse it back out of the refusal's own text and dispatch it
+      # VERBATIM through the CLI entry point — argv, parser and all — rather
+      # than calling the planner the refusal does not name.
+      #
+      # This is the assertion the earlier tests could not make, because they
+      # all entered at ``planLockRecordMigration`` and skipped the parser. The
+      # parser seeded ``tpmUnspecified`` for tool provisioning, which
+      # ``resolveGitTool`` rejects outright ("no provisioning mode was selected
+      # before resolving git"), so the documented invocation exited 1 before
+      # doing any work unless the operator also passed
+      # ``--tool-provisioning=path`` — a flag neither the refusal nor
+      # ``repro workspace --help`` mentions.
+      let named = namedMigrateLocksCommands(pub.diagnostic)
+      checkpoint("commands named: " & named.join(" | "))
+      check named.len >= 1
+      for cmd in named:
+        let argv = cmd.splitWhitespace()
+        check argv.len >= 3
+        check argv[0 .. 2] == @["repro", "workspace", "migrate-locks"]
+        let code = runWorkspaceMigrateLocksCommand(argv[3 .. ^1])
+        checkpoint("`" & cmd & "` -> exit " & $code)
+        check code == 0
 
   test "test_ra32_traversal_and_reserved_names_stay_inside_locks":
     ## A path component derived from a NAME is an injection surface. None of

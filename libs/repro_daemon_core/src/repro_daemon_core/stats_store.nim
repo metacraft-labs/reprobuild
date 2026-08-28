@@ -1,10 +1,41 @@
-import std/[algorithm, json, os, sets, strutils, tables, times]
+## The DERIVED half of the two-store split (M18).
+##
+## Normative specification:
+## ``reprobuild-specs/Build-Analytics-And-Optimization.md`` §"Two Stores",
+## ``reprobuild-specs/Retired-Names.md`` §"Analytics store paths and schema
+## ids".
+##
+## **THE RAW HALF IS GONE FROM HERE.** ``.repro/stats/observations.jsonl``,
+## ``.repro/stats/summary.json`` and the two schema ids
+## ``reprobuild.daemon.stats-observation.v1`` /
+## ``reprobuild.daemon.stats-summary.v1`` are retired: raw per-execution rows
+## are RunQuota's, written as ``ext_repro_action`` on its execution spine and
+## read back through ``runquotad``'s query interface. Reprobuild does not
+## define a database for them, does not choose their location, and does not
+## manage their retention.
+##
+## **NO MIGRATION, AND THE QUESTION IS ALREADY SETTLED.** ``Retired-Names.md``
+## records the JSONL store as "superseded rather than migrated: nothing reads
+## it" -- it had exactly one reader, ``repro stats``, which now reads the
+## shared store instead. An existing ``.repro/stats/observations.jsonl`` is
+## therefore left alone rather than imported: importing it would inject rows
+## with no host identity and no hardware profile into a store whose OS-6
+## invariant refuses aggregates that lack them.
+##
+## ``--write-stats`` SURVIVES WITH A NARROWER JOB: it names the project-local
+## DERIVED store, ``.repro/stats/derived/``, which holds rollups computed FROM
+## RunQuota's rows and never raw samples of its own.
 
-const
-  StatsObservationSchemaId* = "reprobuild.daemon.stats-observation.v1"
-  StatsSummarySchemaId* = "reprobuild.daemon.stats-summary.v1"
-  StatsRetentionRawRuns* = 50
-  StatsRetentionWindowDays* = 90
+import std/[json, os, sets, strutils, tables, times]
+
+import repro_runquota/stats_query
+
+# RAW RETENTION IS NOT REPROBUILD'S ANY MORE. ``StatsRetentionRawRuns = 50``
+# and ``StatsRetentionWindowDays = 90`` were the JSONL store's policy, and
+# ``Retired-Names.md`` retires ``[stats] raw-runs = N`` with no replacement:
+# raw retention is configured once in RunQuota for every client rather than
+# per project. They are deleted rather than left as unused constants, because
+# a constant naming a policy nothing enforces reads as a policy.
 
 type
   StatsCaptureGroup* = enum
@@ -28,10 +59,15 @@ type
 
   StatsFlushResult* = object
     storePath*: string
-    summaryPath*: string
+      ## The DERIVED store this flush was for.
     queuedBefore*: int
     flushed*: int
-    totalObservations*: int
+      ## How many rollup inputs reached a backend. Zero until one is
+      ## linked, and reported rather than assumed.
+    discarded*: int
+      ## How many were thrown away for want of that backend. Counted so a
+      ## reader is never told "0 flushed" without also being told why.
+    derivedBackendLinked*: bool
     lastError*: string
 
 var currentCapture: StatsCaptureConfig
@@ -43,6 +79,7 @@ var currentTarget = ""
 var currentTestFlushDelayMs = 0
 var observationQueue: seq[JsonNode] = @[]
 var processFlushedCount = 0
+var processDiscardedCount = 0
 var processLastFlushError = ""
 
 proc nowUnixMs(): int64 =
@@ -113,24 +150,18 @@ proc captureGroupsText*(config: StatsCaptureConfig): string =
       names.add(group.groupName)
   names.join(",")
 
-proc defaultStatsStorePath*(projectRoot: string): string =
-  projectRoot / ".repro" / "stats" / "observations.jsonl"
-
-proc defaultStatsSummaryPath*(projectRoot: string): string =
-  projectRoot / ".repro" / "stats" / "summary.json"
+proc derivedStatsStorePath*(projectRoot: string): string =
+  ## Where ``--write-stats`` points now: the project-local DERIVED store of
+  ## §"Two Stores", holding rollups, sketches and findings computed FROM
+  ## RunQuota's rows. It holds no raw samples of its own.
+  projectRoot / ".repro" / "stats" / "derived"
 
 proc activeStatsStorePath*(projectRoot: string): string =
-  ## ``--write-stats=PATH`` names the store exactly; bare ``--write-stats``
-  ## uses the conventional path.
+  ## ``--write-stats=PATH`` names the derived store exactly; bare
+  ## ``--write-stats`` uses the conventional derived path.
   if currentCapture.storePath.len > 0:
     return currentCapture.storePath
-  defaultStatsStorePath(projectRoot)
-
-proc activeStatsSummaryPath*(projectRoot: string): string =
-  if currentCapture.storePath.len > 0:
-    let dir = parentDir(currentCapture.storePath)
-    return (if dir.len > 0: dir else: ".") / "summary.json"
-  defaultStatsSummaryPath(projectRoot)
+  derivedStatsStorePath(projectRoot)
 
 proc enqueueStatsObservation*(group: StatsCaptureGroup; kind: string;
                               fields: JsonNode = newJObject())
@@ -179,13 +210,20 @@ proc queuedStatsObservationCount*(): int =
 proc flushedStatsObservationCount*(): int =
   processFlushedCount
 
+proc discardedStatsObservationCount*(): int =
+  processDiscardedCount
+
 proc enqueueStatsObservation*(group: StatsCaptureGroup; kind: string;
                               fields: JsonNode = newJObject()) =
+  ## Queue one project-local observation for the DERIVED store.
+  ##
+  ## NO SCHEMA ID. ``reprobuild.daemon.stats-observation.v1`` is retired:
+  ## it named a project-private raw schema, and raw rows are RunQuota's
+  ## now. What is queued here is input to a project-local rollup, and it
+  ## never leaves this process as a raw row.
   if not statsGroupEnabled(group):
     return
   observationQueue.add(%*{
-    "schemaId": StatsObservationSchemaId,
-    "schemaVersion": 1,
     "occurredAtUnixMs": nowUnixMs(),
     "runId": currentRunId,
     "sessionId": currentSessionId,
@@ -201,200 +239,146 @@ proc maybeTestFlushDelay() =
   if currentTestFlushDelayMs > 0:
     sleep(currentTestFlushDelayMs)
 
-proc readJsonLines(path: string): seq[JsonNode] =
-  if not fileExists(path):
-    return
-  for line in readFile(path).splitLines:
-    let trimmed = line.strip()
-    if trimmed.len == 0:
-      continue
-    try:
-      result.add(parseJson(trimmed))
-    except JsonParsingError:
-      discard
-
-proc readStatsObservations*(projectRoot: string): seq[JsonNode] =
-  readJsonLines(defaultStatsStorePath(projectRoot))
-
 proc defaultStatsSnapshotDir*(projectRoot: string): string =
   projectRoot / ".repro" / "stats" / "snapshots"
 
-proc writeJsonLines(path: string; nodes: openArray[JsonNode]) =
-  createDir(parentDir(path))
-  var file = open(path, fmWrite)
-  defer: file.close()
-  for node in nodes:
-    file.writeLine($node)
-
-proc retentionFiltered(nodes: seq[JsonNode]): seq[JsonNode] =
-  var runOrder: seq[string] = @[]
-  for node in nodes:
-    let runId = node{"runId"}.getStr()
-    if runId.len > 0 and runOrder.find(runId) < 0:
-      runOrder.add(runId)
-  var keepRuns = initHashSet[string]()
-  let start = max(0, runOrder.len - StatsRetentionRawRuns)
-  for i in start ..< runOrder.len:
-    keepRuns.incl(runOrder[i])
-  let cutoffMs = (getTime().toUnix - StatsRetentionWindowDays * 24 * 60 * 60) *
-    1000
-  for node in nodes:
-    let runId = node{"runId"}.getStr()
-    let occurred = node{"occurredAtUnixMs"}.getBiggestInt(0)
-    if (runId.len == 0 or runId in keepRuns) and occurred >= cutoffMs:
-      result.add(node)
-
-proc buildSummary(projectRoot, storePath: string; nodes: seq[JsonNode];
-                  lastFlushed: int): JsonNode =
-  var groups = initCountTable[string]()
-  var runs = initHashSet[string]()
-  var firstMs = int64.high
-  var lastMs = 0'i64
-  for node in nodes:
-    groups.inc(node{"group"}.getStr("unknown"))
-    let runId = node{"runId"}.getStr()
-    if runId.len > 0:
-      runs.incl(runId)
-    let occurred = node{"occurredAtUnixMs"}.getBiggestInt(0)
-    if occurred > 0:
-      firstMs = min(firstMs, occurred)
-      lastMs = max(lastMs, occurred)
-  var groupNode = newJObject()
-  for key, value in groups:
-    groupNode[key] = %value
-  %*{
-    "schemaId": StatsSummarySchemaId,
-    "schemaVersion": 1,
-    "projectRoot": projectRoot,
-    "storePath": storePath,
-    "updatedAtUnixMs": nowUnixMs(),
-    "lastFlushObservationCount": lastFlushed,
-    "totalObservations": nodes.len,
-    "runCount": runs.len,
-    "firstObservationUnixMs": (if firstMs == int64.high: 0'i64 else: firstMs),
-    "lastObservationUnixMs": lastMs,
-    "groups": groupNode,
-    "retention": {
-      "format": "jsonl",
-      "rawRuns": StatsRetentionRawRuns,
-      "windowDays": StatsRetentionWindowDays,
-      "policy": "append batches, retain latest raw runs inside the time window"
-    }
-  }
-
 proc flushStatsObservations*(): StatsFlushResult =
+  ## Drains the derived-store queue.
+  ##
+  ## **NOTHING IS WRITTEN, AND THE DISCARD IS COUNTED RATHER THAN SILENT.**
+  ## The derived store is specified as SQLite (§"Two Stores"), a backend
+  ## reprobuild does not link, so there is nowhere for these rollup inputs
+  ## to go. The queue is drained anyway -- leaving it to grow would be a
+  ## leak -- and ``discarded`` carries the count, so
+  ## ``repro stats status`` can say how much was thrown away instead of
+  ## reporting a store that quietly holds nothing.
+  ##
+  ## WHAT IS *NOT* LOST HERE: the raw per-execution rows. Those never
+  ## entered this queue. They travel to ``runquotad`` as
+  ## ``ext_repro_action`` rows on RunQuota's execution spine, written by
+  ## the build engine at the point each fact is known, and they are what
+  ## ``repro stats`` reads.
   result.queuedBefore = observationQueue.len
   result.flushed = 0
-  if not currentCapture.enabled or currentProjectRoot.len == 0:
+  result.derivedBackendLinked = false
+  if currentProjectRoot.len == 0:
+    result.storePath = ""
+  else:
+    result.storePath = activeStatsStorePath(currentProjectRoot)
+  if not currentCapture.enabled or observationQueue.len == 0:
+    observationQueue.setLen(0)
     return
-  result.storePath = activeStatsStorePath(currentProjectRoot)
-  result.summaryPath = activeStatsSummaryPath(currentProjectRoot)
-  if observationQueue.len == 0:
-    return
-  let pending = observationQueue
+  maybeTestFlushDelay()
+  result.discarded = observationQueue.len
+  processDiscardedCount += observationQueue.len
   observationQueue.setLen(0)
-  try:
-    maybeTestFlushDelay()
-    createDir(parentDir(result.storePath))
-    block writePending:
-      var file = open(result.storePath, fmAppend)
-      defer: file.close()
-      for node in pending:
-        file.writeLine($node)
-    result.flushed = pending.len
-    processFlushedCount += pending.len
-    let retained = retentionFiltered(readJsonLines(result.storePath))
-    writeJsonLines(result.storePath, retained)
-    let summary = buildSummary(currentProjectRoot, result.storePath, retained,
-      pending.len)
-    writeFile(result.summaryPath, pretty(summary))
-    result.totalObservations = retained.len
-    processLastFlushError = ""
-  except CatchableError as err:
-    processLastFlushError = err.msg
-    result.lastError = err.msg
-    for node in pending:
-      observationQueue.add(node)
+  processLastFlushError = ""
 
-proc statsStatusText*(projectRoot: string): string =
-  let storePath = defaultStatsStorePath(projectRoot)
-  let summaryPath = defaultStatsSummaryPath(projectRoot)
-  let nodes = readJsonLines(storePath)
-  let summary =
-    if fileExists(summaryPath):
-      try: parseFile(summaryPath)
-      except CatchableError: buildSummary(projectRoot, storePath, nodes, 0)
-    else:
-      buildSummary(projectRoot, storePath, nodes, 0)
-  result.add("stats capture: disabled by default\n")
-  result.add("active capture: " &
+proc statsStatusText*(projectRoot: string; view: SharedStoreView): string =
+  ## What ``repro stats status`` says about BOTH stores, and it never says
+  ## a number about the raw one without saying where the number came from
+  ## and whether the sample behind it is whole.
+  let storePath = derivedStatsStorePath(projectRoot)
+  result.add("raw capture: RunQuota-owned; every action a RunQuota session " &
+    "admitted writes an ext_repro_action row\n")
+  result.add("active derived capture: " &
     (if currentCapture.enabled: currentCapture.captureGroupsText else: "none") &
     "\n")
-  result.add("store: " & storePath & "\n")
-  result.add("format: jsonl observations + summary.json\n")
-  result.add("queued: " & $queuedStatsObservationCount() & "\n")
-  result.add("flushed: " & $summary{"totalObservations"}.getInt(0) & "\n")
-  result.add("runs: " & $summary{"runCount"}.getInt(0) & "\n")
-  result.add("retention: raw-runs=" & $StatsRetentionRawRuns &
-    " window=" & $StatsRetentionWindowDays & "d\n")
-  result.add("groups:")
-  let groups = summary{"groups"}
-  if groups.kind == JObject and groups.len > 0:
-    var names: seq[string] = @[]
-    for key, value in groups:
-      names.add(key & "=" & $value.getInt())
-    result.add(" " & names.join(","))
+  result.add("raw store: " & view.windowText & "\n")
+  # THE THREE EMPTY WINDOWS ARE NOT ONE. A reader who sees "samples: 0"
+  # must be able to tell "no daemon" from "nothing built" from "the query
+  # failed", so the state is printed above and the consequence spelled
+  # out here.
+  if not figuresArePresentable(view.state):
+    result.add("raw statistics: NOT AVAILABLE (" & view.reason & ")\n")
   else:
-    result.add(" none")
-  result.add("\n")
+    result.add("raw statistics: " &
+      (if view.state == sssIncomplete: "INCOMPLETE" else: "complete") & "\n")
+    result.add("executions: " & $view.sampleCount & "\n")
+    result.add("action rows: " & $view.actionRows.len & "\n")
+    var names: seq[string] = @[]
+    for profile in view.profiles:
+      names.add(profile.hostId & "/" & profile.profileId & " (" &
+        profile.cpuModel & ", " & $profile.logicalCores & " cores)")
+    result.add("host profiles: " &
+      (if names.len == 0: "none" else: names.join("; ")) & "\n")
+  if view.loss.known:
+    result.add("counted losses: dropped=" & $view.loss.dropped &
+      " write-failures=" & $view.loss.writeFailures &
+      " rejected=" & $view.loss.rejected &
+      " extension-rows-refused=" & $view.loss.extensionRowsRefused &
+      " deferred-batches-refused=" & $view.loss.deferredBatchesRefused &
+      # A WHOLE EXECUTION THE STORE DOES NOT HOLD, and the only surface a
+      # reader can learn it from: the client that reported it was
+      # acknowledged, so nothing upstream of here knows the row is gone.
+      " contradictory-executions=" & $view.loss.contradictoryExecutions &
+      "\n")
+  else:
+    result.add("counted losses: unknown (the daemon did not report them)\n")
+  result.add("derived store: " & storePath & "\n")
+  result.add("derived backend: not linked; queued rollup inputs are " &
+    "discarded and counted\n")
+  result.add("queued: " & $queuedStatsObservationCount() & "\n")
+  result.add("flushed: " & $flushedStatsObservationCount() & "\n")
+  result.add("discarded: " & $discardedStatsObservationCount() & "\n")
   if processLastFlushError.len > 0:
     result.add("last flush error: " & processLastFlushError & "\n")
 
-proc statsOverviewText*(projectRoot: string): string =
-  let storePath = defaultStatsStorePath(projectRoot)
-  let nodes = readJsonLines(storePath)
-  var groups = initCountTable[string]()
-  var kinds = initCountTable[string]()
-  var cache = initCountTable[string]()
-  var runquota = initCountTable[string]()
-  var statuses = initCountTable[string]()
-  var runs = initHashSet[string]()
+proc statsOverviewText*(projectRoot: string; view: SharedStoreView): string =
+  ## The one-screen summary, rendered from the shared store.
+  ##
+  ## EVERY FIGURE BELOW IS PRINTED ONLY INSIDE THE BRANCH THAT ESTABLISHED
+  ## THE WINDOW IS PRESENTABLE. A version of this proc that computed the
+  ## counters first and printed the state afterwards would print zeros for
+  ## an unreachable daemon, which is the failure OS-2 names.
+  discard projectRoot
+  result.add("Stats source: " & view.windowText & "\n")
+  if not figuresArePresentable(view.state):
+    result.add("No statistics: " & view.reason & "\n")
+    return
+  if view.state == sssIncomplete:
+    result.add("Sample: INCOMPLETE -- " & $view.loss.totalLost &
+      " observations counted lost by runquotad\n")
   var actions = initHashSet[string]()
-  var launched = 0
-  var timingTotalUs = 0.0
-  for node in nodes:
-    groups.inc(node{"group"}.getStr("unknown"))
-    kinds.inc(node{"kind"}.getStr("unknown"))
-    let runId = node{"runId"}.getStr()
-    if runId.len > 0:
-      runs.incl(runId)
-    let fields = node{"fields"}
-    let actionId = fields{"actionId"}.getStr()
+  var outcomes = initCountTable[string]()
+  var kinds = initCountTable[string]()
+  var pools = initCountTable[string]()
+  var statsKeys = initHashSet[string]()
+  var totalDurationMs = 0'i64
+  for row in view.actionRows:
+    let actionId = row.value("action_id")
     if actionId.len > 0:
       actions.incl(actionId)
-    if fields{"launched"}.getBool(false):
-      inc launched
-    let status = fields{"status"}.getStr()
-    if status.len > 0:
-      statuses.inc(status)
-    let cacheDecision = fields{"cacheDecision"}.getStr()
-    if cacheDecision.len > 0:
-      cache.inc(cacheDecision)
-    let backend = fields{"runQuotaBackend"}.getStr()
-    if backend.len > 0:
-      runquota.inc(backend)
-    timingTotalUs += fields{"totalUs"}.getFloat(0.0)
+    let outcome = row.value("cache_outcome")
+    if outcome.len > 0:
+      outcomes.inc(outcome)
+    let kind = row.value("action_kind")
+    if kind.len > 0:
+      kinds.inc(kind)
+    if row.hasValue("pool"):
+      pools.inc(row.value("pool"))
+  for execution in view.executions:
+    if execution.statsKey.len > 0:
+      statsKeys.incl(execution.statsKey)
+    totalDurationMs += execution.durationMillis
   proc tableText(table: CountTable[string]): string =
     var pairs: seq[string] = @[]
     for key, value in table:
       pairs.add(key & "=" & $value)
     if pairs.len == 0: "none" else: pairs.join(",")
-  result.add("Stats window: runs=" & $runs.len &
-    " observations=" & $nodes.len & "\n")
-  result.add("Capture groups: " & tableText(groups) & "\n")
-  result.add("Observation kinds: " & tableText(kinds) & "\n")
-  result.add("Actions: " & $actions.len & " launched=" & $launched & "\n")
-  result.add("Statuses: " & tableText(statuses) & "\n")
-  result.add("Cache: " & tableText(cache) & "\n")
-  result.add("RunQuota: " & tableText(runquota) & "\n")
-  result.add("Timing total: " & $timingTotalUs & "us\n")
+  result.add("Stats window: executions=" & $view.sampleCount &
+    " actionRows=" & $view.actionRows.len &
+    " first=" & $view.firstObservationUnixMillis &
+    " last=" & $view.lastObservationUnixMillis & "ms\n")
+  var profileNames: seq[string] = @[]
+  for profile in view.profiles:
+    profileNames.add(profile.hostId & "/" & profile.profileId)
+  result.add("Host profiles: " &
+    (if profileNames.len == 0: "none" else: profileNames.join(",")) & "\n")
+  result.add("Actions: " & $actions.len & " launched=" & $view.actionRows.len &
+    "\n")
+  result.add("Action kinds: " & tableText(kinds) & "\n")
+  result.add("Cache: " & tableText(outcomes) & "\n")
+  result.add("Pools: " & tableText(pools) & "\n")
+  result.add("RunQuota: statsKeys=" & $statsKeys.len & "\n")
+  result.add("Timing total: " & $totalDurationMs & "ms\n")

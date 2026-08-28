@@ -28,7 +28,7 @@
 ##      action; provider mode emits exactly one per (package,
 ##      kind, name) triple, idempotent on repeated calls).
 
-import std/[strutils, unittest]
+import std/[os, strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -87,8 +87,15 @@ suite "DSL-port M9.R.14d.7 — meson_package stage-copy emission":
       let pkg = meson_package(srcDir = "./src", configureOptions = @[])
       discard pkg.executable("waylandScanner")
       discard pkg.library("libwaylandClient")
-      # No assertion needed beyond "doesn't raise" — provider-mode
-      # behaviour is exercised end-to-end by the wayland smoke loop.
+      # "No assertion needed beyond doesn't raise" left this case with no
+      # assertion at all, so it reported [OK] whatever the slicing did. The
+      # gate's whole purpose is that unit-test mode writes NOTHING -- the
+      # sibling case above says so in prose: "if the no-project-root branch
+      # failed to short-circuit, a createDir would land under the test cwd".
+      # Assert exactly that.
+      check activeProviderProjectRoot().len == 0
+      check not dirExists(".repro" / "output" / "waylandScanner")
+      check not dirExists(".repro" / "output" / "libwaylandClient")
     finally:
       clearCurrentOwningPackageOverride()
 

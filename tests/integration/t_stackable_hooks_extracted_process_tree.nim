@@ -324,7 +324,7 @@ int main(int argc, char **argv) {
       # one per test; ``prepareMonitorTools`` resolves the identical path.
       let shimDylib = requireBinary(monitorShimPath(repoRoot),
         "reprobuild.test_fixtures.monitor_shim")
-      let depfile = tempRoot / "evidence.rdep"
+      let depfile = tempRoot / "evidence.iomon"
       let parentInput = tempRoot / "parent-input.txt"
       let childInput = tempRoot / "child-input.txt"
 
@@ -364,7 +364,7 @@ int main(int argc, char **argv) {
       let canonicalParentInput = expandFilename(parentInput)
       let canonicalChildInput = expandFilename(childInput)
 
-      check readFile(depfile)[0 .. 3] == "RMDF"
+      check readFile(depfile)[0 .. 3] == "IOMN"
       check records.len > 0
       check hasRecord(records, proc(record: MonitorRecord): bool =
         record.kind == mrProcessStart)
@@ -447,4 +447,11 @@ int main(int argc, char **argv) {
 when not (defined(macosx) or defined(linux)):
   suite "integration_stackable_hooks_extracted_process_tree":
     test "preload hook gate is skipped on this platform":
-      check true
+      # Platform gate. This suite's coverage is macOS/Linux preload-hook
+      # behaviour; on any other host there is nothing to exercise. Emit the
+      # repository's structured ``[platform N/A]`` marker rather than a
+      # bare ``check true``, so the case is COUNTED as unrun coverage by
+      # the marker census instead of reporting an [OK] indistinguishable
+      # from a case that verified something.
+      echo "[platform N/A] integration_stackable_hooks_extracted_process_tree: " &
+        "preload hook gate requires macOS or Linux"

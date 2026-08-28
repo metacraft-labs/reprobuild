@@ -108,13 +108,18 @@ suite "Project-DSL-Composition M5 smoke":
     check producer.executables.len == 0
 
   test "Package[name] / PackageBuild[name] prelude is reachable":
-    # The prelude types are usable from any consumer — the smoke
-    # check is just that an instance can be constructed.
+    # ``discard`` + ``check true`` asserted nothing about either handle: a
+    # prelude that constructed but exposed no accessors would have passed.
+    # "Reachable" means the section accessor resolves THROUGH the handle, so
+    # assert that -- ``build`` off the producer handle and the producer's one
+    # cross-project binding off the build handle.
     let p = Package["m5Producer"]()
-    discard p
     let b = PackageBuild["m5Producer"]()
-    discard b
-    check true
+    discard p
+    check compiles(b.singleEdge)
+    # And the namespace is not a catch-all that would make the line above
+    # vacuous: an unknown binding must NOT resolve off the same receiver.
+    check not compiles(b.noSuchBinding)
 
   test "init flag for the cross-project binding starts false":
     # The accessor template guards on `composeBindingInit_m5Producer_singleEdge`.

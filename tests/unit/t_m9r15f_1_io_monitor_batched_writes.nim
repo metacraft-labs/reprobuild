@@ -136,7 +136,7 @@ suite "DSL-port M9.R.15f.1 — io-monitor fragment-log batched writes":
     # --- Baseline: the M9.R.15c.1 per-record path (encode each frame
     # and write+flush it on its own), against the SAME backing store so
     # the comparison cancels out the filesystem's absolute speed. ---
-    let baselineFile = fragmentDir / "baseline.rdep"
+    let baselineFile = fragmentDir / "baseline.iomon"
     var bf: File
     doAssert open(bf, baselineFile, fmWrite)
     # Warm.
@@ -286,7 +286,7 @@ suite "DSL-port M9.R.15f.1 — io-monitor fragment-log batched writes":
       allowUnmatchedPending = true)
 
     # ``mergeFragments`` must parse without raising.
-    let outputPath = fragmentDir / "merged.rdep"
+    let outputPath = fragmentDir / "merged.iomon"
     let dep = mergeFragments(fragmentDir, outputPath)
     var fileOpenCount = 0
     for r in dep.records:

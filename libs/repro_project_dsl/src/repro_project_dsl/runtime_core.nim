@@ -115,6 +115,58 @@ type
     toolchainSlot*: RootRef
     crossTargetSlot*: RootRef
     featureSetSlot*: RootRef
+    lockFileSlot*: RootRef
+      ## Named-Lock-Files NLF-M7 (§4.4) — the FIFTH slot, and deliberately a
+      ## copy of the four above rather than a new mechanism.
+      ##
+      ## §4.4 corrects the stdlib spec's description of the build context
+      ## ("four interface handles as Nim-typed fields") with what is actually
+      ## here: one ``state`` field and four accessor procs over ``RootRef``
+      ## slots, each lazily filling its slot, with matching setters. It then
+      ## says where the lock file belongs: "**The lock file belongs in that
+      ## same structure**, as a fifth ``lockFileSlot`` with a
+      ## ``lockFile*(ctx)`` accessor and a ``setLockFile``. The accessor-proc
+      ## shape makes this *cheaper* than the spec's 'typed fields' wording
+      ## suggests, not harder: the slot pattern, the lazy fill, and the setter
+      ## all already exist four times over — the fifth is a copy."
+      ##
+      ## ``RootRef`` for the same layering reason as the other four: the
+      ## designation type is owned above this library, and the stdlib accessor
+      ## in ``active_context.nim`` does the downcast.
+      ##
+      ## The slot is a MIRROR, not the authority. What the typed-tool wrappers
+      ## resolve against is the designation stack in ``repro_lock_files``,
+      ## because ``withLockFile`` (§4.4) and the per-call argument (§4.5) nest
+      ## INSIDE one artifact's build body and a single slot cannot represent a
+      ## region narrower than the frame that owns it. ``setLockFile`` writes
+      ## both, so the two never disagree; the slot is what an author reads
+      ## when they ask the context which lock file the ARTIFACT is under.
+    toolchainSlotLockFile*: string
+    crossTargetSlotLockFile*: string
+      ## Named-Lock-Files NLF-M7 (§4.4) — the designation the lazily-filled
+      ## toolchain / cross-target slot was resolved UNDER.
+      ##
+      ## §4.4's requirement is that the build context now carries "a lock file
+      ## field that can differ between two regions of one build body". A slot
+      ## filled once per frame cannot do that: the first `withLockFile` region
+      ## would fill it and every later region in the same body would be served
+      ## the first region's toolchain. That is not a cosmetic caching bug — it
+      ## is the §4.9 shape again, a well-formed build emitting edges under a
+      ## toolchain nobody designated, and it was found by the test rather than
+      ## reasoned about, which is why the fields are recorded here rather than
+      ## the invalidation being left implicit.
+      ##
+      ## Empty string is a legal designation and means "resolved with nothing
+      ## designated". An ADAPTER-INSTALLED slot is marked with
+      ## ``ExplicitSlotDesignation`` so a re-resolve never clobbers it: an
+      ## adapter that wrote the slot directly is exercising the documented
+      ## bypass and outranks the variant-driven default.
+
+const ExplicitSlotDesignation* = "\x00explicit"
+  ## Sentinel written into ``toolchainSlotLockFile`` /
+  ## ``crossTargetSlotLockFile`` by ``setToolchain`` / ``setCrossTarget``. It
+  ## cannot collide with a real lock-file name because a declared name is a
+  ## Nim identifier and cannot contain a NUL.
 
 var activeBuilds {.threadvar.}: seq[PackageBuildState]
 
@@ -178,15 +230,43 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 24'u16
-    ## v24: Windows-Build-Correctness M6 — appends the TOOL's entropy
+  BuildActionPayloadVersion = 26'u16
+    ## v26: Windows-Build-Correctness M6 — appends the TOOL's entropy
     ## blessing: one strict sentinel byte for the ``NonDeterminismPolicy``
     ## ordinal followed by the length-prefixed justification string.
-    ## v23-and-earlier payloads decode as ``ndpUnblessed`` with an empty
+    ## v25-and-earlier payloads decode as ``ndpUnblessed`` with an empty
     ## justification, which is the FAIL-CLOSED direction: a payload written
     ## before the blessing existed cannot have carried one, and reading a
     ## missing field as "blessed" would restore cache publication for every
     ## legacy artefact on the strength of a byte that was never written.
+    ##
+    ## NOTE ON THE NUMBER. The blessing was developed as "v24" on a branch
+    ## that had not yet seen v24/v25 land on mainline, and v24 was taken —
+    ## by a DIFFERENT change, to the dependency policy. Two incompatible
+    ## layouts cannot share a version, so the blessing moved to v26 rather
+    ## than either side renumbering the other's published records. A record
+    ## written as "v24" by that pre-merge branch is not readable here and
+    ## does not pretend to be: it fails the trailing-bytes check at the end
+    ## of ``decodeBuildActionPayload`` with a structured error, so the only
+    ## cost is a cache miss for anyone who ran the branch locally.
+    ##
+    ## v25: the dependency policy REPLACES v24's two trailing fields
+    ## (``trustedInputs`` + ``trustedReason``, the removed
+    ## ``bdpTrustedDeclaredInputs`` payload) with a single trailing
+    ## ``suppressMonitorShimSeed`` byte.
+    ##
+    ## A version bump rather than leaving the removed fields dead-but-parsed,
+    ## because this encoding is append-only WITH per-version gates rather than
+    ## self-describing: a v24 record on disk carries those two fields, and a
+    ## reader that stopped consuming them would leave ``pos`` short and
+    ## misparse every field after the policy. So v24 records are still read,
+    ## and their two fields read and discarded; only v25-and-later records
+    ## carry the new byte. (Forward-incompatibility is the usual kind: a v24
+    ## binary refuses a v25 record outright at the version check rather than
+    ## misreading it.)
+    ##
+    ## v24: appended ``trustedInputs`` + ``trustedReason`` to the dependency
+    ## policy. REMOVED at v25 along with the policy kind they served.
     ##
     ## v23: appends the platform role parallel to each tool-identity
     ## reference. v22-and-earlier payloads decode with an empty list and
@@ -369,6 +449,98 @@ proc runtimeLibraryMatchesHost*(lib: RuntimeLibraryDef;
     (hostOsNorm == "macos" and osNorm == "darwin") or
     (hostOsNorm == "darwin" and osNorm == "macos")
   cpuOk and osOk
+
+# ---------------------------------------------------------------------------
+# PMC-1 — package-level ``platforms:`` (declared availability)
+# ---------------------------------------------------------------------------
+#
+# These are plain (non-``dynOrStatic``) procs on purpose: the ``package``
+# macro's arm lint calls them at COMPILE time from the Nim VM, and a
+# ``dynOrStatic`` proc has its body replaced by ``discard`` in the dynamic
+# provider mode, which the VM cannot execute. They are also cheap and pure,
+# so there is nothing to gain from routing them through the shared DLL.
+
+const
+  KnownPlatformCpuTokens* = ["any", "x86_64", "aarch64", "x86"]
+    ## PMC-1: the CPU vocabulary a ``platforms:`` entry may name. The same
+    ## four the ``PlatformCpu`` enum carries — microarchitecture levels
+    ## (``x86-64-v2``…) are PMC-2 and are NOT accepted here, so an author who
+    ## writes one gets a refusal now rather than a silently-ignored token.
+  KnownPlatformOsTokens* = ["any", "windows", "linux", "macos", "darwin"]
+    ## PMC-1: the OS vocabulary. ``darwin`` is an accepted alias of ``macos``
+    ## because the per-arm ``os =`` setter accepts both and a second spelling
+    ## rule would be a trap.
+
+proc canonicalPlatformOsToken*(text: string): string =
+  ## Fold the accepted OS spellings onto one. ``darwin`` -> ``macos``.
+  let lowered = text.toLowerAscii()
+  if lowered == "darwin" or lowered == "osx": "macos" else: lowered
+
+proc canonicalPlatformCpuToken*(text: string): string =
+  let lowered = text.toLowerAscii()
+  case lowered
+  of "amd64", "x64": "x86_64"
+  of "arm64": "aarch64"
+  of "i386", "i686": "x86"
+  else: lowered
+
+proc parsePlatformConstraintToken*(text: string):
+    tuple[ok: bool; cpu: string; os: string] =
+  ## Parse one ``platforms:`` entry into its (cpu, os) coordinate.
+  ##
+  ## Accepts a bare OS token (``windows``), a bare CPU token
+  ## (``aarch64``), or a ``<cpu>-<os>`` pair (``x86_64-windows``). Empty
+  ## strings mean "any" on that axis. Kept in lockstep with
+  ## ``repro_dsl_stdlib/packages_schema.parsePackagePlatformToken``, which
+  ## is the same grammar on the resolver side; the two are separate because
+  ## the DSL layer must not depend on the stdlib layer.
+  let trimmed = text.strip()
+  let cut = trimmed.rfind('-')
+  if cut > 0 and cut + 1 < trimmed.len:
+    let cpuPart = canonicalPlatformCpuToken(trimmed[0 ..< cut])
+    let osPart = canonicalPlatformOsToken(trimmed[cut + 1 .. ^1])
+    if cpuPart in KnownPlatformCpuTokens and osPart in KnownPlatformOsTokens:
+      return (true, cpuPart, osPart)
+  let asOs = canonicalPlatformOsToken(trimmed)
+  if asOs.len > 0 and asOs != "any" and asOs in KnownPlatformOsTokens:
+    return (true, "any", asOs)
+  let asCpu = canonicalPlatformCpuToken(trimmed)
+  if asCpu.len > 0 and asCpu != "any" and asCpu in KnownPlatformCpuTokens:
+    return (true, asCpu, "any")
+  if trimmed.len == 0 or trimmed.toLowerAscii() == "any":
+    return (true, "any", "any")
+  (false, "", "")
+
+proc platformConstraintMatchesHost*(constraint: PlatformConstraintDef;
+                                    hostCpu, hostOs: string): bool =
+  ## Does ``(hostCpu, hostOs)`` fall inside one declared coordinate?
+  ## Empty / ``any`` on either side matches, for the same fail-open reason
+  ## ``runtimeLibraryMatchesHost`` gives.
+  let cpuNorm = canonicalPlatformCpuToken(constraint.cpu)
+  let hostCpuNorm = canonicalPlatformCpuToken(hostCpu)
+  let cpuOk = cpuNorm.len == 0 or cpuNorm == "any" or
+    hostCpuNorm.len == 0 or hostCpuNorm == "any" or cpuNorm == hostCpuNorm
+  let osNorm = canonicalPlatformOsToken(constraint.os)
+  let hostOsNorm = canonicalPlatformOsToken(hostOs)
+  let osOk = osNorm.len == 0 or osNorm == "any" or
+    hostOsNorm.len == 0 or hostOsNorm == "any" or osNorm == hostOsNorm
+  cpuOk and osOk
+
+proc declaredPackagePlatforms*(packageName: string):
+    tuple[declared: bool; platforms: seq[PlatformConstraintDef];
+          message: string] =
+  ## PMC-1 registry accessor: the explicit ``platforms:`` declaration for
+  ## ``packageName``, or ``declared = false`` when the package did not write
+  ## one (or is not registered in this process at all).
+  ##
+  ## Fail-open on an unregistered name is deliberate: the resolver consults
+  ## this before walking the adapter chain, and a package whose recipe module
+  ## simply was not imported must keep resolving the way it did before PMC-1
+  ## rather than become unavailable everywhere.
+  for pkg in registry:
+    if pkg.packageName == packageName and pkg.platformsDeclared:
+      return (true, pkg.declaredPlatforms, pkg.platformsMessage)
+  (false, @[], "")
 
 proc selectRuntimeLibraries*(packageName, hostCpu, hostOs: string):
     seq[RuntimeLibraryDef] {.dynOrStatic.} =
@@ -716,7 +888,7 @@ proc packageDeclaredDependencyConstraints(pkg: PackageDef): seq[string] =
   ## sort after user-declared entries.
   var indexed: seq[M9R81IndexedDep] = @[]
   var idx = 0
-  for use in pkg.toolUses:
+  for use in pkg.allToolUses():
     indexed.add(M9R81IndexedDep(
       raw: use.rawConstraint,
       sourceLine: if use.sourceLine <= pkg.sourceLine: high(int)
@@ -1160,18 +1332,24 @@ proc selectedExecutable*(packageName, executableName: string): SelectedExecutabl
   SelectedExecutable(packageName: packageName, executableName: executableName)
 
 proc defaultDependencyPolicy*(
-    ignoredInputPrefixes: openArray[string] = []):
+    ignoredInputPrefixes: openArray[string] = [];
+    captureNonDeterminism = false; captureIpc = false):
     BuildActionDependencyPolicy {.dynOrStatic.} =
   BuildActionDependencyPolicy(
     kind: bdpDefault,
-    ignoredInputPrefixes: @ignoredInputPrefixes)
+    ignoredInputPrefixes: @ignoredInputPrefixes,
+    captureNonDeterminism: captureNonDeterminism,
+    captureIpc: captureIpc)
 
 proc automaticMonitorPolicy*(
-    ignoredInputPrefixes: openArray[string] = []):
+    ignoredInputPrefixes: openArray[string] = [];
+    captureNonDeterminism = false; captureIpc = false):
     BuildActionDependencyPolicy {.dynOrStatic.} =
   BuildActionDependencyPolicy(
     kind: bdpAutomaticMonitor,
-    ignoredInputPrefixes: @ignoredInputPrefixes)
+    ignoredInputPrefixes: @ignoredInputPrefixes,
+    captureNonDeterminism: captureNonDeterminism,
+    captureIpc: captureIpc)
 
 # NOTE: a ``declaredOnlyDependencyPolicy`` constructor used to live here. It
 # produced a "track only the statically declared inputs, no runtime
@@ -1183,9 +1361,21 @@ proc automaticMonitorPolicy*(
 # monitorable evidence (e.g. a pure network fetch) are made NON-CACHEABLE per
 # Monitor-Hook-Shim.md:501, never marked complete-on-declared-inputs.
 
+# NOTE: a ``trustedDeclaredInputsPolicy`` constructor used to live here. It
+# produced ``bdpTrustedDeclaredInputs`` — "the author writes the edge's inputs
+# inline and the engine trusts them" — which is the same complete-on-declared-
+# inputs shape as the three removed mechanisms above, only narrower in its
+# stated scope. It has been REMOVED and MUST NOT be re-added. An action that
+# genuinely cannot be monitored declares its inputs through a depfile
+# (``makeDepfilePolicy``), which is derived, regenerable, and read back as real
+# evidence; ``unmonitorableActionDepfile`` below generates one.
+
 proc makeDepfilePolicy*(depfile = "";
                         depfiles: openArray[string] = [];
-                        ignoredInputPrefixes: openArray[string] = []):
+                        ignoredInputPrefixes: openArray[string] = [];
+                        captureNonDeterminism = false;
+                        captureIpc = false;
+                        suppressMonitorShimSeed = false):
     BuildActionDependencyPolicy {.dynOrStatic.} =
   ## MR16: dependency-gathering policy for tools that emit one or
   ## more recognized ``make-depfile`` reports. ``depfile`` (single
@@ -1195,6 +1385,13 @@ proc makeDepfilePolicy*(depfile = "";
   ## expands globs at evidence-collection time against the action's
   ## cwd. Empty inputs are filtered out so passing
   ## ``depfile = ""`` from default-valued recipe wrappers is safe.
+  ##
+  ## ``suppressMonitorShimSeed`` (default false, and false is what every
+  ## ordinary depfile edge wants) additionally withholds the launch-time
+  ## ``REPRO_MONITOR_SHIM_LIB`` environment seed from the action. Only an
+  ## action that performs library interposition ITSELF needs it; see the field
+  ## docs on ``BuildActionDependencyPolicy`` and ``unmonitorableActionDepfile``
+  ## below.
   var merged: seq[string] = @[]
   if depfile.len > 0:
     merged.add(depfile)
@@ -1204,7 +1401,29 @@ proc makeDepfilePolicy*(depfile = "";
   BuildActionDependencyPolicy(
     kind: bdpMakeDepfile,
     depfiles: merged,
-    ignoredInputPrefixes: @ignoredInputPrefixes)
+    ignoredInputPrefixes: @ignoredInputPrefixes,
+    suppressMonitorShimSeed: suppressMonitorShimSeed,
+    captureNonDeterminism: captureNonDeterminism,
+    captureIpc: captureIpc)
+
+proc iomonReportPolicy*(depfile: string;
+                        captureNonDeterminism = false;
+                        captureIpc = false):
+    BuildActionDependencyPolicy {.dynOrStatic.} =
+  ## Dependency-gathering policy for an edge whose command PRODUCES its own
+  ## io-mon ``.iomon`` dependency capture at ``depfile`` (e.g. ``ct test``
+  ## writing the record set of files it actually read). The engine reads that
+  ## file back as the edge's evidence (folded through the monitor-evidence
+  ## reader) instead of monitoring the orchestrator process. Modelled on
+  ## ``makeDepfilePolicy`` but a distinct kind because the produced file is
+  ## io-mon's binary record format, routed to its own engine ``formatName``.
+  ## The path may be a literal or a glob (``*``, ``?``, ``**``) expanded at
+  ## evidence-collection time against the action's cwd.
+  BuildActionDependencyPolicy(
+    kind: bdpIomonReport,
+    depfiles: (if depfile.len > 0: @[depfile] else: @[]),
+    captureNonDeterminism: captureNonDeterminism,
+    captureIpc: captureIpc)
 
 proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy {.dynOrStatic.} =
   acfpTimestamp
@@ -2229,6 +2448,143 @@ proc writeText*(tool: ReproFs; output, text: string; actionId = "";
     dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)
 
+proc escapeMakeDepfilePath(path: string): string =
+  ## Escape one path for the make-format depfile grammar
+  ## ``repro_depfile.parseMakeLikeText`` accepts: a backslash escapes the
+  ## Make meta-characters (space, tab, ``:``, ``#``, ``$``, ``\``) and is a
+  ## literal character otherwise, and ``$`` doubles.
+  result = newStringOfCap(path.len + 8)
+  for ch in path:
+    case ch
+    of ' ', '\t', ':', '#', '\\':
+      result.add('\\')
+      result.add(ch)
+    of '$':
+      result.add("$$")
+    else:
+      result.add(ch)
+
+proc unmonitorableActionDepfileText*(output: string;
+                                     inputs: openArray[string];
+                                     reason: string): string =
+  ## The make-format depfile text ``unmonitorableActionDepfile`` writes, and
+  ## the guards it enforces. Separated from the edge-emitting proc so the
+  ## guards and the generated syntax can be exercised without a ``build:``
+  ## block; see that proc for what this route means.
+  var declared: seq[string] = @[]
+  for path in inputs:
+    if path.len > 0 and path notin declared:
+      declared.add(path)
+  if output.len == 0:
+    raise newException(ValueError,
+      "unmonitorableActionDepfile requires an output path for the depfile " &
+        "it generates")
+  if declared.len == 0:
+    raise newException(ValueError,
+      "unmonitorableActionDepfile requires at least one input: a depfile " &
+        "with no prerequisites gives the consuming edge no evidence at all, " &
+        "which is the declared-only shape this route exists to avoid")
+  if reason.strip().len == 0:
+    raise newException(ValueError,
+      "unmonitorableActionDepfile requires a reason explaining why the " &
+        "consuming action cannot be monitored; it is written into the " &
+        "generated depfile so the justification travels with the artefact")
+  # The output path is checked alongside the inputs: it is the rule TARGET, so
+  # a newline in it splits the rule and the engine reads back a depfile whose
+  # target names something that was never written.
+  for path in @[output] & declared:
+    if '\n' in path or '\r' in path:
+      raise newException(ValueError,
+        "unmonitorableActionDepfile cannot express a path containing a " &
+          "newline in the make-depfile grammar: " & path.escape())
+  result = "# generated by unmonitorableActionDepfile — this action is not\n"
+  result.add("# monitored; the paths below are its ONLY dependency evidence.\n")
+  for line in reason.strip().splitLines():
+    # Trailing backslashes are dropped: the make grammar splices a
+    # backslash-terminated line into the next one, so a reason ending in one
+    # would swallow the rule that follows.
+    result.add("# reason: " & line.strip(leading = false, chars = {'\\'}) & "\n")
+  result.add(escapeMakeDepfilePath(output) & ":")
+  for path in declared:
+    result.add(" \\\n  " & escapeMakeDepfilePath(path))
+  result.add("\n")
+
+proc unmonitorableActionDepfile*(tool: ReproFs; output: string;
+                                 inputs: openArray[string];
+                                 reason: string;
+                                 actionId = ""; deps: openArray[string] = [];
+                                 after: openArray[BuildActionDef] = []):
+    BuildActionDef {.discardable, dynOrStatic.} =
+  ## ESCAPE HATCH — read this whole docstring before using it.
+  ##
+  ## Emits a graph edge whose single output is a make-format depfile at
+  ## ``output`` listing ``inputs``. Pair it with
+  ## ``makeDepfilePolicy(output, suppressMonitorShimSeed = true)`` on the edge
+  ## that cannot be monitored, and order that edge after this one:
+  ##
+  ## .. code-block:: nim
+  ##   let depsEdge = fs.unmonitorableActionDepfile(
+  ##     output = "build/deps/thing.d",
+  ##     inputs = @["build/bin/thing", "build/lib/helper.so"],
+  ##     reason = "<why this action cannot be monitored>")
+  ##   thing.run(
+  ##     after = @[depsEdge],
+  ##     dependencyPolicy = makeDepfilePolicy(
+  ##       "build/deps/thing.d", suppressMonitorShimSeed = true))
+  ##
+  ## WHAT IT DISABLES. ``makeDepfilePolicy`` lowers to a recognized-format
+  ## dependency-gathering kind, which is outside the engine's
+  ## ``MonitorPolicyKinds``: the action is not wrapped in the io-monitor and
+  ## nothing observes what it really reads. ``suppressMonitorShimSeed``
+  ## additionally withholds the ``REPRO_MONITOR_SHIM_LIB`` launch-time
+  ## environment seed, so the action cannot hand our shim down to its own
+  ## children either. The only dependency evidence the edge then has is this
+  ## file.
+  ##
+  ## WHY AN ACTION MIGHT NOT BE MONITORABLE. Today exactly one reason
+  ## qualifies: the action performs library interposition ITSELF, so the
+  ## engine's interposer and the action's re-enter each other on the same libc
+  ## entry points and the pair livelocks. "Monitoring is inconvenient", "the
+  ## action is slow", and "the evidence looks noisy" are NOT reasons — those
+  ## keep ``automaticMonitorPolicy()``, which is the baseline and the thing
+  ## that keeps the action cache sound.
+  ##
+  ## THE LIST IS ONLY AS GOOD AS ITS GENERATOR. Everything the engine will
+  ## treat as this action's inputs is what ``inputs`` says it is. The engine
+  ## does hash those paths and does re-run the edge when their content
+  ## changes — that part is real evidence, not an assertion — but a path the
+  ## generator never names is a dependency the build does not have. An
+  ## incomplete list produces stale cache hits, silently, for as long as it
+  ## stays incomplete.
+  ##
+  ## BE CLEAR ABOUT WHAT IS DERIVED AND WHAT IS NOT. A depfile emitted by a
+  ## real tool is an OBSERVATION — the tool reports what it actually opened.
+  ## This one is not. Its text is a literal built from ``inputs`` here in the
+  ## recipe and carried on the generating edge's command line; nothing looked
+  ## at the action to produce it. What the graph-output form buys is that the
+  ## file is a build artefact rather than a side effect of evaluating the
+  ## recipe: it is written on the same terms as any other output, and it is
+  ## still written on a build whose graph came from cache, where an
+  ## evaluation-time write would simply not happen. What it does NOT buy is a
+  ## list that maintains itself.
+  ##
+  ## SO IT MUST BE UPDATED BY HAND WHEN THE ACTION'S INPUTS CHANGE. Whoever
+  ## adds a runtime dependency to the action is responsible for adding it to
+  ## ``inputs``; nothing will report the omission. The better shape — which
+  ## this helper is a stopgap for — is a depfile produced by the step that
+  ## actually knows the answer (a compile lifted into its own edge emits one
+  ## for free, observed rather than asserted).
+  ##
+  ## ``reason`` is mandatory. It is written into the depfile as a comment, so
+  ## the justification travels with the artefact and shows up in a diff of it
+  ## rather than only in the recipe.
+  let text = unmonitorableActionDepfileText(output, inputs, reason)
+  let selectedActionId =
+    if actionId.len > 0: actionId
+    else: defaultBuiltinActionId("unmonitorableActionDepfile", output)
+  tool.writeText(output = output, text = text,
+    actionId = selectedActionId, deps = deps, after = after)
+
 proc stamp*(tool: ReproFs; output, title: string;
             entries: openArray[string] = []; inputs: openArray[string] = [];
             actionId = ""; deps: openArray[string] = [];
@@ -2530,15 +2886,22 @@ proc writeDependencyPolicy(outp: var seq[byte];
   outp.writeByte(byte(ord(policy.kind)))
   outp.writeStringSeq(policy.depfiles)
   outp.writeStringSeq(policy.ignoredInputPrefixes)
+  # v25: appended LAST so older readers, which stop after
+  # ``ignoredInputPrefixes``, are unaffected. False for every edge that does
+  # not explicitly ask for the seed to be withheld.
+  outp.writeByte(if policy.suppressMonitorShimSeed: 1'u8 else: 0'u8)
 
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16):
     BuildActionDependencyPolicy =
   let kind = readByte(bytes, pos)
-  # ``bdpMakeDepfile`` is the highest valid ordinal now that the removed
-  # ``bdpDeclaredOnly`` case is gone (Reprobuild-Development M17). The
-  # removal only dropped the last enum case, so no other ordinal shifts and
-  # the on-wire encoding of the surviving kinds is unchanged.
-  if kind > byte(ord(bdpMakeDepfile)):
+  # ``bdpIomonReport`` is the highest valid ordinal now that the removed
+  # ``bdpDeclaredOnly`` and ``bdpTrustedDeclaredInputs`` cases are gone
+  # (Reprobuild-Development M17). Both removals only dropped the LAST enum
+  # case at the time, so no surviving ordinal shifts and the on-wire encoding
+  # of the surviving kinds is unchanged. A v24 record that carried a
+  # ``bdpTrustedDeclaredInputs`` (ordinal 4) edge is now refused here rather
+  # than silently re-decoded as something else.
+  if kind > byte(ord(bdpIomonReport)):
     raisePayload("invalid dependency policy kind in build action payload")
   result.kind = BuildActionDependencyPolicyKind(kind)
   if version >= 15'u16:
@@ -2553,6 +2916,15 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16)
       result.depfiles = @[legacy]
   if version >= 10'u16:
     result.ignoredInputPrefixes = readStringSeq(bytes, pos)
+  if version == 24'u16:
+    # v24 alone carried the removed ``bdpTrustedDeclaredInputs`` payload here
+    # (an input seq then a reason string). The fields are gone, but the BYTES
+    # are still on disk in v24 records and must be consumed or every later
+    # field in the payload misparses.
+    discard readStringSeq(bytes, pos)
+    discard readString(bytes, pos)
+  if version >= 25'u16:
+    result.suppressMonitorShimSeed = readByte(bytes, pos) == 1'u8
 
 proc writeActionCachePolicy(outp: var seq[byte];
                             policy: ActionCacheFingerprintPolicy) =
@@ -2698,7 +3070,7 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   payload.writeU32Le(uint32(action.toolIdentityRefKinds.len))
   for kind in action.toolIdentityRefKinds:
     payload.writeByte(byte(ord(kind)))
-  # v24: Windows-Build-Correctness M6 — the tool's entropy blessing. One
+  # v26: Windows-Build-Correctness M6 — the tool's entropy blessing. One
   # strict enum byte plus the justification the DSL required before it
   # would accept the blessing, so the engine's diagnostic can quote the
   # reason rather than merely asserting that one exists.
@@ -2718,10 +3090,20 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
       raisePayload("unknown build action payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
-      17'u16, 18'u16, 19'u16, 20'u16, 21'u16, 22'u16, 23'u16,
-      BuildActionPayloadVersion}:
+  # Every version from 1 up to the current one is readable: each bump either
+  # APPENDS a field gated on its own ``version >=`` check below, or — as at
+  # v25, which dropped two fields a removed policy kind had carried — REPLACES
+  # one, in which case the superseded bytes get an exact-``version ==`` arm
+  # that consumes and discards them. Either way the cursor stays in step for
+  # every version, which is the property this range depends on: a field that
+  # was written but is not consumed leaves ``pos`` short and misparses
+  # everything after it rather than failing. Written as a RANGE rather than a
+  # hand-listed
+  # set because the set form silently dropped the previous version each time
+  # the constant was bumped — a v24 binary then rejected every graph a v23
+  # binary had cached, with "unsupported build action payload version", and
+  # the only way back was deleting the cache.
+  if version < 1'u16 or version > BuildActionPayloadVersion:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2884,8 +3266,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
       result.toolIdentityRefKinds[i] = ToolIdentityRefKind(rawKind)
   else:
     result.toolIdentityRefKinds = @[]
-  if version >= 24'u16:
-    # M6 v24: the tool's entropy blessing. Strict 0..ord(high) sentinel —
+  if version >= 26'u16:
+    # M6 v26: the tool's entropy blessing. Strict 0..ord(high) sentinel —
     # same strictness as v19's requiresElevation and v21's cwdKind — so a
     # mutated payload fails closed with a structured error instead of
     # decoding to whichever ordinal the corrupted byte happens to name.
@@ -2897,7 +3279,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.nonDeterminism = NonDeterminismPolicy(blessingByte)
     result.nonDeterminismJustification = readString(bytes, pos)
   else:
-    # v23-and-earlier payloads predate the blessing. Decode as UNBLESSED:
+    # v25-and-earlier payloads predate the blessing. Decode as UNBLESSED:
     # absence of the field is absence of a blessing, never the reverse.
     result.nonDeterminism = ndpUnblessed
     result.nonDeterminismJustification = ""

@@ -32,6 +32,7 @@ import ./api
 import ./develop_sources
 
 export develop_sources.EDevelopVersionUnknown
+export develop_sources.EDevelopVariantsMalformed
 
 # Spec-Implementation M2d: ``finalizeVariants()`` now drives the
 # Spack-shaped unified solver. We import the solver library here rather
@@ -103,6 +104,21 @@ type
     rng*: string
     gateVariant*: string
     gateValue*: string
+    depKind*: string
+      ## Named-Lock-Files NLF-M7 (§4.6) — which of the three approved
+      ## dependency lists this edge was written in: ``"target"``
+      ## (``uses:`` / ``buildDeps:``), ``"native"`` (``nativeBuildDeps:``) or
+      ## ``"runtime"`` (``runtimeDeps:``).
+      ##
+      ## §4.6's rule is that "``nativeBuildDeps:`` resolves under the
+      ## ``hostTools`` lock file; ``buildDeps:`` and ``runtimeDeps:`` resolve
+      ## under the consuming artifact's lock file", and this is the field that
+      ## carries the fact far enough to act on. Before NLF-M7 the `package`
+      ## macro registered ONLY the ``uses:``/``buildDeps:`` list, so the
+      ## BUILD-platform half of the split never reached the solver at all.
+      ##
+      ## Empty is read as ``"target"`` so a record built by hand keeps its
+      ## former meaning.
 
 var pendingSolverPackages {.threadvar.}: seq[SolverPackageInput]
   ## Spec-Implementation M2d: thread-local registry of solver-bound
@@ -193,7 +209,8 @@ proc resetVariantState*() =
   hasUnifiedSolution = false
 
 proc registerSolverDependency*(parentPackage, depPackage, rng: string;
-                                gateVariant = ""; gateValue = "") =
+                                gateVariant = ""; gateValue = "";
+                                depKind = "target") =
   ## Spec-Implementation M2d: append one solver-bound dependency record.
   ## The ``package`` macro emits one of these per ``PackageUseDef``
   ## immediately after ``registerPackageDef``; ``finalizeVariants()``
@@ -208,7 +225,8 @@ proc registerSolverDependency*(parentPackage, depPackage, rng: string;
     depPackage: depPackage,
     rng: rng,
     gateVariant: gateVariant,
-    gateValue: gateValue))
+    gateValue: gateValue,
+    depKind: depKind))
 
 proc pendingSolverDependencies*(): seq[SolverPackageInput] =
   ## Test-facing accessor for the queued solver-package list. Returns a
@@ -435,6 +453,83 @@ proc buildVariantDecls(ctx: ConfigContext): seq[VariantDecl] =
   # package finalizes and pops its own context, so collisions do not arise
   # across packages — a workspace-scoped table keyed on these names would have
   # to qualify them by package first.
+  result.sort(proc (a, b: VariantDecl): int = cmp(a.name, b.name))
+
+proc developVariantDecls(): seq[VariantDecl] =
+  ## Named-Lock-Files NLF-M2, the variant half (`Named-Lock-Files.md` §10.3,
+  ## §10.4, owner decision Q-4) — the variant declarations a develop-mode
+  ## sibling contributes to this solve.
+  ##
+  ## §10.3 measured that they contributed nothing: `buildVariantDecls` above
+  ## walks only the CURRENT process's ambient context, and a sibling named in
+  ## `uses:` was materialized by `buildPackageDecls` with an empty variants
+  ## field. So a develop sibling's configuration was neither observed nor
+  ## solved, while its version — the half that should have been observed — was
+  ## invented and searched for.
+  ##
+  ## SOLVED, NOT RECORDED. What arrives from the checkout is the sibling's
+  ## variant DECLARATIONS: name, universe, and the recipe's declared default.
+  ## The default lands as a default-band CONTRIBUTION, exactly as an in-process
+  ## `variant: T = default` does, so the solve may overrule it. It deliberately
+  ## does NOT land as `pinnedValue`: a pin is an asserted fact, which is the
+  ## "recorded" half Q-4 decided against, and reason 3 says why — a checkout
+  ## carrying its own variant values would have to feed them back into the
+  ## solve that configures its dependents, the fixpoint this design refuses
+  ## everywhere else.
+  ##
+  ## NO LAYERING LOOP IS OPENED. This reads `develop_sources`, which is
+  ## std-only and shares the `REPRO_DEVELOP_OVERRIDES_FILE` CONTRACT with
+  ## `repro_project_dsl.developOverridePath` rather than its code — the same
+  ## road the version half took, and for the same reason: importing
+  ## `repro_project_dsl` from the solve path is what the module header at the
+  ## top of `develop_sources.nim` refuses.
+  ##
+  ## PRECEDENCE is not re-decided here. The lock pin goes through the same
+  ## `lockedValueFor` the ambient variants use, so §2.5's rule — the lock is
+  ## mode-agnostic and an explicit CLI override layers above it — reaches a
+  ## develop sibling's variant unchanged. The CLI contributions are applied
+  ## here rather than by `applyCliContributionFor` only because that proc runs
+  ## at DECLARATION time against a `ConfigurableNode`, and a sibling's variant
+  ## has no node in this process.
+  var seen: seq[string] = @[]
+  for entry in pendingSolverPackages:
+    if entry.depPackage in seen: continue
+    seen.add(entry.depPackage)
+    let developed = developSourceFor(entry.depPackage)
+    if developed.isNone: continue
+    for declared in developed.get().variants:
+      let name = qualifiedVariantName(entry.depPackage, declared.name)
+      let kind = if declared.kind == dvkBool: vkBool else: vkEnum
+      var contributions: seq[VariantContribution] = @[]
+      if declared.default.len > 0:
+        contributions.add(contribution(vpDefault, declared.default))
+      for cli in pendingCliOverrides:
+        if cli.name == name:
+          contributions.add(contribution(vpSet, cli.value))
+      let locked = lockedValueFor(name, kind)
+      case kind
+      of vkBool:
+        result.add(newBoolVariant(name, contributions = contributions,
+          pinnedValue = locked))
+      else:
+        result.add(newEnumVariant(name, declared.allowedValues,
+          contributions = contributions, pinnedValue = locked))
+
+proc solverVariantDecls(): seq[VariantDecl] =
+  ## The complete variant input for the current registration state: this
+  ## process's ambient declarations plus every develop sibling's, in one
+  ## canonical order.
+  ##
+  ## The union is sorted rather than concatenated because the result is
+  ## rendered into the text `repro_lock.inputsDigestOf` is taken over (NLF-M1).
+  ## Appending the develop declarations after the ambient ones would make the
+  ## rendering a function of the override file's entry order and of which
+  ## dependency happened to be registered first — the same class of defect
+  ## NLF-M1 closed one milestone earlier.
+  if not ambientVariantContext.isNil and
+      ambientVariantContext.state != ccsFinalized:
+    result = buildVariantDecls(ambientVariantContext)
+  result.add(developVariantDecls())
   result.sort(proc (a, b: VariantDecl): int = cmp(a.name, b.name))
 
 proc smallestSatisfyingVersion(rng: string): string =
@@ -797,10 +892,7 @@ proc currentSolverInputsFixture*(): string =
   ## order-independence directly: driving `finalizeVariants` instead would run
   ## a full clingo solve per call and make the property under test depend on
   ## the solver being installed and satisfiable.
-  var variants: seq[VariantDecl] = @[]
-  if not ambientVariantContext.isNil and
-      ambientVariantContext.state != ccsFinalized:
-    variants = buildVariantDecls(ambientVariantContext)
+  let variants = solverVariantDecls()
   var parentSet: seq[string] = @[]
   for entry in pendingSolverPackages:
     if entry.parentPackage notin parentSet:
@@ -844,10 +936,7 @@ proc currentSolverVariantDecls*(): seq[VariantDecl] =
   ## that becomes a `#minimize` weight over a choice rule.
   ##
   ## Returns a copy; callers cannot mutate the ambient context through it.
-  if ambientVariantContext.isNil or
-      ambientVariantContext.state == ccsFinalized:
-    return @[]
-  buildVariantDecls(ambientVariantContext)
+  solverVariantDecls()
 
 proc emitSolverInputsIfRequested(variants: openArray[VariantDecl];
                                  packages: openArray[PackageDecl]) =
@@ -892,9 +981,7 @@ proc finalizeVariants*() =
   # any); package decls come from the pending dependency registry that
   # the ``package`` macro populated immediately after
   # ``registerPackageDef``.
-  var variants: seq[VariantDecl] = @[]
-  if ctxPresent:
-    variants = buildVariantDecls(ambientVariantContext)
+  let variants = solverVariantDecls()
   var parentSet: seq[string] = @[]
   for entry in pendingSolverPackages:
     if entry.parentPackage notin parentSet:

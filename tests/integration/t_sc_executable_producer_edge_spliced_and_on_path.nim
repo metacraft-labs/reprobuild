@@ -187,6 +187,26 @@ created_at = "2026-07-02T00:00:00Z"
       # SC-2 splice of the sibling's freshly-built bin dir.
       check findExe("prod").len == 0
 
+      let cacheRoot = absolutePath(scratch / "action-cache-root")
+      createDir(cacheRoot)
+
+      # Preparation resolves the selected target's complete tool identity.
+      # It must therefore materialize a declared cross-repo producer, while
+      # still stopping before the consumer graph executes.
+      let prepareCmd = q(reproAbs) & " build consume" &
+        " --prepare-only --tool-provisioning=path --daemon=off" &
+        " --log=quiet --progress=quiet --measure=none" &
+        " --action-cache-root=" & q(cacheRoot)
+      checkpoint("running: " & prepareCmd)
+      let (prepareCode, prepareOutput) = run(prepareCmd, consumerRoot)
+      checkpoint("prepare exit=" & $prepareCode)
+      checkpoint(prepareOutput)
+      check prepareCode == 0
+      check fileExists(producerBinary)
+      check not fileExists(consumedMarker)
+      if fileExists(producerBinary):
+        removeFile(producerBinary)
+
       # ---- Build the producer-independent target first, then select the
       # producer-consuming target. The shared base action must retain the same
       # fingerprint when the second target adds the producer identity. ----
@@ -198,8 +218,6 @@ created_at = "2026-07-02T00:00:00Z"
       # ``repro_cli_support.nim:377``) so the test is immune to that bloat and
       # does not pollute the shared cache. Test hygiene only; no production
       # cache-behavior change.
-      let cacheRoot = absolutePath(scratch / "action-cache-root")
-      createDir(cacheRoot)
       let baseCmd = q(reproAbs) & " build base" &
         " --tool-provisioning=path --daemon=off --log=quiet" &
         " --progress=quiet --measure=none" &

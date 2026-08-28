@@ -1,0 +1,836 @@
+## An action's ENVIRONMENT must be part of its cache key, split the way
+## BuildXL splits it: a DECLARED variable contributes ``NAME=value``, a
+## PASSTHROUGH variable contributes ``NAME`` only.
+##
+## MOCK POLICY — NO MOCKS ARE USED IN THIS FILE, AND NONE MAY BE ADDED.
+## Every cache assertion drives the real `runBuild` scheduler in
+## `repro_build_engine`, the real per-edge `ActionCache` + CAS in
+## `repro_local_store`, a real `sh` subprocess and real files in a real
+## temporary directory. The defect under test is that the environment
+## reprobuild CONSTRUCTS for an action never reaches the key the action
+## cache is looked up by, so a mocked store or a fake executor would make
+## the whole file vacuous: the two halves that must disagree are the
+## constructed env and the recorded key, and both have to be production.
+##
+## ## The defect
+##
+## `repro_build_engine.action()` accepts an `env` argument, hands it to
+## the spawn path, and drops it on the floor when it composes the weak
+## fingerprint. Two actions that are identical except for the value of a
+## variable reprobuild itself sets are therefore ONE cache entry. The
+## second one is served the first one's result.
+##
+## ## Why the split, and why it is not optional
+##
+## Keying on the whole environment by value is not the fix; it is a
+## different defect. `PATH` under `nix develop` is not `PATH` in CI, and
+## an action's `PATH` is built by prepending resolved tool directories to
+## whatever the host has. If that value entered the key, every edge in
+## every graph would invalidate on any host difference — the change would
+## read as a correctness fix and land as a total cache wipe.
+##
+## BuildXL's answer, which this file pins:
+##
+## * DECLARED    — the build system chose the value. It is part of what
+##                 the action IS, so `NAME=value` goes in the key.
+## * PASSTHROUGH — the build system admits the HOST's value. The name is
+##                 part of what the action is (it says "this action reads
+##                 the host's `PATH`"); the value is not. `NAME` alone
+##                 goes in the key.
+##
+## Governing spec text:
+##
+## * Filesystem-Policy-And-Observed-Inputs.md §"Environment Variables Are
+##   Graph-Evaluation Inputs" — env is an input to graph evaluation, not
+##   an observed action input. This file does not move that boundary; it
+##   makes the graph-evaluation input actually reach the key.
+## * Incremental-Invalidation.md §"Validation Criteria": "changing a read
+##   input invalidates the action" and "a warm re-run of an unchanged
+##   graph still executes zero actions".
+##
+## ## The properties, and why each one is required
+##
+## 1. declared value changes            => the edge RE-RUNS.
+## 2. passthrough value changes         => the edge does NOT re-run.
+## 3. passthrough NAME set changes      => the edge RE-RUNS.
+## 4. empty env + empty passthrough     => the fingerprint is UNCHANGED,
+##                                        and the classes that reach.
+## 5. the key is order- and duplicate-canonical.
+## 6. the host environment cannot reach the key.
+## 10. every site composing a host PATH declares it passthrough.
+##
+## (1) alone would pass against an engine that keys on the whole
+## environment by value — the regression described above. (2) is what
+## forbids that, and (2) alone would pass against an engine that ignores
+## the environment entirely, which is the defect. (3) is what stops (2)
+## from being vacuous: the passthrough DECLARATION is still keyed, so
+## "this action reads the host's FOO" is a different action from one that
+## does not. (5) and (6) are the structural halves: a non-canonical
+## rendering produces two keys for one environment (a silent miss and a
+## duplicated build), and a `getEnv` reachable from the key computation
+## is how an ambient value silently and permanently enters a record.
+## (10) is the sweep that a person does once: it caught nothing when it
+## was a habit and a fourth site was missed, so it is a test now.
+##
+## ## WHAT (4) DOES NOT SAY — READ THIS BEFORE QUOTING IT
+##
+## (4) says `keyedOnActionEnvironment` is the identity on the empty
+## declaration. It does NOT say landing this invalidates no existing
+## record, and an earlier version of this file was read that way.
+##
+## Measured, dev binary against branch binary, same graph, same project
+## root, isolated cache roots: 1391 / 1391 weak fingerprints MOVED, 0
+## unmoved, with the constructed env byte-identical on both sides. Every
+## lowered process action already carried a `PATH=` entry, so none of
+## them has an empty declaration and the identity arm reaches none of
+## them.
+##
+## **Landing this is a one-time total action-cache wipe for process
+## actions.** The practical cost is smaller than it sounds — those keys
+## are already 100% host-dependent through `pathSearchList` in
+## `profileFingerprintFor`, so they do not survive a host change either
+## way — but it is a wipe, and (4) is not evidence against it. (That
+## remaining host-dependency is now gone: `profileFingerprintFor` keys
+## on the resolved executable's content digest instead of the search
+## list — see
+## `tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim`.
+## Landing THAT was a second total wipe.) What (4)
+## does buy is stated and tested in its reachable half: built-in
+## (non-forking) actions cannot declare an environment at all, so their
+## records survive.
+
+import std/[algorithm, os, sequtils, strutils, tempfiles, unittest]
+
+import repro_build_engine
+import repro_hash
+import repro_local_store
+
+## Both decisions mean "the recorded result is still valid, do not
+## re-execute" (Incremental-Invalidation.md §"File Fingerprint Policies").
+const ReuseDecisions = {cdHit, cdHybridCutoff}
+
+const DeclaredVar = "REPRO_TEST_DECLARED_ENV"
+const PassthroughVar = "REPRO_TEST_PASSTHROUGH_ENV"
+
+proc weak(name: string): ContentDigest =
+  weakFingerprintFromText("declared-env-in-cache-key." & name)
+
+proc byId(res: BuildRunResult; id: string): ActionResult =
+  for item in res.results:
+    if item.id == id:
+      return item
+  raise newException(ValueError, "missing result " & id)
+
+type Fixture = object
+  root: string
+  workRoot: string
+  cacheRoot: string
+  runLogPath: string
+
+proc runCount(f: Fixture): int =
+  ## Out-of-band evidence: how many times the child process actually ran.
+  ## "not launched" must not be merely the engine's bookkeeping agreeing
+  ## with itself.
+  if not fileExists(f.runLogPath):
+    return 0
+  for line in readFile(f.runLogPath).splitLines():
+    if line.strip().len > 0:
+      inc result
+
+proc runLog(f: Fixture): string =
+  if fileExists(f.runLogPath): readFile(f.runLogPath) else: ""
+
+proc makeFixture(): Fixture =
+  let root = createTempDir("repro-declared-env-key-", "")
+  let workRoot = root / "work"
+  createDir(workRoot / "src")
+  createDir(workRoot / "out")
+  writeFile(workRoot / "src" / "fixture.txt", "fixture-generation-1\n")
+  Fixture(
+    root: root,
+    workRoot: workRoot,
+    cacheRoot: root / "cache",
+    runLogPath: workRoot / "out" / "runs.log")
+
+proc envEdge(sh, workRoot: string;
+             env: openArray[string] = [];
+             envPassthrough: openArray[string] = []): BuildAction =
+  ## The edge under test. It records BOTH variables into the run log, so
+  ## a re-run is visible out of band and the value the child actually
+  ## received is checkable.
+  action("env/run",
+    [sh, "-c",
+     "printf '%s|%s\\n' \"${" & DeclaredVar & "-}\" \"${" &
+       PassthroughVar & "-}\" >> out/runs.log; " &
+     "printf 'run.stamp: src/fixture.txt\\n' > out/run.d"],
+    cwd = workRoot,
+    inputs = ["src/fixture.txt"],
+    outputs = [],
+    depfile = "out/run.d",
+    cacheable = true,
+    weakFingerprint = weak("env/run"),
+    actionCachePolicy = ffpHybrid,
+    env = env,
+    envPassthrough = envPassthrough,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+proc warmConfig(cacheRoot: string): BuildEngineConfig =
+  ## Exactly the mode `repro build` runs in.
+  result = defaultBuildEngineConfig(cacheRoot)
+  result.rebuildMissingOutputsOnCacheHit = true
+  result.deferLocalOutputBlobs = true
+  result.bypassRunQuota = true
+  result.maxParallelism = 2'u32
+
+proc shPath(): string = findExe("sh")
+
+suite "an action's declared environment is part of its cache key":
+
+  test "1. a changed DECLARED value re-runs the edge":
+    let sh = shPath()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let config = warmConfig(f.cacheRoot)
+
+      let alpha = graph([envEdge(sh, f.workRoot,
+        env = [DeclaredVar & "=alpha"])])
+      let first = runBuild(alpha, config)
+      check first.byId("env/run").status == asSucceeded
+      check first.byId("env/run").launched
+      check f.runCount() == 1
+      # The child really did receive the declared value.
+      check f.runLog().contains("alpha|")
+
+      # Warm: nothing moved, so nothing re-runs.
+      let warm = runBuild(alpha, config)
+      check warm.byId("env/run").cacheDecision in ReuseDecisions
+      check not warm.byId("env/run").launched
+      check f.runCount() == 1
+
+      # Only the DECLARED value moves. Same id, same argv, same inputs,
+      # same caller-supplied fingerprint text.
+      let beta = graph([envEdge(sh, f.workRoot,
+        env = [DeclaredVar & "=beta"])])
+      let after = runBuild(beta, config)
+      let r = after.byId("env/run")
+      checkpoint("after declared-env change: status=" & $r.status &
+        " cacheDecision=" & $r.cacheDecision &
+        " launched=" & $r.launched & " reason=" & r.reason)
+      check r.cacheDecision notin ReuseDecisions
+      check r.launched
+      check f.runCount() == 2
+      check f.runLog().contains("beta|")
+
+      # ... and the new state is itself cacheable.
+      check not runBuild(beta, config).byId("env/run").launched
+      check f.runCount() == 2
+
+      # ... and going back to the old value hits the OLD record rather
+      # than re-running: the two environments are two cache entries, not
+      # one entry that keeps getting overwritten.
+      let back = runBuild(alpha, config)
+      check back.byId("env/run").cacheDecision in ReuseDecisions
+      check not back.byId("env/run").launched
+      check f.runCount() == 2
+
+  test "2. a changed PASSTHROUGH value does NOT re-run the edge":
+    # This is the anti-regression half. An implementation that keys on
+    # the constructed environment by value passes test 1 and fails here,
+    # and that implementation would invalidate every edge in every graph
+    # the moment PATH differs between a dev shell and CI.
+    let sh = shPath()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let config = warmConfig(f.cacheRoot)
+
+      # The graph is REBUILT after every host change, and that is
+      # load-bearing rather than tidiness. A fingerprint is computed
+      # when the action is constructed, so a test that constructs the
+      # graph once and then mutates the host environment cannot observe
+      # the host value entering the key even if it does — it would pass
+      # against the very implementation it exists to forbid. (Measured:
+      # with a hoisted graph this case survived a mutation that renders
+      # `getEnv(name)` into the passthrough slot.)
+      proc freshGraph(): BuildGraph =
+        graph([envEdge(sh, f.workRoot, envPassthrough = [PassthroughVar])])
+
+      putEnv(PassthroughVar, "host-value-one")
+      defer: delEnv(PassthroughVar)
+
+      check runBuild(freshGraph(), config).byId("env/run").launched
+      check f.runCount() == 1
+      # The host's value really did reach the child — the variable is
+      # passed through, not merely named.
+      check f.runLog().contains("|host-value-one")
+
+      check not runBuild(freshGraph(), config).byId("env/run").launched
+      check f.runCount() == 1
+
+      # Change the HOST's value. The declaration is unchanged.
+      putEnv(PassthroughVar, "host-value-two-which-is-longer")
+      let after = runBuild(freshGraph(), config)
+      let r = after.byId("env/run")
+      checkpoint("after passthrough-value change: status=" & $r.status &
+        " cacheDecision=" & $r.cacheDecision &
+        " launched=" & $r.launched & " reason=" & r.reason)
+      check r.cacheDecision in ReuseDecisions
+      check not r.launched
+      check f.runCount() == 1
+      check not f.runLog().contains("host-value-two")
+
+  test "3. a changed PASSTHROUGH NAME SET re-runs the edge":
+    # What stops test 2 from being vacuous. "This action reads the host's
+    # FOO" is part of what the action is, so acquiring or losing a
+    # passthrough name is a different action.
+    let sh = shPath()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let config = warmConfig(f.cacheRoot)
+
+      let without = graph([envEdge(sh, f.workRoot)])
+      check runBuild(without, config).byId("env/run").launched
+      check f.runCount() == 1
+      check not runBuild(without, config).byId("env/run").launched
+      check f.runCount() == 1
+
+      let with = graph([envEdge(sh, f.workRoot,
+        envPassthrough = [PassthroughVar])])
+      let after = runBuild(with, config)
+      let r = after.byId("env/run")
+      checkpoint("after passthrough-name-set change: status=" & $r.status &
+        " cacheDecision=" & $r.cacheDecision &
+        " launched=" & $r.launched & " reason=" & r.reason)
+      check r.cacheDecision notin ReuseDecisions
+      check r.launched
+      check f.runCount() == 2
+
+suite "the environment key rendering is canonical and host-independent":
+
+  test "4. the empty declaration is the identity — and who that reaches":
+    # READ THE SECOND HALF OF THIS TEST BEFORE QUOTING THE FIRST.
+    #
+    # The identity property below is real and the mutation kills it. It
+    # is ALSO, on its own, one of this campaign's recurring defects: a
+    # test that is correct and vacuous. "Landing this invalidates no
+    # existing record" does NOT follow from it, and asserting that was
+    # wrong.
+    #
+    # Measured, dev binary against branch binary, same graph, same
+    # project root, isolated cache roots:
+    #
+    #   weakFingerprint moved dev -> branch: 1391 / 1391
+    #   unmoved:                                 0
+    #   env identical dev vs branch:         1391 / 1391
+    #
+    # Every lowered process action already carried a `PATH=` entry
+    # before this change, so NO lowered process action has an empty
+    # declaration — the census reports 0 (0%) declaring nothing — and
+    # the identity arm is unreachable for all of them. Landing this is a
+    # ONE-TIME TOTAL ACTION-CACHE WIPE for process actions. (The
+    # practical cost is smaller than that sounds: those keys are already
+    # 100% host-dependent through `pathSearchList` in
+    # `profileFingerprintFor`, so they do not survive a host change
+    # either way.)
+    #
+    # So the identity property is not load-bearing for compatibility. It
+    # is load-bearing for a narrower and still worthwhile claim, which
+    # the reachable half below pins: the classes that CANNOT declare an
+    # environment keep their keys.
+    let base = weakFingerprintFromText("some-edge")
+    check keyedOnActionEnvironment(base, [], []) == base
+    # And the constructor must agree: an action built with no env has the
+    # same fingerprint as the pre-change constructor produced, which is
+    # exactly `keyedOnGoverningLock(base, identity)`.
+    let identity = lockIdentityOutsideSolvedGraph()
+    let a = action("id", ["/bin/true"], weakFingerprint = base,
+      governingLockIdentity = identity)
+    check a.weakFingerprint == keyedOnGoverningLock(base, identity)
+
+    # THE REACHABLE HALF. `builtinAction` takes no `env` argument at
+    # all, so a built-in edge cannot declare an environment however hard
+    # a caller tries — the compatibility property is not merely
+    # satisfiable for this class, it is structural. Every `ensureDir`,
+    # `copyFile`, `writeText`, `stamp`, `preserveTree`, `ensureLine` and
+    # `ensureSnippet` record ever written stays valid.
+    #
+    # This is what makes the identity arm non-vacuous, and it is stated
+    # as an enumeration over the kinds rather than one sample so that a
+    # new built-in kind that somehow acquired an environment would be
+    # caught here.
+    for kind in [bakEnsureDir, bakCopyFile, bakWriteText, bakStamp,
+                 bakPreserveTree, bakEnsureLine, bakEnsureSnippet]:
+      let b = builtinAction(kind, "builtin/" & $kind,
+        weakFingerprint = base, governingLockIdentity = identity)
+      checkpoint("built-in kind: " & $kind)
+      check b.env.len == 0
+      check b.envPassthrough.len == 0
+      check b.weakFingerprint == keyedOnGoverningLock(base, identity)
+
+  test "5. the rendering is order- and duplicate-canonical":
+    let base = weakFingerprintFromText("some-edge")
+    # Order of declared entries is not information.
+    check keyedOnActionEnvironment(base, ["A=1", "B=2"], []) ==
+      keyedOnActionEnvironment(base, ["B=2", "A=1"], [])
+    # Order of passthrough names is not information.
+    check keyedOnActionEnvironment(base, [], ["A", "B"]) ==
+      keyedOnActionEnvironment(base, [], ["B", "A"])
+    # Duplicate declarations resolve last-write-wins, which is what the
+    # spawn-time overlay does. A key that disagreed with the spawn would
+    # be keying on something the action does not experience.
+    check keyedOnActionEnvironment(base, ["A=1", "A=2"], []) ==
+      keyedOnActionEnvironment(base, ["A=2"], [])
+    check keyedOnActionEnvironment(base, ["A=1", "A=2"], []) !=
+      keyedOnActionEnvironment(base, ["A=1"], [])
+    # Name and value are separately framed: no concatenation ambiguity
+    # can make two distinct environments collide.
+    check keyedOnActionEnvironment(base, ["AB=C"], []) !=
+      keyedOnActionEnvironment(base, ["A=BC"], [])
+    check keyedOnActionEnvironment(base, ["A=1", "B="], []) !=
+      keyedOnActionEnvironment(base, ["A=1"], ["B"])
+
+  test "6. a declared value is keyed; a passthrough value is not":
+    let base = weakFingerprintFromText("some-edge")
+    # Declared: value is information.
+    check keyedOnActionEnvironment(base, ["FOO=1"], []) !=
+      keyedOnActionEnvironment(base, ["FOO=2"], [])
+    # Passthrough: the NAME is information, the value is not. A variable
+    # listed as passthrough contributes its name whatever value happens
+    # to sit beside it.
+    check keyedOnActionEnvironment(base, ["FOO=1"], ["FOO"]) ==
+      keyedOnActionEnvironment(base, ["FOO=2"], ["FOO"])
+    check keyedOnActionEnvironment(base, [], ["FOO"]) !=
+      keyedOnActionEnvironment(base, [], [])
+    # ... and a passthrough variable is NOT the same action as a
+    # declared one that happens to carry the host's current value.
+    check keyedOnActionEnvironment(base, ["FOO=1"], ["FOO"]) !=
+      keyedOnActionEnvironment(base, ["FOO=1"], [])
+
+  test "7. the host environment cannot reach the key":
+    # The structural half. PR #96's `NIX_STORE_DIR` defect was a
+    # transient ambient value silently and permanently entering a record
+    # because a key computation called `getEnv`. The same shape here
+    # would be `PATH`: an action's PATH is built by prepending resolved
+    # tool directories to the host's, so a key that read it would differ
+    # between a `nix develop` shell and CI for every edge in the graph.
+    let base = weakFingerprintFromText("some-edge")
+    let declaration = ["PATH=/tool/bin"]
+    let passthrough = ["PATH", PassthroughVar]
+
+    # RESTORE THE PROCESS `PATH` AFTERWARDS. This case sets it to two
+    # fictional values on purpose, and it used to leave the second one
+    # in place — so every case declared after it ran with
+    # `PATH=/completely/different:/host/c:/host/d`, `findExe` returned
+    # `""` for everything, and any later case needing a real `sh` had to
+    # skip. Case 12 below launches a real child through the real engine,
+    # which is only possible once this stops leaking.
+    let hostPath = getEnv("PATH")
+    defer: putEnv("PATH", hostPath)
+
+    putEnv("PATH", "/host/a:/host/b")
+    putEnv(PassthroughVar, "one")
+    let underHostA = keyedOnActionEnvironment(base, declaration, passthrough)
+
+    putEnv("PATH", "/completely/different:/host/c:/host/d")
+    putEnv(PassthroughVar, "two-and-longer")
+    let underHostB = keyedOnActionEnvironment(base, declaration, passthrough)
+    delEnv(PassthroughVar)
+
+    check underHostA == underHostB
+
+  test "8. the key computation's CODE never reads the environment":
+    # Belt and braces for test 7, which can only ever sample two host
+    # environments. `keyedOnActionEnvironment` and the rendering it
+    # delegates to are pure functions of their arguments, and the check
+    # that keeps them pure is that neither body contains a call that can
+    # reach the ambient environment at all.
+    #
+    # Comment lines are stripped before the scan on purpose: the doc
+    # comments on those procedures DISCUSS the banned calls (that is
+    # where the rationale lives), and a scan that could not tell an
+    # explanation from a call would force the rationale out of the
+    # source to stay green.
+    proc codeOf(text, name: string): string =
+      let start = text.find("\nproc " & name)
+      check start >= 0
+      let stop = text.find("\nproc ", start + 1)
+      check stop > start
+      for line in text[start ..< stop].splitLines():
+        if line.strip().startsWith("#"):
+          continue
+        result.add(line & "\n")
+
+    let source = currentSourcePath().parentDir.parentDir /
+      "src" / "repro_build_engine.nim"
+    check fileExists(source)
+    let text = readFile(source)
+    let body = codeOf(text, "actionEnvironmentKeyText") &
+      codeOf(text, "keyedOnActionEnvironment")
+    checkpoint("scanned " & $body.splitLines().len & " code lines")
+    # The scan must actually have found code, not an empty slice.
+    check body.contains("passthrough")
+    for banned in ["getEnv", "existsEnv", "envPairs", "getAllEnv",
+                   "putEnv", "delEnv"]:
+      checkpoint("banned call: " & banned)
+      check not body.contains(banned)
+
+  test "10. every lowering site routes its PATH through ONE decision":
+    # THE SWEEP MADE STRUCTURAL. A review once found a FOURTH lowering
+    # site (`cmakeRegenerationBuildAction`) that built
+    # `"PATH=" & wrapperPath & PathSep & getEnv("PATH")` by hand, ~1000
+    # lines from the other three, and this repository's graph contains no
+    # CMake-driven project, so no measurement could have caught it. Only
+    # reading every site could, and reading every site is what a person
+    # does once and then stops doing.
+    #
+    # WHAT THE RULE NOW IS, AND WHY IT CHANGED TWICE.
+    #
+    # v1: "every `actionPathEntry` call site must declare PATH
+    # passthrough" — right while `actionPathEntry` appended
+    # `getEnv("PATH")`, because a host value must never be keyed.
+    #
+    # v2 inverted it to "no site may declare PATH passthrough", because
+    # the host tail was removed and the value became graph-derived. That
+    # inversion was correct about the hermetic edges and silent about
+    # the rest: it said nothing about WHETHER the entry is emitted, so
+    # three sites began emitting `PATH=` for every edge that resolved
+    # no tools. MEASURED: 1372 of 2753 process actions on this
+    # repository's `test` graph, every `reprobuild.test_execute.*` edge.
+    # `PATH=` REPLACES the inherited value (see
+    # `prependPathDirsToArgvEnv`), so those actions ran with no PATH,
+    # and `t_workspace_root_for_repo_managed_worktree` skipped itself
+    # into `asSucceeded exit=0` and then `cdHit`.
+    #
+    # v3, below, is about the DECISION rather than about either of its
+    # outcomes: emitting and classifying are one choice, so they live in
+    # one place and every site must go through it. Five rules:
+    #
+    #   (a) nothing may build a `PATH=` entry by hand — it must go
+    #       through `actionPathEntry`;
+    #   (b) `actionPathEntry`'s own body must not read the ambient
+    #       environment, which is what makes a hermetic value keyable;
+    #   (c) `actionPathEntry` may be called ONLY from `actionPathDecision`
+    #       (the decision) and `actionPathEnvEntry` (the test-facing
+    #       composition helper) — never from a lowering site, because a
+    #       lowering site that calls it directly is a site that has
+    #       decided to emit unconditionally;
+    #   (d) every `actionPathDecision` call site must consume BOTH halves
+    #       of the answer — a site that takes `.env` and drops
+    #       `.passthrough` re-creates the un-keyed-inheritance defect,
+    #       and one that takes `.passthrough` and drops `.env` produces
+    #       an action with no PATH entry at all; and
+    #   (e) the ambient read may live in exactly one proc,
+    #       `actionInheritedPathValue`, so the hermetic branch cannot
+    #       reach it; and
+    #   (f) every site must pass an `edgeDeclaresTools` argument that
+    #       either READS THE EDGE'S DECLARATION (`toolIdentityRefs`) or
+    #       is the literal `false`, and the literal is allowed only in
+    #       `cmakeRegenerationBuildAction`.
+    #
+    # A fifth lowering site added tomorrow fails (c), (d) or (f) rather
+    # than silently handing the caller's shell control of what the
+    # action executes, or silently handing it nothing.
+    #
+    # WHY (f) EXISTS, MEASURED. Rules (a)-(e) pin how the decision is
+    # SPELLED and what `actionPathDecision` does GIVEN its argument.
+    # None of them, and none of the unit cases in
+    # `t_tool_profile_keys_on_resolution_not_search_path.nim`, pins what
+    # the call sites PASS. Mutating the general typed-tool site to
+    # `edgeDeclaresTools = actionPathPrefix.len > 0` — precisely the
+    # naive "restore the `len > 0` guard" fix the branch rejected — left
+    # EVERY suite green: this file 12/12, the toolpath unit suite 19/19,
+    # the census 4/4, the execute-edge integration gate 2/2 and the
+    # pythonUnittest path-mode gate 2/2. A real build of
+    # `.#test#test_package_root_anchor` nevertheless went from
+    # `asSucceeded` to `asFailed: AssertionError: no `nim` on PATH`,
+    # because that edge's prefix is non-empty (its own `python3`) while
+    # its declaration set is empty. The empty-`PATH` counter in case 11
+    # structurally cannot see it — `PATH=<python3>/bin` is not empty, it
+    # is hermetic, keyed and unusable — which is the branch's own
+    # argument for why an emptiness test is insufficient, and was true
+    # of its own gates until this rule and the third case in
+    # `tests/integration/t_execute_edge_gives_tests_a_usable_path.nim`
+    # were added.
+    #
+    # THE `false` CARVE-OUT IS ONE SITE WIDE, and named rather than
+    # counted, because a bare `false` at the typed-tool site would be
+    # the OPPOSITE mutation: every edge inherits, no edge is hermetic,
+    # and the whole point of `7823baae8` is gone with nothing failing.
+    # `cmakeRegenerationBuildAction` is the one site that legitimately
+    # declares nothing: it re-runs a CMake CONFIGURE, whose tool closure
+    # is whatever the consumer's `CMakeLists.txt` probes by bare name
+    # (`execute_process(COMMAND uname ...)`, uncached `find_program`,
+    # and the fork's own `FindProgram("repro")`), and which is therefore
+    # not enumerable from the lowering site. See the comment there for
+    # the end-to-end measurement of what a hermetic `PATH` did to it.
+    let source = currentSourcePath().parentDir.parentDir.parentDir /
+      "repro_cli_support" / "src" / "repro_cli_support.nim"
+    check fileExists(source)
+    let text = readFile(source)
+    let lines = text.splitLines()
+
+    proc enclosingProc(index: int): string =
+      ## Name of the `proc` a line belongs to, by scanning backwards for
+      ## the nearest column-0 `proc` declaration.
+      var i = index
+      while i >= 0:
+        let line = lines[i]
+        if line.startsWith("proc "):
+          var name = line[5 .. ^1]
+          for stop in ["*", "(", ":", " "]:
+            let cut = name.find(stop)
+            if cut >= 0:
+              name = name[0 ..< cut]
+          return name
+        dec i
+      ""
+
+    var handRolled: seq[string] = @[]
+    var entryCallers: seq[string] = @[]
+    var decisionSites: seq[int] = @[]
+    for i, line in lines:
+      let stripped = line.strip()
+      if stripped.startsWith("#") or stripped.startsWith("##"):
+        continue
+      if line.contains(".add(\"PATH=") or line.contains("= \"PATH=\" &"):
+        handRolled.add($(i + 1) & ": " & stripped)
+      if line.contains("actionPathEntry(") and
+          not line.contains("proc actionPathEntry"):
+        entryCallers.add(enclosingProc(i))
+      if line.contains("actionPathDecision(") and
+          not line.contains("proc actionPathDecision"):
+        decisionSites.add(i)
+
+    # (a)
+    checkpoint("hand-rolled PATH entries: " & $handRolled)
+    check handRolled.len == 0
+
+    # (c) — and the scan must have found call sites at all, or (a) and
+    # (c) would both pass vacuously.
+    checkpoint("actionPathEntry callers: " & $entryCallers)
+    check entryCallers.len >= 2
+    for caller in entryCallers:
+      check caller in ["actionPathDecision", "actionPathEnvEntry"]
+
+    # (d) — the four lowering sites. Each binds the answer to a name and
+    # must use both halves of it.
+    checkpoint("actionPathDecision call sites: " & $decisionSites.len)
+    check decisionSites.len >= 4
+    for site in decisionSites:
+      let line = lines[site].strip()
+      check line.startsWith("let ")
+      let name = line[4 ..< line.find(" =")]
+      checkpoint("decision site line " & $(site + 1) & " binds " & name)
+      var usesEnv = false
+      var usesPassthrough = false
+      for probe in site .. min(site + 20, lines.high):
+        if lines[probe].strip().startsWith("#"):
+          continue
+        if lines[probe].contains(name & ".env"):
+          usesEnv = true
+        if lines[probe].contains(name & ".passthrough"):
+          usesPassthrough = true
+      check usesEnv
+      check usesPassthrough
+
+    # (f) — WHAT each site passes, not merely that it consumes the
+    # answer. The argument text is read out of the call itself, which
+    # spans two lines at all four sites.
+    var declarationArgs: seq[string] = @[]
+    for site in decisionSites:
+      var callText = ""
+      for probe in site .. min(site + 6, lines.high):
+        callText.add(lines[probe].strip() & " ")
+        if lines[probe].contains(")"):
+          break
+      const Marker = "edgeDeclaresTools = "
+      let at = callText.find(Marker)
+      # Fail-closed: a site that passes the argument positionally, or
+      # spells it without the surrounding spaces, is a site this scan
+      # cannot read, and an unreadable site is not a passing one.
+      checkpoint("decision site line " & $(site + 1) & " call: " & callText)
+      check at >= 0
+      if at >= 0:
+        var arg = callText[at + Marker.len .. ^1]
+        let close = arg.find(')')
+        if close >= 0:
+          arg = arg[0 ..< close]
+        arg = arg.strip()
+        declarationArgs.add(arg)
+        checkpoint("  edgeDeclaresTools = " & arg &
+          "  (in " & enclosingProc(site) & ")")
+        check arg.contains("toolIdentityRefs") or
+          (arg == "false" and
+            enclosingProc(site) == "cmakeRegenerationBuildAction")
+    check declarationArgs.len == decisionSites.len
+    # And the declaring form must be the MAJORITY arrangement, or the
+    # carve-out above has quietly become the rule.
+    var declaringSites = 0
+    for arg in declarationArgs:
+      if arg.contains("toolIdentityRefs"):
+        inc declaringSites
+    checkpoint("sites keyed on the edge's own refs: " & $declaringSites)
+    check declaringSites >= decisionSites.len - 1
+
+    proc bodyOf(name: string): string =
+      let start = text.find("\nproc " & name)
+      check start >= 0
+      let stop = text.find("\nproc ", start + 1)
+      check stop > start
+      # Comment lines are stripped before the scan for the same reason
+      # as test 8: the doc comments DISCUSS the ambient read, and a scan
+      # that could not tell an explanation from a call would force the
+      # rationale out of the source to stay green.
+      for line in text[start ..< stop].splitLines():
+        if line.strip().startsWith("#"):
+          continue
+        result.add(line & "\n")
+
+    # (b)
+    let entryBody = bodyOf("actionPathEntry")
+    checkpoint("actionPathEntry body:\n" & entryBody)
+    check entryBody.contains("actionPathPrefix")
+    for banned in ["getEnv", "existsEnv", "envPairs", "getAllEnv"]:
+      checkpoint("banned call in actionPathEntry: " & banned)
+      check not entryBody.contains(banned)
+
+    # (e) — the decision itself must not read the environment either.
+    # The read belongs to `actionInheritedPathValue`, which only the
+    # inherited branch calls; a `getEnv` in `actionPathDecision` would
+    # mean the hermetic branch could reach one too.
+    let decisionBody = bodyOf("actionPathDecision")
+    checkpoint("actionPathDecision body:\n" & decisionBody)
+    check decisionBody.contains("edgeDeclaresTools")
+    for banned in ["getEnv", "existsEnv", "envPairs", "getAllEnv"]:
+      checkpoint("banned call in actionPathDecision: " & banned)
+      check not decisionBody.contains(banned)
+    let inheritedBody = bodyOf("actionInheritedPathValue")
+    checkpoint("actionInheritedPathValue body:\n" & inheritedBody)
+    check inheritedBody.contains("getEnv")
+
+  test "11. an emitted PATH is never the empty string":
+    # THE GATE THE BRANCH WAS MISSING. Test 10 is structural; this one
+    # is behavioural, and it is the one that fails when the emission
+    # decision is wrong regardless of how the code is arranged.
+    #
+    # `classifyActionPath` reads a lowered action back and names its
+    # PATH declaration. `apdEmpty` is the defect class, split out from
+    # "declares a variable" — which is how the build header reported
+    # 1372 empty-PATH edges as ordinary declaring actions for the life
+    # of the defect.
+    proc probe(env, passthrough: openArray[string]): ActionPathDeclaration =
+      classifyActionPath(action("probe", ["/bin/true"],
+        governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+        env = env, envPassthrough = passthrough))
+
+    check probe(["PATH=/a/bin"], []) == apdHermetic
+    check probe(["PATH=/a/bin"], ["PATH"]) == apdInherited
+    check probe([], ["PATH"]) == apdInherited
+    check probe([], []) == apdAbsent
+    check probe(["PATH="], []) == apdEmpty
+    # Last-write-wins, matching `prependPathDirsToArgvEnv`: a later
+    # empty entry is the value the child gets, so it is the one that
+    # decides the class.
+    check probe(["PATH=/a/bin", "PATH="], []) == apdEmpty
+    check probe(["PATH=", "PATH=/a/bin"], []) == apdHermetic
+    # Case-insensitive, for the same reason the launcher is.
+    check probe(["Path="], []) == apdEmpty
+
+  test "12. an empty PATH is not a portability question — the child sees it":
+    # END TO END, through the real launcher, because the whole defect
+    # was a disagreement about what the launcher does with an emitted
+    # `PATH=`. A comment at the lowering site said the entry "does not
+    # get a hermetic empty one — it inherits the caller's, because the
+    # launcher layers `action.env` OVER the inherited environment rather
+    # than replacing it". This runs the launcher and asks it.
+    let sh = shPath()
+    check sh.len > 0
+
+    proc pathSeenBy(env: openArray[string]): string =
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let edge = action("path/probe",
+        [sh, "-c", "printf '%s' \"${PATH-<unset>}\" > out/seen.txt"],
+        cwd = f.workRoot,
+        inputs = [],
+        outputs = ["out/seen.txt"],
+        cacheable = false,
+        weakFingerprint = weak("path/probe"),
+        env = env,
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      let res = runBuild(graph([edge]), warmConfig(f.cacheRoot))
+      check res.byId("path/probe").status == asSucceeded
+      readFile(f.workRoot / "out" / "seen.txt")
+
+    # No declaration: the caller's `$PATH` reaches the child. This is
+    # the reading the D1 comment generalised from, and it is true HERE.
+    let inherited = pathSeenBy([])
+    checkpoint("no PATH entry -> child saw " & $inherited.len & " bytes")
+    check inherited.len > 0
+
+    # A declaration REPLACES it. The child does not see the caller's.
+    let replaced = pathSeenBy(["PATH=/nonexistent-repro-probe-dir"])
+    checkpoint("PATH=<dir> -> child saw: " & replaced)
+    check replaced.contains("/nonexistent-repro-probe-dir")
+    check replaced != inherited
+
+    # And an EMPTY declaration replaces it with nothing. Not a
+    # fall-through, not a no-op: the child runs with no PATH.
+    let emptied = pathSeenBy(["PATH="])
+    checkpoint("PATH= -> child saw: " & $emptied.len & " bytes: " & emptied)
+    check emptied.len == 0
+
+  test "9. the rendering distinguishes the two classes explicitly":
+    # A cache key that cannot be explained cannot be debugged. The
+    # canonical text is what an operator diffs when two hosts disagree,
+    # so it must keep the two classes apart rather than flattening them
+    # into one list of strings.
+    #
+    # This is also where this rendering deliberately diverges from
+    # BuildXL. BuildXL writes the literal `"Pass-through"` into the
+    # VALUE slot with no separate class field
+    # (`PipFingerprinter.cs:360-375`), so a declared variable whose
+    # value renders to exactly that string collides with a passthrough
+    # variable of the same name. Here the class is its own framed field.
+    type Record = tuple[name, class, value: string]
+    proc parse(text: string): seq[Record] =
+      for record in text.split("\x1e"):
+        if record.len == 0:
+          continue
+        let f = record.split("\x1f")
+        check f.len == 5
+        # Length framing is present and honest — that is what makes the
+        # rendering injective.
+        check f[0] == $f[1].len
+        check f[3] == $f[4].len
+        result.add((name: f[1], class: f[2], value: f[4]))
+
+    let records = parse(actionEnvironmentKeyText(
+      ["B=2", "A=1", "A=3"], ["Z", "A"]))
+    check records.len == 3
+    check records.mapIt(it.name) == @["A", "B", "Z"]
+    # Sorted by name, so a diff between two hosts is a diff of the
+    # environment and not of an iteration order.
+    check records.mapIt(it.name) == records.mapIt(it.name).sorted()
+    # `A` is passthrough, so NEITHER of its declared values survives.
+    check records[0].class == "passthrough"
+    check records[0].value == ""
+    # `B` is declared, so its value is present verbatim.
+    check records[1] == (name: "B", class: "declared", value: "2")
+    # `Z` is passthrough with no declared value at all.
+    check records[2].class == "passthrough"
+    # Deterministic: same declaration, same text, every time, whatever
+    # order the caller happened to assemble it in.
+    check actionEnvironmentKeyText(["B=2", "A=1", "A=3"], ["Z", "A"]) ==
+      actionEnvironmentKeyText(["A=3", "B=2", "A=1"], ["A", "Z"])
+    # Malformed entries carry no environment and must not become key
+    # material by accident.
+    check actionEnvironmentKeyText(["no-equals-sign", "=novalue"], []) == ""

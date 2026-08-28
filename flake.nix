@@ -24,7 +24,28 @@
       # overrides this to the ``dev`` sibling clone; pin the default here so the
       # override-free ``lint`` and ``nix-build`` jobs resolve the same source.
       url = "github:metacraft-labs/runquota/dev";
-      flake = false;
+      # A FLAKE INPUT, NOT A BARE SOURCE TREE. Both uses are served by the one
+      # pin: ``${runquota-src}`` still coerces to the fetched source root (so
+      # ``RUNQUOTA_SRC`` and every ``--path:`` into ``libs/*/src`` are
+      # unchanged), and ``runquota-src.packages.<system>.default`` gives us the
+      # daemon+CLI built by runquota's OWN package derivation instead of a copy
+      # of it maintained here.
+      #
+      # Why that matters: runquota's ``runquotad`` / ``runquota`` binaries have
+      # their own dependency closure, and it grows. M13b's published aggregate
+      # table made ``runquota_daemon`` and ``runquota_cli_support`` import
+      # ``shm_lease/*``, which runquota's package derivation feeds itself from
+      # its own ``nim-shm-lease`` input. A mirrored derivation here would have
+      # to re-learn that input — and the next one — even though reprobuild
+      # imports none of those modules; it compiles only
+      # ``runquota_client``/``_codec``/``_core``/``_ipc``/``_process``/``_protocol``
+      # from the source tree, and none of them reach ``shm_lease``.
+      # Delegating the build keeps runquota's transitive dependencies
+      # runquota's business.
+      #
+      # ``nixos-modules`` follows ours so runquota's package set is this
+      # flake's package set — one nixpkgs evaluation, not two.
+      inputs.nixos-modules.follows = "nixos-modules";
     };
     io-mon-src = {
       # io-mon ships the ``io_mon`` Nim package (the byte-identical wire-format
@@ -43,7 +64,37 @@
       # io-mon no longer imports at all. fs_snoop.nim / writer.nim now
       # ``import shm_gset`` + ``shm_gset/transport``, so this pin requires the
       # nim-shm-gset-src input below and its SHM_GSET_SRC wiring.
-      url = "github:metacraft-labs/io-mon/8b6d0b9b91ee8fb907b5cb99ce8f535b7cacb9d8";
+      #
+      # In-Process-Monitor-Hosting HM-4 — bumped to the IoMon-Decomposed-Host-API
+      # DH-4 tip. The engine hosts io-mon's consumer IN-PROCESS now, and the
+      # decomposed lifecycle it calls (``startMonitor`` / ``pollMonitor`` /
+      # ``finishMonitor``, plus ``FsSnoopRequest.env`` / ``.cwd``) does not exist
+      # at all in the previous pin: at ``3a7c15cd`` ``fs_snoop`` exports only
+      # ``findShimLibrary`` / ``completeness`` / ``records`` / ``runMonitored`` /
+      # ``runFsSnoopCli``, and ``FsSnoopRequest`` has neither ``env`` nor ``cwd``.
+      # THIS PIN IS THE PREREQUISITE, not a refresh — io-mon's source having the
+      # API is not the same thing as reprobuild's BUILD having it. Note that a
+      # developer shell entered through ``.envrc`` sets NIX_FLAKE_OVERRIDE_AUTO=1
+      # and therefore resolves ``IO_MON_SRC`` from a ``../io-mon`` sibling when one
+      # exists; this pin is what the sandboxed package build and the override-free
+      # CI jobs use, and it is the revision the two must agree on.
+      #
+      # Bumped again to the sweep-cost fix: ``finishMonitor``'s §4.1 descendant
+      # sweep no longer walks all of /proc per call (~105 ms → ~6 ms), which is
+      # what makes in-process hosting a throughput WIN rather than a regression,
+      # and the same commit closes a false-complete hole in which an ``opendir`` /
+      # ``readdir`` fault during the sweep was silently reported as "no
+      # descendants" instead of as an incomplete observation.
+      #
+      # Bumped to the depfile-format rename tip, which also includes the
+      # memory-frugal ``streamMonitorDepFileRecords`` API consumed directly by
+      # repro_build_engine. Keeping the sandbox pin behind that API makes the
+      # release build fail even when a newer sibling checkout masks the skew.
+      #
+      # Bumped to the per-request event-interest API used by the engine to avoid
+      # collecting categories an edge does not depend on. The enum, request
+      # field, and environment codec are all introduced by this revision.
+      url = "github:metacraft-labs/io-mon/cb26b626e6642f00818da0f64938e64c7ae0d209";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -97,7 +148,30 @@
     # like bearssl-src — it must be supplied as a source input; the dev shell
     # resolves it from the sibling checkout, but the sandboxed package build has
     # no sibling and otherwise fails with "cannot open file: stackable_hooks/…".
-    stackable-hooks-src = {
+    #
+    # THE INPUT NAME IS LOAD-BEARING, and it is why this was called
+    # ``stackable-hooks-src`` until 2026-08-26 and is not any more. `.envrc`
+    # sets ``NIX_FLAKE_OVERRIDE_AUTO=1`` with
+    # ``NIX_FLAKE_OVERRIDE_AUTO_STRIP_SUFFIXES=-src``: the auto arm strips the
+    # suffix off each input name and overrides the input when a sibling
+    # DIRECTORY OF THAT EXACT NAME exists. ``stackable-hooks-src`` stripped to
+    # ``stackable-hooks``; the checkout is ``../nim-stackable-hooks``, so the
+    # auto arm matched nothing and this was the ONLY sibling-backed input in
+    # the flake still resolving to its lock pin while every other one tracked
+    # the working tree. The pin then sat 30 commits behind the sibling, across
+    # ``6a53408`` ("Windows injector: an explicit child environment"), which
+    # added ``runWithMonitorShim``'s ``env`` parameter and
+    # ``WindowsInjectionResult.rootPid`` / ``.monitoringSkipped`` /
+    # ``.skipReason`` — all four read by io-mon's Windows arm
+    # (``fs_snoop.nim`` ~1439 and ~1965). So reprobuild's Windows arm compiled
+    # io-mon against a stackable_hooks that did not have the fields io-mon
+    # names, and nothing said so: ``scripts/check_dev_shell_env.sh``
+    # reconciled only inputs that WERE overridden, which is precisely the set
+    # this one was missing from. That blind spot is now closed by the
+    # sibling-vs-override check in that script, but the name is the fix —
+    # match the directory convention every other input follows and the auto
+    # arm reaches it without anyone having to remember.
+    nim-stackable-hooks-src = {
       # Pinned to the rev that carries ``platform/linux_preload`` (and the rest
       # of io-mon's stackable surface); the older lock lacked it, so
       # io-mon's ``linux_preload_runtime.nim`` failed with "cannot open file:
@@ -116,7 +190,16 @@
       # the store pin — not the sibling — is what ``just build`` (and CI)
       # actually compiles the shim from; the old pin therefore produced a
       # crashing shim even though the local sibling was already hardened.
-      url = "github:metacraft-labs/nim-stackable-hooks/30f69b6ca69c7f06c9a9946b77a85a09f6e3881d";
+      #
+      # Bumped from 30f69b6 to the ``dev`` tip 41ab1b9. The override reaching
+      # the sibling does NOT make this pin cosmetic: the sandboxed package
+      # build, the override-free ``lint`` / ``nix-build`` CI jobs and any
+      # non-workspace consumer resolve the source from here and from nowhere
+      # else, so the pin and the sibling have to agree or the two builds are
+      # different builds. 41ab1b9 is the revision that carries the explicit
+      # Windows child environment (``6a53408``) io-mon's ``fs_snoop`` Windows
+      # arm compiles against; 30f69b6 predates it.
+      url = "github:metacraft-labs/nim-stackable-hooks/41ab1b987aba67e8bcc34a5945ac33e17b6418ed";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -295,7 +378,7 @@
       git-hooks,
       nimcrypto-src,
       bearssl-src,
-      stackable-hooks-src,
+      nim-stackable-hooks-src,
       reprobuild-ct-test-runner-src,
       reprobuild-test-adapters-src,
       codetracer-native-recorder,
@@ -375,40 +458,29 @@
               sourceRoot
             else
               throw "ct-trace-format-src must contain ${requiredModule}";
-          # Build the RunQuota daemon (and CLI) from the ``runquota-src``
-          # input, the same source the reprobuild client compiles against
+          # The RunQuota daemon (and CLI), built from the ``runquota-src``
+          # input — the same source the reprobuild client compiles against
           # (``RUNQUOTA_SRC``). Putting this on the dev-shell PATH means the
           # auto-started ``runquotad`` tracks the pinned/overridable source
           # rather than a separately-installed binary, so
           # ``--override-input runquota-src path:../runquota`` yields a daemon
           # built from the local sibling — no ``RUNQUOTAD_BIN`` and no push
-          # needed to iterate. Mirrors runquota's own flake package.
-          runquotaTools = pkgs.stdenv.mkDerivation {
-            pname = "runquota";
-            version = "0.1.0";
-            src = runquota-src;
-            strictDeps = true;
-            dontConfigure = true;
-            nativeBuildInputs = [
-              pkgs.bash
-              pkgs.coreutils
-              pkgs.just
-              nimFork
-            ];
-            buildPhase = ''
-              runHook preBuild
-              mkdir -p test-logs
-              ${pkgs.bash}/bin/bash scripts/build_apps.sh 2>&1 | tee test-logs/build.log
-              runHook postBuild
-            '';
-            installPhase = ''
-              runHook preInstall
-              mkdir -p "$out/bin"
-              install -m755 build/bin/runquota "$out/bin/runquota"
-              install -m755 build/bin/runquotad "$out/bin/runquotad"
-              runHook postInstall
-            '';
-          };
+          # needed to iterate.
+          #
+          # RUNQUOTA'S OWN PACKAGE, NOT A COPY OF IT. This used to be a
+          # hand-maintained ``mkDerivation`` that re-ran runquota's
+          # ``scripts/build_apps.sh`` here — a mirror of runquota's
+          # ``packages.default``, and mirrors rot. runquota's binaries have a
+          # dependency closure that reprobuild does not share: M13b's published
+          # aggregate table made ``runquota_daemon`` / ``runquota_cli_support``
+          # import ``shm_lease/*`` from ``nim-shm-lease``, wired through
+          # ``SHM_LEASE_SRC`` in runquota's own dev shell and package
+          # derivation. The mirror had no such wiring, so bumping the pin to a
+          # post-M13b revision broke every ``nix develop`` here with
+          # ``cannot open file: shm_lease/anchor`` — in a module reprobuild
+          # never imports. Delegating to ``packages.default`` means this flake
+          # states no opinion about runquota's dependencies, now or next time.
+          runquotaTools = runquota-src.packages.${system}.default;
           # Build CodeTracer's standalone cross-language test driver ``ct-test``
           # from the ``codetracer-src`` input and put it on the dev-shell PATH.
           # Same shape and same motivation as ``runquotaTools`` above: the tool
@@ -514,7 +586,7 @@
                 export BLAKE3_PREFIX=${blake3Prefix}
                 export NIMCRYPTO_SRC=${nimcrypto-src}
                 export BEARSSL_SRC=${bearssl-src}
-                export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
+                export STACKABLE_HOOKS_SRC=${nim-stackable-hooks-src}/src
                 export CODETRACER_TRACE_FORMAT_NIM_SRC=${codeTracerTraceFormatNimSrc}
                 export IO_MON_SRC=${io-mon-src}/src
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
@@ -558,6 +630,36 @@
                   ]
                 }:$PATH
                 exec ${pkgs.bash}/bin/bash scripts/check_suite_case_counts.sh
+              ''}";
+              language = "system";
+              pass_filenames = false;
+              always_run = true;
+            };
+            # The vacuous-case gate, at the same PUSH boundary and for the
+            # same reasons as the case-count baseline above.
+            #
+            # A test case whose only assertion is `check true` reports [OK]
+            # and increments the pass count, so it is invisible to every
+            # downstream signal -- the suite, the summary, the coverage
+            # numbers. It is strictly worse than a skip, which this repo
+            # already refuses, because a skip is at least counted. Running
+            # the suite cannot find one; only a source scan can, and this
+            # one costs seconds.
+            hooks.vacuous-test-cases = {
+              enable = true;
+              name = "no test case asserts only `check true`";
+              stages = [ "pre-push" ];
+              entry = "${pkgs.writeShellScript "reprobuild-check-vacuous-test-cases" ''
+                export PATH=${
+                  pkgs.lib.makeBinPath [
+                    pkgs.bash
+                    pkgs.coreutils
+                    pkgs.git
+                    pkgs.gnugrep
+                    pkgs.python3
+                  ]
+                }:$PATH
+                exec ${pkgs.python3}/bin/python3 scripts/check_vacuous_test_cases.py
               ''}";
               language = "system";
               pass_filenames = false;
@@ -624,7 +726,7 @@
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
-            STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            STACKABLE_HOOKS_SRC = "${nim-stackable-hooks-src}/src";
             CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
@@ -755,7 +857,7 @@
                   --set-default BLAKE3_PREFIX ${blake3Prefix} \
                   --set-default NIMCRYPTO_SRC ${nimcrypto-src} \
                   --set-default BEARSSL_SRC ${bearssl-src} \
-                  --set-default STACKABLE_HOOKS_SRC ${stackable-hooks-src}/src \
+                  --set-default STACKABLE_HOOKS_SRC ${nim-stackable-hooks-src}/src \
                   --set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \
                   --set-default IO_MON_SRC ${io-mon-src}/src \
                   --set-default SHM_GSET_SRC ${nim-shm-gset-src}/src \
@@ -892,7 +994,7 @@
                 BLAKE3_PREFIX|${blake3Prefix}
                 NIMCRYPTO_SRC|${nimcrypto-src}
                 BEARSSL_SRC|${bearssl-src}
-                STACKABLE_HOOKS_SRC|${stackable-hooks-src}/src
+                STACKABLE_HOOKS_SRC|${nim-stackable-hooks-src}/src
                 CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}
                 IO_MON_SRC|${io-mon-src}/src
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
@@ -1097,7 +1199,7 @@
                                       ${reprobuildSource} \
                                       ${nimcrypto-src} \
                                       ${bearssl-src} \
-                                      ${stackable-hooks-src} \
+                                      ${nim-stackable-hooks-src} \
                                       ${ct-trace-format-src} \
                                       ${io-mon-src} \
                                       ${nim-shm-gset-src} \
@@ -1258,7 +1360,7 @@
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
-            STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            STACKABLE_HOOKS_SRC = "${nim-stackable-hooks-src}/src";
             CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
@@ -1268,8 +1370,51 @@
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
+            # Read by RUNQUOTA'S ``config.nims``, not by ours.
+            #
+            # ``RUNQUOTA_SRC`` above serves the compile reprobuild does itself,
+            # which reaches only runquota's client-side libraries. But several
+            # entry points in this shell build runquota's DAEMON, in runquota's
+            # own checkout, with runquota's own build files:
+            # ``scripts/run-m23-benchmark.sh`` and ``scripts/run_tests.sh`` both
+            # run ``just build`` there when ``build/bin/runquotad`` is absent,
+            # and the Justfile's runquota-facing integration recipes do the same.
+            # That build compiles ``runquota_stats_table``, which imports
+            # ``shm_lease/anchor``, and runquota's ``config.nims`` resolves it
+            # from this variable (falling back to a ``../nim-shm-lease``
+            # sibling, which no CI layout of ours provides). Without it the
+            # daemon build stops at ``cannot open file: shm_lease/anchor`` and
+            # takes the benchmark suite down with it.
+            #
+            # THE VALUE IS RUNQUOTA'S OWN PIN, reached through its flake rather
+            # than restated here, for the same reason ``runquotaTools`` delegates
+            # to ``runquota-src.packages.<system>.default``: a second pin of the
+            # same dependency is a second thing to bump, and the two would
+            # eventually disagree about which revision runquota builds against.
+            # Nothing here needs updating when runquota moves its pin.
+            SHM_LEASE_SRC = "${runquota-src.inputs.nim-shm-lease}/src";
             SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
+            # Same contract as SQLITE_PREFIX/XXHASH_PREFIX above, and the same
+            # value the installed wrapper already `--set-default`s: it is how
+            # `reproLibPathFlags` (libs/repro_interface_artifacts) finds the
+            # clingo lib dir for the `-L` + `-Wl,-rpath` it puts on the
+            # interface-extract / provider compile.
+            #
+            # It was the ONLY one of that family missing from this shell, and
+            # LD_LIBRARY_PATH above does not stand in for it: on darwin dyld
+            # ignores LD_LIBRARY_PATH entirely, and `repro_solver` names its
+            # dynlib `@rpath/libclingo.dylib` precisely so LC_RPATH is what
+            # resolves the module-init dlopen. Without the rpath the extract
+            # runner reprobuild compiles for a project aborts before `main`
+            # with `could not load: @rpath/libclingo.dylib`, failing every
+            # build that extracts an interface — `t_ext_repro_action_rows`
+            # (M17) and `t_stats_reads_shared_store` (M18) among them, which
+            # left two milestone gates unrunnable in the sanctioned shell.
+            # The store-wide `*-clingo-*` scan in `nixPrefix` is a last-resort
+            # fallback for hosts with no prefix at all; it is not a substitute
+            # for naming the clingo this shell actually provides.
+            CLINGO_PREFIX = pkgs.clingo;
             packages = [
               runquotaTools
               # ``ct-test`` — CodeTracer's cross-language test driver. On PATH
@@ -1388,7 +1533,61 @@
               pkgs.grub2_efi
               pkgs.kmod
             ];
-            shellHook = pre-commit-check.shellHook;
+            shellHook = ''
+              # Lend pre-commit back its own chained shim BEFORE its installer
+              # runs, so the installer never meets a stale copy of its own
+              # output beside the dispatcher. Without this, a shell entry that
+              # re-runs the installer leaves .git/hooks/pre-push holding a
+              # freshly generated shim and pre-push.repro-local holding the
+              # previous one, and `repro hooks ensure` has two foreign files to
+              # reconcile instead of one. See scripts/pre_commit_hook_handoff.sh
+              # for what each half does and why the canonical hook path is
+              # never touched by it.
+              PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
+                ${./scripts/pre_commit_hook_handoff.sh} before --hook pre-push || true
+            ''
+            + pre-commit-check.shellHook
+            + ''
+              # git-hooks.nix's shellHook, immediately above, runs
+              # pre-commit's installer whenever the generated
+              # .pre-commit-config.yaml it wants differs from the one the
+              # symlink points at — so on the first entry after any change to
+              # the hook definitions or the tools they pin. That pass first
+              # uninstalls the hook types pre-commit manages, then installs its
+              # own, and either way .git/hooks/pre-push — the Reprobuild
+              # dispatcher that runs the publication gate — stops being the
+              # dispatcher: it is DELETED when the config declares no pre-push
+              # stage, and OVERWRITTEN when it declares one. The managed body
+              # is left orphaned beside it. Nothing put it back, so pushes
+              # stopped being gated, no workspace lock was published for the
+              # commits that followed, and CI failed much later unable to
+              # resolve siblings. Re-assert the managed hooks here, in the same
+              # shell entry that removed them, so the window is closed rather
+              # than merely repaired at the next commit.
+              #
+              # Never fails the shell: a dev shell that refuses to open
+              # because a hook could not be written is worse than the drift.
+              # It does, however, say so loudly, and `repro health` reports
+              # the same gap with a remedy.
+              _repro_hook_bin=""
+              if [ -x "$PWD/build/bin/repro" ]; then
+                _repro_hook_bin="$PWD/build/bin/repro"
+              elif command -v repro >/dev/null 2>&1; then
+                _repro_hook_bin="$(command -v repro)"
+              fi
+              if [ -n "$_repro_hook_bin" ]; then
+                "$_repro_hook_bin" hooks ensure --vcs "$PWD" >/dev/null || \
+                  echo "warning: 'repro hooks ensure --vcs $PWD' failed; the pre-push publication gate may be uninstalled. Run it by hand and read its diagnostic." >&2
+              else
+                echo "warning: no 'repro' binary found; the pre-push publication gate cannot be re-asserted after pre-commit's installer. Build it with 'just build' and re-enter the shell." >&2
+              fi
+              unset _repro_hook_bin
+              # Close the handoff: drop the lent-back shim when `ensure`
+              # chained a freshly generated one, put it back when the installer
+              # never ran.
+              PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
+                ${./scripts/pre_commit_hook_handoff.sh} after --hook pre-push || true
+            '';
           };
         };
     };

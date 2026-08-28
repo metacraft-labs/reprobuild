@@ -86,6 +86,41 @@ type
       ## The instance's resolved feature/variant assignment. §6.1: a key that
       ## omitted feature selections would let "two genuinely different lock
       ## files collide".
+    resolvedTarget*: string
+      ## Platform-And-Microarchitecture-Constraints PMC-4 — the
+      ## microarchitecture target this instance RESOLVED FOR, rendered by
+      ## `packages_schema.renderResolvedTarget` (`x86-64-v3`,
+      ## `x86-64-v3+avx512vl`, or `""`).
+      ##
+      ## ## Why it is here and not in `currentPlatformId`
+      ##
+      ## `currentPlatformId` is an AMBIENT COMPILE-TIME read — `hostCPU &
+      ## "-" & hostOS`, fixed when this module was built. That is the right
+      ## shape for `cpu-os`, which cannot change under a running binary. It
+      ## is the wrong shape for the microarchitecture, which is not a
+      ## property of the host at all: it is the answer selection reached
+      ## FOR ONE PACKAGE, and two instances in one graph can legitimately
+      ## resolve to different targets (a v3 build of one tool alongside a
+      ## level-less build of another).
+      ##
+      ## So it arrives as DATA on the value being hashed, set by whoever
+      ## projected the resolution, and this module gains no new host read,
+      ## no new global, and no new import. A field cannot be consulted from
+      ## somewhere it was not passed to, which is the property that keeps
+      ## `lockIdentityOf` a pure function of its argument.
+      ##
+      ## ## Why the empty string is load-bearing
+      ##
+      ## `packageDigest` omits the entry ENTIRELY when this is empty, so a
+      ## graph of instances that declared no floor — every graph that exists
+      ## today — hashes to the identity it hashed to before PMC-4. Emitting
+      ## an empty `target` entry instead would have moved every lock
+      ## identity in the fleet at once, which is a silent cache-miss event
+      ## rather than the safety fix this milestone is. §6.2's own rule
+      ## admits the field for the same reason it admits the platform:
+      ## "anything that legitimately distinguishes two lock files must be
+      ## something the key already captures", and a v2 resolution and a v3
+      ## resolution of one recipe are two different answers.
 
   CanonicalSolvedGraph* = object
     ## The solved graph, in the shape §6.2 hashes. Constructed from a lock or
@@ -170,6 +205,18 @@ proc packageDigest(p: SolvedPackageInstance): string =
   var entries: seq[tuple[path: string, content: string]] = @[
     (path: "version", content: p.version),
     (path: "source", content: p.sourceIdentity)]
+  # PMC-4: the resolved microarchitecture target, present ONLY when the
+  # instance resolved against a declared floor. Omitting the entry rather
+  # than emitting an empty one is what keeps every identity that exists today
+  # byte-identical — see `SolvedPackageInstance.resolvedTarget`.
+  #
+  # The path is unambiguous by construction: `narStyleTreeSerialization`
+  # frames by path, and `target` cannot collide with `variant/<name>` or with
+  # `version` / `source`, so no variant an author could name reaches this
+  # slot. That is the §1.3 concatenation hazard, closed the same way the
+  # nested `variant/` prefix closes it.
+  if p.resolvedTarget.len > 0:
+    entries.add((path: "target", content: p.resolvedTarget))
   for v in sortedVariants(p.variants):
     entries.add((path: "variant/" & v.name, content: v.value))
   narStyleTreeMultihash(entries)
