@@ -317,7 +317,7 @@ jobs:
         uses: metacraft-labs/metacraft-github-actions/clone-repo@main
         with:
           repo: metacraft-labs/reprobuild-examples
-          ref: main
+          ref: dev
           path: ${{ github.workspace }}/../reprobuild-examples
           gh-token: ${{ steps.ci_token.outputs.token }}
 
@@ -338,7 +338,7 @@ jobs:
         uses: metacraft-labs/metacraft-github-actions/clone-repo@main
         with:
           repo: metacraft-labs/vm-harness
-          ref: main
+          ref: dev
           path: ${{ github.workspace }}/../vm-harness
           gh-token: ${{ steps.ci_token.outputs.token }}
 
