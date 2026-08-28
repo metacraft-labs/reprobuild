@@ -10116,6 +10116,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_repos_add_records_project_membership_by_key.nim",
+    binary: "build/test-bin/t_repos_add_records_project_membership_by_key",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim",
     binary: "build/test-bin/t_repos_add_reuses_remotes_and_inherits_revision",
     defines: @[],
@@ -11414,6 +11423,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_project_set_unions_repos.nim",
     binary: "build/test-bin/t_workspace_project_set_unions_repos",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_workspace_pull_continues_past_a_failing_repo.nim",
+    binary: "build/test-bin/t_workspace_pull_continues_past_a_failing_repo",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

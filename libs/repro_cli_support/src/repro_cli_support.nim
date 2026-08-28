@@ -32828,8 +32828,19 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
 # No-rollback partial-sync policy: ``pull`` refreshes the manifest FIRST
 # (advancing it, recording before→after SHAs). If a later per-repo
 # convergence step fails, the manifest repo is NOT rolled back — the
-# report shows the before→after SHAs and ``pull`` stops with a non-zero
-# exit, leaving the partial state for a manual rerun.
+# report shows the before→after SHAs and ``pull`` exits non-zero, leaving
+# the partial state for a manual rerun.
+#
+# Sweep policy: a per-repo failure does NOT abandon the repos behind it.
+# ``pull`` is the command whose entire purpose is "get this workspace onto
+# the declared revisions", and a sweep that quits at repo 5 of 100 hands
+# back a workspace that is mostly stale while the failure it printed
+# scrolls away above the trailing auto-trust lines. The developer then
+# debugs the WRONG repo: their build breaks against siblings that pull was
+# supposed to have converged and never touched. So every repo is attempted,
+# every failure is collected, the digest at the end names them, and the exit
+# code is 1 — the same partial-advance contract ``sync`` follows (see the
+# RA-23 clone-failure comment in ``executeWorkspaceSync``).
 
 type
   WorkspacePullRepoOutcome* = enum
@@ -32941,22 +32952,47 @@ proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
   if report.manifestStopped:
-    result.add("workspace pull: STOPPED after a step failed — the manifest " &
-      "repo was advanced and is NOT rolled back; rerun `repro workspace " &
-      "pull` to resume from the partial state")
-  var skipped = 0
-  for entry in report.repos:
-    if entry.outcome == pullOutcomeTag(ppoSkippedWorkAtRisk):
-      inc skipped
-  if skipped > 0:
-    # Said once, at the end, in the summary position. The per-repo lines above
-    # already carry the detail; what a reader needs here is the count and the
-    # fact that the rest of the workspace DID converge, so a non-zero exit is
-    # not mistaken for "nothing happened".
-    result.add("workspace pull: " & $skipped & " checkout(s) left untouched " &
-      "to protect work that exists nowhere else; every other repo converged")
+    result.add("workspace pull: the manifest repo was advanced and is NOT " &
+      "rolled back after a repo failed; rerun `repro workspace pull` to " &
+      "resume from the partial state")
   for line in renderTrustReportLines("workspace pull", report.autoTrust):
     result.add(line)
+  # The digest goes LAST — after the auto-trust pass, not before it. A repo
+  # failure that prints in the middle of a hundred-repo sweep and is then
+  # buried under trailing "trusted shell hook" lines is a failure the operator
+  # does not see; the final line of the output is the one a tail is guaranteed
+  # to show. Counts, not a wall of git output: the per-repo lines above already
+  # carry each diagnostic.
+  var converged, cloned, failed, skipped = 0
+  var failedPaths, skippedPaths: seq[string]
+  for entry in report.repos:
+    if entry.outcome == pullOutcomeTag(ppoFailed):
+      inc failed
+      failedPaths.add(entry.path)
+    elif entry.outcome == pullOutcomeTag(ppoSkippedWorkAtRisk):
+      inc skipped
+      skippedPaths.add(entry.path)
+    elif entry.outcome == pullOutcomeTag(ppoCloned):
+      inc cloned
+    else:
+      inc converged
+  if skipped > 0:
+    # Said once, in the summary position. What a reader needs here is the count
+    # and the fact that the rest of the workspace DID converge, so a non-zero
+    # exit is not mistaken for "nothing happened".
+    result.add("workspace pull: " & $skipped & " checkout(s) left untouched " &
+      "to protect work that exists nowhere else: " & skippedPaths.join(", "))
+  if failed > 0:
+    # Named, not just counted. "1 repo failed" sends the reader back through
+    # the scrollback; the names let them act, and they are what distinguishes
+    # "my build broke because THIS repo is stale" from "mainline is broken".
+    result.add("workspace pull: " & $failed & " repo(s) FAILED to converge " &
+      "and are still at their previous revision: " & failedPaths.join(", ") &
+      "; every other repo was still attempted — fix these and rerun " &
+      "`repro workspace pull`")
+  result.add("workspace pull summary: converged " & $converged &
+    ", cloned " & $cloned & ", skipped " & $skipped &
+    ", FAILED " & $failed & " (" & $report.repos.len & " repo(s))")
 
 type
   WorkspacePullArgs = object
@@ -33253,9 +33289,12 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
   ##       advance is KEPT on any later failure — no rollback).
   ##   (2) resolve / compose the project.
   ##   (3) for each repo: clone if missing, then converge to the
-  ##       manifest-declared revision on a local tracking branch.
-  ##   (4) emit the structured report; stop (non-zero) on the first
-  ##       per-repo failure, surfacing that the manifest stays advanced.
+  ##       manifest-declared revision on a local tracking branch. A repo
+  ##       that fails is recorded and the sweep CONTINUES — the remaining
+  ##       repos are the ones convergence was asked for.
+  ##   (4) emit the structured report; exit non-zero when any repo failed,
+  ##       naming every one of them and surfacing that the manifest stays
+  ##       advanced.
   var report: WorkspacePullReport
   report.workspaceRoot = args.workspaceRoot
 
@@ -33336,7 +33375,10 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
           (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
         report.repos.add(entry)
         anyFailure = true
-        break
+        # One unreadable / renamed / private repo does not make the other 99
+        # stale checkouts unfixable. Record it and keep going; the exit code
+        # and the end-of-run digest carry the failure.
+        continue
       entry.outcome = pullOutcomeTag(ppoCloned)
     else:
       entry.outcome = pullOutcomeTag(ppoConvergedExisting)
@@ -33375,7 +33417,12 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
       entry.diagnostic = converged.diag
       report.repos.add(entry)
       anyFailure = true
-      break
+      # Same rule as the clone arm above: a fetch that 403s, a branch the
+      # remote dropped, a checkout a broken local hook rejects — none of that
+      # says anything about the repos after it in the list, and abandoning
+      # them leaves the workspace in the exact half-converged state `pull`
+      # exists to prevent.
+      continue
     entry.trackingBranch = converged.branch
     entry.headSha = converged.headSha
     report.repos.add(entry)
@@ -33437,10 +33484,14 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
   ## current branch). Exit codes:
   ##   - 0 — every repo converged to the manifest revision on a tracking
   ##         branch.
-  ##   - 1 — a clone / fetch / branch-attach step failed. When the
-  ##         manifest had already advanced, it is NOT rolled back: the
-  ##         report names the before→after SHAs and the partial state is
-  ##         left for a rerun.
+  ##   - 1 — a clone / fetch / branch-attach step failed for at least one
+  ##         repo. Every OTHER repo was still attempted: the sweep does not
+  ##         abandon the repos behind a failure, because a half-converged
+  ##         workspace reported as success is how a developer ends up
+  ##         debugging a stale sibling instead of the thing that broke. The
+  ##         digest names every failed repo. When the manifest had already
+  ##         advanced, it is NOT rolled back: the report names the
+  ##         before→after SHAs and the partial state is left for a rerun.
   ##   - 2 — every repo that could be converged was, and at least one was
   ##         SKIPPED because converging it would have repointed a branch
   ##         carrying commits no remote has (or moved HEAD off commits held
