@@ -162,7 +162,7 @@ suite "W15 host binary format":
       # For every name that exists in BOTH forms, the helper must select the
       # one this kernel can load. That is the whole point of the helper.
       for name in dual:
-        let selected = reproBinaryPath(name)
+        let selected = reproBinaryPath(stem = name)
         checkpoint(name & " -> " & selected & " (" &
           describeBinaryFormat(selected) & ")")
         check binaryFormatOf(selected) == hostBinaryFormat()
@@ -204,6 +204,17 @@ suite "W15 host binary format":
     # and does not gate anything.
     let expected = @[
       "benchmarks/lib/reprobuild_m23_bench.nim",
+      # Origin's, and CORRECT: this one never names an artefact. It builds
+      # the string under a fresh ``createTempDir`` and hands it to
+      # ``reprobuildSourceRootFromBinaryLocation``, a pure path parser that
+      # walks UP looking for checkout markers. The file is never created,
+      # stat'ed or executed, so there is no artefact for an extension to be
+      # wrong about — adding one would only make the fixture less like the
+      # POSIX path the parser is documented against. Attributed here rather
+      # than exempted by a rule, because the census is deliberately a list
+      # of names: the next new join has to be argued for too.
+      "libs/repro_interface_artifacts/tests/" &
+        "t_reprobuild_source_root_from_binary_location.nim",
       "tests/e2e/macos-phase5/t_e2e_macos_phase5_launchd_system_daemon.nim",
       "tests/e2e/macos-phase5/t_e2e_macos_phase5_macos_system_default.nim",
       "tests/e2e/macos-phase5/t_e2e_macos_phase5_os_hostname.nim",

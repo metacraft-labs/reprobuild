@@ -681,17 +681,46 @@ func hostBinaryName*(stem: string): string =
   ## ``stem`` with the host's executable suffix. The one spelling.
   stem.addFileExt(ExeExt)
 
-proc reproBinaryPath*(stem = "repro"): string =
+proc reproBinaryPath*(repoRoot = ReprobuildRepoRoot;
+                      stem = "repro"): string =
   ## The single supported way for a test to name a binary that
   ## ``scripts/build_apps.sh`` / the ``apps`` collection produced.
   ##
-  ## Source-anchored (not cwd-relative) and extension-correct. W14 fixed
-  ## 69 files that each spelled ``build/bin/repro`` their own way; this is
-  ## the helper it recommended so there is ONE spelling left to search for.
-  ## The literal ``build/bin/repro`` below is load-bearing for
-  ## ``scripts/generate_test_edges.nim``'s ``detectReproBinaryUsage``, which
-  ## substring-scans sources to decide ``requiresReproBinary``.
-  ReprobuildRepoRoot / "build" / "bin" / hostBinaryName(stem)
+  ## ONE proc with TWO parameters, because two independent analyses each
+  ## need one of them and each used to have its own overload. Both took a
+  ## single ``string``, so every one-argument call was ambiguous and the
+  ## module did not compile; the parameters are what tell the two uses
+  ## apart, and the defaults are what keep the common call a bare
+  ## ``reproBinaryPath()``.
+  ##
+  ## ``repoRoot`` — absolute path to the graph-built ``repro`` CLI inside
+  ## it, produced by build-graph edge ``reprobuild.apps.repro``. Every
+  ## helper in this module that needs the CLI goes through here, and that
+  ## funnel is load-bearing, not tidiness:
+  ## ``scripts/repro_binary_reachability.nim`` decides which tests get
+  ## ``build/bin/repro`` declared as a typed input on their EXECUTE edge,
+  ## and it SEEDS on a source spelling the binary's location — this one.
+  ## Taint then propagates along symbol references, so a test that only
+  ## calls ``prepareMonitorTools`` still gets the dependency, and a rebuild
+  ## of the CLI invalidates it instead of the engine serving the test as up
+  ## to date against a stale binary. Consequence for anyone adding a helper
+  ## here: resolve the CLI through this proc and the analysis follows you
+  ## for free; assemble the path some other way and every test calling your
+  ## helper silently loses its dependency on the binary.
+  ##
+  ## ``stem`` — which produced binary. Source-anchored (not cwd-relative)
+  ## and extension-correct. W14 fixed 69 files that each spelled
+  ## ``build/bin/repro`` their own way; this is the helper it recommended
+  ## so there is ONE spelling left to search for. The literal
+  ## ``build/bin/repro`` in this comment is load-bearing for
+  ## ``scripts/generate_test_edges.nim``'s ``detectReproBinaryUsage``,
+  ## which substring-scans sources to decide ``requiresReproBinary``.
+  ##
+  ## Spelled componentwise rather than by joining a ``"build/bin/repro"``
+  ## const so the result carries the host path separator — callers compare
+  ## this against paths they built the same way, and on Windows the two
+  ## spellings are not equal.
+  repoRoot / "build" / "bin" / hostBinaryName(stem)
 
 proc describeBinaryFormat*(path: string): string =
   ## A diagnostic that names what is actually on disk, for the failure
@@ -941,31 +970,6 @@ proc ctInterposeSrcPath*(repoRoot: string): string =
   ""
 
 type MissingTestFixtureError* = object of CatchableError
-
-proc reproBinaryPath*(repoRoot: string): string =
-  ## Absolute path to the graph-built ``repro`` CLI inside ``repoRoot``,
-  ## produced by build-graph edge ``reprobuild.apps.repro``. Every helper
-  ## in this module that needs the CLI goes through here.
-  ##
-  ## That funnel is load-bearing, not tidiness.
-  ## ``scripts/repro_binary_reachability.nim`` decides which tests get
-  ## ``build/bin/repro`` declared as a typed input on their EXECUTE edge,
-  ## and it SEEDS on a source spelling the binary's location — this one.
-  ## Taint then propagates along symbol references, so a test that only
-  ## calls ``prepareMonitorTools`` still gets the dependency, and a
-  ## rebuild of the CLI invalidates it instead of the engine serving the
-  ## test as up to date against a stale binary.
-  ##
-  ## Consequence for anyone adding a helper here: resolve the CLI through
-  ## this proc and the analysis follows you for free. Assemble the path
-  ## some other way and every test calling your helper silently loses its
-  ## dependency on the binary.
-  ##
-  ## Spelled componentwise rather than by joining a ``"build/bin/repro"``
-  ## const so the result carries the host path separator — callers compare
-  ## this against paths they built the same way, and on Windows the two
-  ## spellings are not equal.
-  repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc requireBinary*(path, edgeName: string): string {.discardable.} =
   ## Test-Fixtures-In-Build-Graph: assert that a graph-built fixture binary
