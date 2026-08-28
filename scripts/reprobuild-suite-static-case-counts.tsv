@@ -66,6 +66,7 @@ libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	1
 libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim	nim	2
 libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim	nim	1
 libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim	nim	5
+libs/repro_build_engine/tests/test_engine_worker_pool.nim	nim	4
 libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim	nim	14
 libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	6
 libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	8

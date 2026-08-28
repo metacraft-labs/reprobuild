@@ -57,6 +57,12 @@ import repro_build_engine/action_extension
 # the scheduler. Read its header before changing anything here that touches
 # ``depTempPath`` / ``depDestPath``.
 import repro_build_engine/monitor_flush
+# Engine-Threadpool TP-1: the flush above is one TENANT of the engine's worker
+# pool, not a thread of its own. The scheduler needs only the pool's
+# whole-pool drain here; every flush-shaped call goes through
+# ``monitor_flush``. Imported narrowly so the pool's shared-memory helpers
+# (``sharedDup`` / ``sharedFree``) do not enter this module's namespace.
+from repro_build_engine/worker_pool import awaitEnginePoolIdle
 export action_extension
 
 # M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
@@ -5655,13 +5661,23 @@ when defined(posix):
     ## own reads to the action's evidence, so the mask is set here and restored
     ## immediately; a child inherits it across ``fork``.
     ##
-    ## SAFE BECAUSE THE SCHEDULER IS SINGLE-THREADED. The engine runs N
-    ## concurrent child PROCESSES from one poll loop, not N threads
-    ## (``createThread`` has zero occurrences in this library), so nothing else
-    ## can observe the window between this call and ``endMonitorSpawnContext``.
-    ## If the engine ever grows worker threads, this is the first thing that
-    ## breaks, and it breaks by interleaving one action's output into
-    ## another's.
+    ## SAFE BECAUSE THE SCHEDULER IS SINGLE-THREADED, AND BECAUSE THE ONLY
+    ## OTHER THREADS OPEN NOTHING. The engine runs N concurrent child
+    ## PROCESSES from one poll loop, not N threads, so no other SCHEDULER code
+    ## can observe the window between this call and
+    ## ``endMonitorSpawnContext``.
+    ##
+    ## The qualification is Engine-Threadpool TP-1's, and the previous version
+    ## of this comment — "``createThread`` has zero occurrences in this
+    ## library" — was already wrong when it was written: HM-5's flush worker
+    ## was in ``repro_build_engine/monitor_flush.nim``, inside this library.
+    ## The claim that MATTERS was never the thread count anyway, it is what
+    ## those threads do, and it is checked rather than assumed in
+    ## ``worker_pool.nim``'s header: a pool worker opens no file and creates
+    ## no file, so neither the ``dup2`` on 0/1/2 nor the ``umask`` can be
+    ## observed by one. A future pool tenant that opens or creates a file
+    ## re-opens both questions, and it breaks by interleaving one action's
+    ## output into another's.
     flushFile(stdout)
     flushFile(stderr)
     result.savedIn = dup(cint(0))
@@ -9141,6 +9157,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           "monitor depfile flush failed after the action-cache entry was " &
           "published: " & outcome.error)
       runResult.trace(outcome.actionId, "monitor-flush-failed", outcome.error)
+    # Engine-Threadpool TP-1 — and EVERY OTHER tenant of the engine's worker
+    # pool drains here too, not just the flush above.
+    #
+    # This is inside the ``finally``, which is the whole of the guarantee: an
+    # exception unwinding out of the scheduling loop — a raising
+    # ``progressCallback``, say — must not leave a worker mid-job while the
+    # process tears down around it. ``the pool drains when an exception
+    # unwinds out of the build`` pins that, and moving this line (or the
+    # flush drain above it) out of the ``finally`` is the mutation that
+    # reddens it — measured red on both of that case's assertions: the
+    # depfile never appeared and the dot-prefixed scratch file was left
+    # behind.
+    #
+    # A no-op today beyond the flush, because the flush is the pool's only
+    # tenant; it is here so that adding TP-2's monitor finish does not depend
+    # on someone remembering to add a drain.
+    awaitEnginePoolIdle()
   finishStat("repro scheduler total", totalStart)
   finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats

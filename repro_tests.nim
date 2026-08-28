@@ -540,6 +540,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/test_engine_worker_pool.nim",
+    binary: "build/test-bin/test_engine_worker_pool",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim",
     binary: "build/test-bin/test_m9r72_monitor_loss_classifier",
     defines: @[],
