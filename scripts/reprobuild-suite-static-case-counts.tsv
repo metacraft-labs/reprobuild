@@ -141,6 +141,7 @@ libs/repro_dsl_stdlib/tests/t_develop_sibling_variants_reach_the_solve.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_doc_comment_malformed_directive_is_compile_error.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_doc_comment_position_from_first_line.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_m8_bulk_catalog.nim	nim	11
