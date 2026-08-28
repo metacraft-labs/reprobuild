@@ -11,6 +11,14 @@ name: Deploy get.reprobuild.com
 # The `get-reprobuild` project's production branch is `master`, so we deploy with
 # `--branch master` to publish a PRODUCTION deployment (served on the custom
 # domain) regardless of which repo branch triggered the run.
+#
+# HERMETIC WRANGLER: the self-hosted eph-linux-x64 Nix runners ship no
+# preinstalled node/npx, so cloudflare/pages-action@v1 and
+# cloudflare/wrangler-action@v3 both fail with `npx: command not found`. We do
+# not preinstall software on runners, and we do not fetch wrangler ad-hoc — the
+# build + deploy run inside this flake's `.#ci` dev shell, which provides
+# wrangler pinned by flake.lock (see flake.nix `devShells.ci`). wrangler
+# authenticates from CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID.
 
 on:
   push:
@@ -19,6 +27,8 @@ on:
       - "get/**"
       - "install-on-distributions.sh"
       - "install.ps1"
+      - "flake.nix"
+      - "flake.lock"
       - ".github/workflows/deploy-get.yml"
   workflow_dispatch:
 
@@ -29,19 +39,39 @@ concurrency:
 jobs:
   deploy:
     name: Deploy get.reprobuild.com
-    runs-on: ubuntu-latest
+    runs-on: eph-linux-x64
     permissions:
       contents: read
       deployments: write
+    environment:
+      name: get-reprobuild
+      url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Assemble get/dist
-        run: bash get/build-get.sh
+      - name: Setup Nix
+        uses: metacraft-labs/nixos-modules/.github/setup-nix@main
+        with:
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          nix-github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble get/dist (hermetic — .#ci dev shell)
+        run: nix develop .#ci --command bash get/build-get.sh
 
       - name: Publish to Cloudflare Pages (get-reprobuild)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy get/dist --project-name=get-reprobuild --branch=master --commit-dirty=true
+        id: deploy
+        # Flake-pinned wrangler from `.#ci` (NOT npx / cloudflare/*-action).
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          nix develop .#ci --command wrangler pages deploy get/dist \
+            --project-name=get-reprobuild \
+            --branch=master \
+            --commit-dirty=true | tee wrangler-deploy.log
+          url="$(grep -oE 'https://[a-z0-9.-]+\.pages\.dev' wrangler-deploy.log | tail -1 || true)"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed to: $url"
