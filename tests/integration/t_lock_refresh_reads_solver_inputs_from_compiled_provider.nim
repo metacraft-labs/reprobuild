@@ -85,8 +85,12 @@ versions: 2.2.0
 
 proc q(value: string): string = quoteShell(value)
 
-proc run(command: string): tuple[code: int; output: string] =
-  let res = execCmdEx(command)
+proc run(command: string; cwd = ""): tuple[code: int; output: string] =
+  let res =
+    if cwd.len > 0:
+      execCmdEx(command, workingDir = cwd)
+    else:
+      execCmdEx(command)
   (code: res.exitCode, output: res.output)
 
 suite "MO-12: lock refresh sources solver inputs from the compiled provider":
@@ -127,6 +131,41 @@ suite "MO-12: lock refresh sources solver inputs from the compiled provider":
 
       # The two locks genuinely differ: the default lock is provider-sourced.
       check lockBody != sidecarBody
+
+      # Prime the ordinary monitored provider artifacts, then make a fallback
+      # compile impossible. Lock refresh must validate and reuse the durable
+      # provider instead of silently falling back to the stale sidecar.
+      let warmRecipe = providerRecipe.replace(">=2.4.0", ">=2.0.0")
+      writeFile(projectDir / "repro.nim", warmRecipe)
+      removeFile(projectDir / "repro.lock")
+      let prepared = run(q(reproBinary) &
+        " build --daemon=off --tool-provisioning=path --prepare-only" &
+        " --no-runquota", projectDir)
+      checkpoint("prepare exit=" & $prepared.code)
+      checkpoint(prepared.output)
+      check prepared.code == 0
+      check fileExists(projectDir / ".repro" / "build" / "repro" /
+        "provider" / "project-provider")
+      check fileExists(projectDir / ".repro" / "build" / "repro" /
+        "provider-compile.rbsz")
+
+      let previousNimCompiler = getEnv("REPRO_NIM_COMPILER")
+      putEnv("REPRO_NIM_COMPILER", projectDir / "missing-nim-compiler")
+      defer:
+        if previousNimCompiler.len > 0:
+          putEnv("REPRO_NIM_COMPILER", previousNimCompiler)
+        else:
+          delEnv("REPRO_NIM_COMPILER")
+
+      let durableLock = projectDir / "repro.durable.lock"
+      let viaDurable = run(reproBinary & " lock refresh " & q(projectDir) &
+        " --lock " & q(durableLock))
+      checkpoint("durable refresh exit=" & $viaDurable.code)
+      checkpoint(viaDurable.output)
+      check viaDurable.code == 0
+      let durableBody = readFile(durableLock)
+      check "version = \"2.0.0\"" in durableBody
+      check "version = \"2.2.0\"" notin durableBody
 
   test "lock refresh folds constraints from selected from-source producers":
     if not fileExists(reproBinary):
