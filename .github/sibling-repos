@@ -35,10 +35,12 @@ codetracer-trace-format-nim=dev
 # missing". A check whose outcome depends on which runner picked up the job is
 # not a check.
 #
-# Refs match the inputs CodeTracer's own `flake.nix` pins: trace-format at
-# `main`, native-recorder at `dev` (db-backend's emulator FFI contract moves
-# with recorder dev; `stable` is only the last released snapshot).
-codetracer-trace-format=main
+# native-recorder at `dev` (db-backend's emulator FFI contract moves with
+# recorder dev; `stable` is only the last released snapshot). trace-format's
+# `main` branch was retired in the org branch-rename sweep; its `dev` tip
+# carries exactly the revision reprobuild's flake.nix already pins for the
+# codetracer-trace-format input, so `dev` is the same source under a live ref.
+codetracer-trace-format=dev
 codetracer-native-recorder=dev
 
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
@@ -69,9 +71,10 @@ nim-termctl=dev
 # The TestRunner cross-cutting contract (Nim package `repro_test_adapters`)
 # lives in this standalone repo; `repro_dsl_stdlib` re-exports it, so the
 # recipe-interface extractor that reads codetracer/reprobuild.nim needs it on
-# the --path as `../reprobuild-test-adapters/src`. Mainline branch is `main`.
-reprobuild-test-adapters=main
-reprobuild-ct-test-runner=main
+# the --path as `../reprobuild-test-adapters/src`. Mainline branch is `dev`
+# (the `main` branch was retired in the org branch-rename sweep).
+reprobuild-test-adapters=dev
+reprobuild-ct-test-runner=dev
 
 
 # codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim
@@ -105,7 +108,8 @@ nim-stackable-hooks=41ab1b987aba67e8bcc34a5945ac33e17b6418ed
 runquota=dev
 nim-shm-queue=08d87d26067568e980f4356c4abcf2a0d841a310
 nim-shm-gset=8a9f2f13beb24ab7949ff93c14fb34ae753bbe48
-repo-workspaces=main
+# `main` retired in the org branch-rename sweep; mainline is now `dev`.
+repo-workspaces=dev
 
 
 
