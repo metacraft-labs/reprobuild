@@ -3491,6 +3491,10 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       "wasm-pack",
       "webpack-cli",
       "wget",
+      # Cloudflare Pages/Workers CLI — an isonim static site's deploy step
+      # (`wrangler pages deploy dist/`) declares `uses: "wrangler"`; the
+      # auto-import reaches `repro_dsl_stdlib/packages/wrangler.nim`.
+      "wrangler",
       "xdotool",
       "xvfb-run",
       "yarn",

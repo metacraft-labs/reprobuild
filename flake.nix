@@ -1589,6 +1589,27 @@
                 ${./scripts/pre_commit_hook_handoff.sh} after --hook pre-push || true
             '';
           };
+
+          # Minimal CI shell for the get.reprobuild.com static-site deploy
+          # (.github/workflows/deploy-get.yml). It provides FLAKE-PINNED wrangler
+          # — resolved through this flake's nixpkgs (flake.lock), not an ad-hoc
+          # `npx wrangler` download or an uncached `nix run nixpkgs#wrangler` —
+          # plus the POSIX tools get/build-get.sh needs to assemble get/dist/.
+          #
+          # It deliberately does NOT inherit the heavy default toolchain shell
+          # above: the deploy only copies static files and runs `wrangler pages
+          # deploy`, so pulling in the Nim/Rust/clingo closure would make the
+          # deploy job slower and more fragile for no benefit. The self-hosted
+          # eph-linux-x64 runners ship no node/npx, which is exactly why the
+          # deploy runs wrangler from here rather than via cloudflare/*-action.
+          devShells.ci = pkgs.mkShell {
+            packages = [
+              pkgs.wrangler
+              pkgs.bash
+              pkgs.coreutils
+              pkgs.git
+            ];
+          };
         };
     };
 }
