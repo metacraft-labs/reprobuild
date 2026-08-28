@@ -1215,6 +1215,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
+    binary: "build/test-bin/t_isonim_ssg_render_edge",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim",
     binary: "build/test-bin/t_m67_bulk_catalog",
     defines: @[],
