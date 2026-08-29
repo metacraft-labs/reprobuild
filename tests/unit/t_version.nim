@@ -2,7 +2,7 @@ import std/[strutils, unittest]
 import repro_core
 
 const
-  ExpectedReprobuildVersion = "0.1.3"
+  ExpectedReprobuildVersion = "0.1.4"
   PackageMetadata = staticRead("../../reprobuild.nimble")
 
 proc packageVersionDeclarations(): seq[string] =
