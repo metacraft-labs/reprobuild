@@ -352,12 +352,12 @@ jobs:
             cp -a build/bin/* "${pkg_name}/bin/"
             cp -a build/lib/* "${pkg_name}/lib/"
 
-            # Make the tree run OFF nix: the `.#release` binaries carry a
-            # /nix/store PT_INTERP (linux) / install names (darwin) and do not
-            # bundle their dlopen'd libs, so a raw-copied tarball fails
-            # verify_release.sh'\''s ubuntu:24.04 smoke test with
-            # "exec .../bin/repro: no such file or directory". This relocates +
-            # bundles the runtime closure into lib/ so the asset is portable.
+            # Make the tree run OFF nix: raw-copied release binaries carry a
+            # nix-store ELF interpreter (linux) / install names (darwin) and do
+            # not bundle their runtime libs, so the tarball fails the ubuntu
+            # smoke test in verify_release.sh. Relocate + bundle so it is
+            # portable. (No apostrophes/backticks in this block: it is inside a
+            # single-quoted dev-exec bash -c, where a stray quote truncates it.)
             bash scripts/relocate_release_posix.sh "${pkg_name}"
 
             tar -czf "${pkg_name}.tar.gz" "${pkg_name}"

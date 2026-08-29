@@ -39,7 +39,7 @@ mkdir -p "${libdir}"
 
 os="$(uname -s)"
 
-is_elf() { LC_ALL=C dd if="$1" bs=4 count=1 2>/dev/null | LC_ALL=C grep -q $'\x7fELF'; }
+is_elf() { [ -f "$1" ] && [ "$(LC_ALL=C od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" = "7f454c46" ]; }
 
 case "${os}" in
   Linux*)
