@@ -726,3 +726,43 @@ when not defined(windows) and not defined(macosx):
   if sqliteLibDir.len > 0:
     switch("passL", "-L" & sqliteLibDir)
     switch("passL", "-Wl,-rpath," & sqliteLibDir)
+
+# OpenSSL link search path for `-d:ssl` edges (POSIX).
+#
+# The build graph's `-d:ssl` handling appends `-lssl -lcrypto` on every
+# platform, but only emits the matching `-L` on Windows
+# (`repro_dsl_stdlib/.../openssl_layout.windowsOpensslLinkSearchDir` returns ""
+# on non-Windows). macOS/Linux were expected to inherit the search path from
+# the dev-shell's ambient `NIX_LDFLAGS` (`pkgs.openssl` in flake.nix buildInputs).
+# But the reprobuild ENGINE composes each build action's environment
+# deliberately and does NOT carry ambient `NIX_LDFLAGS`, so a graph-built
+# `-d:ssl` binary (e.g. `reprobuild.apps.repro`, `apps/repro/repro.nim` compiled
+# with `defines=@[..., "ssl"]`) linked `clang ... -lssl -lcrypto` with no `-L`
+# and failed the darwin release leg with `ld: library 'ssl' not found`.
+#
+# Supply the `-L` here the same way blake3/xxhash/sqlite do above: this
+# config.nims `passL` reaches the engine's link edge (the failing link already
+# carried the blake3/xxhash `-L` flags from those blocks, proving the channel).
+# We add only the search path — the graph still owns `-lssl -lcrypto` per edge —
+# so this is a no-op for non-ssl edges. Windows keeps its own graph-level path.
+when not defined(windows):
+  let opensslLibDir = block:
+    let direct = firstExistingLibDir(
+      [
+        getEnv("OPENSSL_LIBDIR"),
+        getEnv("OPENSSL_PREFIX"),
+        "/opt/homebrew/opt/openssl@3",
+        "/opt/homebrew/opt/openssl",
+        "/usr/local/opt/openssl@3",
+        "/usr/local/opt/openssl",
+      ],
+      ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"])
+    if direct.len > 0:
+      direct
+    else:
+      nixLibDir("*-openssl-*",
+        ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"])
+
+  if opensslLibDir.len > 0:
+    switch("passL", "-L" & opensslLibDir)
+    switch("passL", "-Wl,-rpath," & opensslLibDir)
