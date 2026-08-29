@@ -94,7 +94,15 @@
       # Bumped to the per-request event-interest API used by the engine to avoid
       # collecting categories an edge does not depend on. The enum, request
       # field, and environment codec are all introduced by this revision.
-      url = "github:metacraft-labs/io-mon/cb26b626e6642f00818da0f64938e64c7ae0d209";
+      #
+      # Advanced to io-mon `dev` HEAD (latest mainline) per an explicit cross-repo
+      # decision to base BOTH reprobuild and codetracer on the identical latest
+      # io-mon (see .github/sibling-repos' io-mon note). This keeps the Nix build
+      # input in lock-step with the CI sibling pin so a monitored build and a
+      # hermetic build compile against the same io_mon module set (`io_mon/depfile`
+      # among them). Only 5 commits ahead of the prior cb26b626 pin (Windows shim
+      # hooks/interpose + capabilities/render/types), depfile unchanged.
+      url = "github:metacraft-labs/io-mon/e2ee15afe8dd7f538ec2ce79af9a1aa512addce2";
       flake = false;
     };
     nim-shm-gset-src = {
