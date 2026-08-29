@@ -176,7 +176,11 @@ EOS
     # fixup_macho_runtime.sh adds LC_RPATH entries and sets -id on libraries,
     # per-arch for universal images. Point every image at the bundled lib dir.
     script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-    bash "${script_dir}/fixup_macho_runtime.sh" "${pkg_dir}" "@loader_path/../lib" "@executable_path/../lib"
+    # A single @loader_path/../lib LC_RPATH resolves to pkg/lib for BOTH the
+    # bin/ executables (@loader_path=bin -> ../lib) and the lib/ dylibs
+    # (@loader_path=lib -> ../lib == lib). One rpath keeps the added load
+    # commands within the reserved header pad.
+    bash "${script_dir}/fixup_macho_runtime.sh" "${pkg_dir}" "@loader_path/../lib"
 
     # Also rewrite each absolute dependency reference to @rpath/<base> so the
     # LC_RPATH above resolves it from the bundle rather than /nix/store.

@@ -766,3 +766,13 @@ when not defined(windows):
   if opensslLibDir.len > 0:
     switch("passL", "-L" & opensslLibDir)
     switch("passL", "-Wl,-rpath," & opensslLibDir)
+
+# macOS: reserve Mach-O header room so the release packaging step can rewrite
+# install names and add an LC_RPATH (@loader_path/../lib) with install_name_tool
+# without failing "larger updated load commands do not fit (... use
+# -headerpad_max_install_names)". build_apps.sh reserves this for the engine it
+# links directly; the graph-built `.#release` app binaries are linked by the
+# engine and need the same reservation to be relocatable into a portable
+# tarball. No-op off macOS and harmless for non-packaged builds.
+when defined(macosx):
+  switch("passL", "-Wl,-headerpad_max_install_names")
