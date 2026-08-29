@@ -352,6 +352,14 @@ jobs:
             cp -a build/bin/* "${pkg_name}/bin/"
             cp -a build/lib/* "${pkg_name}/lib/"
 
+            # Make the tree run OFF nix: the `.#release` binaries carry a
+            # /nix/store PT_INTERP (linux) / install names (darwin) and do not
+            # bundle their dlopen'd libs, so a raw-copied tarball fails
+            # verify_release.sh'\''s ubuntu:24.04 smoke test with
+            # "exec .../bin/repro: no such file or directory". This relocates +
+            # bundles the runtime closure into lib/ so the asset is portable.
+            bash scripts/relocate_release_posix.sh "${pkg_name}"
+
             tar -czf "${pkg_name}.tar.gz" "${pkg_name}"
             echo "ASSET_PATH=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
             echo "ASSET_NAME=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
@@ -378,14 +386,18 @@ jobs:
       # to the system directories, so the build host cannot satisfy a dlopen
       # the archive omits.
       #
-      # The Linux leg's multi-distro glibc sweep needs Docker, which the
-      # `eph-linux-x64` class does not have -- it is skipped loudly rather than
-      # failing the job (that `docker: command not found` was aborting every
-      # release before the tarball could be uploaded). To restore the sweep,
-      # move the linux matrix row to `eph-linux-x64-nested` (nested Docker) and
-      # set REPRO_VERIFY_REQUIRE_DOCKER=1 here so a future regression is loud.
+      # The Linux leg's multi-distro glibc sweep is the ONLY check that the
+      # tarball runs off the machine that built it, so we now gate on it:
+      # REPRO_VERIFY_REQUIRE_DOCKER=1 turns a missing/unusable Docker into a hard
+      # failure instead of a silent skip (the skip is what let non-portable Linux
+      # tarballs ship v0.1.0..v0.1.3). `eph-linux-x64` now carries a usable
+      # Docker, so the ubuntu:24.04..almalinux:9 sweep runs and proves the
+      # relocate step in packaging. The flag is a no-op on macOS/Windows (the
+      # sweep is Linux-only).
       - name: Verify release assets
         shell: bash
+        env:
+          REPRO_VERIFY_REQUIRE_DOCKER: "1"
         run: |
           bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
 
