@@ -170,13 +170,25 @@ sibling_repo_entries() {
 
 # Emits `<name> <ref>` for each entry carrying an explicit non-SHA ref -- the
 # ones that have to be resolved against the remote.
+#
+# `name!=ref` is the same explicit pin, with the `!` acknowledging that it
+# overrides a revision the workspace lock pins. The ref still has to exist, so
+# the `!` is stripped and the entry checked like any other -- a gate that
+# skipped the acknowledged form would exempt exactly the entries someone
+# deliberately hand-pinned, which are the ones most likely to name a dead ref.
 sibling_repo_branch_pins() {
   sibling_repo_entries "$1" |
-    awk -F= '
-      NF < 2 { next }                       # lock-resolved -- nothing to check
-      { ref = $2 }
-      ref ~ /^[0-9a-f]{40}$/ { next }       # commit pin -- stronger than a branch
-      { print $1, ref }
+    awk '
+      {
+        eq = index($0, "=")
+        if (eq == 0) next                   # lock-resolved -- nothing to check
+        name = substr($0, 1, eq - 1)
+        ref = substr($0, eq + 1)
+        sub(/!$/, "", name)                 # `name!=ref` -- acknowledged override
+        if (name == "" || ref == "") next
+        if (ref ~ /^[0-9a-f]{40}$/) next    # commit pin -- stronger than a branch
+        print name, ref
+      }
     '
 }
 
@@ -199,6 +211,36 @@ if git ls-remote --heads "https://github.com/metacraft-labs/${sibling_probe_repo
     dev >/dev/null 2>&1; then
   network_ok=1
 fi
+
+# Prove the PARSER handles every entry form the clone action accepts, before
+# any network is involved -- this part is free and runs even offline. A parser
+# that drops a form silently checks fewer pins than it reports.
+sibling_parse_fixture="$(mktemp -d)"
+trap 'rm -rf "${sibling_parse_fixture}"' EXIT
+cat >"${sibling_parse_fixture}/sibling-repos" <<'PARSEFIX'
+# a comment, and a blank line follow
+
+bare-lock-resolved
+plain-branch=dev
+acknowledged-override!=dev
+commit-pinned=0123456789abcdef0123456789abcdef01234567
+  indented-branch=main   # trailing comment
+PARSEFIX
+expected_parse='plain-branch dev
+acknowledged-override dev
+indented-branch main'
+actual_parse="$(sibling_repo_branch_pins "${sibling_parse_fixture}/sibling-repos")"
+if [ "${actual_parse}" != "${expected_parse}" ]; then
+  echo "FAIL: the sibling-repos parser does not read the format it claims to." >&2
+  echo "      expected:" >&2
+  printf '%s\n' "${expected_parse}" | sed 's/^/        /' >&2
+  echo "      got:" >&2
+  printf '%s\n' "${actual_parse}" | sed 's/^/        /' >&2
+  echo "      A form it drops is a pin nobody checks. Fix it before trusting" >&2
+  echo "      a clean run." >&2
+  exit 1
+fi
+echo "ok: sibling-repos parser handles bare, =ref, !=ref, SHA and comments"
 
 if [ "${network_ok}" -eq 0 ]; then
   # Never silently pass in CI. Offline is a plausible state for the pre-commit
