@@ -151,16 +151,24 @@ echo "ok: all workflow files load"
 # WHY IT RESOLVES REFS INSTEAD OF DEMANDING `dev`
 #
 # A static "must say dev" rule would be wrong in both directions. Some siblings
-# legitimately do not use `dev` -- a 40-hex SHA is a deliberate, stronger pin,
-# and other metacraft-labs repos kept `main` as their mainline. And a static
-# rule cannot see a typo: `=devel` would sail past it and fail exactly the way
-# `=main` did. Asking the remote is the check that matches the defect.
+# legitimately do not use `dev`: a 40-hex SHA is a deliberate, stronger pin, and
+# `codetracer-trace-format` defaults to `stable` while this file pins it to
+# `dev` on purpose. And a static rule cannot see a typo: `=devel` would sail
+# past it and fail exactly the way `=main` did. Asking the remote is the check
+# that matches the defect.
+#
+# The `main` rule is narrower than "must equal the default branch" for the same
+# reason: pinning a non-default branch is legitimate and done here deliberately.
+# Only `main` on a repo that has MOVED OFF `main` is refused. A repo whose
+# default still is `main` passes.
 #
 # ACCEPTED
 #
 #   name                -- lock-resolved; no explicit ref to verify.
 #   name=<40-hex sha>   -- a commit pin, stronger than any branch.
-#   name=<ref>          -- must exist as a branch or tag in that repo, now.
+#   name=<ref>          -- must exist as a branch or tag in that repo, now;
+#                          and if <ref> is `main`, that repo's default branch
+#                          must still be `main`.
 # =============================================================================
 echo "== .github/sibling-repos pins =="
 
