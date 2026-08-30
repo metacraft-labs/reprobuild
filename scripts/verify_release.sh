@@ -20,7 +20,26 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 echo "=== Extracting $archive_name to $tmp_dir ==="
 if [[ "$archive_name" == *.zip ]]; then
-  unzip -q "$archive_path" -d "$tmp_dir"
+  # Windows-only branch (the .zip archive is the windows leg). `unzip` is NOT
+  # guaranteed in the bash that runs this step: Git for Windows' bash ships a
+  # GNU tar that cannot read zip, and unzip.exe is not part of every Git
+  # install. Prefer unzip when present, but fall back to tools that always
+  # exist on a Windows host -- PowerShell's Expand-Archive, or the
+  # System32 bsdtar (libarchive tar.exe, which unlike GNU tar DOES read zip) --
+  # so a missing unzip does not fail the release AFTER an hour of build time.
+  if command -v unzip > /dev/null 2>&1; then
+    unzip -q "$archive_path" -d "$tmp_dir"
+  elif command -v powershell > /dev/null 2>&1 && command -v cygpath > /dev/null 2>&1; then
+    echo "    unzip not found; extracting with PowerShell Expand-Archive"
+    powershell -NoProfile -Command \
+      "Expand-Archive -LiteralPath '$(cygpath -w "$archive_path")' -DestinationPath '$(cygpath -w "$tmp_dir")' -Force"
+  elif [[ -x /c/Windows/System32/tar.exe ]]; then
+    echo "    unzip not found; extracting with Windows bsdtar (System32\\tar.exe)"
+    /c/Windows/System32/tar.exe -xf "$archive_path" -C "$tmp_dir"
+  else
+    echo "ERROR: cannot extract $archive_name -- no unzip, no PowerShell, no bsdtar available" >&2
+    exit 1
+  fi
 else
   tar -xzf "$archive_path" -C "$tmp_dir"
 fi
