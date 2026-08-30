@@ -45,11 +45,18 @@ case "${os}" in
   Linux*)
     command -v patchelf >/dev/null 2>&1 || { echo "relocate: patchelf not on PATH" >&2; exit 1; }
 
+    # No `patchelf --set-rpath` is used anywhere below: the wrapper (step 4)
+    # launches every binary through the bundled loader with an explicit
+    # `--library-path lib`, which governs BOTH DT_NEEDED and bare-name dlopen
+    # resolution. Rewriting rpaths is therefore unnecessary — and running
+    # patchelf over the bundled `ld-linux-*.so` corrupts the loader and makes
+    # every launch segfault, which is exactly what an earlier version did.
+    # patchelf is used only for its read-only --print-interpreter / --print-rpath.
+
     # ---- 0. Locate the bare-dlopen'd libs (libclingo, libzstd) --------------
-    # ldd does NOT list them (they are dlopen'd at runtime, not DT_NEEDED), so
-    # gather candidate source dirs from the build-env prefixes AND from the
-    # binary's CURRENT rpath (build_apps.sh baked the nix clingo/zstd dirs there
-    # before we overwrite it below).
+    # ldd does NOT list them (dlopen'd at runtime, not DT_NEEDED). Gather source
+    # dirs from the build-env prefixes AND from repro's baked rpath (build_apps.sh
+    # put the nix clingo/zstd dirs there).
     declare -a src_dirs=()
     [ -n "${CLINGO_PREFIX:-}" ] && src_dirs+=("${CLINGO_PREFIX}/lib" "${CLINGO_PREFIX}")
     [ -n "${ZSTD_PREFIX:-}" ] && src_dirs+=("${ZSTD_PREFIX}/lib" "${ZSTD_PREFIX}")
@@ -60,11 +67,13 @@ case "${os}" in
     fi
 
     copy_named_lib() {
-      # copy_named_lib <soname-glob> — copy first match found under src_dirs
+      # copy_named_lib <soname-glob> — copy first match (incl. symlinks, which
+      # `cp -L` dereferences) found under src_dirs. libzstd.so.1 is a symlink,
+      # so `-type f` alone would miss it.
       local glob="$1" d hit
       for d in "${src_dirs[@]:-}"; do
         [ -d "${d}" ] || continue
-        hit="$(find "${d}" -maxdepth 2 -name "${glob}" -type f 2>/dev/null | head -n1 || true)"
+        hit="$(find "${d}" -maxdepth 2 -name "${glob}" \( -type f -o -type l \) 2>/dev/null | head -n1 || true)"
         if [ -n "${hit}" ]; then
           cp -Lf "${hit}" "${libdir}/$(basename "${hit}")"
           return 0
@@ -77,9 +86,8 @@ case "${os}" in
 
     # ---- 1. Transitive ldd closure of every ELF in bin/ + lib/ --------------
     resolve_deps() {
-      # print absolute paths of shared objects ldd resolves for <elf>
       ldd "$1" 2>/dev/null | sed -nE 's#.* => (/[^ ]+) \(0x[0-9a-f]+\)$#\1#p'
-      # the loader line has no "=>" — capture it too
+      # the loader line has no "=>"
       ldd "$1" 2>/dev/null | sed -nE 's#^[[:space:]]*(/[^ ]*ld-linux[^ ]*) \(0x[0-9a-f]+\)$#\1#p'
     }
     changed=1
@@ -100,26 +108,20 @@ case "${os}" in
       done < <(find "${bindir}" "${libdir}" -type f -print0)
     done
 
-    # ---- 2. The loader ------------------------------------------------------
+    # ---- 2. The loader (copied verbatim, never patched) ---------------------
     loader="$(patchelf --print-interpreter "${bindir}/repro")"
     loadername="$(basename "${loader}")"
     [ -e "${libdir}/${loadername}" ] || cp -Lf "${loader}" "${libdir}/${loadername}"
     chmod u+w "${libdir}/${loadername}" 2>/dev/null || true
 
-    # ---- 3. rpath every bundled lib to its own dir --------------------------
-    while IFS= read -r -d '' so; do
-      is_elf "${so}" || continue
-      chmod u+w "${so}" 2>/dev/null || true
-      patchelf --set-rpath '$ORIGIN' "${so}" 2>/dev/null || true
-    done < <(find "${libdir}" -type f -print0)
-
-    # ---- 4. Wrap every bin so it execs the bundled loader relocatably -------
+    # ---- 3. Wrap every bin so it execs the bundled loader relocatably -------
+    # PT_INTERP cannot be $ORIGIN-relative, so instead of repointing the
+    # interpreter we launch through the bundled loader explicitly. The .real
+    # binary's own PT_INTERP is ignored when the loader is invoked this way.
     while IFS= read -r -d '' app; do
       is_elf "${app}" || continue
       base="$(basename "${app}")"
       case "${base}" in .*.real) continue ;; esac
-      chmod u+w "${app}" 2>/dev/null || true
-      patchelf --set-rpath '$ORIGIN/../lib' "${app}" 2>/dev/null || true
       mv "${app}" "${bindir}/.${base}.real"
       cat > "${app}" <<EOS
 #!/bin/sh
