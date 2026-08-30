@@ -273,6 +273,24 @@ else
   fi
   echo "ok: sibling-ref resolver separates a live ref from a missing one"
 
+  # The abandoned-mainline probe needs its own anchor, because the check it
+  # guards is invisible to the one above: `nixos-modules` still HAS a `main`,
+  # so `sibling_ref_exists` says yes, and only the default-branch lookup can
+  # tell that `main` stopped being the mainline. If that lookup silently
+  # started returning nothing, the whole check would pass everything.
+  probe_default="$(git ls-remote --symref \
+    "https://github.com/metacraft-labs/nixos-modules" HEAD 2>/dev/null |
+    awk '/^ref:/ { sub(/^refs\/heads\//, "", $2); print $2; exit }')"
+  if [ "${probe_default}" = "main" ] || [ -z "${probe_default}" ]; then
+    echo "FAIL: the default-branch lookup returned '${probe_default:-<nothing>}'" >&2
+    echo "      for metacraft-labs/nixos-modules, which has moved its default" >&2
+    echo "      off \`main\` while keeping the branch. The abandoned-mainline" >&2
+    echo "      check cannot work if this lookup does not answer; fix it before" >&2
+    echo "      trusting a clean run." >&2
+    exit 1
+  fi
+  echo "ok: default-branch lookup detects a mainline that moved (nixos-modules -> ${probe_default})"
+
   # Non-vacuity: this repo's CI clones siblings on every dev-shell job, so a
   # parse that finds no entries has stopped reading the file it claims to read.
   entry_count="$(sibling_repo_entries "${sibling_repos_file}" | wc -l | tr -d ' ')"
@@ -283,14 +301,52 @@ else
   fi
 
   sibling_violations=""
+  abandoned_violations=""
   checked=0
   while read -r name ref; do
     [ -n "${name}" ] || continue
     checked=$((checked + 1))
     if ! sibling_ref_exists "${name}" "${ref}"; then
       sibling_violations="${sibling_violations}${name}=${ref}"$'\n'
+      continue
+    fi
+    # The ref exists -- but `main` on a repo that has moved its default to
+    # something else is the ABANDONED half of the rename, and existence alone
+    # cannot see it. This is the regime the original incident ran in: between
+    # 2026-08-26 and 2026-08-28 `reprobuild-test-adapters` still HAD a `main`,
+    # frozen at d1ff8317 (2026-07-13) while `dev` carried on. The clone
+    # succeeded, silently, onto a six-week-old tree, and the build failed
+    # fifteen minutes later with `undeclared identifier`. `main` was not
+    # deleted until 2026-08-28, and only then did it fail loudly at clone time.
+    # A ref that resolves is not the same as a ref that is current.
+    #
+    # Scoped deliberately to `main`. Pinning a NON-default branch is legitimate
+    # and common here -- codetracer-trace-format defaults to `stable` and is
+    # pinned to `dev` on purpose -- so a general "must equal the default branch"
+    # rule would reject correct entries. `main` on a repo whose default has
+    # moved is the specific, recurring defect.
+    if [ "${ref}" = "main" ]; then
+      default_ref="$(git ls-remote --symref \
+        "https://github.com/metacraft-labs/${name}" HEAD 2>/dev/null |
+        awk '/^ref:/ { sub(/^refs\/heads\//, "", $2); print $2; exit }')"
+      if [ -n "${default_ref}" ] && [ "${default_ref}" != "main" ]; then
+        abandoned_violations="${abandoned_violations}${name}=main (default branch is '${default_ref}')"$'\n'
+      fi
     fi
   done < <(sibling_repo_branch_pins "${sibling_repos_file}")
+
+  if [ -n "${abandoned_violations}" ]; then
+    echo "FAIL: ${sibling_repos_file} pins \`main\` on repo(s) that have moved off it:" >&2
+    printf '%s' "${abandoned_violations}" | sed 's/^/      /' >&2
+    echo "" >&2
+    echo "      These refs still RESOLVE, so the clone succeeds and CI stays" >&2
+    echo "      quiet -- onto a branch that stopped moving. That is how the" >&2
+    echo "      2026-08-26 failure happened: reprobuild-test-adapters still had" >&2
+    echo "      a \`main\`, frozen six weeks earlier, and the build failed with" >&2
+    echo "      \`undeclared identifier\` rather than anything naming a branch." >&2
+    echo "      Use the repo's current mainline, or a 40-hex SHA." >&2
+    exit 1
+  fi
 
   if [ -n "${sibling_violations}" ]; then
     echo "FAIL: ${sibling_repos_file} pins ref(s) that do not exist:" >&2
