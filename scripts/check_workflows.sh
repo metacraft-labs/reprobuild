@@ -116,27 +116,37 @@ echo "ok: all workflow files load"
 # `name` -- resolve the revision from the workspace lock -- or `name=ref`, an
 # explicit pin that bypasses the lock.
 #
-# metacraft-labs renamed its mainline `main` -> `dev`. `reprobuild-test-adapters`
-# and `reprobuild-ct-test-runner` have NO `main` branch any more, but this file
-# went on pinning `=main` for three days (da6bff51 .. 0d4afc33). The result was
-# not a clean "ref does not exist" failure. `clone-siblings` runs on persistent
-# self-hosted runners, so the sibling directory left behind by an earlier job
-# survived; the clone for a ref that no longer exists left that stale tree in
-# place, and the Nim compile resolved `repro_test_adapters` to a revision from
-# before af0749a. What CI printed was:
+# metacraft-labs renamed its mainline `main` -> `dev`, and this file went on
+# pinning `=main` for three days (da6bff51 .. 0d4afc33). That pin failed in TWO
+# different regimes, which is why this gate has two checks and not one:
 #
-#   libs/repro_generic_test_recorder/src/repro_generic_test_recorder.nim(144, 21)
-#     Error: undeclared identifier: 'testExecutionDeclaration'
+#   2026-08-26 .. 08-28   `main` still EXISTED on reprobuild-test-adapters,
+#                         frozen at d1ff8317 (2026-07-13) while `dev` moved on.
+#                         The clone SUCCEEDED, silently, onto a six-week-old
+#                         tree. Seven CI runs failed this way and none of them
+#                         said anything about a branch.
 #
-# "undeclared identifier" rather than "cannot open file" -- the module resolved,
-# just to the wrong revision. Nothing in that message names a branch rename, a
-# sibling repo, or this file. It cost hours across three PRs, and it was read as
-# a source defect in reprobuild when reprobuild had not changed at all.
+#   2026-08-28 10:54Z ..  `main` was deleted. The same pin now fails loudly at
+#                         clone time:
+#                           ##[error]checkout of revision main failed for ...
+#
+# The quiet regime is the expensive one, and mere existence cannot see it -- so
+# a pin naming `main` is additionally checked against the repo's default branch.
 #
 # This is the third instance of the same rename class in this repo family, and
 # the second time a repo-wide fix was outrun by a branch already in flight. A
 # sed is a snapshot of a moment; this gate is the rule, so a branch that pins a
-# ref which does not exist fails lint ON THAT BRANCH instead of after it lands.
+# dead or abandoned ref fails lint ON THAT BRANCH instead of after it lands.
+#
+# WHAT THIS GATE IS *NOT* FOR. It would not have caught the
+# `undeclared identifier: 'testExecutionDeclaration'` compile error of the same
+# week, and it must not be trusted to. `config.nims` resolves
+# `repro_test_adapters` from `REPRO_TEST_ADAPTERS_SRC` -- exported by the dev
+# shell from the `reprobuild-test-adapters-src` FLAKE INPUT -- in preference to
+# the sibling checkout, so for that module the sibling set is never consulted at
+# all. That failure was a stale `flake.lock` pin and was fixed there. Two stale
+# pins of the same package, in two different mechanisms, at the same time; do
+# not let this gate's green light stand in for the other one.
 #
 # WHY IT RESOLVES REFS INSTEAD OF DEMANDING `dev`
 #
@@ -355,11 +365,11 @@ else
     echo "      metacraft-labs renamed its mainline main -> dev, and several" >&2
     echo "      repos kept no \`main\` branch at all." >&2
     echo "" >&2
-    echo "      This does NOT fail loudly in CI. clone-siblings runs on" >&2
-    echo "      persistent self-hosted runners: a clone for a ref that does not" >&2
-    echo "      exist leaves the previous job's checkout in place, and the build" >&2
-    echo "      compiles against a stale revision. The symptom is an" >&2
-    echo "      \"undeclared identifier\" deep in an unrelated file." >&2
+    echo "      A ref that does not resolve takes the job down at sibling-clone" >&2
+    echo "      time: authenticated-clone.sh removes the destination and exits" >&2
+    echo "      non-zero, so the Test job dies minutes in with" >&2
+    echo "        ##[error]checkout of revision <ref> failed for <repo>" >&2
+    echo "      which names a ref but not this file." >&2
     echo "" >&2
     echo "      Use the repo's real mainline (\`dev\` for most metacraft-labs" >&2
     echo "      repos), or a 40-hex commit SHA for a deliberate pin." >&2
