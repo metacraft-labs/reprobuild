@@ -281,13 +281,6 @@ jobs:
       - name: Bootstrap and Build (Windows)
         if: matrix.os-name == 'windows'
         shell: pwsh
-        env:
-          # Promote scripts/build_apps.sh's runtime-DLL staging warnings to hard
-          # errors. A dev build missing libzstd/sqlite3 is merely degraded; a
-          # RELEASE missing them is broken for every user who unpacks it, and
-          # the failure surfaces far from the cause. clingo is fatal regardless
-          # (module-init dlopen), so it does not depend on this flag.
-          REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS: "1"
         run: |
           # env.ps1 from setup-dev-env is already sourced in GITHUB_ENV/PATH.
           # That is what provisions the pinned conda-forge clingo via
@@ -327,50 +320,44 @@ jobs:
           $runquotaBin = Join-Path $runquotaRoot "build\bin"
           Add-Content -Path $env:GITHUB_PATH -Value $runquotaBin
           $env:Path = $runquotaBin + [IO.Path]::PathSeparator + $env:Path
+
+          # `just bootstrap` runs scripts/build_apps.sh to compile the engine and
+          # every app entry point. That script stages clingo.dll (fatal if absent
+          # -- the dev-env exports REPRO_WINDOWS_CLINGO_DIR) and best-effort stages
+          # libzstd/sqlite3/cacert next to the binaries.
+          #
+          # We deliberately do NOT set REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS=1 for
+          # this step. Those runtime-DLL sources are not all present on the PATH
+          # the windows-diy runner provisions (no zstd.exe is installed, and the
+          # prebuilt Nim does not reliably carry sqlite3_64.dll), so promoting a
+          # miss to a hard error would abort bootstrap before the deterministic
+          # staging below could supply them. Release self-containment is instead
+          # guaranteed by windows/stage-release-dlls.ps1 (explicit, toolchain-
+          # source-first with a pinned-download fallback) and independently gated
+          # by scripts/verify_release.sh against the packaged archive.
           just bootstrap
 
-          # Find and stage required dynamic libraries (OpenSSL & Zstd) so
-          # repro.exe can run and be packaged. The provisioned mingw toolchains
-          # live under $WINDOWS_DIY_INSTALL_ROOT (openssl at
-          # $REPRO_WINDOWS_OPENSSL_DIR; libzstd ships in the WinLibs gcc bin),
-          # NOT under C:\Program Files — search the toolchains tree FIRST, then
-          # fall back to Program Files / msys2.
-          function Find-FirstDll([string]$name, [string[]]$roots) {
-            foreach ($root in $roots) {
-              if ([string]::IsNullOrEmpty($root) -or -not (Test-Path $root)) { continue }
-              $hit = Get-ChildItem -Path $root -Filter $name -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($null -ne $hit) { return $hit }
-            }
-            return $null
-          }
-
-          $opensslRoots = @($env:REPRO_WINDOWS_OPENSSL_DIR, $env:WINDOWS_DIY_INSTALL_ROOT, "C:\Program Files", "C:\Program Files (x86)")
-          $opensslDll = Find-FirstDll "libcrypto-3-x64.dll" $opensslRoots
-          if ($null -ne $opensslDll) {
-            $dllDir = Split-Path -Parent $opensslDll.FullName
-            Copy-Item -Path (Join-Path $dllDir "libcrypto-3-x64.dll") -Destination "build\bin\" -Force
-            Copy-Item -Path (Join-Path $dllDir "libssl-3-x64.dll") -Destination "build\bin\" -Force
-            Write-Host "Staged OpenSSL DLLs from $dllDir"
-          } else {
-            # Hard error, not a warning: the archive is published from whatever
-            # build\bin holds at packaging time, so a warning here becomes a
-            # broken download rather than a failed build.
-            throw "libcrypto-3-x64.dll not found; cannot produce a self-contained release archive"
-          }
-
-          $zstdRoots = @($env:WINDOWS_DIY_INSTALL_ROOT)
-          if ($env:WINDOWS_DIY_INSTALL_ROOT) { $zstdRoots += (Join-Path $env:WINDOWS_DIY_INSTALL_ROOT "msys2") }
-          $zstdRoots += "C:\Program Files", "C:\Program Files (x86)"
-          $zstdDll = Find-FirstDll "libzstd.dll" $zstdRoots
-          if ($null -ne $zstdDll) {
-            $dllDir = Split-Path -Parent $zstdDll.FullName
-            Copy-Item -Path $zstdDll.FullName -Destination "build\bin\libzstd.dll" -Force
-            Write-Host "Staged libzstd.dll from $dllDir"
-          } else {
-            throw "libzstd.dll not found; cannot produce a self-contained release archive"
-          }
+          # Stage every required runtime DLL into build\bin BEFORE running the
+          # engine. The orchestrating repro.exe (built by bootstrap) dlopens
+          # clingo.dll and sqlite3_64.dll at MODULE INIT and imports
+          # libcrypto/libssl through its PE import table, so it will not even
+          # start unless those sit beside it -- Win32 LoadLibrary searches the
+          # exe's own directory first. This same script runs again after the
+          # build (next step) because `.#release` rewrites build\bin.
+          & ./windows/stage-release-dlls.ps1
 
           .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#release
+
+      # Re-stage after `.#release`: that build rewrites build\bin, so the DLLs
+      # staged above may not survive into the packaged tree. Idempotent -- it
+      # re-copies from the runner toolchain sources (cheap) and skips the pinned
+      # downloads when a DLL is already present. This is the state the packaging
+      # step zips and scripts/verify_release.sh asserts against.
+      - name: Stage Windows runtime DLLs into the release tree
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          & ./windows/stage-release-dlls.ps1
 
       # Package the artifacts preserving the bin/ and lib/ structures.
       #
