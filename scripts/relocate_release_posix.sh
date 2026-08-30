@@ -66,23 +66,34 @@ case "${os}" in
       done < <(patchelf --print-rpath "${bindir}/repro" 2>/dev/null | tr ':' '\n')
     fi
 
-    copy_named_lib() {
-      # copy_named_lib <soname-glob> — copy first match (incl. symlinks, which
-      # `cp -L` dereferences) found under src_dirs. libzstd.so.1 is a symlink,
-      # so `-type f` alone would miss it.
+    find_lib() {
+      # find_lib <soname-glob> — first match (incl. symlinks) in src_dirs, then
+      # a bounded nix-store scan as a fallback (ZSTD_PREFIX is often unset and
+      # zstd is not in any binary's rpath).
       local glob="$1" d hit
       for d in "${src_dirs[@]:-}"; do
         [ -d "${d}" ] || continue
         hit="$(find "${d}" -maxdepth 2 -name "${glob}" \( -type f -o -type l \) 2>/dev/null | head -n1 || true)"
-        if [ -n "${hit}" ]; then
-          cp -Lf "${hit}" "${libdir}/$(basename "${hit}")"
-          return 0
-        fi
+        [ -n "${hit}" ] && { printf '%s\n' "${hit}"; return 0; }
       done
-      return 1
+      find /nix/store -maxdepth 3 -name "${glob}" \( -type f -o -type l \) 2>/dev/null | head -n1
     }
-    copy_named_lib 'libclingo.so*' || echo "relocate: WARNING libclingo not found in src_dirs" >&2
-    copy_named_lib 'libzstd.so*'   || echo "relocate: WARNING libzstd not found in src_dirs" >&2
+
+    # Bundle the bare-dlopen'd libs under the EXACT names repro dlopens
+    # (`libclingo.so`, `libzstd.so.1`). `cp -L` dereferences the symlink chain,
+    # so forcing the destination name gives the container a file with the name
+    # the loader looks up — the nix dir that carried the unversioned symlink is
+    # not present off-nix, which is why bundling a versioned copy failed with
+    # `could not load: libclingo.so`.
+    for spec in 'libclingo.so*:libclingo.so' 'libzstd.so.1*:libzstd.so.1'; do
+      glob="${spec%%:*}"; dest="${spec##*:}"
+      src="$(find_lib "${glob}" || true)"
+      if [ -n "${src}" ]; then
+        cp -Lf "${src}" "${libdir}/${dest}"
+      else
+        echo "relocate: WARNING ${dest} not found (dlopen may fail off-nix)" >&2
+      fi
+    done
 
     # ---- 1. Transitive ldd closure of every ELF in bin/ + lib/ --------------
     resolve_deps() {
@@ -164,14 +175,26 @@ EOS
       done < <(find "${bindir}" "${libdir}" -type f -print0)
     done
 
-    # bare-dlopen'd libs (libclingo/libzstd) — otool won't list them
-    for pfx in "${CLINGO_PREFIX:-}" "${ZSTD_PREFIX:-}"; do
-      [ -n "${pfx}" ] || continue
-      while IFS= read -r hit; do
-        [ -n "${hit}" ] || continue
-        base="$(basename "${hit}")"
-        [ -e "${libdir}/${base}" ] || { cp -Lf "${hit}" "${libdir}/${base}"; chmod u+w "${libdir}/${base}" 2>/dev/null || true; }
-      done < <(find "${pfx}" -maxdepth 2 \( -name 'libclingo*.dylib' -o -name 'libzstd*.dylib' \) -type f 2>/dev/null)
+    # bare-dlopen'd libs (libclingo/libzstd) — otool won't list them. Bundle
+    # under the EXACT names repro dlopens (libclingo.dylib / libzstd.1.dylib);
+    # a versioned copy would fail off-nix with `could not load: libclingo.dylib`.
+    dfind_lib() {
+      local glob="$1" pfx hit
+      for pfx in "${CLINGO_PREFIX:-}" "${ZSTD_PREFIX:-}"; do
+        [ -n "${pfx}" ] || continue
+        hit="$(find "${pfx}" -maxdepth 2 -name "${glob}" \( -type f -o -type l \) 2>/dev/null | head -n1 || true)"
+        [ -n "${hit}" ] && { printf '%s\n' "${hit}"; return 0; }
+      done
+      find /nix/store -maxdepth 3 -name "${glob}" \( -type f -o -type l \) 2>/dev/null | head -n1
+    }
+    for spec in 'libclingo*.dylib:libclingo.dylib' 'libzstd.1*.dylib:libzstd.1.dylib'; do
+      glob="${spec%%:*}"; dest="${spec##*:}"
+      src="$(dfind_lib "${glob}" || true)"
+      if [ -n "${src}" ]; then
+        cp -Lf "${src}" "${libdir}/${dest}"; chmod u+w "${libdir}/${dest}" 2>/dev/null || true
+      else
+        echo "relocate: WARNING ${dest} not found (dlopen may fail off-nix)" >&2
+      fi
     done
 
     # ---- 2. Rewrite install names / rpath to @loader_path/../lib -----------
