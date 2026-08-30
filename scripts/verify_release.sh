@@ -90,6 +90,9 @@ fi
 if [[ "$archive_name" == *.zip ]]; then
   required_dlls=(
     clingo.dll             # repro_solver ASP bindings — dlopen'd at MODULE INIT
+    vcruntime140.dll       # clingo.dll is MSVC-built; needs the VC++ redist
+    vcruntime140_1.dll     #   (VCRUNTIME140_1.dll is the one minimal images lack)
+    msvcp140.dll
     libcrypto-3-x64.dll    # OpenSSL, --define:ssl entry points
     libssl-3-x64.dll
     libzstd.dll            # repro cache substitute, zstd frame decompression

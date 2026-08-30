@@ -87,6 +87,37 @@ function Download-Zip {
     return $OutDir
 }
 
+# A conda package (.conda) is a ZIP whose payload is `pkg-*.tar.zst`. Expand the
+# outer ZIP, then untar the zstd payload with the Windows-bundled bsdtar
+# (System32\tar.exe decodes zstd natively on Win10 22H2+, the same tool
+# ensure-clingo.ps1 uses). Returns the extracted package root (holding
+# `Library/bin/`, etc.).
+function Expand-CondaPackage {
+    param([string]$Url, [string]$Sha256, [string]$WorkDir)
+    New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
+    # A .conda file IS a zip, but Expand-Archive only accepts a `.zip` extension,
+    # so name the download accordingly (bytes are unchanged, checksum still holds).
+    $conda = Join-Path $WorkDir "pkg.zip"
+    Write-Host "  downloading $Url"
+    Invoke-WebRequest -Uri $Url -OutFile $conda
+    if ($Sha256) {
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $conda).Hash.ToLower()
+        if ($got -ne $Sha256.ToLower()) {
+            throw "stage-release-dlls: checksum mismatch for $Url (expected $Sha256, got $got)"
+        }
+    }
+    $unzipped = Join-Path $WorkDir "unzipped"
+    Expand-Archive -LiteralPath $conda -DestinationPath $unzipped -Force
+    $pkgZst = Get-ChildItem -LiteralPath $unzipped -Filter "pkg-*.tar.zst" | Select-Object -First 1
+    if ($null -eq $pkgZst) { throw "stage-release-dlls: no pkg-*.tar.zst payload in $Url" }
+    $pkgOut = Join-Path $WorkDir "pkg"
+    New-Item -ItemType Directory -Force -Path $pkgOut | Out-Null
+    $tarExe = Join-Path $env:SystemRoot "System32\tar.exe"
+    & $tarExe -xf $pkgZst.FullName -C $pkgOut
+    if ($LASTEXITCODE -ne 0) { throw "stage-release-dlls: tar failed extracting $($pkgZst.Name) (exit $LASTEXITCODE)" }
+    return $pkgOut
+}
+
 Write-Host "=== Staging required runtime DLLs into $binDir ==="
 
 $toolchainRoot = $env:WINDOWS_DIY_INSTALL_ROOT
@@ -128,6 +159,61 @@ if ($null -eq $clingoSrc) {
     }
 } else {
     Copy-IntoBin -SrcPath $clingoSrc -DestName "clingo.dll"
+}
+
+# ── 2b. clingo.dll's MSVC runtime dependencies ───────────────────────────────
+# The conda-forge clingo.dll is MSVC-built. Its import table needs the VC++
+# redistributable -- MSVCP140.dll, VCRUNTIME140.dll and VCRUNTIME140_1.dll (the
+# UCRT api-ms-win-crt-* it also imports are OS components already in System32).
+# The VC++ redist is NOT guaranteed on a minimal windows-diy image --
+# VCRUNTIME140_1.dll in particular is frequently absent -- so
+# `LoadLibrary("clingo.dll")` returns NULL and repro.exe aborts at module init
+# with "could not load: clingo.dll" EVEN THOUGH clingo.dll is present. (This is
+# exactly what the 2026-08-30 release dry-run hit: clingo.dll staged, load still
+# failed.) Bundle the redist beside clingo.dll -- needed at build time (the
+# orchestrating repro.exe loads clingo at module init) AND in the archive
+# (verify_release.sh scrubs PATH to the system dirs, so PATH cannot help).
+#
+# Source: the runner (System32 / toolchains) if the redist is installed, else a
+# pinned conda-forge vc14_runtime package (the loose, redistributable MSVC
+# runtime). msvcp140.dll pulls in msvcp140_1/2/atomic_wait + concrt140, so stage
+# the whole set to close the transitive class.
+$vcDlls = @(
+    "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
+    "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll", "concrt140.dll"
+)
+$vcMissing = @($vcDlls | Where-Object { -not (Test-Path -LiteralPath (Join-Path $binDir $_)) })
+if ($vcMissing.Count -eq 0) {
+    Write-Host "  MSVC runtime already in build\bin (kept)"
+} else {
+    # Marker is VCRUNTIME140_1.dll: the one most often missing, so finding it
+    # means a complete-enough redist is on the runner. Check System32 DIRECTLY
+    # (the redist installs there, and a recursive walk of System32 is enormous);
+    # the toolchains tree is small enough to recurse.
+    $vcSrcDir = $null
+    $sys32 = Join-Path $env:SystemRoot "System32"
+    if (Test-Path -LiteralPath (Join-Path $sys32 "vcruntime140_1.dll")) {
+        $vcSrcDir = $sys32
+    } else {
+        $marker = Find-FirstFile -Name "vcruntime140_1.dll" -Roots @($toolchainRoot)
+        if ($marker) { $vcSrcDir = Split-Path -Parent $marker }
+    }
+    if (-not $vcSrcDir) {
+        $pkg = Expand-CondaPackage `
+            -Url "https://anaconda.org/conda-forge/vc14_runtime/14.44.35208/download/win-64/vc14_runtime-14.44.35208-h818238b_41.conda" `
+            -Sha256 "ec706fe9368b837fbd05af4851f5ebef12bef8c471a273f4805f7af788407317" `
+            -WorkDir (Join-Path $tmp "vc14_runtime")
+        $vcSrcDir = Join-Path $pkg "Library\bin"
+        if (-not (Test-Path -LiteralPath $vcSrcDir)) { $vcSrcDir = $pkg }
+    }
+    foreach ($d in $vcDlls) {
+        if (Test-Path -LiteralPath (Join-Path $binDir $d)) { continue }
+        $src = Join-Path $vcSrcDir $d
+        if (Test-Path -LiteralPath $src) { Copy-IntoBin -SrcPath $src -DestName $d }
+        elseif ($d -in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
+            throw "stage-release-dlls: required MSVC runtime DLL $d not found at $vcSrcDir; clingo.dll cannot load without it."
+        }
+    }
 }
 
 # ── 3. libzstd.dll ───────────────────────────────────────────────────────────
