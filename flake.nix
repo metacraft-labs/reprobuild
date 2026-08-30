@@ -217,7 +217,19 @@
       # macOS system toolchain), crashing every monitored ``clang`` on Apple
       # silicon and failing the darwin ``.#release`` leg. See
       # metacraft-labs/nim-stackable-hooks#6.
-      url = "github:metacraft-labs/nim-stackable-hooks/34b9b3c1698203763da75180a4f862a58cbf5cda";
+      #
+      # Bumped from 34b9b3c to d51b571 (nim-stackable-hooks dev tip, the PR #6
+      # merge) to unblock the windows-x86_64 release leg. io-mon's pin
+      # (``io-mon-src`` above, e2ee15a) calls ``inlineHookTransactionCapacity()``
+      # in ``windows_interpose.nim`` -- a proc added in stackable-hooks ca39dad
+      # -- and 34b9b3c predates it, so the Windows monitor-shim compile failed
+      # with ``undeclared identifier: 'inlineHookTransactionCapacity'``. The bump
+      # is darwin/linux-NEUTRAL: the whole 34b9b3c..d51b571 diff is CI files plus
+      # the Windows inline-hook sources (``windows_inline_hook.nim``,
+      # ``install_windows.c``/``.h``); ``macos_bodypatch.nim`` (the PAC fix above)
+      # and the Linux syscall-scanner are byte-identical between the two revs, so
+      # the darwin and linux legs compile exactly the same shim as before.
+      url = "github:metacraft-labs/nim-stackable-hooks/d51b571a3d53f92a3200541e8267f7bb25d36c6c";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {

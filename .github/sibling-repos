@@ -104,7 +104,18 @@ io-mon=e2ee15afe8dd7f538ec2ce79af9a1aa512addce2
 # here until 2026-08-26, was not even an ancestor of the flake pin — it sat on
 # a branch that never merged, so the release build and every other build
 # compiled the monitor shim from different sources.
-nim-stackable-hooks=34b9b3c1698203763da75180a4f862a58cbf5cda
+#
+# Bumped 34b9b3c -> d51b571 (nim-stackable-hooks dev tip, PR #6) to unblock the
+# windows-x86_64 leg: the io-mon pin above (e2ee15a) calls
+# `inlineHookTransactionCapacity()` in windows_interpose.nim, a proc introduced
+# in stackable-hooks ca39dad; 34b9b3c predates it, so the windows shim compile
+# failed with "undeclared identifier: 'inlineHookTransactionCapacity'". The bump
+# is darwin/linux-NEUTRAL: the 34b9b3c..d51b571 diff touches only CI files and
+# the Windows inline-hook sources (windows_inline_hook.nim, install_windows.c/.h)
+# -- macos_bodypatch.nim (the arm64e PAC fix) and the linux syscall-scanner are
+# byte-identical -- so the darwin/linux release legs compile the same shim as
+# before.
+nim-stackable-hooks=d51b571a3d53f92a3200541e8267f7bb25d36c6c
 runquota=dev
 nim-shm-queue=08d87d26067568e980f4356c4abcf2a0d841a310
 nim-shm-gset=8a9f2f13beb24ab7949ff93c14fb34ae753bbe48
