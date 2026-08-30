@@ -15,10 +15,24 @@ on:
 # delays the pull-request checks people are actually waiting on, while the
 # branch verdicts arrive hours late against a commit several pushes old.
 #
-# The gate that must not be skipped therefore does not live here. The suite
-# case-count baseline runs in `suite-case-counts.yml`, on a hosted runner, in
-# seconds, with no cancellation -- so it reaches a verdict on every commit
-# without competing for this pool. See that workflow for the reasoning.
+# A gate that must not be skipped therefore does not live here. Two have moved
+# out, for the same reason and by the same route:
+#
+#   - `suite-case-counts.yml` -- the suite case-count baseline, on a hosted
+#     runner, in seconds, with no cancellation, so it reaches a verdict on
+#     every commit without competing for this pool.
+#   - `windows-expand-archive-boundary.yml` -- the M3f execution-boundary gate.
+#     It ran here on `eph-win-x64`, a class that takes 45 minutes to three
+#     hours to allocate, so on `dev` it was superseded before it was ever
+#     assigned a runner: 59 of the last 60 runs ended `cancelled` with an
+#     empty step list and no runner name. Path-filtered and no longer
+#     cancelled on branch pushes, in its own file. See that workflow's header.
+#
+# Note what could NOT fix either case from inside this file: a job-level
+# `concurrency` block is additional to this workflow-level one rather than a
+# replacement for it, so a run-level cancellation still takes the job with it.
+# Moving the job out is the only way to give it a different cancellation
+# policy.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -145,48 +159,6 @@ jobs:
           region: ${{ vars.MCL_S3_ARTIFACTS_REGION }}
           access-key-id: ${{ secrets.MCL_S3_ARTIFACTS_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MCL_S3_ARTIFACTS_SECRET_ACCESS_KEY }}
-
-  windows-expand-archive-boundary:
-    name: Windows expandArchive boundary
-    # M3f is an execution-boundary contract, not a cross-compiled unit test.
-    # Keeping this as its own required PR job means an unavailable Windows
-    # service leaves the gate queued/pending; there is no skip-as-pass branch.
-    runs-on: eph-win-x64
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Mint installation token for Windows dev environment
-        id: ci_token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
-          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
-          owner: metacraft-labs
-
-      - name: Setup Windows dev environment
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
-        with:
-          env-flavor: windows-diy
-          gh-token: ${{ steps.ci_token.outputs.token }}
-
-      - name: Run real PowerShell/filesystem execution-boundary gate
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force build/test-bin | Out-Null
-          New-Item -ItemType Directory -Force build/nimcache/windows-expand-archive-boundary | Out-Null
-          $nimArgs = @(
-            'c', '-r',
-            '--threads:on',
-            '--hints:off',
-            '--warnings:off',
-            '--nimcache:build/nimcache/windows-expand-archive-boundary',
-            '--out:build/test-bin/windows_expand_archive_execution_boundary.exe',
-            'tests/windows/windows_expand_archive_execution_boundary.nim'
-          )
-          & nim @nimArgs
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
-          }
 
   test:
     name: Test

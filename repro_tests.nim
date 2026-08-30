@@ -12968,6 +12968,23 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false),
+  # The host-portable half of the M3f Windows execution-boundary gate.
+  # ``soAny`` is the point: the gate itself
+  # (``tests/windows/windows_expand_archive_execution_boundary.nim``) is
+  # deliberately NOT declared here, because it must never become a Linux skip
+  # -- but the observer-report parsing and the Windows PowerShell module-path
+  # composition it depends on are pure string work, and those run on every
+  # platform in the ordinary suite. That is what makes the Windows-only arm
+  # affordable to fix: its queue is measured in hours, this one is not.
+  TestSpec(
+    source: "tests/windows/t_expand_archive_boundary_support.nim",
+    binary: "build/test-bin/t_expand_archive_boundary_support",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
   TestSpec(
     source: "tools/catalog-harvester/tests/test_gh_releases_source.nim",
     binary: "build/test-bin/test_gh_releases_source",

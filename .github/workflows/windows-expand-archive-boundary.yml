@@ -1,0 +1,178 @@
+name: Windows expandArchive boundary
+
+# The M3f execution-boundary gate, moved out of `ci.yml` because inside it the
+# job could not reach a verdict.
+#
+# WHAT WAS MEASURED
+#
+# Over the last 60 `ci.yml` runs on `dev`, the `Windows expandArchive boundary`
+# job ended `cancelled` 59 times and was still queued the sixtieth. Not one of
+# those cancellations was a job that had started and been interrupted: the
+# GitHub jobs API reports `runner_name: ""` and an EMPTY step list for every one
+# of them. The job never got a runner at all. It sat in the queue, and the next
+# push to `dev` superseded the whole run.
+#
+# The same job on PULL REQUESTS does get a runner, and does finish: the PR
+# concurrency group is per-PR, so a push to `dev` cannot cancel it. Measured
+# queue delay on those runs was 47m, 2h10m and 2h55m before the job started,
+# then ~19m of work. That is the shape of the problem in one line: this runner
+# class takes hours to allocate, and `dev` takes pushes faster than that.
+#
+# A job cancelled 59 times out of 60 does not merely fail to provide signal. It
+# provides ANTI-signal: it looks like a job that is failing rather than a job
+# that never ran, and the two call for opposite responses.
+#
+# WHAT CHANGED, AND WHAT IT COSTS
+#
+# Four options were on the table. Only one of them is available at all:
+#
+#   * A JOB-level `concurrency` block with `cancel-in-progress: false` does not
+#     help. Job-level concurrency is additional to the workflow's, not a
+#     replacement for it, so a run-level cancellation still takes the job with
+#     it. The same argument rules out giving the job its own concurrency GROUP
+#     while it stays in `ci.yml`.
+#   * Dropping `cancel-in-progress` from `ci.yml` is not available either: those
+#     jobs run for hours on a saturated pool, and letting branch runs accumulate
+#     starves the pull-request checks people are waiting on. `ci.yml`'s own
+#     header already argues this, and `suite-case-counts.yml` is the precedent
+#     for the resolution -- a gate that must reach a verdict moves OUT of
+#     `ci.yml` rather than changing `ci.yml`'s cancellation policy for
+#     everything.
+#   * A schedule or a merge-queue gate would answer on a clock rather than on a
+#     change. There is no merge queue configured on this repository, and a
+#     nightly run of a gate whose inputs change every few weeks is mostly runs
+#     nobody needed.
+#
+# So: its own workflow, path-filtered, and cancelled only where cancelling is
+# right.
+#
+#   `paths` -- the gate can only regress when the argv it launches, the harness
+#   that launches it, or the compilation environment of that harness changes.
+#   Filtering to those four paths is the whole capacity argument: in the 60-run
+#   window above, the number of `dev` pushes that touched any of them was ZERO,
+#   which is exactly why sixty queued Windows jobs bought nothing. Every run
+#   this workflow now schedules is one somebody's change actually implicates.
+#
+#   `cancel-in-progress` -- true for pull requests, false for branch pushes.
+#   On a PR, an older run of the same PR is genuinely superseded and there is
+#   no reason to hold a scarce Windows runner for it. On a push to `dev` or
+#   `main` the whole failure above WAS cancellation, and the path filter has
+#   already made a backlog impossible: a queue can only form from pushes that
+#   touch expandArchive, and those do not arrive faster than one every few
+#   weeks.
+#
+#   `workflow_dispatch` -- the escape hatch that makes the path filter safe to
+#   live with. When the gate must be exercised against something the filter
+#   cannot see, it is asked for by hand rather than by pushing a no-op commit.
+#
+# WHAT THE PATH FILTER COSTS, PLAINLY
+#
+# A change that breaks this gate INDIRECTLY -- a new image for the
+# `eph-win-x64` class, a change to the shared `setup-dev-env` action's
+# `windows-diy` flavor, a Windows PowerShell or PowerShell 7 update on the
+# runner -- touches none of the filtered paths and will not schedule this
+# workflow. Such a regression would sit in `dev` until the next change to
+# expandArchive, or until someone runs the workflow by hand.
+#
+# That is a real gap and it is accepted deliberately: it is the price of the
+# job reaching a verdict at all. The alternative on offer was not "runs on
+# every push and catches everything" -- it was "queued on every push and caught
+# nothing", which is what the 59 cancellations were. Note also that the second
+# of the two defects this gate exists to catch WAS an environment change of
+# exactly that indirect kind (the step shell becoming pwsh 7, whose
+# PSModulePath hides Windows PowerShell's `Microsoft.PowerShell.Security`), so
+# the gap is not hypothetical. Two things mitigate it: the harness now names
+# the interpreter and both module paths in its own failure text, and the
+# host-portable half of it runs in the ordinary suite on every platform -- see
+# `tests/windows/t_expand_archive_boundary_support.nim`.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/expand_archive.nim'
+      - 'tests/windows/**'
+      - 'config.nims'
+      - '.github/workflows/windows-expand-archive-boundary.yml'
+  pull_request:
+    paths:
+      - 'libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/expand_archive.nim'
+      - 'tests/windows/**'
+      - 'config.nims'
+      - '.github/workflows/windows-expand-archive-boundary.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: windows-expand-archive-${{ github.event.pull_request.number || github.ref }}
+  # See "WHAT CHANGED, AND WHAT IT COSTS" above. A queued branch run is not
+  # superseded, because being superseded while queued is the defect this file
+  # exists to fix.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  windows-expand-archive-boundary:
+    # The name is load-bearing: it is the check name this gate has always
+    # reported under, and moving the job between workflow files must not
+    # rename it.
+    name: Windows expandArchive boundary
+    # M3f is an execution-boundary contract, not a cross-compiled unit test.
+    # There is no skip-as-pass branch: an unavailable Windows service leaves
+    # this gate queued or failing, never green.
+    runs-on: eph-win-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint installation token for Windows dev environment
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Setup Windows dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: windows-diy
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      # Which interpreter is which, recorded before anything depends on it.
+      #
+      # The ACL half of this gate failed for a full milestone with "the module
+      # could not be loaded", and the answer was not in the ACL code: the step
+      # shell is pwsh 7, whose PSModulePath puts Core-edition copies of Windows
+      # PowerShell's own modules ahead of Windows PowerShell's. That took a log
+      # read to establish and it should never take one again, so both
+      # interpreters and both module paths are printed here, unfiltered.
+      - name: Record the PowerShell interpreters on this runner
+        shell: pwsh
+        run: |
+          Write-Output "step shell: $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion) at $((Get-Process -Id $PID).Path)"
+          Write-Output "step shell PSHOME: $PSHOME"
+          Write-Output "step shell PSModulePath:"
+          $env:PSModulePath -split ';' | ForEach-Object { Write-Output "  $_" }
+          $desktop = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          Write-Output "Windows PowerShell present at ${desktop}: $(Test-Path -LiteralPath $desktop)"
+          Write-Output "'powershell' resolves on PATH to: $((Get-Command powershell -ErrorAction SilentlyContinue).Source)"
+
+      - name: Run real PowerShell/filesystem execution-boundary gate
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/test-bin | Out-Null
+          New-Item -ItemType Directory -Force build/nimcache/windows-expand-archive-boundary | Out-Null
+          $nimArgs = @(
+            'c', '-r',
+            '--threads:on',
+            '--hints:off',
+            '--warnings:off',
+            '--nimcache:build/nimcache/windows-expand-archive-boundary',
+            '--out:build/test-bin/windows_expand_archive_execution_boundary.exe',
+            'tests/windows/windows_expand_archive_execution_boundary.nim'
+          )
+          & nim @nimArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
+          }
