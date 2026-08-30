@@ -337,6 +337,27 @@ jobs:
           # by scripts/verify_release.sh against the packaged archive.
           just bootstrap
 
+          # Put the MSYS coreutils on PATH for the pwsh-side `repro build`.
+          # repro's recipe declares `uses: "mkdir"/"cp"/"chmod"/"sh"` (the
+          # reprobuild-nix-daemon staging edge shells them) and resolves them from
+          # PATH under --tool-provisioning=path. On Windows `mkdir` is a cmd
+          # builtin, not an executable -- the coreutils live in Git for Windows'
+          # `<git>\usr\bin`. setup-dev-env's env.ps1 puts `<git>\bin` on PATH
+          # (bash/sh/git, which is why `sh`/`openssl` already resolve) but NOT
+          # `usr\bin`, and build_apps.sh only saw them because it runs under bash.
+          # `.#release` runs here in pwsh, so add `usr\bin` -- the whole dir, so
+          # every coreutil any edge shells (cp, rm, mv, cat, ...) resolves at
+          # once. The path-mode resolver just needs to FIND each declared tool on
+          # PATH; it composes each action's own PATH from the resolved dirs.
+          $gitExe = (Get-Command git -ErrorAction Stop).Source
+          $gitUsrBin = Join-Path (Split-Path -Parent (Split-Path -Parent $gitExe)) "usr\bin"
+          if (-not (Test-Path -LiteralPath (Join-Path $gitUsrBin "mkdir.exe"))) {
+            throw "coreutils not found at $gitUsrBin (repro path-mode resolution needs mkdir.exe/cp.exe/chmod.exe); is this MinGit rather than full Git for Windows?"
+          }
+          $env:Path = $gitUsrBin + [IO.Path]::PathSeparator + $env:Path
+          Add-Content -Path $env:GITHUB_PATH -Value $gitUsrBin
+          Write-Host "coreutils on PATH via $gitUsrBin"
+
           # Stage every required runtime DLL into build\bin BEFORE running the
           # engine. The orchestrating repro.exe (built by bootstrap) dlopens
           # clingo.dll and sqlite3_64.dll at MODULE INIT and imports
