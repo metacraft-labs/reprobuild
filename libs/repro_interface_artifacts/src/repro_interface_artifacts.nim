@@ -4196,6 +4196,29 @@ const
   ProviderNimcacheSessionEnv* = "REPRO_PROVIDER_NIMCACHE_SESSION"
   ProviderParallelBuildEnv* = "REPRO_PROVIDER_PARALLEL_BUILD"
   ProviderParallelBuildMax* = 64
+  ProviderCompilerEntropyJustification* =
+    "The Nim compiler uses randomness only for disposable names under its " &
+    "nimcache and for process-local hash-table seeding. The generated C, " &
+    "objects, interface artifact, and linked provider are named and derived " &
+    "from the compiler command and monitored inputs; those random values do " &
+    "not reach an output."
+  ProviderCompileEnvironmentPassthrough* = [
+    "REPRO_NIM_COMPILER",
+    "REPRO_BOOTSTRAP_CC",
+    "CC",
+    ProviderNimcacheSessionEnv,
+    "REPRO_PROVIDER_NIMCACHE_MODE",
+    ProviderParallelBuildEnv,
+    "TMPDIR",
+    "TMP",
+    "TEMP"
+  ]
+    ## Environment values already represented by the provider compile command
+    ## or affecting scratch placement only. The command-derived action key
+    ## carries the compiler, C toolchain, and parallelism; the remaining names
+    ## only choose disposable nimcache/temp locations. Keying monitored cache
+    ## evidence on their per-process values would make every new `repro`
+    ## invocation miss an otherwise unchanged provider compile.
   ## Environment variable carrying the per-`repro`-invocation nimcache
   ## session token. The root `repro` process seeds this env var to its
   ## own pid (see `ensureProviderNimcacheSession`) and every child
@@ -5240,6 +5263,21 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
       dynamicFlags.add("--passL:-Wl,-rpath," & libDir)
     for flag in dynamicFlags:
       result.insert(flag, 2)
+
+proc providerCompileConfigurationIdentity*(command: openArray[string]):
+    ContentDigest =
+  ## Stable identity of a provider compile command with output-location noise
+  ## removed. Interface extraction uses the same frontend/C toolchain as the
+  ## provider compile, so this lets its monitored edge key that toolchain while
+  ## a lock refresh reconstructs the original identity from the durable
+  ## provider artifact. The output and nimcache paths are derived state only.
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.providerCompileConfiguration.v1")
+  for arg in command:
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:"):
+      continue
+    payload.writeString(arg)
+  blake3DomainDigest(payload, hdActionFingerprint)
 
 proc providerLibraryCompileCommand*(modulePath, outputBinaryPath: string;
                                     mode: ReproRtlMode;

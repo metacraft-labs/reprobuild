@@ -4,10 +4,10 @@ import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
 when defined(windows):
   import std/winlean
 else:
-  # Only these three, and only for the pipe-feeding guard in
+  # Only these names, and only for the pipe-feeding guard in
   # ``runFeedingStdin`` — `from … import` keeps the rest of `std/posix` out of
   # this module's namespace.
-  from std/posix import signal, SIGPIPE, SIG_IGN
+  from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
 import repro_core
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
 # their containment question under. Imported by MODULE rather than folded into
@@ -5251,6 +5251,9 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     commandStatsId = "repro provider compile edge",
     cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
+    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    nonDeterminism = ndpEntropyBlessed,
+    nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(
       providerCompileIgnoredInputPrefixes(scratchDir)))
 
@@ -7745,6 +7748,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
                           skipCacheHitEvidence = true;
                           statsEnabled = false;
                           validateExistingOnly = false;
+                          providerCompilerCommand: seq[string] = @[];
                           cancelCheck: BuildCancelCallback = nil):
     ProjectInterfaceArtifact =
   ## Materialize a project interface through the build engine.
@@ -7820,7 +7824,17 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # is the property the spec is after: the command line is an input by
   # construction, not a list somebody maintains. Content changes are caught
   # by the engine's recorded-input revalidation on top of it.
-  let edgeIdentity = weakFingerprintFromText(command.join("\x00"))
+  let compileCommand =
+    if providerCompilerCommand.len > 0:
+      providerCompilerCommand
+    else:
+      providerCompileCommand(modulePath,
+        parentDir(artifactPath) / "provider" / "project-provider",
+        workDir, scratchDir)
+  let compileConfiguration =
+    providerCompileConfigurationIdentity(compileCommand)
+  let edgeIdentity = weakFingerprintFromText(command.join("\x00") &
+    "\x00provider-compile-configuration\x00" & digestHex(compileConfiguration))
   let sessionKey = toHex(edgeIdentity.bytes)
   if not forceRebuild and not validateExistingOnly and
       interfaceEdgeSessionResults.hasKey(sessionKey) and
@@ -7853,6 +7867,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     commandStatsId = "repro interface extract edge",
     cacheable = true,
     weakFingerprint = edgeIdentity,
+    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    nonDeterminism = ndpEntropyBlessed,
+    nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy =
       automaticMonitorGatheringPolicy(ignoredInputPrefixes))
   var edgeConfig = BuildEngineConfig(
@@ -7900,12 +7917,24 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       raise newException(OSError, detail)
     if validateExistingOnly:
       var validated = false
+      var validationDetails: seq[string] = @[]
       for item in edgeResult.results:
+        validationDetails.add($item.status & "/" & $item.cacheDecision &
+          (if item.cacheMissReason.len > 0:
+             ": " & item.cacheMissReason
+           elif item.reason.len > 0:
+             ": " & item.reason
+           else:
+             ""))
         if item.id == extractAction.id and item.status == asUpToDate:
           validated = true
       if not validated:
         raise newException(IOError,
-          "interface extraction edge requires execution for " & modulePath)
+          "interface extraction edge requires execution for " & modulePath &
+          (if validationDetails.len > 0:
+             " (" & validationDetails.join("; ") & ")"
+           else:
+             ""))
     if not fileExists(extendedPath(artifactPath)):
       raise newException(IOError,
         "interface extraction edge did not write artifact: " & artifactPath)
@@ -40360,7 +40389,12 @@ proc runFeedingStdin(exe: string;
   # verdict. The previous disposition is restored, so this is not a
   # process-wide policy change.
   when not defined(windows):
-    let previousSigPipe = signal(SIGPIPE, SIG_IGN)
+    var ignoredSigPipe, previousSigPipe: Sigaction
+    ignoredSigPipe.sa_handler = SIG_IGN
+    discard sigemptyset(ignoredSigPipe.sa_mask)
+    ignoredSigPipe.sa_flags = 0
+    let sigPipeGuardInstalled =
+      sigaction(SIGPIPE, ignoredSigPipe, addr previousSigPipe) == 0
   try:
     if payload.len > 0:
       input.write(payload)
@@ -40374,7 +40408,8 @@ proc runFeedingStdin(exe: string;
   except CatchableError:
     discard
   when not defined(windows):
-    discard signal(SIGPIPE, previousSigPipe)
+    if sigPipeGuardInstalled:
+      discard sigaction(SIGPIPE, previousSigPipe)
   var captured = ""
   let outStream = process.outputStream
   var line = ""
@@ -53897,6 +53932,10 @@ proc tryLoadDurableSolverProviderArtifacts(
         not fileExists(extendedPath(providerBinaryPath)) or
         not fileExists(extendedPath(providerArtifactPath)):
       return none(DurableSolverProviderArtifacts)
+    let durableProvider = readProviderCompileArtifact(providerArtifactPath)
+    if durableProvider.outputBinaryPath !=
+        normalizedProviderOutputPath(providerBinaryPath):
+      return none(DurableSolverProviderArtifacts)
     let publicCliPath = stablePublicCliPath()
     var inspectionStats: BuildStats
     let interfaceArtifact = extractInterfaceEdge(modulePath, interfacePath,
@@ -53904,10 +53943,27 @@ proc tryLoadDurableSolverProviderArtifacts(
       projectRootForModule(modulePath), publicCliPath,
       outDir / "build-engine-cache", inspectionStats, requireStub = false,
       bypassRunQuota = runQuotaBypassedByEnv(),
-      validateExistingOnly = true)
-    let plan = providerCompilePlan(modulePath, providerBinaryPath,
-      interfaceArtifact.interfaceFingerprint, compileWorkDir,
-      outDir / "provider-work")
+      validateExistingOnly = true,
+      providerCompilerCommand = durableProvider.compilerCommand)
+    if durableProvider.interfaceFingerprint !=
+        interfaceArtifact.interfaceFingerprint:
+      return none(DurableSolverProviderArtifacts)
+    # Reconstruct the exact compile edge that produced the durable artifact.
+    # A lock command can run under a different provisioning mode than the
+    # preceding build, so deriving a fresh plan from the current compiler
+    # environment would address a different action-cache record and force a
+    # disposable recompile even though the original monitored record remains
+    # valid.
+    let plan = ProviderCompilePlan(
+      inputSources: durableProvider.inputSources,
+      outputBinaryPath: durableProvider.outputBinaryPath,
+      compilerCommand: durableProvider.compilerCommand,
+      compileEdge: durableProvider.compileEdge,
+      interfaceFingerprint: durableProvider.interfaceFingerprint,
+      providerFingerprint: durableProvider.providerFingerprint,
+      providerCompileActionKey:
+        durableProvider.compileEdge.actionFingerprint,
+      workDir: compileWorkDir)
     var provider = staticFreshnessFallbackProvider(plan,
       providerArtifactPath, modulePath, providerBinaryPath,
       interfaceArtifact.interfaceFingerprint, compileWorkDir)
@@ -53940,7 +53996,7 @@ proc tryLoadDurableSolverProviderArtifacts(
           validated = true
       if not validated:
         return none(DurableSolverProviderArtifacts)
-      provider = some(readProviderCompileArtifact(providerArtifactPath))
+      provider = some(durableProvider)
     if not providerCompileArtifactFresh(providerArtifactPath,
         providerBinaryPath, interfaceArtifact.interfaceFingerprint,
         plan.providerFingerprint, compileWorkDir):
@@ -53997,9 +54053,6 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       except CatchableError: discard
     let compileWorkDir = reprobuildLibraryWorkDir()
     let scratchDir = scratchRoot / "work"
-    # MR5 bootstrap toolchain (same provisioning the build path arranges before
-    # an interface extraction / provider compile).
-    ensureBootstrapToolchainEnv(tpmPathOnly, resolveStoreRoot() / "tool-store")
     let interfacePath = scratchRoot / "project-interface.rbsz"
     let stubPath = scratchRoot / "project-interface.nim"
     # Fresh monitored artifacts from a normal build are reused below. On a
@@ -54020,6 +54073,13 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       if inheritedLockPath.len > 0: putEnv(LockPathEnvVar, inheritedLockPath)
     let durable = tryLoadDurableSolverProviderArtifacts(modulePath,
       compileWorkDir)
+    if durable.isNone:
+      # MR5 bootstrap toolchain (same provisioning the build path arranges
+      # before an interface extraction / provider compile). Keep this after
+      # the durable probe: provisioning-mode environment is irrelevant when
+      # the monitored artifacts validate, and changing it first defeats reuse.
+      ensureBootstrapToolchainEnv(tpmPathOnly,
+        resolveStoreRoot() / "tool-store")
     let artifact =
       if durable.isSome:
         durable.get().interfaceArtifact
