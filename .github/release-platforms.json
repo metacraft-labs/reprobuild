@@ -32,7 +32,19 @@
     },
     {
       "os-name": "macos",
-      "runner": "eph-macos-arm64",
+      "$workaround": [
+        "TEMPORARY: retargeted off the `eph-macos-arm64` ephemeral (tart) macOS",
+        "provider onto the static Apple-silicon runners on m3. The ephemeral",
+        "provider was spawning ZERO runners (a provider fault under separate",
+        "investigation), so every macOS release leg queued forever and no",
+        "release could ever complete. `aarch64-darwin` is the label unique to",
+        "the six healthy, idle static m3 runners (m3-mcl-001..006, which also",
+        "advertise self-hosted/macOS/ARM64/darwin/nix-darwin); no ephemeral",
+        "runner carries it, so this routes only to the static pool. These are",
+        "the same nix-darwin hosts CodeTracer's macOS jobs run green on.",
+        "REVERT to `eph-macos-arm64` once the tart macOS provider is fixed."
+      ],
+      "runner": "aarch64-darwin",
       "env-flavor": "nix",
       "platform": "darwin",
       "arch": "aarch64",
