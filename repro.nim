@@ -336,6 +336,24 @@ package reprobuild:
     # under ``nix develop``.
     "nim >=2.2 <3.0"
     "gcc >=12"
+    # Darwin's C compiler is clang, not gcc: Nim emits ``clang`` (not
+    # ``gcc``) for the ``nim.c`` compile/link edges on macOS. Under
+    # ``--tool-provisioning=path`` each edge's PATH is composed from ONLY
+    # the directories its DECLARED tools resolved into (see the
+    # ``reprobuild-nix-daemon`` note below), so ``gcc >=12`` above puts the
+    # gcc-wrapper dir on the Linux edges' PATH but NOTHING puts clang's dir
+    # on the macOS edges' PATH. The macOS ``.#release`` build therefore died
+    # with ``/bin/sh: clang: command not found`` (exit 127) on every C edge,
+    # even though clang is installed -- the composed minimal PATH simply
+    # never included its directory. Declaring ``clang`` here is the exact
+    # darwin analogue of ``gcc >=12``: the path-mode resolver finds it on
+    # PATH (macOS ships clang via the sanctioned Xcode Command Line Tools at
+    # ``/usr/bin/clang``; the nix devShell also carries a clang-wrapper) and
+    # injects that directory into each C edge, mirroring the Linux gcc path.
+    # Gated to darwin so it is never required on Linux/Windows, where the
+    # path-mode resolver would otherwise fail if clang were absent.
+    when defined(macosx):
+      "clang"
     "just >=1"
     # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
     # link/runtime closure explicitly so graph-built binaries receive
