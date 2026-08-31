@@ -124,11 +124,20 @@ verify_sha256() {
 # POSIX file-tree copy. The bin/ and lib/ trees hold simple leaf names (repro,
 # *.so, *.dylib), so a glob loop is enough and avoids `find -print0`/`read -d`,
 # neither of which is portable to dash.
+#
+# The three globs are one list, not a flourish: `*` does NOT match a leading
+# dot, and the released tree contains dot-prefixed files. Once a Linux tarball
+# is made portable, scripts/relocate_release_posix.sh renames every ELF to
+# `bin/.<app>.real` and leaves a launcher at `bin/<app>` -- so a `*`-only loop
+# installs the launchers and silently drops every binary they exec, producing an
+# install where `repro --version` reports "not found" and nothing in the
+# installer's own output says why. `.[!.]*` picks up `.foo`, `..?*` picks up
+# `..foo`, and the `[ -e ]` guard below discards whichever globs do not match.
 copy_tree_files() {
   local source_dir="$1" target_dir="$2" mode="$3" path
   [ -d "$source_dir" ] || return 0
   mkdir -p "$target_dir"
-  for path in "$source_dir"/*; do
+  for path in "$source_dir"/* "$source_dir"/.[!.]* "$source_dir"/..?*; do
     [ -e "$path" ] || continue
     [ -f "$path" ] || continue
     install "-m${mode}" "$path" "$target_dir/$(basename "$path")"

@@ -24,14 +24,25 @@ name: Installer integration (3-OS hermetic)
 #                      assert `repro --version`/`--help` on the installed prefix
 #                      (plus the DLL manifest on Windows).
 #
-# Environment hygiene (why not Docker/clean VMs):
-#   * Linux: eph-linux-x64 has NO Docker (nested-Docker lives on the separate
-#     eph-linux-x64-nested class -- see scripts/verify_release.sh), so the
-#     "clean container" route is unavailable here. Instead we install into a
-#     THROWAWAY prefix under $RUNNER_TEMP and run the installed binary with PATH
-#     scrubbed to system dirs + that prefix, which proves the installed tree is
-#     self-sufficient rather than leaning on the runner's toolchain.
-#   * macOS: same throwaway-prefix + scrubbed-PATH approach.
+# Environment hygiene (what the POSIX legs do and do NOT prove):
+#   * Linux/macOS: we install into a THROWAWAY prefix under $RUNNER_TEMP and run
+#     the installed binary with PATH scrubbed to the system dirs + that prefix.
+#     Be precise about what that buys, because the obvious reading of it is
+#     WRONG: a PATH scrub proves the installed tree does not resolve a *program*
+#     from the runner's toolchain. It says NOTHING about whether the tree can
+#     load. `repro`'s dynamic loader (PT_INTERP) and its library search path
+#     (DT_RUNPATH) are ABSOLUTE paths baked into the ELF at link time -- today
+#     they point into the build host's /nix/store -- and PATH cannot reach
+#     either. So a scrubbed-PATH run is green on a binary that would not exec at
+#     all on a user's machine, which is exactly the failure this workflow exists
+#     to catch. The archive-level launchability question belongs to
+#     scripts/verify_release.sh's preflight + multi-distro sweep, called from the
+#     `build` job below; these legs additionally assert the installer transports
+#     the archive's bytes UNCHANGED, which is the installer's own contract.
+#   * Note on Docker: `eph-linux-x64` was historically Docker-less, which is why
+#     verify_release.sh skips its sweep when Docker is unusable. That is no
+#     longer true -- the class now has a working daemon -- so the sweep runs, and
+#     its preflight is what reports whether the archive can run off-host.
 #   * Windows: PATH scrubbed to the system directories (mirrors the PATH-scrub
 #     in scripts/verify_release.sh) so the loader cannot satisfy from the build
 #     host a DLL the archive omits.
@@ -353,7 +364,70 @@ jobs:
 
           echo "=== Asserting installed binary from a scrubbed PATH ==="
           test -x "${prefix}/bin/repro" || { echo "::error::repro not installed at ${prefix}/bin/repro"; exit 1; }
-          # Scrub PATH to prove the installed tree stands on its own.
+
+          # The installer's OWN contract: it transports the archive's bin/+lib/
+          # bytes to the prefix. Assert that directly instead of inferring it
+          # from a successful `--version`, which stays green over an installer
+          # that stripped, re-linked or installed a stale tree -- and which on
+          # this runner would also stay green over a tree that only runs here.
+          mkdir -p unpacked && tar -xzf "${built}" -C unpacked
+          root="$(dirname "$(find unpacked -maxdepth 3 -type d -name bin | head -n 1)")"
+          # sha256sum on Linux, shasum on macOS -- same split the Compute
+          # checksum step above makes.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256() { sha256sum "$1" | awk '{print $1}'; }
+          else
+            sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+          fi
+          compared=0
+          mismatched=0
+          # `find`, not a `bin/*` glob, and deliberately recursive. Both choices
+          # are about what the installer is ALLOWED to silently skip:
+          #   * dotfiles -- scripts/relocate_release_posix.sh (release.yml's
+          #     POSIX packaging step) renames each ELF to `bin/.<app>.real` and
+          #     leaves a wrapper behind. install-on-distributions.sh's
+          #     copy_tree_files iterates `"$source_dir"/*`, which skips those,
+          #     so a relocated archive would install wrappers pointing at
+          #     nothing. A glob here would skip them too and agree with the bug.
+          #   * subdirectories -- copy_tree_files is flat (`[ -f ] || continue`),
+          #     so a nested archive layout would be dropped without a word.
+          while IFS= read -r src; do
+            rel="${src#"${root}"/}"
+            dst="${prefix}/${rel}"
+            compared=$((compared + 1))
+            if [ ! -f "${dst}" ]; then
+              echo "::error::installer did not place ${rel}"; mismatched=$((mismatched + 1)); continue
+            fi
+            if [ "$(sha256 "${src}")" != "$(sha256 "${dst}")" ]; then
+              echo "::error::installed ${rel} differs from the archive's copy"; mismatched=$((mismatched + 1))
+            fi
+          done < <(find "${root}/bin" "${root}/lib" -type f | sort)
+          # Positive control: "0 mismatches" is free on an empty set, so assert
+          # the comparison actually reached the tree before believing it.
+          archive_files="$(find "${root}/bin" "${root}/lib" -type f | wc -l | tr -d ' ')"
+          echo "compared ${compared} of ${archive_files} archive file(s); ${mismatched} mismatched"
+          if [ "${compared}" -eq 0 ] || [ "${compared}" != "${archive_files}" ]; then
+            echo "::error::byte-identity check reached ${compared} files, expected ${archive_files} (>0)"
+            exit 1
+          fi
+          if [ "${mismatched}" != "0" ]; then
+            echo "::error::${mismatched} installed file(s) differ from the archive"
+            exit 1
+          fi
+
+          # Report the loader facts rather than asserting a property this leg
+          # cannot see. On a runner that HAS /nix/store these will name it, and
+          # that is the point: it is the visible reason the scrubbed-PATH run
+          # below is not evidence of portability.
+          echo "=== Installed loader facts (this is NOT a portability check) ==="
+          if command -v readelf >/dev/null 2>&1; then
+            readelf -lWd "${prefix}/bin/repro" | grep -E 'program interpreter|RUNPATH|RPATH' || true
+          elif command -v otool >/dev/null 2>&1; then
+            otool -L "${prefix}/bin/repro" | head -20 || true
+          fi
+
+          # Scrub PATH: proves the installed tree resolves no PROGRAM from the
+          # runner's toolchain. It cannot speak to the loader (see the header).
           export PATH="${prefix}/bin:/usr/bin:/bin"
           repro --version
           repro --help >/dev/null
