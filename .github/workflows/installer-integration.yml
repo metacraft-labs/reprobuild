@@ -1,0 +1,543 @@
+name: Installer integration (3-OS hermetic)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Proves the committed installer (install-on-distributions.sh + install.ps1)
+# installs a WORKING reprobuild on Linux, macOS and Windows -- against the PR's
+# OWN freshly-built artifacts, with NO published release and NO prod hosting.
+#
+# Shape:
+#   plan            -- read .github/release-platforms.json (the one source of
+#                      truth for the platform set) and derive the build/test
+#                      matrix, so this test can never drift from what a real
+#                      release ships.
+#   stage-installer -- upload the PR's install scripts as an artifact. The test
+#                      job downloads and serves them, so it runs the COMMITTED
+#                      copy, transported over HTTP exactly like a published
+#                      `curl <host>/install-on-distributions.sh` would be.
+#   build           -- build + package reprobuild the same way release.yml does
+#                      (per-platform tar.gz/zip + .sha256), upload as artifacts.
+#   test            -- download {installer script, built archive} for this OS,
+#                      rename the archive to the channel the installer expects
+#                      (reprobuild-latest-<platform>-<arch>.<ext>), serve the
+#                      directory over a LOCAL http server on 127.0.0.1, then run
+#                      the installer the real-world way against that server and
+#                      assert `repro --version`/`--help` on the installed prefix
+#                      (plus the DLL manifest on Windows).
+#
+# Environment hygiene (what the POSIX legs do and do NOT prove):
+#   * Linux/macOS: we install into a THROWAWAY prefix under $RUNNER_TEMP and run
+#     the installed binary with PATH scrubbed to the system dirs + that prefix.
+#     Be precise about what that buys, because the obvious reading of it is
+#     WRONG: a PATH scrub proves the installed tree does not resolve a *program*
+#     from the runner's toolchain. It says NOTHING about whether the tree can
+#     load. `repro`'s dynamic loader (PT_INTERP) and its library search path
+#     (DT_RUNPATH) are ABSOLUTE paths baked into the ELF at link time -- today
+#     they point into the build host's /nix/store -- and PATH cannot reach
+#     either. So a scrubbed-PATH run is green on a binary that would not exec at
+#     all on a user's machine, which is exactly the failure this workflow exists
+#     to catch. The archive-level launchability question belongs to
+#     scripts/verify_release.sh's preflight + multi-distro sweep, called from the
+#     `build` job below; these legs additionally assert the installer transports
+#     the archive's bytes UNCHANGED, which is the installer's own contract.
+#   * Note on Docker: `eph-linux-x64` was historically Docker-less, which is why
+#     verify_release.sh skips its sweep when Docker is unusable. That is no
+#     longer true -- the class now has a working daemon -- so the sweep runs, and
+#     its preflight is what reports whether the archive can run off-host.
+#   * Windows: PATH scrubbed to the system directories (mirrors the PATH-scrub
+#     in scripts/verify_release.sh) so the loader cannot satisfy from the build
+#     host a DLL the archive omits.
+#   The test job deliberately does NOT run setup-dev-env: an end user has no dev
+#   toolchain, and provisioning one would defeat the point of a clean install.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+    paths:
+      - install-on-distributions.sh
+      - install.ps1
+      - .github/workflows/installer-integration.yml
+      - .github/release-platforms.json
+      - .github/workflows/release.yml
+      - scripts/build_apps.sh
+      - scripts/verify_release.sh
+      - windows/ensure-clingo.ps1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Plan matrix
+    runs-on: eph-linux-x64
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # github-script (not jq/python) so this runs on a bare runner before any
+      # dev-env provisioning, exactly as release.yml's plan job does.
+      - name: Derive matrix from release-platforms.json
+        id: plan
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const spec = JSON.parse(fs.readFileSync('.github/release-platforms.json', 'utf8'));
+            const platforms = spec.platforms;
+            if (!Array.isArray(platforms) || platforms.length === 0) {
+              core.setFailed('.github/release-platforms.json declares no platforms.');
+              return;
+            }
+            const nimble = fs.readFileSync('reprobuild.nimble', 'utf8');
+            const m = nimble.match(/^\s*version\s*=\s*"([^"]+)"/m);
+            if (!m) { core.setFailed('could not read version from reprobuild.nimble'); return; }
+            core.setOutput('matrix', JSON.stringify(platforms));
+            core.setOutput('version', m[1]);
+            core.info(`installer-integration will exercise ${platforms.length} platform(s) at version ${m[1]}.`);
+
+  stage-installer:
+    name: Stage installer scripts
+    runs-on: eph-linux-x64
+    steps:
+      - uses: actions/checkout@v4
+      # Transport the PR's committed installer scripts as an artifact so the
+      # test job runs *these* files, served over HTTP like a published script.
+      - name: Upload installer scripts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-scripts
+          path: |
+            install-on-distributions.sh
+            install.ps1
+          if-no-files-found: error
+          retention-days: 3
+
+  build:
+    name: Build ${{ matrix.os-name }} (${{ matrix.arch }})
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Windows: assert Git for Windows (bash) is present, like release.yml ──
+      - name: Assert Git for Windows is available
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bash = Get-Command bash -ErrorAction SilentlyContinue
+          $git = Get-Command git -ErrorAction SilentlyContinue
+          if ($bash -and $git) { & git --version; exit 0 }
+          $missing = @()
+          if (-not $bash) { $missing += 'bash' }
+          if (-not $git) { $missing += 'git' }
+          throw "Missing on this Windows runner: $($missing -join ', '). Git for Windows provides both; fix the runner image."
+
+      - name: Mint installation token for cross-repo sibling clones
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Setup dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: ${{ matrix.env-flavor }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          flake-override-inputs: |
+            runquota-src=../runquota
+            io-mon-src=../io-mon
+            nim-shm-queue-src=../nim-shm-queue
+            nim-stackable-hooks-src=../nim-stackable-hooks
+            reprobuild-test-adapters-src=../reprobuild-test-adapters
+
+      - name: Clone nim-bearssl (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          if (Test-Path -Path ../nim-bearssl) { Remove-Item -Recurse -Force ../nim-bearssl }
+          git clone --depth 1 --recurse-submodules https://github.com/status-im/nim-bearssl.git ../nim-bearssl
+
+      - name: Configure repro binary-cache publish
+        uses: ./.github/actions/setup-repro-publish
+        with:
+          publish-key: ${{ secrets.REPRO_PUBLISH_KEY }}
+          publish-cert: ${{ secrets.REPRO_PUBLISH_CERT }}
+
+      - name: Bootstrap and Build (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dev-exec just bootstrap
+          dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#release
+
+      - name: Bootstrap and Build (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        env:
+          REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS: "1"
+        run: |
+          Push-Location ../runquota
+          just build
+          Pop-Location
+          $runquotaRoot = (Resolve-Path ../runquota).Path
+          $runquotaBin = Join-Path $runquotaRoot "build\bin"
+          Add-Content -Path $env:GITHUB_PATH -Value $runquotaBin
+          $env:Path = $runquotaBin + [IO.Path]::PathSeparator + $env:Path
+          just bootstrap
+
+          $opensslDll = Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Filter "libcrypto-3-x64.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $opensslDll) {
+            $dllDir = Split-Path -Parent $opensslDll.FullName
+            Copy-Item -Path (Join-Path $dllDir "libcrypto-3-x64.dll") -Destination "build\bin\" -Force
+            Copy-Item -Path (Join-Path $dllDir "libssl-3-x64.dll") -Destination "build\bin\" -Force
+          } else {
+            throw "libcrypto-3-x64.dll not found on system; cannot produce a self-contained archive"
+          }
+
+          $zstdSearchPaths = @()
+          if ($env:WINDOWS_DIY_INSTALL_ROOT) {
+            $zstdSearchPaths += Join-Path $env:WINDOWS_DIY_INSTALL_ROOT "msys2"
+          }
+          $zstdSearchPaths += "C:\Program Files", "C:\Program Files (x86)"
+          $zstdDll = Get-ChildItem -Path $zstdSearchPaths -Filter "libzstd.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $zstdDll) {
+            $dllDir = Split-Path -Parent $zstdDll.FullName
+            Copy-Item -Path (Join-Path $dllDir "libzstd.dll") -Destination "build\bin\" -Force
+          } else {
+            throw "libzstd.dll not found on system; cannot produce a self-contained archive"
+          }
+
+          .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#release
+
+      - name: Package release assets (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          dev-exec bash -c '
+            set -euo pipefail
+            version=$(grep "^version\s*=" reprobuild.nimble | sed -E "s/version\s*=\s*\"([^\"]+)\"/\1/")
+            pkg_name="reprobuild-${version}-${{ matrix.platform }}-${{ matrix.arch }}"
+
+            mkdir -p "${pkg_name}/bin" "${pkg_name}/lib"
+            cp -a build/bin/* "${pkg_name}/bin/"
+            cp -a build/lib/* "${pkg_name}/lib/"
+
+            tar -czf "${pkg_name}.tar.gz" "${pkg_name}"
+            echo "ASSET_PATH=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
+            echo "ASSET_NAME=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
+          '
+
+      - name: Package release assets (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          $version = (Get-Content reprobuild.nimble | Select-String -Pattern 'version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          $pkg_name = "reprobuild-${version}-${{ matrix.platform }}-${{ matrix.arch }}"
+
+          New-Item -ItemType Directory -Force -Path "${pkg_name}\bin"
+          New-Item -ItemType Directory -Force -Path "${pkg_name}\lib"
+          Copy-Item -Path "build\bin\*" -Destination "${pkg_name}\bin\" -Recurse
+          Copy-Item -Path "build\lib\*" -Destination "${pkg_name}\lib\" -Recurse
+
+          Compress-Archive -Path "${pkg_name}" -DestinationPath "${pkg_name}.zip" -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${pkg_name}.zip"
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_NAME=${pkg_name}.zip"
+
+      # Same gate release.yml applies at build time: the PACKAGED archive runs,
+      # and on Windows its DLL manifest + scrubbed-PATH smoke test pass. This is
+      # the archive-level check; the `test` job below adds the installer-level
+      # check (that the installer places a working binary on the prefix/PATH).
+      - name: Verify release archive
+        shell: bash
+        run: bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+
+      - name: Compute checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="${{ env.ASSET_NAME }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${asset}" > "${asset}.sha256"
+          else
+            shasum -a 256 "${asset}" > "${asset}.sha256"
+          fi
+          cat "${asset}.sha256"
+
+      - name: Upload built archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-ci-build-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            ${{ env.ASSET_NAME }}
+            ${{ env.ASSET_NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 3
+
+  test:
+    name: Install & verify ${{ matrix.os-name }} (${{ matrix.arch }})
+    needs: [plan, stage-installer, build]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      # NB: intentionally no checkout / no setup-dev-env -- this job simulates a
+      # clean end-user machine that has only the installer and the archive.
+      - name: Download built reprobuild archive
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-ci-build-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist
+
+      - name: Download installer scripts
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-scripts
+          path: dist
+
+      # ── POSIX: serve locally, run `curl … | sh`, assert on the prefix ───────
+      - name: Stage, serve, install and verify (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          EXT: ${{ matrix.archive_ext }}
+          PORT: "8973"
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+
+          # Rename the built archive to the channel the installer fetches by
+          # default (REPROBUILD_CHANNEL=latest). The installer reads only the
+          # hash column of the sidecar, so a rename keeps the .sha256 valid.
+          set -- reprobuild-*-"${PLATFORM}-${ARCH}.${EXT}"
+          built="$1"
+          [ -f "${built}" ] || { echo "::error::no built archive matching reprobuild-*-${PLATFORM}-${ARCH}.${EXT}"; exit 1; }
+          latest="reprobuild-latest-${PLATFORM}-${ARCH}.${EXT}"
+          cp "${built}" "${latest}"
+          cp "${built}.sha256" "${latest}.sha256"
+
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "::error::python3 is required to serve the local fixture. Add it to the ${PLATFORM} runner image."
+            exit 1
+          fi
+
+          # Server + install + assert all in ONE step so the backgrounded server
+          # is guaranteed to outlive the client (backgrounded procs are not
+          # reliably preserved across separate workflow steps).
+          python3 -m http.server "${PORT}" --bind 127.0.0.1 >server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "${server_pid}" 2>/dev/null || true' EXIT
+
+          base="http://127.0.0.1:${PORT}"
+          for _ in $(seq 1 100); do
+            curl -fsS "${base}/install-on-distributions.sh" -o /dev/null 2>/dev/null && break
+            sleep 0.2
+          done
+
+          prefix="${RUNNER_TEMP}/repro-prefix"
+          rm -rf "${prefix}"
+          echo "=== Running the committed installer the real-world way ==="
+          curl -fsSL "${base}/install-on-distributions.sh" \
+            | REPROBUILD_DOWNLOAD_BASE="${base}" REPROBUILD_INSTALL_PREFIX="${prefix}" sh
+
+          echo "=== Asserting installed binary from a scrubbed PATH ==="
+          test -x "${prefix}/bin/repro" || { echo "::error::repro not installed at ${prefix}/bin/repro"; exit 1; }
+
+          # The installer's OWN contract: it transports the archive's bin/+lib/
+          # bytes to the prefix. Assert that directly instead of inferring it
+          # from a successful `--version`, which stays green over an installer
+          # that stripped, re-linked or installed a stale tree -- and which on
+          # this runner would also stay green over a tree that only runs here.
+          mkdir -p unpacked && tar -xzf "${built}" -C unpacked
+          root="$(dirname "$(find unpacked -maxdepth 3 -type d -name bin | head -n 1)")"
+          # sha256sum on Linux, shasum on macOS -- same split the Compute
+          # checksum step above makes.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256() { sha256sum "$1" | awk '{print $1}'; }
+          else
+            sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+          fi
+          compared=0
+          mismatched=0
+          # `find`, not a `bin/*` glob, and deliberately recursive. Both choices
+          # are about what the installer is ALLOWED to silently skip:
+          #   * dotfiles -- scripts/relocate_release_posix.sh (release.yml's
+          #     POSIX packaging step) renames each ELF to `bin/.<app>.real` and
+          #     leaves a wrapper behind. install-on-distributions.sh's
+          #     copy_tree_files iterates `"$source_dir"/*`, which skips those,
+          #     so a relocated archive would install wrappers pointing at
+          #     nothing. A glob here would skip them too and agree with the bug.
+          #   * subdirectories -- copy_tree_files is flat (`[ -f ] || continue`),
+          #     so a nested archive layout would be dropped without a word.
+          while IFS= read -r src; do
+            rel="${src#"${root}"/}"
+            dst="${prefix}/${rel}"
+            compared=$((compared + 1))
+            if [ ! -f "${dst}" ]; then
+              echo "::error::installer did not place ${rel}"; mismatched=$((mismatched + 1)); continue
+            fi
+            if [ "$(sha256 "${src}")" != "$(sha256 "${dst}")" ]; then
+              echo "::error::installed ${rel} differs from the archive's copy"; mismatched=$((mismatched + 1))
+            fi
+          done < <(find "${root}/bin" "${root}/lib" -type f | sort)
+          # Positive control: "0 mismatches" is free on an empty set, so assert
+          # the comparison actually reached the tree before believing it.
+          archive_files="$(find "${root}/bin" "${root}/lib" -type f | wc -l | tr -d ' ')"
+          echo "compared ${compared} of ${archive_files} archive file(s); ${mismatched} mismatched"
+          if [ "${compared}" -eq 0 ] || [ "${compared}" != "${archive_files}" ]; then
+            echo "::error::byte-identity check reached ${compared} files, expected ${archive_files} (>0)"
+            exit 1
+          fi
+          if [ "${mismatched}" != "0" ]; then
+            echo "::error::${mismatched} installed file(s) differ from the archive"
+            exit 1
+          fi
+
+          # Report the loader facts rather than asserting a property this leg
+          # cannot see. On a runner that HAS /nix/store these will name it, and
+          # that is the point: it is the visible reason the scrubbed-PATH run
+          # below is not evidence of portability.
+          echo "=== Installed loader facts (this is NOT a portability check) ==="
+          if command -v readelf >/dev/null 2>&1; then
+            readelf -lWd "${prefix}/bin/repro" | grep -E 'program interpreter|RUNPATH|RPATH' || true
+          elif command -v otool >/dev/null 2>&1; then
+            otool -L "${prefix}/bin/repro" | head -20 || true
+          fi
+
+          # Scrub PATH: proves the installed tree resolves no PROGRAM from the
+          # runner's toolchain. It cannot speak to the loader (see the header).
+          export PATH="${prefix}/bin:/usr/bin:/bin"
+          repro --version
+          repro --help >/dev/null
+          echo "=== installer integration PASS ($(uname -s) ${ARCH}) ==="
+
+      # ── Windows: serve via a TcpListener (no HttpListener URL-ACL needed),
+      #    run `irm … | iex`, assert repro.exe + the DLL manifest ─────────────
+      - name: Stage, serve, install and verify (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          EXT: ${{ matrix.archive_ext }}
+          PORT: "8973"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location dist
+          Get-ChildItem | Format-Table -AutoSize | Out-String | Write-Host
+
+          $built = Get-ChildItem -Filter "reprobuild-*-$($env:PLATFORM)-$($env:ARCH).$($env:EXT)" | Select-Object -First 1
+          if (-not $built) { throw "no built archive matching reprobuild-*-$($env:PLATFORM)-$($env:ARCH).$($env:EXT)" }
+          $latest = "reprobuild-latest-$($env:PLATFORM)-$($env:ARCH).$($env:EXT)"
+          Copy-Item $built.FullName $latest -Force
+          Copy-Item "$($built.FullName).sha256" "$latest.sha256" -Force
+
+          $root = (Get-Location).Path
+          $port = [int]$env:PORT
+
+          # Minimal loopback HTTP/1.0 server on a raw TcpListener. HttpListener
+          # would need a URL-ACL reservation (or admin) for its prefix; a
+          # TcpListener needs neither, so this works as the plain runner user.
+          $server = Start-Job -ArgumentList $root, $port -ScriptBlock {
+            param($root, $port)
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+            $listener.Start()
+            while ($true) {
+              $client = $listener.AcceptTcpClient()
+              try {
+                $stream = $client.GetStream()
+                $reader = [System.IO.StreamReader]::new($stream)
+                $requestLine = $reader.ReadLine()
+                while ($true) { $h = $reader.ReadLine(); if ([string]::IsNullOrEmpty($h)) { break } }
+                $rel = [Uri]::UnescapeDataString(($requestLine -split ' ')[1]).TrimStart('/')
+                $path = Join-Path $root $rel
+                $writer = [System.IO.BinaryWriter]::new($stream)
+                if (Test-Path -LiteralPath $path -PathType Leaf) {
+                  $bytes = [System.IO.File]::ReadAllBytes($path)
+                  # Serve scripts/checksums as text so `irm install.ps1 | iex`
+                  # gets a decodable string, not a byte array.
+                  $ctype = 'application/octet-stream'
+                  if ($path -match '\.(ps1|sh|sha256|txt)$') { $ctype = 'text/plain; charset=utf-8' }
+                  $head = "HTTP/1.0 200 OK`r`nContent-Length: $($bytes.Length)`r`nContent-Type: $ctype`r`nConnection: close`r`n`r`n"
+                  $writer.Write([System.Text.Encoding]::ASCII.GetBytes($head))
+                  $writer.Write($bytes)
+                } else {
+                  $head = "HTTP/1.0 404 Not Found`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+                  $writer.Write([System.Text.Encoding]::ASCII.GetBytes($head))
+                }
+                $writer.Flush()
+              } finally {
+                $client.Close()
+              }
+            }
+          }
+
+          try {
+            $base = "http://127.0.0.1:$port"
+            $ready = $false
+            for ($i = 0; $i -lt 100; $i++) {
+              try {
+                Invoke-WebRequest -UseBasicParsing "$base/install.ps1" -OutFile "$env:TEMP\probe.ps1" | Out-Null
+                $ready = $true; break
+              } catch { Start-Sleep -Milliseconds 200 }
+            }
+            if (-not $ready) {
+              Receive-Job $server | Write-Host
+              throw "local server did not become ready on $base"
+            }
+
+            $prefix = Join-Path $env:RUNNER_TEMP 'repro-prefix'
+            if (Test-Path $prefix) { Remove-Item -Recurse -Force $prefix }
+
+            Write-Host "=== Running the committed installer the real-world way ==="
+            $env:REPROBUILD_DOWNLOAD_BASE = $base
+            $env:REPROBUILD_INSTALL_PREFIX = $prefix
+            Invoke-RestMethod "$base/install.ps1" | Invoke-Expression
+
+            Write-Host "=== Asserting installed repro.exe + DLL manifest from a scrubbed PATH ==="
+            $bin = Join-Path $prefix 'bin'
+            $repro = Join-Path $bin 'repro.exe'
+            if (-not (Test-Path $repro)) { throw "repro.exe not installed at $repro" }
+
+            # Scrub PATH to the system directories (+ the install bin), mirroring
+            # scripts/verify_release.sh, so the loader cannot resolve a missing
+            # DLL from the build host.
+            $sys = $env:SystemRoot
+            $env:Path = @($bin, "$sys\System32", $sys, "$sys\System32\Wbem") -join ';'
+
+            & $repro --version
+            if ($LASTEXITCODE -ne 0) { throw "repro.exe --version exited $LASTEXITCODE" }
+            & $repro --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "repro.exe --help exited $LASTEXITCODE" }
+
+            $required = @('clingo.dll', 'libcrypto-3-x64.dll', 'libssl-3-x64.dll', 'libzstd.dll', 'sqlite3_64.dll', 'sqlite3.dll')
+            $missing = $required | Where-Object { -not (Test-Path (Join-Path $bin $_)) }
+            if ($missing) { throw "installed bin\ is missing required DLLs: $($missing -join ', ')" }
+
+            Write-Host "=== installer integration PASS (Windows $($env:ARCH)) ==="
+          } finally {
+            Stop-Job $server -ErrorAction SilentlyContinue
+            Remove-Job $server -Force -ErrorAction SilentlyContinue
+          }
