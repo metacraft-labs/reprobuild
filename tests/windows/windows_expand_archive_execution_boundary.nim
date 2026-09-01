@@ -23,15 +23,26 @@ import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_dsl_stdlib/packages/expand_archive
 
+import ./expand_archive_boundary_support
+
 type
   ProcessResult = object
     exitCode: int
     output: string
 
   ObservedRun = object
+    ## ``exitCode`` is the OBSERVER's. ``childExit`` is the process under test's,
+    ## and ``childExitReported`` says whether the observer got far enough to read
+    ## it at all. Keeping them apart is the whole point: an observer that dies
+    ## before launching the child also exits non-zero, and reading that as the
+    ## child's verdict is how this gate previously reported a state it never
+    ## reached. See Verification-Harness-Traps.md section 2.
     exitCode: int
     output: string
     scratchPath: string
+    scratchReported: bool
+    childExit: int
+    childExitReported: bool
 
 const ObserverCommand = """
 $ErrorActionPreference = 'Stop'
@@ -42,17 +53,54 @@ $watcher.IncludeSubdirectories = $false
 $watcher.EnableRaisingEvents = $true
 $subscription = Register-ObjectEvent -InputObject $watcher -EventName Created -SourceIdentifier 'repro-expand-archive-created'
 try {
+  # The child is EXPECTED to fail in two of the four cases below, so its
+  # failure must not become the OBSERVER's failure before the observer has
+  # read the watcher. Two independent mechanisms do exactly that under
+  # $ErrorActionPreference = 'Stop':
+  #
+  #   * Windows PowerShell turns a native command's stderr into
+  #     NativeCommandError records whenever the host's own stderr is
+  #     redirected -- which it always is here, because the Nim harness pipes
+  #     it (poStdErrToStdOut).
+  #   * pwsh 7.4+ additionally applies $ErrorActionPreference to a native
+  #     command's non-zero EXIT CODE
+  #     ($PSNativeCommandUseErrorActionPreference, on by default).
+  #
+  # Either one aborts this scriptblock at the '&' below. The observer then
+  # exits non-zero having never called Wait-Event -- so it reports "no
+  # scratch archive was created" about a child that created one, while its
+  # own non-zero exit is read as the child's. That is precisely the failure
+  # this gate showed: `exitCode != 0` green, `scratchPath.len > 0` red.
+  #
+  # 'Continue' for the duration of the call, and the exit code read
+  # explicitly afterwards, is the only combination that lets a failing child
+  # be observed rather than propagated.
+  $observerPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $childExit = $null
   & $env:REPRO_TEST_POWERSHELL -NoProfile -Command $env:REPRO_TEST_COMMAND
   $childExit = $LASTEXITCODE
+  $ErrorActionPreference = $observerPreference
+  if ($null -eq $childExit) {
+    # `&` never launched the child (command not found, access denied). Print
+    # a non-numeric placeholder rather than a plausible integer: the reader
+    # parses CHILD_EXIT= strictly, so this reports "not observed" instead of
+    # impersonating an exit code.
+    $childExit = 'unlaunched'
+  }
   $created = Wait-Event -SourceIdentifier 'repro-expand-archive-created' -Timeout 10
   if ($null -ne $created) {
     [Console]::Out.WriteLine('SCRATCH=' + $created.SourceEventArgs.FullPath)
-  } elseif ($env:REPRO_TEST_REQUIRE_CREATION -eq '1') {
+  }
+  # Printed BEFORE the require-creation throw below, and unconditionally:
+  # once the child has been waited on, its exit code is a fact the reader is
+  # entitled to even when the watcher assertion then fails.
+  [Console]::Out.WriteLine('CHILD_EXIT=' + $childExit)
+  if ($null -eq $created -and $env:REPRO_TEST_REQUIRE_CREATION -eq '1') {
     throw 'scratch .zip creation was not observed'
   }
-  [Console]::Out.WriteLine('CHILD_EXIT=' + $childExit)
   if ($childExit -ne 0) {
-    exit $childExit
+    exit 1
   }
 } finally {
   Unregister-Event -SourceIdentifier 'repro-expand-archive-created' -ErrorAction SilentlyContinue
@@ -80,14 +128,103 @@ proc runProcess(executable: string; args: seq[string];
   result.exitCode = process.waitForExit()
   process.close()
 
+proc inheritedModulePath(): string =
+  getEnv("PSModulePath")
+
+proc fixtureShellEnvironment(): StringTableRef =
+  ## Environment for the FIXTURE PowerShell calls -- the ones that build
+  ## archives and manipulate ACLs. It differs from the inherited environment in
+  ## exactly one variable, and that variable is the bug.
+  ##
+  ## ``Get-Acl`` / ``Set-Acl`` live in ``Microsoft.PowerShell.Security``, which
+  ## Windows PowerShell autoloads by walking ``$env:PSModulePath``. The CI step
+  ## shell on this runner class is PowerShell 7 (``C:\pwsh\pwsh.EXE``), and it
+  ## exports a ``PSModulePath`` whose ``$PSHOME\Modules`` entry holds
+  ## PowerShell 7's OWN ``Microsoft.PowerShell.Security``, whose manifest
+  ## declares ``CompatiblePSEditions = @("Core")``. Desktop edition finds that
+  ## copy first, refuses it, and reports
+  ##
+  ##   Get-Acl : The 'Get-Acl' command was found in the module
+  ##   'Microsoft.PowerShell.Security', but the module could not be loaded.
+  ##
+  ## ``Microsoft.PowerShell.Archive`` (``Expand-Archive`` / ``Compress-Archive``)
+  ## carries no ``CompatiblePSEditions`` key at all, so Desktop edition loads
+  ## PowerShell 7's copy of THAT one happily -- which is why the archive
+  ## fixtures kept working and only the ACL arm went red, and why the symptom
+  ## looked like an ACL bug rather than an environment one.
+  ##
+  ## Rebuilding the variable from Windows PowerShell's own three directories is
+  ## composed and unit-tested host-side in
+  ## ``tests/windows/t_expand_archive_boundary_support.nim``.
+  result = processEnvironment()
+  result["PSModulePath"] = windowsPowerShellModulePath(
+    getEnv("SystemRoot"), getEnv("ProgramFiles"), getEnv("USERPROFILE"))
+
+proc fixtureShellExe(): string =
+  ## The fixture interpreter, named absolutely and required to exist.
+  ##
+  ## No silent fallback to a PATH lookup: ``powershell`` on PATH is what the
+  ## PRODUCTION argv resolves (deliberately -- that resolution is part of what
+  ## this gate checks), and letting the fixture share that ambiguity is how an
+  ## ACL check ends up unable to say which interpreter refused its module.
+  result = windowsPowerShellExe(getEnv("SystemRoot"))
+  if not fileExists(result):
+    raise newException(IOError,
+      "Windows PowerShell (Desktop edition) not found at " & result &
+      " - the ACL fixtures need it. Inherited PSModulePath was: " &
+      inheritedModulePath())
+
 proc runPowerShell(command: string): ProcessResult =
-  runProcess("powershell", @["-NoProfile", "-Command", command])
+  ## Fixture-side PowerShell. See ``fixtureShellExe`` and
+  ## ``fixtureShellEnvironment`` above for why neither the interpreter nor the
+  ## module path is inherited.
+  runProcess(fixtureShellExe(), @["-NoProfile", "-Command", command],
+             fixtureShellEnvironment())
 
 proc requireProcessSuccess(processResult: ProcessResult; context: string) =
   if processResult.exitCode != 0:
     raise newException(IOError,
       context & " exited " & $processResult.exitCode & ": " &
         processResult.output)
+
+proc requireSecurityModuleLoaded() =
+  ## Preflight for the ACL arm: prove ``Get-Acl`` is live BEFORE any assertion
+  ## depends on it.
+  ##
+  ## An ACL check whose module silently failed to load is a check that does not
+  ## check (Verification-Harness-Traps.md section 2). The probe therefore
+  ## asserts on what it PRODUCED -- a marker line naming the module that
+  ## actually backs ``Get-Acl`` -- rather than on a zero exit code, and on
+  ## failure it names the interpreter, the module path it was given, and the
+  ## foreign entries in the path it was NOT given, so the next reader does not
+  ## have to re-derive the diagnosis from "the module could not be loaded".
+  let probe = runPowerShell(
+    "$ErrorActionPreference = 'Stop'; " &
+    "Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; " &
+    "$command = Get-Command Get-Acl -ErrorAction Stop; " &
+    "if ($command.ModuleName -ne 'Microsoft.PowerShell.Security') { " &
+      "throw ('Get-Acl resolved to module ' + $command.ModuleName) }; " &
+    "[Console]::Out.WriteLine('" & SecurityModuleTag &
+      "' + $command.ModuleName)")
+  let foreign = foreignModulePathEntries(
+    inheritedModulePath(), getEnv("SystemRoot"), getEnv("ProgramFiles"),
+    getEnv("USERPROFILE"))
+  let diagnosis =
+    "\n  interpreter: " & fixtureShellExe() &
+    "\n  PSModulePath given: " & windowsPowerShellModulePath(
+      getEnv("SystemRoot"), getEnv("ProgramFiles"), getEnv("USERPROFILE")) &
+    "\n  PSModulePath inherited: " & inheritedModulePath() &
+    "\n  foreign entries in the inherited path: " & foreign.join(", ")
+  if probe.exitCode != 0:
+    raise newException(IOError,
+      "Microsoft.PowerShell.Security failed to load; the ACL arm would have " &
+      "asserted over a check that does not check. Probe exited " &
+      $probe.exitCode & ": " & probe.output & diagnosis)
+  let reported = taggedValue(probe.output, SecurityModuleTag)
+  if not reported.found or reported.value != "Microsoft.PowerShell.Security":
+    raise newException(IOError,
+      "Microsoft.PowerShell.Security probe exited 0 without reporting the " &
+      "module behind Get-Acl. Output: " & probe.output & diagnosis)
 
 proc readAccessSddl(path: string): string =
   let readResult = runPowerShell(
@@ -145,11 +282,21 @@ proc restoreAccessAndResetChildren(path, accessSddl: string): ProcessResult =
       powershellSingleQuotedLiteral(accessSddl) & ", " &
       "[System.Security.AccessControl.AccessControlSections]::Access); " &
     "Set-Acl -LiteralPath $path -AclObject $acl; " &
+    # icacls is a NATIVE command, and this runs on the teardown path. Under
+    # $ErrorActionPreference = 'Stop' with the host's stderr redirected (it
+    # always is here), anything icacls writes to stderr becomes a terminating
+    # NativeCommandError before the explicit $LASTEXITCODE check below can
+    # run -- and a spurious throw here abandons the fixture with a delete-deny
+    # ACE still installed on a directory the next test must remove. The exit
+    # code is the signal that matters, so it is the one that is read.
+    "$restorePreference = $ErrorActionPreference; " &
+    "$ErrorActionPreference = 'Continue'; " &
     "Get-ChildItem -LiteralPath $path -Force | ForEach-Object { " &
       "& icacls.exe $_.FullName /reset /T /C /Q | Out-Null; " &
       "if ($LASTEXITCODE -ne 0) { " &
         "throw ('icacls reset failed for ' + $_.FullName + " &
-          "' with exit code ' + $LASTEXITCODE) } }")
+          "' with exit code ' + $LASTEXITCODE) } }; " &
+    "$ErrorActionPreference = $restorePreference")
 
 proc runObserved(argv: seq[string]; tempRoot: string;
                  requireCreation: bool): ObservedRun =
@@ -164,13 +311,35 @@ proc runObserved(argv: seq[string]; tempRoot: string;
   env["REPRO_TEST_COMMAND"] = argv[3]
   env["REPRO_TEST_REQUIRE_CREATION"] =
     if requireCreation: "1" else: "0"
+  # The OBSERVER host is deliberately the bare PATH name too, and its
+  # environment is deliberately inherited unchanged: the child inherits from
+  # the observer, so sanitising anything here would run the production argv
+  # under conditions production does not have. The fixture helpers above are
+  # the only calls that get a rebuilt PSModulePath.
   let observed = runProcess(
     "powershell", @["-NoProfile", "-Command", ObserverCommand], env)
   result.exitCode = observed.exitCode
   result.output = observed.output
-  for line in observed.output.splitLines():
-    if line.startsWith("SCRATCH="):
-      result.scratchPath = line["SCRATCH=".len .. ^1]
+  let report = parseObserverReport(observed.output)
+  result.scratchPath = report.scratchPath
+  result.scratchReported = report.scratchReported
+  result.childExit = report.childExit
+  result.childExitReported = report.childExitReported
+
+proc requireObserverReachedChild(run: ObservedRun; context: string) =
+  ## Refuse to read the observer's exit code as the child's.
+  ##
+  ## ``CHILD_EXIT=`` can only be printed by the code path that read the child's
+  ## ``$LASTEXITCODE``. Its absence means the observer died first -- and every
+  ## assertion downstream would then be describing the harness, not the
+  ## boundary. Raising here rather than checking makes that state impossible to
+  ## mistake for a verdict.
+  if not run.childExitReported:
+    raise newException(IOError,
+      context & ": the observer exited " & $run.exitCode &
+      " without ever reporting CHILD_EXIT, so it never read the child's exit " &
+      "code. Its own exit code is not the child's. Observer output:\n" &
+      run.output)
 
 proc remainingScratchFiles(tempRoot: string): seq[string] =
   for path in walkFiles(tempRoot / "repro-expand-archive-*.zip"):
@@ -203,6 +372,14 @@ suite "M3f Windows expandArchive runtime boundary":
       buildZipArgvWindows(archive, destinationB), root,
       requireCreation = true)
 
+    # The observer's exit code is the weakest thing it produces; assert the
+    # child's, which only the path that actually read $LASTEXITCODE can report.
+    requireObserverReachedChild(first, "first success run")
+    requireObserverReachedChild(second, "second success run")
+    check first.childExit == 0
+    check second.childExit == 0
+    check first.scratchReported
+    check second.scratchReported
     check first.exitCode == 0
     check second.exitCode == 0
     check first.scratchPath.len > 0
@@ -233,6 +410,14 @@ suite "M3f Windows expandArchive runtime boundary":
       buildZipArgvWindows(missingArchive, destination), root,
       requireCreation = false)
 
+    # `Copy-Item` refuses a missing source before it creates the destination,
+    # so this arm's identity is that the failure happened BEFORE any scratch
+    # existed. Asserting the absence of a creation event, and not merely the
+    # absence of a leftover file, is what distinguishes it from the extraction
+    # arm below -- which fails after creating one and then cleans it up.
+    requireObserverReachedChild(failed, "copy-failure run")
+    check failed.childExit != 0
+    check not failed.scratchReported
     check failed.exitCode != 0
     check remainingScratchFiles(root).len == 0
 
@@ -249,6 +434,17 @@ suite "M3f Windows expandArchive runtime boundary":
       buildZipArgvWindows(invalidArchive, destination), root,
       requireCreation = true)
 
+    # `Copy-Item` succeeds here -- the invalid file is copied to scratch
+    # perfectly well -- and `Expand-Archive` is what fails, so a scratch
+    # archive HAS been created and the implementation owes us its path. That
+    # expectation was always right; what was wrong was the observer, which
+    # took the child's failure as a terminating error and exited before it
+    # could call Wait-Event. `exitCode != 0` was then green because the
+    # OBSERVER had failed, while `scratchPath.len > 0` was red because it
+    # never looked. requireObserverReachedChild makes that state impossible.
+    requireObserverReachedChild(failed, "extraction-failure run")
+    check failed.childExit != 0
+    check failed.scratchReported
     check failed.exitCode != 0
     check failed.scratchPath.len > 0
     check failed.scratchPath.extractFilename().startsWith(
@@ -273,6 +469,11 @@ suite "M3f Windows expandArchive runtime boundary":
         " -Force")
       requireProcessSuccess(compress, "create cleanup-failure archive")
 
+      # Before anything asserts through Get-Acl / Set-Acl, prove they are
+      # actually live. Get-Acl failing to autoload is not a runner fault and
+      # not an ACL result -- it is a check that does not check, and it is what
+      # made this case die at readAccessSddl on every Windows run.
+      requireSecurityModuleLoaded()
       originalAccessSddl = readAccessSddl(root)
       # Restoration is required even when installation reports a failure:
       # Set-Acl may have completed before the verification step failed.
