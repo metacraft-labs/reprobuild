@@ -98,7 +98,18 @@ proc requireGit(gitBin: string; args: openArray[string]; cwd = "") =
       "\nexit=" & $res.code & "\n" & res.output)
     fail()
 
-const HookNames = ["pre-push", "post-commit", "post-merge", "post-checkout"]
+const HookNames = ["pre-commit", "pre-push", "post-commit", "post-merge",
+                   "post-checkout"]
+  ## The managed set, which this case asserts is installed in EVERY
+  ## participating repo — so it has to be the set `VcsHookNames` names, not a
+  ## snapshot of it.
+  ##
+  ## It was four hooks until `flake.lock` acquired a commit-time refresh.
+  ## `flake.lock` is an IN-TREE lock, and Unified-Locking-And-Hooks.md §13.1
+  ## makes the update rule a property of the backend: an in-tree lock is
+  ## written by the `pre-commit` hook, as part of forming the revision. Both
+  ## assertions below multiply by `HookNames.len` rather than by a literal, so
+  ## the next hook to join the set changes this list and nothing else.
 
 # ---------------------------------------------------------------------------
 # Fixture: three sibling repos plus a workspace root that is ITSELF a git repo

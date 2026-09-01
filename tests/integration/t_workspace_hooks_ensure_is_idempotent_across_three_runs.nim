@@ -4,9 +4,14 @@
 ## installer. Five sub-cases (per the M17 deliverable in
 ## ``reprobuild-specs/Workspace-Management.milestones.org``):
 ##
-##   1. ``test_m17_hooks_ensure_installs_four_hooks_per_repo`` — fresh
-##      workspace, four hooks land in every participating repo with the
-##      managed-by sentinel comment and the executable bit set.
+##   1. ``test_m17_hooks_ensure_installs_the_managed_hook_set_per_repo`` —
+##      fresh workspace, every hook of the managed set lands in every
+##      participating repo with the managed-by sentinel comment and the
+##      executable bit set. The set was four hooks through M19a; NF-2 added
+##      ``pre-commit``, because an IN-TREE lock is written while the revision
+##      is being formed (Unified-Locking-And-Hooks.md §13.1). The counts below
+##      are derived from ``ManagedHooksPerRepo`` rather than written out, so
+##      the next hook to join the set changes one line.
 ##   2. ``test_m17_hooks_ensure_is_idempotent_across_three_runs`` — run
 ##      ensure three times back-to-back; every per-repo per-hook entry
 ##      reports ``already-up-to-date`` on the second and third runs and
@@ -232,14 +237,23 @@ proc readReport(fx: M17Fixture): JsonNode =
 proc hookFilesInRepo(workspaceRoot, repoName: string):
     seq[tuple[name: string; path: string]] =
   let hooksDir = workspaceRoot / repoName / ".git" / "hooks"
-  for name in ["pre-push", "post-commit", "post-merge", "post-checkout"]:
+  # NF-2 added `pre-commit`: `flake.lock` is an IN-TREE lock, and
+  # Unified-Locking-And-Hooks.md §13.1 makes the update rule a property of the
+  # backend — an in-tree lock is written by the pre-commit hook, as part of
+  # forming the revision. Listed here so the counts below stay derived from
+  # the managed set rather than from a number somebody has to remember.
+  for name in ["pre-commit", "pre-push", "post-commit", "post-merge",
+               "post-checkout"]:
     result.add((name: name, path: hooksDir / name))
+
+const ManagedHooksPerRepo = 5
+const ManagedHookEntries = ManagedHooksPerRepo * 3  ## three repos
 
 # ---- the suite -------------------------------------------------------------
 
 suite "M17 — repro hooks ensure --vcs (workspace-aware)":
 
-  test "test_m17_hooks_ensure_installs_four_hooks_per_repo":
+  test "test_m17_hooks_ensure_installs_the_managed_hook_set_per_repo":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -257,8 +271,8 @@ suite "M17 — repro hooks ensure --vcs (workspace-aware)":
       check report["mode"].getStr() == "workspace"
       check report["project"].getStr() == "lib-a"
       check report["repos"].len == 3
-      # Four hooks × three repos = 12 entries.
-      check report["entries"].len == 12
+      # One entry per (repo, managed hook).
+      check report["entries"].len == ManagedHookEntries
 
       # Every per-repo per-hook entry was a fresh ``installed`` outcome
       # on the first run.
@@ -312,7 +326,7 @@ suite "M17 — repro hooks ensure --vcs (workspace-aware)":
       let secondRes = invokeEnsure(fx)
       check secondRes.code == 0
       let secondReport = readReport(fx)
-      check secondReport["entries"].len == 12
+      check secondReport["entries"].len == ManagedHookEntries
       for entry in secondReport["entries"]:
         check entry["outcome"].getStr() == "already-up-to-date"
       for path, body in firstBytes:
@@ -322,17 +336,17 @@ suite "M17 — repro hooks ensure --vcs (workspace-aware)":
       let thirdRes = invokeEnsure(fx)
       check thirdRes.code == 0
       let thirdReport = readReport(fx)
-      check thirdReport["entries"].len == 12
+      check thirdReport["entries"].len == ManagedHookEntries
       for entry in thirdReport["entries"]:
         check entry["outcome"].getStr() == "already-up-to-date"
       for path, body in firstBytes:
         check readFile(path) == body
 
       # Sanity: the summary table is what the renderer prints. Every
-      # outcome on runs 2/3 must be ``already-up-to-date`` = 12.
-      check secondReport["summary"]["already-up-to-date"].getInt() == 12
-      check thirdReport["summary"]["already-up-to-date"].getInt() == 12
-      check firstReport["summary"]["installed"].getInt() == 12
+      # outcome on runs 2/3 must be ``already-up-to-date``.
+      check secondReport["summary"]["already-up-to-date"].getInt() == ManagedHookEntries
+      check thirdReport["summary"]["already-up-to-date"].getInt() == ManagedHookEntries
+      check firstReport["summary"]["installed"].getInt() == ManagedHookEntries
 
   test "test_m17_hooks_ensure_chains_pre_existing_user_hook":
     let gitBin = findExe("git")
@@ -463,8 +477,8 @@ suite "M17 — repro hooks ensure --vcs (workspace-aware)":
       # ``dispatch`` is the entry point the installed hook scripts
       # call. With no body registered (M17 ground state) every known
       # hook name returns 0 cleanly so M18+ can layer their bodies on
-      # top without a flag day. We exercise all four names.
-      for hookName in ["pre-push", "post-commit", "post-merge",
+      # top without a flag day. We exercise every name in the managed set.
+      for hookName in ["pre-commit", "pre-push", "post-commit", "post-merge",
                        "post-checkout"]:
         let res = invokeDispatch(fx, hookName)
         if res.code != 0:
