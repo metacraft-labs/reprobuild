@@ -445,7 +445,25 @@ jobs:
         env:
           REPRO_VERIFY_REQUIRE_DOCKER: "1"
         run: |
-          bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+          # macOS runs this under `dev-exec` so the nix dev shell supplies the
+          # POSIX userland the script shells out to (find, coreutils, ...). The
+          # static nix-darwin runners do NOT carry `find` on the bare step PATH
+          # -- unlike the ephemeral image, whose system /usr/bin leaked in -- so
+          # a bare `bash scripts/verify_release.sh` dies at the first `find` with
+          # `find: command not found` (exit 127) even though the archive built,
+          # packaged, and re-signed cleanly. This mirrors the POSIX packaging
+          # step above, which already runs under `dev-exec` for the same reason.
+          #
+          # Linux stays BARE on purpose: its verify runs the multi-distro Docker
+          # sweep (REPRO_VERIFY_REQUIRE_DOCKER=1), and the host `docker` CLI is
+          # not in the nix dev shell -- routing it through `dev-exec` would turn
+          # a green leg red. Windows stays bare too (Git-for-Windows bash already
+          # supplies find/grep/etc.; there is no `dev-exec` on windows-diy).
+          if [ "${{ matrix.os-name }}" = "macos" ]; then
+            dev-exec bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+          else
+            bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+          fi
 
       # Checksum at the point of production. The publish job RE-computes this
       # from the downloaded artifact and compares, which is what makes the
