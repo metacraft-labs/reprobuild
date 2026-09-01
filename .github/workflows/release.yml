@@ -289,12 +289,18 @@ jobs:
         # annotation instead of blocking the pool for hours. Remove/raise once
         # the Windows interface-extract hang is root-caused and fixed (it is
         # release-only and has no CI coverage today -- see ci.yml).
-        # The Windows runner is slow and load-variable: the app build has taken
-        # 37-65 min and the interface-extract `nim c` (247 serial gcc compiles of
-        # the full DSL-stdlib closure, ~11 min healthy) sits on top. Diagnostics
-        # proved the extract COMPLETES -- it was never a deadlock, just a long
-        # serial compile whose tail latency spiked into hours. Cap generously.
-        timeout-minutes: 120
+        # The Windows runner is slow and cache-less (windows-diy recompiles the
+        # whole tree from scratch): app build 43-65 min + interface-extract ~13
+        # min + the `.#release` build of 20 artifacts ~61 min (the repro app
+        # alone is 435k lines of C / 1.9 GiB / 12 min) ≈ 115-140 min. A 120-min
+        # cap guillotined the LAST still-compiling artifact (reprobuild.apps.repro)
+        # at exactly 120 min -- a killed process with empty stderr, not a real
+        # failure. The phases PROGRESS (proven: extract completes in 13 min, the
+        # earlier "hang" was that too-tight cap), they are just slow, so give the
+        # whole leg room to finish. The interface-extract still has its own tight
+        # 40-min inner cap (REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS) to catch a
+        # genuine extract wedge fast, so this outer cap need not be tight.
+        timeout-minutes: 240
         env:
           # Cap the interface `nim c` (inside runCommand) above a healthy-but-slow
           # extract (~11 min observed; 40 min gives wide margin) so genuine
