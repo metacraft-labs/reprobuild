@@ -2464,6 +2464,58 @@ proc ensureExecutable(path: string) =
     setFilePermissions(extendedPath(path), {fpUserRead, fpUserWrite, fpUserExec,
       fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
+when defined(macosx):
+  # SIP prefixes, kept byte-identical to nim-stackable-hooks'
+  # ``propagation.sipProtectedPrefixes`` (the population io-mon itself uses via
+  # ``isSipProtected`` / ``rewriteSipPath``) so the engine and the monitor agree
+  # on what counts as SIP-protected. Defined locally rather than imported to
+  # keep this foundational lib free of a new dependency edge; the values MUST
+  # track the shared population.
+  const macosSipCompilerPrefixes = ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"]
+
+  proc isSipProtectedCompiler(path: string): bool =
+    for prefix in macosSipCompilerPrefixes:
+      if path.startsWith(prefix):
+        return true
+    false
+
+  proc firstNonSipCCompilerOnPath(): string =
+    ## macOS / Apple Silicon: the io-mon monitor shim
+    ## (``librepro_monitor_shim.dylib``, injected via ``DYLD_INSERT_LIBRARIES``)
+    ## cannot be carried into a SIP-protected, arm64e *system* binary. ``nim c``
+    ## shells the C back-end out to the compiler resolved here, so when that
+    ## compiler is one of the SIP binaries (``/usr/bin/cc``), the monitored
+    ## reprobuild provider / interface compile spawns an unmonitorable arm64e
+    ## child and dyld either refuses an arm64-only shim slice ("incompatible
+    ## architecture ... need arm64e") or the arm64e interpose path crashes the
+    ## child — the compile then fails with an opaque
+    ## "execution of an external program failed". A non-SIP compiler (the Nix /
+    ## Homebrew clang wrapper that ``nix develop`` puts on ``PATH``) takes the
+    ## arm64 shim slice cleanly and is fully monitorable. Prefer it, mirroring
+    ## the engine's ``resolveNonSipShell`` for the analogous ``/bin/sh`` case.
+    ## Returns "" when only SIP compilers are on ``PATH`` (e.g. a bare login
+    ## shell); the caller then falls back to the SIP compiler unchanged.
+    let pathEnv = getEnv("PATH")
+    for name in ["cc", "clang", "gcc"]:
+      for dir in pathEnv.split(PathSep):
+        if dir.len == 0:
+          continue
+        let candidate = dir / name
+        if not fileExists(extendedPath(candidate)):
+          continue
+        if isSipProtectedCompiler(candidate):
+          continue
+        return candidate
+    ""
+
+  proc preferNonSipCompiler(candidate: string): string =
+    ## When ``candidate`` is a SIP-protected compiler, substitute a non-SIP one
+    ## if PATH offers it; otherwise keep ``candidate`` (best effort).
+    if candidate.len == 0 or not isSipProtectedCompiler(candidate):
+      return candidate
+    let nonSip = firstNonSipCCompilerOnPath()
+    if nonSip.len > 0: nonSip else: candidate
+
 proc hostCCompilerPath(): string =
   # MR9 — `$REPRO_BOOTSTRAP_CC` is the bootstrap-resolved gcc absolute
   # path published by `ensureBootstrapToolchainEnv` (tool_profiles.nim)
@@ -2482,12 +2534,18 @@ proc hostCCompilerPath(): string =
     return bootstrapCC
   let ccEnv = getEnv("CC")
   if ccEnv.len > 0 and isAbsolute(ccEnv):
-    return ccEnv
+    when defined(macosx):
+      return preferNonSipCompiler(ccEnv)
+    else:
+      return ccEnv
   when not defined(windows):
     let runtimeCC = findExe("cc")
     if runtimeCC.len > 0 and isAbsolute(runtimeCC) and
         fileExists(extendedPath(runtimeCC)):
-      return runtimeCC
+      when defined(macosx):
+        return preferNonSipCompiler(runtimeCC)
+      else:
+        return runtimeCC
   if BuiltCCompilerPath.len > 0 and fileExists(extendedPath(BuiltCCompilerPath)):
     return BuiltCCompilerPath
   ""
