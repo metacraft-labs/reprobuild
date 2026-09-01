@@ -132,6 +132,16 @@ package cargo:
           role = input
         flag targetDir is string,
           alias = "--target-dir"
+        # Package / binary selectors — let a recipe restrict a virtual
+        # workspace build to a single member crate + binary (granular
+        # per-artifact edge) instead of building every member. Maps to
+        # cargo's ``-p``/``--bin``. VERIFY(build): kwarg name ``package``
+        # must not collide with the DSL ``package`` macro at call sites;
+        # if it does, rename the kwarg (keep ``alias = "--package"``).
+        flag package is string,
+          alias = "--package"
+        flag bin is string,
+          alias = "--bin"
 
       subcmd "test":
         ## `cargo test` orchestrates build + run in one verb. The
