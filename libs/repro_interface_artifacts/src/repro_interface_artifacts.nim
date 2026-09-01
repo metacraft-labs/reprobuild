@@ -2360,7 +2360,43 @@ proc runCommand(command: openArray[string];
         process = startProcess("cmd.exe",
           args = @["/c", scriptPath],
           workingDir = cwd, options = {poUsePath})
-    let exitCode = process.waitForExit()
+    # Bounded wait. A wedged `nim c` -- whose gcc children can deadlock on
+    # Windows and hold the runner for HOURS (observed: a 4h+ hang on the
+    # full-closure interface extract) -- must fail fast with whatever it wrote
+    # to the sink, never hang. REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS overrides
+    # the default cap; a value <= 0 restores the original unbounded wait. On
+    # timeout we kill the WHOLE process tree (wrapper -> nim.exe -> gcc.exe) via
+    # `taskkill /T` so no orphaned compiler keeps the slot busy, then still read
+    # the partial sink -- so with `--listCmd` the LAST command in the dump is the
+    # sub-command that wedged, converting a silent hang into an actionable error.
+    var timeoutSecs = 1800
+    block:
+      let raw = getEnv("REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS").strip()
+      if raw.len > 0:
+        try:
+          timeoutSecs = parseInt(raw)
+        except ValueError:
+          timeoutSecs = 1800
+    var exitCode = 0
+    var timedOut = false
+    if timeoutSecs <= 0:
+      exitCode = process.waitForExit()
+    else:
+      let deadline = epochTime() + timeoutSecs.float
+      while true:
+        if not running(process):
+          exitCode = process.waitForExit()
+          break
+        if epochTime() >= deadline:
+          timedOut = true
+          discard execCmd("taskkill /F /T /PID " & $process.processID &
+            " > nul 2>&1")
+          try:
+            exitCode = process.waitForExit()
+          except CatchableError:
+            exitCode = 124
+          break
+        sleep(500)
     process.close()
     try:
       removeFile(extendedPath(scriptPath))
@@ -2380,6 +2416,12 @@ proc runCommand(command: openArray[string];
         removeFile(extendedPath(sinkPath))
       except CatchableError:
         discard
+    if timedOut:
+      exitCode = 124
+      output = "runCommand: TIMED OUT after " & $timeoutSecs &
+        "s and killed the nim/gcc process tree. Partial sink output follows; " &
+        "with --listCmd the LAST command shown is the one that wedged.\n" &
+        output
     result = ProviderCompileExecutionResult(
       exitCode: exitCode,
       output: output)
@@ -4645,6 +4687,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
       producerPathFlags.add("--path:" & absolutePath(extra))
   if producerPathFlags.len > 0:
     command.insert(producerPathFlags, 4 + libFlags.len)
+  # Diagnostic (opt-in via REPRO_INTERFACE_LIST_CMD): make the otherwise-silent
+  # interface `nim c` echo every sub-command (the gcc.exe compile/link lines) it
+  # issues. Paired with runCommand's Windows timeout-and-dump-sink, the LAST
+  # echoed command in the dump names the exact sub-process that wedged, turning a
+  # silent multi-hour hang into an actionable error. Inserted among the flags
+  # (index 2), never after `runnerPath`, or nim treats it as a second input file.
+  if getEnv("REPRO_INTERFACE_LIST_CMD").len > 0:
+    command.insert(@["--listCmd"], 2)
   # `workDir` is the reprobuild library lookup/fingerprint root. Installed Nix
   # packages deliberately point it at their immutable source closure, so it is
   # not a valid compiler working directory: Nim writes relative linker response
