@@ -41,6 +41,29 @@ if (-not (Test-Path -LiteralPath $binDir)) {
 
 $tmp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
 
+# Retry wrapper for the public-CDN downloads below. This script runs on the
+# critical release-staging path and pulls from conda-forge / curl.se, which
+# flake (transient `no healthy upstream` 503s). Without a retry a single blip
+# fails the whole ~2h Windows release leg. 6 attempts with capped linear
+# backoff (~45s total) rides out a minute-long outage, then fails for real.
+# (This script is standalone -- it does not dot-source toolchain-utils.ps1 --
+# so the helper is duplicated here rather than shared.)
+function Invoke-DownloadWithRetry {
+    param([Parameter(Mandatory = $true)][scriptblock]$Script)
+    $attempts = 6
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        try {
+            return & $Script
+        } catch {
+            if ($attempt -ge $attempts) { throw }
+            $wait = [Math]::Min(3 * $attempt, 30)
+            Write-Host ("  download attempt {0}/{1} failed ({2}); retrying in {3}s..." -f `
+                $attempt, $attempts, $_.Exception.Message, $wait)
+            Start-Sleep -Seconds $wait
+        }
+    }
+}
+
 function Copy-IntoBin {
     param([string]$SrcPath, [string]$DestName)
     $dest = Join-Path $binDir $DestName
@@ -75,7 +98,7 @@ function Download-Zip {
     param([string]$Url, [string]$Sha256, [string]$OutDir)
     $zip = Join-Path $tmp ("dl-" + [IO.Path]::GetRandomFileName() + ".zip")
     Write-Host "  downloading $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $zip
+    Invoke-DownloadWithRetry { Invoke-WebRequest -Uri $Url -OutFile $zip }
     if ($Sha256) {
         $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower()
         if ($got -ne $Sha256.ToLower()) {
@@ -99,7 +122,7 @@ function Expand-CondaPackage {
     # so name the download accordingly (bytes are unchanged, checksum still holds).
     $conda = Join-Path $WorkDir "pkg.zip"
     Write-Host "  downloading $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $conda
+    Invoke-DownloadWithRetry { Invoke-WebRequest -Uri $Url -OutFile $conda }
     if ($Sha256) {
         $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $conda).Hash.ToLower()
         if ($got -ne $Sha256.ToLower()) {
@@ -288,7 +311,7 @@ if (Test-Path -LiteralPath (Join-Path $binDir "cacert.pem")) {
     $cacertSrc = Find-FirstFile -Name "cacert.pem" -Roots $cacertRoots
     if ($null -eq $cacertSrc) {
         try {
-            Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile (Join-Path $binDir "cacert.pem")
+            Invoke-DownloadWithRetry { Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile (Join-Path $binDir "cacert.pem") }
             Write-Host "  staged cacert.pem  <-  https://curl.se/ca/cacert.pem"
         } catch {
             Write-Warning "stage-release-dlls: cacert.pem not found near nim and download failed ($($_.Exception.Message)); HTTPS at runtime will fail until one is beside repro.exe."

@@ -2,11 +2,18 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 function Invoke-WithRetry {
+  # The cache-less windows-diy toolchain pulls every tool from a public CDN
+  # (conda-forge for clingo, WinLibs for gcc, ...), and those flake: a single
+  # `no healthy upstream` (proxy 503) fetching clingo has failed the whole ~2h
+  # Windows release leg. 4 attempts over ~12s was not enough to ride out a
+  # sustained CDN blip, so retry longer -- 6 attempts with capped linear
+  # backoff (3,6,9,12,15s -> ~45s total) survives a minute-long outage while
+  # still failing fast on a genuine, persistent error.
   param(
     [Parameter(Mandatory = $true)]
     [scriptblock]$Script,
-    [int]$Attempts = 4,
-    [int]$DelaySeconds = 2
+    [int]$Attempts = 6,
+    [int]$DelaySeconds = 3
   )
 
   for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
@@ -16,7 +23,10 @@ function Invoke-WithRetry {
       if ($attempt -ge $Attempts) {
         throw
       }
-      Start-Sleep -Seconds ($DelaySeconds * $attempt)
+      $wait = [Math]::Min($DelaySeconds * $attempt, 30)
+      Write-Host ("  download attempt {0}/{1} failed ({2}); retrying in {3}s..." -f `
+        $attempt, $Attempts, $_.Exception.Message, $wait)
+      Start-Sleep -Seconds $wait
     }
   }
 }
