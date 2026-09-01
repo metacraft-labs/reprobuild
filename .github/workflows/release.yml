@@ -289,15 +289,20 @@ jobs:
         # annotation instead of blocking the pool for hours. Remove/raise once
         # the Windows interface-extract hang is root-caused and fixed (it is
         # release-only and has no CI coverage today -- see ci.yml).
-        timeout-minutes: 75
+        # The Windows runner is slow and load-variable: the app build has taken
+        # 37-65 min and the interface-extract `nim c` (247 serial gcc compiles of
+        # the full DSL-stdlib closure, ~11 min healthy) sits on top. Diagnostics
+        # proved the extract COMPLETES -- it was never a deadlock, just a long
+        # serial compile whose tail latency spiked into hours. Cap generously.
+        timeout-minutes: 120
         env:
-          # TEMPORARY diagnostic (remove once the Windows interface-extract hang
-          # is fixed). REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS caps the interface
-          # `nim c` inside runCommand so a wedged extract fails in ~10 min with a
-          # dumped partial sink instead of hanging out the 75-min step. LIST_CMD
-          # makes nim echo each gcc sub-command, so the last line of that dump is
-          # the exact sub-process that wedged.
-          REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS: "600"
+          # Cap the interface `nim c` (inside runCommand) above a healthy-but-slow
+          # extract (~11 min observed; 40 min gives wide margin) so genuine
+          # slowness passes while a true multi-hour wedge is still killed fast
+          # with a dumped partial sink. LIST_CMD keeps nim echoing each gcc
+          # sub-command so any future wedge names itself. Both are retained as
+          # durable guards, not just debug scaffolding.
+          REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS: "2400"
           REPRO_INTERFACE_LIST_CMD: "1"
         shell: pwsh
         run: |

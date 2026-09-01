@@ -2389,8 +2389,11 @@ proc runCommand(command: openArray[string];
           break
         if epochTime() >= deadline:
           timedOut = true
-          discard execCmd("taskkill /F /T /PID " & $process.processID &
-            " > nul 2>&1")
+          # No shell redirection here: execCmd does not route this through a
+          # shell that interprets `>`, so `> nul` reached taskkill as a literal
+          # argument ("Invalid argument/option - '>'") and the kill silently
+          # no-op'd. Let taskkill's couple of status lines flow to the log.
+          discard execCmd("taskkill /F /T /PID " & $process.processID)
           try:
             exitCode = process.waitForExit()
           except CatchableError:
