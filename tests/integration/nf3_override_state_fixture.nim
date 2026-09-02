@@ -191,6 +191,26 @@ proc flakeArgs*(fx: Nf2Fixture; extra = ""; cwd = ""):
   let errText = if fileExists(errPath): readFile(errPath) else: ""
   (code: res.code, stdout: res.output, stderr: errText)
 
+proc makeSiblingALinkedWorktree*(fx: Nf2Fixture; name: string): string =
+  ## Replace ``ws/<name>`` — an ordinary clone, whose `.git` is a DIRECTORY —
+  ## with a LINKED WORKTREE of the same repository, whose `.git` is a regular
+  ## FILE holding a `gitdir:` pointer. This is the shape
+  ## `repro branch ../<name>` produces, so it is not an exotic case: it is how
+  ## a second workspace on the same repos is normally made.
+  ##
+  ## Returns the worktree's HEAD.
+  let host = fx.scratch / ("worktree-host-" & name)
+  discard requireCmd(q(fx.gitBin) & " clone -q " & q(originUrl(fx, name)) &
+    " " & q(host))
+  discard requireCmd(q(fx.gitBin) & " -C " & q(host) &
+    " config user.email tester@example.invalid")
+  discard requireCmd(q(fx.gitBin) & " -C " & q(host) &
+    " config user.name \"NF2 Tester\"")
+  removeDir(siblingDir(fx, name))
+  discard requireCmd(q(fx.gitBin) & " -C " & q(host) &
+    " worktree add -q --detach " & q(siblingDir(fx, name)) & " HEAD")
+  headOf(fx, siblingDir(fx, name))
+
 proc statusRow*(doc: JsonNode; input: string): JsonNode =
   if doc.kind != JObject or not doc.hasKey("rows"): return nil
   for row in doc["rows"]:

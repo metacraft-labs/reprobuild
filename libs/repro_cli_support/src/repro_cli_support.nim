@@ -55459,10 +55459,17 @@ type
     ## ``flake.lock``, and the answer NF-3 compares against the pin — ONE
     ## computation with three consumers, so the pins the lock carries cannot
     ## describe a different substitution than the one the dev shell performed,
-    ## and the drift report cannot describe a third.
+    ## and the drift report cannot describe a third. Parallel derivations of
+    ## "which inputs are overridden" are exactly the drift this campaign exists
+    ## to remove.
     input*: string
     repo*: string
     path*: string
+    rev*: string
+      ## The checkout's ``HEAD``, observed ONCE at binding time and reused by
+      ## every consumer. Never empty: an input whose revision cannot be observed
+      ## is not bound at all (see ``flakeBindInputsToCheckouts``), so
+      ## "substituted" implies "observable" by construction.
 
   FlakeDevelopSelection = object
     ## The develop set in the shape the flake verbs need: repo name -> checkout
@@ -55568,11 +55575,37 @@ proc flakeDeclaredInputsAt(flakeRoot: string):
 
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     checkoutOf: Table[string, string]; suffixes: openArray[string];
+    identity: GitToolIdentity;
     report: var seq[string]): seq[FlakeOverrideBinding] =
   ## Bind each declared flake input to the develop-set checkout of the repo its
   ## (suffix-stripped) name denotes. Every input that is NOT bound and could
   ## plausibly have been is NAMED in ``report`` rather than dropped, because a
   ## silently skipped override is the shape of §5's inert knob.
+  ##
+  ## ## SUBSTITUTED IMPLIES OBSERVABLE
+  ##
+  ## An input is substituted only when the directory it would point at is a git
+  ## checkout whose ``HEAD`` can be read. This is a rule about the campaign's
+  ## own claim rather than a convenience.
+  ##
+  ## The alternative — substitute the directory anyway — produces a state in
+  ## which the dev shell builds a tree whose revision NOTHING can name: NF-2's
+  ## refresh has no revision to record, so `flake.lock` keeps a pin that
+  ## describes something else, and NF-3's report has nothing to compare, so it
+  ## can only say "unknown". §3.3 already names that outcome exactly — the
+  ## environment is "unreproducible by construction … because the pins are not
+  ## the inputs" — and §6's whole claim is that both environments agree on which
+  ## revision of each dependency is in play. A build input with no revision
+  ## cannot be agreed about.
+  ##
+  ## Refusing to bind it is the direction that keeps the claim true: nix builds
+  ## the `flake.lock` pin, so the lock DOES describe what was built, and the
+  ## skip is announced with its reason so "we chose the pin" and "we could not
+  ## tell" never look alike (NF-1's rule). The pre-push gate then has nothing to
+  ## refuse — which matters, because a refusal here could name no command that
+  ## resolves it: `repro flake refresh-lock` answers "could not read HEAD …
+  ## keeps its pin" and exits 0, so the operator would loop forever on a gate
+  ## that never stops refusing.
   for name in inputNames:
     let repo = stripFlakeInputSuffix(name, suffixes)
     if repo notin checkoutOf:
@@ -55599,7 +55632,25 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
         dir & ", which has no flake.nix, so nix cannot take it as an input. " &
         "It keeps its flake.lock pin.")
       continue
-    result.add(FlakeOverrideBinding(input: name, repo: repo, path: dir))
+    if not flakeSiblingIsGitCheckout(dir):
+      report.add("NOT substituted: flake input '" & name & "' resolves to " &
+        dir & ", which is not a git checkout, so no revision can be observed " &
+        "for it. Substituting it would put a tree nothing can name into the " &
+        "build, leaving flake.lock pinning something else with no way to say " &
+        "so; it keeps its flake.lock pin instead. Remedy: make " & dir &
+        " a git checkout (`repro develop --only=" & repo &
+        "` places one), or leave it on its pin.")
+      continue
+    let head = gitRunPlain(identity, ["-C", dir, "rev-parse", "HEAD"])
+    if head.code != 0 or head.output.strip().len == 0:
+      report.add("NOT substituted: flake input '" & name & "' resolves to " &
+        dir & ", whose HEAD could not be read (" & head.output.strip() &
+        "), so no revision can be observed for it. It keeps its flake.lock " &
+        "pin. Remedy: repair that checkout (`git -C " & dir &
+        " rev-parse HEAD` shows the error).")
+      continue
+    result.add(FlakeOverrideBinding(input: name, repo: repo, path: dir,
+      rev: head.output.strip()))
   result.sort(proc (a, b: FlakeOverrideBinding): int = cmp(a.input, b.input))
 
 # ---------------------------------------------------------------------------
@@ -55890,7 +55941,8 @@ proc flakeOverrideStateReport*(flakeRoot: string;
   result.examined = true
   result.ok = true
   for b in bindings:
-    var row = FlakeOverrideStateRow(input: b.input, repo: b.repo, path: b.path)
+    var row = FlakeOverrideStateRow(input: b.input, repo: b.repo, path: b.path,
+      siblingRev: b.rev)
     if not parsed.pins.hasKey(b.input):
       row.relation = fprUnpinned
       if parsed.unpinned.hasKey(b.input):
@@ -55903,17 +55955,14 @@ proc flakeOverrideStateReport*(flakeRoot: string;
       continue
     row.node = parsed.pins[b.input].node
     row.pinnedRev = parsed.pins[b.input].rev
-    let head = gitRunPlain(identity, ["-C", b.path, "rev-parse", "HEAD"])
-    if head.code == 0: row.siblingRev = head.output.strip()
-    let verdict = flakeClassifyPin(identity, b.path, row.pinnedRev,
-      row.siblingRev)
+    # ``b.rev`` was observed by the binder, in the same pass that decided this
+    # input is substituted at all. Re-reading HEAD here would open a window in
+    # which the shell was given one revision and the report describes another.
+    let verdict = flakeClassifyPin(identity, b.path, row.pinnedRev, row.siblingRev)
     row.relation = verdict.relation
     row.aheadBy = verdict.aheadBy
     row.behindBy = verdict.behindBy
     row.detail = verdict.detail
-    if head.code != 0:
-      row.detail = "HEAD of " & b.path & " could not be read (" &
-        head.output.strip() & ")"
     result.rows.add(row)
 
 proc flakeStateDisagrees*(row: FlakeOverrideStateRow): bool =
@@ -56133,7 +56182,7 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 
   # ---- bind inputs to develop-set checkouts ------------------------------
   let emitted = flakeBindInputsToCheckouts(inputNames, checkoutOf, suffixes,
-    report)
+    identity, report)
 
   # ---- the SAME bindings, compared against the pins (§3.2) ----------------
   let state = flakeOverrideStateReport(flakeRoot, emitted, identity)
@@ -56711,7 +56760,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     return
   result.notices = selection.notices
   let bound = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
-    suffixes, result.notices)
+    suffixes, identity, result.notices)
   if bound.len == 0:
     result.tag = "no-overrides"
     result.diagnostic = "no flake input of " & declared.flakePath &
@@ -56759,13 +56808,11 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   # automation: an observation, never a decision (§13.2).
   var revisions: seq[tuple[input, rev: string]]
   for b in bound:
-    let head = gitRunPlain(identity, ["-C", b.path, "rev-parse", "HEAD"])
-    if head.code != 0:
-      result.notices.add("could not read HEAD of '" & b.repo & "' at " &
-        b.path & " (" & head.output.strip() & "); input '" & b.input &
-        "' keeps its pin")
-      continue
-    revisions.add((input: b.input, rev: head.output.strip()))
+    # ``b.rev`` was read by the binder, which refuses to bind an input whose
+    # revision it could not observe — so a bound input always has one, and the
+    # "could not read HEAD" arm that used to live here is now a NOT-substituted
+    # notice issued at the point the substitution was declined.
+    revisions.add((input: b.input, rev: b.rev))
 
   var lockText = ""
   try:
@@ -57188,7 +57235,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   var skipped: seq[string]
   for n in selection.notices: skipped.add(n)
   let exact = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
-    defaultFlakeInputStripSuffixes, skipped)
+    defaultFlakeInputStripSuffixes, identity, skipped)
   var state = flakeOverrideStateReport(flakeRoot, exact, identity)
   if not state.ok:
     result.examined = true
@@ -57425,7 +57472,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     return refuse()
   for n in selection.notices: notices.add(n)
   let bindings = flakeBindInputsToCheckouts(declared.names,
-    selection.checkoutOf, suffixes, notices)
+    selection.checkoutOf, suffixes, identity, notices)
 
   let state = flakeOverrideStateReport(flakeRoot, bindings, identity)
   if not state.ok:

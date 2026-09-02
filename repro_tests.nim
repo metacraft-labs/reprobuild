@@ -7514,6 +7514,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim",
+    binary: "build/test-bin/t_a_linked_worktree_sibling_is_reported_and_gated",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_a_repo_not_in_develop_mode_is_not_substituted.nim",
     binary: "build/test-bin/t_a_repo_not_in_develop_mode_is_not_substituted",
     defines: @[],
@@ -7597,6 +7606,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_amend_and_rebase_are_idempotent.nim",
     binary: "build/test-bin/t_amend_and_rebase_are_idempotent",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_an_unobservable_sibling_is_not_substituted.nim",
+    binary: "build/test-bin/t_an_unobservable_sibling_is_not_substituted",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

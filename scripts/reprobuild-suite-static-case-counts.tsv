@@ -841,6 +841,7 @@ tests/integration/t_a_clean_workspace_pushes_without_a_diagnostic.nim	nim	1
 tests/integration/t_a_commit_that_moves_no_sibling_does_not_touch_the_lock.nim	nim	1
 tests/integration/t_a_dirty_sibling_leaves_the_lock_alone.nim	nim	1
 tests/integration/t_a_dirty_sibling_outside_the_closure_does_not_block.nim	nim	1
+tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim	nim	1
 tests/integration/t_a_repo_not_in_develop_mode_is_not_substituted.nim	nim	1
 tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim	nim	1
 tests/integration/t_a_worktree_sibling_is_not_invisible_to_the_refresh.nim	nim	1
@@ -851,6 +852,7 @@ tests/integration/t_action_cache_per_edge_no_global_log_no_growth.nim	nim	2
 tests/integration/t_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing.nim	nim	3
 tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	nim	6
 tests/integration/t_amend_and_rebase_are_idempotent.nim	nim	1
+tests/integration/t_an_unobservable_sibling_is_not_substituted.nim	nim	1
 tests/integration/t_an_unresolvable_membership_is_not_read_as_no_overrides.nim	nim	1
 tests/integration/t_apply_if_binds_config_by_workspace_path.nim	nim	1
 tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim	nim	1
