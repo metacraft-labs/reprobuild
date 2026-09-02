@@ -118,6 +118,21 @@ require_count flake.nix 'CODESIGN=/usr/bin/codesign \' 1
 require_count flake.nix "loaderStrings=\$(strings \"\$candidate\" | sed -e 's/^@//')" 1
 require_count flake.nix '<<< "$loaderStrings"' 3
 
+# EVERY `just lint` gate is `<check> 2>&1 | tee -a test-logs/lint.log`, so the
+# recipe's exit status is the PIPELINE's, and without `pipefail` that is
+# `tee`'s — a logging utility that succeeds whatever the gate decided. The
+# Justfile's `set shell` supplies the `-o pipefail` that makes the gate's
+# verdict the recipe's verdict; measured on 2026-09-01, `just lint` on `dev`
+# exits 1 and names line 435 (the dev-shell gate) because of it.
+#
+# That is one line at the top of one file, and nothing else in the repository
+# would notice its removal: the lint log would still carry every FAIL line, the
+# pre-commit hook would still `exec just lint`, and the hook would go green
+# while the gates went red. This repository has already paid for that exact
+# shape once — three of four io-mon CI checks reported `tee`'s status — so the
+# invariant is asserted here rather than left to survive on its own.
+require_count Justfile 'set shell := ["bash", "-eu", "-o", "pipefail", "-c"]' 1
+
 # Capture `just --summary` once and check it through a here-string. Piping into
 # `grep -q` under `set -o pipefail` can surface SIGPIPE as a false "missing
 # recipe" result when grep finds an early match and closes the pipe.
