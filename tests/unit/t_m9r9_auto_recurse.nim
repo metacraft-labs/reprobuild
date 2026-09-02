@@ -595,6 +595,43 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
     check "gcc" in BootstrapCycleBreakTools
     check "python3" in BootstrapCycleBreakTools
 
+  test "test_m9r9_cache_substitution_precedes_bootstrap_cycle_break":
+    let scratch = createTempDir("repro-m9r9-bootstrap-cache-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "python3")
+
+    let useDef = syntheticUseDef("python3")
+    let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
+    check outcome.kind == rrNeedsBuild
+    check "python3" in BootstrapCycleBreakTools
+    check shouldTryFromSourceCacheSubstitution(outcome,
+      cacheConfigured = true,
+      prepareOnly = false,
+      dryRun = false,
+      forceRebuild = false)
+    check not shouldTryFromSourceCacheSubstitution(outcome,
+      cacheConfigured = false,
+      prepareOnly = false,
+      dryRun = false,
+      forceRebuild = false)
+    check not shouldTryFromSourceCacheSubstitution(outcome,
+      cacheConfigured = true,
+      prepareOnly = false,
+      dryRun = true,
+      forceRebuild = false)
+
+  test "test_m9r9_lock_fold_keeps_missing_bootstrap_provider_metadata":
+    let scratch = createTempDir("repro-m9r9-bootstrap-lock-fold-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "gcc")
+
+    let useDef = syntheticUseDef("gcc")
+    let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
+    check outcome.kind == rrNeedsBuild
+    check "gcc" in BootstrapCycleBreakTools
+    check sourceProviderRecipeDirForSolverFold(outcome) ==
+      absolutePath(scratch / "gcc")
+
   test "test_m9r9_resolved_recipes_cache_is_addressable":
     # The per-process resolution cache must be reachable from outside
     # the dispatcher so the test harness (and ``repro why``) can

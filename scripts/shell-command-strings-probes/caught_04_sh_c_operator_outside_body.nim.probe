@@ -1,0 +1,8 @@
+## `sh` really is argv[0] — and the redirect is in a LATER argv element, so on
+## Windows `sh` receives `>` and the path as ordinary positional parameters and
+## the redirect never happens. Being INSIDE the `-c` body is what makes a site
+## safe; the head literal alone does not prove that.
+import std/[os, osproc]
+
+proc runLogged(body, log: string): string =
+  execCmdEx("sh -c " & quoteShell(body) & " > " & quoteShell(log)).output

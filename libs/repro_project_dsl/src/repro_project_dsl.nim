@@ -81,6 +81,27 @@ when defined(reproProviderMode):
   import repro_provider_runtime
   export repro_provider_runtime
 
+# Windows-Build-Correctness M6 — the entropy-blessing vocabulary is defined
+# ONCE, in ``repro_core``, and shared verbatim by the DSL (which declares the
+# blessing) and the build engine (which acts on it). A parallel mirror enum in
+# each layer is exactly the drift the ``CacheEntryIdentity`` import above
+# avoids, and it would drift in the direction that matters: a DSL that says
+# "blessed" and an engine that reads a different ordinal fails OPEN.
+#
+# Imported symbol-by-symbol rather than as a whole module: consumers such as
+# ``repro_dsl_stdlib/packages/nim.nim`` import ``repro_core`` AND
+# ``repro_project_dsl``, and re-exporting all of ``dependency_gathering`` here
+# would make every shared name (``DependencyGatheringPolicy``, …) ambiguous at
+# those call sites.
+# Exporting the TYPE carries its enum fields with it (Nim rejects exporting
+# an enum field on its own), so `ndpUnblessed` / `ndpEntropyBlessed` become
+# usable by every DSL consumer without re-exporting the rest of
+# `dependency_gathering` and making `DependencyGatheringPolicy` ambiguous at
+# the call sites that import both `repro_core` and `repro_project_dsl`.
+from repro_core/dependency_gathering import NonDeterminismPolicy,
+  ndpUnblessed, ndpEntropyBlessed
+export NonDeterminismPolicy
+
 include "repro_project_dsl/types"
 
 # Project-DSL-Composition M5: per-section typed-object prelude.

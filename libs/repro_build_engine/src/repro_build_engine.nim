@@ -57,6 +57,12 @@ import repro_build_engine/action_extension
 # the scheduler. Read its header before changing anything here that touches
 # ``depTempPath`` / ``depDestPath``.
 import repro_build_engine/monitor_flush
+# Engine-Threadpool TP-1: the flush above is one TENANT of the engine's worker
+# pool, not a thread of its own. The scheduler needs only the pool's
+# whole-pool drain here; every flush-shaped call goes through
+# ``monitor_flush``. Imported narrowly so the pool's shared-memory helpers
+# (``sharedDup`` / ``sharedFree``) do not enter this module's namespace.
+from repro_build_engine/worker_pool import awaitEnginePoolIdle
 export action_extension
 
 # M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
@@ -275,6 +281,19 @@ type
     dynamicDepsFile*: string
     monitorDepfile*: string
     dependencyPolicy*: DependencyGatheringPolicy
+    nonDeterminism*: NonDeterminismPolicy
+      ## Windows-Build-Correctness M6 — the entropy blessing of the TOOL
+      ## this action invokes, declared in that tool's CLI spec and lowered
+      ## here by ``repro_cli_support``. ``ndpUnblessed`` (the zero value) is
+      ## the default for every hand-constructed and legacy action, which is
+      ## the fail-closed direction: an action nobody vouched for pays for
+      ## observed entropy with its cache publication. Read by
+      ## ``collectEvidence``.
+    nonDeterminismJustification*: string
+      ## The tool's own stated reason, quoted into the action's evidence
+      ## diagnostics so ``repro why`` can answer "why did this keep caching
+      ## despite reading randomness?" without the reader having to go and
+      ## find the package spec.
     builtinText*: string
     builtinEntries*: seq[string]
     targetNames*: seq[string]
@@ -536,6 +555,31 @@ type
     # the local CAS. This is only appropriate for modes that rebuild missing
     # outputs instead of restoring them from cache.
     deferLocalOutputBlobs*: bool
+    requireCompleteOutputEvidence*: bool
+      ## S7 — the safety gate that makes the restore branch usable without
+      ## also making it dangerous.
+      ##
+      ## Restoring an action's DECLARED outputs is equivalent to re-running
+      ## it only when those outputs are the whole of its product. When they
+      ## are not, a restore yields a tree that is silently missing whatever
+      ## the action produced but did not declare — and it reports a cache
+      ## HIT while doing so. ``repro_cli_support.nim`` records the precedent
+      ## (see the ``develop --all`` note at its ``rebuildMissingOutputs``
+      ## call site): an action whose real product was a clone TREE
+      ## materialized only its receipt, and the chained step then failed
+      ## against a directory nobody had created.
+      ##
+      ## With this set, an action whose observed writes are not accounted
+      ## for by its declared outputs is published WITHOUT output payloads.
+      ## A payload-less record cannot serve a restore — the lookup returns
+      ## ``aclMissNoOutputPayload`` — so the action re-executes and produces
+      ## its whole product again. The gate therefore fails CLOSED: the cost
+      ## of a false negative is a rebuild, never an incomplete tree.
+      ##
+      ## "Accounted for" is deliberately narrow; see
+      ## ``undeclaredSurvivingWrites``. Default ``false`` preserves every
+      ## pre-S7 caller byte for byte. ``enableCachedOutputRestore`` is the
+      ## one place that turns it on, together with the two knobs it guards.
     # When true, the engine spawns each `bakProcess` action directly via
     # `osproc.startProcess` instead of going through the RunQuota helper, and
     # synthesizes a result JSON in the same on-disk schema the helper would
@@ -559,6 +603,15 @@ type
     # ``preparedRunQuotaCommand`` for the numbers and for what would have to
     # change before this becomes the default, and ``MonitorHostingMode`` for
     # what the three settings mean.
+    #
+    # IT IS A PRODUCT OPTION, NOT A TEST SEAM (In-Process-Monitor-Hosting P1,
+    # option (b)). ``repro build --monitor-hosting=never|where-supported|
+    # required`` and ``REPROBUILD_MONITOR_HOSTING`` set it; both go through
+    # ``parseMonitorHostingMode`` below. The surface exists so the HM-6
+    # verdict above can be RE-MEASURED on other hardware without writing a
+    # harness — which is the only reason to move it off ``mhmNever``. Note
+    # that only L1 (``--no-runquota``) can host, so the experiment is
+    # ``--no-runquota --monitor-hosting=where-supported``.
     monitorHosting*: MonitorHostingMode
     dryRun*: bool
     progressCallback*: BuildProgressCallback
@@ -652,6 +705,61 @@ type
       ## ``nil`` so an inadvertent elevated edge surfaces with the
       ## spec-mandated diagnostic instead of running.
 
+  EntropyCallerOrigin* = enum
+    ## Windows-Build-Correctness M6 — where an observed entropy read came
+    ## from, as far as the capture can tell. READ THE CASES LITERALLY; the
+    ## middle one is narrower than its io-mon spelling suggests.
+    ecoMainImage
+      ## The Windows shim's `caller=program`. The return address of the call
+      ## lay inside the main EXE image, so this is the monitored program's
+      ## own code. This inference is SOUND in this direction.
+    ecoOutsideMainImage
+      ## The Windows shim's `caller=system` — and the one token in this
+      ## whole design that must not be over-read. It means "the return
+      ## address was not in the main EXE image", which covers ntdll's and
+      ## the loader's startup baseline AND a bundled libcrypto, a compiler
+      ## plugin, or a native extension under an interpreter host. The
+      ## program's own randomness routinely lands here, and the shim's
+      ## per-(source, origin) dedup collapses even the count, so there is
+      ## no residual to notice it by. Treating this as "no program
+      ## randomness" would silently grade an unblessed program
+      ## deterministic. This engine therefore treats it EXACTLY like
+      ## `ecoMainImage` for the cache decision; it is kept as a distinct
+      ## case only so the diagnostic can say which one it saw.
+    ecoUnattributed
+      ## No `caller=` token at all. This is the macOS and Linux shape:
+      ## those arms attribute at the SHIM and emit `mrNonDeterministic`
+      ## only for the program's own use, so an absent token means "already
+      ## filtered", not "unknown". Same consequence as the two above.
+
+  EntropyObservation* = object
+    source*: string
+      ## The entry point io-mon named: `BCryptGenRandom`, `ProcessPrng`,
+      ## `RtlGenRandom`, `CryptGenRandom`, `getentropy`, `arc4random`,
+      ## `getrandom`, ...
+    origin*: EntropyCallerOrigin
+
+  EntropyObservability* = enum
+    ## Whether the capture's own backend declaration says entropy COULD be
+    ## observed. This exists because the absence of `mrNonDeterministic`
+    ## records is only meaningful if the monitor was able to produce them:
+    ## "the shim has no entropy hooks" and "the program read no entropy"
+    ## are the same silence, and this milestone's whole subject is telling
+    ## those two apart.
+    entUnknown
+      ## The capture carries no `mrBackendProfile` record, so it makes no
+      ## claim either way. Deliberately the ZERO value, so a `PathSetEvidence`
+      ## that was never folded starts here rather than at `entObserved`.
+    entObserved
+      ## A backend profile is present and lists `non-determinism` among its
+      ## supported capabilities. Absence of entropy records is then real
+      ## evidence of absence.
+    entNotObserved
+      ## A backend profile is present and does NOT list `non-determinism`,
+      ## or the capture carries an explicit `mrCapabilityGap` for it. The
+      ## monitor could not have seen an entropy read, so silence proves
+      ## nothing.
+
   PathSetEvidence* = object
     declaredInputs*: seq[string]
     declaredOutputs*: seq[string]
@@ -659,6 +767,24 @@ type
     monitorReads*: seq[string]
     monitorWrites*: seq[string]
     monitorProbes*: seq[string]
+    monitorEnvReads*: seq[string]
+      ## M10 — the NAMES of the environment variables the monitor observed
+      ## this action reading (`mrEnvRead`, io-mon's observed-declared-input
+      ## record; deduped per process by the shim and again here).
+      ##
+      ## NAMES, not paths: they are deliberately kept out of `monitorReads`
+      ## and never run through `materialPath`. A variable is not a file, has
+      ## no content to fingerprint and no directory to resolve against;
+      ## `cacheEnvInputs` pairs each name with the VALUE the action saw and
+      ## the action cache re-reads that value on the next lookup.
+      ##
+      ## This field is what makes io-mon's `mcapObservedEnv` mean anything to
+      ## a consumer. Until it existed, `foldMonitorDepFileEvidence` dropped
+      ## every `mrEnvRead` on its `else: discard` arm -- so all three
+      ## platforms' shims recorded environment reads faithfully and the action
+      ## cache ignored them, which is a false cache HIT whenever a build reads
+      ## a variable whose value later changes.
+
     monitorDirectoryEnumerations*: seq[string]
       ## Directories the action ENUMERATED (`opendir`/`readdir`), as opposed
       ## to merely probed for existence. The monitor reports the two as
@@ -678,6 +804,16 @@ type
       ## Entries also remain in `monitorProbes`, so every existing consumer
       ## of that field keeps the exact set it had before.
     diagnostics*: seq[string]
+    entropyObservations*: seq[EntropyObservation]
+      ## M6 — one entry per distinct (source, origin) the capture recorded.
+      ## io-mon already dedupes per source per caller-origin per process, so
+      ## this stays small even for a build that draws randomness in a loop.
+      ## Deliberately NOT folded into `monitorReads`: an entropy read is not
+      ## a file whose content can be fingerprinted, which is exactly why it
+      ## needs a policy rather than a cache-key entry.
+    entropyObservability*: EntropyObservability
+      ## M6 — what the capture's backend profile says about whether entropy
+      ## reads are observable at all.
 
   MonitorEvidenceStatus* = enum
     ## M9.R.72.3 — spec-graded monitor-loss status. Implements the ladder
@@ -1265,9 +1401,25 @@ proc materializeActionCacheOutputs*(cas: CasStore;
   if record.outputPayloadKind != opkCasBlobs:
     raise newException(CacheIntegrityError,
       "cache record does not contain output payloads")
-  var payloads: seq[seq[byte]] = @[]
-  for output in record.outputs:
-    payloads.add(cas.casGet(contentHashForActionBlob(output.blob)))
+  # Local-CAS-Hardlink-Materialization M2. Only a DIRECTORY output's payload
+  # is needed in memory — ``materializeDirectorySnapshotPayload`` parses a
+  # snapshot envelope rather than writing bytes to a path. Every other
+  # output goes to ``casMaterialize``, which since M1 streams (and, where
+  # the filesystem allows, links) each entry without ever holding it.
+  #
+  # Pre-reading all of them made the facade's O(1)-memory property stop at
+  # this boundary: a restore of many large outputs still peaked at the sum
+  # of them one layer up. The slots are indexed BY RECORD POSITION, which
+  # is why this is a pre-sized ``newSeq`` with holes rather than a filtered
+  # append — ``payloads[i]`` below is read with ``i`` from the record.
+  #
+  # Nothing is weakened by not reading them: ``casMaterialize`` runs its
+  # own existence pre-pass over every entry before touching a destination,
+  # and hash-verifies each staged result before committing any rename.
+  var payloads = newSeq[seq[byte]](record.outputs.len)
+  for i, output in record.outputs:
+    if output.metadata.kind == ffkDirectory:
+      payloads[i] = cas.casGet(contentHashForActionBlob(output.blob))
   var entries: seq[CasMaterialization] = @[]
   for output in record.outputs:
     if output.metadata.kind == ffkDirectory:
@@ -1304,6 +1456,29 @@ proc defaultBuildEngineConfig*(cacheRoot: string;
     progressCallback: nil,
     statsEnabled: false,
     suppressTrace: false)
+
+proc enableCachedOutputRestore*(config: var BuildEngineConfig) =
+  ## S7 — select the CAS-restore configuration, as ONE call rather than as
+  ## three fields a caller has to remember to set together.
+  ##
+  ## Restoring a deleted output from the local CAS needs all three, and
+  ## setting two of them is worse than setting none: blobs stored with
+  ## ``rebuildMissingOutputsOnCacheHit = true`` are disk spent on a branch
+  ## that can never be taken (the state ``repro build`` was in before S7 —
+  ## every published record ``opkMetadataOnly``), and the restore branch
+  ## reached without ``requireCompleteOutputEvidence`` is the hazard the
+  ## gate exists to stop. Grouping them means a caller cannot pick the
+  ## unsafe two.
+  ##
+  ## * ``deferLocalOutputBlobs = false`` — store the output payloads in the
+  ##   local CAS, so there is something to restore FROM;
+  ## * ``rebuildMissingOutputsOnCacheHit = false`` — on a hit whose outputs
+  ##   are missing, restore them instead of re-running the action;
+  ## * ``requireCompleteOutputEvidence = true`` — but only for actions whose
+  ##   observed writes their declared outputs actually account for.
+  config.deferLocalOutputBlobs = false
+  config.rebuildMissingOutputsOnCacheHit = false
+  config.requireCompleteOutputEvidence = true
 
 proc addMetric*(stats: var BuildStats; name: string; elapsedUs: float) =
   for metric in stats.metrics.mitems:
@@ -1588,6 +1763,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
+             nonDeterminism = ndpUnblessed;
+             nonDeterminismJustification = "";
              env: openArray[string] = [];
              envPassthrough: openArray[string] = [];
              requiresElevation = false;
@@ -1633,6 +1810,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
     dependencyPolicy: effectiveDependencyPolicy,
+    nonDeterminism: nonDeterminism,
+    nonDeterminismJustification: nonDeterminismJustification,
     requiresElevation: requiresElevation)
 
 proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
@@ -2242,6 +2421,33 @@ proc addUnique(values: var seq[string]; seen: var HashSet[string];
     return
   values.add(value)
 
+proc addUnique(values: var seq[string]; seen: var HashSet[string];
+               value, key: string) =
+  ## `addUnique` where MEMBERSHIP is keyed differently from what is stored.
+  ##
+  ## Exists for observed environment names: Windows environment lookup is
+  ## case-insensitive, so `PATH` and `Path` are one variable with one value
+  ## and must produce one cache-key entry, while the stored spelling stays the
+  ## one the program used.
+  if value.len == 0:
+    return
+  if seen.containsOrIncl(key):
+    return
+  values.add(value)
+
+proc envNameKey*(name: string): string =
+  ## The dedup key for an observed environment variable name.
+  ##
+  ## Upper-cased on Windows ONLY. On POSIX the environment is
+  ## case-SENSITIVE -- `Path` and `PATH` really are two variables with two
+  ## values -- so folding case there would merge two distinct inputs into one
+  ## cache-key entry and lose whichever the merge dropped. The io-mon shims
+  ## make the same platform split for the same reason.
+  when defined(windows):
+    name.toUpperAscii
+  else:
+    name
+
 proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
   result = path.replace('\\', '/').strip()
   while result.startsWith("./"):
@@ -2280,6 +2486,40 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
+proc selfConsumedDeclaredPaths*(action: BuildAction): seq[string] =
+  ## S5 — the materialized paths this action declares as BOTH an input and
+  ## an output, in declaration order.
+  ##
+  ## Such an action genuinely consumes its own output: an incremental tool
+  ## reading the state a previous run left behind. It is therefore NOT
+  ## hermetic — its result depends on what was on disk before it ran — and
+  ## the one thing it must never do is silently take a cache hit on that
+  ## stale state. It does not — and NOT because anything here exempts it.
+  ## These paths are NOT exempt from ``selfWrittenOutputKeys``; they are in
+  ## that set like any other declared output. The carve-out is STRUCTURAL:
+  ## both input folds add ``evidence.declaredInputs`` first and unfiltered,
+  ## so such a path is already in the key before the self-write filter is
+  ## consulted, and all the filter can still drop is the same file arriving
+  ## a second time through an observed channel under another spelling. The
+  ## fingerprint keeps tracking it and the action misses on every run in
+  ## which its own output changed. A permanent miss is the correct answer
+  ## for a non-hermetic action; a hit would be a false one.
+  ##
+  ## This proc is therefore purely diagnostic — nothing in
+  ## ``cacheInputPaths`` branches on its result. ``collectEvidence`` turns a
+  ## non-empty result into a diagnostic so the permanent miss that follows
+  ## does not read as a caching bug.
+  for output in action.outputs:
+    let materialized = materialPath(action.cwd, output)
+    let key = materialized.replace('\\', '/')
+    var declared = false
+    for input in action.inputs:
+      if materialPath(action.cwd, input).replace('\\', '/') == key:
+        declared = true
+        break
+    if declared and materialized notin result:
+      result.add(materialized)
+
 proc isVolatileMonitorPath(path: string): bool =
   ## Runtime pseudo-filesystems describe the monitored process or host at one
   ## instant. They cannot be reopened reliably when the action is fingerprinted
@@ -2290,7 +2530,6 @@ proc isVolatileMonitorPath(path: string): bool =
     normalized == "/proc" or normalized.startsWith("/proc/") or
     normalized == "/sys" or normalized.startsWith("/sys/") or
     normalized == "/run" or normalized.startsWith("/run/")
-
 proc parseCreateActionRecord(payload, path: string; lineNo: int;
                              governingLockIdentity: LockIdentity): BuildAction =
   ## Decode an M25 ``create-action`` JSON payload into a BuildAction. The
@@ -2544,6 +2783,12 @@ type
     monitorReads*: HashSet[string]
     monitorWrites*: HashSet[string]
     monitorProbes*: HashSet[string]
+    monitorEnvReads*: HashSet[string]
+      ## M10 — case-INSENSITIVE membership on Windows, where `PATH` and `Path`
+      ## are one variable. The shim already dedupes that way; this is the
+      ## second line, for a merge of fragments from processes that spelled it
+      ## differently.
+
     monitorDirectoryEnumerations*: HashSet[string]
 
 proc monitorProfileEvidenceComplete(detail: string): bool =
@@ -2552,6 +2797,90 @@ proc monitorProfileEvidenceComplete(detail: string): bool =
     let pair = part.split("=", 1)
     if pair.len == 2 and pair[0] == "evidenceComplete":
       return pair[1] == "true"
+
+const NonDeterminismCapabilityId = "non-determinism"
+  ## io-mon's `capabilityId(mcapNonDeterminism)`. Matched against both the
+  ## `supported=` list of an `mrBackendProfile` record and the `capability=`
+  ## token of an `mrCapabilityGap` record.
+
+proc monitorProfileSupportsNonDeterminism*(detail: string): bool =
+  ## M6 — does this `mrBackendProfile` record advertise entropy observation?
+  ##
+  ## The profile detail is `backend=...;supported=a,b,c;required=...;
+  ## evidenceComplete=...` (io-mon `capabilities.backendProfileRecord`). A
+  ## profile that does not name `non-determinism` among its supported
+  ## capabilities cannot have produced an `mrNonDeterministic` record, so its
+  ## silence on entropy is not evidence.
+  ##
+  ## Note this reads `supported=`, not `required=`: `required` says only
+  ## which capabilities the CALLER asked for, which answers a different
+  ## question (io-mon `types.MonitorCapabilityGap.inputChannel` makes the same
+  ## point about the gap record's `required` flag).
+  for part in detail.split(';'):
+    let pair = part.split("=", 1)
+    if pair.len == 2 and pair[0] == "supported":
+      for capability in pair[1].split(','):
+        if capability == NonDeterminismCapabilityId:
+          return true
+      return false
+  false
+
+proc capabilityGapIsNonDeterminism*(recordPath, detail: string): bool =
+  ## M6 — is this `mrCapabilityGap` record the entropy one?
+  ##
+  ## io-mon writes the capability id into the record's `path` AND into the
+  ## detail's `capability=` token (`capabilities.capabilityGapRecord`). Both
+  ## are checked because they are written by different lines and a consumer
+  ## that trusted only one would go quiet if either changed.
+  if recordPath == NonDeterminismCapabilityId:
+    return true
+  for part in detail.split(';'):
+    let pair = part.split("=", 1)
+    if pair.len == 2 and pair[0] == "capability":
+      return pair[1] == NonDeterminismCapabilityId
+  false
+
+proc entropyCallerOrigin*(detail: string): EntropyCallerOrigin =
+  ## M6 — classify an `mrNonDeterministic` record's caller attribution.
+  ##
+  ## Windows details read `entropy source=<fn> caller=program|system`; the
+  ## macOS (`non-deterministic entropy source`) and Linux (`linux
+  ## non-deterministic source`) arms carry no `caller=` token because those
+  ## shims filter at the hook and only emit the program's own use.
+  ##
+  ## FAIL-CLOSED ON AMBIGUITY: only a SINGLE `caller=program` token yields
+  ## `ecoMainImage`. A duplicated token is attacker-shaped evidence (io-mon's
+  ## `trustedDetailToken` refuses to resolve one for the same reason), and
+  ## here the safe answer is the one that keeps the observation
+  ## consequential.
+  var seen = 0
+  var value = ""
+  for token in detail.split({' ', '\t', '\n', '\r'}):
+    if token.startsWith("caller="):
+      inc seen
+      value = token["caller=".len .. ^1]
+  if seen == 0:
+    return ecoUnattributed
+  if seen == 1 and value == "program":
+    return ecoMainImage
+  ecoOutsideMainImage
+
+proc describeEntropyOrigin(origin: EntropyCallerOrigin): string =
+  case origin
+  of ecoMainImage: "the program's own main image (caller=program)"
+  of ecoOutsideMainImage:
+    "outside the main image (caller=system: ntdll's baseline OR the " &
+      "program's own bundled DLL -- indistinguishable)"
+  of ecoUnattributed:
+    "the program's own code (shim-side attribution, no caller token)"
+
+proc addEntropyObservation(evidence: var PathSetEvidence;
+                           source: string; origin: EntropyCallerOrigin) =
+  for existing in evidence.entropyObservations:
+    if existing.source == source and existing.origin == origin:
+      return
+  evidence.entropyObservations.add(
+    EntropyObservation(source: source, origin: origin))
 
 proc benignRawSyscallLoss*(detail: string): bool =
   ## Recognise the io-mon "raw syscall unsupported" event-loss class and say
@@ -2718,7 +3047,6 @@ proc benignRawSyscallLoss*(detail: string): bool =
       return false
     return number in BenignRawSyscallNumbers
   false
-
 proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
   ##
@@ -2828,6 +3156,17 @@ proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
   ## mesMonitorUnavailable. Return whichever is more severe.
   if ord(a) >= ord(b): a else: b
 
+const FailedExecDetailToken = "execstatus=failed"
+  ## The token io-mon puts in an `mrProcessExec` record's `detail` when the
+  ## exec syscall RETURNED — i.e. it failed and no new image ran. Emitted by
+  ## io-mon `src/io_mon/shim/linux_preload.nim` (`repro_hook_execve`, the
+  ## M9.R.68.3 follow-up record) as `"execstatus=failed errno=<n>"`, and
+  ## consumed by io-mon's own writer to retract the preceding pre-flush exec
+  ## from its unmonitored-subtree signal. The engine matches the same token so
+  ## a failed exec never becomes a content input. Keep in step with that emit
+  ## site; a rename there silently turns absent paths into cache inputs here,
+  ## which `t_executed_binary_is_a_recorded_input.nim` pins.
+
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
                           seen: var EvidenceSeenSets;
@@ -2854,6 +3193,46 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   elif record.kind == mrBackendProfile and
       not monitorProfileEvidenceComplete(record.detail):
     status = worseMonitorStatus(status, mesUnknownScopeLoss)
+
+  # M6 — entropy evidence and the capability declaration that says whether
+  # entropy COULD have been evidenced. Neither touches ``status``: an
+  # entropy read is not a monitoring loss (io-mon SAW it), and a
+  # non-determinism capability gap is not in ``InputEvidenceCapabilities``
+  # so it does not move the completeness floor. Both are carried out on
+  # ``evidence`` for ``collectEvidence`` to weigh against the invoked
+  # tool's blessing.
+  #
+  # Deliberately BEFORE the `materialPath` / volatile-path guard below:
+  # these records' `path` fields are capability ids and entropy source
+  # names, not filesystem paths, so nothing about them should be resolved
+  # against the action's cwd or tested for volatility.
+  case record.kind
+  of mrNonDeterministic:
+    addEntropyObservation(evidence, record.path,
+      entropyCallerOrigin(record.detail))
+  of mrBackendProfile:
+    # A gap record already seen wins: ``entNotObserved`` is the
+    # conservative answer and must not be relaxed by a profile parsed
+    # afterwards.
+    if evidence.entropyObservability != entNotObserved:
+      evidence.entropyObservability =
+        if monitorProfileSupportsNonDeterminism(record.detail): entObserved
+        else: entNotObserved
+  of mrCapabilityGap:
+    if capabilityGapIsNonDeterminism(record.path, record.detail):
+      evidence.entropyObservability = entNotObserved
+  of mrEnvRead:
+    # M10 — `record.path` here is a variable NAME, not a path. Resolving it
+    # against the action's cwd (as the `materialized` line below does for
+    # every other kind) would turn `SOURCE_DATE_EPOCH` into
+    # `<cwd>/SOURCE_DATE_EPOCH` and quietly key the cache on a file that
+    # does not exist. Handled here, above that line, for the same reason as
+    # the entropy arms.
+    if record.path.len > 0:
+      evidence.monitorEnvReads.addUnique(seen.monitorEnvReads,
+        record.path, envNameKey(record.path))
+  else:
+    discard
 
   let materialized = materialPath(cwd, record.path)
   if materialized.isVolatileMonitorPath():
@@ -2938,6 +3317,65 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
       discard
   of mrFileWrite:
     evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+  of mrProcessExec:
+    # A binary the action EXECUTED. Its bytes decide what the action
+    # computes at least as directly as any file it reads, so it is a
+    # content dependency and belongs in `monitorReads` beside
+    # `mrLibraryLoad`.
+    #
+    # WHY IT NEEDS ITS OWN ARM. It cannot arrive as an `mrFileRead`: the
+    # kernel maps the image, no interposed `open` is involved, and the
+    # loaded-object enumeration explicitly EXCLUDES the main executable
+    # (io-mon `shim/linux_preload.nim` :: `libraryLoadRecordablePath`,
+    # `dlpi_name == ""`), on the stated grounds that it "is already
+    # captured as the process image by `mrProcessExec`". Until this arm
+    # existed, nothing in this engine referenced `mrProcessExec` at all,
+    # so that hand-off landed in the `else: discard` below and the
+    # executed binary was in no cache key.
+    #
+    # Measured before this arm, over four action shapes, all on edges
+    # that declare no tool refs. Only the first was covered, and only by
+    # accident — a bare name invoked through a shell makes bash `stat`
+    # every PATH candidate, and the resolved hit lands as an
+    # `mrPathProbe`, which IS folded:
+    #
+    #   bare name via a shell   -> path-probe + process-exec, in the key
+    #   absolute path in the shell command  -> process-exec ONLY, not in the key
+    #   the action's own argv[0]            -> NOTHING AT ALL
+    #   bare name via glibc `execvp`        -> unresolved name + failed marker
+    #
+    # Rows 2 and 4 are what this arm addresses. Row 3 cannot be: io-mon's
+    # `execve` hook lives in the CHILD, so the launcher's exec of the
+    # action's ROOT image precedes the shim constructor and there is no
+    # record here to fold. That one is closed on the launcher side by
+    # `executedToolImagePath`.
+    #
+    # TWO GUARDS, both load-bearing.
+    #
+    # (1) ABSOLUTE PATHS ONLY. `execvp`/`execlp`/`execvpe` record the
+    #     name the CALLER passed, unresolved — io-mon's
+    #     `dispatch_execvp` emits before handing off to glibc, which
+    #     then does the PATH walk internally where no interposer can see
+    #     it. Folding `execdep-helper3` would send it through
+    #     `materialPath`, which joins a relative path onto the action's
+    #     cwd and MANUFACTURES `<cwd>/execdep-helper3` — a path that
+    #     does not exist, is not what ran, and would be a fabricated
+    #     dependency layered on top of the gap rather than a fix for it.
+    #     Skipping is the conservative choice: it leaves the gap exactly
+    #     where it was and invents nothing. Resolving here is not
+    #     available — the search PATH that glibc used is the CHILD's
+    #     environment at the moment of the call, which this fold does
+    #     not have and must not guess at.
+    # (2) NO FAILED EXECS. io-mon emits a follow-up `mrProcessExec`
+    #     carrying `execstatus=failed` when the syscall returned
+    #     (`shim/linux_preload.nim`, M9.R.68.3). A failed exec ran no
+    #     bytes, and its path frequently does not exist at all — bash's
+    #     platform-probe cascade alone execs a dozen absent paths per
+    #     `configure`. Existence-of-absent-paths is what `mrPathProbe`
+    #     is for; it must not enter the key as a content read.
+    if record.path.isAbsolute and
+        not record.detail.contains(FailedExecDetailToken):
+      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
   of mrPathProbe:
     evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
   of mrDirectoryEnumerate:
@@ -3051,6 +3489,104 @@ proc collectConvertedEvidence(action: BuildAction;
                               specs: openArray[PostBuildDependencyConverterSpec];
                               evidence: var PathSetEvidence;
                               seen: var EvidenceSeenSets): bool
+
+proc applyEntropyBlessingPolicy(action: BuildAction;
+                                collection: var EvidenceCollection) =
+  ## Windows-Build-Correctness M6 — the consumer half of the entropy
+  ## blessing.
+  ##
+  ## io-mon reports THAT an executable consumed randomness and refuses to
+  ## decide what it means: `mrNonDeterministic` deliberately does not force
+  ## `mcIncomplete`, because the read WAS observed, so nothing is missing
+  ## from the capture. This is the caller policy io-mon defers to.
+  ##
+  ## THE CONSEQUENCE, and why it is this one. An unblessed tool that read
+  ## entropy loses its action-cache PUBLICATION (`disableCacheHits`) and
+  ## nothing else. The action still runs, still succeeds, and its outputs
+  ## are still used by everything downstream — which is right, because
+  ## nothing about this evidence says the outputs are wrong. What it says is
+  ## that they may not be REPRODUCIBLE, and a cache entry is a promise that
+  ## re-running the same inputs yields the same bytes. Refusing to make that
+  ## promise costs a rebuild; making it falsely serves the wrong bytes
+  ## forever. Note also what is NOT done: `publishable` stays true (a
+  ## non-deterministic action is not a failed action) and
+  ## `monitorStatus` is untouched, so this does NOT trip the scheduler's
+  ## session-wide `sessionCachePublishDisabled` — one tool's randomness must
+  ## not make every other action in the build uncacheable.
+  ##
+  ## HOW `caller=system` IS HANDLED, which is the load-bearing decision.
+  ## io-mon's Windows attribution token distinguishes main-EXE-image from
+  ## everything else, NOT program from system (see `EntropyCallerOrigin`).
+  ## Filtering `caller=system` away as "the loader's baseline" would silently
+  ## grade an unblessed program deterministic whenever its randomness came
+  ## through its own bundled DLL — a false clean, the exact failure this
+  ## campaign exists to prevent. So EVERY origin is consequential here; the
+  ## origin is recorded and reported but never used to excuse an observation.
+  ##
+  ## That is affordable because the feared cost did not materialise. Measured
+  ## on this host against the M5 shim: a monitored `cmd /c ver` (39 records),
+  ## `where.exe cmd` (336 records) and a full `nim c` compile driving gcc and
+  ## ld (25 206 records, `mcComplete`, `eventLoss=0`) each produced ZERO
+  ## `mrNonDeterministic` records — the ntdll startup baseline that would have
+  ## flagged everything is not in fact reported for these programs. What did
+  ## report was `powershell -NoProfile -Command 1+1`: three sources
+  ## (`ProcessPrng`, `RtlGenRandom`, `CryptGenRandom`), all `caller=system`,
+  ## i.e. a .NET interpreter host drawing randomness through its own runtime
+  ## — precisely the case a `caller=system` filter would have excused.
+  ##
+  ## ABSENCE OF EVIDENCE IS NOT EVIDENCE OF ABSENCE. If the capture's own
+  ## backend profile says entropy could not be observed, "no entropy records"
+  ## carries no information, and an unblessed action is treated exactly as if
+  ## it had read entropy. This is what makes the whole policy fail closed
+  ## against an older shim or a backend without the capability, and it is
+  ## read from the machinery M4/M5 built for it: the profile record's
+  ## `supported=` list and the `mrCapabilityGap` records.
+  if not action.cacheable:
+    # An action that never publishes has nothing to withhold, and saying so
+    # in its diagnostics would be noise on every fetch edge.
+    return
+  let observations = collection.evidence.entropyObservations
+  if action.nonDeterminism == ndpEntropyBlessed:
+    if observations.len > 0:
+      var sources: seq[string] = @[]
+      for observation in observations:
+        sources.add(observation.source)
+      collection.evidence.diagnostics.add(
+        "entropy observed (" & sources.join(", ") & ") but the invoking " &
+        "tool is blessed in its CLI spec, so it is not treated as a " &
+        "determinism problem: " & action.nonDeterminismJustification &
+        " Spec: Windows-Build-Correctness-Bitness-And-Capabilities." &
+        "milestones.org M6.")
+    return
+  if observations.len > 0:
+    var described: seq[string] = @[]
+    for observation in observations:
+      described.add(observation.source & " from " &
+        describeEntropyOrigin(observation.origin))
+    collection.evidence.diagnostics.add(
+      "action-cache publish skipped: this action's process tree read " &
+      "entropy (" & described.join("; ") & ") and the tool it invokes is " &
+      "not blessed. Declare `nonDeterminism entropyBlessed, justification " &
+      "= \"...\"` in the tool's CLI spec if its randomness cannot reach " &
+      "its output. Note that caller attribution is one-way: an entropy " &
+      "read reported from outside the main image is NOT evidence that the " &
+      "program itself drew none. Spec: " &
+      "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
+    collection.disableCacheHits = true
+    return
+  if collection.evidence.entropyObservability != entObserved:
+    collection.evidence.diagnostics.add(
+      "action-cache publish skipped: the capture's backend " &
+      (if collection.evidence.entropyObservability == entNotObserved:
+         "declares that entropy reads are not observable"
+       else:
+         "is not declared at all (no backend-profile record), so entropy " &
+         "observability is unknown") &
+      ", and the tool this action invokes is not blessed. No " &
+      "`mrNonDeterministic` record is therefore not evidence that no " &
+      "randomness was consumed. Spec: " &
+      "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
+    collection.disableCacheHits = true
 
 proc applyMonitorEvidenceStatus(action: BuildAction;
                                 status: MonitorEvidenceStatus;
@@ -3182,8 +3718,116 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     if action.cacheable:
       col.publishable = false
 
+proc monitorPayloadArgIndex(argv: openArray[string]): int
+proc preparedRunQuotaCommand(action: BuildAction;
+                             config: BuildEngineConfig;
+                             shellUmaskWrap = true): ReproCommandSpec
+
+proc isExecutableFile(path: string): bool =
+  ## `execvp`'s candidate test, as close as a consumer can get to it: the
+  ## entry must exist and carry an execute bit. `execvp` itself asks the
+  ## kernel and keeps walking on `EACCES`; asking for any execute bit is the
+  ## same decision for every candidate a build action can plausibly hit, and
+  ## it never opens the file.
+  if not fileExists(extendedPath(path)):
+    return false
+  try:
+    let perms = getFilePermissions(extendedPath(path))
+    {fpUserExec, fpGroupExec, fpOthersExec} * perms != {}
+  except OSError, IOError:
+    false
+
+proc executedToolImagePath(action: BuildAction;
+                           config: ptr BuildEngineConfig): string =
+  ## The on-disk image this action's OWN root command names, resolved the way
+  ## the launcher resolves it.
+  ##
+  ## WHY THE LAUNCHER HAS TO ANSWER THIS. io-mon's `execve` hook lives in the
+  ## CHILD — it is installed by the preloaded shim's constructor, which runs
+  ## only once the new image is already mapped. The launcher's exec of the
+  ## action's ROOT image therefore happens strictly BEFORE any hook exists, so
+  ## `mrProcessExec` covers NESTED execs and nothing else. Measured: an action
+  ## whose `argv[0]` IS the tool produced a 19-record depfile containing that
+  ## binary's six glibc shared objects and NOT the binary itself. No arm in
+  ## `foldOneMonitorRecord` can close that, because there is no record.
+  ##
+  ## This is the untyped analogue of `resolvedExecutableDigest`
+  ## (`repro_tool_profiles`), which already pins exactly this fact for
+  ## DECLARED tools — the profile keys on what the resolution found rather
+  ## than on the search path that found it. An edge that declares no tool refs
+  ## had no equivalent, so its root image was in no cache key at all.
+  ##
+  ## RESOLUTION, AND WHAT IT IS AND IS NOT.
+  ##
+  ## * An absolute name needs no resolution and no environment — the launcher
+  ##   execs exactly that path.
+  ## * A name containing a separator is resolved against the action's `cwd`,
+  ##   which is what POSIX `exec` does with it and what the launcher's own
+  ##   `chdir` makes true.
+  ## * A BARE name is the only case that needs a search, and the search runs
+  ##   over the PATH that `preparedRunQuotaCommand` — the single authority
+  ##   every launch path shares for the child's argv+env contract — puts in
+  ##   the child's environment. Same string, same POSIX first-match rule.
+  ##   It is a reconstruction of the launcher's resolution, not an observation
+  ##   of the kernel's; `t_executed_binary_is_a_recorded_input.nim` is what
+  ##   holds the two together end to end on a real build.
+  ##
+  ## `shellUmaskWrap = false` deliberately: the `/bin/sh -c 'umask 022 && …'`
+  ## the wrapped launch paths add is the ENGINE's own scaffolding, sits ABOVE
+  ## the monitor, and is identical for every action. Recording it would put
+  ## one constant in every key and say nothing about the action.
+  ##
+  ## Returns "" when the image cannot be identified without guessing — a
+  ## monitored argv that is not the canonical `repro internal io monitor … --`
+  ## shape, a bare name that no PATH entry supplies, or no config to ask.
+  ## Returning nothing leaves the pre-existing gap exactly as it was; it never
+  ## invents a path.
+  if action.argv.len == 0:
+    return ""
+  let payloadIndex = monitorPayloadArgIndex(action.argv)
+  if payloadIndex < 0 and action.argv.len >= 4 and
+      action.argv[1] == "internal" and action.argv[2] == "io" and
+      action.argv[3] == "monitor":
+    # Monitor-wrapped but not in the shape `monitorPayloadArgIndex` accepts.
+    # The root image would be the `repro` binary, which is the launcher, not
+    # the action. Say nothing rather than record the wrong thing.
+    return ""
+  let base = if payloadIndex >= 0: payloadIndex else: 0
+  if base >= action.argv.len:
+    return ""
+  let name = action.argv[base]
+  if name.len == 0:
+    return ""
+  if name.isAbsolute:
+    return name
+  if name.contains(DirSep) or name.contains(AltSep):
+    return os.normalizedPath(materialPath(action.cwd, name))
+  if config == nil:
+    return ""
+  var searchPath = ""
+  try:
+    let command = preparedRunQuotaCommand(action, config[],
+      shellUmaskWrap = false)
+    for entry in command.env:
+      if entry.startsWith("PATH="):
+        searchPath = entry.substr("PATH=".len)
+  except CatchableError:
+    return ""
+  if searchPath.len == 0:
+    return ""
+  for dir in searchPath.split(PathSep):
+    # POSIX: an empty PATH element names the current working directory.
+    let dirBase = if dir.len == 0: action.cwd else: dir
+    if dirBase.len == 0:
+      continue
+    let candidate = materialPath(action.cwd, dirBase) / name
+    if isExecutableFile(candidate):
+      return os.normalizedPath(candidate)
+  ""
+
 proc collectEvidence(action: BuildAction; strict: bool;
-                     hostedRecords: ptr seq[MonitorRecord] = nil):
+                     hostedRecords: ptr seq[MonitorRecord] = nil;
+                     config: ptr BuildEngineConfig = nil):
                      EvidenceCollection =
   ## ``hostedRecords`` (HM-5) is the in-memory record set for an action the
   ## engine hosted the monitor for. When it is non-nil the monitor evidence is
@@ -3198,12 +3842,43 @@ proc collectEvidence(action: BuildAction; strict: bool;
   result.publishable = true
   result.evidence.declaredInputs = action.inputs
   result.evidence.declaredOutputs = action.outputs
+  # S5 — an action that declares the same path as BOTH an input and an
+  # output consumes its own output: an incremental tool reading the state
+  # a previous run left behind. That action is not hermetic, and the one
+  # thing it must never do is silently take a cache hit on stale state.
+  # It does not: ``cacheInputPaths`` adds the DECLARED inputs first and
+  # unfiltered, so the path is in the key before the self-write filter is
+  # consulted (see ``selfWrittenOutputKeys``). The fingerprint keeps
+  # tracking it and the action misses on every run in which its own output
+  # changed. Say that out loud rather than letting a permanent miss look
+  # like a caching bug.
+  for materialized in action.selfConsumedDeclaredPaths():
+    result.evidence.diagnostics.add(
+      "action declares '" & materialized & "' as both an input and an " &
+      "output, so it consumes its own output and is not hermetic; the " &
+      "path is retained in the action-cache input set (a stale hit " &
+      "would be worse than a permanent miss). Spec: " &
+      "Filesystem-Policy-And-Observed-Inputs.md §\"Source Rewrites\".")
   # Deferred-D4: track membership in side-car ``HashSet``s so adding the
   # k-th unique evidence entry costs O(1) instead of O(k). Monitor
   # records on a single action can exceed several thousand entries; the
   # legacy linear ``find`` made the per-action wrap-up the dominant
   # term on the 14-app / ~1044-action collections from B1/B3/B5.
   var seen: EvidenceSeenSets
+  # The action's OWN root image, which no monitor record can supply — see
+  # `executedToolImagePath`. Folded as a content read, beside `mrLibraryLoad`
+  # and the `mrProcessExec` arm that covers this action's NESTED execs.
+  #
+  # SCOPED TO THE AUTOMATIC-MONITOR CLASS on purpose. That is the class where
+  # the ENGINE promises to discover the input set, so a missing input is the
+  # engine's defect. On an edge whose inputs are declared by its author, the
+  # author owns that set and the engine adding an undeclared path to the key
+  # behind their back is a different decision, with a different blast radius,
+  # and it is not the one this change makes.
+  if action.dependencyPolicy.kind in MonitorPolicyKinds:
+    let rootImage = executedToolImagePath(action, config)
+    if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
+      result.evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
   let reports = action.reportSpecsForPolicy()
   if action.dependencyPolicy.kind in RecognizedPolicyKinds and reports.len == 0:
     result.evidence.diagnostics.add(
@@ -3371,6 +4046,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
           foldMonitorDepFileEvidence(action.monitorDepfile,
             action.cwd, result.evidence, seen)
       applyMonitorEvidenceStatus(action, status, result)
+      applyEntropyBlessingPolicy(action, result)
     except MonitorDepFileReaderError as err:
       result.evidence.diagnostics.add("monitor depfile read failed: " & err.msg)
       # A decode error means the iomon file is corrupt — cannot classify the
@@ -3413,19 +4089,73 @@ proc collectEvidence(action: BuildAction; strict: bool;
   if strict and not result.publishable:
     discard
 
-proc evidenceInputPaths(evidence: PathSetEvidence): seq[string] =
+proc selfWrittenOutputKeys(action: BuildAction): HashSet[string] =
+  ## S5 — the action's OWN declared output paths, keyed in the normalized
+  ## (forward-slash, materialized) form the input folds compare on. The
+  ## observed-evidence channels are filtered against this set before they
+  ## reach the action-cache key.
+  ##
+  ## Why an own declared output is never an input: a linker, an archiver
+  ## and a compiler all OPEN the file they are writing (and stat/probe it
+  ## first), and the monitor faithfully records that access as a read.
+  ## Those bytes are bytes the action produced *in this same run* — the
+  ## content that was there before cannot affect a hermetic result, so
+  ## the prior content is not an input. Recording it as one makes the
+  ## action depend on itself: the fingerprint can never match once the
+  ## output exists or changes, which costs a hit on every relink and
+  ## makes CAS restore of a deleted output structurally impossible.
+  ## Spec: ``reprobuild-specs/Filesystem-Policy-And-Observed-Inputs.md``
+  ## §"Writable Output Scopes" — a declared output is a writable scope,
+  ## not a dependency-relevant read scope.
+  ##
+  ## The exclusion is deliberately as narrow as it can be: EXACT declared
+  ## output paths of THIS action, matched by string equality after
+  ## materialization. No directory containment, no prefix rule, no
+  ## "looks like an output" heuristic — an over-broad filter here would
+  ## drop a genuine input that merely lives next to an output, and
+  ## dropping a genuine input is a false cache hit, the cardinal sin.
+  ##
+  ## There is one case where an own declared output IS a real input: an
+  ## incremental tool that reads the state a previous run left behind,
+  ## declaring the same path as input and output. That action is not
+  ## hermetic and must NOT silently get a hit. It doesn't, and NOT because
+  ## of anything in this set — the carve-out is structural. Both folds
+  ## below add ``evidence.declaredInputs`` FIRST and UNFILTERED, so a path
+  ## the author declared as an input is in the key before this set is ever
+  ## consulted. Declaration outranks every filter; that is the same
+  ## principle ``cacheInputPaths``' ``declaredMaterialized`` retention
+  ## encodes for the tool-root filter. ``selfConsumedDeclaredPaths`` +
+  ## ``collectEvidence`` name such an action in a diagnostic so the
+  ## permanent miss that follows does not read as a caching bug.
+  result = initHashSet[string]()
+  for output in action.outputs:
+    result.incl(materialPath(action.cwd, output).replace('\\', '/'))
+
+proc evidenceInputPaths(action: BuildAction;
+                        evidence: PathSetEvidence): seq[string] =
   # Deferred-D4: side-car ``HashSet`` keeps the per-action wrap-up linear
   # in N rather than quadratic. The output ``seq`` preserves insertion
   # order — callers downstream of action-cache key construction (see
   # ``cacheInputPaths``) depend on it for stable fingerprints.
+  #
+  # S5: the observed channels are filtered against the action's own
+  # declared outputs; see ``selfWrittenOutputKeys``. Declared inputs are
+  # never filtered.
+  let selfWritten = action.selfWrittenOutputKeys()
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
     result.addUnique(seen, input)
   for input in evidence.depfileInputs:
+    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+      continue
     result.addUnique(seen, input)
   for input in evidence.monitorReads:
+    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+      continue
     result.addUnique(seen, input)
   for probe in evidence.monitorProbes:
+    if selfWritten.contains(materialPath(action.cwd, probe).replace('\\', '/')):
+      continue
     result.addUnique(seen, probe)
 
 proc nixStoreRoot(path: string): string =
@@ -3504,9 +4234,31 @@ proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
     if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
       return true
 
-proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string] =
+proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[string] =
+  ## The action-cache key's input path set: the paths whose content or
+  ## metadata a later run compares against to decide ``cdHit`` /
+  ## ``cdMiss``. Exported for the regression tests that pin the two
+  ## properties below directly (same precedent as ``EvidenceSeenSets`` /
+  ## ``foldMonitorDepFileEvidence``); the engine's three publish sites
+  ## are the only production callers.
+  ##
+  ## Two filters apply, and they are NOT the same rule:
+  ##
+  ## * the tool-root / ignored-prefix filter drops observed reads under
+  ##   the toolchain's own store roots. ``declaredMaterialized`` exempts
+  ##   anything the action DECLARED as an input from that filter — the
+  ##   declaration is the author's statement that this path is a real
+  ##   dependency, and a heuristic must not overrule it (a declared
+  ##   input that happens to live inside a ``/nix/store`` tool root, for
+  ##   instance, would otherwise be silently dropped from the key).
+  ## * S5's self-write filter drops the action's OWN declared outputs
+  ##   from the OBSERVED channels only — see ``selfWrittenOutputKeys``
+  ##   for why those are provably not inputs, and for the
+  ##   declared-input carve-out that keeps the two filters from
+  ##   colliding. Declared inputs are never dropped by either filter.
   let toolRoots = action.toolInputRoots()
   let ignoredRoots = action.ignoredInputRoots()
+  let selfWritten = action.selfWrittenOutputKeys()
   var declaredMaterialized = initHashSet[string]()
   # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
   # output ``seq`` retains insertion order because the action-cache key
@@ -3518,20 +4270,280 @@ proc cacheInputPaths(action: BuildAction; evidence: PathSetEvidence): seq[string
     result.addUnique(seen, path)
   for input in evidence.depfileInputs:
     let path = materialPath(action.cwd, input)
-    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+    let key = path.replace('\\', '/')
+    if selfWritten.contains(key):
+      continue
+    if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
     let path = materialPath(action.cwd, input)
-    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+    let key = path.replace('\\', '/')
+    if selfWritten.contains(key):
+      continue
+    if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
     let path = materialPath(action.cwd, probe)
-    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+    let key = path.replace('\\', '/')
+    if selfWritten.contains(key):
+      continue
+    if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+      continue
+    result.addUnique(seen, path)
+
+proc actionEnvLookup*(action: BuildAction; name: string):
+    tuple[present: bool, value: string] =
+  ## The value the ACTION would see for `name`, and whether it is set at all.
+  ##
+  ## Resolved against `action.env` -- the environment the engine composed for
+  ## this action -- and NOT against the daemon's own process environment,
+  ## which is a different set entirely. `envValue` above answers "" for both
+  ## unset and set-to-empty; the cache has to tell them apart, because a
+  ## program branching on "is this variable defined" sees the difference.
+  let prefix = name & "="
+  when defined(windows):
+    # Case-insensitive, matching how Windows itself resolves a lookup.
+    let wanted = prefix.toUpperAscii
+    for item in action.env:
+      if item.len >= wanted.len and item[0 ..< wanted.len].toUpperAscii == wanted:
+        return (true, item.substr(wanted.len))
+  else:
+    for item in action.env:
+      if item.startsWith(prefix):
+        return (true, item.substr(prefix.len))
+  (false, "")
+
+proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence):
+    seq[EnvFingerprint] =
+  ## The action-cache key's OBSERVED ENVIRONMENT set: each variable io-mon saw
+  ## the action read, paired with the value it held at the time.
+  ##
+  ## This is the consumer half of io-mon's `mcapObservedEnv`. The shim records
+  ## that the build ASKED for a variable; only the engine knows what it
+  ## answered, and only the engine can re-read it on the next lookup to decide
+  ## whether the recorded result still applies.
+  ##
+  ## Sorted by key so two runs that observed the same variables in different
+  ## orders produce the SAME strong fingerprint. The file-input list gets its
+  ## determinism from a fixed traversal order; observed env reads arrive in
+  ## whatever order the program happened to make them, which for a threaded
+  ## build is not stable across runs -- and an unstable key is a permanent
+  ## cache miss, indistinguishable from a correct invalidation.
+  var names = evidence.monitorEnvReads
+  names.sort(proc (a, b: string): int = cmp(envNameKey(a), envNameKey(b)))
+  for name in names:
+    let resolved = action.actionEnvLookup(name)
+    result.add(EnvFingerprint(name: name, present: resolved.present,
+      value: resolved.value))
+
+proc actionEnvResolver*(action: BuildAction): EnvResolver =
+  ## `cacheEnvInputs`' counterpart for the LOOKUP side: how the action cache
+  ## re-reads a recorded variable when deciding hit or miss.
+  ##
+  ## A closure over a COPY of the action's env, because the resolver outlives
+  ## this call and the store calls it while walking records.
+  let env = action.env
+  result = proc(name: string): tuple[present: bool, value: string]
+      {.gcsafe, raises: [].} =
+    let prefix = name & "="
+    when defined(windows):
+      let wanted = prefix.toUpperAscii
+      for item in env:
+        if item.len >= wanted.len and
+            item[0 ..< wanted.len].toUpperAscii == wanted:
+          return (true, item.substr(wanted.len))
+    else:
+      for item in env:
+        if item.startsWith(prefix):
+          return (true, item.substr(prefix.len))
+    (false, "")
+
+proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
+  ## S7 — the subset of the action's ``ignoredInputPrefixes`` that the
+  ## restore gate may read as "machine-local derived state, not product",
+  ## materialized against the action's ``cwd``.
+  ##
+  ## *This proc exists because the two readings of ``ignoredInputPrefixes``
+  ## are not the same claim, and conflating them silently loses build
+  ## products.* The field's established meaning is about the cache KEY:
+  ## "do not treat what I read under here as a discovered input". The
+  ## reason recipes reach for it is usually self-invalidation — see
+  ## ``cmake_package.nim``'s install edge, whose comment says so in as many
+  ## words: *"Treating either mutable tree as a discovered input makes the
+  ## install edge depend on its own previous writes and miss on every warm
+  ## build."* That is a statement about inputs. It says nothing whatsoever
+  ## about whether the bytes under the prefix are part of what the action
+  ## PRODUCES, and the restore gate needs the second claim, not the first.
+  ##
+  ## Where the two come apart is not hypothetical, and it is not a corner:
+  ## it is the shape of every from-source package edge in the stdlib. The
+  ## ``cmake --install`` edge declares ``outputs = @[installStamp]``, a
+  ## single stamp file; its real product is the staged install tree under
+  ## ``effectiveDestRoot``; and it lists that very same
+  ## ``effectiveDestRoot`` as an ignored input prefix. Read naively, the
+  ## exclusion below would exempt the entire product, the gate would see
+  ## nothing unaccounted for, the record would be published WITH payloads,
+  ## and a later build would report ``cdHit`` / ``restored`` having put back
+  ## only the stamp. Reproduced through a real ``runBuild`` during review:
+  ## green build, reported cache hit, install tree gone.
+  ## ``meson_package.nim``'s setup / compile / install edges have the
+  ## identical shape.
+  ##
+  ## The rule, therefore: *a derived-state prefix is honoured only where it
+  ## is DISJOINT from everything the action has declared as its own
+  ## product.* An author who says both "my product goes here" and "ignore
+  ## what I write here" has made the KEY claim, not the PRODUCT claim, and
+  ## the gate must not upgrade one into the other on their behalf. Two
+  ## declarations count as product:
+  ##
+  ## * ``action.declaredOutputs`` — the M9.R.75 write ROOTS. Overlap is
+  ##   tested with ``writeRootsOverlap``, the same predicate M9.R.75's own
+  ##   R7 pairwise pass uses, and in BOTH directions, because two directory
+  ##   subtrees intersect exactly when one contains the other. Both
+  ##   directions are load-bearing: ``cmake-install`` names the write root
+  ##   itself as a prefix (equal), and also names the build directory ABOVE
+  ##   it (prefix contains root), and the second would exempt the staged
+  ##   tree just as thoroughly as the first.
+  ## * ``action.outputs`` — the declared product FILES, for actions that
+  ##   carry no write-root declaration at all. A prefix containing a
+  ##   declared output is not describing scratch space; the file itself
+  ##   stays exempt through ``selfWrittenOutputKeys`` either way, so all
+  ##   this costs is that its undeclared NEIGHBOURS are seen again.
+  ##
+  ## Note the asymmetry with ``ignoredInputRoots``' use in
+  ## ``cacheInputPaths``: this side materializes the prefix against
+  ## ``action.cwd`` while the input side compares raw, so a RELATIVE prefix
+  ## is honoured here and inert there. That difference is deliberate and it
+  ## is this side that is right — a recipe spells its scratch directory the
+  ## way it spells its outputs, and a declaration the author wrote must not
+  ## be honoured or ignored depending on whether they happened to write it
+  ## absolute. Aligning the input side would drop paths that are in cache
+  ## KEYS today, so it is a separable change and is not made here.
+  ##
+  ## Nothing here weakens the nimcache declaration this milestone added to
+  ## ``nim.nim``: a ``nim c`` edge carries no ``declaredOutputs``, and its
+  ## nimcache (``build/nimcache/<name>``) contains none of its declared
+  ## outputs (``build/bin/<name>.exe``), so the prefix is disjoint from the
+  ## product and stays honoured. That is the same fact stated as a rule
+  ## rather than as a coincidence — and it is what makes the ``nimcache =``
+  ## passthrough safe: a recipe that pointed a nimcache at its own output
+  ## directory would lose the exemption and fail closed instead of silently
+  ## exempting its binary's neighbours.
+  proc coverageKey(path: string): string =
+    ## Case-FOLDED on Windows, unlike every other comparison in this family.
+    ## The direction is what decides it: the other comparisons ask "is this
+    ## observed write one of my outputs?", where a case-folded match could
+    ## exempt a path that is not the output and hand back a hit, so they
+    ## stay case-sensitive. This one asks "does this prefix cover my
+    ## product?", where a MISSED match re-enables the exemption and loses
+    ## the product. Folding is the fail-closed direction here and the
+    ## strict spelling is the fail-closed direction there.
+    let normalized = normalizeWriteRoot(path)
+    when defined(windows): normalized.toLowerAscii()
+    else: normalized
+
+  var productRoots: seq[string] = @[]
+  for root in action.declaredOutputs:
+    let normalized = coverageKey(materialPath(action.cwd, root))
+    if normalized.len > 0:
+      productRoots.add(normalized)
+  var productFiles: seq[string] = @[]
+  for output in action.outputs:
+    let normalized = coverageKey(materialPath(action.cwd, output))
+    if normalized.len > 0:
+      productFiles.add(normalized)
+  for raw in action.ignoredInputRoots():
+    let materialized = materialPath(action.cwd, raw)
+    let prefix = coverageKey(materialized)
+    if prefix.len == 0:
+      continue
+    var covers = false
+    for root in productRoots:
+      if writeRootsOverlap(prefix, root):
+        covers = true
+        break
+    if not covers:
+      for file in productFiles:
+        if pathAtOrUnderRoot(file, prefix):
+          covers = true
+          break
+    if covers:
+      continue
+    result.add(materialized)
+
+proc undeclaredSurvivingWrites*(action: BuildAction;
+                                evidence: PathSetEvidence): seq[string] =
+  ## S7 — the paths this action was OBSERVED to write that its declared
+  ## outputs do not account for and that are still on disk when the action
+  ## finishes. A non-empty result means "restoring this action's declared
+  ## outputs is NOT equivalent to re-running it", and the engine responds by
+  ## publishing the record without payloads so the restore branch cannot be
+  ## taken for it. See ``BuildEngineConfig.requireCompleteOutputEvidence``.
+  ##
+  ## Three exclusions, and each of them is a claim about the path being
+  ## irrelevant to a restore rather than a convenience:
+  ##
+  ## * the action's own DECLARED outputs — those are exactly what a restore
+  ##   puts back, so writing them is the action doing its job.
+  ##   ``selfWrittenOutputKeys`` supplies the same normalized, exact-match
+  ##   set S5's input filter uses, for the same reason: no directory rule,
+  ##   no prefix rule.
+  ## * anything at or under one of the action's HONOURED derived prefixes —
+  ##   see ``honouredDerivedPrefixes``, which is where the whole of that
+  ##   exclusion's safety argument lives. It is NOT simply
+  ##   ``ignoredInputPrefixes``: a prefix that overlaps the action's own
+  ##   declared product is dropped, because such a prefix is a statement
+  ##   about the cache KEY and not about the PRODUCT.
+  ## * writes that no longer exist, or that are DIRECTORIES.
+  ##
+  ## The last one is not an optimization, it is required for the gate to
+  ## mean anything. The monitor records a directory creation as a write, so
+  ## a real ``nim c`` edge reports ``build/``, ``build/bin/`` and every
+  ## intermediate above them — including the parent of its own declared
+  ## output. Measured through the real CLI on the reference program (a
+  ## one-file ``hello.nim`` whose body is one ``echo``; see ``nim.nim``'s
+  ## ``compileDependencyPolicy`` for the full invocation, which is the one
+  ## measurement this milestone quotes anywhere it needs a number): *41
+  ## observed writes*, of which the gate reports 15 once directories,
+  ## transients and the declared binary are set aside — and those 15 are
+  ## the nimcache, which is what the ``nim.nim`` declaration is for. A
+  ## restore that materializes a declared output creates its parent
+  ## directories on the way (``casMaterialize`` does), and a directory with
+  ## no files in it is not a product, so nothing is lost by skipping them —
+  ## an undeclared product inside a directory is caught by the FILES it
+  ## contains, which is how the motivating clone-tree case is caught.
+  ## Transient files are the same argument in a different shape: a tool that
+  ## writes a temp file and unlinks it has produced nothing to restore.
+  ##
+  ## Note what is NOT excluded. ``action.declaredOutputs`` — the M9.R.75
+  ## write ROOTS — does not exempt anything, and must not: the motivating
+  ## failure is an action that wrote its real product INSIDE its own write
+  ## root without declaring the product itself. Exempting write roots would
+  ## make the gate blind to precisely the case it exists for. It is read
+  ## here only in the OPPOSITE direction, to DISQUALIFY a derived prefix
+  ## that covers one.
+  ##
+  ## Comparison is by exact string equality after separator normalization,
+  ## and is therefore case-SENSITIVE even on Windows. That direction is the
+  ## safe one: a declared output observed under a different case spelling is
+  ## reported here, which costs the action its blobs and a rebuild. The
+  ## reverse — case-folding, and so matching a path that is not the declared
+  ## output — would hand back a hit.
+  let selfWritten = action.selfWrittenOutputKeys()
+  let derivedRoots = action.honouredDerivedPrefixes()
+  var seen = initHashSet[string]()
+  for write in evidence.monitorWrites:
+    let path = materialPath(action.cwd, write)
+    if selfWritten.contains(path.replace('\\', '/')):
+      continue
+    if path.isUnderAnyRoot(derivedRoots):
+      continue
+    if dirExists(path) or not fileExists(path):
       continue
     result.addUnique(seen, path)
 
@@ -3558,7 +4570,6 @@ proc cacheEnumeratedDirectories(action: BuildAction;
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
-
 proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSetEvidence =
   result.declaredInputs = action.inputs
   result.declaredOutputs = action.outputs
@@ -5451,6 +6462,51 @@ func monitorHostingRefusal*(path: MonitorLaunchPath): string =
     "helper launch path, which starts the action from a separate " &
     "`repro __repro-runquota-helper` process" & Why
 
+const MonitorHostingEnvVar* = "REPROBUILD_MONITOR_HOSTING"
+  ## The environment spelling of ``--monitor-hosting``
+  ## (In-Process-Monitor-Hosting P1, option (b)). Same vocabulary, same
+  ## parser, same default — see ``configuredMonitorHostingMode``.
+
+func parseMonitorHostingMode*(value, source: string): MonitorHostingMode =
+  ## In-Process-Monitor-Hosting P1(b) — the OPERATOR SURFACE for
+  ## ``BuildEngineConfig.monitorHosting``.
+  ##
+  ## WHY IT LIVES HERE rather than beside the CLI's other flag parsers. The
+  ## default this decodes is a MEASURED verdict, not a UI preference, and
+  ## ``test_umask_wrap_both_spawn_paths``'s "in-process hosting is off in
+  ## every shipped configuration" pins it by scanning the shipped sources
+  ## for the field name. Keeping the ``mhm*`` literals in the module that
+  ## DECLARES them — the one module the scan exempts, because the first two
+  ## checks of that case pin its only construction site at RUNTIME instead —
+  ## means the CLI never has to spell an enabling mode to offer the flag.
+  ## ``--monitor-hosting`` is therefore plumbing, not a shipped enable, and
+  ## the pin can say so precisely.
+  ##
+  ## ``source`` is the spelling to blame in the diagnostic, exactly as
+  ## ``parseBuildDaemonMode(value, source)`` uses it: the flag on the command
+  ## line, the variable name in the environment.
+  case value.toLowerAscii()
+  of "never", "off":
+    mhmNever
+  of "where-supported", "wheresupported", "auto":
+    mhmWhereSupported
+  of "required", "require":
+    mhmRequired
+  else:
+    raise newException(ValueError,
+      "unsupported " & source & "=" & value &
+        " (expected never, where-supported, or required)")
+
+proc configuredMonitorHostingMode*(): MonitorHostingMode =
+  ## The environment default for ``--monitor-hosting``. ``mhmNever`` when
+  ## unset, which is the same value ``BuildEngineConfig``'s zero value gives,
+  ## so an operator who never heard of this knob gets byte-identical
+  ## behaviour to the pre-P1 engine.
+  let configured = getEnv(MonitorHostingEnvVar, "")
+  if configured.len == 0:
+    return mhmNever
+  parseMonitorHostingMode(configured, MonitorHostingEnvVar)
+
 type
   MonitorHostRecord = object
     ## Per-slot bookkeeping for one hosted monitor. Everything here is plain
@@ -5601,13 +6657,23 @@ when defined(posix):
     ## own reads to the action's evidence, so the mask is set here and restored
     ## immediately; a child inherits it across ``fork``.
     ##
-    ## SAFE BECAUSE THE SCHEDULER IS SINGLE-THREADED. The engine runs N
-    ## concurrent child PROCESSES from one poll loop, not N threads
-    ## (``createThread`` has zero occurrences in this library), so nothing else
-    ## can observe the window between this call and ``endMonitorSpawnContext``.
-    ## If the engine ever grows worker threads, this is the first thing that
-    ## breaks, and it breaks by interleaving one action's output into
-    ## another's.
+    ## SAFE BECAUSE THE SCHEDULER IS SINGLE-THREADED, AND BECAUSE THE ONLY
+    ## OTHER THREADS OPEN NOTHING. The engine runs N concurrent child
+    ## PROCESSES from one poll loop, not N threads, so no other SCHEDULER code
+    ## can observe the window between this call and
+    ## ``endMonitorSpawnContext``.
+    ##
+    ## The qualification is Engine-Threadpool TP-1's, and the previous version
+    ## of this comment — "``createThread`` has zero occurrences in this
+    ## library" — was already wrong when it was written: HM-5's flush worker
+    ## was in ``repro_build_engine/monitor_flush.nim``, inside this library.
+    ## The claim that MATTERS was never the thread count anyway, it is what
+    ## those threads do, and it is checked rather than assumed in
+    ## ``worker_pool.nim``'s header: a pool worker opens no file and creates
+    ## no file, so neither the ``dup2`` on 0/1/2 nor the ``umask`` can be
+    ## observed by one. A future pool tenant that opens or creates a file
+    ## re-opens both questions, and it breaks by interleaving one action's
+    ## output into another's.
     flushFile(stdout)
     flushFile(stderr)
     result.savedIn = dup(cint(0))
@@ -7228,6 +8294,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var metadataCache = initFileMetadataCache()
     if config.skipCacheHitEvidence:
       var hotProbes: seq[HotMetadataProbe] = @[]
+      # M10 — parallel to `hotProbes`, so a record that observed environment
+      # variables can have them re-read on THIS path too. Without it the
+      # whole-graph shortcut below would serve a hit for an action whose
+      # environment moved, and nothing downstream would look again.
+      var hotEnvResolvers: seq[EnvResolver] = @[]
       for action in buildGraph.actions:
         if (not action.cacheable) or action.dynamicDepsFile.len > 0:
           return none(BuildRunResult)
@@ -7246,10 +8317,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           weakFingerprint: action.weakFingerprint,
           policy: action.actionCachePolicy,
           outputRoot: action.cwd))
+        hotEnvResolvers.add(action.actionEnvResolver())
       let lookupStart = statStart()
       let navigatorStart = statStart()
       let scan = cache.scanHotIndexMetadataInputsUnchanged(hotProbes,
-        addr metadataCache)
+        addr metadataCache, hotEnvResolvers)
       finishStat("repro hot index navigator scan", navigatorStart)
       finishStat("repro cache lookup", lookupStart)
       case scan.status
@@ -7276,6 +8348,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         discard
 
     var hotRecords: seq[ActionResultRecord] = @[]
+    # M10 — parallel to `hotRecords`; see `hotEnvResolvers` above.
+    var hotRecordEnvResolvers: seq[EnvResolver] = @[]
     for action in buildGraph.actions:
       if (not action.cacheable) or action.dynamicDepsFile.len > 0:
         return none(BuildRunResult)
@@ -7301,10 +8375,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if outputStateMismatch(hotRecord.get(), action.cwd).len > 0:
         return none(BuildRunResult)
       hotRecords.add(hotRecord.get())
+      hotRecordEnvResolvers.add(action.actionEnvResolver())
     let lookupStart = statStart()
     let inputScanStart = statStart()
     let inputsUnchanged =
-      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
+      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache,
+        hotRecordEnvResolvers)
     finishStat("repro hot input scan", inputScanStart)
     finishStat("repro cache lookup", lookupStart)
     if not inputsUnchanged:
@@ -7406,6 +8482,42 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc invalidateCachedWrites(action: BuildAction; evidence: PathSetEvidence) =
     for output in evidence.monitorWrites:
       invalidateCachedPath(materialPath(action.cwd, output))
+
+  proc storeOutputBlobsFor(action: BuildAction;
+                           evidence: PathSetEvidence): bool =
+    ## Whether this action's output PAYLOADS go into the local CAS, as
+    ## opposed to a metadata-only record.
+    ##
+    ## The three publish sites (elevated, builtin, process) asked this
+    ## question with three copies of the same expression; S7 needed to add a
+    ## second clause to all three, and three copies of a SAFETY condition is
+    ## how one of them ends up without it. One closure now, so the gate
+    ## cannot be present at two sites and absent at the third.
+    let wanted = (not config.deferLocalOutputBlobs) or
+      config.peerCacheActionPublisher != nil or
+      (config.binaryCachePublisher != nil and
+        (action.publishToBinaryCache or config.binaryCacheIntermediateScope))
+    if not wanted:
+      return false
+    if not config.requireCompleteOutputEvidence:
+      return true
+    # S7's gate. A payload-less record cannot serve a restore, so withholding
+    # the blobs is exactly "this action must re-run rather than be restored".
+    let unaccounted = action.undeclaredSurvivingWrites(evidence)
+    if unaccounted.len == 0:
+      return true
+    runResult.trace(action.id, "cache-output-blobs-withheld",
+      "undeclared surviving writes: " & unaccounted.join(", "))
+    let idx = idToIndex.resultIndex(action.id)
+    runResult.results[idx].evidence.diagnostics.add(
+      "output payloads withheld (S7): action wrote " & $unaccounted.len &
+      " path(s) its declared outputs do not account for — " &
+      unaccounted.join(", ") & ". Restoring only the declared outputs " &
+      "would serve an incomplete tree, so the record is published without " &
+      "payloads and the action re-runs instead. Declare the path as an " &
+      "output, or as an ignored (machine-local derived) prefix, if it " &
+      "should not gate the restore.")
+    false
 
   poolCapacity[""] = maxParallel
   for p in buildGraph.pools:
@@ -7962,6 +9074,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
               reusableInPlace,
             metadataCache = addr fileMetadataCache,
+            envResolver = action.actionEnvResolver(),
             outputRoot = action.cwd)
           finishStat("repro cache lookup", lookupStart)
           # Peer-Cache M1: on local miss, consult the LAN peer cache.
@@ -7993,6 +9106,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                     config.rebuildMissingOutputsOnCacheHit and
                     reusableInPlace,
                   metadataCache = addr fileMetadataCache,
+                  envResolver = action.actionEnvResolver(),
                   outputRoot = action.cwd)
                 finishStat("repro peer-cache lookup-retry", retryStart)
                 runResult.trace(id, "peer-cache-hit", $lookup.status)
@@ -8099,7 +9213,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             not config.forceRebuild and
             not action.needsExecutionForPolicy():
           let evidenceStart = statStart()
-          let evidence = collectEvidence(action, strict = true)
+          let evidence = collectEvidence(action, strict = true,
+            config = addr config)
           finishStat("repro evidence collect", evidenceStart)
           runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence
           if not evidence.publishable:
@@ -8215,7 +9330,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if status == asSucceeded:
             invalidateCachedOutputs(action)
             let evidenceStart = statStart()
-            let evidence = collectEvidence(action, strict = true)
+            let evidence = collectEvidence(action, strict = true,
+              config = addr config)
             finishStat("repro evidence collect", evidenceStart)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
@@ -8242,11 +9358,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # M9.R.72.3 block for the spec citation.
             if action.cacheable and not evidence.disableCacheHits:
               let recordStart = statStart()
-              let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-              config.peerCacheActionPublisher != nil or
-              (config.binaryCachePublisher != nil and
-                (action.publishToBinaryCache or
-                 config.binaryCacheIntermediateScope))
+              let storeOutputBlobs =
+                storeOutputBlobsFor(action, evidence.evidence)
               let record = cache.recordActionResult(cas.inner,
                 action.weakFingerprint,
                 action.actionCachePolicy,
@@ -8254,6 +9367,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 action.outputs, action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
+                envInputs = action.cacheEnvInputs(evidence.evidence),
                 # An elevated edge reaches this site instead of the
                 # monitored one, and it used to record every directory
                 # input with NO membership digest. That is not "less
@@ -8389,7 +9503,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if finished.status == asSucceeded:
             invalidateCachedOutputs(plan.action)
             let evidenceStart = statStart()
-            let evidence = collectEvidence(plan.action, strict = true)
+            let evidence = collectEvidence(plan.action, strict = true,
+              config = addr config)
             finishStat("repro evidence collect", evidenceStart)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
@@ -8425,17 +9540,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               # opted into publishing — the publish hook guards on
               # ``outputPayloadKind == opkCasBlobs`` and would
               # silently skip otherwise.
-              let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-                config.peerCacheActionPublisher != nil or
-                (config.binaryCachePublisher != nil and
-                  (plan.action.publishToBinaryCache or
-                   config.binaryCacheIntermediateScope))
+              let storeOutputBlobs =
+                storeOutputBlobsFor(plan.action, evidence.evidence)
               let record = cache.recordActionResult(cas.inner,
                 plan.action.weakFingerprint,
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
+                envInputs = plan.action.cacheEnvInputs(evidence.evidence),
                 # Same omission as the elevated site above, reached by
                 # builtin edges and by anything whose plan is not a
                 # `bakProcess`. A builtin cannot be wrapped in the
@@ -8943,9 +10056,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # HM-5 — fold from the records the host already has. The ``.iomon``
             # for this action may not exist yet; that is the point.
             collectEvidence(action, strict = true,
-              hostedRecords = addr hostedMonitorRecords)
+              hostedRecords = addr hostedMonitorRecords,
+              config = addr config)
           else:
-            collectEvidence(action, strict = true)
+            collectEvidence(action, strict = true,
+              config = addr config)
         hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
         # HM-5 — a publication that FAILED means this action's ``.iomon`` never
@@ -9005,16 +10120,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # either the peer-cache publisher OR the binary-cache
           # publisher (with this action opted in) needs to read the
           # blob payloads back out of the local CAS.
-          let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-            config.peerCacheActionPublisher != nil or
-            (config.binaryCachePublisher != nil and
-              (action.publishToBinaryCache or
-               config.binaryCacheIntermediateScope))
+          let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
           let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
             storeOutputBlobs = storeOutputBlobs,
             metadataCache = addr fileMetadataCache,
+            envInputs = action.cacheEnvInputs(evidence.evidence),
             enumeratedDirectories =
               action.cacheEnumeratedDirectories(evidence.evidence))
           finishStat("repro cache record", recordStart)
@@ -9087,6 +10199,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           "monitor depfile flush failed after the action-cache entry was " &
           "published: " & outcome.error)
       runResult.trace(outcome.actionId, "monitor-flush-failed", outcome.error)
+    # Engine-Threadpool TP-1 — and EVERY OTHER tenant of the engine's worker
+    # pool drains here too, not just the flush above.
+    #
+    # This is inside the ``finally``, which is the whole of the guarantee: an
+    # exception unwinding out of the scheduling loop — a raising
+    # ``progressCallback``, say — must not leave a worker mid-job while the
+    # process tears down around it. ``the pool drains when an exception
+    # unwinds out of the build`` pins that, and moving this line (or the
+    # flush drain above it) out of the ``finally`` is the mutation that
+    # reddens it — measured red on both of that case's assertions: the
+    # depfile never appeared and the dot-prefixed scratch file was left
+    # behind.
+    #
+    # A no-op today beyond the flush, because the flush is the pool's only
+    # tenant; it is here so that adding TP-2's monitor finish does not depend
+    # on someone remembering to add a drain.
+    awaitEnginePoolIdle()
   finishStat("repro scheduler total", totalStart)
   finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats

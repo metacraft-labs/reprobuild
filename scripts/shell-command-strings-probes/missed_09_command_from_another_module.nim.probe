@@ -1,0 +1,12 @@
+## The command string is assembled by a helper in ANOTHER module. Only a bare
+## identifier bound by a `let`/`var`/`const` IN THIS FILE is resolved, so there
+## is no literal here to test and the site reports clean.
+##
+## This is the documented ceiling of a single-file lexical scanner rather than
+## an exemption: the compile-time ambient-execution linter is the tool for the
+## cross-module class.
+import std/[osproc]
+import command_catalog
+
+proc probe(): string =
+  execCmdEx(command_catalog.probeCommand()).output

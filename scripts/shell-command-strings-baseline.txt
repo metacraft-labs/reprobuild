@@ -1,0 +1,45 @@
+# shell-command-strings baseline — see scripts/check_shell_command_strings.sh
+# Regenerate with: scripts/check_shell_command_strings.sh --write-baseline
+# Then WRITE THE VERDICT for each entry: it is a defect until argued otherwise.
+#
+# Format: <file>|<exec api>|<operator classes>|<the offending literal(s)>
+# Line numbers are deliberately absent so an edit above a site does not
+# invalidate the baseline.
+#
+# Note what is NOT here. Three sites in the tree carry a redirect token and are
+# provably shell-bound, so the scanner exempts them STRUCTURALLY rather than by
+# baseline — that is the judgement this check exists to stop people
+# re-deriving:
+#   - the dev-session supervisor detach (`) </dev/null >> … 2>&1 &`) goes
+#     through `execShellCmd`, which is a real shell on both platforms;
+#   - the `setsid` cache-push detach lives in the `of wtPosix:` arm of a
+#     `case targetOs`, and the `wtWindows` arm builds an argv;
+#   - `runFixtureCmd` appends `>'…' 2>&1` to an explicit `sh -c` BODY with
+#     `sh` as argv[0].
+# Break any of those three properties and the site appears here.
+
+# DEFECT, found 2026-08-27 by this check on the day it was written; NOT fixed
+# (milestone W10 reports it rather than absorbing it).
+# `typecheckConsumerAgainstInterface` (the RP8 LSP typecheck capability,
+# reached today only by `t_rp8_lsp_typecheck_and_goto_def`)
+# builds `"cd " & quoteShell(repoRoot) & " && " & cmd` and runs it through
+# `execCmdEx`. On Windows there is no shell, so the whole string is looked up
+# as an executable named `cd` and `execCmdEx` RAISES rather than returning a
+# verdict. Measured:
+#   OSError: Requested command not found:
+#     'cd C:\…\w10probe && git.exe rev-parse --git-dir'
+# Fix shape: pass `workingDir` to an argv `startProcess` and drop the `cd &&`.
+libs/repro_cli_support/src/repro_cli_support.nim|execCmdEx|and-or-pipe|&&
+
+# DEFECT, found 2026-08-27 by this check; NOT fixed (reported by W10). The
+# `zekZstdPipe` extractor builds `zstd -dc <archive> | tar -xf - -C <dest>`
+# and runs it through `execCmdEx`. Its own comment asserts "execCmdEx runs
+# through cmd.exe on Windows, which honors | natively" — that is false, and
+# it is the exact misconception this check encodes. Measured with the same
+# shape: the `|` and everything after it arrive as argv to the FIRST program.
+#   git --version | git hash-object --stdin  ->  exit 129,
+#   "error: unknown option `stdin'" from `git version`
+# Fix shape: spawn the two processes and connect the pipe in-process, or make
+# the shell explicit. The comment's own note that Windows "typically takes the
+# (ii) path before falling through here" is why this has not been seen.
+libs/repro_home_apply/src/repro_home_apply/builtin_adapter.nim|execCmdEx|and-or-pipe||

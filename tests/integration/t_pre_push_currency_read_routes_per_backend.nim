@@ -32,10 +32,22 @@
 ## missing or ``./build/bin/repro`` absent.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl, tomlBasicString
 
 import repro_workspace_manifests
 
-const reproBinary = "./build/bin/repro"
+const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory.
+  ##
+  ## The previous spelling (``"./build/bin/" & addFileExt("repro", ExeExt)``)
+  ## made the working directory an unstated fixture input: from the repo root
+  ## the case ran, from any other directory ``fileExists`` was false and it
+  ## SKIPPED, and from a scratch directory that happened to carry a staged
+  ## ``build/bin/repro`` it ran against THAT binary and reported failures that
+  ## read as product refusals. ``currentSourcePath()`` is absolute on both
+  ## platforms, so this constant is the same from every cwd.
+const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
 
 proc q(value: string): string = quoteShell(value)
 
@@ -44,11 +56,17 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc initGitRepo(gitBin, path: string) =
@@ -72,13 +90,24 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"HL-2 Tester\"")
 
-proc writeStubCli(path: string) =
+proc writeStubCli(path: string): string =
+  ## Returns the path the ``[locking] route`` must name as ``program``.
+  ##
+  ## The external-cli backend launches ``program`` DIRECTLY
+  ## (``repro_lock_store.startProcess(s.program, ...)``), which is the
+  ## right contract — "program" means a program. Off POSIX a ``#!``
+  ## script is not one: Windows answers "%1 is not a valid Win32
+  ## application". So the fixture keeps ONE copy of the stub logic and,
+  ## on Windows only, writes a ``.cmd`` launcher beside it that hands the
+  ## script to ``sh`` with the arguments and stdin untouched. Git and
+  ## msys2 both ship an ``sh`` on this host; the absolute path is baked in
+  ## so the launcher does not depend on the child's PATH.
   writeFile(path, """#!/usr/bin/env bash
 set -euo pipefail
 db="${DB_DIR:?DB_DIR unset}"
@@ -102,6 +131,18 @@ echo "unknown op: $op" >&2
 exit 1
 """)
   inclFilePermissions(path, {fpUserExec, fpGroupExec, fpOthersExec})
+  when defined(windows):
+    let shBin = findExe("sh")
+    doAssert shBin.len > 0, "no `sh` on PATH to launch the stub CLI"
+    let launcher = path.changeFileExt("cmd")
+    writeFile(launcher,
+      "@echo off\r\n" &
+      "\"" & shBin.replace('\\', '/') & "\" \"" &
+        path.replace('\\', '/') & "\" %*\r\n" &
+      "exit /b %ERRORLEVEL%\r\n")
+    launcher
+  else:
+    path
 
 proc projectToml(coreUrl, secretUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
@@ -145,7 +186,7 @@ suite "HL-2 — pre-push currency read routes per backend":
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
-        projectToml("file://" & coreOrigin, "file://" & secretOrigin))
+        projectToml(fileUrl(coreOrigin), fileUrl(secretOrigin)))
       writeFile(manifestsRoot / "repos" / "core.toml",
         repoFragment("core", "core-origin"))
       writeFile(manifestsRoot / "repos" / "secret.toml",
@@ -161,7 +202,7 @@ suite "HL-2 — pre-push currency read routes per backend":
       let db = scratch / "personal-db"
       createDir(db)
       let stub = scratch / "personal-store.sh"
-      writeStubCli(stub)
+      let stubProgram = writeStubCli(stub)
       putEnv("DB_DIR", db)
       defer: delEnv("DB_DIR")
 
@@ -174,7 +215,8 @@ suite "HL-2 — pre-push currency read routes per backend":
         "{ visibility = \"team\", backend = \"git-checkout\", " &
         "path = \"manifests-team\", repos = [\"core\"] }, " &
         "{ visibility = \"personal\", backend = \"external-cli\", " &
-        "program = \"" & stub & "\", repos = [\"secret\"] }]\n")
+        "program = \"" & tomlBasicString(stubProgram) &
+        "\", repos = [\"secret\"] }]\n")
 
       putEnv("REPROBUILD_SYSTEM_CONFIG", scratch / "no-system.toml")
       putEnv("REPROBUILD_USER_CONFIG", scratch / "no-user.toml")

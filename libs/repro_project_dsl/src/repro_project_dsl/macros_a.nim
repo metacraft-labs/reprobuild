@@ -77,6 +77,24 @@ proc requireStrLit(node: NimNode; what: string): string =
       "the macro cannot evaluate an expression here", node)
   node.strVal
 
+proc foldStrLitConcat(node: NimNode; what: string): string =
+  ## Like `requireStrLit`, but folds a `"a" & "b" & "c"` chain of string
+  ## literals into one compile-time string.
+  ##
+  ## `requireStrLit` exists to refuse EXPRESSIONS whose value the macro cannot
+  ## know. A concatenation of literals is not one of those: every operand is
+  ## present in the AST, so the text IS knowable and refusing it would only
+  ## force the author onto one unwrappable line. The distinction is kept
+  ## narrow on purpose — only `&`, only between string literals; anything
+  ## else still goes through `requireStrLit`'s error.
+  ##
+  ## Added for M6's `nonDeterminism ... justification = "..."`, which is
+  ## prose: a rule that made the reason hard to write would be a rule that
+  ## encouraged short, uninformative reasons.
+  if node.kind == nnkInfix and node.len == 3 and node[0].eqIdent("&"):
+    return foldStrLitConcat(node[1], what) & foldStrLitConcat(node[2], what)
+  requireStrLit(node, what)
+
 proc codeOrEmpty(code: string): string =
   ## Emit-side companion to `exprCode`. An unset field holds no source at all,
   ## and splicing "" would produce `field: ,` — a syntax error in the generated
@@ -288,6 +306,58 @@ proc parseCommandDependencyPolicy(node: NimNode;
       result.suppressMonitorShimSeed =
         boolLiteral(suppressSeedValue, result.suppressMonitorShimSeed)
 
+type
+  NonDeterminismDecl = tuple[policy: NonDeterminismPolicy; justification: string]
+
+proc parseNonDeterminismDecl(node: NimNode;
+                             fallback: NonDeterminismDecl): NonDeterminismDecl =
+  ## Windows-Build-Correctness M6 — parse the tool-level entropy blessing:
+  ##
+  ##   nonDeterminism entropyBlessed,
+  ##     justification = "why this tool's randomness cannot reach its output"
+  ##
+  ## Two rules are enforced HERE rather than left to review, because both
+  ## failures are silent at the point they matter (an action that quietly
+  ## keeps caching):
+  ##
+  ##   * A blessing MUST carry a justification. "Do not bless anything you
+  ##     cannot justify" is only a rule if the compiler asks for the reason;
+  ##     a bare ``nonDeterminism entropyBlessed`` is a compile error naming
+  ##     the tool.
+  ##   * An unrecognised policy word is a compile ERROR, not a silent
+  ##     fallback to the parent's value. ``dependencyPolicy`` falls back
+  ##     (its unknown-word case predates this), but the failure modes are
+  ##     not comparable: an unrecognised dependency policy leaves the
+  ##     inherited monitoring in place, while a misspelt blessing that
+  ##     silently inherited ``ndpUnblessed`` would read as "the author
+  ##     tried to bless this and it did not take" — which is the SAFE
+  ##     direction only by accident, and a misspelt word that inherited a
+  ##     blessing from an enclosing scope would not be safe at all.
+  if calleeName(node).normalize != "nondeterminism" or node.len < 2:
+    error("nonDeterminism expects a policy name " &
+      "(entropyBlessed or unblessed)", node)
+  result = fallback
+  let text = identText(node[1]).normalize
+  case text
+  of "entropyblessed", "blessed":
+    result.policy = ndpEntropyBlessed
+  of "unblessed", "none":
+    result.policy = ndpUnblessed
+    result.justification = ""
+  else:
+    error("nonDeterminism expects entropyBlessed or unblessed, got: " &
+      identText(node[1]), node)
+  for i in 2 ..< node.len:
+    let justificationValue = namedValue(node[i], "justification")
+    if not justificationValue.isNil:
+      result.justification =
+        foldStrLitConcat(justificationValue, "nonDeterminism justification")
+  if result.policy == ndpEntropyBlessed and result.justification.len == 0:
+    error("nonDeterminism entropyBlessed requires justification = \"...\": " &
+      "state what this tool draws randomness FOR and why it cannot reach " &
+      "the tool's output. An unjustified blessing silently restores cache " &
+      "publication for a tool whose results may not be reproducible.", node)
+
 proc collectOutputsOperands(node: NimNode; sink: var seq[NimNode]) =
   ## Flatten the operand list of an ``outputs`` statement into a sequence
   ## of identifier (or AccQuoted) nodes.
@@ -414,6 +484,7 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
                    parentOutputFlags: openArray[string];
                    parentTypedOutputs: openArray[TypedOutputDef];
                    parentPolicy: BuildActionDependencyPolicy;
+                   parentNonDeterminism: NonDeterminismDecl;
                    wholeBody: NimNode;
                    commands: var seq[CliCommandDef]): CliCommandDef =
   ## Named-Targets M0: walk a ``cli:`` body or a ``subcmd`` body in
@@ -439,6 +510,12 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
     else:
       packageName & "." & executableName & "." & path.join(".")
   result.dependencyPolicy = parentPolicy
+  # M6: the blessing is inherited from the enclosing ``cli:`` scope exactly
+  # the way ``dependencyPolicy`` is, which is what makes it a property of the
+  # TOOL: ``nim`` writes it once above its subcommands and both ``nim c`` and
+  # ``nim js`` carry it.
+  result.nonDeterminism = parentNonDeterminism.policy
+  result.nonDeterminismJustification = parentNonDeterminism.justification
   result.params = @parentParams
   result.outputFlags = @parentOutputFlags
   result.typedOutputs = @parentTypedOutputs
@@ -449,6 +526,11 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
     of "dependencypolicy":
       result.dependencyPolicy = parseCommandDependencyPolicy(stmt,
         result.dependencyPolicy)
+    of "nondeterminism":
+      let decl = parseNonDeterminismDecl(stmt,
+        (result.nonDeterminism, result.nonDeterminismJustification))
+      result.nonDeterminism = decl.policy
+      result.nonDeterminismJustification = decl.justification
     of "pos":
       # DSL-port M6: v8's ``cli:`` body accepts ``pos`` at the root scope
       # (``executable myTool: cli: pos input is string``) for tools with
@@ -530,7 +612,9 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
       let childBody = stmt[stmt.len - 1]
       discard parseCliScope(packageName, executableName, childBody,
         childPath, false, result.params, result.outputFlags,
-        result.typedOutputs, result.dependencyPolicy, wholeBody, commands)
+        result.typedOutputs, result.dependencyPolicy,
+        (result.nonDeterminism, result.nonDeterminismJustification),
+        wholeBody, commands)
     else:
       discard
 
@@ -593,7 +677,10 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       # directly under ``cli:`` and seeds the cumulative output set that
       # each subcommand inherits, all in one source-order pass.
       let rootCmd = parseCliScope(packageName, result.exportName, cliBody,
-        @[], true, @[], @[], @[], defaultDependencyPolicy(), cliBody,
+        @[], true, @[], @[], @[], defaultDependencyPolicy(),
+        # M6: every tool starts UNBLESSED. A tool is blessed only where its
+        # own spec says so, in writing, with a reason.
+        (ndpUnblessed, ""), cliBody,
         commands)
       discard rootCmd
       # ``parseCliScope`` only emits non-root commands into ``commands``.
@@ -2328,6 +2415,9 @@ proc packageLiteral(pkg: PackageDef): string =
       result.add("], providerEntrypointId: " &
           escForCode(cmd.providerEntrypointId) &
         ", dependencyPolicy: " & dependencyPolicyCode(cmd.dependencyPolicy) &
+        ", nonDeterminism: " & $cmd.nonDeterminism &
+        ", nonDeterminismJustification: " &
+          escForCode(cmd.nonDeterminismJustification) &
         ", outputFlags: @[")
       for ofIndex, flagName in cmd.outputFlags:
         if ofIndex > 0:
@@ -2799,6 +2889,25 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "extraEnv = extraEnv, " &
+      # Windows-Build-Correctness M6 — the tool's entropy blessing is
+      # SPLICED AS A LITERAL, not exposed as a formal parameter, and the
+      # two reasons are opposite failures of the same field:
+      #
+      #   * A formal could be OVERRIDDEN at a call site, which would make
+      #     the blessing an edge property. The whole point of the design is
+      #     that a recipe cannot vouch for a tool it merely calls.
+      #   * A formal could be DROPPED by a hand-written alias. That is not
+      #     hypothetical: ``nim.c`` takes ``dependencyPolicy`` and hands
+      #     ``compileDependencyPolicy`` a freshly constructed value, so the
+      #     policy the ``cli:`` block declares never reaches a ``nim.c``
+      #     edge at all. A blessing that vanished the same way would fail
+      #     OPEN in the worst place — the one tool this milestone blesses.
+      #
+      # Spliced, it survives both: every wrapper call carries it and no
+      # caller can name it.
+      "nonDeterminism = " & $cmd.nonDeterminism & ", " &
+      "nonDeterminismJustification = " &
+        escForCode(cmd.nonDeterminismJustification) & ", " &
       "dependencyPolicy = dependencyPolicy)\n")
     # Typed-Outputs M1: bind each typed-output field by evaluating its
     # ``pathExpr`` in the call-site flag scope. The shared
@@ -3382,6 +3491,10 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       "wasm-pack",
       "webpack-cli",
       "wget",
+      # Cloudflare Pages/Workers CLI — an isonim static site's deploy step
+      # (`wrangler pages deploy dist/`) declares `uses: "wrangler"`; the
+      # auto-import reaches `repro_dsl_stdlib/packages/wrangler.nim`.
+      "wrangler",
       "xdotool",
       "xvfb-run",
       "yarn",
@@ -3995,7 +4108,8 @@ proc expandInterfaceParamStmt(stmt: NimNode;
 proc parseInterfaceCommand(toolId: string; node: NimNode;
                            paramGroups: Table[string, seq[NimNode]];
                            commonParams: openArray[CliParamDef];
-                           defaultPolicy: BuildActionDependencyPolicy):
+                           defaultPolicy: BuildActionDependencyPolicy;
+                           defaultNonDeterminism: NonDeterminismDecl):
     CliCommandDef =
   let loc = lineFile(node)
   let head = calleeName(node).normalize
@@ -4011,6 +4125,8 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
   result.providerEntrypointId =
     if result.name.len == 0: toolId & ".call" else: toolId & "." & result.name
   result.dependencyPolicy = defaultPolicy
+  result.nonDeterminism = defaultNonDeterminism.policy
+  result.nonDeterminismJustification = defaultNonDeterminism.justification
   result.params = @commonParams
   result.sourceFile = loc.file
   result.sourceLine = loc.line
@@ -4019,6 +4135,18 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
     if calleeName(stmt).normalize == "dependencypolicy":
       result.dependencyPolicy = parseInterfaceDependencyPolicy(stmt,
         result.dependencyPolicy)
+      continue
+    if calleeName(stmt).normalize == "nondeterminism":
+      # M6: same statement, same meaning, in the second parser. The two CLI
+      # front ends are parallel implementations (see
+      # ``parseInterfaceDependencyPolicy`` vs
+      # ``parseCommandDependencyPolicy``); a declaration wired into only one
+      # of them would be silently ignored in the other, which for a blessing
+      # means the tool stays uncacheable with no diagnostic.
+      let decl = parseNonDeterminismDecl(stmt,
+        (result.nonDeterminism, result.nonDeterminismJustification))
+      result.nonDeterminism = decl.policy
+      result.nonDeterminismJustification = decl.justification
       continue
     # Named-Targets M0/M1: ``outputs <flag> [<flag>...]`` declares the
     # cumulative output set for this subcommand. ``defineCliInterface``
@@ -4194,6 +4322,12 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "extraEnv = extraEnv, " &
+      # M6: spliced literal, not a formal — see the identical splice in
+      # ``toolActionWrapperCode`` for why the blessing must not be nameable
+      # at a call site.
+      "nonDeterminism = " & $command.nonDeterminism & ", " &
+      "nonDeterminismJustification = " &
+        escForCode(command.nonDeterminismJustification) & ", " &
       "dependencyPolicy = dependencyPolicy)\n")
     # Typed-Outputs M1: bind typed fields against the call-site flag
     # values via the shared helper (the ``package``-block wrapper uses
@@ -4251,6 +4385,8 @@ macro defineCliInterface*(toolSymbol: untyped;
       paramGroups[group.name] = group.statements
   var commonParams: seq[CliParamDef] = @[]
   var defaultPolicy = defaultDependencyPolicy()
+  # M6: unblessed until the interface says otherwise, with a reason.
+  var defaultNonDeterminism: NonDeterminismDecl = (ndpUnblessed, "")
   proc addCommonParams(stmt: NimNode) =
     var stack: seq[string] = @[]
     for expandedStmt in expandInterfaceParamStmt(stmt, paramGroups, stack):
@@ -4263,7 +4399,8 @@ macro defineCliInterface*(toolSymbol: untyped;
           expandedStmt)
       else:
         error("top-level CLI interface statements accept flags, templates, " &
-          "dependencyPolicy, call:, or subcmd sections", expandedStmt)
+          "dependencyPolicy, nonDeterminism, call:, or subcmd sections",
+          expandedStmt)
   for stmt in body:
     let head = calleeName(stmt).normalize
     if head in ["flag", "boolflag", "pos"]:
@@ -4272,14 +4409,17 @@ macro defineCliInterface*(toolSymbol: untyped;
       addCommonParams(stmt)
     elif head == "dependencypolicy":
       defaultPolicy = parseInterfaceDependencyPolicy(stmt, defaultPolicy)
+    elif head == "nondeterminism":
+      defaultNonDeterminism = parseNonDeterminismDecl(stmt,
+        defaultNonDeterminism)
   var commands: seq[CliCommandDef] = @[]
   for stmt in body:
     let head = calleeName(stmt).normalize
     case head
     of "call", "subcmd":
       commands.add(parseInterfaceCommand(toolId, stmt, paramGroups,
-        commonParams, defaultPolicy))
-    of "flag", "boolflag", "pos", "dependencypolicy":
+        commonParams, defaultPolicy, defaultNonDeterminism))
+    of "flag", "boolflag", "pos", "dependencypolicy", "nondeterminism":
       discard
     of "":
       if stmt.kind == nnkTemplateDef:

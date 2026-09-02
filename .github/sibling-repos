@@ -35,10 +35,12 @@ codetracer-trace-format-nim=dev
 # missing". A check whose outcome depends on which runner picked up the job is
 # not a check.
 #
-# Refs match the inputs CodeTracer's own `flake.nix` pins: trace-format at
-# `main`, native-recorder at `dev` (db-backend's emulator FFI contract moves
-# with recorder dev; `stable` is only the last released snapshot).
-codetracer-trace-format=main
+# native-recorder at `dev` (db-backend's emulator FFI contract moves with
+# recorder dev; `stable` is only the last released snapshot). trace-format's
+# `main` branch was retired in the org branch-rename sweep; its `dev` tip
+# carries exactly the revision reprobuild's flake.nix already pins for the
+# codetracer-trace-format input, so `dev` is the same source under a live ref.
+codetracer-trace-format=dev
 codetracer-native-recorder=dev
 
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
@@ -69,32 +71,33 @@ nim-termctl=dev
 # The TestRunner cross-cutting contract (Nim package `repro_test_adapters`)
 # lives in this standalone repo; `repro_dsl_stdlib` re-exports it, so the
 # recipe-interface extractor that reads codetracer/reprobuild.nim needs it on
-# the --path as `../reprobuild-test-adapters/src`. Mainline branch is `main`.
-reprobuild-test-adapters=main
-reprobuild-ct-test-runner=main
+# the --path as `../reprobuild-test-adapters/src`. Mainline branch is `dev`
+# (the `main` branch was retired in the org branch-rename sweep).
+reprobuild-test-adapters=dev
+reprobuild-ct-test-runner=dev
 
 
 # codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim
-# etc.) imports `io_mon` and `stackable_hooks/propagation`; codetracer's .envrc
-# wires IO_MON_SRC / NIM_STACKABLE_HOOKS_SRC from the ../io-mon and
-# ../nim-stackable-hooks siblings. io-mon is pinned to the hardened revision
-# used by this retirement campaign.
+# etc.) imports `io_mon` (including `io_mon/depfile`) and
+# `stackable_hooks/propagation`; codetracer's .envrc wires IO_MON_SRC /
+# NIM_STACKABLE_HOOKS_SRC from the ../io-mon and ../nim-stackable-hooks siblings.
 #
-# 75de6f2 is 8a55c4f + ONE cherry-picked commit touching only
-# `scripts/build_shim.sh` (io-mon branch `pin/hardened-platform-detect`). It is
-# deliberately not io-mon's dev tip: dev carries five further commits to
-# dep_queue / writer / the macOS sandbox-tools lifecycle, and moving the pin
-# would change the io-mon RUNTIME this campaign is hardening against. The
-# cherry-pick changes a build script only.
+# Pinned to io-mon's mainline (`dev`) tip. This was DELIBERATELY ADVANCED from the
+# old hardened pin 75de6f29 (`pin/hardened-platform-detect` = 8a55c4f + a
+# build_shim.sh cherry-pick) to the latest io-mon per an explicit cross-repo
+# decision (user sign-off): codetracer `dev` now imports `io_mon/depfile`, a
+# module that does NOT exist at 75de6f29, so that frozen pin broke reprobuild's
+# Test compile with `io_mon_capture.nim(83): cannot open file: io_mon/depfile`.
+# codetracer and reprobuild are now BOTH based on this identical latest io-mon so
+# the io_mon module set resolves the same way in both builds.
 #
-# Why it is needed: at 8a55c4f, build_shim.sh dispatches on `$(uname -s)`, and
-# inside reprobuild's MONITORED `repro build` action on macOS that expands to
-# the empty string — the v0.1.3 release and the 30608858466 validation run both
-# died on `unsupported platform  for the io-mon shim` (note the doubled space)
-# minutes after the same script had succeeded outside the engine in the same
-# job. The cherry-pick resolves the platform from `$OSTYPE`/`$HOSTTYPE` (bash
-# builtins — no fork for a monitoring shim to interpose) with uname as fallback.
-io-mon=75de6f292f3df7303662915988874ac310012406
+# The macOS shim platform-detection hardening the old pin existed for is PRESERVED
+# at this rev: build_shim.sh here resolves the platform from `$OSTYPE`/`$HOSTTYPE`
+# (bash builtins — no fork for the monitored shim to interpose), with `uname` only
+# as fallback, so the "unsupported platform  for the io-mon shim" failure the pin
+# guarded against does not regress. The retirement/hardening campaign re-baselines
+# against this latest io-mon runtime rather than the frozen 8a55c4f one.
+io-mon=e2ee15afe8dd7f538ec2ce79af9a1aa512addce2
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
@@ -105,7 +108,8 @@ nim-stackable-hooks=41ab1b987aba67e8bcc34a5945ac33e17b6418ed
 runquota=dev
 nim-shm-queue=08d87d26067568e980f4356c4abcf2a0d841a310
 nim-shm-gset=8a9f2f13beb24ab7949ff93c14fb34ae753bbe48
-repo-workspaces=main
+# `main` retired in the org branch-rename sweep; mainline is now `dev`.
+repo-workspaces=dev
 
 
 

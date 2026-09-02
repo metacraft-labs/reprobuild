@@ -43,23 +43,54 @@
 ## Skip rule: ``git`` missing on PATH or ``./build/bin/repro`` absent.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl
 
 import repro_workspace_manifests
 
-const reproBinary = "./build/bin/repro"
+const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory.
+  ##
+  ## The previous spelling (``"./build/bin/" & addFileExt("repro", ExeExt)``)
+  ## made the working directory an unstated fixture input: from the repo root
+  ## the case ran, from any other directory ``fileExists`` was false and it
+  ## SKIPPED, and from a scratch directory that happened to carry a staged
+  ## ``build/bin/repro`` it ran against THAT binary and reported failures that
+  ## read as product refusals. ``currentSourcePath()`` is absolute on both
+  ## platforms, so this constant is the same from every cwd.
+const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
 
 proc q(value: string): string = quoteShell(value)
+
+proc shPath(value: string): string =
+  ## ``value`` spelled for the POSIX ``sh`` that git runs a hook under.
+  ##
+  ## Nim's ``quoteShell`` follows the WINDOWS convention off POSIX: it
+  ## leaves the native backslash separators alone and quotes only on
+  ## whitespace. Inside ``sh`` a backslash is an ESCAPE, so a hook body
+  ## built with ``q`` did not survive Git-for-Windows' bundled shell — the
+  ## hook exited non-zero under ``set -eu`` and ABORTED the push it was
+  ## supposed to race, which surfaced as "git push origin HEAD:main
+  ## failed". Forward slashes inside single quotes are accepted by both
+  ## that shell and Windows itself.
+  "'" & value.replace('\\', '/').replace("'", "'\\''") & "'"
 
 proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   let res = execCmdEx(command, workingDir = cwd)
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc gitConfig(gitBin, repo: string) =
@@ -82,7 +113,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   gitConfig(gitBin, targetPath)
 
 proc seedGitCheckoutBackend(gitBin, checkoutRoot, bare: string) =
@@ -189,7 +220,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "team.toml",
-    projectToml("file://" & coreOrigin))
+    projectToml(fileUrl(coreOrigin)))
   writeFile(manifestsRoot / "repos" / "core.toml",
     repoFragment("core", "core-origin"))
   seedManifestGitLayer(gitBin, manifestsRoot, result.scratch / "manifest.git")
@@ -232,18 +263,26 @@ proc raceTeamBackendOnNextPush(gitBin: string; fx: Fixture;
   let fired = fx.scratch / "team-race-fired"
   writeFile(hook,
     "#!/bin/sh\nset -eu\n" &
-    "if [ ! -e " & q(fired) & " ]; then\n" &
-    "  : > " & q(fired) & "\n" &
-    "  " & q(gitBin) & " -C " & q(sidecar) &
+    "if [ ! -e " & shPath(fired) & " ]; then\n" &
+    "  : > " & shPath(fired) & "\n" &
+    "  " & shPath(gitBin) & " -C " & shPath(sidecar) &
       " push origin main >/dev/null 2>&1\n" &
     "fi\n")
   setFilePermissions(hook, {fpUserRead, fpUserWrite, fpUserExec})
-  rel
+  # The caller compares this against `git ls-tree --name-only` output, and git
+  # names a path with `/` on every host. `rel` was built with Nim's DirSep-aware
+  # `/`, so off POSIX it came back as `locks\team\core\<sha>.toml` and matched
+  # nothing. Return the GIT spelling; `sidecar / rel` above is the only place
+  # the native one is wanted, and it is already resolved.
+  rel.replace('\\', '/')
 
 proc backendUpstreamFiles(gitBin, bare: string): string =
   let ls = run(q(gitBin) & " -C " & q(bare) &
     " ls-tree -r --name-only refs/heads/main")
-  check ls.code == 0
+  # `doAssert`, not `check`: this is a helper, outside any `test` body,
+  # where `check` cannot see the injected `testStatusIMPL` and the case
+  # would still report `[OK]` after printing "Check failed".
+  doAssert ls.code == 0, "git ls-tree failed in " & bare & ":\n" & ls.output
   ls.output
 
 proc invokeGate(fx: Fixture; refsFile: string): tuple[code: int; output: string] =

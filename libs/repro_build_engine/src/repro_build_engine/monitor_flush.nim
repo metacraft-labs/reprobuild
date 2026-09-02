@@ -58,19 +58,43 @@
 ## ``flush_temp_is_on_the_destination_filesystem`` asserts the property by
 ## comparing ``st_dev``, not by reading this comment.
 ##
-## THE WORKER IS THE ENGINE'S ONLY THREAD, AND NOTHING GARBAGE-COLLECTED
-## CROSSES INTO IT. The queue is a pair of intrusive linked lists in
-## ``allocShared0`` memory whose payloads are manually-owned ``cstring``s; the
-## globals this module keeps are a lock, a condition variable, two node
-## pointers and three integers. That is not fastidiousness, it is HM-3's
-## finding applied: a ``ref`` shared across threads races ``nimIncRef`` /
-## ``nimDecRef`` because ORC's counts are atomic only under ``-d:gcAtomicArc``,
-## and TSAN found exactly that in nim-shm-gset's pool. Keeping GC'd values on
-## one side of the boundary makes the whole question unrepresentable rather
-## than argued — and it is also what makes ``flushWorkerLoop`` provably
-## ``gcsafe`` instead of cast to it.
+## THIS MODULE NO LONGER OWNS A THREAD — Engine-Threadpool TP-1.
 ##
-## THE WORKER NEVER WRITES TO ``stdout`` OR ``stderr``.
+## HM-5 shipped a bespoke worker here, and it was the engine's only one. TP-1
+## replaced it with a reusable pool (``worker_pool.nim``) that this module is
+## now simply the first TENANT of: the queue, the worker loop, the outcome
+## list, the shutdown discipline and the backpressure bound all live there, and
+## what remains here is the publication itself plus the flush-shaped API the
+## scheduler calls. The spec asked for one pool with several users rather than
+## a second bespoke thread, and this is that move.
+##
+## NOTHING ABOUT THE SEMANTICS MOVED WITH IT, and the two that matter are
+## restated because they are load-bearing and mutation-pinned:
+##
+##   * a CACHEABLE hosted action waits for its OWN publication before it
+##     publishes a cache entry (``awaitMonitorFlush``); a non-cacheable one
+##     never waits;
+##   * a build does not end with a publication in flight
+##     (``awaitMonitorFlushes``), so no scratch file is left beside a depfile
+##     that never appeared.
+##
+## Both are now expressed through the pool's per-tenant primitives, which were
+## written to have exactly the shape HM-5's globals had — including the
+## "``idle`` is not a timeout in disguise" test that closes the
+## drained-by-an-earlier-call case.
+##
+## NOTHING GARBAGE-COLLECTED CROSSES INTO A WORKER. A job is an intrusive node
+## in ``allocShared0`` memory whose payload is manually-owned ``cstring``s,
+## embedded in the pool's own job header; the task and release hooks are
+## ``{.nimcall, gcsafe.}`` code pointers with no environment. That is not
+## fastidiousness, it is HM-3's finding applied: a ``ref`` shared across
+## threads races ``nimIncRef`` / ``nimDecRef`` because ORC's counts are atomic
+## only under ``-d:gcAtomicArc``, and TSAN found exactly that in nim-shm-gset's
+## pool. Keeping GC'd values on one side of the boundary makes the whole
+## question unrepresentable rather than argued — and it is also what makes
+## ``publishOneFlush`` provably ``gcsafe`` instead of cast to it.
+##
+## THE WORKERS NEVER WRITE TO ``stdout`` OR ``stderr``.
 ## ``beginMonitorSpawnContext`` redirects descriptors 0/1/2 around a hosted
 ## spawn, and a worker that wrote a diagnostic inside that window would land it
 ## in some action's captured output. Failures come back through
@@ -88,14 +112,16 @@
 ##   * ``umask(0022)`` — the worker creates no file, so no mode is decided
 ##     inside the window.
 ##
-## Both hold BECAUSE the worker's job is a rename. A future worker that wrote
-## the file itself would re-open both questions, which is the concrete reason
-## the "point io-mon at /dev/null and re-encode here" variant was rejected on
-## more than its CPU cost.
+## Both hold BECAUSE this tenant's job is a rename, and they now have to hold
+## for EVERY tenant of the shared pool rather than for one thread — see
+## ``worker_pool.nim``'s header, which states that as the obligation the second
+## tenant inherits. A future worker that wrote the file itself would re-open
+## both questions, which is the concrete reason the "point io-mon at /dev/null
+## and re-encode here" variant was rejected on more than its CPU cost.
 
-import std/[locks, os, strutils]
+import std/[os, strutils]
 
-from std/times import epochTime
+import ./worker_pool
 
 type
   MonitorFlushJob* = object
@@ -127,42 +153,24 @@ type
   FlushNode = ptr FlushNodeObj
   FlushNodeObj = object
     ## A queued publication, in shared memory. Every string field is a
-    ## manually-owned copy freed by whichever side consumes the node.
-    next: FlushNode
-    actionId: cstring
+    ## manually-owned copy freed by ``releaseFlushJob`` on the worker.
+    ##
+    ## ``base`` MUST be first: the pool hands a task a ``ptr
+    ## EnginePoolJobObj`` and the task casts it back to this type, which is
+    ## an identity on the address only while the header sits at offset 0. The
+    ## ``static`` assertion below is what makes that a compile error rather
+    ## than a memory-corruption bug if the fields are ever reordered.
+    base: EnginePoolJobObj
     tempPath: cstring
     destPath: cstring
     failSubstring: cstring
     delayMs: int
 
-  OutcomeNode = ptr OutcomeNodeObj
-  OutcomeNodeObj = object
-    next: OutcomeNode
-    actionId: cstring
-    error: cstring
+static:
+  doAssert offsetOf(FlushNodeObj, base) == 0,
+    "the pool job header must be the first field of FlushNodeObj"
 
-var flushLock: Lock
-var flushSignal: Cond
-var flushJobHead: FlushNode = nil
-var flushJobTail: FlushNode = nil
-var flushOutcomeHead: OutcomeNode = nil
-var flushPending: int = 0
-var flushStarted: bool = false
-var flushWorker: Thread[void]
-
-proc sharedDup(value: string): cstring =
-  ## Copy a Nim string into shared, manually-managed memory. NOT the GC's:
-  ## the block outlives the caller's string and is released by ``sharedFree``
-  ## on whichever thread consumes it.
-  let n = value.len
-  result = cast[cstring](allocShared0(n + 1))
-  if n > 0:
-    copyMem(result, value.cstring, n)
-
-proc sharedFree(value: var cstring) =
-  if value != nil:
-    deallocShared(value)
-    value = nil
+let monitorFlushTenant = registerEnginePoolTenant("monitor-depfile-flush")
 
 proc monitorFlushTempPath*(destPath: string; nonce: int): string =
   ## The scratch file io-mon writes, ALWAYS a sibling of ``destPath``.
@@ -185,8 +193,13 @@ proc monitorFlushTempPath*(destPath: string; nonce: int): string =
     $nonce & ".tmp"
   if dir.len == 0: scratch else: dir / scratch
 
-proc publishOneFlush(node: FlushNode): string =
+proc publishOneFlush(node: FlushNode): string {.gcsafe.} =
   ## Do the publication. Returns "" on success, the failure message otherwise.
+  ##
+  ## Runs ON A POOL WORKER. Every value it touches is either a manually-owned
+  ## ``cstring`` out of the job node or a Nim string it creates and destroys
+  ## itself; it reaches no module-level state at all, which is why the
+  ## compiler accepts the ``gcsafe`` above rather than needing it cast.
   ##
   ## ``failSubstring`` is the fault-injection seam
   ## (``REPROBUILD_MONITOR_FLUSH_FAIL``) that
@@ -194,7 +207,7 @@ proc publishOneFlush(node: FlushNode): string =
   ## real failure of the real code path — the scratch file is removed so the
   ## rename has nothing to publish — rather than a mock: everything downstream
   ## sees exactly what a genuine ENOSPC would produce.
-  let actionId = $node.actionId
+  let actionId = $enginePoolJobKey(addr node.base)
   let tempPath = $node.tempPath
   let destPath = $node.destPath
   let failSubstring = $node.failSubstring
@@ -221,59 +234,35 @@ proc publishOneFlush(node: FlushNode): string =
     return "monitor depfile flush failed for " & actionId & ": " & err.msg
   ""
 
-proc flushWorkerLoop() {.thread.} =
-  while true:
-    acquire(flushLock)
-    while flushJobHead == nil:
-      wait(flushSignal, flushLock)
-    let node = flushJobHead
-    flushJobHead = node.next
-    if flushJobHead == nil:
-      flushJobTail = nil
-    release(flushLock)
+proc runFlushJob(job: EnginePoolJob): cstring {.nimcall, gcsafe.} =
+  ## The pool task. ``job`` is the ``base`` field of a ``FlushNodeObj``, which
+  ## the ``static`` assertion above pins at offset 0.
+  let node = cast[FlushNode](job)
+  if node.delayMs > 0:
+    # The seam ``the scheduler starts the next edges before the file lands``
+    # measures through. Without it the publication is a single ``rename``
+    # and lands so fast that the case could pass on a machine where nothing
+    # overlapped at all, which would make it a test of scheduling luck.
+    sleep(node.delayMs)
+  let err = publishOneFlush(node)
+  if err.len == 0: nil else: sharedDup(err)
 
-    if node.delayMs > 0:
-      # The seam ``the scheduler starts the next edges before the file lands``
-      # measures through. Without it the publication is a single ``rename``
-      # and lands so fast that the case could pass on a machine where nothing
-      # overlapped at all, which would make it a test of scheduling luck.
-      sleep(node.delayMs)
-    let err = publishOneFlush(node)
-
-    let outcome = cast[OutcomeNode](allocShared0(sizeof(OutcomeNodeObj)))
-    outcome.actionId = sharedDup($node.actionId)
-    outcome.error = sharedDup(err)
-    sharedFree(node.actionId)
-    sharedFree(node.tempPath)
-    sharedFree(node.destPath)
-    sharedFree(node.failSubstring)
-    deallocShared(node)
-
-    acquire(flushLock)
-    outcome.next = flushOutcomeHead
-    flushOutcomeHead = outcome
-    dec flushPending
-    signal(flushSignal)
-    release(flushLock)
-
-proc ensureMonitorFlushWorker() =
-  ## Start the worker on first use and never before: a build with no hosted
-  ## monitor — which is every build today, since hosting is off by default —
-  ## creates no thread at all.
-  if flushStarted:
-    return
-  initLock(flushLock)
-  initCond(flushSignal)
-  flushStarted = true
-  createThread(flushWorker, flushWorkerLoop)
+proc releaseFlushJob(job: EnginePoolJob) {.nimcall, gcsafe.} =
+  ## Free this tenant's half of the node. ``base.key`` is NOT freed here: the
+  ## pool owns it and has already moved it into the outcome.
+  let node = cast[FlushNode](job)
+  sharedFree(node.tempPath)
+  sharedFree(node.destPath)
+  sharedFree(node.failSubstring)
+  deallocShared(node)
 
 proc enqueueMonitorFlush*(job: MonitorFlushJob) =
-  ## Hand one publication to the worker. Returns as soon as the job is queued —
+  ## Hand one publication to the pool. Returns as soon as the job is queued —
   ## this is the call the scheduler makes BEFORE it collects evidence,
   ## publishes a cache entry, or launches the next edges.
   ##
   ## The two test seams are read HERE, per job, rather than once when the
-  ## worker starts: a test process that runs several builds must not be stuck
+  ## pool starts: a test process that runs several builds must not be stuck
   ## with whatever the first one happened to set.
   let delayMs =
     try:
@@ -281,55 +270,24 @@ proc enqueueMonitorFlush*(job: MonitorFlushJob) =
     except ValueError:
       0
   let node = cast[FlushNode](allocShared0(sizeof(FlushNodeObj)))
-  node.actionId = sharedDup(job.actionId)
   node.tempPath = sharedDup(job.tempPath)
   node.destPath = sharedDup(job.destPath)
   node.failSubstring = sharedDup(getEnv("REPROBUILD_MONITOR_FLUSH_FAIL", ""))
   node.delayMs = delayMs
-  node.next = nil
+  submitEnginePoolJob(monitorFlushTenant, job.actionId, addr node.base,
+    runFlushJob, releaseFlushJob)
 
-  ensureMonitorFlushWorker()
-  acquire(flushLock)
-  if flushJobTail == nil:
-    flushJobHead = node
-    flushJobTail = node
-  else:
-    flushJobTail.next = node
-    flushJobTail = node
-  inc flushPending
-  signal(flushSignal)
-  release(flushLock)
-
-proc takeOutcomes(): seq[MonitorFlushOutcome] =
-  ## Move the completed publications out of shared memory and back into
-  ## ordinary Nim values. Called only on the scheduler's thread.
+proc asFlushOutcomes(outcomes: seq[EnginePoolOutcome]):
+    seq[MonitorFlushOutcome] =
   result = @[]
-  var node: OutcomeNode = nil
-  acquire(flushLock)
-  node = flushOutcomeHead
-  flushOutcomeHead = nil
-  release(flushLock)
-  # The list is built head-first, so walking it yields newest-first; reverse
-  # into completion order because a diagnostic that names several actions
-  # should read in the order they happened.
-  var collected: seq[MonitorFlushOutcome] = @[]
-  while node != nil:
-    let nxt = node.next
-    collected.add MonitorFlushOutcome(
-      actionId: $node.actionId, error: $node.error)
-    sharedFree(node.actionId)
-    sharedFree(node.error)
-    deallocShared(node)
-    node = nxt
-  for i in countdown(collected.len - 1, 0):
-    result.add collected[i]
+  for outcome in outcomes:
+    result.add MonitorFlushOutcome(
+      actionId: outcome.key, error: outcome.error)
 
 proc drainMonitorFlushOutcomes*(): seq[MonitorFlushOutcome] =
   ## Every publication that has COMPLETED since the last drain, without
   ## blocking on the ones that have not.
-  if not flushStarted:
-    return @[]
-  takeOutcomes()
+  asFlushOutcomes(drainEnginePoolOutcomes(monitorFlushTenant))
 
 proc awaitMonitorFlush*(actionId: string; timeoutSeconds = 30.0):
     seq[MonitorFlushOutcome] =
@@ -354,29 +312,13 @@ proc awaitMonitorFlush*(actionId: string; timeoutSeconds = 30.0):
   ## even reaped. The publication has overlapped all of that. The wait is also
   ## taken ONLY by a cacheable action — an action with no entry to publish has
   ## nothing to be conservative about and never waits.
-  if not flushStarted:
-    return @[]
-  let deadline = epochTime() + timeoutSeconds
-  while true:
-    var found = false
-    var idle = false
-    acquire(flushLock)
-    var n = flushOutcomeHead
-    while n != nil:
-      if $n.actionId == actionId:
-        found = true
-        break
-      n = n.next
-    idle = flushPending <= 0
-    release(flushLock)
-    # ``idle`` is not a timeout in disguise. With nothing in flight, this
-    # action's outcome was either drained by an earlier call — in which case
-    # the caller already recorded it — or never queued, which is what a
-    # monitor fault leaves behind. Waiting longer would answer neither.
-    if found or idle or epochTime() >= deadline:
-      break
-    sleep(1)
-  takeOutcomes()
+  ##
+  ## The "``idle`` is not a timeout in disguise" reasoning that used to live
+  ## here now lives in ``awaitEnginePoolOutcome``, unchanged: with nothing of
+  ## this tenant's in flight, the outcome was either drained by an earlier call
+  ## or never queued, and waiting longer would answer neither.
+  asFlushOutcomes(
+    awaitEnginePoolOutcome(monitorFlushTenant, actionId, timeoutSeconds))
 
 proc awaitMonitorFlushes*(timeoutSeconds = 30.0): seq[MonitorFlushOutcome] =
   ## Wait for every queued publication and return the outcomes not yet drained.
@@ -386,14 +328,5 @@ proc awaitMonitorFlushes*(timeoutSeconds = 30.0): seq[MonitorFlushOutcome] =
   ## because a build whose actions all succeeded must not be failed by a
   ## debugging artefact that has not landed yet — the missing entry shows up as
   ## a skipped cache publish, which is a re-run.
-  if not flushStarted:
-    return @[]
-  let deadline = epochTime() + timeoutSeconds
-  while true:
-    acquire(flushLock)
-    let remaining = flushPending
-    release(flushLock)
-    if remaining <= 0 or epochTime() >= deadline:
-      break
-    sleep(1)
-  takeOutcomes()
+  asFlushOutcomes(
+    awaitEnginePoolTenantIdle(monitorFlushTenant, timeoutSeconds))

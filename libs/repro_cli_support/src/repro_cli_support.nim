@@ -3,7 +3,18 @@ import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
 
 when defined(windows):
   import std/winlean
+else:
+  # Only these names, and only for the pipe-feeding guard in
+  # ``runFeedingStdin`` — `from … import` keeps the rest of `std/posix` out of
+  # this module's namespace.
+  from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
 import repro_core
+# W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
+# their containment question under. Imported by MODULE rather than folded into
+# `repro_core`'s re-exports on purpose: it is wanted at four named sites here
+# and at two in `git_actions.nim`, and a repo-wide re-export would put
+# `fsContainment` in the namespace of every module that touches `repro_core`.
+import repro_core/path_identity
 import repro_build_engine
 import repro_cmake_trycompile
 import repro_dev_env_activation
@@ -243,7 +254,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -285,7 +296,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " switch <branch> [-b|--new-branch] [--yes] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
-      " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...]\n       " &
+      " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n       " &
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
           programName &
@@ -2603,6 +2614,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
+      # Windows-Build-Correctness M6 — carry the invoked TOOL's entropy
+      # blessing onto the engine action. Lowered as its own pair rather
+      # than folded into ``lowerDependencyPolicy`` because it must survive
+      # a wrapper that replaces the dependency policy wholesale, which
+      # ``nim.c`` does (see ``compileDependencyPolicy``).
+      nonDeterminism = payload.nonDeterminism,
+      nonDeterminismJustification = payload.nonDeterminismJustification,
       commandStatsId = commandStatsId,
       env = inlineEnv,
       envPassthrough = inlineEnvPassthrough,
@@ -2718,6 +2736,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
+      # Windows-Build-Correctness M6 — carry the invoked TOOL's entropy
+      # blessing onto the engine action. Lowered as its own pair rather
+      # than folded into ``lowerDependencyPolicy`` because it must survive
+      # a wrapper that replaces the dependency policy wholesale, which
+      # ``nim.c`` does (see ``compileDependencyPolicy``).
+      nonDeterminism = payload.nonDeterminism,
+      nonDeterminismJustification = payload.nonDeterminismJustification,
       commandStatsId = commandStatsId)
 
   let executableName = payload.call.executableName
@@ -2878,6 +2903,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
+      # Windows-Build-Correctness M6 — carry the invoked TOOL's entropy
+      # blessing onto the engine action. Lowered as its own pair rather
+      # than folded into ``lowerDependencyPolicy`` because it must survive
+      # a wrapper that replaces the dependency policy wholesale, which
+      # ``nim.c`` does (see ``compileDependencyPolicy``).
+      nonDeterminism = payload.nonDeterminism,
+      nonDeterminismJustification = payload.nonDeterminismJustification,
       commandStatsId = commandStatsId,
       env = mergedEnv,
       envPassthrough = mergedEnvPassthrough)
@@ -2971,6 +3003,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     actionCachePolicy = actionCachePolicy,
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
+    # M6 — see the comment at the sibling lowering sites.
+    nonDeterminism = payload.nonDeterminism,
+    nonDeterminismJustification = payload.nonDeterminismJustification,
     commandStatsId = commandStatsId,
     env = mergedEnv,
     envPassthrough = mergedEnvPassthrough)
@@ -3349,6 +3384,15 @@ proc materializedSubstitutionConfigured(): bool =
     bcCachesConfig.loadEndpoints().len > 0
   except CatchableError:
     false
+
+proc shouldTryFromSourceCacheSubstitution*(
+    outcome: FromSourceResolveResult;
+    cacheConfigured, prepareOnly, dryRun, forceRebuild: bool): bool =
+  ## Cached source artifacts remain valid for bootstrap-floor tools. The floor
+  ## prevents recursive self-hosting builds; it must not prevent restoring an
+  ## artifact that was already built from source under the same identity.
+  outcome.kind == rrNeedsBuild and cacheConfigured and
+    not prepareOnly and not dryRun and not forceRebuild
 
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
@@ -3809,7 +3853,14 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 8'u16
+  LoweredGraphCacheVersion = 9'u16
+    # v9: Windows-Build-Correctness M6 — the lowered ``BuildAction`` now
+    # carries the invoked tool's entropy blessing. The version bump
+    # invalidates older entries rather than decoding them with a guessed
+    # value, because the two ordinals are not interchangeable: reading a
+    # pre-blessing record as blessed would restore cache publication for an
+    # action nobody vouched for.
+    #
     # v8: DependencyGatheringPolicy serializes a third trailing bool,
     # `suppressMonitorShimSeed`. A warm record that lost it would hand the
     # shim-library env seed back to an action that must not receive it — the
@@ -3952,8 +4003,9 @@ proc mergeProducerRuntimeIdentity*(identity: PathOnlyBuildIdentity;
   for actionIdentity in identity.actionIdentities:
     if actionIdentity.resolvedExecutablePath.len > 0:
       binDirs.addUnique(parentDir(actionIdentity.resolvedExecutablePath))
-    for path in actionIdentity.pathSearchList:
-      binDirs.addUnique(path)
+    if actionIdentity.installMethod != "path":
+      for path in actionIdentity.pathSearchList:
+        binDirs.addUnique(path)
     for path in actionIdentity.pkgConfigSearchList:
       aux.pkgConfigDirs.addUnique(path)
     for path in actionIdentity.cmakePrefixList:
@@ -4565,6 +4617,9 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeString(action.dynamicDepsFile)
   outp.writeString(action.monitorDepfile)
   outp.writeDependencyPolicy(action.dependencyPolicy)
+  # M6 v6: the invoked tool's entropy blessing plus its stated reason.
+  outp.add(byte(ord(action.nonDeterminism)))
+  outp.writeString(action.nonDeterminismJustification)
   outp.writeString(action.builtinText)
   outp.writeStringSeq(action.builtinEntries)
   outp.writeStringSeq(action.targetNames)
@@ -4618,6 +4673,12 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.dynamicDepsFile = readString(bytes, pos)
   result.monitorDepfile = readString(bytes, pos)
   result.dependencyPolicy = readDependencyPolicy(bytes, pos)
+  # M6 v6: strict sentinel — a corrupt byte must not decode to a blessing.
+  let blessingByte = readByteValue(bytes, pos)
+  if blessingByte > byte(ord(high(NonDeterminismPolicy))):
+    raiseEnvelopeError(eeMalformed, "invalid nonDeterminism ordinal")
+  result.nonDeterminism = NonDeterminismPolicy(blessingByte)
+  result.nonDeterminismJustification = readString(bytes, pos)
   result.builtinText = readString(bytes, pos)
   result.builtinEntries = readStringSeq(bytes, pos)
   result.targetNames = readStringSeq(bytes, pos)
@@ -5190,6 +5251,9 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     commandStatsId = "repro provider compile edge",
     cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
+    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    nonDeterminism = ndpEntropyBlessed,
+    nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(
       providerCompileIgnoredInputPrefixes(scratchDir)))
 
@@ -5896,6 +5960,13 @@ type
 proc resolveProducerBinding*(selector: string;
                              workspaceRoot: string): ProducerBinding
 
+proc devEnvProducerEdgesPossible*(projectRoot: string): bool
+  ## W2 — the cheapest honest answer to "could ANY selector in this workspace
+  ## be a declared cross-repo producer edge?". Forward-declared here because
+  ## its body needs ``committedLockPath``, which lives next to the lock
+  ## helpers, while its caller (``devEnvProducerActivation``) is far above
+  ## them. See the body for why three ``fileExists`` calls decide it.
+
 var lastResolvedProducerBinding*: ProducerBinding =
   ProducerBinding(selector: "", kind: pbkNotProducer)
   ## SC-1 observability sink. The ``mkToolIdentityResolver`` closure records
@@ -6016,7 +6087,15 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       # branch above already added. The other adapters keep the fallback
       # because for them the list IS graph-derived — and they need it,
       # since some record no ``resolvedExecutablePath`` at all.
-      if actionIdy.installMethod != "path":
+      # Cross-repo executable producers use a path-shaped profile, but its
+      # search list is graph-derived and includes declared runtime tools.
+      # Retain those directories while continuing to exclude the ambient
+      # search list from ordinary host-path profiles.
+      var isCrossRepoExecutableProducer = false
+      {.cast(gcsafe).}:
+        isCrossRepoExecutableProducer =
+          producerMaterializedBinDirs.hasKey(name)
+      if actionIdy.installMethod != "path" or isCrossRepoExecutableProducer:
         for searchDir in actionIdy.pathSearchList:
           if searchDir.len > 0 and searchDir notin mergedBinDirs:
             mergedBinDirs.add(searchDir)
@@ -7668,6 +7747,8 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
                           suppressTrace = true;
                           skipCacheHitEvidence = true;
                           statsEnabled = false;
+                          validateExistingOnly = false;
+                          providerCompilerCommand: seq[string] = @[];
                           cancelCheck: BuildCancelCallback = nil):
     ProjectInterfaceArtifact =
   ## Materialize a project interface through the build engine.
@@ -7743,9 +7824,20 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # is the property the spec is after: the command line is an input by
   # construction, not a list somebody maintains. Content changes are caught
   # by the engine's recorded-input revalidation on top of it.
-  let edgeIdentity = weakFingerprintFromText(command.join("\x00"))
+  let compileCommand =
+    if providerCompilerCommand.len > 0:
+      providerCompilerCommand
+    else:
+      providerCompileCommand(modulePath,
+        parentDir(artifactPath) / "provider" / "project-provider",
+        workDir, scratchDir)
+  let compileConfiguration =
+    providerCompileConfigurationIdentity(compileCommand)
+  let edgeIdentity = weakFingerprintFromText(command.join("\x00") &
+    "\x00provider-compile-configuration\x00" & digestHex(compileConfiguration))
   let sessionKey = toHex(edgeIdentity.bytes)
-  if not forceRebuild and interfaceEdgeSessionResults.hasKey(sessionKey) and
+  if not forceRebuild and not validateExistingOnly and
+      interfaceEdgeSessionResults.hasKey(sessionKey) and
       fileExists(extendedPath(artifactPath)):
     return interfaceEdgeSessionResults[sessionKey]
   let actionId = "__repro_interface_extract-" &
@@ -7775,6 +7867,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     commandStatsId = "repro interface extract edge",
     cacheable = true,
     weakFingerprint = edgeIdentity,
+    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    nonDeterminism = ndpEntropyBlessed,
+    nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy =
       automaticMonitorGatheringPolicy(ignoredInputPrefixes))
   var edgeConfig = BuildEngineConfig(
@@ -7791,7 +7886,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     bypassRunQuota: bypassRunQuota,
     fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
     inlineRunQuota: true,
-    dryRun: false,
+    dryRun: validateExistingOnly,
     forceRebuild: forceRebuild,
     suppressTrace: suppressTrace,
     skipCacheHitEvidence: skipCacheHitEvidence,
@@ -7820,6 +7915,26 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       if detail.len == 0:
         detail = "interface extraction edge failed for " & modulePath
       raise newException(OSError, detail)
+    if validateExistingOnly:
+      var validated = false
+      var validationDetails: seq[string] = @[]
+      for item in edgeResult.results:
+        validationDetails.add($item.status & "/" & $item.cacheDecision &
+          (if item.cacheMissReason.len > 0:
+             ": " & item.cacheMissReason
+           elif item.reason.len > 0:
+             ": " & item.reason
+           else:
+             ""))
+        if item.id == extractAction.id and item.status == asUpToDate:
+          validated = true
+      if not validated:
+        raise newException(IOError,
+          "interface extraction edge requires execution for " & modulePath &
+          (if validationDetails.len > 0:
+             " (" & validationDetails.join("; ") & ")"
+           else:
+             ""))
     if not fileExists(extendedPath(artifactPath)):
       raise newException(IOError,
         "interface extraction edge did not write artifact: " & artifactPath)
@@ -7827,6 +7942,26 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     interfaceEdgeSessionResults[sessionKey] = result
   finally:
     releaseInterfaceArtifactLock(artifactLock)
+
+proc restoreCachedOutputsEnvDefault(): bool =
+  ## S7 — the ``REPRO_RESTORE_CACHED_OUTPUTS`` default behind
+  ## ``--restore-cached-outputs``, in one place because every command that
+  ## drives a build has to reach the same answer.
+  ##
+  ## The env spelling is a convenience, NOT a necessity, and the difference
+  ## matters because the milestone originally recorded the opposite. A
+  ## daemon-hosted build is not out of the flag's reach: the daemon
+  ## re-parses the client's ``request.rawArgs`` through ``runBuildCommand``,
+  ## so ``repro build --restore-cached-outputs`` reaches a daemon-hosted run
+  ## exactly like any other build flag. It is the ENV spelling that a daemon
+  ## does not carry across — ``getEnv`` inside the daemon reads the
+  ## environment the daemon was STARTED with, not the client's — so setting
+  ## the variable in a shell only takes effect for ``--daemon=off`` runs or
+  ## for a daemon started after it was set. The variable exists so the mode
+  ## can be turned on for a whole session or a whole CI job without editing
+  ## every invocation; the flag always wins over it.
+  getEnv("REPRO_RESTORE_CACHED_OUTPUTS").normalize in
+    ["1", "true", "yes", "on"]
 
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
@@ -7848,6 +7983,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         substituteMaterialized = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false;
+                        restoreCachedOutputs = false;
+
+                        monitorHosting = mhmNever;
                         benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
@@ -8141,6 +8279,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
+      # In-Process-Monitor-Hosting P1(b) — the operator's value, NEVER a
+      # literal. `mhmNever` unless `--monitor-hosting` or
+      # `REPROBUILD_MONITOR_HOSTING` said otherwise, so the shipped default
+      # is unchanged and `test_umask_wrap_both_spawn_paths` still pins it.
+      monitorHosting: monitorHosting,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       publishCachedResults: publishCacheHits,
@@ -8150,6 +8293,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       peerCacheActionFetcher: peerCacheFetcher,
       peerCacheActionPublisher: peerCachePublisher,
       peerCacheActionInstaller: peerCacheInstaller)
+    # S7 — ``--restore-cached-outputs``. See the matching call on the main
+    # inline build path below; this is the only other BUILD engine config,
+    # and leaving it out would make the flag depend on which of the two
+    # paths the invocation happened to take.
+    if restoreCachedOutputs:
+      engineConfig.enableCachedOutputRestore()
     # M9.L.4-refactor Step C: wire the binary-cache publisher closure
     # into the production engine config. The closure is inert when
     # ``REPRO_CACHE_DISABLE=1`` (silent) or when the key/cert env vars
@@ -8607,17 +8756,48 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       let outcome = tryResolveFromSourceTool(useDef)
       if outcome.kind == rrResolved:
         continue
-      # M9.R.14c.2 — if the unresolved tool is in the cycle-break set
-      # (either seeded as part of the bootstrap floor OR added
-      # reactively by an earlier closing-edge cycle), skip auto-recurse.
-      # The downstream resolver routes it through stdlib provisioning.
-      if useDef.executableName.len > 0 and
-          useDef.executableName in fromSourceCycleBrokenTools:
-        continue
       if outcome.kind != rrNeedsBuild:
         continue
       let siblingRecipeDir = absolutePath(outcome.recipeDir)
       if siblingRecipeDir in fromSourceResolvedRecipes:
+        continue
+      let siblingManifest = siblingRecipeDir / "repro.nim"
+      if shouldTryFromSourceCacheSubstitution(outcome,
+          materializedSubstitutionConfigured(), prepareOnly, dryRun,
+          forceRebuild):
+        let substituteOutcome = executeBuildTarget(
+          siblingManifest, effectiveMode, publicCliPath,
+          selectDefaultAction = true,
+          workRoot = workRoot,
+          progressMode = bpmQuiet,
+          progressBarStyle = progressBarStyle,
+          showSet = {},
+          measureSet = {},
+          reportPersistence = BuildReportPersistence(suppressed: true),
+          logMode = blmSummary,
+          diagnosticsPath = "",
+          prepareOnly = false,
+          dryRun = false,
+          forceRebuild = false,
+          noOutputCleanup = true,
+          publishCacheHits = false,
+          publishMaterialized = false,
+          substituteMaterialized = true,
+          skipCmakeRegeneration = skipCmakeRegeneration,
+          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          restoreCachedOutputs = restoreCachedOutputs,
+          eventSink = eventSink,
+          cancelCheck = cancelCheck)
+        if substituteOutcome.exitCode == 0 and
+            tryResolveFromSourceTool(useDef).kind == rrResolved:
+          logSummary("from-source cache substitute: restored \"" &
+            outcome.toolName & "\" at " & siblingRecipeDir)
+          fromSourceResolvedRecipes.incl(siblingRecipeDir)
+          continue
+      # The bootstrap floor suppresses recursive construction only after a
+      # configured source-artifact cache had a chance to restore the mirror.
+      if useDef.executableName.len > 0 and
+          useDef.executableName in fromSourceCycleBrokenTools:
         continue
       if siblingRecipeDir in fromSourceBuildStack:
         # DSL-port M9.R.10a — cycle break via stdlib fall-through.
@@ -8653,36 +8833,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           ". This is a sanity ceiling — production recipe chains should " &
           "stay well below it; investigate the call chain for an " &
           "accidental fan-out.")
-      let siblingManifest = siblingRecipeDir / "repro.nim"
-      if materializedSubstitutionConfigured() and
-          not prepareOnly and not dryRun and not forceRebuild:
-        let substituteOutcome = executeBuildTarget(
-          siblingManifest, effectiveMode, publicCliPath,
-          selectDefaultAction = true,
-          workRoot = workRoot,
-          progressMode = bpmQuiet,
-          progressBarStyle = progressBarStyle,
-          showSet = {},
-          measureSet = {},
-          reportPersistence = BuildReportPersistence(suppressed: true),
-          logMode = blmSummary,
-          diagnosticsPath = "",
-          prepareOnly = false,
-          dryRun = false,
-          forceRebuild = false,
-          noOutputCleanup = true,
-          publishCacheHits = false,
-          publishMaterialized = false,
-          substituteMaterialized = true,
-          skipCmakeRegeneration = skipCmakeRegeneration,
-          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
-          eventSink = eventSink,
-          cancelCheck = cancelCheck)
-        if substituteOutcome.exitCode == 0:
-          logSummary("from-source cache substitute: restored \"" &
-            outcome.toolName & "\" at " & siblingRecipeDir)
-          fromSourceResolvedRecipes.incl(siblingRecipeDir)
-          continue
       logSummary("from-source auto-recurse: building \"" & outcome.toolName &
         "\" at " & siblingRecipeDir)
       fromSourceBuildStack.add(siblingRecipeDir)
@@ -8709,6 +8859,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           substituteMaterialized = substituteMaterialized,
           skipCmakeRegeneration = skipCmakeRegeneration,
           bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          restoreCachedOutputs = restoreCachedOutputs,
           eventSink = eventSink,
           cancelCheck = cancelCheck)
         if siblingOutcome.exitCode != 0:
@@ -8940,6 +9091,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             substituteMaterialized = substituteMaterialized,
             skipCmakeRegeneration = skipCmakeRegeneration,
             bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+            restoreCachedOutputs = restoreCachedOutputs,
             eventSink = eventSink,
             cancelCheck = cancelCheck)
           if producerOutcome.exitCode != 0:
@@ -9445,12 +9597,35 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
+      # In-Process-Monitor-Hosting P1(b) — same operator value as the
+      # `runLoweredGraphBuild` config above, and for the same reason: the
+      # two are alternative entry points into the SAME build, so a flag
+      # wired to only one of them would work or not depending on whether
+      # the lowered-graph cache happened to hit.
+      monitorHosting: monitorHosting,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       publishCachedResults: publishCacheHits,
       suppressTrace: mcTrace notin measureSet,
       skipCacheHitEvidence: mcCacheEvidence notin measureSet,
       cancelCallback: cancelCheck)
+    # S7 — ``--restore-cached-outputs`` is what makes the CAS-restore
+    # configuration reachable from ``repro build`` at all. Until it existed,
+    # this construction's two literals above (``rebuild… = true``,
+    # ``defer… = true``) meant every record this path published was
+    # ``opkMetadataOnly`` and a deleted output was always rebuilt, never
+    # restored — measured as 181 of 181 records on the reference host.
+    #
+    # It is opt-in rather than the default for two independent reasons,
+    # both recorded in ``Windows-Cacheable-Builds-Session-Residuals`` S7:
+    # storing every artefact's payload is a second full copy of the build
+    # tree on any filesystem without reflink, and turning restore on
+    # re-reads every existing ``cacheable = true`` as the strictly stronger
+    # claim "my declared outputs are my whole product". The engine's gate
+    # (``requireCompleteOutputEvidence``, set by the same call) enforces
+    # that claim per action instead of trusting it.
+    if restoreCachedOutputs:
+      engineConfig.enableCachedOutputRestore()
     # M9.L.4-refactor Step C: wire the binary-cache publisher closure
     # into the production engine config for the main inline build
     # path (the runLoweredGraphBuild helper above gets the same
@@ -9699,6 +9874,17 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
       DevEnvShellOp(kind: deskSetEnv, name: "REPRO_PROJECT_ROOT",
         value: canonicalProjectRoot)
     ])
+  # W2-no-producer-ops-and-no-report: this artifact is SYNTHESIZED right above
+  # from ``binDirsForDevelop`` — it is ``repro develop``'s own PATH projection,
+  # not a dev-env introspection artifact, and it carries no ``toolProfiles``.
+  # ``devEnvProducerPins`` classifies ``toolProfiles``; with none there is
+  # nothing for it to classify and a report call here would be a guaranteed
+  # no-op, which is why this site cannot even REPORT rather than merely
+  # declining to bind. ``repro develop`` does print its resolved ``binDirs``
+  # and every ``tool: <name> <path>`` pair, so its answer is visible if not
+  # attributed. (It does not run the producer pre-pass either; that is
+  # recorded in W2's DONE section as a separate, still-open gap, not something
+  # this call site can fix.)
   runActivatedCommand(artifact, "", command, canonicalProjectRoot)
 
 proc valueAfterFlag(args: openArray[string]; flag: string): string =
@@ -9989,6 +10175,19 @@ proc runDevEnvShellRenderHelper(args: openArray[string]): int =
     var navigatorStats: DevEnvNavigatorStats
     let ops = shellOpsFromNavigatorFile(artifactPath, navigatorStats)
     createDir(extendedPath(parentDir(outputPath)))
+    # W2-no-producer-ops-and-no-report: this is not an activation surface. It
+    # is the BUILD ACTION behind the dev-env edge — it renders the shell
+    # fragment to a file that ``__repro-direnv-activate`` later streams — and
+    # its output is content-addressed by the edge's cache key. Two consequences
+    # rule out both halves. Binding would fold a producer's build OUTPUT into a
+    # cached artifact, which is the staleness failure W2's whole design avoids.
+    # Reporting would emit the notice once, on the run that MISSED the cache,
+    # and then never again for as long as the fragment stayed warm — a warning
+    # that appears at most once per cache generation is worse than none,
+    # because its absence stops meaning anything. The surface that consumes
+    # this fragment reports at activation time instead, where the answer is
+    # re-derived every time; see ``runReproDirenvActivationHelper``. This
+    # helper also has no project root in hand, only an artifact path.
     writeFile(extendedPath(outputPath), renderDevEnvShellOps(ops, depPosix))
     if navigatorStatsPath.len > 0:
       createDir(extendedPath(parentDir(navigatorStatsPath)))
@@ -10778,6 +10977,342 @@ proc writeDevEnvStats(path: string; edge: DevEnvEdgeResult;
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), $devEnvStatsJson(edge, commandName) & "\n")
 
+# ---------------------------------------------------------------------------
+# W2 — a dev-env BINDS a cross-repo producer; it never BUILDS one.
+#
+# The decision this implements, and the four reasons it is not "the dev-env
+# engine should call the build's producer pre-pass" (Windows-Cacheable-Builds
+# -Session-Residuals W2):
+#
+# * COST. The build's pre-pass (``repro_cli_support.nim`` ~7987-8237, inline in
+#   ``executeBuildTarget``) runs a full recursive ``executeBuildTarget`` on the
+#   producer's DEFAULT target. For the motivating pin that is a 1263-action
+#   graph. Nothing about it persists across processes — ``producerMaterialized
+#   BinDirs`` is a process-global that is never written to disk — so EVERY
+#   ``repro shell`` / ``repro exec`` / prompt-time hook would re-enter the
+#   producer's whole engine pass. The M77 no-op budget is < 15 ms p50 here.
+#
+# * STALENESS. A producer's build OUTPUT is not one of the dev-env artifact's
+#   declared source inputs, and it cannot become one: ``computeDevEnvEdge
+#   CacheKey`` exists precisely so the shell hook can answer without walking a
+#   graph, and folding a build product into it defeats that. So the binding is
+#   deliberately NOT baked into the cached RBDE artifact. It is re-derived at
+#   every activation from cheap on-disk state, which is what makes it correct
+#   about staleness rather than merely lucky.
+#
+# * CIRCULARITY. For the motivating case the producer IS the running engine.
+#   The dev-env's own provider-compile and introspection edges are argv'd
+#   against ``config.publicCliPath``, i.e. the image already running, so
+#   building the pin could not change what computed the artifact — and on
+#   Windows the ``reprobuild.apps.repro`` edge relinks the running executable
+#   and cannot complete in place (S5's record audit). Binding a materialized
+#   bin dir has none of that: it is a path prepend.
+#
+# * LAYERING. The pre-pass is not a callable unit, and it lives in
+#   ``repro_cli_support``, which DEPENDS ON ``repro_dev_env_engine``. Calling
+#   it from the dev-env engine inverts the dependency. Resolving the binding
+#   here — where ``resolveProducerBinding`` already lives — does not.
+#
+# What is left is the half that WAS a defect: before W2 a dev-env dropped every
+# ``uses:`` declaration on the floor and silently answered a declared producer
+# name from the ambient PATH. That is now impossible: a pin is either bound to
+# the materialized output or announced as not in effect, naming the ambient
+# binary that will answer instead and the command that fixes it.
+#
+# Cost of the pass itself: ``resolveProducerBinding`` reads at most two small
+# files (``repro.lock``, ``.repro/develop-overrides.toml``) plus one ``dirExists``
+# / directory-head probe per declared producer. It never fetches (a lock-pinned
+# producer with no checkout is REPORTED, not cloned — a network operation has no
+# business on an interactive activation path) and never compiles.
+
+type
+  DevEnvProducerPinState* = enum
+    ## What a dev-env activation was able to do with one declared ``uses:``
+    ## cross-repo producer selector.
+    deppBound
+      ## A previous ``repro build`` materialized the producer's output; its
+      ## ``build/bin`` is prepended to the activated ``PATH``.
+    deppNotBuilt
+      ## The producer edge is declared and its source is present, but nothing
+      ## has been built. The name falls through to the ambient PATH, loudly.
+    deppNoSource
+      ## The producer edge is declared but no source checkout is available
+      ## here. Not fetched — see the header note.
+    deppUnresolvable
+      ## Resolving the binding failed (e.g. a develop override naming a
+      ## checkout that is not on disk). Reported, never fatal to the shell.
+
+  DevEnvProducerPin* = object
+    selector*: string
+    executableName*: string
+    state*: DevEnvProducerPinState
+    sourceRoot*: string
+    binDir*: string
+    boundExecutable*: string
+      ## The materialized producer executable that decided ``deppBound``.
+    ambientPath*: string
+      ## The executable that WILL answer ``executableName`` when the pin is not
+      ## bound. Empty when nothing on the ambient PATH answers it.
+    detail*: string
+
+const DevEnvProducerPinsEnvVar* = "REPRO_DEV_ENV_PRODUCER_PINS"
+  ## Newline-free, ``;``-separated ``<selector>=<binDir>`` list of the producer
+  ## pins this activation BOUND. Exported into the activated environment so the
+  ## binding is observable from inside the shell rather than only inferable
+  ## from ``PATH`` ordering.
+
+proc devEnvProducerSourceRootNoFetch(binding: ProducerBinding;
+                                     selector, projectRoot: string): string =
+  ## ``producerSourceRoot``'s read-only twin. Same answers for a develop
+  ## override and for a lock pin whose checkout is already present (either as a
+  ## workspace sibling or as an already-fetched revision tree), and an empty
+  ## string instead of a ``git fetch`` when it is not.
+  case binding.kind
+  of pbkDevelopOverride:
+    result = binding.localPathAbsolute
+  of pbkLockPinned:
+    let sibling = findSiblingProjectFile(selector, projectRoot)
+    if sibling.len > 0:
+      return parentDir(sibling)
+    let revision = binding.lockedDep.coordinates.revision
+    if binding.lockedDep.name.len > 0 and revision.len > 0:
+      let fetched = lockPinnedProducerCacheRoot(projectRoot) /
+        binding.lockedDep.name / revision
+      if dirExists(extendedPath(fetched)):
+        return fetched
+  of pbkOnDiskSibling, pbkNotProducer:
+    discard
+
+proc executableInDir(dir, name: string): string =
+  ## The path a PATH search of ``dir`` would find for ``name``, or "". This is
+  ## deliberately the SAME question the prepend exists to answer, so "bound"
+  ## can never mean "a directory that happens to contain something".
+  if name.len == 0 or not dirExists(extendedPath(dir)):
+    return ""
+  let direct = dir / name
+  if fileExists(extendedPath(direct)):
+    return direct
+  when defined(windows):
+    if splitFile(name).ext.len == 0:
+      for ext in [ExeExt, "bat", "cmd", "com"]:
+        if ext.len == 0:
+          continue
+        let candidate = dir / addFileExt(name, ext)
+        if fileExists(extendedPath(candidate)):
+          return candidate
+  ""
+
+proc producerInterfaceExecutableNames(projectRoot, selector: string):
+    seq[string] =
+  ## The producer's OWN declared binary names, read from the interface artifact
+  ## a previous ``repro build`` already extracted next to the producer's
+  ## materialized output — never by compiling anything here.
+  ##
+  ## This matters because a selector need not equal the binary it produces:
+  ## the workspace pin ``uses: "reprobuild"`` produces ``repro``. The build
+  ## seam learns that mapping from the producer's interface; so does this pass,
+  ## from the copy the build left behind at
+  ## ``<root>/.repro/build/<target>/cross-repo-producers/<key>/producer-interface.rbsz``.
+  ## Returns an empty seq when no such artifact exists, and the caller then
+  ## falls back to the declared selector name — which is the safe direction: a
+  ## name that does not resolve is REPORTED, never silently bound.
+  let buildRoot = absolutePath(projectRoot) / ".repro" / "build"
+  if not dirExists(extendedPath(buildRoot)):
+    return
+  let key = selectorFilesystemKey(selector)
+  for entryKind, entryPath in walkDir(extendedPath(buildRoot)):
+    if entryKind != pcDir:
+      continue
+    # Only the tail is reused: ``walkDir`` over an ``extendedPath`` yields
+    # ``\\?\``-prefixed entries, and that namespace is strict-canonical, so
+    # re-joining onto one with ``/`` separators produces a path Windows
+    # rejects. Rebuild from the ordinary root instead.
+    let ifacePath = buildRoot / splitPath(entryPath).tail /
+      "cross-repo-producers" / key / "producer-interface.rbsz"
+    if not fileExists(extendedPath(ifacePath)):
+      continue
+    try:
+      let producerArtifact = readInterfaceArtifact(ifacePath)
+      for exe in producerArtifact.projectInterface.publicExecutables:
+        let binName =
+          if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
+        if binName.len > 0 and binName notin result:
+          result.add(binName)
+    except CatchableError:
+      continue
+
+proc devEnvProducerPins*(artifact: DevEnvArtifact;
+                         projectRoot: string): seq[DevEnvProducerPin] =
+  ## Classify every cross-repo producer selector the recipe declared in
+  ## ``uses:``. Selectors that are NOT declared producer edges are omitted
+  ## entirely: for those, resolution from the ambient PATH is the declared
+  ## contract of ``defaultToolProvisioning "path"``, not a silent fallthrough.
+  ## Builds nothing, fetches nothing, compiles nothing.
+  if projectRoot.len == 0:
+    return
+  let workspaceRoot = absolutePath(projectRoot)
+  var seen: seq[string] = @[]
+  for profile in artifact.toolProfiles:
+    let selector = profile.packageIdentity
+    if selector.len == 0 or selector in seen:
+      continue
+    seen.add(selector)
+    var pin = DevEnvProducerPin(
+      selector: selector,
+      executableName:
+        if profile.logicalName.len > 0: profile.logicalName else: selector)
+    var binding: ProducerBinding
+    try:
+      binding = resolveProducerBinding(selector, workspaceRoot)
+    except CatchableError as err:
+      pin.state = deppUnresolvable
+      pin.detail = err.msg
+      pin.ambientPath = findExe(pin.executableName)
+      result.add(pin)
+      continue
+    if not binding.declaresProducerEdge():
+      continue
+    pin.sourceRoot = devEnvProducerSourceRootNoFetch(binding, selector,
+      workspaceRoot)
+    if pin.sourceRoot.len == 0 or
+        not dirExists(extendedPath(pin.sourceRoot)):
+      pin.state = deppNoSource
+      pin.ambientPath = findExe(pin.executableName)
+      result.add(pin)
+      continue
+    # The canonical producer output layout every producing edge writes to, and
+    # the same one ``recordProducerMaterialization`` seeds its bin dirs from.
+    let binDir = absolutePath(pin.sourceRoot) / "build" / "bin"
+    pin.binDir = binDir
+    var candidateNames =
+      producerInterfaceExecutableNames(workspaceRoot, selector)
+    if candidateNames.len == 0:
+      candidateNames = @[pin.executableName]
+    for candidate in candidateNames:
+      let realized = executableInDir(binDir, candidate)
+      if realized.len > 0:
+        pin.boundExecutable = realized
+        break
+    if pin.boundExecutable.len > 0:
+      pin.state = deppBound
+    else:
+      pin.state = deppNotBuilt
+      pin.ambientPath = findExe(pin.executableName)
+    result.add(pin)
+
+proc devEnvProducerShellOps*(pins: openArray[DevEnvProducerPin]):
+    seq[DevEnvShellOp] =
+  ## The activation ops for the BOUND pins. Emitted in reverse declaration
+  ## order because ``deskPrependPath`` applies sequentially: reversing here
+  ## makes the FIRST declared pin end up first on the resulting ``PATH``.
+  var bound: seq[DevEnvProducerPin] = @[]
+  for pin in pins:
+    if pin.state == deppBound and pin.binDir.len > 0:
+      bound.add(pin)
+  if bound.len == 0:
+    return
+  for i in countdown(bound.high, 0):
+    result.add(DevEnvShellOp(kind: deskPrependPath, name: "PATH",
+      value: bound[i].binDir))
+  var summary: seq[string] = @[]
+  for pin in bound:
+    summary.add(pin.selector & "=" & pin.binDir)
+  result.add(DevEnvShellOp(kind: deskSetEnv, name: DevEnvProducerPinsEnvVar,
+    value: summary.join($PathSep)))
+
+proc devEnvProducerNotices*(pins: openArray[DevEnvProducerPin];
+                            appliesToPath = true): seq[string] =
+  ## One human-readable line per pin that is NOT in effect. A bound pin is
+  ## silent — it did what the declaration asked for.
+  ##
+  ## ``appliesToPath`` is false on the surfaces that deliberately do not bind
+  ## (see ``repro dev-env export``): the notice then says so, rather than
+  ## implying the pin merely needs building.
+  for pin in pins:
+    if pin.state == deppBound:
+      if not appliesToPath:
+        result.add("cross-repo producer \"" & pin.selector &
+          "\" is materialized at " & pin.binDir &
+          " but this surface does not put it on PATH; `repro shell`, " &
+          "`repro exec` and `repro run` do.")
+      continue
+    var line = "cross-repo producer \"" & pin.selector &
+      "\" is declared in uses: but is not pinned in this environment"
+    case pin.state
+    of deppBound:
+      discard
+    of deppNotBuilt:
+      line.add(" — nothing is built at " & pin.binDir &
+        ". Run `repro build` in " & pin.sourceRoot & " (or for a target " &
+        "that consumes it) once; the dev-env binds the materialized output " &
+        "thereafter.")
+    of deppNoSource:
+      line.add(" — no source checkout is available for it here. A dev-env " &
+        "activation deliberately does not fetch one; run `repro build` for a " &
+        "target that consumes it.")
+    of deppUnresolvable:
+      line.add(" — its binding could not be resolved: " & pin.detail)
+    if pin.ambientPath.len > 0:
+      line.add(" `" & pin.executableName & "` will resolve to " &
+        pin.ambientPath & " from the ambient PATH instead.")
+    else:
+      line.add(" `" & pin.executableName &
+        "` is not on the ambient PATH either.")
+    result.add(line)
+
+proc emitDevEnvProducerNotices(pins: openArray[DevEnvProducerPin];
+                               appliesToPath = true) =
+  var emitted = false
+  for notice in devEnvProducerNotices(pins, appliesToPath):
+    stderr.writeLine("repro dev-env: warning: " & notice)
+    emitted = true
+  if emitted:
+    # W2 — FLUSH. On Windows a redirected ``stderr`` is fully buffered by
+    # the C runtime, so a notice written by a LONG-LIVED process sits in that
+    # buffer until the process exits or the buffer fills. For ``repro dev`` /
+    # ``repro up`` that is not a test artefact but the defect itself: a session
+    # that runs for hours would hold its "this pin is not in effect" warning
+    # for hours, and a session that is killed rather than stopped would lose it
+    # entirely — which is being silent about a declared pin by a slower route.
+    # Found exactly that way: the ``--foreground`` case asserted the pin (read
+    # from a file the watch task wrote, so unaffected) and the notice (read
+    # from the supervisor's own pipe) and only the notice went missing, on the
+    # run where the supervisor was terminated instead of exiting cleanly.
+    try:
+      stderr.flushFile()
+    except IOError:
+      discard
+
+proc devEnvProducerActivation(artifact: DevEnvArtifact; projectRoot: string;
+                              appliesToPath = true): seq[DevEnvShellOp] =
+  ## Resolve + report in one call, for the activation surfaces. Reporting is
+  ## never fatal: a broken pin must leave the developer with a WORKING shell
+  ## that says what it could not provide, not with no shell at all.
+  if not devEnvProducerEdgesPossible(projectRoot):
+    return
+  let pins = devEnvProducerPins(artifact, projectRoot)
+  emitDevEnvProducerNotices(pins, appliesToPath)
+  if appliesToPath:
+    result = devEnvProducerShellOps(pins)
+
+proc devEnvProducerOpsResolver*(projectRoot: string):
+    DevSessionProducerOpsResolver =
+  ## W2 — the ONE producer-binding resolver a dev session is driven with, for
+  ## both the ``--foreground`` and the detached arm of ``repro dev`` / ``repro
+  ## up``.
+  ##
+  ## It exists as a named factory rather than as a lambda written out at each
+  ## call site because the two arms are two DIFFERENT construction paths for
+  ## the same session — ``supervisorConfig`` builds the config the foreground
+  ## arm runs directly and the detached arm serialises to CLI args, and
+  ## ``runDevSessionSupervisorHelper`` rebuilds it from those args in the
+  ## child. Before this, only the child set the callback, so ``--foreground``
+  ## activated services and watch tasks with no producer pins and said nothing
+  ## about it. Two spellings of one policy is how that happened; there is now
+  ## one spelling, and ``runDevSessionSupervisor`` cannot be called without it.
+  result = proc (artifact: DevEnvArtifact): seq[DevEnvShellOp] =
+    devEnvProducerActivation(artifact, projectRoot)
+
 proc emitDevEnvDiagnostics(artifact: DevEnvArtifact): bool =
   ## Returns true when an error diagnostic was emitted.
   for diagnostic in artifact.diagnostics:
@@ -10795,14 +11330,16 @@ proc emitDevEnvDiagnostics(artifact: DevEnvArtifact): bool =
 
 proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
                     task: DevEnvTaskSummary; forwardedArgs: seq[string];
-                    defaultWorkingDirectory: string): int =
+                    defaultWorkingDirectory: string;
+                    extraOps: openArray[DevEnvShellOp] = []): int =
   when defined(windows):
     let shellLine =
       if forwardedArgs.len > 0:
         task.command & " " & forwardedArgs.mapIt(quoteShell(it)).join(" ")
       else:
         task.command
-    let activation = activatedEnvironment(artifact, artifactPath, defaultWorkingDirectory)
+    let activation = activatedEnvironment(artifact, artifactPath,
+      defaultWorkingDirectory, extraOps)
     let cmdExe = getEnv("COMSPEC", "cmd.exe")
     var process = startProcess(cmdExe,
       args = @["/c", shellLine],
@@ -10812,7 +11349,8 @@ proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
     result = process.waitForExit()
     process.close()
   else:
-    let activation = activatedEnvironment(artifact, artifactPath, defaultWorkingDirectory)
+    let activation = activatedEnvironment(artifact, artifactPath,
+      defaultWorkingDirectory, extraOps)
     let shellPath = getEnv("SHELL", "/bin/sh")
     let shellLine = task.command & " \"$@\""
     var childArgs = @["-c", shellLine, "--"]
@@ -11335,8 +11873,10 @@ proc runReproRunCommand(args: openArray[string];
       if activeTask.name == parsed.target:
         task = activeTask
         break
+    let producerOps = devEnvProducerActivation(artifact,
+      parsed.selection.projectRoot)
     return runTaskCommand(artifact, edge.artifactPath, task,
-      parsed.forwardedArgs, parsed.selection.projectRoot)
+      parsed.forwardedArgs, parsed.selection.projectRoot, producerOps)
 
   if parsed.qualifier == rtqTask:
     # ``task:<name>`` explicitly requested the task tier, but no task
@@ -11465,8 +12005,10 @@ proc runReproExecCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
     return 1
-  runActivatedCommand(artifact, edge.artifactPath, parsed.command,
+  let producerOps = devEnvProducerActivation(artifact,
     parsed.selection.projectRoot)
+  runActivatedCommand(artifact, edge.artifactPath, parsed.command,
+    parsed.selection.projectRoot, producerOps)
 
 proc defaultInteractiveShell(): string =
   when defined(windows):
@@ -11488,9 +12030,11 @@ proc runReproShellCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
     return 1
+  let producerOps = devEnvProducerActivation(artifact,
+    parsed.selection.projectRoot)
   if parsed.printEnv:
     stdout.write(renderDevEnvArtifact(artifact, edge.artifactPath,
-      parsed.printFormat))
+      parsed.printFormat, producerOps))
     return 0
   let shellPath =
     if parsed.shellPath.len > 0:
@@ -11498,7 +12042,7 @@ proc runReproShellCommand(args: openArray[string];
     else:
       defaultInteractiveShell()
   spawnActivatedShell(artifact, edge.artifactPath, shellPath,
-    parsed.selection.projectRoot)
+    parsed.selection.projectRoot, producerOps)
 
 # M74 — ``repro dev-env export <shell>``.
 #
@@ -11755,6 +12299,19 @@ proc runDevEnvExportCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if not parsed.allowStale and emitDevEnvDiagnostics(artifact):
     return 1
+
+  # W2 — this surface REPORTS producer pins but does not apply them, and the
+  # asymmetry with ``repro shell`` / ``exec`` / ``run`` is deliberate rather
+  # than an omission. The export plan is sealed: ``dev-env deactivate``
+  # re-derives the activation script from the on-disk artifact and compares
+  # ``activationScriptHash`` to detect tampering. A producer's materialization
+  # state can change between activation and deactivation for a wholly ordinary
+  # reason — somebody ran ``repro build`` — so folding it into the plan would
+  # make a normal build fire the tamper seal (exit 3, env left as-is) on the
+  # next ``cd`` out of the directory. Reporting it costs nothing and keeps the
+  # surface honest about what it is not doing.
+  discard devEnvProducerActivation(artifact, selection.projectRoot,
+    appliesToPath = false)
 
   var plan = devEnvArtifactToExportPlan(edge.artifactPath)
   # M77 — emit the cache-key as the ``__REPRO_APPLIED`` marker. The
@@ -12081,7 +12638,11 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
   let edge = computePublicDevEnv(parsed.selection, publicCliPath)
   let config = supervisorConfig(parsed, edge, publicCliPath, mode)
   if parsed.foreground:
-    return runDevSessionSupervisor(config)
+    # W2 — the SAME resolver the detached arm re-creates in
+    # ``runDevSessionSupervisorHelper``. ``runDevSessionSupervisor`` takes it as
+    # a required parameter precisely so these two arms cannot drift again.
+    return runDevSessionSupervisor(config,
+      devEnvProducerOpsResolver(parsed.selection.projectRoot))
   config.startBackgroundSupervisor()
   let status = waitForDevSessionReady(config)
   echo "repro " & commandName & ": session " &
@@ -12143,10 +12704,11 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
     else:
       raise newException(ValueError, "unsupported dev session mode: " & modeText)
   let debounceText = valueAfterFlag(args, "--debounce-ms")
+  let sessionProjectRoot = valueAfterFlag(args, "--project-root")
   let config = DevSessionSupervisorConfig(
     mode: mode,
     foreground: args.find("--foreground") >= 0,
-    projectRoot: valueAfterFlag(args, "--project-root"),
+    projectRoot: sessionProjectRoot,
     modulePath: valueAfterFlag(args, "--module"),
     outDir: valueAfterFlag(args, "--out-dir"),
     workDir: valueAfterFlag(args, "--work-dir"),
@@ -12159,7 +12721,14 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
     developOverridesPath: valueAfterFlag(args, "--develop-overrides"),
     httpBind: valueAfterFlag(args, "--http"),
     debounceMs: if debounceText.len > 0: parseInt(debounceText) else: 250)
-  runDevSessionSupervisor(config)
+  # W2 — a ``repro dev`` / ``repro up`` session starts services and runs
+  # watch-cycle tasks in the activated environment, so it is an activation
+  # surface like ``repro exec`` and gets the same treatment: bind the producer
+  # pins a build materialized, report the ones it cannot. The supervisor
+  # re-reads the artifact every cycle and calls the resolver each time, which
+  # is what lets a long-lived session pick up a producer rebuilt underneath it.
+  runDevSessionSupervisor(config,
+    devEnvProducerOpsResolver(sessionProjectRoot))
 
 proc runDevSessionHttpHelper(args: openArray[string]): int =
   let portText = valueAfterFlag(args, "--port")
@@ -12489,7 +13058,46 @@ proc renderNativeShellTransition(previousArtifactPath: string;
       of depJson:
         discard
   if nextArtifact.isSome:
-    result.add(renderDevEnvArtifact(nextArtifact.get(), nextArtifactPath,
+    let nextArtifactValue = nextArtifact.get()
+    # W2 — REPORT the workspace's declared ``uses:`` producer pins. This is
+    # ``repro hooks ensure --shell bash|zsh|fish|powershell`` (and, through
+    # ``renderDevEnvShellOps``, ``--shell-direnv``): the prompt-time surface,
+    # and the one a developer who installed the hook spends all day inside.
+    # It was fully silent before, which meant the workspace's most-used shell
+    # was the one place a declared pin could go unmentioned. The notices go to
+    # stderr; every hook template captures only stdout for its ``eval`` /
+    # ``source`` / ``Invoke-Expression``, so reporting cannot corrupt the
+    # script. The artifact's own ``projectRoot`` is the workspace root here —
+    # the introspection edge validates it against the selection that produced
+    # it, so it is the same root ``repro shell`` would pass.
+    discard devEnvProducerActivation(nextArtifactValue,
+      nextArtifactValue.projectRoot, appliesToPath = false)
+    # W2-no-producer-ops: it reports (above) but deliberately does not BIND,
+    # and the reason is NOT the M75 tamper seal. That seal covers
+    # ``devEnvArtifactToExportPlan``, which ``dev-env deactivate`` re-derives
+    # and re-hashes; it is reached from ``repro shell hook <shell>`` and never
+    # from this function. The earlier note here claimed otherwise and was
+    # simply wrong.
+    #
+    # The real reason is the UNLOAD half of this same function. A native-shell
+    # transition undoes the PREVIOUS environment by re-deriving its removals
+    # from the previous artifact's bytes (``nativePathRemovals`` and
+    # ``nativeUnsetNames``, both of which read ``artifact.shellOps``). A
+    # producer bin dir is deliberately not in those bytes — that is exactly
+    # what makes the binding staleness-proof on the surfaces that do bind —
+    # so a ``deskPrependPath`` emitted here would be matched by no later
+    # removal. It would survive every ``cd`` out and gain a fresh copy on every
+    # ``cd`` in, and after a ``repro build`` the accumulated copies would no
+    # longer even agree with each other. ``repro shell`` / ``exec`` / ``run``
+    # bind instead, and they can afford to: the environment they build dies
+    # with the command that asked for it.
+    #
+    # Making this bind is therefore not a wiring tweak. It requires the
+    # transition to record what it APPLIED (the M75 rollback manifest's job)
+    # and the unload to consume that record rather than re-derive from the
+    # artifact — the same change W2's closing section names as W1's second
+    # rough edge. Deliberately not attempted here.
+    result.add(renderDevEnvArtifact(nextArtifactValue, nextArtifactPath,
       format))
 
 proc findDevEnvProjectRoot(startPath: string): string =
@@ -12809,8 +13417,18 @@ proc writeExecutableIfChanged(path, content: string): bool =
   if fileExists(extendedPath(path)) and readFile(extendedPath(path)) == content:
     ensureExecutable(path)
     return false
-  writeFile(extendedPath(path), content)
-  ensureExecutable(path)
+  # A managed hook can reconcile itself while its shell still has the
+  # dispatcher open. Truncating that inode in place lets the active shell read
+  # a mixture of the old and new scripts. Stage beside the hook and replace it
+  # with one rename so existing readers retain the complete old inode.
+  let staged = path & ".repro-write-" & $getCurrentProcessId() & ".tmp"
+  try:
+    writeFile(extendedPath(staged), content)
+    ensureExecutable(staged)
+    moveFile(extendedPath(staged), extendedPath(path))
+  finally:
+    if fileExists(extendedPath(staged)):
+      removeFile(extendedPath(staged))
   true
 
 proc removeFileIfExists(path: string): bool =
@@ -14268,6 +14886,36 @@ proc runReproDirenvActivationHelper(args: openArray[string];
   let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true)
   writeDevEnvStats(selection.statsPath, edge, "hooks shell-direnv")
   stdout.write(readFile(extendedPath(edge.shellFragmentPath)))
+  # W2 — REPORT the workspace's declared ``uses:`` producer pins, exactly as
+  # the native-shell transition does. This is what ``repro hooks ensure
+  # --shell-direnv`` installs into ``.envrc``; direnv shows an ``.envrc``'s
+  # stderr, and the managed block ``eval``s only stdout, so the notice reaches
+  # the developer without touching the script.
+  #
+  # The gate is not an optimisation detail here: this surface had no reason to
+  # read the RBDE artifact at all (it streams the pre-rendered shell fragment
+  # the dev-env edge produced), and it runs on every direnv reload. A workspace
+  # that declares no cross-repo producer — nearly every workspace — pays three
+  # ``fileExists`` calls and no artifact read.
+  if devEnvProducerEdgesPossible(selection.projectRoot):
+    discard devEnvProducerActivation(
+      readDevEnvArtifact(edge.artifactPath), selection.projectRoot,
+      appliesToPath = false)
+  # W2-no-producer-ops: reports (above), does not BIND. direnv would in fact
+  # unload a prepend correctly — it snapshots and restores the environment
+  # itself rather than relying on the artifact-derived unload the native-shell
+  # hook uses — so the accumulation argument recorded at
+  # ``renderNativeShellTransition`` does not apply. The reason here is
+  # staleness. direnv re-evaluates ``.envrc`` only when ``.envrc`` or a watched
+  # path changes; ``repro build`` materializing a producer is neither. A bound
+  # direnv environment would therefore assert a pin for as long as the
+  # developer stayed in the directory, with nothing able to re-derive it —
+  # which is precisely the "a shell can hand you a stale driver indefinitely"
+  # failure the per-activation re-derivation exists to make impossible. A
+  # NOTICE that is stale is a visible, checkable claim; a BINDING that is stale
+  # silently runs the wrong binary. Until the block can ``watch_file`` the
+  # producer's materialization, this surface reports and ``repro shell``
+  # binds.
   stdout.write(renderDevEnvShellOps([
     DevEnvShellOp(kind: deskSetEnv, name: "REPRO_DEV_ENV_ARTIFACT",
       value: edge.artifactPath),
@@ -16098,6 +16746,231 @@ proc replacedSolvedVersion(projectRoot, dependency: string): string =
   ""
 
 # ---------------------------------------------------------------------------
+# The LOCK PLANE's checkout-path boundary (W5).
+#
+# The manifest plane got a boundary in `readRepoFragment` and four delete
+# sites that ask for themselves. The lock plane had NEITHER, and both planes
+# feed the same deletes — so a committed `repro.lock` carrying
+# `path = "./."` walked straight through `parseLockedDependencies` (which
+# validates nothing about `path`), past `isRootLockedDep` (a literal
+# `== "."` compare, which `./.` is not), into `developAllTargetPath` (whose
+# exemption is the same literal), and out at `repro develop --all --reset`'s
+# `removeDir`, which deleted the workspace root — `.git` included, with the
+# run then printing a REFUSAL from a later, correctly-guarded cleanup while
+# the tree was already gone.
+#
+# WHY THE BOUNDARY IS HERE rather than in `repro_lock`. `parseLockedDependencies`
+# is a byte-level (de)serializer with no notion of a workspace root, and
+# `repro_lock` cannot see `repro_workspace_manifests`' checkout-path
+# vocabulary without a new dependency edge onto the TOML reader. Re-deriving
+# the rule there is the failure this whole guard is about — two independent
+# definitions of "degenerate path", one of which ends up narrower, and it is
+# always the narrower one standing in front of the delete. So the rule stays
+# in ONE place (`lockedCheckoutPathRejection`, beside the manifest-plane
+# questions it must not be confused with) and is asked HERE, in
+# `parseWorkspaceLockedDeps`, at the funnel through which lock bytes become
+# `LockedDep`s.
+#
+# HOW COMPLETE THE FUNNEL IS, stated as the CURRENT state of this file so the
+# check it invites actually succeeds, because that is the whole value of the
+# claim. Grep `repro_cli_support.nim` for `parseLockedDependencies` and the
+# call sites are TWO: inside `parseWorkspaceLockedDeps` just below, which IS
+# the boundary, and `runReproLockValidate`'s round-trip re-parse. Grep for
+# `parseWorkspaceLockedDeps` and the call sites are SIX — every reader in this
+# module that consumes the parsed deps.
+#
+# `runReproLockValidate`'s re-parse is left on the bare parser on purpose. It
+# re-parses `serializeLockedDependencies(ld)` where `ld` came out of
+# `parseWorkspaceLockedDeps` moments earlier and has already been validated,
+# and it only string-compares the re-serialization against the original to
+# prove the round trip is stable. Routing it through the boundary would
+# validate the same bytes twice and, worse, would make a round-trip-stability
+# check able to fail for a reason that is not a round-trip failure.
+#
+# (Before this change all seven were bare calls on `parseLockedDependencies`.
+# The six that consume the parsed deps are the ones that moved; that is the
+# delta, not the present state.)
+#
+# No PRODUCT code outside this module consumes `parseLockedDependencies` —
+# that is the property that makes the funnel hold, and it is the one worth
+# asserting. (`repro_lock`'s own round-trip tests call it, and so do
+# `tests/integration/t_lock_foreign_coords.nim` and
+# `t_solved_packages_are_first_class_locked_deps.nim`; all three assert the
+# byte format rather than hand the result to a consumer, so they are outside
+# the property, not exceptions to it.)
+# ---------------------------------------------------------------------------
+
+type
+  LockedCheckoutPathError* = object of CatchableError
+    ## A lock records a checkout path — or a dependency NAME used as a
+    ## directory segment — that no consumer may be handed.
+    ##
+    ## A distinct type, not a `SolvedGraphLockParseError`, and the distinction
+    ## is load-bearing: several readers deliberately SWALLOW a parse failure
+    ## and fall back to an empty lock ("a lock we cannot parse is not a
+    ## coherence question"). That fallback is right for a truncated file and
+    ## wrong for a reader that is about to hand the parsed deps to a delete —
+    ## a lock that parses perfectly and names the workspace root as a checkout
+    ## to delete must not degrade into silence.
+    ##
+    ## WHAT THAT DOES AND DOES NOT MEAN, site by site, because "everyone
+    ## re-raises it" would be false and a reader can check this list against
+    ## the six `parseWorkspaceLockedDeps` call sites in this module:
+    ##
+    ##   * `resolveProducerBinding` — no handler at all; it propagates.
+    ##   * `populateLockedDeps` — catches `LockedCheckoutPathError` FIRST and
+    ##     re-raises it, then falls back to an empty dep set on any other
+    ##     `CatchableError`. THIS is the site the distinct type exists for: it
+    ##     is the source that feeds `repro develop --all --reset`'s
+    ##     `removeDir`, so an empty dep set here would trade an unbounded
+    ##     delete for a silent no-op.
+    ##   * `gatewayVerifyPublicLock` — catches `CatchableError` and turns it
+    ##     into a push REFUSAL, discriminating on `err of
+    ##     LockedCheckoutPathError` only to pick the wording. Escalated, not
+    ##     swallowed.
+    ##   * `runReproLockValidate` — catches it and records `err.msg` as a
+    ##     reported problem, because saying what is wrong with a lock is what
+    ##     that verb is for.
+    ##   * `lockedDepsForWorkspace` and `collectLockCoherence` DO swallow it,
+    ##     under a blanket `except CatchableError`, and that is correct at
+    ##     both — neither creates nor deletes anything derived from `dep.path`.
+    ##     The first reads the OLD lock purely as a carry-forward source and
+    ##     then overwrites the document; the second keys claims by the path
+    ##     and compares them. A lock they cannot use contributes nothing,
+    ##     which is the whole remedy either one needs.
+    ##
+    ## So the invariant is not "no site swallows it". It is that no site
+    ## swallows it on a route to a delete.
+
+proc raiseLockedCheckoutPath(origin, detail: string) {.noreturn.} =
+  raise newException(LockedCheckoutPathError,
+    "lock " & origin & " " & detail)
+
+proc validateLockedDeps*(deps: seq[LockedDep]; origin: string) =
+  ## Ask the lock-plane question of every dependency a lock supplies, and name
+  ## the offender and the remedy when the answer is no (RA-28 /
+  ## Interactive-UX-And-Progress.md Principle 2).
+  ##
+  ## THREE fields, because three of them steer a delete:
+  ##
+  ##   * `path` — `<workspaceRoot> / path` is the checkout directory, and
+  ##     `repro develop --all --reset` removes it before re-cloning.
+  ##   * `name` — `lockPinnedProducerCacheRoot(ws) / name / <revision>` is the
+  ##     lock-pinned producer cache directory, and that is a `removeDir`
+  ##     target too. It is asked the TRAVERSAL question only: a name is not a
+  ##     checkout path, so `.` and "" are not meaningful there, but a `..`
+  ##     segment steers the delete out of the cache exactly as it would out of
+  ##     the workspace.
+  ##   * `coordinates.revision` — the ADJACENT segment of that same
+  ##     expression, from the same lock, reaching the same `removeDir`. Asked
+  ##     the same traversal question for the same reason, and it had been
+  ##     missed on the first pass purely because the eye lands on `name`.
+  ##     Measured before it was guarded: `revision = "../../../../victim"`
+  ##     joined to `C:\Users\<u>\AppData\Local\Temp\victim`, because
+  ##     `extendedPath` calls `normalizedPath(absolutePath(...))` and Windows
+  ##     collapses the `..` before the `\\?\` prefix goes on — so the extended
+  ##     prefix confers no protection whatsoever. Nothing else asks: neither
+  ##     `parseLockedDependencies` (no format check at all) nor
+  ##     `isExactLockedRevision` (which guards the DEVELOP plane, not this
+  ##     one). And the delete at `fetchLockPinnedProducer` fires BEFORE the
+  ##     fetch, so a bogus revision that could never resolve to a commit does
+  ##     not save the directory it names.
+  ##
+  ## `coordinates.url` is deliberately NOT asked a path question here, and the
+  ## reasoning is worth recording because it looks like an omission. It IS a
+  ## delete-steering string: `urlSlug` turns it into a cache-relative
+  ## directory and three cleanup paths `removeDir` the result on a clone
+  ## failure (`shared_clones.nim`'s `refreshSharedBare` and
+  ## `ensureManifestCache`, and `git_actions.nim`'s `refresh-bare` executor).
+  ## But a path rule is the WRONG rule for it, twice over. A `..` segment is
+  ## legal in a REMOTE path — it names something on the server and may never
+  ## become a local directory at all — so refusing it at the lock boundary
+  ## would refuse a legitimate remote. And the lock is not the only source:
+  ## the manifest plane's `repo.remote` reaches exactly the same slug through
+  ## `cloneUrlFor`, and never passes through this proc, so a rule here would
+  ## cover one of the two producers and leave the other open — the "guard that
+  ## exists and does not hold" failure this whole change is about. The rule
+  ## therefore lives where the URL BECOMES a path, in `sanitizeSlugSegment`,
+  ## which is total, covers every caller and every plane at once, and is the
+  ## one place that can be correct about it. See the note there.
+  for dep in deps:
+    let pathRejection = lockedCheckoutPathRejection(dep.path)
+    if pathRejection.len > 0:
+      raiseLockedCheckoutPath(origin,
+        "records dependency '" & dep.name & "' at checkout path '" &
+        dep.path & "', which " & pathRejection)
+    let nameRejection = pathTraversalRejection(dep.name)
+    if nameRejection.len > 0:
+      raiseLockedCheckoutPath(origin,
+        "records the dependency name '" & dep.name & "', which " &
+        nameRejection & "; the name is used as a cache directory segment " &
+        "that is deleted and recreated — regenerate the lock with " &
+        "`repro lock refresh`")
+    # `Coordinates` is a variant object: `revision` exists only on the `ckVcs`
+    # branch, and reading it on any other branch is a `FieldDefect`. The kind
+    # check is a language requirement here, not a narrowing of the guard —
+    # `ckVcs` is the only branch that carries a revision, and the only one
+    # `fetchLockPinnedProducer` builds a cache directory for.
+    if dep.coordinates.kind == ckVcs:
+      let revisionRejection = pathTraversalRejection(dep.coordinates.revision)
+      if revisionRejection.len > 0:
+        raiseLockedCheckoutPath(origin,
+          "records dependency '" & dep.name & "' at revision '" &
+          dep.coordinates.revision & "', which " & revisionRejection &
+          "; the revision is used as a cache directory segment that is " &
+          "deleted and recreated — regenerate the lock with " &
+          "`repro lock refresh`")
+
+proc parseWorkspaceLockedDeps*(content, origin: string): LockedDependencies =
+  ## `parseLockedDependencies` plus the lock-plane boundary. THE entry point
+  ## for turning committed-lock bytes into `LockedDep`s a consumer will act
+  ## on. Six call sites in this module come through here; the only other place
+  ## the bare parser is still named is `runReproLockValidate`'s round-trip
+  ## re-parse, which consumes nothing (see the block comment above). The bare
+  ## parser is also called from three TEST files — `repro_lock`'s own
+  ## round-trip suite, `t_lock_foreign_coords` and
+  ## `t_solved_packages_are_first_class_locked_deps` — each asserting the byte
+  ## format rather than consuming the result. The property that holds, and the
+  ## one this boundary rests on, is narrower than "nobody else calls it": no
+  ## PRODUCT code outside `repro_cli_support` consumes it.
+  ##
+  ## `origin` names the artifact for the diagnostic — a path for a file on
+  ## disk, or a description for a blob (a pushed lock read out of a bare repo
+  ## has no path).
+  result = parseLockedDependencies(content)
+  validateLockedDeps(result.deps, origin)
+
+proc devEnvProducerEdgesPossible*(projectRoot: string): bool =
+  ## W2 — see the forward declaration. ``declaresProducerEdge`` accepts exactly
+  ## two ``ProducerBinding`` kinds, ``pbkDevelopOverride`` and
+  ## ``pbkLockPinned``, and ``resolveProducerBinding`` can only produce either
+  ## one when one of these three files exists. So for a workspace that declares
+  ## no cross-repo producers at all — which is nearly every workspace — three
+  ## ``fileExists`` calls decide the whole pass, and it costs no lock parse, no
+  ## overrides parse, and no ``findExe`` walk of the ambient ``PATH``.
+  ##
+  ## That is what buys the M77 prompt-time budget for the surfaces added in
+  ## this milestone's fix pass. ``__repro-native-shell-activate`` runs on every
+  ## ``cd`` / ``chpwd`` / prompt and ``__repro-direnv-activate`` on every direnv
+  ## reload; on the direnv side this gate also skips reading the RBDE artifact
+  ## from disk, which that surface otherwise had no reason to do at all.
+  ##
+  ## Fail-OPEN on any error. The gate is an optimisation, and the only failure
+  ## direction it must never take is the one that makes a declared pin go
+  ## unreported — so if it cannot cheaply decide, the full pass runs.
+  if projectRoot.len == 0:
+    return false
+  try:
+    let root = absolutePath(projectRoot)
+    if fileExists(extendedPath(committedLockPath(root))):
+      return true
+    if fileExists(extendedPath(developOverridesPath(root))):
+      return true
+    return fileExists(extendedPath(developOverridesMetadataPath(root)))
+  except CatchableError:
+    return true
+
+# ---------------------------------------------------------------------------
 # Cross-Repo-Source-Consumption SC-1 — the "resolve package binding" hook.
 #
 # Spec: ``Cross-Repo-Source-Consumption.md`` §4.1 (call-site wiring); §2 (the
@@ -16231,7 +17104,7 @@ proc resolveProducerBinding*(selector: string;
   let lockP = committedLockPath(workspaceRoot)
   let lock =
     if fileExists(extendedPath(lockP)):
-      parseLockedDependencies(readFile(extendedPath(lockP)))
+      parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
     else:
       LockedDependencies()
   var overrides =
@@ -17279,8 +18152,11 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   var existingDeps: seq[LockedDep] = @[]
   let existingLockP = committedLockPath(root)
   if fileExists(extendedPath(existingLockP)):
-    try: existingDeps = parseLockedDependencies(
-      readFile(extendedPath(existingLockP))).deps
+    # A carry-forward source only: a lock we cannot read (or that carries a
+    # path no consumer may be handed) simply contributes nothing, and the
+    # rewrite that follows replaces it with a well-formed document.
+    try: existingDeps = parseWorkspaceLockedDeps(
+      readFile(extendedPath(existingLockP)), existingLockP).deps
     except CatchableError: discard
   # Sibling deps: the develop-mode discovery set FIRST, then the recipe's
   # ``uses:`` producer siblings folded in (deduped by path and name).
@@ -17573,6 +18449,13 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var publishCacheHits = false
   var publishMaterialized = false
   var skipCmakeRegeneration = false
+  # S7 — ``--restore-cached-outputs`` / ``--no-restore-cached-outputs``,
+  # over the ``REPRO_RESTORE_CACHED_OUTPUTS`` default. See
+  # ``restoreCachedOutputsEnvDefault`` for what the env spelling is and is
+  # not: the flag reaches a daemon-hosted build fine (the daemon re-parses
+  # ``request.rawArgs`` through this very proc), the env variable is the one
+  # that does not cross into a daemon started before it was set.
+  var restoreCachedOutputs = restoreCachedOutputsEnvDefault()
   var forwardedActionArgs: seq[string] = @[]
   var afterArgumentSeparator = false
   # MO-1 — committed solved-graph lock. ``--lock <file>`` selects an
@@ -17593,6 +18476,22 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
+  # In-Process-Monitor-Hosting P1(b): the operator surface for
+  # ``BuildEngineConfig.monitorHosting``. Same shape as ``--daemon`` above —
+  # an environment default (``REPROBUILD_MONITOR_HOSTING``) that the flag
+  # overrides, both decoded by the same parser, which lives beside the enum
+  # in ``repro_build_engine``. The default is ``mhmNever``, which is the
+  # measured HM-6 verdict and is what ``test_umask_wrap_both_spawn_paths``
+  # pins; this knob exists so that verdict can be RE-CHECKED on other
+  # hardware through the CLI instead of by writing a harness.
+  #
+  # Note which launch path each setting actually reaches: hosting is only
+  # possible on L1, so the experiment is
+  # ``repro build --no-runquota --monitor-hosting=where-supported``. On a
+  # normal (RunQuota) build ``where-supported`` silently keeps the wrapper
+  # and ``required`` FAILS the action with ``monitorHostingRefusal``'s
+  # sentence rather than running it unmonitored.
+  var monitorHosting = configuredMonitorHostingMode()
   # Named-Targets M5: ``--list-targets`` enumerates every implicit /
   # explicit target name visible in the current project's target-export
   # table. ``--list-targets-json`` is the JSON view; ``--list-targets``
@@ -17723,10 +18622,17 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       publishMaterialized = true
     elif arg == "--skip-cmake-regeneration":
       skipCmakeRegeneration = true
+    elif arg == "--restore-cached-outputs":
+      restoreCachedOutputs = true
+    elif arg == "--no-restore-cached-outputs":
+      restoreCachedOutputs = false
     elif arg == "--no-runquota":
       bypassRunQuota = true
     elif arg == "--runquota":
       bypassRunQuota = false
+    elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
+      monitorHosting = parseMonitorHostingMode(
+        valueFromFlag(args, i, "--monitor-hosting"), "--monitor-hosting")
     elif arg == "--unicode":
       setUnicodeOverride(true)
     elif arg == "--no-unicode":
@@ -18071,6 +18977,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         publishMaterialized = publishMaterialized,
         skipCmakeRegeneration = skipCmakeRegeneration,
         bypassRunQuotaExplicit = bypassRunQuota,
+        restoreCachedOutputs = restoreCachedOutputs,
+
+        monitorHosting = monitorHosting,
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck,
@@ -21858,6 +22767,14 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   # dir the test writes its trace to). Absence of ``--ct-incremental`` leaves
   # the legacy watch behaviour byte-for-byte unchanged.
   var ctFlags = WatchCtIncrementalFlags()
+  # S7 — ``repro watch`` drives ``executeBuildTarget`` directly rather than
+  # through ``runBuildCommand``, so it gets neither the flag nor the
+  # environment default unless it asks for them here. It did not, and that
+  # was a build entry point silently unable to restore for the same reason
+  # all seven engine configs were: nobody looked at it. Wired rather than
+  # recorded as a gap, because a watch loop is precisely where restoring a
+  # deleted output instead of rebuilding it pays off.
+  var restoreCachedOutputs = restoreCachedOutputsEnvDefault()
 
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
@@ -21924,6 +22841,10 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         reportPersistence.path = arg["--write-report=".len .. ^1]
     elif arg == "--no-write-report":
       reportPersistence.suppressed = true
+    elif arg == "--restore-cached-outputs":
+      restoreCachedOutputs = true
+    elif arg == "--no-restore-cached-outputs":
+      restoreCachedOutputs = false
     elif arg.startsWith("--attach="):
       attachSessionId = arg.split("=", maxsplit = 1)[1]
     elif arg == "--attach":
@@ -22327,6 +23248,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         showSet = showSet,
         measureSet = measureSet,
         reportPersistence = reportPersistence,
+        restoreCachedOutputs = restoreCachedOutputs,
         eventSink = buildEventSink,
         cancelCheck = cancelCheck,
         extraNameSelectors = extraNameSelectors)
@@ -23387,6 +24309,143 @@ proc developAllTargetPath(node: LockedDep; workspaceRoot, intoDir: string):
     return os.normalizedPath(absolutePath(workspaceRoot / node.path))
   os.normalizedPath(parentDir(absolutePath(workspaceRoot)) / seg)
 
+proc developPlacementRejection(absTarget, workspaceRoot, intoDir: string):
+    string =
+  ## Why `absTarget` may not be created and destroyed as a develop checkout,
+  ## or "" when it may. Asked ONCE per node, before the placement is reported
+  ## or acted on, and again in front of this driver's discard.
+  ##
+  ## The belt to `lockedCheckoutPathRejection`'s pair of braces, and worth its
+  ## lines for the reason `removeCloneTargetSafely` gives for the same shape:
+  ## it holds for targets that never came from a lock at all —
+  ## `--into=<dir>` is operator-supplied, and a future caller composing a
+  ## placement by hand gets the same proof for free.
+  ##
+  ## The rule is NOT "beneath the workspace root". The develop plane's default
+  ## placement is the SIBLING topology ONE LEVEL ABOVE the workspace root
+  ## (`../<name>`, CLI/develop.md §"Checkout Placement"), and
+  ## `developAllTargetPath` honours a lock `path` that already names one, so
+  ## containment would refuse the documented default. The rule is the
+  ## placement SCOPE the same section defines, plus the two shapes that are
+  ## catastrophic in any scope:
+  ##
+  ##   * the workspace root itself, and any ancestor of it — a develop
+  ##     checkout is a peer of the workspace or lives inside it, never the
+  ##     thing the workspace lives inside;
+  ##   * anything outside the placement scope — `<intoDir>` when `--into` was
+  ##     given, else the workspace root and its parent. This is what keeps a
+  ##     lock from steering a checkout (and, under `--reset`, a `removeDir`)
+  ##     to an arbitrary directory: `../sib` is a sibling and is honoured,
+  ##     `../../../Users` is not a sibling of anything and is refused.
+  ##
+  ## W8-R1/R2 — ASKED OF THE RESOLVED TARGET. This proc used to fold both
+  ## sides with `os.normalizedPath(absolutePath(...))` and compare byte-wise,
+  ## which is a lexical rule and could not see a reparse point: a `../sib`
+  ## whose `sib` is a directory junction onto the workspace passed the scope
+  ## test (it IS in scope — it is a sibling) and `--reset` then `removeDir`'d
+  ## the workspace at EXIT 0. Reproduced on `09324b61`, for a junction and for
+  ## a directory symlink alike.
+  ##
+  ## `fsContainment` (`repro_core/path_identity.nim`) resolves both sides
+  ## through the filesystem, so the junction's verdict is `fcSameDirectory`
+  ## and the first refusal below fires. The SCOPE test is then run on the
+  ## resolved spellings too — it is a `startsWith` like the others, and
+  ## leaving it on the raw spelling would move the blind spot rather than
+  ## close it.
+  ##
+  ## Refusal on RESOLUTION FAILURE is deliberate and is the same policy the
+  ## other four consumers take: `--reset` deletes the directory this proc
+  ## approves, so a target whose location cannot be established is a target
+  ## whose placement cannot be proven. The failure modes and what each means
+  ## are tabulated at the top of `path_identity.nim`.
+  let contained = fsContainment(absTarget, workspaceRoot)
+  let root = contained.root
+  let target = contained.target
+  case contained.verdict
+  of fcUnresolvable:
+    return "the checkout target '" & absTarget & "' cannot be located " &
+      "relative to the workspace root: " & contained.reason &
+      "; nothing was created or removed — resolve the path (or the " &
+      "junction/symlink it goes through) and re-run, or pass `--into=DIR` " &
+      "to place this checkout deliberately"
+  of fcSameDirectory:
+    return "the checkout target '" & target & "' IS the workspace root; " &
+      "a lock records the workspace root repo as `.` and it is never placed " &
+      "into develop mode — regenerate the lock with `repro lock refresh`"
+  of fcContainsRoot:
+    return "the checkout target '" & target & "' CONTAINS the workspace " &
+      "root '" & root & "'; a develop checkout may be a sibling of the " &
+      "workspace but never an ancestor of it — regenerate the lock with " &
+      "`repro lock refresh`"
+  of fcBeneath, fcDisjoint:
+    discard
+  var scopes: seq[string]
+  if intoDir.len > 0:
+    let intoResolved = resolveCanonicalPath(intoDir)
+    if intoResolved.status == prsFailed:
+      return "`--into` cannot be resolved: " & intoResolved.reason
+    scopes.add(intoResolved.path)
+  else:
+    scopes.add(root)
+    scopes.add(parentDir(root))
+  for scope in scopes:
+    if scope.len > 0 and target.len > scope.len and
+        target.startsWith(scope & $DirSep):
+      return ""
+  "the checkout target '" & target & "' is outside the develop placement " &
+    "scope (" & scopes.join(", ") & "); a locked `path` may name a " &
+    "directory beneath the workspace root or a SIBLING of it (`../name`), " &
+    "and `--into=DIR` places checkouts under DIR — regenerate the lock with " &
+    "`repro lock refresh`, or pass `--into=DIR` to place this checkout " &
+    "deliberately"
+
+proc resolvedOwnTreeRejection(computedTarget, workspaceRoot: string): string =
+  ## Why the directory `computedTarget` RESOLVES TO may not be deleted as a
+  ## repo's own tree, or "" when it may.
+  ##
+  ## The filesystem half of `checkoutPathRejection`, and the two are a pair
+  ## rather than alternatives. `checkoutPathRejection` asks about the
+  ## SPELLING: is `<workspaceRoot> / <path>` a directory reference that stays
+  ## inside the workspace? That question is total, cheap and platform-
+  ## identical, and it is the right one to ask of a declaration. This one asks
+  ## where the answer actually LANDS, which the spelling cannot say (W8-R1): a
+  ## perfectly ordinary `path = "vendor/thing"` whose `vendor\thing` is a
+  ## directory junction onto the workspace root — or onto `C:\Users` — is
+  ## accepted by every lexical rule in this repository and then handed to
+  ## `removeDir`, which walks straight into the reparse point.
+  ##
+  ## The manifest plane's rule is the strict one, because it can afford to be:
+  ## a declared checkout path is workspace-relative with no `..` and no drive,
+  ## so a repo's own tree is BENEATH the workspace root by construction. Any
+  ## other resolved verdict means a reparse point moved it, and the two
+  ## planes' answers are deliberately different here — `git_actions.nim`'s
+  ## executors permit a DISJOINT sibling because the develop plane's
+  ## documented default placement is one, and this plane has no such default.
+  ##
+  ## `fcUnresolvable` refuses for the reason every site in this class refuses:
+  ## the next statement is a recursive delete, and a location that could not
+  ## be established is a containment that was not proven. See
+  ## `repro_core/path_identity.nim` for the per-failure-mode policy.
+  let contained = fsContainment(computedTarget, workspaceRoot)
+  case contained.verdict
+  of fcBeneath:
+    ""
+  of fcSameDirectory:
+    "resolves to the workspace root itself (" & contained.root & "), so " &
+      "removing it would delete the workspace"
+  of fcContainsRoot:
+    "resolves to '" & contained.target & "', which CONTAINS the workspace " &
+      "root (" & contained.root & "), so removing it would delete the " &
+      "workspace from the outside"
+  of fcDisjoint:
+    "resolves to '" & contained.target & "', which is OUTSIDE the workspace " &
+      "root (" & contained.root & ") — a checkout path is workspace-" &
+      "relative, so this one reaches out through a junction or symlink and " &
+      "removing it would delete a directory the workspace does not own"
+  of fcUnresolvable:
+    "cannot be located relative to the workspace root (" & contained.root &
+      "): " & contained.reason
+
 proc gitHeadShaOf(gitBinary, repoDir: string): string =
   ## Best-effort ``git rev-parse HEAD`` for adopt/idempotent detection. Returns
   ## "" when the directory is not a resolvable git checkout.
@@ -23433,7 +24492,8 @@ proc isExactLockedRevision*(value: string): bool =
 
 proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
                                node: LockedDep;
-                               identity: GitToolIdentity):
+                               identity: GitToolIdentity;
+                               intoDir: string):
     tuple[ok: bool; diagnostic: string] =
   ## Clone ``node`` from its locked VCS coordinates into ``absTarget`` and
   ## reset the checkout to the EXACT locked ``revision`` SHA. Two chained
@@ -23549,7 +24609,12 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
     ##
     ## The caller either created ``absTarget`` in this call (the fresh-clone
     ## path) or deliberately removed a pre-existing one first (the ``--reset``
-    ## path), so in both cases nothing that predates this call is destroyed.
+    ## path), so in both cases nothing that predates this call is destroyed —
+    ## PROVIDED ``absTarget`` is the node's own tree, which is exactly what
+    ## `developPlacementRejection` establishes and what nothing in this
+    ## driver used to ask.
+    if developPlacementRejection(absTarget, workspaceRoot, intoDir).len > 0:
+      return
     try:
       if dirExists(absTarget): removeDir(absTarget)
     except CatchableError:
@@ -23982,6 +25047,23 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     let absTarget = developAllTargetPath(node, root, args.intoDir)
     outcome.path = absTarget
 
+    # The placement question, asked ONCE and BEFORE anything is created,
+    # removed or reported — so `--list`, `--dry-run` and a real run all give
+    # the same answer. They did not: `--list` and `--dry-run` both ANNOUNCED
+    # the workspace root as this node's target, and the real run then deleted
+    # it, which is the worst possible ordering of a preview and its
+    # consequence.
+    let placementRejection =
+      developPlacementRejection(absTarget, root, args.intoDir)
+    if placementRejection.len > 0:
+      outcome.mode = "refused"
+      outcome.ok = false
+      outcome.diagnostic = "refusing to place '" & node.name & "': " &
+        placementRejection & ". Nothing was placed for this node."
+      outcomes.add(outcome)
+      anyFailure = true
+      continue
+
     # Reuse / adopt an existing suitable checkout over cloning a duplicate.
     let prior = findOverride(overrides, node.name)
     if prior.isSome and os.normalizedPath(absolutePath(prior.get().local_path)) ==
@@ -24026,7 +25108,8 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
         # what the prior checkout contained (shallow, dirty, or diverged).
         removeDir(absTarget)
         let resetRes =
-          cloneNodeAtLockedRevision(root, absTarget, node, identity)
+          cloneNodeAtLockedRevision(root, absTarget, node, identity,
+            args.intoDir)
         if not resetRes.ok:
           outcome.mode = "error"
           outcome.ok = false
@@ -24058,7 +25141,8 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       outcome.ok = true
     else:
       # Clone fresh at the locked revision.
-      let cloneRes = cloneNodeAtLockedRevision(root, absTarget, node, identity)
+      let cloneRes = cloneNodeAtLockedRevision(
+        root, absTarget, node, identity, args.intoDir)
       if not cloneRes.ok:
         outcome.mode = "error"
         outcome.ok = false
@@ -25541,7 +26625,7 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
       forceRefresh = true
     elif arg in ["--daemon", "--progress", "--progress-bars",
         "--write-diagnostics", "--show", "--measure", "--write-report",
-        "--log", "--write-benchmark", "--write-stats"]:
+        "--log", "--write-benchmark", "--write-stats", "--monitor-hosting"]:
       discard valueFromFlag(args, i, arg)
     elif arg == "--no-write-report":
       discard
@@ -25552,6 +26636,7 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
         arg.startsWith("--write-report=") or
         arg.startsWith("--log=") or arg.startsWith("--write-benchmark=") or
         arg.startsWith("--write-stats=") or
+        arg.startsWith("--monitor-hosting=") or
         arg.startsWith("--stats-groups="):
       discard
     elif arg == "--prepare-only":
@@ -28952,10 +30037,13 @@ proc collectLockCoherence*(identity: GitToolIdentity;
       continue
     var parsed: LockedDependencies
     try:
-      parsed = parseLockedDependencies(readFile(extendedPath(lockPath)))
+      parsed = parseWorkspaceLockedDeps(
+        readFile(extendedPath(lockPath)), lockPath)
     except CatchableError:
       # A lock we cannot parse is not a coherence question; the lock verbs
-      # already report malformed locks loudly.
+      # already report malformed locks loudly. Nothing here is deleted or
+      # created from `dep.path` — the claims are keyed by it and compared —
+      # so dropping an unusable lock's claims is the whole remedy needed.
       continue
     for dep in parsed.deps:
       if dep.coordinates.kind != ckVcs: continue
@@ -29347,6 +30435,22 @@ method readabilityDiagnostic*(s: GitCheckoutLockStore): string =
         "be read: " & locksDir & " (" & locksDiag & ")"
   ""
 
+proc isCommitAddressedLockStore*(store: LockStore): bool =
+  ## Is this backend COMMIT-ADDRESSED — can it be asked for the record
+  ## belonging to ONE exact commit (``locks/<project>/<repo>/<sha>.toml``),
+  ## rather than only for "the latest record for (project, repo)"?
+  ##
+  ## This is the predicate ``CLI/develop.md`` §"Which record, for a
+  ## commit-addressed backend" turns on, and it is stated ONCE here because two
+  ## different rules read it: ``lockRecordAtCommit`` (which answers ``none`` for
+  ## every other backend, so the caller falls through to the ordinary resolver)
+  ## and ``composeDevelopLockSet`` (which, for a commit-addressed backend whose
+  ## key resolved, must take the key's record and NOTHING else). Two spellings
+  ## of "is this git-checkout" could drift apart, and the drift would be silent:
+  ## one of them deciding "yes" while the other decided "no" is exactly the
+  ## branch-tip fallback the spec forbids.
+  (not store.isNil) and (store of GitCheckoutLockStore)
+
 proc lockRecordAtCommit*(store: LockStore; project, repo, sha: string):
     Option[StoreLockRecord] =
   ## The COMMIT-KEYED record read. The ``LockStore`` interface exposes only
@@ -29364,7 +30468,7 @@ proc lockRecordAtCommit*(store: LockStore; project, repo, sha: string):
   ## uses the ordinary ``latestLock`` resolver.
   if store.isNil or project.len == 0 or repo.len == 0 or sha.len == 0:
     return none(StoreLockRecord)
-  if not (store of GitCheckoutLockStore):
+  if not isCommitAddressedLockStore(store):
     return none(StoreLockRecord)
   let gs = GitCheckoutLockStore(store)
   let rel = lockFileRepoRelativePath(project, repo, sha)
@@ -30610,7 +31714,15 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
     if not fileExists(extendedPath(lockP)):
       return LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[])
     try:
-      return parseLockedDependencies(readFile(extendedPath(lockP)))
+      return parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+    except LockedCheckoutPathError:
+      # NOT the "fall back cleanly" case. The document parsed; what it says is
+      # that a dependency's checkout directory is the workspace root (or an
+      # ancestor of it), and this is the source that feeds `repro develop
+      # --all --reset`'s `removeDir`. Degrading that to an empty dep set would
+      # trade an unbounded delete for a silent no-op and a misleading "the
+      # lock set is empty" further down. Fail loud, at the reader.
+      raise
     except CatchableError:
       return LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[])
   of lskManifestRepo, lskExternalStore:
@@ -30785,7 +31897,7 @@ proc lockRecordAtCommitOrAncestor*(store: LockStore; project, repo, sha: string;
   if result.rec.isSome:
     result.foundAt = sha
     return
-  if store.isNil or not (store of GitCheckoutLockStore): return
+  if not isCommitAddressedLockStore(store): return
   if gitBin.len == 0 or repoRoot.len == 0 or sha.len == 0: return
   var chain: seq[string]
   try:
@@ -31246,7 +32358,52 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     # landed on, because a pin silently resolved from a different commit than
     # the one asked for is precisely the surprise this command exists to
     # prevent.
+    #
+    # W7 — and the corollary the fold below MUST honour. When this backend is
+    # commit-addressed AND a key resolved, the record at the key (or at the
+    # nearest locked first-parent ancestor of it) is the backend's ENTIRE
+    # contribution. Nothing else it holds may supply a pin:
+    #
+    #   "There is no branch-tip fallback: a backend that yields no record for
+    #    the resolved key contributes nothing and says so."
+    #                     — CLI/develop.md §"Which record, for a
+    #                       commit-addressed backend"
+    #
+    # ``keyedOnly`` is that sentence. Without it the per-dep fold below fell
+    # through to ``lockedShaFromStore``, whose two reads are BOTH keyed on
+    # something other than the develop key: ``latestLockShas(project)`` folds
+    # every trigger-keyed candidate in the store newest-first by Git history,
+    # and ``latestLock(project, repoName)`` takes the newest candidate under one
+    # repo's own subtree. Neither asks whether the commit in the record's name
+    # is an ancestor of the key, so a record published on a SIBLING BRANCH — a
+    # branch tip, exactly — supplied the pin while the ``keyNotes`` entry just
+    # below said "there is no branch-tip fallback" about the very same backend,
+    # in the very same output. Measured, and not only in the listing: on the
+    # ``--all`` path the same run reported "adopted existing checkout of lib @
+    # <sidebranch pin>" and exited 0, so the disagreement was between the
+    # message and a PLACEMENT.
+    #
+    # The rule is scoped to "a key resolved", and that scope is the whole of
+    # what keeps a routed workspace working. ``rootRepoName`` is empty when no
+    # manifest entry places a repo at ``.``; nothing then keys this backend on a
+    # commit at all (the ``--at`` branch above says so out loud), it is not
+    # commit-addressed IN THIS WORKSPACE, and the ordinary project read applies
+    # unchanged.
+    #
+    # What this deliberately does NOT do is reach for a partition filed under a
+    # DIFFERENT trigger repo's coordinate. Unified-Locking-And-Hooks.md §6
+    # Decision 1 consequence 2 anchors a partition at a trigger that belongs to
+    # it and says consumers reach it by asking "what did the workspace look like
+    # at THIS repo's commit" — for `repro develop` run in the workspace root,
+    # "this repo" is the root repo, and a partition triggered by a sibling is
+    # answering a question about the SIBLING's history. It is reachable by the
+    # consumer keyed on that sibling (CI's `resolve-sibling-rev.sh`), and it is
+    # not an answer about the root's commit. The two documents do not conflict
+    # here: both readers are commit-addressed, and neither sanctions "the newest
+    # record anywhere in the store".
     var commitKeyed = initTable[string, string]()
+    let keyedOnly = isCommitAddressedLockStore(store) and
+      rootRepoName.len > 0 and rootHeadSha.len > 0
     if rootRepoName.len > 0 and rootHeadSha.len > 0:
       let hit = lockRecordAtCommitOrAncestor(
         store, resolved.projectName, rootRepoName, rootHeadSha, gitBin, root)
@@ -31327,8 +32484,14 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       # failed, and a checkout was left behind at a revision nobody locked.
       # Both halves are checked: the record the backend HOLDS and the revision
       # the populator RESOLVED must each be an exact pin.
+      #
+      # W7 — ``keyedOnly`` (above): for a commit-addressed backend whose key
+      # resolved, the key's record is the ONLY record that may answer. An empty
+      # answer here is the spec's "contributes nothing", and the ``noRecord``
+      # entry below is its "and says so".
       let backendRev =
         if commitKeyed.hasKey(d.path): commitKeyed[d.path]
+        elif keyedOnly: ""
         else: lockedShaFromStore(store, resolved.projectName, d.name, d.path)
       if backendRev.len == 0 or
           not isExactLockedRevision(backendRev) or
@@ -32470,8 +33633,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       if outcome.status in {asSucceeded, asCacheHit, asUpToDate}:
         # RA-23: a successful NEW-repo clone is named distinctly (``cloned``)
         # from an updated existing checkout (``succeeded``).
+        #
+        # A SUCCESS may still carry a notice. `executeForceReset` on the
+        # workspace root repo resets the tracked set and deliberately skips
+        # `git clean -ffdx` (the clean's bound is the directory, and on the
+        # root repo that directory is the whole workspace), so it succeeds
+        # having done less than "force-sync overwrote" implies. An executor
+        # signals that by setting `reason` on an `asSucceeded` result; the
+        # text in `stderr` is carried onto the row so the operator reads it
+        # where they read the outcome, not in a log.
+        let notice = if outcome.reason.len > 0: outcome.stderr else: ""
         checkoutStatus[repoIdx] =
-          (if isClone: ("cloned", "") else: ("succeeded", ""))
+          (if isClone: ("cloned", notice) else: ("succeeded", notice))
         # RA-27 per-repo live progress: emit motion as each repo finishes.
         if emitProgress:
           stderr.writeLine("workspace sync: [" &
@@ -32579,7 +33752,25 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     let actionTag =
       if wasForceReset: "force_reset" else: syncActionTag(decision.action)
     let message =
-      if wasForceReset:
+      if wasForceReset and status == "failed":
+        # The overwrite line is a claim about what HAPPENED, so it may only be
+        # printed when it did. A force-reset can be REFUSED by the executor —
+        # `executeForceReset` locates its target relative to the workspace
+        # root first, and a target OUTSIDE the workspace is refused outright —
+        # and reporting "force-sync overwrote '<path>'" on that row would
+        # describe a destructive act that was deliberately not performed.
+        # Defer to the executor's diagnostic, which names the offender and the
+        # remedy.
+        "force-sync did NOT overwrite '" & decision.path & "': " & diagnostic
+      elif wasForceReset and diagnostic.len > 0:
+        # Succeeded, but PARTIALLY: the workspace root repo's tracked set was
+        # reset and the `git clean -ffdx` half was skipped on purpose. Saying
+        # only "overwrote" here would be the report over-claiming in the one
+        # direction that matters — an operator who believes the tree is
+        # byte-identical to a fresh checkout when untracked files survive.
+        "force-sync PARTIALLY overwrote '" & decision.path & "' to " &
+          forceResetTarget.getOrDefault(repoIdx) & ": " & diagnostic
+      elif wasForceReset:
         "force-sync overwrote '" & decision.path & "' to " &
           forceResetTarget.getOrDefault(repoIdx)
       else: decision.message
@@ -32766,8 +33957,19 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
 # No-rollback partial-sync policy: ``pull`` refreshes the manifest FIRST
 # (advancing it, recording before→after SHAs). If a later per-repo
 # convergence step fails, the manifest repo is NOT rolled back — the
-# report shows the before→after SHAs and ``pull`` stops with a non-zero
-# exit, leaving the partial state for a manual rerun.
+# report shows the before→after SHAs and ``pull`` exits non-zero, leaving
+# the partial state for a manual rerun.
+#
+# Sweep policy: a per-repo failure does NOT abandon the repos behind it.
+# ``pull`` is the command whose entire purpose is "get this workspace onto
+# the declared revisions", and a sweep that quits at repo 5 of 100 hands
+# back a workspace that is mostly stale while the failure it printed
+# scrolls away above the trailing auto-trust lines. The developer then
+# debugs the WRONG repo: their build breaks against siblings that pull was
+# supposed to have converged and never touched. So every repo is attempted,
+# every failure is collected, the digest at the end names them, and the exit
+# code is 1 — the same partial-advance contract ``sync`` follows (see the
+# RA-23 clone-failure comment in ``executeWorkspaceSync``).
 
 type
   WorkspacePullRepoOutcome* = enum
@@ -32879,22 +34081,47 @@ proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
   if report.manifestStopped:
-    result.add("workspace pull: STOPPED after a step failed — the manifest " &
-      "repo was advanced and is NOT rolled back; rerun `repro workspace " &
-      "pull` to resume from the partial state")
-  var skipped = 0
-  for entry in report.repos:
-    if entry.outcome == pullOutcomeTag(ppoSkippedWorkAtRisk):
-      inc skipped
-  if skipped > 0:
-    # Said once, at the end, in the summary position. The per-repo lines above
-    # already carry the detail; what a reader needs here is the count and the
-    # fact that the rest of the workspace DID converge, so a non-zero exit is
-    # not mistaken for "nothing happened".
-    result.add("workspace pull: " & $skipped & " checkout(s) left untouched " &
-      "to protect work that exists nowhere else; every other repo converged")
+    result.add("workspace pull: the manifest repo was advanced and is NOT " &
+      "rolled back after a repo failed; rerun `repro workspace pull` to " &
+      "resume from the partial state")
   for line in renderTrustReportLines("workspace pull", report.autoTrust):
     result.add(line)
+  # The digest goes LAST — after the auto-trust pass, not before it. A repo
+  # failure that prints in the middle of a hundred-repo sweep and is then
+  # buried under trailing "trusted shell hook" lines is a failure the operator
+  # does not see; the final line of the output is the one a tail is guaranteed
+  # to show. Counts, not a wall of git output: the per-repo lines above already
+  # carry each diagnostic.
+  var converged, cloned, failed, skipped = 0
+  var failedPaths, skippedPaths: seq[string]
+  for entry in report.repos:
+    if entry.outcome == pullOutcomeTag(ppoFailed):
+      inc failed
+      failedPaths.add(entry.path)
+    elif entry.outcome == pullOutcomeTag(ppoSkippedWorkAtRisk):
+      inc skipped
+      skippedPaths.add(entry.path)
+    elif entry.outcome == pullOutcomeTag(ppoCloned):
+      inc cloned
+    else:
+      inc converged
+  if skipped > 0:
+    # Said once, in the summary position. What a reader needs here is the count
+    # and the fact that the rest of the workspace DID converge, so a non-zero
+    # exit is not mistaken for "nothing happened".
+    result.add("workspace pull: " & $skipped & " checkout(s) left untouched " &
+      "to protect work that exists nowhere else: " & skippedPaths.join(", "))
+  if failed > 0:
+    # Named, not just counted. "1 repo failed" sends the reader back through
+    # the scrollback; the names let them act, and they are what distinguishes
+    # "my build broke because THIS repo is stale" from "mainline is broken".
+    result.add("workspace pull: " & $failed & " repo(s) FAILED to converge " &
+      "and are still at their previous revision: " & failedPaths.join(", ") &
+      "; every other repo was still attempted — fix these and rerun " &
+      "`repro workspace pull`")
+  result.add("workspace pull summary: converged " & $converged &
+    ", cloned " & $cloned & ", skipped " & $skipped &
+    ", FAILED " & $failed & " (" & $report.repos.len & " repo(s))")
 
 type
   WorkspacePullArgs = object
@@ -33191,9 +34418,12 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
   ##       advance is KEPT on any later failure — no rollback).
   ##   (2) resolve / compose the project.
   ##   (3) for each repo: clone if missing, then converge to the
-  ##       manifest-declared revision on a local tracking branch.
-  ##   (4) emit the structured report; stop (non-zero) on the first
-  ##       per-repo failure, surfacing that the manifest stays advanced.
+  ##       manifest-declared revision on a local tracking branch. A repo
+  ##       that fails is recorded and the sweep CONTINUES — the remaining
+  ##       repos are the ones convergence was asked for.
+  ##   (4) emit the structured report; exit non-zero when any repo failed,
+  ##       naming every one of them and surfacing that the manifest stays
+  ##       advanced.
   var report: WorkspacePullReport
   report.workspaceRoot = args.workspaceRoot
 
@@ -33274,7 +34504,10 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
           (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
         report.repos.add(entry)
         anyFailure = true
-        break
+        # One unreadable / renamed / private repo does not make the other 99
+        # stale checkouts unfixable. Record it and keep going; the exit code
+        # and the end-of-run digest carry the failure.
+        continue
       entry.outcome = pullOutcomeTag(ppoCloned)
     else:
       entry.outcome = pullOutcomeTag(ppoConvergedExisting)
@@ -33313,7 +34546,12 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
       entry.diagnostic = converged.diag
       report.repos.add(entry)
       anyFailure = true
-      break
+      # Same rule as the clone arm above: a fetch that 403s, a branch the
+      # remote dropped, a checkout a broken local hook rejects — none of that
+      # says anything about the repos after it in the list, and abandoning
+      # them leaves the workspace in the exact half-converged state `pull`
+      # exists to prevent.
+      continue
     entry.trackingBranch = converged.branch
     entry.headSha = converged.headSha
     report.repos.add(entry)
@@ -33375,10 +34613,14 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
   ## current branch). Exit codes:
   ##   - 0 — every repo converged to the manifest revision on a tracking
   ##         branch.
-  ##   - 1 — a clone / fetch / branch-attach step failed. When the
-  ##         manifest had already advanced, it is NOT rolled back: the
-  ##         report names the before→after SHAs and the partial state is
-  ##         left for a rerun.
+  ##   - 1 — a clone / fetch / branch-attach step failed for at least one
+  ##         repo. Every OTHER repo was still attempted: the sweep does not
+  ##         abandon the repos behind a failure, because a half-converged
+  ##         workspace reported as success is how a developer ends up
+  ##         debugging a stale sibling instead of the thing that broke. The
+  ##         digest names every failed repo. When the manifest had already
+  ##         advanced, it is NOT rolled back: the report names the
+  ##         before→after SHAs and the partial state is left for a rerun.
   ##   - 2 — every repo that could be converged was, and at least one was
   ##         SKIPPED because converging it would have repointed a branch
   ##         carrying commits no remote has (or moved HEAD off commits held
@@ -36651,15 +37893,15 @@ proc parsePostCommitArgs(args: openArray[string]):
 # post-commit process exiting.
 #
 #   * POSIX: a new session via ``setsid ... &`` with stdio to /dev/null.
-#   * Windows (RA-19): a detached child via ``cmd /c start /b "" ...``
-#     with stdio to NUL — ``start /b`` launches the re-invoked
-#     ``repro hooks cache-push`` without a new window and returns
-#     immediately, so the commit is never blocked.
+#   * Windows (W4): a SHELL-FREE detached child — ``CreateProcessW`` with
+#     ``DETACHED_PROCESS`` and stdio bound to ``NUL``. No ``cmd.exe``, no
+#     ``start /b``. See ``spawnDetachedNoShell`` below for why the shell
+#     route is not merely inelegant but unusable here.
 #
-# The DECISION (which detach mechanism + command line for a given OS) is
+# The DECISION (which detach mechanism + child argv for a given OS) is
 # factored into the pure ``cachePushSpawnCommand`` below so it is
-# computable and assertable on any host; only the actual ``execShellCmd``
-# launch is platform-guarded.
+# computable and assertable on any host; only the actual launch is
+# platform-guarded.
 
 type
   WorkspaceTargetOs* = enum
@@ -36672,46 +37914,55 @@ type
 
   CachePushSpawnSpec* = object
     ## The fully-resolved, platform-parameterized spec for the detached
-    ## post-commit cache push. ``shellInvocation`` is the command handed to
-    ## the host shell; ``detach`` names the mechanism (for diagnostics /
-    ## tests). Empty ``shellInvocation`` means "nothing to launch".
+    ## post-commit cache push. ``detach`` names the mechanism (for
+    ## diagnostics / tests).
+    ##
+    ## ``argv`` is the child's REAL argument vector and is the single
+    ## "is there anything to launch?" signal on every target: empty argv
+    ## means nothing to do. ``shellInvocation`` is populated ONLY where a
+    ## shell is genuinely the detach mechanism — i.e. POSIX. On Windows it
+    ## is deliberately EMPTY, because there is no correct Windows shell
+    ## string to build here and leaving a plausible-looking one in the
+    ## record is how the next caller re-acquires the W4 defect.
     targetOs*: WorkspaceTargetOs
-    detach*: string            ## e.g. "setsid&" (POSIX) / "start /b" (Win)
-    shellInvocation*: string   ## the command string for the host shell
+    detach*: string            ## "setsid&" (POSIX) / "CreateProcess:detached"
+    argv*: seq[string]         ## the child's argv; empty ⇒ nothing to launch
+    shellInvocation*: string   ## POSIX shell command; EMPTY on wtWindows
 
 proc cachePushSpawnCommand*(targetOs: WorkspaceTargetOs;
                             exePath, repoRoot, workspaceName: string):
                             CachePushSpawnSpec =
   ## PURE decision function: given a target OS and the re-invocation
-  ## arguments, build the detached-spawn command for the post-commit eager
-  ## cache push. No process is launched here — callers feed
-  ## ``shellInvocation`` to the host shell under a platform guard.
+  ## arguments, build the detached-spawn plan for the post-commit eager
+  ## cache push. No process is launched here.
   ##
   ##   * ``wtPosix``  → ``setsid <repro hooks cache-push …> </dev/null
-  ##                    >/dev/null 2>&1 &`` (new session, fully detached).
-  ##   * ``wtWindows``→ ``cmd /c start /b "" <repro hooks cache-push …>
-  ##                    >NUL 2>&1`` (no new window, returns immediately).
+  ##                    >/dev/null 2>&1 &`` (new session, fully detached),
+  ##                    fed to ``sh -c``. ``quoteShell`` on POSIX IS the
+  ##                    ``sh`` quoting convention, so the round trip is
+  ##                    lossless and the shell earns its place.
+  ##   * ``wtWindows``→ NO shell string at all: the caller spawns ``argv``
+  ##                    directly with ``CreateProcessW`` +
+  ##                    ``DETACHED_PROCESS`` (``spawnDetachedNoShell``).
+  ##                    ``cmd.exe`` cannot round-trip a ``quoteShell``ed
+  ##                    command line — see W4 and the long comment on
+  ##                    ``spawnDetachedNoShell``.
   ##
-  ## Returns an empty ``shellInvocation`` when ``workspaceName`` or
-  ## ``exePath`` is empty (nothing to push / no re-invokable binary).
+  ## Returns an empty ``argv`` when ``workspaceName`` or ``exePath`` is
+  ## empty (nothing to push / no re-invokable binary).
   result.targetOs = targetOs
   if workspaceName.len == 0 or exePath.len == 0:
     return
-  let childArgs = shellCommand(@[exePath, "hooks", "cache-push",
-    "--repo-root", repoRoot, "--workspace-name", workspaceName])
+  result.argv = @[exePath, "hooks", "cache-push",
+    "--repo-root", repoRoot, "--workspace-name", workspaceName]
   case targetOs
   of wtPosix:
     result.detach = "setsid&"
     result.shellInvocation =
-      "setsid " & childArgs & " </dev/null >/dev/null 2>&1 &"
+      "setsid " & shellCommand(result.argv) & " </dev/null >/dev/null 2>&1 &"
   of wtWindows:
-    # ``start /b`` (via ``cmd /c``) launches the child without a console
-    # window and returns immediately, detaching it from the post-commit
-    # process. The empty ``""`` is ``start``'s title argument (required so
-    # a quoted exe path is not mistaken for the title). Stdio → NUL.
-    result.detach = "start /b"
-    result.shellInvocation =
-      "start /b \"\" " & childArgs & " >NUL 2>&1"
+    result.detach = "CreateProcess:detached"
+    result.shellInvocation = ""
 
 proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
   ## Resolve the workspace's project repos in the best-effort post-commit /
@@ -36861,18 +38112,121 @@ proc runCachePushCommand*(args: openArray[string]): int =
     discard
   0
 
+when defined(windows):
+  proc spawnDetachedNoShell*(argv: openArray[string]): bool =
+    ## Launch ``argv`` as a fully detached Windows child — no console, no
+    ## window, no shell, stdio bound to ``NUL`` — and return WITHOUT
+    ## waiting for it. Returns false when the child could not be started.
+    ##
+    ## WHY THIS EXISTS AND WHY IT DOES NOT USE ``cmd.exe`` (W4)
+    ## -------------------------------------------------------
+    ## Windows offers exactly one shell-level detach, ``cmd /c start /b ""
+    ## <child>``, and its mandatory empty title argument puts a literal
+    ## ``"`` inside a string that ``cmd.exe`` must re-parse. Nim's
+    ## ``quoteShell`` is ``quoteShellWindows``, which escapes an embedded
+    ## ``"`` as ``\"`` — the ``CommandLineToArgvW`` / C-runtime
+    ## convention. ``cmd.exe`` DOES NOT IMPLEMENT THAT CONVENTION: it
+    ## treats ``\`` as an ordinary character and toggles its quote state
+    ## on the following ``"``. The title therefore arrived as ``\"\"``,
+    ## cmd's quote state broke, two ``cmd.exe`` generations sat alive at
+    ## ~0 CPU indefinitely, the child was never started, and the caller —
+    ## the real git ``post-commit`` hook — blocked on them. A ``git
+    ## commit`` in a hooked Windows workspace hung.
+    ##
+    ## The mismatch is a CLASS, not one bad character. ``quoteShellWindows``
+    ## quotes on whitespace only, so every other ``cmd`` metacharacter —
+    ## ``&``, ``^``, ``|``, ``<``, ``>``, ``(``, ``)``, ``%VAR%`` — reaches
+    ## a cmd command line bare, and all of them are legal in an NTFS path.
+    ## Dropping the ``quoteShell`` would have fixed the one observed hang
+    ## and left the rest of the class armed.
+    ##
+    ## So the fix is to stop asking a shell to re-parse a command line:
+    ##
+    ##   * ``CreateProcessW`` consumes ``quoteShellWindows``'s convention,
+    ##     which is ITS OWN convention — correct by construction, for
+    ##     spaces (``C:\Program Files\…``) and metacharacters alike.
+    ##   * ``DETACHED_PROCESS`` gives a child with no console and no
+    ##     window, which is what ``start /b`` was being asked for.
+    ##   * Three inheritable ``NUL`` handles give the stdio redirection
+    ##     ``>NUL 2>&1`` was there for, so the child cannot write into the
+    ##     commit's output and cannot die on a broken pipe.
+    ##
+    ## ``lpApplicationName`` is passed explicitly as well as ``argv[0]`` in
+    ## the command line, so ``CreateProcessW``'s space-probing search of an
+    ## unquoted first token never applies.
+    ##
+    ## Handle inheritance is left at the process-wide default (the NUL
+    ## handles must be inherited, which requires ``bInheritHandles``).
+    ## That matches what ``osproc.startProcess`` — every other child spawn
+    ## in this codebase — already does, and what the ``cmd`` route did
+    ## before it; narrowing it would need a ``PROC_THREAD_ATTRIBUTE_``
+    ## ``HANDLE_LIST`` here and nowhere else, which is inconsistency
+    ## without safety.
+    if argv.len == 0:
+      return false
+
+    var commandLine = ""
+    for i, arg in argv:
+      if i > 0:
+        commandLine.add(' ')
+      commandLine.add(quoteShellWindows(arg))
+
+    var inheritable = SECURITY_ATTRIBUTES(
+      nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
+      lpSecurityDescriptor: nil,
+      bInheritHandle: 1)
+    let nulName = newWideCString("NUL")
+    let shareMode = DWORD(FILE_SHARE_READ or FILE_SHARE_WRITE)
+    let nulIn = createFileW(nulName, DWORD(GENERIC_READ), shareMode,
+      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
+    let nulOut = createFileW(nulName, DWORD(GENERIC_WRITE), shareMode,
+      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
+    let nulErr = createFileW(nulName, DWORD(GENERIC_WRITE), shareMode,
+      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
+    defer:
+      for handle in [nulIn, nulOut, nulErr]:
+        if handle != INVALID_HANDLE_VALUE and handle != Handle(0):
+          discard closeHandle(handle)
+    if nulIn == INVALID_HANDLE_VALUE or nulOut == INVALID_HANDLE_VALUE or
+        nulErr == INVALID_HANDLE_VALUE:
+      return false
+
+    var startup = STARTUPINFO()
+    startup.cb = int32(sizeof(STARTUPINFO))
+    startup.dwFlags = STARTF_USESTDHANDLES
+    startup.hStdInput = nulIn
+    startup.hStdOutput = nulOut
+    startup.hStdError = nulErr
+
+    var spawned = PROCESS_INFORMATION()
+    var applicationName = newWideCString(argv[0])
+    var mutableCommandLine = newWideCString(commandLine)
+    let created = createProcessW(applicationName, mutableCommandLine,
+      nil, nil, 1, DETACHED_PROCESS, nil, nil, startup, spawned)
+    if created == 0:
+      return false
+    # Neither handle is waited on: the point is detachment. Closing them
+    # releases OUR references; the child keeps running.
+    discard closeHandle(spawned.hThread)
+    discard closeHandle(spawned.hProcess)
+    true
+
 proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   ## Fire a detached, fire-and-forget cache-ref push and return
   ## immediately so the originating commit is never blocked. The child
   ## re-invokes ``repro hooks cache-push`` detached from the parent.
   ## Best-effort: any failure to even launch the child is swallowed.
   ##
-  ## The command itself is computed by the pure ``cachePushSpawnCommand``
-  ## (POSIX ``setsid … &`` vs Windows ``start /b``); only the host-shell
+  ## The plan is computed by the pure ``cachePushSpawnCommand``; only the
   ## launch is platform-guarded.
   ##   * POSIX: ``sh -c "setsid … &"`` — new session, stdio to /dev/null.
-  ##   * Windows (RA-19): ``cmd /c "start /b …"`` — no new window, returns
-  ##     immediately, stdio to NUL.
+  ##     ``quoteShell`` on POSIX IS ``sh``'s own quoting convention, so
+  ##     the shell round trip is lossless and the shell is doing real work
+  ##     (``setsid`` + the ``&`` background fork).
+  ##   * Windows (W4): ``CreateProcessW`` + ``DETACHED_PROCESS`` with
+  ##     stdio to ``NUL``, straight from ``spec.argv``. No shell is
+  ##     involved, so no quoting convention has to survive a second
+  ##     parser. See ``spawnDetachedNoShell``.
   if workspaceName.len == 0:
     return
   let myExe = getAppFilename()
@@ -36883,11 +38237,11 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   else:
     const targetOs = wtPosix
   let spec = cachePushSpawnCommand(targetOs, myExe, repoRoot, workspaceName)
-  if spec.shellInvocation.len == 0:
+  if spec.argv.len == 0:
     return
   try:
     when defined(windows):
-      discard execShellCmd("cmd /c " & q(spec.shellInvocation))
+      discard spawnDetachedNoShell(spec.argv)
     else:
       discard execShellCmd("sh -c " & q(spec.shellInvocation))
   except CatchableError:
@@ -38984,6 +40338,86 @@ proc allowedSignerIdentity*(keyId: string): string =
   ## a stable principal so the allowed-signers line ties a key to its id.
   "repro-cert/" & keyId
 
+proc runFeedingStdin(exe: string;
+                     args: openArray[string];
+                     payload: string): tuple[code: int; output: string] =
+  ## Run ``exe`` with an ARGV and hand it ``payload`` on its stdin, capturing
+  ## stdout+stderr. Returns the child's exit code.
+  ##
+  ## This exists because a shell redirect is NOT a portable way to feed a
+  ## child. ``execCmdEx`` adds ``poEvalCommand``, and on POSIX Nim then runs
+  ## the string through ``/bin/sh -c`` (so ``… < file`` redirects), while on
+  ## Windows it hands the string to ``CreateProcessW`` VERBATIM — there is no
+  ## shell, so ``<`` and the path become two ordinary argv entries and stdin
+  ## is never redirected. Measured: ``git hash-object --stdin < payload``
+  ## through ``execCmdEx`` on Windows exits 128 having hashed the EMPTY input
+  ## (``e69de29b…``) and then reports ``could not open '<' for reading``.
+  ##
+  ## Quoting cannot rescue the redirect form either: ``quoteShell`` on Windows
+  ## quotes on WHITESPACE only, so ``&``, ``^``, ``|``, ``(``, ``)`` and
+  ## ``%VAR%`` all pass through bare. An argv plus a real pipe write has
+  ## neither problem: no metacharacter in a path is ever interpreted, on
+  ## either platform.
+  ##
+  ## Read discipline: stdin is written and CLOSED first (so the child sees
+  ## EOF and can finish), then stdout is drained to EOF, then we wait. Drain
+  ## before wait — a child blocked on a full pipe never exits. ``readLine``
+  ## rather than ``readAll``: Nim 2.2's ``readAll`` stops at the first short
+  ## pipe read on Windows (the same trap ``gitRunPlain`` documents). The
+  ## output stream is deliberately NOT closed here — ``osproc``'s Windows
+  ## ``close`` asserts that it is still open — while closing the INPUT stream
+  ## is anticipated: ``fileClose`` blanks the handle, so ``process.close``'s
+  ## second close of it is a no-op on both platforms.
+  var process: Process
+  try:
+    process = startProcess(exe, args = @args,
+      options = {poStdErrToStdOut, poUsePath})
+  except CatchableError:
+    # Could not spawn at all. Fail closed with a non-zero code, exactly as a
+    # failed ``execCmdEx`` would have.
+    return (code: 127, output: "could not start " & exe)
+  defer: process.close()
+  let input = process.inputStream
+  # POSIX: a child that exits before reading leaves us writing to a pipe with
+  # no reader, and the DEFAULT disposition of SIGPIPE kills US — silently,
+  # with no exception and no message. ``ssh-keygen -Y verify`` does exactly
+  # that when the ``-s`` file will not parse, which is the path
+  # ``t_unsigned_or_wrong_key_certificate_is_rejected``'s garbled-signature
+  # case walks. Measured: writing 1 MiB into such a verify killed the writer
+  # with 141 (128 + SIGPIPE). Ignoring the signal across the write turns that
+  # into an ordinary EPIPE ``IOError``, and the child's exit code stays the
+  # verdict. The previous disposition is restored, so this is not a
+  # process-wide policy change.
+  when not defined(windows):
+    var ignoredSigPipe, previousSigPipe: Sigaction
+    ignoredSigPipe.sa_handler = SIG_IGN
+    discard sigemptyset(ignoredSigPipe.sa_mask)
+    ignoredSigPipe.sa_flags = 0
+    let sigPipeGuardInstalled =
+      sigaction(SIGPIPE, ignoredSigPipe, addr previousSigPipe) == 0
+  try:
+    if payload.len > 0:
+      input.write(payload)
+    input.flush()
+  except CatchableError:
+    discard  # child died early; the exit code below is the verdict
+  # Inside the guard too: POSIX `close` is `fclose`, which flushes, so it can
+  # be the call that writes into a reader-less pipe.
+  try:
+    input.close()   # EOF for the child; osproc's `close` tolerates this
+  except CatchableError:
+    discard
+  when not defined(windows):
+    if sigPipeGuardInstalled:
+      discard sigaction(SIGPIPE, previousSigPipe)
+  var captured = ""
+  let outStream = process.outputStream
+  var line = ""
+  while outStream.readLine(line):
+    captured.add(line)
+    captured.add("\n")
+  (code: process.waitForExit(), output: captured)
+
 proc verifyCertificateSignature*(cert: TestCertificate;
                                  store: RegisteredKeyStore): SignatureVerdict =
   ## The TC-5 SIGNATURE verifier (additive to the TC-1 COVERAGE verifier). A
@@ -39013,23 +40447,24 @@ proc verifyCertificateSignature*(cert: TestCertificate;
     return svBadSignature
   let scratch = createTempDir("repro-cert-verify-", "")
   defer: removeDir(scratch)
-  let payloadFile = scratch / "payload"
   let sigFile = scratch / "payload.sig"
   let allowedSigners = scratch / "allowed_signers"
-  writeFile(payloadFile, payload)
   writeFile(sigFile, sigBytes)
   # The allowed-signers file ties THIS key_id's registered public key to the
   # principal we verify as, so a signature made by a DIFFERENT key (even a
   # registered one under another id) does not verify for this key_id.
   writeFile(allowedSigners,
     allowedSignerIdentity(cert.keyId) & " " & signer.publicKey & "\n")
-  # ``ssh-keygen -Y verify`` reads the signed payload on stdin.
-  let cmd = shellCommand(@[sshKeygen, "-Y", "verify",
+  # ``ssh-keygen -Y verify`` reads the signed payload on STDIN and has no flag
+  # to read it from a file, so the payload has to be WRITTEN to the child's
+  # input pipe. It must NOT be a `` < file`` appended to a command string:
+  # that is a no-op on Windows (see ``runFeedingStdin``), which made every
+  # signature verify against an EMPTY payload and therefore fail — no
+  # certificate has ever been trusted on Windows.
+  let res = runFeedingStdin(sshKeygen, @["-Y", "verify",
     "-f", allowedSigners, "-I", allowedSignerIdentity(cert.keyId),
-    "-n", certificateSignatureNamespace, "-s", sigFile]) &
-    " < " & quoteShell(payloadFile)
-  let res = execCmdEx(cmd)
-  if res.exitCode == 0: svValid else: svBadSignature
+    "-n", certificateSignatureNamespace, "-s", sigFile], payload)
+  if res.code == 0: svValid else: svBadSignature
 
 proc certificateIsTrusted*(cert: TestCertificate;
                            store: RegisteredKeyStore): bool =
@@ -39081,11 +40516,20 @@ const
 
 proc gitNoteRun(gitBin: string;
                 args: openArray[string];
-                preserveObjectStore = false):
+                received = ReceivedObjectStore()):
     tuple[code: int; output: string] =
   ## Free-standing argv runner for the notes commands (same shape as
   ## ``gitRunPlain`` but takes a bare git binary path so the transport layer
   ## does not require a resolved ``GitToolIdentity``).
+  ##
+  ## ``received`` is the receive-pack object-store snapshot a ``pre-receive``
+  ## hook captured at entry. It DEFAULTS TO EMPTY, so every ordinary caller
+  ## keeps the plain scrubbed environment byte-for-byte; only a call that has
+  ## explicitly said "this reads the receiving repository's OWN incoming
+  ## objects" gets the bindings back. Passing it for a child that touches any
+  ## other repository would reintroduce precisely the cross-repository bug the
+  ## scrubber exists to prevent — see ``withReceivedObjectStore``.
+
   ##
   ## ``preserveObjectStore`` keeps Git's object-store bindings
   ## (``GitObjectStoreEnv``) instead of scrubbing them. Set it ONLY for a read
@@ -39098,7 +40542,7 @@ proc gitNoteRun(gitBin: string;
     cmd.add(" ")
     cmd.add(quoteShell(arg))
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-    env = scrubbedGitRepositoryEnv(preserveObjectStore = preserveObjectStore))
+    env = receivedObjectStoreEnv(received))
   (code: res.exitCode, output: res.output)
 
 proc framedCertificateRecord(cert: TestCertificate): string =
@@ -39150,9 +40594,27 @@ proc attachCertificate*(gitBin, repoPath, commit: string;
         res2.output.strip())
   (ok: true, diagnostic: "")
 
+type
+  GitObjectReadStatus* = enum
+    ## The THREE outcomes a read of a git object out of a receiving repository
+    ## can have. They are kept apart deliberately: folding ``gorUnreadable``
+    ## into ``gorAbsent`` is the shape that turned the public-tier lock gate
+    ## into a no-op, because every call site that reads "absent" as "nothing to
+    ## check" then reads "I could not look" as "nothing to check" too.
+    gorAbsent      ## the object store was readable and there is no such record
+    gorPresent     ## the record was read
+    gorUnreadable  ## the read itself FAILED — the caller must not infer
+                   ## absence from it
+
+  GitNoteRead* = object
+    ## Outcome of reading one commit's note blob.
+    status*: GitObjectReadStatus
+    body*: string
+    diagnostic*: string  ## why, when ``status == gorUnreadable``
+
 proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
                              commit: string;
-                             preserveObjectStore = false): string =
+                             received = ReceivedObjectStore()): GitNoteRead =
   ## Read the note blob attached to ``commit`` straight out of a raw
   ## NOTES-COMMIT SHA (not a ref). ``git notes --ref <raw-sha>`` does NOT work
   ## (``--ref`` resolves a ref NAME, not a commit-ish), but a notes tree maps
@@ -39162,12 +40624,19 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
   ## then ``git cat-file blob`` it. This is what lets the gateway read an
   ## INCOMING certificate note in ``pre-receive`` BEFORE the notes ref has been
   ## moved into place (the objects are already present; only the ref update is
-  ## pending). Returns "" when there is no note for ``commit``.
+  ## pending).
+  ##
+  ## ``gorAbsent`` means the notes tree WAS read and carries no entry for
+  ## ``commit``. A git failure at any step is ``gorUnreadable`` and says which
+  ## step failed — a notes-commit the push just delivered is not allowed to
+  ## read as "no certificate".
   let ls = gitNoteRun(gitBin,
-    ["-C", repoPath, "ls-tree", "-r", notesCommitSha],
-    preserveObjectStore = preserveObjectStore)
+    ["-C", repoPath, "ls-tree", "-r", notesCommitSha], received)
   if ls.code != 0:
-    return ""
+    return GitNoteRead(status: gorUnreadable, body: "",
+      diagnostic: "cannot read the notes tree of " & notesCommitSha &
+        " in '" & repoPath & "' (git ls-tree exit " & $ls.code & ": " &
+        ls.output.strip() & ")")
   for rawLine in ls.output.splitLines():
     let line = rawLine.strip()
     if line.len == 0: continue
@@ -39180,12 +40649,80 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
     let path = line[tabIdx + 1 .. ^1].strip()
     if path.replace("/", "") == commit:
       let blob = gitNoteRun(gitBin,
-        ["-C", repoPath, "cat-file", "blob", objSha],
-        preserveObjectStore = preserveObjectStore)
+        ["-C", repoPath, "cat-file", "blob", objSha], received)
       if blob.code == 0:
-        return blob.output
-      return ""
-  ""
+        return GitNoteRead(status: gorPresent, body: blob.output)
+      return GitNoteRead(status: gorUnreadable, body: "",
+        diagnostic: "the notes tree of " & notesCommitSha & " names blob " &
+          objSha & " for " & commit & " but it cannot be read (git cat-file " &
+          "exit " & $blob.code & ": " & blob.output.strip() & ")")
+  GitNoteRead(status: gorAbsent, body: "")
+
+proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
+                                   notesRef: string;
+                                   received = ReceivedObjectStore()):
+    tuple[certs: seq[TestCertificate]; status: GitObjectReadStatus;
+          diagnostic: string] =
+  ## ``readAttachedCertificatesFromRef`` plus the READ STATUS it had to throw
+  ## away to fit a ``seq`` return. The gate uses this one so it can say
+  ## "the certificate note could not be read" instead of "no certificate" —
+  ## two conditions with the same refusal but opposite remedies, and telling a
+  ## developer to mint a certificate they already minted is how this class of
+  ## defect stays alive.
+  ##
+  ## ``notesRef`` may be a 40-hex notes-COMMIT SHA (the pre-receive case) or a
+  ## ref NAME (the post-receive / settled case). ``git notes --ref`` only
+  ## accepts a ref name, so we try the raw-SHA tree-walk first and fall back to
+  ## ``git notes show`` for a ref name.
+  ##
+  ## The raw-SHA read — the one the pre-receive gate depends on, where the
+  ## object is known to have been delivered — reports unreadability apart.
+  ##
+  ## The ref-NAME read does NOT, and that is a KNOWN RESIDUAL rather than a
+  ## property to rely on. "No such ref" is separated out by the ``rev-parse
+  ## --verify --quiet`` probe below, but every remaining ``git notes show``
+  ## failure is reported ``gorAbsent``, and they are not all absences: git
+  ## itself tells them apart, with exit 1 / ``error: no note found for object``
+  ## for the genuine absence and exit 128 / ``fatal: bad object <sha>`` when the
+  ## note object cannot be read. Folding the second into the first is the same
+  ## shape as the collapse that made the lock gate a no-op — narrower, and
+  ## harmless to the VERDICT (the cert gate refuses on absence anyway), but it
+  ## costs the same wrong remedy on the fallback path the pre-receive gate takes
+  ## when the incoming-notes read yields nothing. Fixing it means classifying on
+  ## the exit code here, the way ``gatewayReadPushedLock`` classifies on its
+  ## three steps.
+  var read: GitNoteRead
+  let looksLikeSha = notesRef.len == 40 and
+    notesRef.allCharsInSet(HexDigits)
+  if looksLikeSha:
+    read = noteBlobFromNotesCommit(gitBin, repoPath, notesRef, commit,
+      received)
+  else:
+    let exists = gitNoteRun(gitBin,
+      ["-C", repoPath, "rev-parse", "--verify", "--quiet", notesRef],
+      received)
+    if exists.code != 0 or exists.output.strip().len == 0:
+      read = GitNoteRead(status: gorAbsent, body: "")
+    else:
+      let res = gitNoteRun(gitBin,
+        ["-C", repoPath, "notes", "--ref", notesRef, "show", commit],
+        received)
+      read =
+        if res.code == 0: GitNoteRead(status: gorPresent, body: res.output)
+        else: GitNoteRead(status: gorAbsent, body: "")
+  result.status = read.status
+  result.diagnostic = read.diagnostic
+  if read.status != gorPresent or read.body.len == 0:
+    return
+  for body in splitCertificateRecords(read.body):
+    var cert: TestCertificate
+    try:
+      cert = parseCertificateFromToml(body)
+    except TestCertificateParseError:
+      continue
+    # Mismatch filter: only certs that genuinely attest THIS commit.
+    if cert.commit == commit:
+      result.certs.add(cert)
 
 proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
                                       notesRef: string;
@@ -39200,33 +40737,11 @@ proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
   ## reads off the pre-receive stdin. Records whose internal ``commit`` field
   ## does not equal ``commit`` are DROPPED; unparseable records are skipped.
   ##
-  ## ``notesRef`` may be a 40-hex notes-COMMIT SHA (the pre-receive case) or a
-  ## ref NAME (the post-receive / settled case). ``git notes --ref`` only
-  ## accepts a ref name, so we try the raw-SHA tree-walk first and fall back to
-  ## ``git notes show`` for a ref name.
-  var noteBody = ""
-  let looksLikeSha = notesRef.len == 40 and
-    notesRef.allCharsInSet(HexDigits)
-  if looksLikeSha:
-    noteBody = noteBlobFromNotesCommit(gitBin, repoPath, notesRef, commit,
-      preserveObjectStore = preserveObjectStore)
-  else:
-    let res = gitNoteRun(gitBin,
-      ["-C", repoPath, "notes", "--ref", notesRef, "show", commit],
-      preserveObjectStore = preserveObjectStore)
-    if res.code == 0:
-      noteBody = res.output
-  if noteBody.len == 0:
-    return @[]
-  for body in splitCertificateRecords(noteBody):
-    var cert: TestCertificate
-    try:
-      cert = parseCertificateFromToml(body)
-    except TestCertificateParseError:
-      continue
-    # Mismatch filter: only certs that genuinely attest THIS commit.
-    if cert.commit == commit:
-      result.add(cert)
+  ## This is the seq-shaped convenience wrapper for callers that hold a
+  ## settled repository and have nothing to do with a read failure; anything
+  ## that must tell a failed read from an absent note calls
+  ## ``readAttachedCertificatesFrom``.
+  readAttachedCertificatesFrom(gitBin, repoPath, commit, notesRef).certs
 
 proc readAttachedCertificates*(gitBin, repoPath, commit: string):
     seq[TestCertificate] =
@@ -39649,10 +41164,33 @@ proc parseGatewayRefUpdates*(stdinText: string): seq[GatewayRefUpdate] =
       refName: parts[2]))
 
 type
+  GatewayGateRecord* = object
+    ## POSITIVE evidence that the gate READ a pushed object and decided on its
+    ## CONTENTS, for one pushed ref.
+    ##
+    ## It exists because the absence of a rejection proves nothing. "The push
+    ## succeeded", "the diagnostic did not mention a private repo", "the server
+    ## did not touch the team backend" are all satisfied perfectly by a gate
+    ## that read nothing at all — which is exactly what this gate was doing.
+    ## A record naming the OBJECT ID the gate read and the COUNTS it derived
+    ## from that object's bytes cannot be produced without reading it, so a
+    ## test can assert acceptance was earned rather than defaulted to.
+    refName*: string
+    lockBlobId*: string  ## object id of the ``repro.lock`` blob that was read
+    depCount*: int       ## locked dependencies parsed out of those bytes
+    integrityChecked*: int  ## of those, entries whose integrity was recomputed
+                            ## against the received objects
+    trustedCerts*: int   ## certificates read off the pushed notes object and
+                         ## found registered-signed (the cert gate's half)
+
   GatewayVerifyResult* = object
     ## Outcome of the pre-receive certificate verify for ONE pushed branch.
     accepted*: bool
     diagnostic*: string
+    gated*: seq[GatewayGateRecord]
+      ## What the gate actually read and decided on. Empty when it read
+      ## nothing — which for a branch update carrying a lock is itself the
+      ## defect, not a neutral outcome.
 
 # ---- HL-5 (§6 Decision 3) — server-side PUBLIC-TIER lock gate --------------
 #
@@ -39687,33 +41225,97 @@ type
 const committedLockPathInTree = CommittedLockFileName
   ## The committed lock's path inside a pushed commit's tree (repo root).
 
-proc gatewayReadPushedLock(gitBin, gatewayBareDir, commit: string): string =
+type
+  GatewayLockStatus* = enum
+    ## The FOUR outcomes of reading a pushed commit's committed lock, which the
+    ## old ``string``-returning reader folded into one another.
+    ##
+    ## It returned ``""`` for a git error, for a commit whose tree has no
+    ## ``repro.lock``, and for a committed-but-empty one. The call site then
+    ## chose the most permissive reading of the three — "nothing to gate" — so
+    ## ANY failure to read silently disarmed a security gate. That collapse,
+    ## not the environment quirk that triggered it, is the defect: fix the
+    ## environment and the collapse still stands ready for the next cause.
+    ## Hence four states, and a caller that must decide each on purpose.
+    glrUnreadable  ## the gateway could NOT read the pushed commit or its
+                   ## tree. NOT an absence — the caller must FAIL CLOSED.
+    glrAbsent      ## the tree was read and carries no ``repro.lock``: a
+                   ## public-tier-less repo. Nothing to gate (the §6
+                   ## Decision 3 boundary).
+    glrEmpty       ## a ``repro.lock`` IS committed but is empty/blank. It
+                   ## declares no dependencies, so — like ``glrAbsent``, and
+                   ## unlike ``glrUnreadable`` — there is nothing to gate.
+                   ## Reported apart so the two absences are never confused
+                   ## with the failure.
+    glrPresent     ## lock bytes were read
+
+  GatewayLockRead* = object
+    ## What ``gatewayReadPushedLock`` found.
+    status*: GatewayLockStatus
+    blob*: string        ## the lock bytes, when ``glrPresent``
+    blobId*: string      ## the git object id of the blob that was read
+    diagnostic*: string  ## why, when ``glrUnreadable``
+
+proc gatewayReadPushedLock(gitBin, gatewayBareDir, commit: string;
+                           received = ReceivedObjectStore()): GatewayLockRead =
   ## Read the committed ``repro.lock`` blob out of the pushed COMMIT's tree in
   ## the bare repo. In pre-receive the commit object is already present (the
   ## push delivered it) even though the branch ref update is still pending, so
-  ## ``git show <commit>:repro.lock`` resolves the blob straight from the
-  ## received objects. Returns "" when the pushed commit carries no
-  ## ``repro.lock`` (a public-tier-less repo) or on any git error — the caller
-  ## treats "no lock" as "nothing to gate", never as a pass-through of a bad
-  ## lock.
+  ## the blob resolves straight from the received objects — provided the child
+  ## git can still SEE them (``ReceivedObjectStore``).
   ##
-  ## ``preserveObjectStore`` is REQUIRED here and is the whole reason the read
-  ## works: in ``pre-receive`` the pushed commit is not in the bare's own object
-  ## store yet — it sits in the push quarantine that Git names through
-  ## ``GIT_OBJECT_DIRECTORY`` / ``GIT_QUARANTINE_PATH``. Dropping those makes
-  ## every read of the pushed content fail, which this proc reports as "" —
-  ## i.e. as "this push carries no lock" — and the gate then accepts a lock it
-  ## never actually saw. The gate that exists to reject cannot be allowed to
-  ## mistake blindness for absence.
-  let res = gitNoteRun(gitBin,
-    ["-C", gatewayBareDir, "show", commit & ":" & committedLockPathInTree],
-    preserveObjectStore = true)
-  if res.code != 0:
-    return ""
-  res.output
+  ## The three git steps exist to separate the two questions a single
+  ## ``git show <commit>:repro.lock`` cannot: that command exits 128 both when
+  ## the commit is unreachable and when the tree simply has no such path.
+  ##
+  ##   1. ``cat-file -t <commit>``     — can we read the pushed commit AT ALL?
+  ##   2. ``ls-tree -- repro.lock``    — does its tree carry the lock?
+  ##   3. ``cat-file blob <id>``       — read it.
+  ##
+  ## A failure at any step is ``glrUnreadable`` and names the step.
+  let typ = gitNoteRun(gitBin,
+    ["-C", gatewayBareDir, "cat-file", "-t", commit], received)
+  if typ.code != 0 or typ.output.strip() != "commit":
+    return GatewayLockRead(status: glrUnreadable,
+      diagnostic: "the pushed commit " & commit & " cannot be read out of '" &
+        gatewayBareDir & "' (git cat-file -t exit " & $typ.code & ": " &
+        typ.output.strip() & ")")
+  let entry = gitNoteRun(gitBin,
+    ["-C", gatewayBareDir, "ls-tree", commit, "--",
+     committedLockPathInTree], received)
+  if entry.code != 0:
+    return GatewayLockRead(status: glrUnreadable,
+      diagnostic: "the tree of the pushed commit " & commit &
+        " cannot be listed in '" & gatewayBareDir & "' (git ls-tree exit " &
+        $entry.code & ": " & entry.output.strip() & ")")
+  var blobId = ""
+  for rawLine in entry.output.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0: continue
+    let tabIdx = line.find('\t')
+    if tabIdx < 0: continue
+    let meta = line[0 ..< tabIdx].splitWhitespace()
+    if meta.len < 3: continue
+    if meta[1] != "blob": continue
+    blobId = meta[2]
+  if blobId.len == 0:
+    return GatewayLockRead(status: glrAbsent)
+  let blob = gitNoteRun(gitBin,
+    ["-C", gatewayBareDir, "cat-file", "blob", blobId], received)
+  if blob.code != 0:
+    return GatewayLockRead(status: glrUnreadable, blobId: blobId,
+      diagnostic: "the tree of the pushed commit " & commit & " names " &
+        committedLockPathInTree & " as blob " & blobId &
+        " but it cannot be read (git cat-file exit " & $blob.code & ": " &
+        blob.output.strip() & ")")
+  if blob.output.strip().len == 0:
+    return GatewayLockRead(status: glrEmpty, blob: blob.output,
+      blobId: blobId)
+  GatewayLockRead(status: glrPresent, blob: blob.output, blobId: blobId)
 
 proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
-    ld: LockedDependencies): seq[LockedIntegrityFailure] =
+    ld: LockedDependencies;
+    received = ReceivedObjectStore()): seq[LockedIntegrityFailure] =
   ## Server-side analogue of ``verifyLockedIntegrityAtCoordinates`` for the
   ## RECEIVED committed lock: recompute each locked entry's git-native multihash
   ## against the BARE repo's object store (no working tree on the server) and
@@ -39743,8 +41345,7 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
     # would look "not present", turning a clean push into a false refusal.
     let rp = gitNoteRun(gitBin,
       ["-C", gatewayBareDir, "rev-parse", "--verify", "--quiet",
-       d.coordinates.revision & "^{commit}"],
-      preserveObjectStore = true)
+       d.coordinates.revision & "^{commit}"], received)
     if rp.code != 0 or rp.output.strip().len == 0:
       result.add(LockedIntegrityFailure(name: d.name, path: d.path,
         expected: d.integrity, observed: "",
@@ -39763,7 +41364,8 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
           "recorded integrity " & d.integrity))
 
 proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
-                              updates: seq[GatewayRefUpdate]):
+                              updates: seq[GatewayRefUpdate];
+                              received = ReceivedObjectStore()):
     GatewayVerifyResult =
   ## HL-5 (§6 Decision 3) — the PUBLIC-TIER lock gate. For each pushed BRANCH
   ## update, read the committed ``repro.lock`` blob from the received commit and
@@ -39773,24 +41375,56 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
   ## tree is a no-op (public-tier-less repo). ALWAYS runs (independent of the
   ## certificate ``gate_mode``): the public-tier lock invariant holds for every
   ## public repo regardless of whether the project opts into certificates.
+  ##
+  ## FAILS CLOSED on an unreadable lock. "I could not read the pushed commit"
+  ## is not "this push carries no lock", and the gate no longer treats it as
+  ## though it were: a lock the gateway cannot read is not a lock the gateway
+  ## may wave through. This holds whether or not ``received`` was supplied —
+  ## it is the property that makes the NEXT cause of an unreadable object a
+  ## refusal instead of a silent pass.
   result.accepted = true
   let zeroSha = "0000000000000000000000000000000000000000"
   for u in updates:
     if not u.refName.startsWith("refs/heads/"): continue
     if u.newSha == zeroSha: continue  # branch deletion — nothing in the tree.
-    let lockBlob = gatewayReadPushedLock(gitBin, gatewayBareDir, u.newSha)
-    if lockBlob.strip().len == 0:
-      continue  # no public lock in this push — nothing to gate (boundary).
+    let read = gatewayReadPushedLock(gitBin, gatewayBareDir, u.newSha,
+      received)
+    case read.status
+    of glrUnreadable:
+      result.accepted = false
+      result.diagnostic = u.refName &
+        ": lock-unreadable: the gateway could not read the pushed " &
+        committedLockPathInTree & " — " & read.diagnostic &
+        "; REFUSING, because a lock this gate cannot read is not a lock it " &
+        "may wave through (an unreadable object is not an absent one)"
+      return
+    of glrAbsent, glrEmpty:
+      # The §6 Decision 3 boundary, and the ONLY two states that mean it: the
+      # tree was read and declares no public-tier dependencies. Distinct from
+      # ``glrUnreadable`` above on purpose — that is the collapse this gate
+      # used to make.
+      continue
+    of glrPresent:
+      discard
+    let lockBlob = read.blob
     var ld: LockedDependencies
     try:
-      ld = parseLockedDependencies(lockBlob)
+      ld = parseWorkspaceLockedDeps(lockBlob,
+        "blob " & committedLockPathInTree & "@" & u.newSha)
     except CatchableError as err:
       # A malformed committed lock about to become the public boundary is
       # itself refusal-worthy — a public-only cloner could not consume it.
+      # So is a lock that parses but records a checkout path no consumer may
+      # be handed: publishing it would hand every future cloner a document
+      # whose `repro develop --all --reset` deletes their workspace root, and
+      # the gateway is the last place that sees it before it becomes theirs.
       result.accepted = false
+      let unusable =
+        if err of LockedCheckoutPathError: " is not usable"
+        else: " does not parse"
       result.diagnostic = u.refName &
         ": lock_references_private_repo/lock-parse-failed: the pushed " &
-        committedLockPathInTree & " does not parse (" & err.msg & ")"
+        committedLockPathInTree & unusable & " (" & err.msg & ")"
       return
     # (a) private-ref check — the committed public lock must reference ONLY
     # public-tier repos. ``visibility`` "" (default) or "public" is fine; any
@@ -39809,7 +41443,7 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
         return
     # (b) integrity check against the received objects.
     let failures = gatewayVerifyReceivedLockIntegrity(
-      gitBin, gatewayBareDir, ld)
+      gitBin, gatewayBareDir, ld, received)
     if failures.len > 0:
       let f = failures[0]
       result.accepted = false
@@ -39817,10 +41451,24 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
         ": locked-integrity-mismatch: '" &
         (if f.path.len > 0: f.path else: f.name) & "' — " & f.diagnostic
       return
+    # ACCEPTED — and say what the acceptance was based on. A verdict that only
+    # ever speaks when it refuses is indistinguishable from a verdict that
+    # never looked; this record names the blob the gate read and the counts it
+    # derived from that blob's bytes.
+    var integrityChecked = 0
+    for d in ld.deps:
+      if d.integrity.startsWith("git-sha") and d.coordinates.kind == ckVcs and
+         d.coordinates.revision.len > 0:
+        inc integrityChecked
+    result.gated.add(GatewayGateRecord(refName: u.refName,
+      lockBlobId: read.blobId, depCount: ld.deps.len,
+      integrityChecked: integrityChecked))
 
 proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
                         updates: seq[GatewayRefUpdate];
-                        cfg: GatewayConfig): GatewayVerifyResult =
+                        cfg: GatewayConfig;
+                        received = ReceivedObjectStore()):
+    GatewayVerifyResult =
   ## The AUTHORITATIVE receiving-side check. For each pushed BRANCH update,
   ## read the certificates that arrived for the pushed commit (from the
   ## INCOMING ``refs/notes/reprobuild/certificates`` value — already an object
@@ -39858,20 +41506,34 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
     # Read the certs that arrived for this commit. Prefer the incoming notes
     # SHA (pre-receive: ref not yet updated); fall back to the well-known ref
     # for a post-receive / already-updated read.
+    #
+    # The cert gate already fails CLOSED (an absent certificate is a refusal
+    # under ``required``), so an unreadable note does not let anything
+    # through. It does something else that cost this campaign three sessions:
+    # it reports "no covering test certificate" to an author whose certificate
+    # is right there in the push, and sends them to mint it again. So the read
+    # status is carried and NAMED, without changing any accept/reject
+    # decision.
+
     # ``preserveObjectStore``: the certificate note arrives in the SAME push as
     # the commit it attests, so its objects are in the push quarantine too. A
     # scrubbed read finds no certificate for any commit and a ``required``
     # gate then refuses every push — including the covered ones it is meant to
     # let through.
     var attached: seq[TestCertificate]
+    var noteUnreadable = ""
     if notesSha.len > 0 and notesSha != zeroSha:
-      attached = readAttachedCertificatesFromRef(
-        gitBin, gatewayBareDir, pushedCommit, notesSha,
-        preserveObjectStore = true)
+      let read = readAttachedCertificatesFrom(
+        gitBin, gatewayBareDir, pushedCommit, notesSha, received)
+      attached = read.certs
+      if read.status == gorUnreadable:
+        noteUnreadable = read.diagnostic
     if attached.len == 0:
-      attached = readAttachedCertificatesFromRef(
-        gitBin, gatewayBareDir, pushedCommit, certificateNotesRef,
-        preserveObjectStore = true)
+      let read = readAttachedCertificatesFrom(
+        gitBin, gatewayBareDir, pushedCommit, certificateNotesRef, received)
+      attached = read.certs
+      if read.status == gorUnreadable and noteUnreadable.len == 0:
+        noteUnreadable = read.diagnostic
     # Drop every cert that is not a registered-signed, unrevoked, valid-sig
     # attestation (TC-5) BEFORE coverage (TC-1).
     var trusted: seq[TestCertificate]
@@ -39907,13 +41569,27 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
         if sigNotes.len > 0: " (untrusted certs ignored: " &
           sigNotes.join("; ") & ")"
         else: ""
-      let detail = u.refName & ": uncovered: " & missing.join("; ") & sigDetail
+      # Say WHICH of the two uncovered conditions this is. "No certificate
+      # arrived" and "a certificate arrived and the gateway could not read it"
+      # have the same verdict and opposite remedies.
+      let readDetail =
+        if noteUnreadable.len > 0: " (certificate-note-unreadable: " &
+          noteUnreadable & " — this is NOT a missing certificate)"
+        else: ""
+      let detail = u.refName & ": uncovered: " & missing.join("; ") &
+        sigDetail & readDetail
       if cfg.gateMode == cgmRequired:
         result.accepted = false
         result.diagnostic = detail
         return
       else:  # advisory — record but accept.
         result.diagnostic = "advisory: " & detail
+    else:
+      # COVERED — and by WHAT. Same reasoning as the lock gate's record: an
+      # acceptance that says nothing is indistinguishable from a gate that
+      # never read the note.
+      result.gated.add(GatewayGateRecord(refName: u.refName,
+        trustedCerts: trusted.len))
 
 proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
                                updates: seq[GatewayRefUpdate]):
@@ -39962,6 +41638,18 @@ proc runGatewayCommand*(args: openArray[string]): int =
   ##     AUTHORITATIVE certificate verify, exit non-zero to REJECT on a miss.
   ##   - ``post-receive`` : read the same stream, FORWARD the received refs to
   ##     the real upstream bare.
+  ##
+  ## GATEWAY ENTRY, and the reason that phrase matters: the receive-pack
+  ## object-store bindings are captured HERE, on the very first statement,
+  ## before anything in this process has had the chance to scrub them. During
+  ## ``pre-receive`` the pushed objects live in a quarantine directory that
+  ## only those bindings name, so every read the gate makes of the receiving
+  ## bare's OWN incoming objects carries them back in (see
+  ## ``receiveHookObjectStore``). Nothing else does: the ``post-receive``
+  ## forward to the upstream deliberately runs scrubbed, because there the
+  ## child touches a DIFFERENT repository and the bindings would be the
+  ## cross-repository bug the scrubber exists to prevent.
+  let received = receiveHookObjectStore()
   if args.len == 0:
     stderr.writeLine("repro gateway: expected a phase " &
       "(pre-receive | post-receive)")
@@ -39984,9 +41672,13 @@ proc runGatewayCommand*(args: openArray[string]): int =
   case phase
   of "pre-receive":
     # Cert gate (TC-5/TC-1) — kept verbatim (HL-5 is ADDITIVE).
-    let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg)
+    let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg, received)
     if verdict.diagnostic.len > 0:
       stderr.writeLine("reprobuild gateway: " & verdict.diagnostic)
+    for rec in verdict.gated:
+      stderr.writeLine("reprobuild gateway: " & rec.refName &
+        ": certificate gate: COVERED by " & $rec.trustedCerts &
+        " trusted certificate(s) read from the pushed notes object")
     if not verdict.accepted:
       stderr.writeLine("reprobuild gateway: push REJECTED — no covering " &
         "test certificate (run 'repro certify' then push). The receiving-" &
@@ -39998,9 +41690,18 @@ proc runGatewayCommand*(args: openArray[string]): int =
     # mismatch. Server-side, so ``--no-verify`` cannot bypass it (same
     # enforcement point as the cert gate). The server gates ONLY the public
     # tier — team/personal/evidence backends are never read.
-    let lockVerdict = gatewayVerifyPublicLock(gitBin, gatewayDir, updates)
+    let lockVerdict = gatewayVerifyPublicLock(gitBin, gatewayDir, updates,
+      received)
     if lockVerdict.diagnostic.len > 0:
       stderr.writeLine("reprobuild gateway: " & lockVerdict.diagnostic)
+    # What the gate READ, on every accepted branch that carried a lock. This
+    # line is the only thing in an accepted push that a gate reading nothing
+    # cannot also produce, so it is what a test can hold the gate to.
+    for rec in lockVerdict.gated:
+      stderr.writeLine("reprobuild gateway: " & rec.refName &
+        ": public-tier lock gate: read repro.lock blob " & rec.lockBlobId &
+        " deps=" & $rec.depCount &
+        " integrity-checked=" & $rec.integrityChecked & " verdict=ACCEPTED")
     if not lockVerdict.accepted:
       stderr.writeLine("reprobuild gateway: push REJECTED — the pushed " &
         "public repro.lock failed the server-side public-tier lock gate. " &
@@ -40029,8 +41730,11 @@ proc developSetClosure(repos: seq[ResolvedRepo];
   ## develop-mode sibling is a git-submodule replacement, so only the
   ## pushed repo's own dependency closure can break a teammate's build of
   ## it). Unknown dependency names (a ``depends`` entry that names no repo
-  ## in the resolved set) are skipped — the closure only ever contains
-  ## repos that actually participate in this workspace.
+  ## in the resolved set) contribute nothing to the closure — there is no
+  ## repo to observe. They are NOT thereby harmless, and the gate does not
+  ## treat them as such: ``undeclaredDependsInClosure`` below reports them and
+  ## the gate refuses, because a name it cannot resolve is a repo the push
+  ## claims to depend on and the gate did not check.
   ##
   ## When ``pushedRepoName`` is empty (the hook was invoked without a
   ## resolvable ``--current-repo``), the closure is empty and the caller
@@ -40054,6 +41758,53 @@ proc developSetClosure(repos: seq[ResolvedRepo];
       for dep in byName[name].depends:
         if dep.len > 0 and dep notin result:
           pending.add(dep)
+
+proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
+    pushedRepoName: string): seq[string] =
+  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
+  ## repo the workspace declares, in first-seen order and de-duplicated.
+  ##
+  ## Such an edge used to be dropped in silence. The effect was that the gate
+  ## verified a SMALLER set than the manifests declare while still reporting
+  ## success: one typo in a ``depends`` list removed a real dependency from the
+  ## cleanliness / publication / lock stages, and nothing said so. That is the
+  ## same shape as a check that passes having verified nothing, just at the
+  ## granularity of one edge — so the gate refuses on it and names the edge.
+  ##
+  ## The resolver already refuses a fragment that references an undeclared
+  ## remote for exactly this reason ("turning a typo into a silent success is a
+  ## worse failure mode than the transitional convenience is worth"); this is
+  ## the same rule applied to the other cross-reference a fragment can make.
+  if pushedRepoName.len == 0:
+    return
+  var byName = initHashSet[string]()
+  for repo in repos:
+    byName.incl(repo.name)
+  if pushedRepoName notin byName:
+    return
+  var byNameRepo = initTable[string, ResolvedRepo]()
+  for repo in repos:
+    byNameRepo[repo.name] = repo
+  var seen = initHashSet[string]()
+  var reported = initHashSet[string]()
+  var pending = @[pushedRepoName]
+  while pending.len > 0:
+    let name = pending.pop()
+    if name in seen:
+      continue
+    seen.incl(name)
+    if name notin byNameRepo:
+      continue
+    for dep in byNameRepo[name].depends:
+      if dep.len == 0:
+        continue
+      if dep notin byName:
+        if dep notin reported:
+          reported.incl(dep)
+          result.add(name & " -> " & dep)
+        continue
+      if dep notin seen:
+        pending.add(dep)
 
 proc repoNameForFragment(identity: GitToolIdentity; membershipRoot, relPath,
     newTip, oldTip: string): string =
@@ -40478,6 +42229,32 @@ proc findLockPinningOrphan(identity: GitToolIdentity;
           return LockPinFinding(orphanOid: oid, lockedPath: path,
             lockRelPath: cand.relPath, lockRoot: root, lockTriggerSha: trigger)
 
+proc unpublishedHeadEvidence*(headSha, requestedRemote,
+                              answeredScope: string): string =
+  ## The "HEAD is not published" evidence line, worded from the search that
+  ## ACTUALLY ran rather than from the remote name the gate asked about.
+  ##
+  ## ``isPublishedQuery`` scopes to ``<remote>/*`` only when that remote is
+  ## configured in the checkout; otherwise it answers the ANY-remote question
+  ## (``git_actions.remoteBranchContainsHead``). Reporting the requested name
+  ## regardless produced refusals like "HEAD … not on a 'origin/*'
+  ## remote-tracking branch" against a checkout with no ``origin`` at all —
+  ## true only of a remote that does not exist, and silent about the fact that
+  ## every remote the checkout DOES have had already been searched. An
+  ## operator reading that goes looking for the wrong publication.
+  ##
+  ## ``answeredScope`` is ``GitQueryResult.publishedScope``: a remote name when
+  ## the search was scoped, ``""`` when it covered every remote-tracking
+  ## branch.
+  let head = if headSha.len > 0: "HEAD " & headSha else: "HEAD"
+  if answeredScope.len > 0:
+    return head & " not on a '" & answeredScope & "/*' remote-tracking branch"
+  if requestedRemote.len > 0:
+    return head & " not on any remote-tracking branch (this checkout has no " &
+      "remote named '" & requestedRemote & "', so every configured remote " &
+      "was accepted)"
+  head & " not on any remote-tracking branch"
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
@@ -40593,10 +42370,29 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       let slash = upstream.output.strip().find('/')
       if slash > 0:
         agreedRemoteName = upstream.output.strip()[0 ..< slash]
+  # ``--current-repo`` is optional; ``--workspace-root`` is the caller's
+  # explicit target either way. Every other use of ``parsed.currentRepo``
+  # above is guarded by ``len > 0``, but this one was passed through bare —
+  # and an empty repo root makes ``push_hook_protocol``'s ``runGit`` omit its
+  # ``-C``, so ``rev-parse --show-object-format``, ``rev-parse HEAD^{commit}``,
+  # ``cat-file`` and ``merge-base --is-ancestor`` all answered from THE
+  # PROCESS WORKING DIRECTORY's repository. The gate then decided an
+  # unrelated repository's pre-push protocol validity and "independently
+  # observed HEAD" — from a non-repository cwd it refused with "unsupported
+  # or unreadable Git object format" (exit 2), and from any git checkout it
+  # read that checkout's HEAD instead of the workspace's.
+  #
+  # Use the same fallback ``runCheckCommand`` already applies to the SAME
+  # stream a few frames up. That is not a new risk: if the fallback root were
+  # not a readable repository, that earlier ``parsePrePushRefStream`` would
+  # already have refused this invocation with exit 2 before reaching here.
+  let protocolRepoRoot =
+    if parsed.currentRepo.len > 0: parsed.currentRepo
+    else: parsed.workspaceRoot
   let outgoing =
     if parsed.pushedRefsPath.len > 0:
       evaluateOutgoingCurrent(identity.binaryPath,
-        parsed.currentRepo, parsed.pushedRefsPath, parsed.hookRemoteName,
+        protocolRepoRoot, parsed.pushedRefsPath, parsed.hookRemoteName,
         parsed.hookRemoteLocation, agreedRemoteName, agreedRemoteLocation)
     else:
       OutgoingCurrentDecision(protocolOk: true)
@@ -40605,7 +42401,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       repo: currentRepoPath,
       property: "pre-push-protocol",
       remediation: "reinstall the managed hooks with 'repro hooks ensure --vcs " &
-        parsed.currentRepo & "' and retry the push",
+        protocolRepoRoot & "' and retry the push",
       evidence: outgoing.diagnostic))
     result.exitCode = 2
     return
@@ -40650,6 +42446,24 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       identity, resolved, membershipRoot, newTip, oldTip))
   let scope = prePushScope(resolved, currentRepoName, currentManifestLayer,
     membershipScope)
+  # A `depends` edge that names no declared repo silently SHRANK the scope the
+  # stages below walk. Refuse instead: the gate must not report success over a
+  # dependency it could not resolve, and the offending edge is named so the
+  # manifest can be fixed rather than guessed at.
+  let danglingDepends = undeclaredDependsInClosure(resolved.repos,
+    currentRepoName)
+  if danglingDepends.len > 0:
+    result.failures.add(CheckFailure(
+      repo: currentRepoPath,
+      property: "dependency-not-declared",
+      remediation: "declare the missing repo in this workspace's manifests " &
+        "(or fix the name) — the gate cannot verify a dependency the " &
+        "workspace does not declare; edges: " & danglingDepends.join(", "),
+      evidence: $danglingDepends.len &
+        " `depends` edge(s) in the pushed repo's closure name a repo this " &
+        "workspace does not declare: " & danglingDepends.join(", ")))
+    result.exitCode = 2
+    return
   let scopeClosure = scope.names
   let scopeIsWholeWorkspace = scope.wholeWorkspace
   proc repoInScope(name: string): bool =
@@ -40694,6 +42508,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       pubDiagnostic: string
       branch: string
       remoteName: string
+      pubScope: string
+        ## Which remote the ``isPublished`` answer was actually scoped to
+        ## (``""`` = every remote-tracking branch). NOT the same as
+        ## ``remoteName``: the query degrades to the any-remote answer when
+        ## the manifest-derived name is not a remote of this checkout, and
+        ## the refusal below must describe the search that happened.
       hasGit: bool
   var observations: seq[RepoObs]
   # MO-5 — PRIVATE repos whose source is NOT present locally (unreadable /
@@ -40729,6 +42549,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     obs.remoteName = rName
     let pubRes = queryGitState(
       isPublishedQuery(absRepo, rName), identity)
+    obs.pubScope = pubRes.publishedScope
     if pubRes.status == gqsOk:
       obs.isPublished = pubRes.isPublished
     else:
@@ -40941,8 +42762,8 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           outgoing.diagnostic
         elif obs.pubDiagnostic.len > 0:
           "publish-probe-failed: " & obs.pubDiagnostic
-        else: "HEAD " & obs.headSha &
-          " not on a '" & obs.remoteName & "/*' remote-tracking branch"
+        else:
+          unpublishedHeadEvidence(obs.headSha, obs.remoteName, obs.pubScope)
       let remediation =
         if selfPush and outgoing.diagnostic.len > 0:
           "resolve '" & outgoing.diagnostic & "' in " & obs.path &
@@ -41168,10 +42989,11 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
             headSha == outgoing.headOid and
             sameFilesystemPath(sourcePath, parsed.currentRepo):
           continue
-        let evidence =
-          if headSha.len > 0:
-            "HEAD " & headSha & " not on any remote-tracking branch"
-          else: "HEAD not on any remote-tracking branch"
+        # A develop-override deliberately asks the ANY-remote question (it is
+        # an arbitrary local path with no manifest-declared remote), so the
+        # requested name is empty and the wording is the plain one.
+        let evidence = unpublishedHeadEvidence(headSha, "",
+          pubRes.publishedScope)
         result.failures.add(CheckFailure(
           repo: entry.package,
           property: "develop_override_unpublished",
@@ -48407,6 +50229,73 @@ proc reachableExcluding(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep != excluded and dep notin result:
           pending.add(dep)
 
+proc undeletableCheckoutDiagnostic(repo: ResolvedRepo; rejection: string;
+                                   projectFile, workspaceRoot: string;
+                                   landingStated = false): string =
+  ## The RA-28 shape of a `repro remove` refusal
+  ## (Interactive-UX-And-Progress.md Principle 2): NAME the offender and NAME
+  ## a copy-pasteable remedy.
+  ##
+  ## Both halves were missing from the first shape of this guard, which said
+  ## only "refusing to remove the declared checkout path '.' — it must name a
+  ## directory beneath the workspace root, not the workspace root itself".
+  ## That names a value, not a repo; it never says the value belongs to
+  ## `ws-root`; and it leaves an operator who genuinely wants the root repo
+  ## out of the project with nowhere to go. The remedy is real and specific:
+  ## the DECLARATION can be dropped without touching the tree, by removing the
+  ## fragment's line from the project's `includes` — which is exactly what
+  ## `repro remove` would have done, minus the delete it must not perform.
+  ##
+  ## And that is a COMMAND, not an editing instruction. `repro workspace repos
+  ## remove <fragment>` drops the include edge from every membership that
+  ## declares the fragment and states, in its own final line, that "any
+  ## existing checkout was left on disk" — precisely the half of `repro
+  ## remove` that is in bounds here. A remedy the operator has to perform by
+  ## hand in a TOML array is a remedy that gets performed wrongly (RA-28 /
+  ## Interactive-UX-And-Progress.md Principle 2 asks for a copy-pasteable
+  ## one), and this is one of the two that were not.
+  ##
+  ## The verb reads `manifestRepoRootFor(workspaceRoot)`, which is the
+  ## workspace root itself — so it can only reach a fragment at
+  ## `<workspaceRoot>/repos/<stem>.toml`. A workspace whose membership lives
+  ## in a materialized manifest CHECKOUT (`.repro/manifests/…`, from `init
+  ## --manifest-url`) is out of the verb's reach, and for that layout the
+  ## remedy falls back to naming the exact file, the exact key, and the exact
+  ## entry — never "edit the manifest".
+  let fragmentStem = repo.fragmentPath.splitFile.name
+  let nativeFragment =
+    repo.fragmentPath.len > 0 and
+    os.normalizedPath(absolutePath(repo.fragmentPath)) ==
+      os.normalizedPath(
+        absolutePath(workspaceRoot / "repos" / (fragmentStem & ".toml")))
+  let remedy =
+    if nativeFragment:
+      "Remedy: to drop the declaration WITHOUT deleting the tree, run " &
+        "`repro workspace repos remove " & fragmentStem &
+        "` (it edits the membership declaration only and leaves the " &
+        "checkout on disk), then `repro sync`."
+    else:
+      "Remedy: to drop the declaration WITHOUT deleting the tree, delete " &
+        "the entry \"repos/" & fragmentStem & ".toml\" from the " &
+        "`includes` array in " & projectFile & ", then run `repro sync`. " &
+        "(`repro workspace repos remove` would do this for you, but it " &
+        "edits " & (workspaceRoot / "projects") & " and cannot reach a " &
+        "manifest checkout at " & parentDir(repo.fragmentPath) & ".)"
+  # `landingStated` — the LEXICAL rejection says what is wrong with the
+  # spelling and leaves it to this proc to say where that spelling lands. The
+  # RESOLVED rejection (`resolvedOwnTreeRejection`) has already named the
+  # directory the path resolves to and what deleting it would take, and it is
+  # the only one of the two that CAN: the landing is the whole of what it
+  # measured, and the lexical join below would name a different (and, for a
+  # junction, misleadingly innocent) directory.
+  "refusing to remove '" & repo.name & "': its declared checkout path '" &
+    repo.path & "' " & rejection &
+    (if landingStated: ". "
+     else: ", so " & (workspaceRoot / repo.path) &
+       " IS the workspace root and removing it would delete the workspace " &
+       "itself. ") &
+    "Nothing was removed for this repo. " & remedy
+
 proc executeRemove(parsed: RemoveArgs): RemoveReport =
   result.workspaceRoot = parsed.workspaceRoot
   result.target = parsed.target
@@ -48429,6 +50318,60 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
     return
 
   let target = resolved.repos[matchIdx]
+
+  # `repro remove` ends in a `removeDir(<workspaceRoot> / repo.path)`, so it is
+  # a delete site and owes the OWN-TREE question — `checkoutPathRejection`,
+  # the same proc `runWorkspaceDisableCommand` asks immediately in front of
+  # its own `removeDir`. It is not the schema boundary's question: the reader
+  # asks `declaredCheckoutPathRejection`, which admits `path = "."` because
+  # that is how a workspace declares its ROOT repo. A value the model needs to
+  # be declarable is not a directory this command may delete —
+  # `<workspaceRoot> / "."` IS the workspace root.
+  #
+  # The root reaches this command by two different routes, and they do not get
+  # the same answer:
+  #
+  #   * NAMED as the target (`repro remove ws-root`, or `repro remove .` —
+  #     the lookup above matches on `repo.name` OR `repo.path`). Refuse the
+  #     REQUEST, here, before anything is mutated. A GC that silently skipped
+  #     the delete would still drop the target's `includes` edge and still
+  #     print a per-repo line, so the operator would be told a repo was
+  #     removed while its tree stayed: the declaration and the disk
+  #     disagreeing is exactly the state this command exists to prevent.
+  #     There is no partial execution of "remove the workspace root" that is
+  #     correct, so the whole verb refuses and nothing is touched.
+  #   * SWEPT IN as an unreachable member of some OTHER target's `depends`
+  #     closure. There the operator asked for something else and the rest of
+  #     the GC is legitimate, so only the root's own delete is skipped — see
+  #     the per-entry `rejection` on the plan below.
+  let targetRejection = checkoutPathRejection(target.path.strip())
+  if targetRejection.len > 0:
+    result.exitCode = 1
+    result.declarationChanged = false
+    result.repos.add(RemoveRepoEntry(
+      name: target.name, path: target.path, effect: "refused",
+      diagnostic: undeletableCheckoutDiagnostic(target, targetRejection,
+        resolved.projectFile, parsed.workspaceRoot)))
+    return
+
+  # W8-R1 — and then the same question of the RESOLVED path, because the
+  # spelling above cannot see a reparse point. `path = "vendor/thing"` passes
+  # every lexical rule in this repository and still names the workspace root
+  # when `vendor\thing` is a directory junction onto it; `removeDir` walks
+  # into the reparse point and the workspace goes. This is the NAMED-target
+  # route, so it refuses the whole verb before anything is mutated, exactly
+  # as the lexical rejection above does — there is no partial execution of
+  # "remove the workspace root" that is correct.
+  let targetLanding = resolvedOwnTreeRejection(
+    parsed.workspaceRoot / target.path.strip(), parsed.workspaceRoot)
+  if targetLanding.len > 0:
+    result.exitCode = 1
+    result.declarationChanged = false
+    result.repos.add(RemoveRepoEntry(
+      name: target.name, path: target.path, effect: "refused",
+      diagnostic: undeletableCheckoutDiagnostic(target, targetLanding,
+        resolved.projectFile, parsed.workspaceRoot, landingStated = true)))
+    return
 
   # RA-22 reachability GC. The removed dependency is the target. The set of
   # checkouts considered for collection (the CANDIDATE set) is the target
@@ -48502,10 +50445,40 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
     repo: ResolvedRepo
     dirty: bool
     dirtyDiag: string
+    rejection: string  ## Non-empty when this entry's tree may not be deleted.
+    landingStated: bool  ## True when `rejection` came from the RESOLVED
+                         ## question and so already names where the path
+                         ## lands. See `undeletableCheckoutDiagnostic`.
   var plan: seq[GcEntry]
   var anyDirty = false
+  var refusedRemovals = 0
   for repo in gcRepos:
-    let repoPath = parsed.workspaceRoot / repo.path
+    let normalized = repo.path.strip()
+    # The own-tree question, per GC entry. The NAMED target was already
+    # refused above; this is the other route in — the workspace root sitting
+    # in some other target's ``depends`` closure, unreachable from a
+    # surviving root, and so swept into the GC set without anyone naming it.
+    # The delete is skipped, not the command: the operator asked to remove
+    # something else and that removal is legitimate.
+    let rejection = checkoutPathRejection(normalized)
+    if rejection.len > 0:
+      inc refusedRemovals
+      # No dirty probe: nothing is going to be deleted, so there is no work
+      # to discard, and a DIRTY classification here would raise the RA-9
+      # confirmation prompt over a removal that is not going to happen.
+      plan.add(GcEntry(repo: repo, rejection: rejection))
+      continue
+    # W8-R1 — the SWEPT-IN route's resolved question, asked separately from
+    # the named-target route's above because the two answer differently: this
+    # one skips the ONE delete and lets the rest of the GC stand, since the
+    # operator asked for something else and that removal is legitimate.
+    let landing = resolvedOwnTreeRejection(
+      parsed.workspaceRoot / normalized, parsed.workspaceRoot)
+    if landing.len > 0:
+      inc refusedRemovals
+      plan.add(GcEntry(repo: repo, rejection: landing, landingStated: true))
+      continue
+    let repoPath = parsed.workspaceRoot / normalized
     var dirty = false
     var dirtyDiag = ""
     if dirExists(repoPath / ".git"):
@@ -48519,22 +50492,33 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
     if dirty: anyDirty = true
     plan.add(GcEntry(repo: repo, dirty: dirty, dirtyDiag: dirtyDiag))
 
-  # Preview the per-repo effect BEFORE mutating anything.
+  # Preview the per-repo effect BEFORE mutating anything. A refusal is
+  # previewed as a refusal: a preview that promised a removal the run then
+  # declines is the preview being wrong, which is the one thing a preview
+  # cannot be.
   let effectVerb = if parsed.dryRun: "would remove" else: "remove"
-  stderr.writeLine("repro remove will " & effectVerb & " " & $plan.len &
+  stderr.writeLine("repro remove will " & effectVerb & " " &
+    $(plan.len - refusedRemovals) &
     " repo(s) from project '" & resolved.projectName & "':")
   for p in plan:
     stderr.writeLine("  " & p.repo.path & " (name=" & p.repo.name & ")" &
-      (if p.dirty: " [DIRTY — uncommitted changes WILL BE DISCARDED]"
+      (if p.rejection.len > 0: " [REFUSED — " & p.rejection & "]"
+       elif p.dirty: " [DIRTY — uncommitted changes WILL BE DISCARDED]"
        else: " [clean]"))
 
   if parsed.dryRun:
     for p in plan:
       var entry = RemoveRepoEntry(name: p.repo.name, path: p.repo.path,
-        dirty: p.dirty, effect: "would_remove")
-      if p.dirty: entry.diagnostic = p.dirtyDiag
+        dirty: p.dirty,
+        effect: if p.rejection.len > 0: "refused" else: "would_remove")
+      if p.rejection.len > 0:
+        entry.diagnostic = undeletableCheckoutDiagnostic(p.repo, p.rejection,
+          resolved.projectFile, parsed.workspaceRoot,
+          landingStated = p.landingStated)
+      elif p.dirty:
+        entry.diagnostic = p.dirtyDiag
       result.repos.add(entry)
-    result.exitCode = 0
+    result.exitCode = if refusedRemovals > 0: 1 else: 0
     return
 
   # RA-9 confirmation: a DIRTY removal in the GC set needs the destructive
@@ -48543,7 +50527,8 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   # the operator answers once for the destructive batch.
   if anyDirty:
     let decision = confirmDestructive(
-      prompt = "Remove " & $plan.len & " repo(s) and DISCARD uncommitted " &
+      prompt = "Remove " & $(plan.len - refusedRemovals) &
+        " repo(s) and DISCARD uncommitted " &
         "changes? [y/N] ",
       autoYes = parsed.force,
       isTty = isatty(stdin),
@@ -48556,8 +50541,15 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
         var entry = RemoveRepoEntry(name: p.repo.name, path: p.repo.path,
           dirty: p.dirty)
         entry.effect =
-          if decision == ddRefusedNonTty: "refused" else: "declined"
-        if p.dirty: entry.diagnostic = p.dirtyDiag
+          if p.rejection.len > 0: "refused"
+          elif decision == ddRefusedNonTty: "refused"
+          else: "declined"
+        if p.rejection.len > 0:
+          entry.diagnostic = undeletableCheckoutDiagnostic(p.repo, p.rejection,
+            resolved.projectFile, parsed.workspaceRoot,
+            landingStated = p.landingStated)
+        elif p.dirty:
+          entry.diagnostic = p.dirtyDiag
         result.repos.add(entry)
       result.exitCode = 2
       result.declarationChanged = false
@@ -48571,13 +50563,26 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   let changed = dropFragmentInclude(resolved.projectFile, target.fragmentPath)
   result.declarationChanged = changed
   for p in plan:
-    let repoPath = parsed.workspaceRoot / p.repo.path
+    if p.rejection.len > 0:
+      # Answered by `checkoutPathRejection` when the plan was built — this is
+      # the workspace root (or another value that is not the repo's own tree)
+      # swept in through a `depends` closure. Skip THIS delete and say so;
+      # the rest of the GC stands.
+      result.repos.add(RemoveRepoEntry(
+        name: p.repo.name, path: p.repo.path, effect: "refused",
+        diagnostic: undeletableCheckoutDiagnostic(p.repo, p.rejection,
+          resolved.projectFile, parsed.workspaceRoot,
+          landingStated = p.landingStated)))
+      continue
+    let repoPath = parsed.workspaceRoot / p.repo.path.strip()
     if dirExists(repoPath):
       removeDir(repoPath)
     var entry = RemoveRepoEntry(name: p.repo.name, path: p.repo.path,
       dirty: p.dirty, effect: "removed")
     result.repos.add(entry)
-  result.exitCode = 0
+  # A refused removal means the run did NOT do what it previewed, so it must
+  # not exit 0 — the same convention `repro workspace disable` follows.
+  result.exitCode = if refusedRemovals > 0: 1 else: 0
 
 proc renderRemoveTextLines*(report: RemoveReport): seq[string] =
   for entry in report.repos:
@@ -48585,7 +50590,11 @@ proc renderRemoveTextLines*(report: RemoveReport): seq[string] =
     if entry.diagnostic.len > 0:
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
-  if report.exitCode == 0 and report.declarationChanged:
+  # Reported on `declarationChanged` alone, not on a zero exit: a run that
+  # refused ONE checkout still dropped the target's include, and the operator
+  # has to be told which of the two halves happened. Every path that does not
+  # touch the project file sets `declarationChanged = false` explicitly.
+  if report.declarationChanged:
     result.add("repro remove: dropped '" & report.target &
       "' from project '" & report.project & "'")
 
@@ -50132,6 +52141,12 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
         valueFromFlag(args, i, "--stats-groups"))
     elif arg == "--log" or arg.startsWith("--log="):
       result.buildFlags.add("--log=" & valueFromFlag(args, i, "--log"))
+    elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
+      # In-Process-Monitor-Hosting P1(b): forwarded verbatim, like every
+      # other value-taking build flag here, so `repro test`/`bench`/`lint`
+      # can drive the same experiment as `repro build`.
+      result.buildFlags.add("--monitor-hosting=" &
+        valueFromFlag(args, i, "--monitor-hosting"))
     elif arg == "--package" or arg.startsWith("--package="):
       result.buildFlags.add("--package=" &
         valueFromFlag(args, i, "--package"))
@@ -51895,6 +53910,103 @@ type CompiledProviderSolverInputs = object
   defaultToolProvisioning: string
   sourceRecipeRoots: seq[string]
 
+type DurableSolverProviderArtifacts = object
+  interfaceArtifact: ProjectInterfaceArtifact
+  providerArtifact: ProviderCompileArtifact
+
+proc tryLoadDurableSolverProviderArtifacts(
+    modulePath, compileWorkDir: string):
+    Option[DurableSolverProviderArtifacts] =
+  ## A normal build already materializes monitored interface/provider edges in
+  ## the recipe's output directory. Lock refresh asks the same build-engine
+  ## edges to validate their recorded read sets in dry-run mode before reading
+  ## those artifacts. A miss falls back to the disposable direct-extraction
+  ## path below, so lock refresh still writes no project artifacts of its own.
+  try:
+    let outDir = outputDirForTarget(parseBuildTarget(modulePath), "")
+    let interfacePath = outDir / "project-interface.rbsz"
+    let stubPath = outDir / "project-interface.nim"
+    let providerBinaryPath = outDir / "provider" / "project-provider"
+    let providerArtifactPath = outDir / "provider-compile.rbsz"
+    if not fileExists(extendedPath(interfacePath)) or
+        not fileExists(extendedPath(providerBinaryPath)) or
+        not fileExists(extendedPath(providerArtifactPath)):
+      return none(DurableSolverProviderArtifacts)
+    let durableProvider = readProviderCompileArtifact(providerArtifactPath)
+    if durableProvider.outputBinaryPath !=
+        normalizedProviderOutputPath(providerBinaryPath):
+      return none(DurableSolverProviderArtifacts)
+    let publicCliPath = stablePublicCliPath()
+    var inspectionStats: BuildStats
+    let interfaceArtifact = extractInterfaceEdge(modulePath, interfacePath,
+      stubPath, compileWorkDir, outDir / "provider-work",
+      projectRootForModule(modulePath), publicCliPath,
+      outDir / "build-engine-cache", inspectionStats, requireStub = false,
+      bypassRunQuota = runQuotaBypassedByEnv(),
+      validateExistingOnly = true,
+      providerCompilerCommand = durableProvider.compilerCommand)
+    if durableProvider.interfaceFingerprint !=
+        interfaceArtifact.interfaceFingerprint:
+      return none(DurableSolverProviderArtifacts)
+    # Reconstruct the exact compile edge that produced the durable artifact.
+    # A lock command can run under a different provisioning mode than the
+    # preceding build, so deriving a fresh plan from the current compiler
+    # environment would address a different action-cache record and force a
+    # disposable recompile even though the original monitored record remains
+    # valid.
+    let plan = ProviderCompilePlan(
+      inputSources: durableProvider.inputSources,
+      outputBinaryPath: durableProvider.outputBinaryPath,
+      compilerCommand: durableProvider.compilerCommand,
+      compileEdge: durableProvider.compileEdge,
+      interfaceFingerprint: durableProvider.interfaceFingerprint,
+      providerFingerprint: durableProvider.providerFingerprint,
+      providerCompileActionKey:
+        durableProvider.compileEdge.actionFingerprint,
+      workDir: compileWorkDir)
+    var provider = staticFreshnessFallbackProvider(plan,
+      providerArtifactPath, modulePath, providerBinaryPath,
+      interfaceArtifact.interfaceFingerprint, compileWorkDir)
+    if provider.isNone:
+      let providerAction = providerCompileBuildAction(plan,
+        modulePath, interfacePath, providerArtifactPath,
+        internalReproHelperCliPath(publicCliPath), compileWorkDir,
+        outDir / "provider-work")
+      let validation = runBuild(graph([providerAction]), BuildEngineConfig(
+        cacheRoot: outDir / "build-engine-cache",
+        actionCacheRoot: currentActionCacheRoot(),
+        runQuotaCliPath: publicCliPath,
+        monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
+        monitorCliArgs: internalIoMonitorArgs,
+        maxParallelism: 1'u32,
+        stdoutLimit: 1024 * 1024,
+        stderrLimit: 1024 * 1024,
+        rebuildMissingOutputsOnCacheHit: true,
+        deferLocalOutputBlobs: true,
+        bypassRunQuota: runQuotaBypassedByEnv(),
+        inlineRunQuota: true,
+        dryRun: true,
+        suppressTrace: true,
+        skipCacheHitEvidence: true))
+      if validation.hasFailedActions():
+        return none(DurableSolverProviderArtifacts)
+      var validated = false
+      for item in validation.results:
+        if item.id == providerAction.id and item.status == asUpToDate:
+          validated = true
+      if not validated:
+        return none(DurableSolverProviderArtifacts)
+      provider = some(durableProvider)
+    if not providerCompileArtifactFresh(providerArtifactPath,
+        providerBinaryPath, interfaceArtifact.interfaceFingerprint,
+        plan.providerFingerprint, compileWorkDir):
+      return none(DurableSolverProviderArtifacts)
+    some(DurableSolverProviderArtifacts(
+      interfaceArtifact: interfaceArtifact,
+      providerArtifact: provider.get()))
+  except CatchableError:
+    none(DurableSolverProviderArtifacts)
+
 proc solverInputsFromCompiledProvider(projectDir: string;
                                       requireSolverBinding = true;
                                       strict = false):
@@ -51941,17 +54053,13 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       except CatchableError: discard
     let compileWorkDir = reprobuildLibraryWorkDir()
     let scratchDir = scratchRoot / "work"
-    # MR5 bootstrap toolchain (same provisioning the build path arranges before
-    # an interface extraction / provider compile).
-    ensureBootstrapToolchainEnv(tpmPathOnly, resolveStoreRoot() / "tool-store")
     let interfacePath = scratchRoot / "project-interface.rbsz"
     let stubPath = scratchRoot / "project-interface.nim"
-    # Deliberately NOT the extraction edge (Compiles-Are-Normal-Edges.md):
-    # every path here — artifact, stub, sidecars, nimcache — lives under a
-    # temp root this proc creates and deletes in the same call, so an edge
-    # would be keyed on paths that never exist again and could never hit.
-    # This is a best-effort probe for the lock refresh, not a build; its
-    # results are thrown away and it writes nothing into the project tree.
+    # Fresh monitored artifacts from a normal build are reused below. On a
+    # miss, deliberately do NOT create extraction edges for these temp paths:
+    # they disappear at the end of this call, so such edges could never hit.
+    # The fallback remains a best-effort lock probe whose results are thrown
+    # away and which writes nothing into the project tree.
     # A refresh always re-solves. Clear inherited build pins before interface
     # extraction as well as provider execution: module initialization can run
     # during either process, and an old pin must not prevent us from observing
@@ -51963,9 +54071,22 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     defer:
       if inheritedPins.len > 0: putEnv(LockPinsEnvVar, inheritedPins)
       if inheritedLockPath.len > 0: putEnv(LockPathEnvVar, inheritedLockPath)
-    let artifact = extractInterfaceFromModule(modulePath, interfacePath,
-      stubPath, compileWorkDir, scratchDir, requireStub = false,
-      consumerRoot = projectRootForModule(modulePath))
+    let durable = tryLoadDurableSolverProviderArtifacts(modulePath,
+      compileWorkDir)
+    if durable.isNone:
+      # MR5 bootstrap toolchain (same provisioning the build path arranges
+      # before an interface extraction / provider compile). Keep this after
+      # the durable probe: provisioning-mode environment is irrelevant when
+      # the monitored artifacts validate, and changing it first defeats reuse.
+      ensureBootstrapToolchainEnv(tpmPathOnly,
+        resolveStoreRoot() / "tool-store")
+    let artifact =
+      if durable.isSome:
+        durable.get().interfaceArtifact
+      else:
+        extractInterfaceFromModule(modulePath, interfacePath,
+          stubPath, compileWorkDir, scratchDir, requireStub = false,
+          consumerRoot = projectRootForModule(modulePath))
     # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.
@@ -51981,9 +54102,13 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       if useDef.packageSelector.len > 0 and
           useDef.packageSelector notin usesSelectors:
         usesSelectors.add(useDef.packageSelector)
-    let providerBinaryPath = scratchRoot / "provider" / "project-provider"
-    let provider = compileProviderBinary(modulePath, providerBinaryPath,
-      artifact.interfaceFingerprint, "", compileWorkDir, scratchDir)
+    let provider =
+      if durable.isSome:
+        durable.get().providerArtifact
+      else:
+        let providerBinaryPath = scratchRoot / "provider" / "project-provider"
+        compileProviderBinary(modulePath, providerBinaryPath,
+          artifact.interfaceFingerprint, "", compileWorkDir, scratchDir)
     let emitPath = scratchRoot / "solver-inputs.explain"
     let protocolRoot = scratchRoot / "protocol"
     let cwd = if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
@@ -52131,6 +54256,20 @@ proc mergeProviderSolverInputs(aggregate: var CompiledProviderSolverInputs;
     cmp(a.name, b.name))
   aggregate.packages.sort(proc(a, b: PackageDecl): int = cmp(a.name, b.name))
 
+proc sourceProviderRecipeDirForSolverFold*(
+    outcome: FromSourceResolveResult): string =
+  ## Solver-input extraction reads recipe metadata only. A missing artifact is
+  ## therefore not a reason to skip a bootstrap-floor recipe: no recursive
+  ## package build occurs here, and omitting the provider would let lock
+  ## generation ignore its dependency ranges.
+  case outcome.kind
+  of rrResolved:
+    outcome.profile.selectedStorePath
+  of rrNeedsBuild:
+    outcome.recipeDir
+  of rrSiblingMissing:
+    ""
+
 proc foldFromSourceProviderSolverInputs(projectDir: string;
                                         aggregate: var
                                           CompiledProviderSolverInputs) =
@@ -52150,16 +54289,7 @@ proc foldFromSourceProviderSolverInputs(projectDir: string;
     if useDef.executableName.len == 0:
       continue
     let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
-    var recipeDir = ""
-    case outcome.kind
-    of rrResolved:
-      recipeDir = outcome.profile.selectedStorePath
-    of rrNeedsBuild:
-      if useDef.executableName in fromSourceCycleBrokenTools:
-        continue
-      recipeDir = outcome.recipeDir
-    of rrSiblingMissing:
-      continue
+    var recipeDir = sourceProviderRecipeDirForSolverFold(outcome)
     if recipeDir.len == 0:
       continue
     recipeDir = absolutePath(recipeDir)
@@ -52539,7 +54669,14 @@ proc runReproLockValidate(rest: openArray[string]): int =
   block integrity:
     var ld: LockedDependencies
     try:
-      ld = parseLockedDependencies(readFile(extendedPath(lockP)))
+      ld = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+    except LockedCheckoutPathError as err:
+      # `repro lock validate` exists to REPORT what is wrong with a lock, so
+      # this is the one reader that must not treat an unusable path as a
+      # reason to stop looking. Recorded as a problem, with the message the
+      # boundary composed (offender + remedy) carried through verbatim.
+      problems.add(err.msg)
+      break integrity
     except CatchableError:
       break integrity
     let once = serializeLockedDependencies(ld)
@@ -53518,6 +55655,32 @@ proc windowsProvisioningPlan*(installRoot: string;
     # installRoot) is put on $env:PATH for this PowerShell session.
     activateCommand: ". " & q(installRoot & "\\env.ps1"))
 
+when defined(windows):
+  proc runPowerShellCommand(command: string): int =
+    ## Run one PowerShell ``-Command`` string, inheriting the operator's
+    ## stdio, and return its exit code (``-1`` if it could not be started).
+    ##
+    ## The ``-Command`` payload is passed as a REAL argv element, not
+    ## spliced into a shell command line. It used to be
+    ## ``execShellCmd("powershell -NoProfile -Command " & quoteShell(cmd))``,
+    ## which is the W4 defect in its second habitat: ``execShellCmd`` is C
+    ## ``system()``, i.e. ``cmd /c <string>``, and ``quoteShell`` on Windows
+    ## escapes an embedded ``"`` as ``\"`` — a convention ``cmd.exe`` does
+    ## not implement. The install commands DO embed quotes as soon as the
+    ## install root contains a space (``q(toolDir)`` above), which is the
+    ## ``%LOCALAPPDATA%`` of any account whose user name has one, so the
+    ## quoted install root reached PowerShell mangled. ``startProcess``
+    ## hands the argv to ``CreateProcessW`` under ``CreateProcessW``'s own
+    ## quoting rules, and no second parser ever sees the string.
+    try:
+      let child = startProcess("powershell",
+        args = @["-NoProfile", "-Command", command],
+        options = {poUsePath, poParentStreams})
+      result = child.waitForExit()
+      child.close()
+    except CatchableError:
+      result = -1
+
 proc runWorkspaceProvisionCommand*(args: openArray[string]): int =
   ## ``repro workspace provision`` — ensure the host toolchain and activate
   ## the workspace env. On Linux/macOS this is a no-op (the Nix devShell /
@@ -53551,15 +55714,12 @@ proc runWorkspaceProvisionCommand*(args: openArray[string]): int =
       stdout.writeLine("repro workspace provision: ensuring " & step.tool)
       # Run the idempotent check; install only when it fails. Best-effort
       # per tool — a failed ensure is reported, not fatal to the others.
-      let checkRc = execShellCmd("powershell -NoProfile -Command " &
-        q(step.checkCommand))
+      let checkRc = runPowerShellCommand(step.checkCommand)
       if checkRc != 0:
-        discard execShellCmd("powershell -NoProfile -Command " &
-          q(step.installCommand))
+        discard runPowerShellCommand(step.installCommand)
     stdout.writeLine("repro workspace provision: activating env via " &
       plan.activation.activateCommand)
-    discard execShellCmd("powershell -NoProfile -Command " &
-      q(plan.activation.activateCommand))
+    discard runPowerShellCommand(plan.activation.activateCommand)
     return 0
   else:
     # POSIX hosts get their toolchain from the Nix devShell / scaffolded
@@ -54571,20 +56731,56 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
     # it. Manifest data is not trusted with that: refuse the individual removal
     # and say so, rather than resolving the path and hoping.
     #
-    # The manifest reader now refuses those shapes at the schema boundary, so
-    # this is a second line rather than the only one — but it asks the SAME
-    # question, via `checkoutPathRejection`, instead of keeping a private copy
-    # of the rule. Two independently-written definitions of "degenerate path"
-    # is how one of them ends up narrower than the other, and the narrower one
-    # is always the one in front of the `removeDir`.
+    # `checkoutPathRejection` is the OWN-TREE question — "may a consumer
+    # create or delete this directory as the repo's own tree?" — and this is
+    # the site it exists for. It is deliberately NOT the schema boundary's
+    # question: `readRepoFragment` asks `declaredCheckoutPathRejection`, which
+    # admits `path = "."` because that is how a workspace declares its ROOT
+    # repo. A declaration the model needs is not a directory this loop may
+    # delete, and the workspace root is exactly that: `<workspaceRoot> / "."`
+    # is the workspace root, so `.` is refused HERE, in front of the
+    # `removeDir`, where refusing it actually protects something. Asking the
+    # shared proc rather than keeping a private copy is still the point —
+    # two independently-written definitions of "degenerate path" is how one
+    # of them ends up narrower than the other, and the narrower one is always
+    # the one in front of the `removeDir`.
     let normalized = path.strip()
     let rejection = checkoutPathRejection(normalized)
     if rejection.len > 0:
       inc removalFailures
+      # RA-28: name the offender AND the remedy. The value alone is not the
+      # offender — `.` says nothing about which repo declared it or what
+      # survives — and an operator told only that a removal was refused has
+      # nowhere to go. The project IS disabled either way; what is left behind
+      # is one tree, and the remedy is the command that shows what that tree
+      # holds before anyone deletes it by hand.
       stderr.writeLine("repro workspace disable: refusing to remove the " &
-        "declared checkout path '" & path & "' — it " & rejection)
+        "declared checkout path '" & path & "' — it " & rejection & ", so " &
+        (workspaceRoot / normalized) & " IS the workspace root and removing " &
+        "it would delete the workspace itself. The project is still " &
+        "disabled; this one checkout is left in place. Remedy: inspect it " &
+        "with `git -C " & workspaceRoot & " status` and remove only what you " &
+        "mean to — reprobuild will not delete the directory it is running in.")
       continue
     let dir = workspaceRoot / normalized
+    # W8-R1 — and then the same question of the RESOLVED directory, because
+    # the spelling check above is blind to reparse points. A declared
+    # `path = "only-mine"` whose `only-mine` is a directory junction onto the
+    # workspace root passes every lexical rule and then hands the workspace
+    # root to `removeDir`, which walks into the junction. Refuse this ONE
+    # checkout and say so, exactly as the lexical refusal above does: the
+    # project IS disabled either way, and what is left behind is one tree.
+    let landing = resolvedOwnTreeRejection(dir, workspaceRoot)
+    if landing.len > 0:
+      inc removalFailures
+      stderr.writeLine("repro workspace disable: refusing to remove the " &
+        "declared checkout path '" & path & "' — it " & landing & ". The " &
+        "project is still disabled; this one checkout is left in place. " &
+        "Remedy: inspect what it actually points at with " &
+        "`git -C " & dir & " status` and remove only what you mean to — " &
+        "reprobuild will not delete a directory it cannot prove is the " &
+        "repo's own tree.")
+      continue
     if not dirExists(dir):
       continue
     try:
@@ -54969,9 +57165,22 @@ proc runCompletionCommand*(programName: string; args: openArray[string];
 
 proc gitOutput(gitBin, repoRoot: string; sub: openArray[string]): tuple[
     code: int; output: string] =
+  ## Run one `git -C <repoRoot> …` against the membership manifest repo.
+  ##
+  ## The child MUST NOT inherit Git's repository-local bindings. Git exports an
+  ## absolute `GIT_DIR` (plus `GIT_INDEX_FILE`, `GIT_WORK_TREE`, …) to every
+  ## hook it runs, and those OVERRIDE `-C` — so a `repro workspace repos add`
+  ## reached from a hook, or from any `.git`-file checkout that exported them,
+  ## resolves this `-C` to the INVOKING repository instead. Every other git
+  ## helper in this file already scrubs (`gitRunPlain`, `gitRunPlainEnv`,
+  ## `gitTopLevel`, `gitHooksDir`); this one did not, and it is the one that
+  ## runs `add` / `commit` / `push`. The read-side version of the same leak
+  ## made every sibling look dirty; the write-side version stages and COMMITS
+  ## into the wrong repository, so the scrub is not optional here.
   var argv = @[gitBin, "-C", repoRoot]
   for a in sub: argv.add(a)
-  let res = execCmdEx(quoteShellCommand(argv))
+  let res = execCmdEx(quoteShellCommand(argv),
+    env = scrubbedGitRepositoryEnv())
   (code: res.exitCode, output: res.output)
 
 proc manifestRepoRootFor(workspaceRoot: string): string =
@@ -55002,10 +57211,17 @@ proc remoteRevisionState(gitBin, remoteUrl, revision: string): tuple[
     return (rrsOk, "")
   if gitBin.len == 0:
     return (rrsUnknown, "no git binary")
-  # Never let a credential prompt block manifest authoring.
-  putEnv("GIT_TERMINAL_PROMPT", "0")
+  # Never let a credential prompt block manifest authoring. Set it on the
+  # CHILD's environment rather than with `putEnv`: this proc runs inside a
+  # long-lived CLI process, and a process-wide mutation would silently change
+  # the prompting behaviour of every later git invocation in the same run.
+  # The same environment is scrubbed of Git's repository-local bindings, so an
+  # inherited `GIT_DIR` / `GIT_CONFIG*` cannot redirect the query.
+  var lsRemoteEnv = scrubbedGitRepositoryEnv()
+  lsRemoteEnv["GIT_TERMINAL_PROMPT"] = "0"
   let res = execCmdEx(quoteShellCommand(
-    [gitBin, "ls-remote", "--heads", "--tags", remoteUrl, revision]))
+    [gitBin, "ls-remote", "--heads", "--tags", remoteUrl, revision]),
+    env = lsRemoteEnv)
   if res.exitCode != 0:
     return (rrsUnknown, res.output.strip())
   for line in res.output.splitLines():
@@ -56109,7 +58325,23 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           fragmentExisted = true
         if plan.mintedFetch.len > 0:
           ensureRemoteEntry(target.abs, plan.remoteName, plan.mintedFetch)
-        discard appendFragmentInclude(target.abs, fragmentRel)
+        # Same rule as the repo-set branch above: the membership key is read
+        # off what the name resolves to, and the array is located BY ITS KEY.
+        #
+        # This used to call `appendFragmentInclude`, which inserts before the
+        # first line that is a lone `]`. A project manifest declares
+        # `member_sets` before `member_repos`, so the fragment path landed in
+        # `member_sets` and the whole project stopped resolving — not just the
+        # added repo: "member set 'repos/<name>.toml' does not exist (looked
+        # for 'repo-sets/repos/<name>.toml.toml')".
+        let memberKey = membershipKeyFor(manifestRoot, repo)
+        if memberKey != memberReposKey:
+          stderr.writeLine("repro workspace repos add: '" & repo &
+            "' does not resolve to a repo fragment (" &
+            (manifestRoot / "repos" / (repo & ".toml")) &
+            "); refusing to guess which membership key it belongs under")
+          return 2
+        discard editSetMember(target.abs, memberKey, repo, add = true)
         paths.add(target.rel)
         remoteNames.add(target.name & "=" & plan.remoteName &
           (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
@@ -56181,7 +58413,19 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           return 2
         dropped = editSetMember(target.abs, memberKey, repo, add = false)
       of mkProject:
-        dropped = removeFragmentInclude(target.abs, fragmentRel)
+        # Mirrors the add path: the entry is a NAME under `member_repos`, not a
+        # fragment path under `includes`, so removing it has to use the same
+        # key-located edit or `remove` cannot undo what `add` wrote.
+        let memberKey = membershipKeyFor(manifestRoot, repo)
+        if memberKey.len == 0:
+          stderr.writeLine("repro workspace repos remove: '" & repo &
+            "' resolves to neither a repo fragment nor a repo-set (looked " &
+            "for " & (manifestRoot / "repos" / (repo & ".toml")) & " and " &
+            (manifestRoot / "repo-sets" / (repo & ".toml")) &
+            "); refusing to guess which membership key to edit in " &
+            target.rel)
+          return 2
+        dropped = editSetMember(target.abs, memberKey, repo, add = false)
       if dropped:
         droppedFrom.add(project)
         paths.add(target.rel)

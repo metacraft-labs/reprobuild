@@ -1,0 +1,7 @@
+## A binding chain two levels deep. Documented limitation: one level only.
+import std/[osproc]
+
+proc runQuiet(tool: string): string =
+  let base = tool & " --version > /tmp/out"
+  let cmd = base
+  execCmdEx(cmd).output

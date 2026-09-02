@@ -143,6 +143,78 @@ proc scrubbedGitRepositoryEnv*(preserveObjectStore = false): StringTableRef =
         (preserveObjectStore and isGitObjectStoreEnvKey(key)):
       result[key] = value
 
+const GitReceivedObjectStoreEnv* = [
+  "GIT_QUARANTINE_PATH",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES"]
+  ## The subset of ``GitRepositoryLocalEnv`` that names WHERE THE OBJECTS ARE
+  ## during a ``receive-pack`` hook.
+  ##
+  ## ``receive-pack`` stages an incoming push in a QUARANTINE object directory
+  ## and only migrates it into the repository once every ``pre-receive`` hook
+  ## has accepted. Until then the pushed objects are reachable ONLY through
+  ## these three bindings: ``GIT_OBJECT_DIRECTORY`` points at the quarantine,
+  ## ``GIT_ALTERNATE_OBJECT_DIRECTORIES`` back at the repository's real store,
+  ## and ``GIT_QUARANTINE_PATH`` records the staging directory. A child git run
+  ## with them scrubbed cannot see the very objects the hook is being asked to
+  ## judge: ``cat-file -t`` exits 128, ``ls-tree -r`` exits 128 and
+  ## ``rev-parse --verify`` exits 1, for a commit that is unquestionably
+  ## present.
+  ##
+  ## They stay in ``GitRepositoryLocalEnv`` — scrubbing them is CORRECT for the
+  ## case that list exists for, a ``git -C <other-repository>`` that must not
+  ## inherit the invoking repository's object store. ``receiveHookObjectStore``
+  ## below names the ONE case that is not that: a hook reading ITS OWN
+  ## repository, where the bindings are not an inherited accident but the only
+  ## address the objects have.
+
+type
+  ReceivedObjectStore* = object
+    ## A snapshot of ``GitReceivedObjectStoreEnv`` taken from the AMBIENT
+    ## environment, before any scrub, so it can be put back on a child that
+    ## reads the receiving repository's own received objects.
+    ##
+    ## ``captured`` distinguishes "there was nothing to capture" (an ordinary
+    ## non-hook invocation, or a git old enough not to quarantine) from "the
+    ## bindings were captured and are empty", so a caller can report the two
+    ## apart instead of guessing.
+    captured*: bool
+    bindings*: seq[tuple[name, value: string]]
+
+proc receiveHookObjectStore*(): ReceivedObjectStore =
+  ## Capture the receive-pack object-store bindings from the ambient
+  ## environment. Call this at HOOK ENTRY, before anything scrubs them.
+  result.captured = false
+  for name in GitReceivedObjectStoreEnv:
+    if existsEnv(name):
+      result.captured = true
+      result.bindings.add((name: name, value: getEnv(name)))
+
+proc withReceivedObjectStore*(env: StringTableRef;
+                              store: ReceivedObjectStore): StringTableRef =
+  ## Put a captured ``ReceivedObjectStore`` BACK onto an otherwise scrubbed
+  ## environment. Use this ONLY for a child git that reads the receiving
+  ## repository's own objects (``git -C <that same bare> …``).
+  ##
+  ## Never use it for a child that touches a DIFFERENT repository — a forward
+  ## push to the upstream, say. There the bindings would do exactly the damage
+  ## the scrubber exists to prevent, by pointing the other repository's
+  ## receive side at this one's object store.
+  result = env
+  if result.isNil:
+    result = newStringTable(modeCaseSensitive)
+  if not store.captured:
+    return
+  for binding in store.bindings:
+    result[binding.name] = binding.value
+
+proc receivedObjectStoreEnv*(store: ReceivedObjectStore): StringTableRef =
+  ## ``scrubbedGitRepositoryEnv`` plus the captured received-object bindings:
+  ## the environment for a read the receiving repository makes of its own
+  ## incoming objects. With nothing captured this is exactly
+  ## ``scrubbedGitRepositoryEnv()``, so a non-hook caller is unaffected.
+  withReceivedObjectStore(scrubbedGitRepositoryEnv(), store)
+
 proc modeName(mode: ToolProvisioningMode): string =
   case mode
   of tpmUnspecified: "unspecified"

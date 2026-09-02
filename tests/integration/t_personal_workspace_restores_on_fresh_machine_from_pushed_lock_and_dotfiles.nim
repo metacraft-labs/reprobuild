@@ -48,8 +48,20 @@
 ## ``/etc``. Skip: ``git`` missing or ``./build/bin/repro`` absent.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl
 
-const reproBinary = "./build/bin/repro"
+const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory.
+  ##
+  ## The previous spelling (``"./build/bin/" & addFileExt("repro", ExeExt)``)
+  ## made the working directory an unstated fixture input: from the repo root
+  ## the case ran, from any other directory ``fileExists`` was false and it
+  ## SKIPPED, and from a scratch directory that happened to carry a staged
+  ## ``build/bin/repro`` it ran against THAT binary and reported failures that
+  ## read as product refusals. ``currentSourcePath()`` is absolute on both
+  ## platforms, so this constant is the same from every cwd.
+const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
 
 proc q(value: string): string = quoteShell(value)
 
@@ -58,11 +70,17 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc gitConfig(gitBin, repo: string) =
@@ -166,7 +184,7 @@ suite "HL-7 — personal workspace restores on a fresh machine":
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "personal.toml",
-        projectToml("file://" & appOrigin))
+        projectToml(fileUrl(appOrigin)))
       writeFile(manifestsRoot / "repos" / "app.toml", repoFragment())
       createDir(ws / ".repro")
       writeFile(ws / ".repro" / "workspace.toml", workspaceLocal())

@@ -121,15 +121,18 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # cwdKind byte + 4 for the empty cwdCustomPath string length (the
     # v21 addition) + 4 for the empty declaredOutputs count + 4 for the
     # empty readOnlyRoots count (the v22 addition) + 4 for the empty
-    # toolIdentityRefKinds count (the v23 addition). All of these
-    # fields are absent at v11.
+    # toolIdentityRefKinds count (the v23 addition) + 1 for the
+    # nonDeterminism sentinel byte + 4 for the empty
+    # nonDeterminismJustification string length (the
+    # Windows-Build-Correctness M6 v24 addition). All of these fields
+    # are absent at v11.
     #
     # This count MUST be kept in step with ``encodeBuildActionPayload``
     # whenever a new trailing field bumps ``BuildActionPayloadVersion``:
     # trimming too few bytes leaves the forged payload with trailing
     # bytes the v11 decoder never consumes, and the decode fails with
     # ``trailing build action payload bytes``.
-    let trimBytes = 40
+    let trimBytes = 45
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
       (uint32(payload[8]) shl 16) or
@@ -161,7 +164,9 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # length + 1 for the v21 cwdKind byte + 4 for the empty v21
     # cwdCustomPath string + 4 for the empty v22 declaredOutputs seq +
     # 4 for the empty v22 readOnlyRoots seq + 4 for the empty v23
-    # toolIdentityRefKinds count). v16-and-earlier payloads MUST decode
+    # toolIdentityRefKinds count + 1 for the M6 v24 nonDeterminism
+    # sentinel byte + 4 for its empty justification string).
+    # v16-and-earlier payloads MUST decode
     # with all newer fields at their inert defaults so legacy artefacts
     # keep working.
     #
@@ -177,7 +182,7 @@ suite "t_engine_typed_output_payload_codec_round_trip":
       actionCachePolicy: defaultActionCachePolicy())
 
     var payload = encodeBuildActionPayload(action)
-    let trimBytes = 26
+    let trimBytes = 31
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
       (uint32(payload[8]) shl 16) or

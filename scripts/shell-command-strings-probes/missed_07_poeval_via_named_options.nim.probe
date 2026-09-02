@@ -1,0 +1,10 @@
+## `poEvalCommand` supplied indirectly through a named option set. The
+## `startProcess` arm requires the token to appear literally in the call's
+## argument text.
+import std/[os, osproc]
+
+const CommandStringOptions = {poEvalCommand, poStdErrToStdOut}
+
+proc spawnLogged(tool, log: string): Process =
+  startProcess(tool & " --version > " & quoteShell(log),
+               options = CommandStringOptions)

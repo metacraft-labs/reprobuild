@@ -6,7 +6,17 @@
 
 import std/[os, osproc, strutils, times, unittest]
 
-const reproBinary = when defined(windows): "./build/bin/repro.exe" else: "./build/bin/repro"
+const ReprobuildRepoRoot =
+  currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory. `currentSourcePath()` is
+  ## absolute on both platforms, so `reproBinary` names the same file from
+  ## every cwd — and the case below no longer SKIPS when it is launched from
+  ## anywhere but the repo root.
+
+const reproBinary =
+  when defined(windows): ReprobuildRepoRoot / "build/bin/repro.exe"
+  else: ReprobuildRepoRoot / "build/bin/repro"
 
 proc q(value: string): string = quoteShell(value)
 
@@ -21,8 +31,13 @@ suite "Nim package path handling integration and caching":
       checkpoint("skipped — repro binary not built")
       skip()
     else:
-      let repoRoot = getCurrentDir()
-      let reproAbs = absolutePath(reproBinary)
+      # The three builds below run WITH THE REPO ROOT AS THEIR WORKING
+      # DIRECTORY, which is a real fixture requirement (they build this
+      # repository's own project file). Read it from the source path, not from
+      # `getCurrentDir()`: the latter made the case build whatever project
+      # happened to sit in the launcher's cwd.
+      let repoRoot = ReprobuildRepoRoot
+      let reproAbs = reproBinary
       let scratch = getTempDir() / "t_nim_package_path_handling-" & $getCurrentProcessId()
       
       removeDir(scratch)

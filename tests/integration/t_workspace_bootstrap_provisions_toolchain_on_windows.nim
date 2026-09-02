@@ -8,7 +8,9 @@
 ##   * ``windowsProvisioningPlan`` — the ordered toolchain ensure-steps
 ##     (gcc/gh/gpg/just/nim/python/repo) + a PowerShell env activation.
 ##   * ``cachePushSpawnCommand`` — the platform-parameterized detached
-##     cache-push command (POSIX ``setsid … &`` vs Windows ``start /b``).
+##     cache-push plan (POSIX ``setsid … &`` through ``sh`` vs Windows
+##     ``CreateProcessW`` + ``DETACHED_PROCESS``, which uses no shell at
+##     all; see W4).
 ##
 ## Both are PURE, platform-PARAMETERIZED functions (they take a
 ## ``WorkspaceTargetOs`` / install root, NOT ``when defined(windows)``), so
@@ -17,8 +19,11 @@
 ## their execution.
 ##
 ## DEFERRED (cannot run on Linux): live Windows toolchain provisioning
-## (the actual ``pwsh`` ensure-steps) and the real detached
-## ``cmd /c start /b`` spawn. This test covers the decision/plan layer only.
+## (the actual ``pwsh`` ensure-steps) and the real detached spawn. The
+## LIVE Windows behaviour of that spawn — the hook returns AND the child
+## actually runs — is pinned by
+## ``t_post_commit_dispatch_returns_and_detached_push_lands``; this test
+## covers the decision/plan layer only.
 ##
 ## Falsifiability:
 ##   * If the Windows plan omits a required tool (or is empty), the
@@ -99,27 +104,44 @@ suite "RA-19 — Windows workspace bootstrap parity (plan/decision layer)":
     # It references the env.ps1 dot-source.
     check plan.activation.activateCommand.contains("env.ps1")
 
-  test "test_ra19_cache_push_windows_uses_detached_start_not_posix_fork":
-    # Windows target → detached ``start /b`` form, NOT the POSIX
-    # ``setsid``/``&`` fork form.
+  test "test_ra19_cache_push_windows_is_shell_free_not_posix_fork":
+    # W4: the Windows target detaches through ``CreateProcessW`` +
+    # ``DETACHED_PROCESS`` and carries NO shell command line at all.
+    #
+    # It used to emit ``cmd /c start /b "" …`` and this case asserted that
+    # string. That decision was the defect: the empty ``start`` title is a
+    # literal ``"`` inside a line ``cmd.exe`` re-parses, ``quoteShell``
+    # escapes it as ``\"`` (the CommandLineToArgvW convention, which
+    # ``cmd.exe`` does not implement), and the real git post-commit hook
+    # hung forever on two wedged ``cmd.exe`` generations. The regression
+    # guard is therefore inverted: a Windows spec that grows a shell
+    # invocation back has re-acquired the defect.
     let spec = cachePushSpawnCommand(wtWindows, "C:\\repro.exe",
       "C:\\ws\\repo", "myworkspace")
     check spec.targetOs == wtWindows
-    check spec.shellInvocation.len > 0
-    check spec.detach == "start /b"
-    check spec.shellInvocation.contains("start /b")
-    # It re-invokes the cache-push entry point with the right args.
-    check spec.shellInvocation.contains("hooks")
-    check spec.shellInvocation.contains("cache-push")
-    check spec.shellInvocation.contains("myworkspace")
-    # Crucially it must NOT be the POSIX form (this is the regression guard:
-    # if Windows fell back to the POSIX ``setsid … &`` it would fail here).
-    check not spec.shellInvocation.contains("setsid")
-    check not spec.shellInvocation.contains("/dev/null")
-    check not spec.shellInvocation.endsWith("&")
+    check spec.detach == "CreateProcess:detached"
+    # No shell string, and specifically not the one that broke.
+    check spec.shellInvocation.len == 0
+    # The child is described as a real argv — nothing to re-parse.
+    check spec.argv == @["C:\\repro.exe", "hooks", "cache-push",
+      "--repo-root", "C:\\ws\\repo", "--workspace-name", "myworkspace"]
+    # Each argument is its OWN element: a quote-hostile workspace path
+    # cannot leak into a command line because there is no command line.
+    let hostile = cachePushSpawnCommand(wtWindows, "C:\\Program Files\\repro.exe",
+      "C:\\ws x\\re&po", "ws&x")
+    check hostile.argv[0] == "C:\\Program Files\\repro.exe"
+    check hostile.argv[4] == "C:\\ws x\\re&po"
+    check hostile.argv[6] == "ws&x"
+    check hostile.shellInvocation.len == 0
+    # And it must NOT be the POSIX form (if Windows fell back to the POSIX
+    # ``setsid … &`` this would fail).
+    check not spec.detach.contains("setsid")
 
   test "test_ra19_cache_push_posix_keeps_setsid_fork_form_unchanged":
     # POSIX target → existing ``setsid … &`` detached form (no regression).
+    # POSIX keeps its shell because ``quoteShell`` on POSIX IS ``sh``'s own
+    # quoting convention, so the round trip is lossless, and because the
+    # shell is doing real work there (``setsid`` + the ``&`` fork).
     let spec = cachePushSpawnCommand(wtPosix, "/usr/bin/repro",
       "/ws/repo", "myworkspace")
     check spec.targetOs == wtPosix
@@ -130,13 +152,27 @@ suite "RA-19 — Windows workspace bootstrap parity (plan/decision layer)":
     check spec.shellInvocation.endsWith("&")
     check spec.shellInvocation.contains("cache-push")
     check spec.shellInvocation.contains("myworkspace")
+    # The argv is the same on both targets — only the launch differs.
+    check spec.argv == @["/usr/bin/repro", "hooks", "cache-push",
+      "--repo-root", "/ws/repo", "--workspace-name", "myworkspace"]
     # And it must NOT be the Windows form.
     check not spec.shellInvocation.contains("start /b")
 
   test "test_ra19_cache_push_empty_inputs_produce_no_invocation":
     # No workspace name (or no exe) → nothing to launch, on either target.
+    # ``argv`` is the single "nothing to do" signal now, because the
+    # Windows target legitimately has no shell invocation even when there
+    # IS work; keying the guard off ``shellInvocation`` would silently
+    # disable the Windows push entirely.
     let noName = cachePushSpawnCommand(wtWindows, "C:\\repro.exe",
       "C:\\ws\\repo", "")
+    check noName.argv.len == 0
     check noName.shellInvocation.len == 0
     let noExe = cachePushSpawnCommand(wtPosix, "", "/ws/repo", "myworkspace")
+    check noExe.argv.len == 0
     check noExe.shellInvocation.len == 0
+    # Positive control: with both inputs present the Windows spec DOES have
+    # work — otherwise the two assertions above would be vacuous.
+    let present = cachePushSpawnCommand(wtWindows, "C:\\repro.exe",
+      "C:\\ws\\repo", "myworkspace")
+    check present.argv.len > 0
