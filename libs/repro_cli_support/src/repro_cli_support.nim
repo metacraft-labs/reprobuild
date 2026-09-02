@@ -13048,6 +13048,43 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
   result.add("}\n\n")
   result.add("REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)\n")
   result.add("cd \"$REPO_ROOT\"\n")
+  if hookName == "pre-commit":
+    # NF-2 — the ONE git binding that has to survive the scrub below, carried
+    # across it under a name git does not read.
+    #
+    # The scrub STAYS, and stays complete, for the reason it was written: a
+    # managed hook shells out to `repro`, `repro` walks the workspace's
+    # siblings, and `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` inherited
+    # from the committing repository would bind a `git -C <sibling>` back to
+    # it. This workspace has 150+ siblings for that to be wrong about, and the
+    # failure would be silent.
+    #
+    # `pre-commit` is the one hook that must also reach INTO the invoking
+    # repository — it stages the refreshed `flake.lock` into the index the
+    # commit in flight is being built from, and which file that is depends on
+    # how the commit was invoked. Measured with git 2.50.1: `git commit` and
+    # `git commit --amend` pass `.git/index`, `git commit -a` passes
+    # `<root>/.git/index.lock`, and `git commit -- <paths>` passes
+    # `<root>/.git/next-index-<pid>.lock`. For the last two, staging without the
+    # variable is not a near miss — git holds that lock for the commit in
+    # flight, so `git add` exits 128 and the commit goes out naming the OLD
+    # sibling revision.
+    #
+    # Hence a PRIVATE carrier rather than an exemption from the unset: nothing
+    # downstream binds a repository from `REPROBUILD_HOOK_GIT_INDEX_FILE`, so
+    # every sibling operation still runs against a clean git environment, and
+    # the single call that stages into this repository's own index opts in by
+    # name (`stageRefreshedFlakeLock`).
+    #
+    # A relative value is absolutised HERE, against the repository root, while
+    # the working directory is still known: `repro` runs `git -C <repo>`, and
+    # `.git/index` read from anywhere else is a different file, or none.
+    result.add("REPROBUILD_CAPTURED_GIT_INDEX_FILE=${GIT_INDEX_FILE:-}\n")
+    result.add("case \"$REPROBUILD_CAPTURED_GIT_INDEX_FILE\" in\n")
+    result.add("  ''|/*) ;;\n")
+    result.add("  *) REPROBUILD_CAPTURED_GIT_INDEX_FILE=" &
+      "\"$REPO_ROOT/$REPROBUILD_CAPTURED_GIT_INDEX_FILE\" ;;\n")
+    result.add("esac\n")
   # Resolve the invoking checkout first: Git's hook environment is the source
   # of truth for a linked worktree's root. Only the managed child boundary is
   # scrubbed; the dispatcher has already invoked a preserved user hook with
@@ -13106,8 +13143,18 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
     result.add("    exit 0\n")
     result.add("  fi\n")
     result.add("  REPRO_STATUS=0\n")
-    result.add("  \"$REPRO_CMD\" hooks dispatch " & hookName &
-      " --repo-root \"$REPO_ROOT\" -- \"$@\" || REPRO_STATUS=$?\n")
+    # The private index carrier is a PER-COMMAND assignment, not an export:
+    # the contract probe above and anything else this body may ever run see
+    # nothing of it. Only `pre-commit` carries one — keeping it out of the
+    # other bodies means only `pre-commit`'s contract digest moves, so a
+    # workspace's post-commit / post-merge / post-checkout hooks are not
+    # invalidated by a change that has nothing to do with them.
+    let indexHandover =
+      if hookName == "pre-commit":
+        HookGitIndexFileEnv & "=\"$REPROBUILD_CAPTURED_GIT_INDEX_FILE\" "
+      else: ""
+    result.add("  " & indexHandover & "\"$REPRO_CMD\" hooks dispatch " &
+      hookName & " --repo-root \"$REPO_ROOT\" -- \"$@\" || REPRO_STATUS=$?\n")
   result.add("  if [ \"$REPRO_STATUS\" -ne 0 ]; then " &
     "repro_dispatch_attribution; fi\n")
   result.add("  exit $REPRO_STATUS\n")
@@ -37539,57 +37586,62 @@ proc stageRefreshedFlakeLock(repoRoot, lockPath: string):
   ## `git add` the refreshed lock into the IN-FLIGHT index, so the commit
   ## being formed carries it.
   ##
-  ## ## `GIT_INDEX_FILE` is inherited, and that is load-bearing
+  ## ## Which index, and why the answer has to be asked for
   ##
   ## Every other git call in this file goes through `scrubbedGitRepositoryEnv`,
   ## which removes `GIT_INDEX_FILE` along with the rest of git's
   ## repository-local bindings. That is right for a call against a SIBLING
   ## repository and wrong here, because "the index" is precisely the object
   ## this call has to reach — and which file that is depends on how the commit
-  ## was invoked. Measured on this host with git 2.50, printing
+  ## was invoked. Measured on this host with git 2.50.1, printing
   ## `GIT_INDEX_FILE` from a real pre-commit hook:
   ##
-  ##   | `git commit`            | `.git/index`                  |
-  ##   | `git commit --amend`    | `.git/index`                  |
-  ##   | `git commit -a`         | `.git/index.lock`             |
-  ##   | `git commit -- <paths>` | `.git/next-index-<pid>.lock`  |
+  ##   | `git commit`            | `.git/index`                        |
+  ##   | `git commit --amend`    | `.git/index`                        |
+  ##   | `git commit -a`         | `<root>/.git/index.lock`            |
+  ##   | `git commit -- <paths>` | `<root>/.git/next-index-<pid>.lock` |
   ##
-  ## With the variable scrubbed, the two temporary-index forms do not merely
-  ## stage into the wrong place: `git add` exits 128 ("Unable to create
-  ## '.git/index.lock'") because git is holding that lock for the commit in
-  ## flight. With it inherited, `git commit`, `git commit --amend` and
-  ## `git commit -a` each stage correctly and the commit carries the refreshed
-  ## lock — pinned end to end by
-  ## `t_commit_records_the_sibling_revision_the_shell_actually_used`, whose
-  ## `-a` arm is the one a scrubbed environment turns red. The fourth form,
-  ## `git commit -- <paths>`, is reasoned about here and NOT covered by a case.
+  ## The first two land on the default index, which is where a `git add` with
+  ## no `GIT_INDEX_FILE` writes anyway. The other two do not, and there the
+  ## miss is not a near one: git holds `.git/index.lock` for the commit in
+  ## flight, so `git add` exits 128 ("Unable to create '.git/index.lock'"), the
+  ## commit goes out naming the OLD sibling revision, and the refreshed lock is
+  ## left as a working-tree modification. That is §3.1's headline failure
+  ## reproduced for two of the four ways people commit.
   ##
-  ## ## The limit of that, stated rather than implied
+  ## ## The value arrives under a PRIVATE name, and that is the whole design
   ##
-  ## Inheriting it here is necessary and not yet sufficient, because THE
-  ## MANAGED HOOK BODY SCRUBS IT FIRST. `vcsManagedHookBody` unsets the whole
-  ## of `GitRepositoryLocalEnv` (`repro_workspace_vcs/src/git_tool.nim`) before
-  ## dispatching, and `GIT_INDEX_FILE` is on that list — the list exists so a
-  ## `git -C <sibling>` call cannot be bound to the invoking repository, and it
-  ## predates there being a hook that must reach the invoking repository's own
-  ## in-flight index. So through the INSTALLED hook only the two forms whose
-  ## index is `.git/index` (`git commit`, `git commit --amend`) carry the
-  ## refreshed lock; `git commit -a` and `git commit -- <paths>` refresh and
-  ## then fail to stage.
+  ## `vcsManagedHookBody` unsets the whole of `GitRepositoryLocalEnv`
+  ## (`repro_workspace_vcs/src/git_tool.nim`) before dispatching, so that a
+  ## `git -C <sibling>` inside `repro` cannot be bound back to the repository
+  ## whose commit fired the hook. That unset STAYS and stays complete — a
+  ## workspace has 150+ siblings for a stray binding to be silently wrong
+  ## about. What the `pre-commit` body does instead is carry the value across
+  ## the scrub as `REPROBUILD_HOOK_GIT_INDEX_FILE` (already absolutised against
+  ## the repository root, while the hook still knew it), which git reads
+  ## nothing from. This call is the only reader, it names the repository
+  ## explicitly with `-C`, and it re-introduces `GIT_INDEX_FILE` into the
+  ## environment of that ONE child process.
   ##
-  ## That failure is LOUD, which is why it is a gap rather than this campaign's
-  ## own kind of defect: the 128 lands in `ok = false`, the log line reads
-  ## `NOT STAGED`, and two stderr lines name the remedy. Closing it means
-  ## threading the value through the managed body under a private name, which
-  ## changes the body and so every installed hook's contract digest — a
-  ## workspace-wide reinstall, and therefore not folded in here.
+  ## `GIT_INDEX_FILE` is still honoured as a fallback, for a `pre-commit` hook
+  ## that dispatches `repro hooks dispatch pre-commit` directly rather than
+  ## through the managed body — a hand-written hook, or one predating the
+  ## carrier. Such a hook has not scrubbed anything, so git's own variable is
+  ## still the live answer there.
   ##
-  ## A RELATIVE value is absolutised against the current working directory
-  ## before `-C` moves git elsewhere; `.git/index` interpreted from the wrong
-  ## directory is a different file, or none.
+  ## All four forms are pinned end to end by
+  ## `t_every_commit_form_stages_through_the_installed_hook`, which drives the
+  ## hook `repro hooks ensure --vcs` actually installs; its second case asserts
+  ## that nothing else of git's repository-local environment reaches `repro`.
   var env = scrubbedGitRepositoryEnv()
-  let indexFile = getEnv("GIT_INDEX_FILE")
+  var indexFile = getEnv(HookGitIndexFileEnv)
+  if indexFile.len == 0:
+    indexFile = getEnv("GIT_INDEX_FILE")
   if indexFile.len > 0:
+    # A relative value reaches here only on the fallback path (the carrier is
+    # absolutised in the hook body). It is resolved against the current working
+    # directory before `-C` moves git elsewhere — `.git/index` interpreted from
+    # the wrong directory is a different file, or none.
     env["GIT_INDEX_FILE"] =
       if isAbsolute(indexFile): indexFile else: absolutePath(indexFile)
   var identity: GitToolIdentity

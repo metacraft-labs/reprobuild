@@ -8513,6 +8513,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_every_commit_form_stages_through_the_installed_hook.nim",
+    binary: "build/test-bin/t_every_commit_form_stages_through_the_installed_hook",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_every_launch_path_is_monitored.nim",
     binary: "build/test-bin/t_every_launch_path_is_monitored",
     defines: @[],

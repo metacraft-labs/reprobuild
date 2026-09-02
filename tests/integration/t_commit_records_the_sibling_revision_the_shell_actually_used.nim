@@ -49,6 +49,12 @@
 ##      git holds that lock for the commit in flight, so a `git add` with
 ##      `GIT_INDEX_FILE` stripped exits 128.
 ##
+## Assertion (5) is made here against the fixture's directly-written hook,
+## which does not scrub git's environment. Every commit form through the hook
+## `repro hooks ensure --vcs` actually INSTALLS — which does scrub, and which
+## therefore has to carry the index across the scrub itself — is asserted by
+## `t_every_commit_form_stages_through_the_installed_hook`.
+##
 ## The second case in this suite asks `nix` itself, on a lock `nix flake lock`
 ## generated, whether the recorded revision is the one an evaluation resolves
 ## to. That is the only observation here that cannot be satisfied by a refresh
