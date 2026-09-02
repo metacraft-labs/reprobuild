@@ -38136,6 +38136,33 @@ type
     deferredPublishWrites: seq[DeferredParticipationWrite]
     exitCode*: int
 
+  FlakeGateVerdict* = object
+    ## NF-3 — what the gate's `flake.lock` stage observed about the pushed
+    ## repo. Declared HERE, beside the gate's own types, because
+    ## ``executeCheckPrePush`` is defined thousands of lines above the flake
+    ## block that produces it; ``verifyFlakeLockAgainstSiblings`` is
+    ## forward-declared for the same reason, exactly as
+    ## ``runPreCommitLockCommand`` already is.
+    ##
+    ## ``examined`` is NOT ``rows.len > 0``, and the distinction is the whole
+    ## contract: a repo with no flake, a flake whose inputs no sibling backs,
+    ## and a flake whose every pin matches its sibling are three different
+    ## answers, and only the last one is "verified, and it agrees". A verdict
+    ## that could not tell them apart would be the campaign's motivating bug
+    ## wearing the gate's uniform.
+    examined*: bool         ## a flake.nix + flake.lock pair was actually read
+    substituted*: int       ## inputs a workspace checkout substitutes
+    agreeing*: int          ## …of those, the ones whose pin IS the sibling HEAD
+    stale*: bool            ## at least one substituted pin disagrees
+    evidence*: string       ## machine-greppable per-input drift record
+    remediation*: string    ## the command, runnable from where this prints
+    summary*: string        ## one human line, for a notice
+    notices*: seq[string]
+
+proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
+  identity: GitToolIdentity;
+  toolProvisioning: ToolProvisioningMode): FlakeGateVerdict
+
 proc lockUpdateKindTag(kind: CheckLockUpdateKind): string =
   case kind
   of cluNone: "none"
@@ -41479,6 +41506,65 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           source: sourcePath))
         result.exitCode = 2
         return
+
+  # ---- 3b. NF-3: the IN-TREE lock is VERIFIED, never produced ------------
+  #
+  # Unified-Locking-And-Hooks.md §13.1 makes the update rule a property of the
+  # BACKEND: an out-of-tree lock is written by this gate (stage 4 below), an
+  # in-tree one is written by the `pre-commit` hook and the gate "verifies
+  # only". `flake.lock` is an in-tree committed lock (§13.6), so this stage
+  # writes nothing at all — it reads the file, compares each substituted
+  # input's pin against the sibling checkout's HEAD, and refuses on a
+  # disagreement with a command that RUNS FROM WHERE THIS MESSAGE IS PRINTED.
+  #
+  # Placed BEFORE stage 4 deliberately: verify the lock the revision already
+  # carries before writing the one this push will publish. After NF-2 this
+  # should almost never fire; when it does it means the commit path was
+  # bypassed (`--no-verify`, a hook that was never installed, a lock edited by
+  # hand), which is exactly what a gate is for.
+  #
+  # The override set this stage verifies is resolved EXACTLY — `repro develop`'s
+  # own composed selection, bound by the same binder that produces the
+  # `--override-input` arguments the dev shell was given. There is no cheap
+  # pre-pass and no escalation.
+  #
+  # There was one, and it is gone because it failed OPEN. It derived a candidate
+  # set from workspace membership on the theory that the three filesystem
+  # conditions it applied were a superset of the exact answer's; they were not —
+  # the exact binder did not require a sibling to be a git checkout, so a
+  # `flake.nix`-carrying sibling with no `.git` was substituted, drifted, and
+  # never became a candidate. The gate printed OK. A gate is the correctness
+  # boundary and a rare operation, so it pays the exact query's cost rather than
+  # trading the guarantee for it.
+  if parsed.currentRepo.len > 0:
+    var verdict: FlakeGateVerdict
+    try:
+      verdict = verifyFlakeLockAgainstSiblings(parsed.currentRepo,
+        parsed.workspaceRoot, identity, parsed.toolProvisioning)
+    except CatchableError as err:
+      # Not swallowed into "the lock is fine": a verification that could not
+      # run is reported as a verification that could not run.
+      verdict = FlakeGateVerdict(examined: true, stale: true,
+        evidence: "flake-verify-failed: " & err.msg,
+        remediation: "investigate the flake.lock verification failure (" &
+          err.msg & "), then re-push",
+        summary: "flake.lock could not be verified against the workspace " &
+          "siblings: " & err.msg)
+    for n in verdict.notices: result.notices.add(n)
+    if verdict.stale:
+      result.failures.add(CheckFailure(
+        repo: currentRepoPath,
+        property: "flake_lock_stale",
+        remediation: verdict.remediation,
+        evidence: verdict.evidence,
+        source: parsed.currentRepo / "flake.lock"))
+      result.exitCode = 2
+      return
+    # A verified-and-agreeing flake is NOT announced. §NF-3's own test
+    # (`a_clean_workspace_pushes_without_a_diagnostic`) is the reason: a gate
+    # that says something on every clean push trains people to scroll past the
+    # one push where it says something else. The verdict is still in the
+    # report's structured form for anyone who asks.
 
   # ---- 4. lock currency --------------------------------------------------
   # Pick the manifest-layer root the way M11 / M12 do, then read the
@@ -55349,15 +55435,31 @@ proc flakeOverrideWorkspaceRoot(explicit: string): string =
     dir = parent
   resolveInvokedWorkspaceRoot("")
 
+proc flakeSiblingIsGitCheckout(dir: string): bool =
+  ## Is ``dir`` a git checkout? BOTH shapes count, and that is the whole point
+  ## of spelling this out once: in an ordinary clone ``.git`` is a DIRECTORY,
+  ## but in a linked worktree (`git worktree add`, which is how
+  ## ``repro branch ../<name>`` forks a workspace) it is a regular FILE holding
+  ## a ``gitdir:`` pointer.
+  ##
+  ## Testing only for the directory silently misclassifies every linked
+  ## worktree as "not a repo", and every caller fails OPEN in the dangerous
+  ## direction when that happens: the binder would drop the input and report
+  ## "nothing can have moved", and the dirty-sibling scope would drop the repo
+  ## and stop it blocking. Both are §3.1 reintroduced quietly, which is the one
+  ## outcome this campaign exists to prevent.
+  dirExists(extendedPath(dir / ".git")) or
+    fileExists(extendedPath(dir / ".git"))
+
 type
   FlakeOverrideBinding* = object
     ## One substitution: the flake input name, the workspace repo backing it,
     ## and that repo's checkout directory. This is the answer NF-1 emits as
-    ## ``--override-input <input> path:<path>`` and the answer NF-2 records
-    ## into ``flake.lock`` — ONE computation with two consumers, so the pins
-    ## the lock carries cannot describe a different substitution than the one
-    ## the dev shell performed. Two parallel derivations of "which inputs are
-    ## overridden" would be exactly the drift this campaign exists to remove.
+    ## ``--override-input <input> path:<path>``, the answer NF-2 records into
+    ## ``flake.lock``, and the answer NF-3 compares against the pin — ONE
+    ## computation with three consumers, so the pins the lock carries cannot
+    ## describe a different substitution than the one the dev shell performed,
+    ## and the drift report cannot describe a third.
     input*: string
     repo*: string
     path*: string
@@ -55500,6 +55602,418 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     result.add(FlakeOverrideBinding(input: name, repo: repo, path: dir))
   result.sort(proc (a, b: FlakeOverrideBinding): int = cmp(a.input, b.input))
 
+# ---------------------------------------------------------------------------
+# NF-3 — ONE override-state report, read by every consumer.
+#
+# Spec: reprobuild-specs/Nix-Flake-Coexistence.md §3.1 (ahead: you publish
+# something you never built), §3.2 (behind: you are testing a downgrade), §4
+# ("the gate VERIFIES rather than produces") and §5 (the report itself: "which
+# inputs are substituted, and for each, whether the sibling is at, ahead of,
+# or behind its pin — which is what the ambient shell-entry warning consumes");
+# reprobuild-specs/Unified-Locking-And-Hooks.md §13.1 (an in-tree lock is
+# verified, never written, at pre-push), §13.5 (what pre-push checks for a
+# committed lock) and §"the named command must RUN where the message is
+# printed"; reprobuild-specs/Nix-Flake-Coexistence.milestones.org §NF-3.
+#
+# ## ONE resolution of the override set, and why there cannot be two
+#
+# The report is computed from ``flakeBindInputsToCheckouts`` — NF-1's binder
+# over ``repro develop``'s own composed selection — and from nothing else.
+# Every consumer reads THAT: the arguments `.envrc` splices into `use flake`,
+# the ambient drift report printed beside them, the commit-path refresh, and
+# the pre-push gate.
+#
+# An earlier shape derived the override set twice: once exactly, and once
+# cheaply from workspace membership on the theory that the cheap answer was a
+# superset safe to warn from. It was not a superset in either direction, and
+# both errors were measured on this workspace:
+#
+#   * it OVER-reported — a repo that is in the membership, on disk, a git
+#     checkout, carries a `flake.nix` and is off its pin, but is `evidence-only`
+#     and therefore NOT in the develop set, was reported as "BEHIND … your dev
+#     shell is building the OLDER code". The dev shell was building the pin. A
+#     warning that says the shell is building something it is not is §5's inert
+#     knob from the other side;
+#   * it UNDER-reported — the cheap derivation required the sibling to be a git
+#     checkout and the exact binder did not, so a `flake.nix`-carrying sibling
+#     with no `.git` was substituted by the exact answer and invisible to the
+#     cheap one. The pre-push gate escalated only when the cheap pass found a
+#     candidate, so it printed OK and let the push through. A gate that fails
+#     open is not a gate.
+#
+# The cost that motivated the split is real and is not paid twice: shell entry
+# runs ONE command (`repro flake override-args`), which resolves the develop
+# set once and prints both the arguments and the drift report. The residual
+# cost is `repro develop --list`'s own, recorded as an outstanding item in the
+# milestone rather than worked around with an answer that is wrong.
+#
+# ## The asymmetry, which is a spec rule and not a preference (§3.2)
+#
+#   * a sibling AHEAD of its pin means YOU ARE DEVELOPING. Normal. The gate
+#     refuses it (what you built is not what you would publish — §3.1) but the
+#     ambient report does not treat it as a problem.
+#   * a sibling BEHIND its pin almost always means YOUR CHECKOUT IS STALE, not
+#     that you chose to downgrade. It is NOT an error — deliberately testing an
+#     older dependency is legitimate — but it MUST NOT be silent, because
+#     unknowingly testing one is how a green shell certifies nothing.
+# ---------------------------------------------------------------------------
+
+const flakeOverrideStatusLabel = "repro flake override-status"
+
+type
+  FlakePinRelation* = enum
+    ## How a sibling checkout stands against the revision `flake.lock` pins.
+    fprAt          ## the sibling's HEAD IS the pinned revision
+    fprAhead       ## the pin is an ancestor of HEAD — §3.1, you are developing
+    fprBehind      ## HEAD is an ancestor of the pin — §3.2, the checkout is stale
+    fprDiverged    ## neither is an ancestor of the other
+    fprUnknown     ## HEAD is not the pin, but the DIRECTION is not computable
+    fprUnpinned    ## the input carries no pin of its own to disagree with
+
+  FlakeOverrideStateRow* = object
+    input*: string        ## the flake input name
+    repo*: string         ## the workspace repo backing it
+    path*: string         ## that repo's checkout
+    node*: string         ## the `flake.lock` node the input resolves to
+    pinnedRev*: string    ## what `flake.lock` says
+    siblingRev*: string   ## what the checkout is actually at
+    relation*: FlakePinRelation
+    aheadBy*: int         ## commits in HEAD that the pin does not have
+    behindBy*: int        ## commits in the pin that HEAD does not have
+    detail*: string       ## why an unknown/unpinned row is what it is
+
+  FlakeOverrideState* = object
+    ## The §5 report. ``ok`` and ``examined`` are separate on purpose: NF-1's
+    ## rule that "an empty result and a failure must not look alike" applies
+    ## twice over here, because a report with no rows can mean four different
+    ## things and only one of them is good news.
+    ok*: bool             ## the report could be produced at all
+    examined*: bool       ## a flake.nix + flake.lock pair was read
+    workspaceRoot*: string
+    flakePath*: string
+    lockPath*: string
+    rows*: seq[FlakeOverrideStateRow]
+    notices*: seq[string]
+    refusals*: seq[string]
+
+proc flakePinRelationTag*(relation: FlakePinRelation): string =
+  case relation
+  of fprAt: "at"
+  of fprAhead: "ahead"
+  of fprBehind: "behind"
+  of fprDiverged: "diverged"
+  of fprUnknown: "unknown"
+  of fprUnpinned: "unpinned"
+
+proc shortRev(rev: string): string =
+  if rev.len >= 12: rev[0 ..< 12] else: rev
+
+proc flakeLockPinnedRevisions*(lockText: string):
+    tuple[ok: bool; diagnostic: string;
+          pins: Table[string, tuple[node, rev: string]];
+          unpinned: Table[string, tuple[node, reason: string]]] =
+  ## Every root input of a `flake.lock`, split into the ones that pin a
+  ## revision and the ones that cannot.
+  ##
+  ## Note what is NOT consulted: `narHash`, `lastModified` and `revCount`.
+  ## NF-2's refresh DELETES those three from any node whose `rev` it moved (a
+  ## stale `narHash` makes nix 2.32.8 silently evaluate the OLD tree, and a
+  ## correct one cannot be computed for an unpushed sibling revision), so a
+  ## verifier that required them would call every lock NF-2 wrote corrupt.
+  ## `rev` is a content hash of the tree git hands nix, so it is the whole of
+  ## the pin this report needs.
+  result.pins = initTable[string, tuple[node, rev: string]]()
+  result.unpinned = initTable[string, tuple[node, reason: string]]()
+  var doc: JsonNode
+  try:
+    doc = parseJson(lockText)
+  except CatchableError as err:
+    result.diagnostic = "flake.lock is not readable as JSON (" & err.msg & ")"
+    return
+  if doc.kind != JObject or not doc.hasKey("nodes") or
+      doc["nodes"].kind != JObject:
+    result.diagnostic = "flake.lock has no `nodes` object, so it is not a " &
+      "flake lock"
+    return
+  let rootKey =
+    if doc.hasKey("root") and doc["root"].kind == JString: doc["root"].getStr()
+    else: "root"
+  let nodes = doc["nodes"]
+  if not nodes.hasKey(rootKey) or nodes[rootKey].kind != JObject:
+    result.diagnostic = "flake.lock names '" & rootKey &
+      "' as its root node, but `nodes` holds no such object, so no input " &
+      "name resolves to anything"
+    return
+  let rootNode = nodes[rootKey]
+  if not rootNode.hasKey("inputs"):
+    # nix writes `"root": {}` — no `inputs` member at all — for a flake that
+    # declares no inputs. That is a COMPLETE lock which happens to pin nothing,
+    # not a damaged one, and the difference matters because the gate refuses on
+    # a damaged lock. Reported as `ok` with no pins and no unpinned inputs,
+    # which every consumer reads as "there is nothing here for a sibling to
+    # disagree with".
+    result.ok = true
+    return
+  if rootNode["inputs"].kind != JObject:
+    result.diagnostic = "flake.lock's root node has an `inputs` member that " &
+      "is not an object, so no input name resolves to a node"
+    return
+  for name, target in rootNode["inputs"].pairs:
+    if target.kind != JString:
+      # A `follows` PATH (an array of node names). See the decision recorded
+      # against `fprUnpinned` in `flakeOverrideStateReport`.
+      result.unpinned[name] = (node: "", reason:
+        "it resolves through a `follows` path rather than to a node of its " &
+        "own, so it carries no pin that could disagree with a sibling")
+      continue
+    let nodeKey = target.getStr()
+    if not nodes.hasKey(nodeKey) or nodes[nodeKey].kind != JObject:
+      result.unpinned[name] = (node: nodeKey, reason:
+        "it names node '" & nodeKey & "', which is absent from `nodes`")
+      continue
+    let node = nodes[nodeKey]
+    if not node.hasKey("locked") or node["locked"].kind != JObject:
+      result.unpinned[name] = (node: nodeKey, reason:
+        "node '" & nodeKey & "' carries no `locked` object")
+      continue
+    let locked = node["locked"]
+    if not locked.hasKey("rev") or locked["rev"].kind != JString or
+        locked["rev"].getStr().len == 0:
+      result.unpinned[name] = (node: nodeKey, reason:
+        "node '" & nodeKey & "' pins no `rev` (a `path:` or dirty-tree input " &
+        "is locked by content, not by revision)")
+      continue
+    result.pins[name] = (node: nodeKey, rev: locked["rev"].getStr())
+  result.ok = true
+
+proc flakeClassifyPin(identity: GitToolIdentity;
+    dir, pinnedRev, headRev: string):
+    tuple[relation: FlakePinRelation; aheadBy, behindBy: int; detail: string] =
+  ## Where the checkout at ``dir`` stands relative to ``pinnedRev``.
+  ##
+  ## The AT/not-at half is a string comparison and is therefore always
+  ## answerable. Only the DIRECTION needs git history, and when the pinned
+  ## revision is not in the checkout (never fetched, or rewritten away) the
+  ## direction is reported as `unknown` WITH ITS REASON rather than guessed —
+  ## "the lock and the sibling disagree" is still established, which is the
+  ## proposition the gate acts on.
+  if headRev.len > 0 and headRev == pinnedRev:
+    return (relation: fprAt, aheadBy: 0, behindBy: 0, detail: "")
+  if headRev.len == 0:
+    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
+      "the checkout's HEAD could not be read")
+  let present = gitRunPlain(identity,
+    ["-C", dir, "cat-file", "-e", pinnedRev & "^{commit}"])
+  if present.code != 0:
+    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
+      "the pinned revision " & shortRev(pinnedRev) & " is not present in " &
+      dir & ", so the DIRECTION of the drift could not be computed (run " &
+      "`git -C " & dir & " fetch --all` and re-run this to learn it)")
+  let counts = gitRunPlain(identity,
+    ["-C", dir, "rev-list", "--left-right", "--count",
+     pinnedRev & "..." & headRev])
+  if counts.code != 0:
+    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
+      "`git rev-list --left-right --count` failed in " & dir & " (" &
+      counts.output.strip() & ")")
+  let fields = counts.output.strip().splitWhitespace()
+  if fields.len != 2:
+    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
+      "`git rev-list --left-right --count` answered '" &
+      counts.output.strip() & "', which is not two counts")
+  var onlyPin, onlyHead: int
+  try:
+    onlyPin = parseInt(fields[0])
+    onlyHead = parseInt(fields[1])
+  except ValueError:
+    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
+      "`git rev-list --left-right --count` answered '" &
+      counts.output.strip() & "', which is not two counts")
+  if onlyPin == 0 and onlyHead > 0:
+    return (relation: fprAhead, aheadBy: onlyHead, behindBy: 0, detail: "")
+  if onlyHead == 0 and onlyPin > 0:
+    return (relation: fprBehind, aheadBy: 0, behindBy: onlyPin, detail: "")
+  (relation: fprDiverged, aheadBy: onlyHead, behindBy: onlyPin, detail: "")
+
+proc flakeOverrideStateReport*(flakeRoot: string;
+    bindings: openArray[FlakeOverrideBinding];
+    identity: GitToolIdentity): FlakeOverrideState =
+  ## THE report of §5, and the single place at/ahead/behind is decided.
+  ##
+  ## ``bindings`` is the substitution set — the very list of
+  ## ``--override-input <name> path:<dir>`` arguments the dev shell was given —
+  ## so every row describes an input nix really is building from a workspace
+  ## checkout, and every such input has a row. The report cannot describe a
+  ## different substitution than the one that happened, because there is only
+  ## one derivation of it.
+  ##
+  ## ## `follows`-routed inputs are UNPINNED, which is not drift — and not
+  ## ## silence either
+  ##
+  ## NF-2 skips a `follows`-routed input with a notice, and NF-3 has to decide
+  ## whether that skip is drift. It is not, and the reason is the same rule the
+  ## refusal itself is bound by. Such an input resolves to ANOTHER input's
+  ## node; it carries no pin of its own, so "the pin disagrees with the
+  ## sibling" is not a proposition that can be false about it. Refusing would
+  ## produce a gate nobody can pass: `refreshFlakeLockText` deliberately
+  ## declines to move a `follows` input (following it is a re-solve, not an
+  ## observation), so the refusal would name a command that cannot help, which
+  ## is precisely what §"the named command must RUN where the message is
+  ## printed" exists to forbid. Re-pointing the input is `nix flake update`'s
+  ## job — a solver decision, explicit and rare (§4).
+  ##
+  ## It is still a ROW, with `relation = unpinned` and its reason, and it is
+  ## counted separately in every rendering. "No drift" and "nothing here could
+  ## be checked" must not look alike.
+  result.flakePath = flakeRoot / "flake.nix"
+  result.lockPath = flakeRoot / "flake.lock"
+  if not fileExists(result.flakePath) or not fileExists(result.lockPath):
+    # Ordinary and quiet: a repo without both halves has no pins for a sibling
+    # to disagree with. `examined` stays false so no caller can read this as
+    # "verified, and it agrees".
+    result.ok = true
+    return
+  var lockText = ""
+  try:
+    lockText = readFile(result.lockPath)
+  except CatchableError as err:
+    result.refusals.add(result.lockPath & " could not be read (" & err.msg &
+      "). Remedy: fix the file's permissions (`chmod +r " & result.lockPath &
+      "`).")
+    return
+  let parsed = flakeLockPinnedRevisions(lockText)
+  if not parsed.ok:
+    result.refusals.add(result.lockPath & ": " & parsed.diagnostic &
+      ". Remedy: restore it from git (`git -C " & flakeRoot &
+      " checkout -- flake.lock`) or regenerate it with `nix flake lock`.")
+    return
+  result.examined = true
+  result.ok = true
+  for b in bindings:
+    var row = FlakeOverrideStateRow(input: b.input, repo: b.repo, path: b.path)
+    if not parsed.pins.hasKey(b.input):
+      row.relation = fprUnpinned
+      if parsed.unpinned.hasKey(b.input):
+        row.node = parsed.unpinned[b.input].node
+        row.detail = parsed.unpinned[b.input].reason
+      else:
+        row.detail = "it is not one of the root node's inputs in " &
+          result.lockPath & ", so there is no pin to compare against"
+      result.rows.add(row)
+      continue
+    row.node = parsed.pins[b.input].node
+    row.pinnedRev = parsed.pins[b.input].rev
+    let head = gitRunPlain(identity, ["-C", b.path, "rev-parse", "HEAD"])
+    if head.code == 0: row.siblingRev = head.output.strip()
+    let verdict = flakeClassifyPin(identity, b.path, row.pinnedRev,
+      row.siblingRev)
+    row.relation = verdict.relation
+    row.aheadBy = verdict.aheadBy
+    row.behindBy = verdict.behindBy
+    row.detail = verdict.detail
+    if head.code != 0:
+      row.detail = "HEAD of " & b.path & " could not be read (" &
+        head.output.strip() & ")"
+    result.rows.add(row)
+
+proc flakeStateDisagrees*(row: FlakeOverrideStateRow): bool =
+  ## Does this row say the lock and the sibling disagree? `at` does not;
+  ## `unpinned` cannot (see the report's own header). Everything else does,
+  ## INCLUDING `unknown`: the AT/not-at comparison already succeeded there and
+  ## only the direction is missing.
+  row.relation notin {fprAt, fprUnpinned}
+
+proc flakeRowSentence(row: FlakeOverrideStateRow): string =
+  ## One row, rendered for a human, always naming the sibling and the distance.
+  let who = "'" & row.repo & "' (flake input '" & row.input & "')"
+  case row.relation
+  of fprAt:
+    who & " is AT its pin " & shortRev(row.pinnedRev)
+  of fprAhead:
+    who & " is " & $row.aheadBy & " commit(s) AHEAD of the revision " &
+      "flake.lock pins (pin " & shortRev(row.pinnedRev) & ", HEAD " &
+      shortRev(row.siblingRev) & ")"
+  of fprBehind:
+    who & " is " & $row.behindBy & " commit(s) BEHIND the revision " &
+      "flake.lock pins (pin " & shortRev(row.pinnedRev) & ", HEAD " &
+      shortRev(row.siblingRev) & ")"
+  of fprDiverged:
+    who & " has DIVERGED from the revision flake.lock pins — " &
+      $row.aheadBy & " commit(s) ahead and " & $row.behindBy &
+      " behind (pin " & shortRev(row.pinnedRev) & ", HEAD " &
+      shortRev(row.siblingRev) & ")"
+  of fprUnknown:
+    who & " does NOT match the revision flake.lock pins (pin " &
+      shortRev(row.pinnedRev) & ", HEAD " & shortRev(row.siblingRev) &
+      "); distance UNKNOWN: " & row.detail
+  of fprUnpinned:
+    who & " is substituted but carries no pin to compare: " & row.detail
+
+proc flakeStateCounts*(state: FlakeOverrideState):
+    tuple[at, ahead, behind, diverged, unknown, unpinned: int] =
+  for row in state.rows:
+    case row.relation
+    of fprAt: inc result.at
+    of fprAhead: inc result.ahead
+    of fprBehind: inc result.behind
+    of fprDiverged: inc result.diverged
+    of fprUnknown: inc result.unknown
+    of fprUnpinned: inc result.unpinned
+
+proc flakeStateSummaryLine(state: FlakeOverrideState): string =
+  let c = flakeStateCounts(state)
+  $state.rows.len & " substituted input(s) of " & state.lockPath & ": " &
+    $c.at & " at pin, " & $c.ahead & " ahead, " & $c.behind & " behind, " &
+    $c.diverged & " diverged, " & $c.unknown & " unknown, " &
+    $c.unpinned & " unpinned"
+
+proc flakeReconcileCommand(row: FlakeOverrideStateRow;
+    flakeRoot, workspaceRoot: string): string =
+  ## The command that reconciles ONE row, spelled so it runs from anywhere —
+  ## including, necessarily, from the directory the message is printed in.
+  ## §"the named command must RUN where the message is printed", rule 2:
+  ## "spell out the location flag", because `repro flake refresh-lock`
+  ## resolves a bare invocation against the current directory.
+  case row.relation
+  of fprBehind:
+    # The checkout is the stale half, so the FIRST remedy moves the checkout,
+    # not the lock. Recording a downgrade is still available and named second,
+    # because deliberately testing an older dependency is legitimate (§3.2).
+    "git -C " & row.path & " merge --ff-only " & row.pinnedRev &
+      "  (or, to record the downgrade instead: repro flake refresh-lock " &
+      "--flake=" & flakeRoot & " --workspace-root=" & workspaceRoot & ")"
+  else:
+    "repro flake refresh-lock --flake=" & flakeRoot &
+      " --workspace-root=" & workspaceRoot
+
+proc flakeRenderDriftReport(state: FlakeOverrideState;
+    flakeRoot, workspaceRoot, label: string) =
+  ## The §3.2 ambient rendering, on stderr, shared by every verb that computes
+  ## the override set — so the warning a developer sees beside their dev-shell
+  ## arguments and the one `repro flake override-status` prints are the same
+  ## text produced by the same code.
+  for row in state.rows:
+    case row.relation
+    of fprAt:
+      discard
+    of fprBehind:
+      # §3.2, the whole point: NAMED, at ANY distance, with the reconciling
+      # command. The measured case that motivated it was three commits — small
+      # enough that a threshold would have hidden it, and it was hidden for as
+      # long as nothing looked.
+      stderr.writeLine(label & ": WARNING: " & flakeRowSentence(row) &
+        ". A sibling behind its pin almost always means your checkout is " &
+        "stale rather than that you chose to downgrade, and your dev shell " &
+        "is building the OLDER code. This is a warning, not an error: " &
+        "deliberately testing an older dependency is legitimate. Reconcile " &
+        "with: `" & flakeReconcileCommand(row, flakeRoot, workspaceRoot) & "`")
+    of fprAhead:
+      stderr.writeLine(label & ": " & flakeRowSentence(row) &
+        " — you are developing; committing here records it in flake.lock.")
+    of fprDiverged, fprUnknown, fprUnpinned:
+      stderr.writeLine(label & ": " & flakeRowSentence(row))
+  stderr.writeLine(label & ": " & flakeStateSummaryLine(state))
+
 proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   ## ``repro flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|
   ## …every other `repro develop` set-form selector] [--flake=DIR]
@@ -55517,6 +56031,24 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   ## remedy on stderr. `.envrc` splices stdout into a `use flake` line, so a
   ## diagnostic printed there would become a flake argument and the resulting
   ## error would name a nix parse failure instead of the real cause.
+  ##
+  ## ## It also prints the §3.2 drift report, and that is why `.envrc` is ONE
+  ## ## line
+  ##
+  ## The ambient behind-pin warning (§3.2) is computed from THESE bindings —
+  ## the very arguments printed on stdout — so shell entry resolves the develop
+  ## set exactly ONCE and gets both. A second command computing the same
+  ## override set a second way was tried and removed: it disagreed with this
+  ## one in both directions (see the report block's header), and on a workspace
+  ## this size it would have doubled the cost of every directory entry to say
+  ## something less true.
+  ##
+  ## The report goes to STDERR, so the stdout contract above is untouched, and
+  ## a report that cannot be produced is a loud stderr line rather than a
+  ## refusal: the override ARGUMENTS are still correct and still the ones the
+  ## shell should use, and a dev shell that refuses to activate because
+  ## `flake.lock` is unreadable would stop work over something the shell does
+  ## not depend on.
   var
     flakeDir = ""
     stripSpec = ""
@@ -55524,6 +56056,11 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
     asJson = false
     explicitRoot = ""
     passthrough: seq[string]
+    toolProvisioning = tpmPathOnly
+      ## Seeded, never left ``tpmUnspecified``: ``resolveGitTool`` REJECTS that
+      ## outright, and this is the line `.envrc` runs on every directory entry.
+      ## The same defect and the same fix are recorded for
+      ## ``repro workspace migrate-locks`` and ``repro flake refresh-lock``.
     i = 0
   while i < args.len:
     let arg = args[i]
@@ -55537,6 +56074,10 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
     elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       explicitRoot = valueFromFlag(args, i, "--workspace-root")
       passthrough.add("--workspace-root=" & explicitRoot)
+    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+      passthrough.add(arg)
     else:
       passthrough.add(arg)
     inc i
@@ -55557,6 +56098,16 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
       "`_fo_args=\"$(repro flake override-args --all)\" || exit 1`.")
     2
 
+  # ---- git, needed to observe each bound checkout's revision --------------
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
+  except CatchableError as err:
+    refusals.add("git is not resolvable (" & err.msg &
+      "), so no sibling's revision can be observed and an override could be " &
+      "emitted for a directory whose content nothing can name")
+    return refuse()
+
   # ---- the develop set, through `repro develop`'s own composer ------------
   let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
   if not selection.ok:
@@ -55567,8 +56118,9 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   let selectedNames = selection.selected
 
   # ---- the flake's declared inputs ---------------------------------------
-  let declared = flakeDeclaredInputsAt(
-    if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir())
+  let flakeRoot =
+    if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
+  let declared = flakeDeclaredInputsAt(flakeRoot)
   let flakePath = declared.flakePath
   if not declared.ok:
     for r in declared.refusals: refusals.add(r)
@@ -55582,6 +56134,9 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   # ---- bind inputs to develop-set checkouts ------------------------------
   let emitted = flakeBindInputsToCheckouts(inputNames, checkoutOf, suffixes,
     report)
+
+  # ---- the SAME bindings, compared against the pins (§3.2) ----------------
+  let state = flakeOverrideStateReport(flakeRoot, emitted, identity)
 
   if asJson:
     var arr = newJArray()
@@ -55614,6 +56169,22 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
     " repo(s) selected; " & flakePath & " declares " & $inputNames.len &
     " input(s)" &
     (if suffixes.len > 0: "; stripping " & suffixes.join(",") else: "") & ")")
+  # ---- the ambient §3.2 report, from the bindings just emitted ------------
+  if not state.ok:
+    # LOUD, and not a refusal: the arguments above are correct and the shell
+    # should use them. What was lost is the ability to say how each substituted
+    # sibling stands against its pin, which is exactly the silence NF-3 exists
+    # to end — so it is stated in the same words the report would have used.
+    for r in state.refusals:
+      stderr.writeLine(flakeOverrideStatusLabel & ": " & r)
+    stderr.writeLine(flakeOverrideStatusLabel &
+      ": the override state could not be determined, so whether any " &
+      "substituted sibling is AHEAD of or BEHIND its flake.lock pin is " &
+      "UNKNOWN. This is NOT the same answer as 'nothing has drifted'. The " &
+      "override arguments above are unaffected.")
+  elif state.examined:
+    flakeRenderDriftReport(state, flakeRoot, selection.workspaceRoot,
+      flakeOverrideStatusLabel)
   0
 
 # ---------------------------------------------------------------------------
@@ -56008,22 +56579,6 @@ type
       ## observable rather than inferred.
     exitCode*: int
 
-proc flakeSiblingIsGitCheckout(dir: string): bool =
-  ## Is ``dir`` a git checkout? BOTH shapes count, and that is the whole point
-  ## of spelling this out once: in an ordinary clone ``.git`` is a DIRECTORY,
-  ## but in a linked worktree (`git worktree add`, which is how
-  ## ``repro branch ../<name>`` forks a workspace) it is a regular FILE holding
-  ## a ``gitdir:`` pointer.
-  ##
-  ## Testing only for the directory silently misclassifies every linked
-  ## worktree as "not a repo", and both callers below fail OPEN in the
-  ## dangerous direction when that happens: the commit-path pre-filter skips
-  ## the input and reports "nothing can have moved", and the dirty-sibling
-  ## scope drops the repo and stops it blocking. Both are §3.1 reintroduced
-  ## quietly, which is the one outcome this campaign exists to prevent.
-  dirExists(extendedPath(dir / ".git")) or
-    fileExists(extendedPath(dir / ".git"))
-
 proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
     bound: openArray[FlakeOverrideBinding]; notices: var seq[string]):
       seq[tuple[name, path: string]] =
@@ -56274,7 +56829,21 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
     asJson = false
     explicitRoot = ""
     currentRepo = ""
-    toolProvisioning = tpmUnspecified
+    toolProvisioning = tpmPathOnly
+      ## NOT ``tpmUnspecified``, and the difference is the whole difference
+      ## between a command that runs and one that only reads as though it
+      ## would. ``resolveGitTool`` REJECTS ``tpmUnspecified`` outright ("no
+      ## provisioning mode was selected before resolving git; callers must
+      ## parse --tool-provisioning before invoking resolveGitTool"), so this
+      ## verb — the one NF-3's pre-push refusal tells the operator to run —
+      ## exited 2 with that message for every invocation that did not spell
+      ## the flag out. Every other verb's parser seeds ``tpmPathOnly`` and
+      ## lets ``--tool-provisioning`` override it (the same defect was fixed
+      ## for ``repro workspace migrate-locks``); this now does too.
+      ##
+      ## Found by NF-3's `t_push_refuses_when_the_lock_disagrees_with_the_
+      ## siblings`, which does not match the emitted remedy against a pattern
+      ## but EXECUTES it in the directory the refusal names.
     passthrough: seq[string]
     i = 0
   while i < args.len:
@@ -56500,13 +57069,416 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     # wrong and let the commit stand.
     result.line = "flake-lock error: " & err.msg
 
+
+proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
+    identity: GitToolIdentity;
+    toolProvisioning: ToolProvisioningMode): FlakeGateVerdict =
+  ## CONSUMER 1 — the pre-push gate's in-tree-lock verification (§13.1's
+  ## "verifies only" row, §13.5's contract).
+  ##
+  ## ONE resolution, and it is the EXACT one. An earlier shape ran a cheap
+  ## membership-derived pre-pass and escalated to the develop set only when the
+  ## cheap pass found a candidate. That pre-pass was not a superset: a sibling
+  ## carrying a `flake.nix` and no `.git` is substituted by the exact binder and
+  ## was invisible to it, so the gate printed OK and let the push through. A
+  ## gate that fails open is not a gate.
+  ##
+  ## The price is that a push resolves the develop set, which on a large
+  ## workspace is a minutes-scale query. That is the honest cost of the
+  ## guarantee, and push is the right place to pay it: it is rare, it is the
+  ## publication boundary, and everything downstream of it consumes the lock
+  ## this stage is verifying.
+  let flakeRoot = absolutePath(repoRoot)
+  if not fileExists(flakeRoot / "flake.nix") or
+      not fileExists(flakeRoot / "flake.lock"):
+    return
+  # ASK THE LOCK FIRST, and the order is not stylistic.
+  #
+  # `flakeDeclaredInputsAt` REFUSES when its scan finds no input, because
+  # (NF-1) "a flake with no inputs has nothing to override, and a parse that
+  # matched nothing looks exactly the same". That rule is right for a verb the
+  # caller invoked; applied blind in a GATE it refuses the push of any repo
+  # whose flake genuinely declares no inputs — a real shape, and one no command
+  # can repair, which is the failure mode §"the named command must RUN where
+  # the message is printed" exists to forbid.
+  #
+  # The lock settles it without guessing. A `flake.lock` whose root node
+  # declares no inputs and a `flake.nix` that declares none are the same
+  # statement made twice: there is no pin here for a sibling to disagree with,
+  # so the gate is quiet. A lock that DOES declare inputs while the scan found
+  # none is the other case entirely — the scan lost the file's shape, so the
+  # override set is under-reported and NF-2's refresh has silently stopped
+  # pinning — and THAT refuses.
+  var lockText = ""
+  try:
+    lockText = readFile(flakeRoot / "flake.lock")
+  except CatchableError as err:
+    result.examined = true
+    result.stale = true
+    result.evidence = "flake-lock-unreadable: " & err.msg
+    result.remediation = flakeRoot & "/flake.lock could not be read (" &
+      err.msg & "); fix its permissions (`chmod +r " & flakeRoot &
+      "/flake.lock`) and re-push"
+    result.summary = "flake.lock could not be verified: " & err.msg
+    return
+  let lockInputs = flakeLockPinnedRevisions(lockText)
+  if not lockInputs.ok:
+    result.examined = true
+    result.stale = true
+    result.evidence = "flake-lock-unreadable: " & lockInputs.diagnostic
+    result.remediation = flakeRoot & "/flake.lock: " & lockInputs.diagnostic &
+      "; restore it from git (`git -C " & flakeRoot &
+      " checkout -- flake.lock`) or regenerate it with `nix flake lock`, " &
+      "then re-push"
+    result.summary = "flake.lock could not be verified: " &
+      lockInputs.diagnostic
+    return
+  if lockInputs.pins.len == 0 and lockInputs.unpinned.len == 0:
+    # The lock pins nothing at all. Examined, and it agrees with everything.
+    result.examined = true
+    return
+  let declared = flakeDeclaredInputsAt(flakeRoot)
+  if not declared.ok:
+    # A flake whose inputs cannot be read is not a flake with no inputs. NF-1's
+    # rule, and the gate is the last place that distinction can still be made
+    # before the state is published — reached only now that the LOCK has said
+    # there are inputs to have lost.
+    result.examined = true
+    result.stale = true
+    result.evidence = "flake-inputs-unreadable: " & declared.refusals.join("; ")
+    result.remediation = "the lock at " & flakeRoot & "/flake.lock declares " &
+      $(lockInputs.pins.len + lockInputs.unpinned.len) & " input(s), but " &
+      declared.refusals.join("; ") & " From " & flakeRoot &
+      " run: `nix flake metadata` to see what nix reads there; make " &
+      declared.flakePath & " parseable, then re-push."
+    result.summary = "flake.lock could not be verified: " &
+      declared.refusals.join("; ")
+    return
+  # The EXACT override set: `repro develop`'s own composed selection, bound by
+  # NF-1's binder. The same two calls `repro flake override-args` makes, so the
+  # set this gate verifies is by construction the set the dev shell was given.
+  var selector = @["--all", "--workspace-root=" & workspaceRoot]
+  if toolProvisioning == tpmPathOnly:
+    selector.add("--tool-provisioning=path")
+  let selection = flakeDevelopSelectionOf(selector, workspaceRoot)
+  if not selection.ok:
+    # No answer at all. REFUSE, naming the cause: the alternative is to publish
+    # a state whose lock nobody could check, which is §3.1 with the gate's
+    # blessing on it.
+    result.examined = true
+    result.stale = true
+    result.evidence = "flake-develop-set-unresolvable: " &
+      selection.refusals.join("; ")
+    result.remediation = "the workspace's develop set at " & workspaceRoot &
+      " could not be resolved (" & selection.refusals.join("; ") &
+      "), so which flake inputs are substituted is UNKNOWN and " &
+      "flake.lock could not be verified; repair the workspace (`repro " &
+      "workspace status --workspace-root=" & workspaceRoot &
+      "`) and re-push"
+    result.summary = "flake.lock could not be verified: the develop set " &
+      "could not be resolved"
+    return
+  # The selection's own notices and the binder's "NOT substituted" inventory are
+  # collected but deliberately NOT surfaced when the verdict comes out clean: an
+  # input no checkout substitutes keeps its `flake.lock` pin and cannot disagree
+  # with it, so announcing it on every push is the noise
+  # `a_clean_workspace_pushes_without_a_diagnostic` exists to forbid.
+  # `repro flake override-args` / `override-status` print exactly these lines
+  # at shell entry, which is where the inventory belongs.
+  var skipped: seq[string]
+  for n in selection.notices: skipped.add(n)
+  let exact = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
+    defaultFlakeInputStripSuffixes, skipped)
+  var state = flakeOverrideStateReport(flakeRoot, exact, identity)
+  if not state.ok:
+    result.examined = true
+    result.stale = true
+    result.evidence = "flake-lock-unreadable: " & state.refusals.join("; ")
+    result.remediation = state.refusals.join("; ")
+    result.summary = "flake.lock could not be verified: " &
+      state.refusals.join("; ")
+    return
+  let c = flakeStateCounts(state)
+  result.examined = state.examined
+  result.substituted = state.rows.len
+  result.agreeing = c.at
+  var offenders: seq[FlakeOverrideStateRow]
+  for row in state.rows:
+    if flakeStateDisagrees(row): offenders.add(row)
+  if offenders.len == 0:
+    # Verified, and it agrees. Deliberately silent — a gate that says something
+    # on every clean push trains people to scroll past the one push where it
+    # says something else. The counts are still in the structured verdict for
+    # anyone who asks.
+    return
+  result.stale = true
+  for n in skipped: result.notices.add(n)
+  var sentences: seq[string]
+  var evidence: seq[string]
+  for row in offenders:
+    sentences.add(flakeRowSentence(row))
+    evidence.add("input=" & row.input & " repo=" & row.repo &
+      " node=" & row.node & " pinned=" & row.pinnedRev &
+      " sibling=" & row.siblingRev &
+      " relation=" & flakePinRelationTag(row.relation) &
+      " ahead=" & $row.aheadBy & " behind=" & $row.behindBy)
+  result.evidence = "lock=" & state.lockPath & " " & evidence.join("; ")
+  result.summary = "flake.lock disagrees with the workspace siblings: " &
+    sentences.join("; ")
+  # §13.1: the gate VERIFIES. It does not run the refresh itself — writing the
+  # lock here would dirty the tree, and committing that dirt moves HEAD, so the
+  # lock would describe the state before the commit carrying it. The operator
+  # runs the refresh, commits it, and pushes a revision that carries a lock
+  # describing itself.
+  #
+  # The command is spelled with BOTH location flags so it runs unchanged from
+  # the directory this message is printed in — which is the pushed repo, since
+  # the managed pre-push hook `cd`s to the repository root before dispatching.
+  var remedies: seq[string]
+  for row in offenders:
+    let cmd = flakeReconcileCommand(row, flakeRoot, workspaceRoot)
+    if cmd notin remedies: remedies.add(cmd)
+  result.remediation = sentences.join("; ") &
+    " — flake.lock is an IN-TREE committed lock, so this gate verifies it " &
+    "and never writes it. From " & flakeRoot & " run: `" &
+    remedies.join("` and `") & "`, then commit the refreshed flake.lock and " &
+    "re-push."
+
+proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
+  ## CONSUMER 2 — ``repro flake override-status [--all|--only=LIST|
+  ## --except=LIST|--tier=LIST| …every other `repro develop` set-form selector]
+  ## [--flake=DIR] [--workspace-root=PATH] [--strip-suffix=LIST] [--json]``.
+  ##
+  ## The §3.2 report on its own, for anyone who wants it without the override
+  ## arguments — CI, a script, `--json`. SHELL ENTRY DOES NOT NEED IT: `.envrc`
+  ## is NF-1's single line, and `repro flake override-args` prints this very
+  ## report on stderr from the bindings it just emitted, so the develop set is
+  ## resolved ONCE per directory entry rather than once per consumer:
+  ##
+  ##     _fo_args="$(repro flake override-args --all)" || exit 1
+  ##     eval "use flake '.?submodules=1' $_fo_args"
+  ##
+  ## The SELECTION is `repro develop`'s, in full (§5's fourth bullet, and §2's
+  ## "AUTO is all-or-nothing while `repro develop` selects a set"). A verb that
+  ## accepted `--only=` and then reported on everything would be answering a
+  ## question nobody asked, and would report drift for inputs it had just been
+  ## told are not in play.
+  ##
+  ## Behaviour is the §3.2 asymmetry, exactly:
+  ##
+  ##   * a BEHIND sibling produces a WARNING naming the sibling, the distance
+  ##     and the reconciling command. It is NOT an error — exit stays 0 —
+  ##     because deliberately testing an older dependency is legitimate; it is
+  ##     never suppressed, at any distance, because unknowingly testing one is
+  ##     how a green shell certifies nothing.
+  ##   * an AHEAD sibling is stated once and not warned about: it means you are
+  ##     developing, and NF-2's pre-commit refresh will record it the moment
+  ##     you commit. (The PUSH gate does refuse it — §3.1 — but that is the
+  ##     publication boundary, not the shell.)
+  ##   * a workspace where nothing is substituted, or everything is at its pin,
+  ##     prints its one accounting line and nothing else. A report that spoke
+  ##     up on every `cd` would train people to scroll past the one time it
+  ##     mattered.
+  ##
+  ## Exit 0 for every observation, INCLUDING behind. Exit 2 only when the
+  ## report could not be produced at all — an empty report and a failed one
+  ## must not look alike (NF-1's rule).
+  var
+    flakeDir = ""
+    stripSpec = ""
+    stripGiven = false
+    asJson = false
+    explicitRoot = ""
+    passthrough: seq[string]
+    toolProvisioning = tpmPathOnly
+      ## Seeded, not left ``tpmUnspecified`` — see the same note on
+      ## ``runFlakeRefreshLockCommand``. ``resolveGitTool`` REJECTS
+      ## ``tpmUnspecified`` outright, so a verb that seeded it would exit 2 for
+      ## every invocation that did not spell the flag out.
+    i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--flake" or arg.startsWith("--flake="):
+      flakeDir = valueFromFlag(args, i, "--flake")
+    elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
+      stripSpec = valueFromFlag(args, i, "--strip-suffix")
+      stripGiven = true
+    elif arg == "--json":
+      asJson = true
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      explicitRoot = valueFromFlag(args, i, "--workspace-root")
+      passthrough.add("--workspace-root=" & explicitRoot)
+    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+      passthrough.add(arg)
+    else:
+      # Every remaining flag is a `repro develop` set-form selector and reaches
+      # the composer verbatim. This is the ONE line that makes `--only=` and
+      # `--except=` mean here what they mean there.
+      passthrough.add(arg)
+    inc i
+
+  let flakeRoot =
+    if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
+  let suffixes =
+    if stripGiven: parseCommaList(stripSpec)
+    else: defaultFlakeInputStripSuffixes
+  let workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
+
+  var refusals: seq[string]
+  var notices: seq[string]
+  proc refuse(): int =
+    for line in refusals:
+      stderr.writeLine(flakeOverrideStatusLabel & ": " & line)
+    stderr.writeLine(flakeOverrideStatusLabel &
+      ": REFUSING — the override state could not be determined. This is NOT " &
+      "the same answer as 'nothing has drifted', and it is reported " &
+      "differently on purpose: a report that cannot tell those apart is the " &
+      "silent green shell this command exists to remove.")
+    2
+
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
+  except CatchableError as err:
+    refusals.add("git is not resolvable (" & err.msg &
+      "), so no sibling HEAD can be observed")
+    return refuse()
+
+  if not fileExists(flakeRoot / "flake.nix") or
+      not fileExists(flakeRoot / "flake.lock"):
+    # Asked BEFORE the input scan, and the order matters. A flake with no
+    # declared inputs is a refusal (NF-1: a parse that matched nothing looks
+    # exactly like a flake with nothing to override), but a directory that is
+    # not a locked flake at all is an ordinary answer — there is no pin here
+    # for a sibling to drift from — and it must not be reported as a broken
+    # flake. Three distinguishable answers, not two.
+    if asJson:
+      stdout.writeLine(pretty(%*{
+        "schemaId": "reprobuild.flake-override-status.v1",
+        "workspaceRoot": workspaceRoot,
+        "flake": flakeRoot / "flake.nix",
+        "lock": flakeRoot / "flake.lock",
+        "examined": false,
+        "counts": %*{"at": 0, "ahead": 0, "behind": 0, "diverged": 0,
+                     "unknown": 0, "unpinned": 0},
+        "rows": newJArray(),
+        "notices": newJArray(),
+        "summary": "no flake.nix + flake.lock pair at " & flakeRoot},
+        indent = 2))
+    else:
+      stderr.writeLine(flakeOverrideStatusLabel &
+        ": no flake.nix + flake.lock pair at " & flakeRoot &
+        "; there is no pin here for a sibling to drift from")
+    return 0
+
+  # And the lock is asked BEFORE the flake scan, for the reason spelled out in
+  # `verifyFlakeLockAgainstSiblings`: a lock whose root declares no inputs and
+  # a flake that declares none say the same thing, and NF-1's
+  # "a scan that matched nothing REFUSES" rule must not turn that agreement
+  # into a diagnostic on every directory entry. A lock that DOES declare inputs
+  # while the scan found none still refuses — that one is the scan losing the
+  # file's shape.
+  var lockProbe = ""
+  try:
+    lockProbe = readFile(flakeRoot / "flake.lock")
+  except CatchableError as err:
+    refusals.add(flakeRoot & "/flake.lock could not be read (" & err.msg &
+      "). Remedy: `chmod +r " & flakeRoot & "/flake.lock`.")
+    return refuse()
+  let lockInputs = flakeLockPinnedRevisions(lockProbe)
+  if lockInputs.ok and lockInputs.pins.len == 0 and
+      lockInputs.unpinned.len == 0:
+    if asJson:
+      stdout.writeLine(pretty(%*{
+        "schemaId": "reprobuild.flake-override-status.v1",
+        "workspaceRoot": workspaceRoot,
+        "flake": flakeRoot / "flake.nix",
+        "lock": flakeRoot / "flake.lock",
+        "examined": true,
+        "counts": %*{"at": 0, "ahead": 0, "behind": 0, "diverged": 0,
+                     "unknown": 0, "unpinned": 0},
+        "rows": newJArray(),
+        "notices": newJArray(),
+        "summary": "0 substituted input(s) of " & flakeRoot &
+          "/flake.lock: its root node declares no inputs"}, indent = 2))
+    else:
+      stderr.writeLine(flakeOverrideStatusLabel &
+        ": 0 substituted input(s) of " & flakeRoot &
+        "/flake.lock: its root node declares no inputs, so nothing here pins " &
+        "a sibling")
+    return 0
+
+  let declared = flakeDeclaredInputsAt(flakeRoot)
+  if not declared.ok:
+    for r in declared.refusals: refusals.add(r)
+    return refuse()
+
+  # THE override set: `repro develop`'s composed selection, bound by NF-1's
+  # binder. One derivation, the same one `repro flake override-args` emits and
+  # the same one the pre-push gate verifies, so no two of them can disagree
+  # about which inputs the dev shell is actually building from.
+  let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
+  if not selection.ok:
+    for r in selection.refusals: refusals.add(r)
+    return refuse()
+  for n in selection.notices: notices.add(n)
+  let bindings = flakeBindInputsToCheckouts(declared.names,
+    selection.checkoutOf, suffixes, notices)
+
+  let state = flakeOverrideStateReport(flakeRoot, bindings, identity)
+  if not state.ok:
+    for r in state.refusals: refusals.add(r)
+    return refuse()
+
+  if asJson:
+    var rows = newJArray()
+    for row in state.rows:
+      rows.add(%*{"input": row.input, "repo": row.repo, "path": row.path,
+                  "node": row.node, "pinned": row.pinnedRev,
+                  "sibling": row.siblingRev,
+                  "relation": flakePinRelationTag(row.relation),
+                  "aheadBy": row.aheadBy, "behindBy": row.behindBy,
+                  "detail": row.detail,
+                  "sentence": flakeRowSentence(row)})
+    var noticeArr = newJArray()
+    for n in notices: noticeArr.add(%n)
+    let c = flakeStateCounts(state)
+    stdout.writeLine(pretty(%*{
+      "schemaId": "reprobuild.flake-override-status.v1",
+      "workspaceRoot": workspaceRoot,
+      "flake": state.flakePath,
+      "lock": state.lockPath,
+      "examined": state.examined,
+      "counts": %*{"at": c.at, "ahead": c.ahead, "behind": c.behind,
+                   "diverged": c.diverged, "unknown": c.unknown,
+                   "unpinned": c.unpinned},
+      "rows": rows,
+      "notices": noticeArr,
+      "summary": flakeStateSummaryLine(state)}, indent = 2))
+    return 0
+
+  for n in notices:
+    stderr.writeLine(flakeOverrideStatusLabel & ": " & n)
+  if not state.examined:
+    stderr.writeLine(flakeOverrideStatusLabel &
+      ": no flake.nix + flake.lock pair at " & flakeRoot &
+      "; there is no pin here for a sibling to drift from")
+    return 0
+  # ONE renderer, shared with `repro flake override-args`. Two copies of these
+  # sentences would be free to drift from each other, and the whole subject of
+  # this milestone is two things that were free to drift from each other.
+  flakeRenderDriftReport(state, flakeRoot, workspaceRoot,
+    flakeOverrideStatusLabel)
+  0
+
 proc runReproFlakeCommand*(args: openArray[string]): int =
   ## Top-level dispatcher for ``repro flake <verb> …``. NF-1 ships
-  ## ``override-args``, NF-2 ``refresh-lock``; NF-3's drift report belongs in
-  ## the same namespace.
+  ## ``override-args``, NF-2 ``refresh-lock``, NF-3 ``override-status``.
   if args.len == 0:
     stderr.writeLine("repro flake: error: missing verb " &
-      "(one of: override-args, refresh-lock)")
+      "(one of: override-args, refresh-lock, override-status)")
     return 2
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
   case args[0]
@@ -56514,9 +57486,11 @@ proc runReproFlakeCommand*(args: openArray[string]): int =
     return runFlakeOverrideArgsCommand(rest)
   of "refresh-lock":
     return runFlakeRefreshLockCommand(rest)
+  of "override-status":
+    return runFlakeOverrideStatusCommand(rest)
   else:
     stderr.writeLine("repro flake: error: unknown verb '" & args[0] &
-      "' (one of: override-args, refresh-lock)")
+      "' (one of: override-args, refresh-lock, override-status)")
     return 2
 
 proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
