@@ -1,0 +1,9 @@
+## The `else:` arm of `when defined(windows)` — the POSIX arm, and the exact
+## shape `killProcessTree` uses in `libs/repro_tool_profiles`.
+import std/[osproc]
+
+proc killTree(pid: int) =
+  when defined(windows):
+    discard execCmdEx("taskkill /T /F /PID " & $pid)
+  else:
+    discard execCmdEx("kill -KILL -" & $pid & " 2>/dev/null")

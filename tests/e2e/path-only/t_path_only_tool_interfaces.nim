@@ -133,6 +133,17 @@ suite "e2e_path_only_tool_interfaces":
       check readFile(binDir / "m8-fixture-tool.probes").splitLines.
         filterIt(it.len > 0).len == 1
 
+      # A `$PATH` entry that decides NOTHING: a freshly created, EMPTY
+      # directory appended at the END, where the declared tool cannot be
+      # found and behind the directory where it already was. Every
+      # declared use still resolves to exactly the executable it
+      # resolved to before, so nothing downstream of resolution may
+      # move.
+      #
+      # This block used to assert the exact opposite on both counts —
+      # that the action fingerprint MOVED and that the tool was probed a
+      # second time. Both values below were measured by running this
+      # suite, not inferred.
       let extraDir = tempRoot / "extra-path-entry"
       createDir(extraDir)
       let changedPathValue = pathValue & $PathSep & extraDir
@@ -142,8 +153,76 @@ suite "e2e_path_only_tool_interfaces":
         valueAfter(changedOutput, "toolIdentity:"))
       check changedIdentity.profiles[0].resolvedExecutablePath ==
         identity.profiles[0].resolvedExecutablePath
-      check changedIdentity.actionIdentities[0].actionFingerprint !=
+      check changedIdentity.profiles[0].resolvedExecutableDigest ==
+        identity.profiles[0].resolvedExecutableDigest
+      # `==`, not `!=`. The action fingerprint is keyed on what the
+      # resolver FOUND (`resolvedExecutablePath` +
+      # `resolvedExecutableDigest`), not on where it looked;
+      # `profileFingerprintFor` / `actionFingerprintFor` stopped hashing
+      # `pathSearchList` at v6 -> v7. The old `!=` here stated the
+      # host-dependence defect as a requirement: on the real graph ONE
+      # appended nonexistent directory moved 1391 / 1391 weak
+      # fingerprints while 0 tools resolved differently.
+      check changedIdentity.actionIdentities[0].actionFingerprint ==
         identity.actionIdentities[0].actionFingerprint
+      # 1, not 2 — the tool is NOT probed again, because nothing
+      # re-resolved. `toolIdentityCacheKey` used to fold the verbatim
+      # `getEnv("PATH")`, so any `$PATH` difference at all threw the
+      # on-disk tool-identity memo away and paid for a full re-resolve
+      # (which, since `resolvedExecutableDigest` landed, also re-reads
+      # and blake3s every resolved tool). It now folds
+      # `pathModeResolutionSignature`, which asks WHICH executable each
+      # declared use would select under this `$PATH`. Same selections =>
+      # same key => memo hit => no probe.
+      check readFile(binDir / "m8-fixture-tool.probes").splitLines.
+        filterIt(it.len > 0).len == 1
+      # And because the memo hit, the identity handed back is the one
+      # recorded at resolution time: it still carries the `$PATH` the
+      # resolver actually walked, which did not include `extraDir`.
+      # Recording the search list is unchanged behaviour — only hashing
+      # it was dropped — so this pins WHICH search list a served memo
+      # reports, and it is the resolution-time one.
+      check changedIdentity.profiles[0].pathSearchList ==
+        identity.profiles[0].pathSearchList
+      check extraDir notin changedIdentity.profiles[0].pathSearchList
+
+      # NON-VACUITY GUARD for the fingerprint equality above.
+      #
+      # Everything asserted above is also what a plain memo hit would
+      # produce, and a memo hit says nothing about whether the
+      # FINGERPRINT is `$PATH`-independent — it would be equal either
+      # way. So discard the memo, force the resolver to run again under
+      # the CHANGED `$PATH`, and check the fingerprint it computes from
+      # scratch.
+      let outDir = parentDir(identityPath)
+      removeDir(outDir / "tool-identity-cache")
+      removeFile(identityPath)
+      let reresolvedOutput = requireSuccess(@[reproBin, "build", target,
+        "--tool-provisioning=path", "--log=actions"], repoRoot, changedPathValue)
+      let reresolved = readPathOnlyBuildIdentity(
+        valueAfter(reresolvedOutput, "toolIdentity:"))
+      # The input under test really did change, and really was recorded.
+      # Without these two the equality below would pass vacuously
+      # against a resolver that had merely stopped recording the
+      # caller's `$PATH` — e.g. one that recorded only
+      # `parentDir(resolvedExecutablePath)`, which satisfies every other
+      # assertion in this test.
+      check reresolved.profiles[0].pathSearchList !=
+        identity.profiles[0].pathSearchList
+      check extraDir in reresolved.profiles[0].pathSearchList
+      check reresolved.profiles[0].resolvedExecutablePath ==
+        identity.profiles[0].resolvedExecutablePath
+      check reresolved.profiles[0].resolvedExecutableDigest ==
+        identity.profiles[0].resolvedExecutableDigest
+      # A DIFFERENT search list, a genuinely fresh resolution, and the
+      # same fingerprint. This is the property `!=` above denied.
+      check reresolved.profiles[0].profileFingerprint ==
+        identity.profiles[0].profileFingerprint
+      check reresolved.actionIdentities[0].actionFingerprint ==
+        identity.actionIdentities[0].actionFingerprint
+      # 2 on the same instrument that read 1 above: a real re-resolution
+      # DOES re-probe exactly once, so the `== 1` above is a measurement
+      # of "the memo hit", not of a probe counter that stopped counting.
       check readFile(binDir / "m8-fixture-tool.probes").splitLines.
         filterIt(it.len > 0).len == 2
 

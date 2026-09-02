@@ -21,8 +21,24 @@ proc runRepro(reproBin, workingDir: string; args: openArray[string]; env: seq[tu
 
 suite "integration_dev_env_allow":
   test "directory allow and deny workflow":
-    let repoRoot = getCurrentDir()
-    let reproBin = repoRoot / "build" / "bin" / "repro"
+    # W15: this used to be
+    #
+    #   let repoRoot = getCurrentDir()
+    #   let reproBin = repoRoot / "build" / "bin" / "repro"
+    #
+    # which made the process working directory an unstated fixture input and
+    # spelled the binary without ``ExeExt``. Compiled once and run from three
+    # directories it gave three different failures, none of them about the
+    # allow/deny workflow: from the repo root it executed the LINUX ELF that a
+    # ``nix develop`` build leaves in the shared, gitignored ``build/bin``
+    # ("%1 is not a valid Win32 application"); from a scratch directory it
+    # named a binary that does not exist; from a scratch directory carrying a
+    # staged one it drove a binary this test did not build.
+    #
+    # ``reproBinaryPath`` is source-anchored and extension-correct, and
+    # ``requireHostBinary`` proves the bytes are this platform's machine
+    # format before anything is executed — presence was never the property.
+    let reproBin = requireHostBinary(reproBinaryPath())
 
     # Create a temporary directory structure mimicking a project
     let tempRoot = createTempDir("repro-test-allow", "")

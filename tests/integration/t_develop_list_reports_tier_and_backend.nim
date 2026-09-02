@@ -79,8 +79,20 @@
 ## layer 4 is silenced. Skip: ``git`` missing or ``repro`` unbuilt.
 
 import std/[algorithm, json, os, osproc, strutils, tempfiles, times, unittest]
+from repro_test_support import fileUrl
 
-const reproBinary = "./build/bin/repro"
+const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory.
+  ##
+  ## The previous spelling (``"./build/bin/" & addFileExt("repro", ExeExt)``)
+  ## made the working directory an unstated fixture input: from the repo root
+  ## the case ran, from any other directory ``fileExists`` was false and it
+  ## SKIPPED, and from a scratch directory that happened to carry a staged
+  ## ``build/bin/repro`` it ran against THAT binary and reported failures that
+  ## read as product refusals. ``currentSourcePath()`` is absolute on both
+  ## platforms, so this constant is the same from every cwd.
+const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
 
 proc q(value: string): string = quoteShell(value)
 
@@ -89,11 +101,17 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc initGitRepo(gitBin, path: string) =
@@ -209,7 +227,7 @@ suite "DS-6: --list answers the lock-set question, read-only":
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
-        projectToml("file://" & coreOrigin, "file://" & teamOrigin))
+        projectToml(fileUrl(coreOrigin), fileUrl(teamOrigin)))
       writeFile(manifestsRoot / "repos" / "core.toml",
         repoFragment("core", "core-origin"))
       writeFile(manifestsRoot / "repos" / "team-lib.toml",
@@ -219,9 +237,9 @@ suite "DS-6: --list answers the lock-set question, read-only":
       discard requireGit(q(gitBin) & " -C " & q(manifestsRoot) &
         " commit -m manifests")
 
-      discard requireGit(q(gitBin) & " clone " & q("file://" & coreOrigin) &
+      discard requireGit(q(gitBin) & " clone " & q(fileUrl(coreOrigin)) &
         " " & q(ws / "core"))
-      discard requireGit(q(gitBin) & " clone " & q("file://" & teamOrigin) &
+      discard requireGit(q(gitBin) & " clone " & q(fileUrl(teamOrigin)) &
         " " & q(ws / "team-lib"))
       createDir(ws / ".repro")
       writeFile(ws / ".repro" / "workspace.toml",
@@ -231,7 +249,7 @@ suite "DS-6: --list answers the lock-set question, read-only":
         "branch = \"main\"\n")
 
       writeFile(ws / "repro.lock",
-        committedLock(depInline("core", "core", "file://" & coreOrigin,
+        committedLock(depInline("core", "core", fileUrl(coreOrigin),
           coreSha)))
       writeFile(ws / ".repro-workspace.toml",
         "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
@@ -280,7 +298,7 @@ suite "DS-6: --list answers the lock-set question, read-only":
       check ("backend: team tier / git-checkout at " & manifestsRoot) in
         listed.output
       # The fixed-order selection trace: six stages, none of them given here.
-      for stage in ["mode --all", "project (not given)", "group (not given)",
+      for stage in ["mode --all", "project (not given)", "tag (not given)",
                     "filter (not given)", "only (not given)",
                     "except (not given)"]:
         check ("selection: " & stage) in listed.output

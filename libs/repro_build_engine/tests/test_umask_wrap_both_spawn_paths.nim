@@ -312,13 +312,61 @@ when defined(linux) or defined(macosx):
       ## MUTATION TARGET B — set the field at any construction site in any
       ## shipped source under `libs/` or `apps/` (for instance
       ## `repro_profile_compile/edge.nim`, which is on the bypass path and so
-      ## is the one where it would actually take effect): the last check
-      ## reddens and names the file.
+      ## is the one where it would actually take effect): the scans below
+      ## redden and name the file.
       ##
       ## In-Process-Monitor-Hosting P3 turned the field from a `bool` into
-      ## `MonitorHostingMode`, and the scan below follows the FIELD NAME, so
-      ## it covers `mhmWhereSupported` and `mhmRequired` alike — a shipped
-      ## site cannot request either one without writing `monitorHosting`.
+      ## `MonitorHostingMode`, so there are now two ways to say "on" and the
+      ## scans below cover both: the FIELD NAME, which no shipped file but
+      ## the CLI may write at all, and the two ENABLING MODE names, which no
+      ## shipped file may write under any circumstances.
+      ##
+      ## WHAT P1(b) CHANGED HERE, AND WHY IT IS A RELAXATION AND NOT A HOLE.
+      ## P1 asked what this field is FOR and the answer taken was (b): give
+      ## it an operator surface — `--monitor-hosting=never|where-supported|
+      ## required` plus `REPROBUILD_MONITOR_HOSTING` — so the HM-6 verdict can
+      ## be re-checked on other hardware through the CLI instead of by writing
+      ## a harness. P1 also says, correctly, that adding the surface "would
+      ## need the new pin's third assertion relaxed deliberately, which is the
+      ## right shape: adding the surface should be a visible edit to the test
+      ## that says there is none."
+      ##
+      ## This is that edit. The old third assertion was "no shipped source
+      ## under libs/ or apps/ so much as NAMES the field", which the plumbing
+      ## necessarily violates. It is replaced by TWO assertions that between
+      ## them still pin exactly what mattered:
+      ##
+      ##   1. NO shipped source, WITH NO EXCEPTIONS AT ALL, so much as NAMES
+      ##      an enabling mode literal. This is the "silent flip" refusal and
+      ##      it has no allowlist — not even for the plumbing file, which is
+      ##      why the parser was put in the field's OWN module
+      ##      (`parseMonitorHostingMode`): the CLI never spells
+      ##      `mhmWhereSupported` or `mhmRequired`, so it does not need an
+      ##      exemption from this one. The rule is deliberately about the
+      ##      MODE ALONE rather than about the mode next to the field — see
+      ##      `EnablingModes` below for the two one-line edits that walk past
+      ##      the weaker version, both of them measured.
+      ##   2. The only shipped file that names the field AT ALL is the one
+      ##      named below, by path. A SECOND shipped site — even one that
+      ##      assigns a variable rather than a literal, which assertion 1
+      ##      cannot see — reddens here. The permission is a named file, not
+      ##      a widened rule: "anything under repro_cli_support" or "any line
+      ##      that also mentions a flag" would have re-admitted exactly the
+      ##      class this case exists to refuse.
+      ##
+      ## And the allowlist is itself pinned NOT VACUOUS: the file it names has
+      ## to actually carry the surface (assertion 3 below). An allowlist entry
+      ## whose plumbing was deleted would otherwise sit there permanently
+      ## permitting a mention nobody is making.
+      ##
+      ## THE SCAN IS STILL `libs/` + `apps/` AND DELIBERATELY NOT
+      ## `benchmarks/`. `benchmarks/suites/monitor-overhead/hm6_acceptance.nim`
+      ## sets the field on purpose — it is the harness that MEASURED the
+      ## verdict, and it has to drive both arms to do that. It is not a
+      ## shipped configuration and this case's name is about shipped
+      ## configurations, so widening the walk would mean adding a second
+      ## allowlist entry for a file whose whole job is to enable hosting.
+      ## Recorded here rather than left to be re-derived.
       check defaultBuildEngineConfig(getCurrentDir() / "build" /
         "test-tmp" / "hm6-default").monitorHosting == mhmNever
       # And not merely because `defaultBuildEngineConfig` omits it: a bare
@@ -340,6 +388,47 @@ when defined(linux) or defined(macosx):
       # covers, on the only path where the field has any effect, is exactly
       # the silent flip this case exists to refuse.
       const Field = "monitorHosting"
+      # The mode literals that TURN IT ON. NAMING ONE AT ALL is the trigger,
+      # not naming one next to the field — and that is the whole reason the
+      # P1(b) parser was put in the field's own module rather than beside the
+      # CLI's other flag parsers.
+      #
+      # WHY NOT "the field AND a mode on the same line", which is the obvious
+      # rule. Because it is a rule about LINES, and both ways around it are
+      # ordinary Nim that nobody would look at twice:
+      #
+      #   let wanted = mhmRequired      # names a mode, not the field
+      #   config.monitorHosting = wanted    # names the field, not a mode
+      #
+      #   config.monitorHosting =       # names the field, not a mode
+      #     mhmRequired                 # names a mode, not the field
+      #
+      # Neither is caught by a line-local conjunction. In the ONE file the
+      # allowlist below permits to name the field, neither would be caught by
+      # anything else either — which would leave the "no exceptions" claim
+      # true only of the spelling nobody uses to be sneaky. MEASURED: with
+      # the conjunction rule, both edits sat in `repro_cli_support.nim` with
+      # this case reporting 8 [OK].
+      #
+      # So the rule is the stronger and simpler one: OUTSIDE THE DECLARING
+      # MODULE, NO SHIPPED SOURCE NAMES AN ENABLING MODE AT ALL. That is
+      # exactly the property P1(b)'s design already relies on — the CLI
+      # offers `--monitor-hosting` without ever spelling `mhmWhereSupported`
+      # or `mhmRequired`, because `parseMonitorHostingMode` lives next to the
+      # enum — and it is now PINNED rather than merely true. Moving the
+      # parser into the CLI reddens this case, which is the right answer: it
+      # would put both halves of an enable in a file the scan is not allowed
+      # to refuse mentions in.
+      const EnablingModes = ["mhmWhereSupported", "mhmRequired"]
+      # THE ALLOWLIST, BY PATH AND FOR ONE REASON EACH. Adding an entry here
+      # is the visible edit P1(b) asks for.
+      #   * repro_cli_support.nim — `--monitor-hosting` /
+      #     `REPROBUILD_MONITOR_HOSTING`: the local variable, the flag branch,
+      #     the `executeBuildTarget` parameter and call, and the field on the
+      #     two main `BuildEngineConfig`s. Every one of those carries the
+      #     OPERATOR's value; none of them names an enabling mode.
+      let optInPlumbing = [getCurrentDir() / "libs" / "repro_cli_support" /
+        "src" / "repro_cli_support.nim"]
       # The module that DECLARES the field names it in its own type, in three
       # comments and in the hosting decision, so it cannot be scanned for a
       # bare mention. It needs no scanning: the only config it constructs is
@@ -348,6 +437,8 @@ when defined(linux) or defined(macosx):
       let fieldOwner = getCurrentDir() / "libs" / "repro_build_engine" /
         "src" / "repro_build_engine.nim"
       var enablingSites: seq[string] = @[]
+      var unpermittedMentions: seq[string] = @[]
+      var permittedMentions = 0
       var scanned = 0
       let cliSource = getCurrentDir() / "libs" / "repro_cli_support" / "src" /
         "repro_cli_support.nim"
@@ -369,9 +460,25 @@ when defined(linux) or defined(macosx):
           sources.add path
       for path in sources:
         inc scanned
+        var permittedHere = false
+        for permitted in optInPlumbing:
+          if fileExists(permitted) and sameFile(path, permitted):
+            permittedHere = true
+            break
         for line in readFile(path).splitLines():
-          if Field in line:
-            enablingSites.add path.extractFilename & ": " & line.strip()
+          # ASSERTION 1 — no allowlist, not even for the plumbing, and the
+          # mode literal ALONE is the trigger. See `EnablingModes`.
+          for mode in EnablingModes:
+            if mode in line:
+              enablingSites.add path.extractFilename & ": " & line.strip()
+              break
+          if Field notin line:
+            continue
+          # ASSERTION 2 — the mention itself, permitted only by name.
+          if permittedHere:
+            inc permittedMentions
+          else:
+            unpermittedMentions.add path.extractFilename & ": " & line.strip()
       # NOT VACUOUS, and `scanned > 1` is not enough to say so: a walk that
       # went to the wrong tree, or an exclusion rule that grew until it
       # excluded everything, still scans hundreds of files and still reports a
@@ -396,11 +503,92 @@ when defined(linux) or defined(macosx):
       check missed.len == 0
       check scanned > 1
       if enablingSites.len > 0:
-        echo "a shipped construction site names ", Field, ":\n  ",
+        echo "a shipped source names an enabling ", Field, " mode:\n  ",
           enablingSites.join("\n  "),
           "\n  HM-6 measured hosting as no faster at the default ",
           "parallelism on a real build, and consistently slower on cheap ",
           "actions, and it is ",
           "reachable on the bypass path only. Enabling it in the product ",
-          "needs the HM-6 verdict revisited, not a config edit."
+          "needs the HM-6 verdict revisited, not a config edit. The P1(b) ",
+          "operator surface is how you turn it on for a MEASUREMENT: ",
+          "`--monitor-hosting=where-supported` (with `--no-runquota`, which ",
+          "is the only launch path that can host) or ",
+          "`REPROBUILD_MONITOR_HOSTING`."
       check enablingSites.len == 0
+
+      if unpermittedMentions.len > 0:
+        echo "a shipped source outside the P1(b) opt-in plumbing names ",
+          Field, ":\n  ", unpermittedMentions.join("\n  "),
+          "\n  Exactly one shipped file is allowed to name it — the CLI, ",
+          "which carries `--monitor-hosting` / `REPROBUILD_MONITOR_HOSTING` ",
+          "into the engine config. A second site is how the default gets ",
+          "flipped for one code path without flipping the default: it needs ",
+          "a named entry in `optInPlumbing` above and a reason, not a ",
+          "silent mention."
+      check unpermittedMentions.len == 0
+
+      # ASSERTION 3, AND IT IS WHAT KEEPS ASSERTION 2's ALLOWLIST HONEST.
+      # An allowlist entry is a hole the moment the thing it was opened for
+      # stops existing: delete the flag and the entry keeps permitting
+      # whatever else lands in that file. So the permission has to be USED,
+      # and the surface it was opened for has to be THERE.
+      let cliText = readFile(cliSource)
+      if permittedMentions == 0:
+        echo "the P1(b) allowlist permits ", Field,
+          " in the CLI, but the CLI does not name it: the entry is now a ",
+          "standing exemption for a plumbing that no longer exists. Remove ",
+          "the entry, or restore the surface."
+      check permittedMentions > 0
+      if not cliText.contains("--monitor-hosting"):
+        echo "the CLI does not carry the `--monitor-hosting` flag, so the ",
+          "P1(b) operator surface this case's allowlist was relaxed for is ",
+          "gone; the HM-6 verdict is once again unreproducible without a ",
+          "harness."
+      check cliText.contains("--monitor-hosting")
+      # AND THAT ONE IS A SOURCE MATCH, WITH THE WEAKNESS A SOURCE MATCH
+      # HAS: a CLI that had lost the flag but kept a comment naming it would
+      # satisfy it. It cannot be pinned at runtime from here — this file is
+      # a `repro_build_engine` test and does not link the CLI, and importing
+      # `repro_cli_support` to reach one flag would invert the dependency
+      # direction. What actually exercises the flag end to end is the
+      # shipped binary: `repro build --help` lists it, a bad value exits 1
+      # naming the flag, and `--no-runquota --monitor-hosting=where-supported`
+      # produces a `.host.stdout` where the default produces none. Declared
+      # rather than papered over.
+      #
+      # The environment half is pinned at RUNTIME rather than by a source
+      # match, because a source match for an env-var name would pass on a
+      # mention of it in a comment. `configuredMonitorHostingMode` is what
+      # the CLI's `var monitorHosting = …` initialiser calls, so this is the
+      # decode the flag falls back to.
+      let priorEnv = getEnv(MonitorHostingEnvVar)
+      let priorEnvSet = existsEnv(MonitorHostingEnvVar)
+      delEnv(MonitorHostingEnvVar)
+      # AN UNSET ENVIRONMENT IS STILL OFF — the surface did not become a
+      # second way for the default to drift.
+      check configuredMonitorHostingMode() == mhmNever
+      putEnv(MonitorHostingEnvVar, "where-supported")
+      check configuredMonitorHostingMode() == mhmWhereSupported
+      putEnv(MonitorHostingEnvVar, "required")
+      check configuredMonitorHostingMode() == mhmRequired
+      if priorEnvSet:
+        putEnv(MonitorHostingEnvVar, priorEnv)
+      else:
+        delEnv(MonitorHostingEnvVar)
+      # And the flag's own vocabulary decodes to the same three values, so
+      # `--monitor-hosting` and the variable cannot drift apart.
+      check parseMonitorHostingMode("never", "--monitor-hosting") == mhmNever
+      check parseMonitorHostingMode("where-supported",
+        "--monitor-hosting") == mhmWhereSupported
+      check parseMonitorHostingMode("required",
+        "--monitor-hosting") == mhmRequired
+      var rejected = false
+      try:
+        discard parseMonitorHostingMode("yes-please", "--monitor-hosting")
+      except ValueError:
+        rejected = true
+      if not rejected:
+        echo "`--monitor-hosting` accepted a value outside its vocabulary; ",
+          "a typo would then silently select whichever mode the parser ",
+          "falls through to."
+      check rejected

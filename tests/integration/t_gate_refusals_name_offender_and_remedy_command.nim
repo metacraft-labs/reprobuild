@@ -24,6 +24,40 @@
 ##                           working-tree switch the gate guards; the remedy is
 ##                           ``repro switch <branch> --yes``.
 ##   - switch-missing        ``repro switch`` of an absent branch.
+##   - remove-workspace-root ``repro remove`` of a repo declared at
+##                           ``path = "."``. Both routes in — NAMED as the
+##                           target, and swept into the RA-22 GC set through
+##                           another target's ``depends`` closure.
+##   - remove-workspace-root-remedy  the same refusal on the FLAT membership
+##                           layout, where the remedy is a real command
+##                           (``repro workspace repos remove <fragment>``).
+##                           The case RUNS what the refusal printed and
+##                           asserts the declaration went and the tree
+##                           stayed — a quoted remedy that does not work is
+##                           worse than none. On the ``.repro/manifests``
+##                           layout the verb cannot reach the file, so the
+##                           refusal falls back to naming the file, the key
+##                           and the entry, which the case above asserts.
+##   - disable-workspace-root ``repro workspace disable`` of a project that
+##                           declares the workspace root repo.
+##   - develop-lock-path     ``repro develop --all`` against a committed
+##                           ``repro.lock`` whose dependency ``path``
+##                           resolves to the workspace root.
+##
+## The last three arrived with W5 and are the reason this file grew: each
+## stands in front of a recursive delete that would have taken the workspace,
+## and the first shape of all three said only that something "is not beneath
+## the workspace root" — in one case printing the SAME PATH TWICE either side
+## of that phrase, with no repo named and no remedy. A guard whose refusal
+## teaches nothing sends the operator looking for a way around it.
+##
+## ``repro sync --force-sync`` on the workspace root is deliberately NOT in
+## this list. It is no longer a refusal: ``git reset --hard`` is bounded by
+## git's tracked set and is in bounds there, so the reset runs and only the
+## ``git clean -ffdx`` half is skipped. It reports a PARTIAL success with the
+## same offender+remedy pairing, asserted in
+## ``t_checkout_path_cannot_escape_the_workspace_root`` where the surviving
+## files are asserted alongside it.
 ##
 ## For EACH case: the offender (the real repo / branch name) must appear in
 ## the refusal text AND a copy-pasteable command (``repro …`` / ``git …``)
@@ -44,11 +78,15 @@ proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `quit`: this is a HELPER, called from fixture builders
+  ## outside any `test` body. `quit 1` tears the whole binary down and takes
+  ## every case after it with it, reporting nothing about which one was
+  ## running. `doAssert` raises, and the `test` template's own
+  ## `except Exception` attributes the failure to the case that caused it,
+  ## from any call depth.
   let res = runCmd(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0,
+    "command failed: " & command & "\nexit=" & $res.code & "\n" & res.output
   res.output
 
 proc repoRoot(): string =
@@ -162,6 +200,89 @@ proc baseFixture(gitBin, slug: string): Fixture =
   result.workspaceRoot = workspaceRoot
   cloneInto(gitBin, result.libAOrigin, workspaceRoot / "lib-a")
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
+
+const wsRootFragmentToml = """
+schema = "reprobuild.workspace.repo.v1"
+
+[repo]
+name = "ws-root"
+path = "."
+remote = "lib-a-origin"
+revision = "main"
+"""
+
+proc projectTomlWithWorkspaceRoot(libAUrl: string): string =
+  ## A project that declares the workspace ROOT repo (``path = "."``) beside
+  ## an ordinary checkout. ``lib-a`` depends on ``ws-root``, which is what
+  ## sweeps the root into ``repro remove lib-a``'s RA-22 GC candidate set
+  ## without anyone naming it.
+  "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+  "[project]\n" &
+  "name = \"lib-a\"\n" &
+  "default_revision = \"main\"\n" &
+  "trunk = \"main\"\n\n" &
+  "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
+  "includes = [\n  \"repos/ws-root.toml\",\n  \"repos/lib-a.toml\",\n]\n"
+
+const libADependsOnRootToml = """
+schema = "reprobuild.workspace.repo.v1"
+
+[repo]
+name = "lib-a"
+path = "lib-a"
+remote = "lib-a-origin"
+revision = "main"
+depends = ["ws-root"]
+"""
+
+proc declareWorkspaceRootRepo(fx: Fixture) =
+  writeFile(fx.manifestsRoot / "repos" / "ws-root.toml", wsRootFragmentToml)
+  writeFile(fx.manifestsRoot / "repos" / "lib-a.toml", libADependsOnRootToml)
+  writeFile(fx.manifestsRoot / "projects" / "lib-a.toml",
+    projectTomlWithWorkspaceRoot(fileUrl(fx.libAOrigin)))
+
+proc nativeLayoutFixture(gitBin, slug: string): Fixture =
+  ## The OTHER workspace layout, and the reason it is worth a fixture of its
+  ## own here: membership lives FLAT at the workspace root
+  ## (`<ws>/projects/*.toml` + `<ws>/repos/*.toml`, the `<org>/repro-workspace`
+  ## repo), not in a materialized checkout under `.repro/manifests`.
+  ## `manifestsRoot` accepts both; `repro workspace repos remove` reads
+  ## `manifestRepoRootFor`, which is the workspace root ONLY — so the
+  ## authoring verb can reach this layout and not the other one. That
+  ## difference is exactly what the `repro remove` remedy has to be honest
+  ## about, so both layouts are exercised.
+  ##
+  ## The root is a real git checkout because `repro workspace repos remove`
+  ## COMMITS the membership edit it makes; a plain directory would refuse.
+  result.scratch = createTempDir("repro-ra28-" & slug & "-", "")
+  result.reproBin = reproBinary()
+  result.libAOrigin = result.scratch / "origin-lib-a.git"
+  result.libASeed = result.scratch / "seed-lib-a"
+  result.libASha = seedGitOrigin(gitBin, result.libAOrigin, result.libASeed)
+
+  let workspaceRoot = result.scratch / "workspace"
+  createDir(workspaceRoot)
+  createDir(workspaceRoot / "projects")
+  createDir(workspaceRoot / "repos")
+  writeFile(workspaceRoot / "projects" / "lib-a.toml",
+    projectTomlWithWorkspaceRoot(fileUrl(result.libAOrigin)))
+  writeFile(workspaceRoot / "repos" / "ws-root.toml", wsRootFragmentToml)
+  writeFile(workspaceRoot / "repos" / "lib-a.toml", libADependsOnRootToml)
+  writeFile(workspaceRoot / "PRECIOUS.txt", "must survive\n")
+  result.manifestsRoot = workspaceRoot
+  result.workspaceRoot = workspaceRoot
+  cloneInto(gitBin, result.libAOrigin, workspaceRoot / "lib-a")
+  writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
+
+  discard requireGit(q(gitBin) & " init -b main " & q(workspaceRoot))
+  discard requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
+    " config user.email tester@example.invalid")
+  discard requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
+    " config user.name \"RA28 Tester\"")
+  discard requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
+    " add projects repos PRECIOUS.txt")
+  discard requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
+    " commit -m \"seed native membership\"")
 
 proc seedManifestGitLayer(gitBin: string; fx: var Fixture) =
   ## Make ``.repro/manifests`` a real git checkout tracking a bare upstream so
@@ -430,6 +551,192 @@ suite "RA-28 — refusals name the offender and a remedy command":
       check diag.contains("stash")
       # The dirty file is untouched — the refusal mutated nothing.
       check fileExists(fx.workspaceRoot / "lib-a" / "dirty.txt")
+
+  test "remove_workspace_root_names_offender_and_remedy":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = baseFixture(gitBin, "remove-wsroot")
+      defer: removeDir(fx.scratch)
+      declareWorkspaceRootRepo(fx)
+
+      # Route 1: NAMED as the target. The whole verb refuses and nothing is
+      # mutated — a GC that silently skipped the delete would still drop the
+      # include and still print a removal line, telling the operator a repo
+      # was removed while its tree stayed.
+      let named = runShell(shellCommand(@[
+        fx.reproBin, "remove", "ws-root", "--force",
+        "--workspace-root=" & fx.workspaceRoot]))
+      checkpoint("repro remove ws-root: " & named.output)
+      check named.code == 1
+      # RA-28: the offender is the REPO the operator named, not the string
+      # `.`; the remedy is the one that exists — the declaration can be
+      # dropped without the delete.
+      assertNamesOffenderAndRemedy(named.output, "ws-root")
+      check named.output.contains("Remedy:")
+      check named.output.contains("repro sync")
+      check named.output.contains("IS the workspace root")
+      # This fixture's membership lives in a materialized manifest CHECKOUT
+      # (`.repro/manifests`), which `repro workspace repos remove` cannot
+      # reach — it reads `manifestRepoRootFor`, the workspace root itself. So
+      # the remedy here is the fallback, and the whole point of the fallback
+      # is that it is EXACT: the file, the key, and the entry to delete from
+      # it. "Edit the manifest" is what this replaced.
+      check named.output.contains(
+        fx.manifestsRoot / "projects" / "lib-a.toml")
+      check named.output.contains("`includes`")
+      check named.output.contains("\"repos/ws-root.toml\"")
+      # ...and it says WHY the command is not offered, rather than leaving
+      # the operator to discover that it no-ops.
+      check named.output.contains("repro workspace repos remove")
+      # Nothing was mutated.
+      check dirExists(fx.workspaceRoot / "lib-a" / ".git")
+      check fileExists(fx.manifestsRoot / "projects" / "lib-a.toml")
+
+      # Route 2: SWEPT INTO the GC set through ``lib-a``'s ``depends``
+      # closure. Only the root's own delete is skipped; the removal the
+      # operator actually asked for still happens.
+      let swept = runShell(shellCommand(@[
+        fx.reproBin, "remove", "lib-a", "--force",
+        "--workspace-root=" & fx.workspaceRoot]))
+      checkpoint("repro remove lib-a: " & swept.output)
+      check swept.code == 1
+      assertNamesOffenderAndRemedy(swept.output, "ws-root")
+      check swept.output.contains("Remedy:")
+      # The targeted removal went through, so the refusal is proven targeted
+      # rather than the command merely failing early.
+      check not dirExists(fx.workspaceRoot / "lib-a")
+      # ...and the workspace itself is intact.
+      check dirExists(fx.manifestsRoot / "repos")
+
+  test "remove_workspace_root_remedy_is_a_runnable_command":
+    ## RA-28's second half, taken literally: the remedy has to be a COMMAND.
+    ##
+    ## `repro remove <root-repo>` refuses, correctly — the delete would take
+    ## the workspace. What it then tells the operator to do used to be "delete
+    ## the `includes` entry for ws-root.toml in <projectFile> and run `repro
+    ## sync`", which is an instruction to hand-edit a TOML array. That is not
+    ## a remedy command, it is a work item; Interactive-UX-And-Progress.md
+    ## Principle 2 asks for something the operator can paste.
+    ##
+    ## One exists — `repro workspace repos remove <fragment>` drops the
+    ## include edge from every membership that declares the fragment and
+    ## states, in its own words, that "any existing checkout was left on
+    ## disk", which is precisely the half of `repro remove` that is in bounds
+    ## here. This case does not merely assert that the string is printed: it
+    ## RUNS what the refusal printed and asserts the outcome, because a
+    ## remedy that is quoted but does not work is worse than none.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = nativeLayoutFixture(gitBin, "remove-wsroot-cmd")
+      defer: removeDir(fx.scratch)
+
+      let refused = runShell(shellCommand(@[
+        fx.reproBin, "remove", "ws-root", "--force",
+        "--workspace-root=" & fx.workspaceRoot]))
+      checkpoint("repro remove ws-root: " & refused.output)
+      check refused.code == 1
+      assertNamesOffenderAndRemedy(refused.output, "ws-root")
+      check refused.output.contains("IS the workspace root")
+      # The remedy, verbatim and copy-pasteable.
+      check refused.output.contains("repro workspace repos remove ws-root")
+      check refused.output.contains("leaves the checkout on disk")
+      check refused.output.contains("repro sync")
+      # Nothing was mutated by the refusal itself.
+      check fileExists(fx.workspaceRoot / "repos" / "ws-root.toml")
+      check fileExists(fx.workspaceRoot / "PRECIOUS.txt")
+
+      # Now RUN it. This is the assertion that separates a remedy from a
+      # sentence.
+      let remedy = runShell(shellCommand(@[
+        fx.reproBin, "workspace", "repos", "remove", "ws-root",
+        "--workspace-root=" & fx.workspaceRoot]))
+      checkpoint("repro workspace repos remove ws-root: " & remedy.output)
+      check remedy.code == 0
+      # The DECLARATION is gone...
+      let projectAfter = readFile(fx.workspaceRoot / "projects" / "lib-a.toml")
+      checkpoint("project after: " & projectAfter)
+      check not projectAfter.contains("repos/ws-root.toml")
+      check projectAfter.contains("repos/lib-a.toml")
+      # ...and the TREE is not. That is the whole reason this command is the
+      # right remedy and `repro remove` is not.
+      check fileExists(fx.workspaceRoot / "PRECIOUS.txt")
+      check readFile(fx.workspaceRoot / "PRECIOUS.txt") == "must survive\n"
+      check dirExists(fx.workspaceRoot / ".git")
+      check dirExists(fx.workspaceRoot / "lib-a" / ".git")
+
+  test "disable_workspace_root_names_offender_and_remedy":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = baseFixture(gitBin, "disable-wsroot")
+      defer: removeDir(fx.scratch)
+      declareWorkspaceRootRepo(fx)
+      # ``disable`` refuses to record an EMPTY active set, so a second
+      # project has to stay enabled for the removal loop to be reached at
+      # all — and the removal loop is what is under test.
+      writeFile(fx.manifestsRoot / "projects" / "keeper.toml",
+        projectTomlSingle(fileUrl(fx.libAOrigin)).replace(
+          "name = \"lib-a\"", "name = \"keeper\""))
+      writeWorkspaceProjects(fx.workspaceRoot, @["lib-a", "keeper"])
+
+      let res = runShell(shellCommand(@[
+        fx.reproBin, "workspace", "disable", "lib-a", "--force",
+        "--workspace-root=" & fx.workspaceRoot]))
+      checkpoint("repro workspace disable lib-a: " & res.output)
+      check res.code == 1
+      # The offender here is the resolved DIRECTORY: `.` on its own says
+      # nothing, and the operator needs to know which tree survived. The
+      # remedy is the command that shows what is in it before anyone deletes
+      # it by hand.
+      assertNamesOffenderAndRemedy(res.output, fx.workspaceRoot)
+      check res.output.contains("IS the workspace root")
+      check res.output.contains("git -C ")
+      check res.output.contains("left in place")
+      check dirExists(fx.manifestsRoot / "projects")
+
+  test "develop_degenerate_lock_path_names_offender_and_remedy":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      # A committed-lock-only workspace: no manifest checkout, so
+      # ``resolveWorkspaceLockedDeps`` routes it to the committed lock — the
+      # plane that had no boundary at all before W5.
+      let scratch = createTempDir("repro-ra28-developlock-", "")
+      defer: removeDir(scratch)
+      let reproBin = reproBinary()
+      let depOrigin = scratch / "origin-dep.git"
+      let depSha = seedGitOrigin(gitBin, depOrigin, scratch / "seed-dep")
+      let workspaceRoot = scratch / "workspace"
+      createDir(workspaceRoot)
+      writeFile(workspaceRoot / "repro.lock",
+        "schema = \"reprobuild.solved-graph-lock.v2\"\n\n" &
+        "[lock]\nplatform = \"amd64-linux\"\noptimal = false\n" &
+        "inputs_digest = \"fnv1a64:0000000000000000\"\n" &
+        "variants = []\npackages = []\n" &
+        "deps = [{ name = \"dep\", path = \"./.\", coord_kind = \"vcs\", " &
+        "url = \"" & fileUrl(depOrigin) & "\", ref = \"main\", " &
+        "revision = \"" & depSha & "\", integrity = \"git-sha1:" & depSha &
+        "\", version = \"\", visibility = \"public\", " &
+        "participation = \"\", depends = \"\", groups = \"\" }]\n")
+
+      let res = runShell(shellCommand(@[
+        reproBin, "develop", "--all", "--reset",
+        "--workspace-root=" & workspaceRoot]))
+      checkpoint("repro develop --all --reset: " & res.output)
+      check res.code == 1
+      # The offender is the dependency AND the value that made it
+      # undeliverable; the remedy is the command that rewrites the lock,
+      # because a lock is machine-written and "edit it" is not an
+      # instruction.
+      assertNamesOffenderAndRemedy(res.output, "dep")
+      check res.output.contains("'./.'")
+      check res.output.contains("repro lock refresh")
 
   test "checkout_missing_branch_names_offender_and_remedy":
     let gitBin = findExe("git")

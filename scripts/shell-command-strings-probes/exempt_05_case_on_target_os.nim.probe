@@ -1,0 +1,15 @@
+## An `of` arm naming a POSIX target on a subject that IS an operating system.
+## This is the `case targetOs` / `of wtPosix:` shape the cache-push detach
+## uses, and the exemption must survive the tightening that closed probes 01
+## and 02.
+import std/[os, osproc]
+
+type WorkerTarget = enum
+  wtPosix, wtWindows
+
+proc detachPush(targetOs: WorkerTarget; command, log: string): int =
+  case targetOs
+  of wtPosix:
+    execCmdEx("setsid " & command & " >> " & quoteShell(log) & " 2>&1 &").exitCode
+  of wtWindows:
+    0

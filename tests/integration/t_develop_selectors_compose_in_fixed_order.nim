@@ -81,21 +81,66 @@
 ## layer 4 is silenced. Skip: ``git`` missing or ``repro`` unbuilt.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl
 
-const reproBinary = "./build/bin/repro"
+const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory.
+  ##
+  ## The previous spelling (``"./build/bin/" & addFileExt("repro", ExeExt)``)
+  ## made the working directory an unstated fixture input: from the repo root
+  ## the case ran, from any other directory ``fileExists`` was false and it
+  ## SKIPPED, and from a scratch directory that happened to carry a staged
+  ## ``build/bin/repro`` it ran against THAT binary and reported failures that
+  ## read as product refusals. ``currentSourcePath()`` is absolute on both
+  ## platforms, so this constant is the same from every cwd.
+const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
 
 proc q(value: string): string = quoteShell(value)
+
+# The selector globs below are spelled WITHOUT shell quotes.
+# ``execCmdEx`` runs no shell on Windows (``poEvalCommand`` hands
+# the string to ``CreateProcessW``), so ``--filter='lib-*'`` reached
+# ``repro`` with the apostrophes still attached and matched nothing.
+# Unquoted is correct on POSIX too: ``sh`` pathname-expands the whole
+# word ``--filter=lib-*``, which matches no file, so it stays literal
+# — and the stage-trace assertions here already expect the unquoted
+# spelling to be what ``repro`` echoes back.
 
 proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   let res = execCmdEx(command, workingDir = cwd)
   (code: res.exitCode, output: res.output)
 
+proc runStdout(command: string; cwd = ""):
+    tuple[code: int; output: string] =
+  ## Run ``command`` capturing STDOUT ONLY; stderr stays on the test's own
+  ## stderr, where the run log still records it.
+  ##
+  ## Callers below compare a ``--list`` table byte for byte, and stdout
+  ## (block-buffered into the pipe) would interleave nondeterministically
+  ## with stderr if merged. The previous spelling appended a literal
+  ## ``2>/dev/null`` to the command string — a SHELL redirect, and
+  ## ``execCmdEx`` runs no shell (``poEvalCommand`` hands the string to
+  ## ``CreateProcessW`` on Windows), so on Windows the token reached
+  ## ``repro develop`` as an argument and it refused with "unsupported
+  ## repro develop set-form argument: 2>/dev/null". Dropping
+  ## ``poStdErrToStdOut`` expresses the same intent through the API.
+  let res = execCmdEx(command, options = {poUsePath, poEvalCommand},
+                      workingDir = cwd)
+  (code: res.exitCode, output: res.output)
+
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc initGitRepo(gitBin, path: string) =
@@ -170,7 +215,7 @@ suite "DS-7: the membership axis composes in a fixed order":
       var remoteBlock = ""
       for i, name in repos:
         remoteBlock.add("[[remote]]\nname = \"" & name & "-origin\"\n" &
-          "fetch = \"file://" & origins[i] & "\"\n\n")
+          "fetch = \"" & fileUrl(origins[i]) & "\"\n\n")
 
       # `tags`: lib-core + lib-extra are `libs`; tool-a + tool-b are `tools`;
       # `shared` declares NO tags, so it is in the implicit `default` tag
@@ -207,7 +252,7 @@ suite "DS-7: the membership axis composes in a fixed order":
 
       for name in repos:
         discard requireGit(q(gitBin) & " clone " &
-          q("file://" & scratch / ("origin-" & name & ".git")) & " " &
+          q(fileUrl(scratch / ("origin-" & name & ".git"))) & " " &
           q(ws / name))
 
       createDir(ws / ".repro")
@@ -241,12 +286,13 @@ suite "DS-7: the membership axis composes in a fixed order":
       check lockRes.code == 0
 
       proc list(flags: string): tuple[code: int; output: string] =
-        ## STDOUT only. The argv-order property below compares the answer BYTE
-        ## FOR BYTE, and stdout (block-buffered into the pipe) and stderr
-        ## (unbuffered) would interleave nondeterministically if merged. The
-        ## notices are asserted by the DS-5 / DS-6 tests that own them.
-        run(repro & " develop --list --tool-provisioning=path " & flags &
-          " 2>/dev/null", cwd = ws)
+        ## STDOUT only (see ``runStdout``). The argv-order property below
+        ## compares the answer BYTE FOR BYTE, and stdout (block-buffered into
+        ## the pipe) and stderr (unbuffered) would interleave
+        ## nondeterministically if merged. The notices are asserted by the
+        ## DS-5 / DS-6 tests that own them.
+        runStdout(repro & " develop --list --tool-provisioning=path " &
+          flags, cwd = ws)
 
       # ---- baseline: the whole lock set. ---------------------------------
       let all = list("")
@@ -278,10 +324,10 @@ suite "DS-7: the membership axis composes in a fixed order":
       check filterExact.code == 0
       check selectedRepos(filterExact.output).len == 0
       check "the selection is empty" in filterExact.output
-      let filterGlob = list("--filter='lib-*'")
+      let filterGlob = list("--filter=lib-*")
       check filterGlob.code == 0
       check selectedRepos(filterGlob.output) == @["lib-core", "lib-extra"]
-      let filterQ = list("--filter='tool-?'")
+      let filterQ = list("--filter=tool-?")
       check filterQ.code == 0
       check selectedRepos(filterQ.output) == @["tool-a", "tool-b"]
 
@@ -314,17 +360,17 @@ suite "DS-7: the membership axis composes in a fixed order":
       # witness in this all-stage pipeline; the dedicated `exceptCounted`
       # witness below proves that `--except` narrows at its fixed stage too.
       let permutations = [
-        "--all --project=alpha --tag=libs --filter='lib-*' " &
+        "--all --project=alpha --tag=libs --filter=lib-* " &
           "--only=lib-core --except=tool-a",
-        "--except=tool-a --only=lib-core --filter='lib-*' " &
+        "--except=tool-a --only=lib-core --filter=lib-* " &
           "--tag=libs --project=alpha --all",
-        "--tag=libs --except=tool-a --all --filter='lib-*' " &
+        "--tag=libs --except=tool-a --all --filter=lib-* " &
           "--project=alpha --only=lib-core",
         "--only=lib-core --all --except=tool-a --project=alpha " &
-          "--filter='lib-*' --tag=libs",
-        "--filter='lib-*' --tag=libs --project=alpha --all " &
+          "--filter=lib-* --tag=libs",
+        "--filter=lib-* --tag=libs --project=alpha --all " &
           "--except=tool-a --only=lib-core",
-        "--project=alpha --filter='lib-*' --except=tool-a --tag=libs " &
+        "--project=alpha --filter=lib-* --except=tool-a --tag=libs " &
           "--only=lib-core --all",
       ]
       let reference = list(permutations[0])
@@ -370,7 +416,7 @@ suite "DS-7: the membership axis composes in a fixed order":
       check twoModesFlipped.code == twoModesErr.code
 
       let twoFilters = run(repro &
-        " develop --list --filter='lib-*' --filter='tool-*'" &
+        " develop --list --filter=lib-* --filter=tool-*" &
         " --tool-provisioning=path", cwd = ws)
       check twoFilters.code != 0
       check "--filter was given twice with different values" in
@@ -384,7 +430,7 @@ suite "DS-7: the membership axis composes in a fixed order":
 
       # Repeating the SAME value is harmless — a script assembling argv from
       # several fragments legitimately does that — and stays accepted.
-      let sameTwice = list("--all --all --filter='lib-*' --filter='lib-*'")
+      let sameTwice = list("--all --all --filter=lib-* --filter=lib-*")
       check sameTwice.code == 0
       check selectedRepos(sameTwice.output) == @["lib-core", "lib-extra"]
 
@@ -420,11 +466,11 @@ suite "DS-7: the membership axis composes in a fixed order":
       ]
 
       # …and the counts themselves, not only the labels, depend on the order.
-      # `--tag=libs` keeps 2 of 5; `--filter='*-a'` then keeps 0 of those 2.
+      # `--tag=libs` keeps 2 of 5; `--filter=*-a` then keeps 0 of those 2.
       # Run the other way round the filter would keep 1 of 5 (`tool-a`) and the
       # tag would then keep 0 — same empty answer, different narrowing. A
       # report that cannot tell those apart cannot show a fixed order at all.
-      let counted = list("--all --tag=libs --filter='*-a'")
+      let counted = list("--all --tag=libs --filter=*-a")
       check counted.code == 0
       check stageLines(counted.output) == @[
         "selection: mode --all -> 5 repo(s)",

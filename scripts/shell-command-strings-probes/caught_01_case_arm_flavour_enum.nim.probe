@@ -1,0 +1,16 @@
+## A `case` arm named like POSIX, on a subject that is NOT an operating system.
+##
+## `ShellFlavour` is a rendering style, not a platform: `sfPosixStyle` is
+## reachable on Windows whenever the caller asks for POSIX-style rendering.
+## The old exemption keyed on the ARM NAME alone and waved this through.
+import std/[osproc]
+
+type ShellFlavour = enum
+  sfPosixStyle, sfWindowsStyle
+
+proc renderProbe(flavour: ShellFlavour; script, log: string): string =
+  case flavour
+  of sfPosixStyle:
+    execCmdEx("sh " & script & " > " & log).output
+  of sfWindowsStyle:
+    execCmdEx("cmd /c " & script).output

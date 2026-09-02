@@ -1,0 +1,11 @@
+## A string `case` arm naming a Linux artefact. The arm is reachable on
+## Windows (the subject is an artefact name, not a platform), and a string
+## literal is not an OS enum value at all.
+import std/[osproc]
+
+proc harvest(artefact, dest: string): string =
+  case artefact
+  of "linux-headers":
+    execCmdEx("dpkg -L linux-headers > " & dest).output
+  else:
+    ""

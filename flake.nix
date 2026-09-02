@@ -94,7 +94,15 @@
       # Bumped to the per-request event-interest API used by the engine to avoid
       # collecting categories an edge does not depend on. The enum, request
       # field, and environment codec are all introduced by this revision.
-      url = "github:metacraft-labs/io-mon/cb26b626e6642f00818da0f64938e64c7ae0d209";
+      #
+      # Advanced to io-mon `dev` HEAD (latest mainline) per an explicit cross-repo
+      # decision to base BOTH reprobuild and codetracer on the identical latest
+      # io-mon (see .github/sibling-repos' io-mon note). This keeps the Nix build
+      # input in lock-step with the CI sibling pin so a monitored build and a
+      # hermetic build compile against the same io_mon module set (`io_mon/depfile`
+      # among them). Only 5 commits ahead of the prior cb26b626 pin (Windows shim
+      # hooks/interpose + capabilities/render/types), depfile unchanged.
+      url = "github:metacraft-labs/io-mon/e2ee15afe8dd7f538ec2ce79af9a1aa512addce2";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -1588,6 +1596,27 @@
               PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
                 ${./scripts/pre_commit_hook_handoff.sh} after --hook pre-push || true
             '';
+          };
+
+          # Minimal CI shell for the get.reprobuild.com static-site deploy
+          # (.github/workflows/deploy-get.yml). It provides FLAKE-PINNED wrangler
+          # — resolved through this flake's nixpkgs (flake.lock), not an ad-hoc
+          # `npx wrangler` download or an uncached `nix run nixpkgs#wrangler` —
+          # plus the POSIX tools get/build-get.sh needs to assemble get/dist/.
+          #
+          # It deliberately does NOT inherit the heavy default toolchain shell
+          # above: the deploy only copies static files and runs `wrangler pages
+          # deploy`, so pulling in the Nim/Rust/clingo closure would make the
+          # deploy job slower and more fragile for no benefit. The self-hosted
+          # eph-linux-x64 runners ship no node/npx, which is exactly why the
+          # deploy runs wrangler from here rather than via cloudflare/*-action.
+          devShells.ci = pkgs.mkShell {
+            packages = [
+              pkgs.wrangler
+              pkgs.bash
+              pkgs.coreutils
+              pkgs.git
+            ];
           };
         };
     };

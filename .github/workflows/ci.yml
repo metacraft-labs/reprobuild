@@ -96,7 +96,7 @@ jobs:
             tree-sitter-tolk
             codetracer-native-recorder
           permission-contents: read
-      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
@@ -136,7 +136,7 @@ jobs:
       - name: Mirror logs to S3 (non-blocking)
         if: always()
         continue-on-error: true
-        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@main
+        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@dev
         with:
           path: test-logs/
           prefix: lint-logs/${{ github.run_id }}
@@ -164,7 +164,7 @@ jobs:
           owner: metacraft-labs
 
       - name: Setup Windows dev environment
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: windows-diy
           gh-token: ${{ steps.ci_token.outputs.token }}
@@ -282,7 +282,7 @@ jobs:
       # Local clones let CI pick up sibling changes without waiting for a
       # flake.lock bump.
       - name: Clone runquota sibling
-        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/runquota
           # runquota's mainline is ``dev`` (its default branch); ``main`` is
@@ -298,7 +298,7 @@ jobs:
       # test job must clone it and scripts/run_tests.sh builds it as a
       # prerequisite. Pinned to the ``reprobuild`` branch (the fork).
       - name: Clone reprobuild-cmake sibling
-        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/reprobuild-cmake
           ref: reprobuild
@@ -314,10 +314,10 @@ jobs:
       # path baked in via currentSourcePath() at compile time points at
       # a non-existent file on the CI runner.
       - name: Clone reprobuild-examples sibling
-        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/reprobuild-examples
-          ref: main
+          ref: dev
           path: ${{ github.workspace }}/../reprobuild-examples
           gh-token: ${{ steps.ci_token.outputs.token }}
 
@@ -335,10 +335,10 @@ jobs:
       # macOS because the Hyper-V backend they exercise is Windows-
       # only.
       - name: Clone vm-harness sibling
-        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/vm-harness
-          ref: main
+          ref: dev
           path: ${{ github.workspace }}/../vm-harness
           gh-token: ${{ steps.ci_token.outputs.token }}
 
@@ -358,7 +358,7 @@ jobs:
             https://github.com/blocksense-network/direnv-nix-flake-overrides.git \
             "$dest"
 
-      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
@@ -684,7 +684,7 @@ jobs:
       - name: Mirror logs to S3 (non-blocking)
         if: always()
         continue-on-error: true
-        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@main
+        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@dev
         with:
           path: test-logs/
           prefix: test-logs/${{ github.run_id }}
@@ -745,7 +745,7 @@ jobs:
             tree-sitter-tolk
             codetracer-native-recorder
           permission-contents: read
-      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
@@ -766,7 +766,7 @@ jobs:
       - name: Mirror logs to S3 (non-blocking)
         if: always()
         continue-on-error: true
-        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@main
+        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@dev
         with:
           path: test-logs/
           prefix: build-logs/${{ github.run_id }}

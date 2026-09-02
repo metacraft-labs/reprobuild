@@ -140,7 +140,7 @@
 ## fixture tool is a genuine executable shell script that the resolver
 ## actually spawns for its ``--version`` probe.
 
-import std/[options, os, strutils, tempfiles, unittest]
+import std/[options, os, strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_cli_support
@@ -623,6 +623,38 @@ suite "the fork-time PATH overlay excludes the host search list":
     checkpoint("binDirs: " & $resolved.get().binDirs)
     check resolved.get().binDirs == @[storeBin, extraBin]
 
+  test "a cross-repo path profile retains graph-derived runtime tool dirs":
+    let scratch = createTempDir("repro-toolpath-overlay-producer-", "")
+    defer: removeDir(scratch)
+
+    let producerBin = scratch / "producer" / "bin"
+    let runtimeBin = scratch / "runtime" / "bin"
+    createDir(producerBin)
+    createDir(runtimeBin)
+    writeFixtureTool(producerBin, "PRODUCER")
+
+    let hadPrior = producerMaterializedBinDirs.hasKey(FixtureToolName)
+    let prior = if hadPrior:
+                  producerMaterializedBinDirs[FixtureToolName]
+                else:
+                  @[]
+    defer:
+      if hadPrior:
+        producerMaterializedBinDirs[FixtureToolName] = prior
+      else:
+        producerMaterializedBinDirs.del(FixtureToolName)
+
+    producerMaterializedBinDirs[FixtureToolName] =
+      @[producerBin, runtimeBin]
+    let identity = pathAdapterIdentity(
+      producerBin / FixtureToolName, producerBin, runtimeBin)
+    let resolver = mkToolIdentityResolver(identity)
+    let resolved = resolver(FixtureToolName, dkBuild)
+
+    check resolved.isSome
+    checkpoint("cross-repo producer binDirs: " & $resolved.get().binDirs)
+    check resolved.get().binDirs == @[producerBin, runtimeBin]
+
 suite "an action's PATH is a decision, and it is never the empty string":
   ## THE GATE THAT WAS MISSING WHEN `PATH=` SHIPPED.
   ##
@@ -660,10 +692,11 @@ suite "an action's PATH is a decision, and it is never the empty string":
     check decision.passthrough.len == 0
     # ... and the host's `$PATH` is not a term in it. The dev shell that
     # runs this test has a long `$PATH`; none of it may appear.
+    let decisionEntries = decision.env[0]["PATH=".len .. ^1].split($PathSep)
     for entry in getEnv("PATH").split($PathSep):
       if entry.len == 0 or entry == binDir:
         continue
-      check not decision.env[0].contains(entry)
+      check entry notin decisionEntries
 
   test "a non-declaring edge with nothing resolved emits NO PATH entry":
     # The branch the 1372 `reprobuild.test_execute.*` edges take, and

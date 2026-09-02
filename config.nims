@@ -243,6 +243,13 @@ for libName in [
   "repro_dev_env_activation",
   "repro_dev_env_engine",
   "repro_tool_profiles",
+  # Platform-And-Filesystem-Facts F1/F2: the declared OS and filesystem
+  # fact tables (value + citation + observability marker each) and the
+  # path -> table-row lookup. Deliberately listed BEFORE the store: the
+  # store is a consumer, the facts library depends on nothing in this
+  # repository, and it must stay importable without dragging the store
+  # (or repro_platform's MSVC dev-env process launcher) in behind it.
+  "repro_fs_facts",
   "repro_local_store",
   # M9.R.77.2 — R11 Layer-1 CAS-store facade over ``repro_local_store``
   # (spec: Store-And-Installation-Layout.md §R11 Two-Layer Split).

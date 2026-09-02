@@ -5,7 +5,17 @@
 
 import std/[os, osproc, strutils, unittest]
 
-const reproBinary = "./build/bin/repro"
+const ReprobuildRepoRoot =
+  currentSourcePath().parentDir().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory.
+
+const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
+  ## `addFileExt` is not decoration. The previous spelling was the bare
+  ## `"./build/bin/repro"`, which on Windows names a file that never exists —
+  ## so the guard below took the `skip()` branch on EVERY Windows run, and the
+  ## case has never executed there. Two defects in one line: the cwd
+  ## dependence and the missing executable extension.
 
 const fixtureProject = """
 import repro_project_dsl

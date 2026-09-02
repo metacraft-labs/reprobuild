@@ -1,0 +1,7 @@
+## W13's shape: a two-stage pipe through a command string. On Windows the `|`
+## and everything after it arrive as argv to the FIRST program.
+import std/[os, osproc]
+
+proc extract(archive, dest: string): int =
+  execCmdEx("zstd -dc " & quoteShell(archive) &
+            " | tar -xf - -C " & quoteShell(dest)).exitCode

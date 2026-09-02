@@ -1,0 +1,9 @@
+## `when not defined(windows):` is POSIX-only, and the whole-condition test
+## introduced in W14 must keep reading it that way.
+import std/[osproc]
+
+proc probe(): string =
+  when not defined(windows):
+    execCmdEx("uname -a > /tmp/probe.txt").output
+  else:
+    ""
