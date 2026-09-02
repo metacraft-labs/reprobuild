@@ -427,7 +427,39 @@ jobs:
           # build (next step) because `.#release` rewrites build\bin.
           & ./windows/stage-release-dlls.ps1
 
-          .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#release
+          # Run the `.#release` build from a COPY of repro.exe at a different
+          # path. That build's `reprobuild.apps.repro` edge RELINKS
+          # build\bin\repro.exe -- the very binary orchestrating the build -- and
+          # on Windows a running .exe holds an exclusive lock on its own image
+          # file, so the linker cannot open it for output:
+          #
+          #   ld.exe: cannot open output file ...\build\bin\repro.exe: Permission denied
+          #   collect2.exe: error: ld returned 1 exit status
+          #   Error: execution of an external program failed: 'gcc.exe @repro_linkerArgs.txt'
+          #
+          # (POSIX has no such lock: `ld` unlinks the old inode and creates a new
+          # file, so a running process keeps executing the old image while the new
+          # binary lands -- which is exactly why the Linux/macOS legs relink repro
+          # without trouble and only Windows fails here. This is also why the DSL
+          # runtime library is already built as `librepro_project_dsl_runtime.new.dll`
+          # and swapped: the same self-lock, handled for the .dll but not the .exe.)
+          #
+          # The copy lives NEXT TO the staged runtime DLLs in build\bin so
+          # clingo.dll / sqlite3_64.dll / libcrypto-3-x64.dll / libssl / vcruntime
+          # etc. still resolve from the orchestrator's own directory at load time
+          # (Win32 LoadLibrary searches the exe's dir first). It is removed in the
+          # `finally` so the packaged archive carries only repro.exe, never the
+          # orchestrator copy.
+          $orchestrator = "build\bin\repro-orchestrator.exe"
+          Copy-Item -LiteralPath "build\bin\repro.exe" -Destination $orchestrator -Force
+          try {
+            & ".\$orchestrator" build --tool-provisioning=path --daemon=off --no-runquota .#release
+            if ($LASTEXITCODE -ne 0) {
+              throw "repro .#release build failed (exit code $LASTEXITCODE)"
+            }
+          } finally {
+            Remove-Item -LiteralPath $orchestrator -Force -ErrorAction SilentlyContinue
+          }
 
       # Re-stage after `.#release`: that build rewrites build\bin, so the DLLs
       # staged above may not survive into the packaged tree. Idempotent -- it
