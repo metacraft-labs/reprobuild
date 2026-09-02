@@ -2828,6 +2828,17 @@ proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
   ## mesMonitorUnavailable. Return whichever is more severe.
   if ord(a) >= ord(b): a else: b
 
+const FailedExecDetailToken = "execstatus=failed"
+  ## The token io-mon puts in an `mrProcessExec` record's `detail` when the
+  ## exec syscall RETURNED — i.e. it failed and no new image ran. Emitted by
+  ## io-mon `src/io_mon/shim/linux_preload.nim` (`repro_hook_execve`, the
+  ## M9.R.68.3 follow-up record) as `"execstatus=failed errno=<n>"`, and
+  ## consumed by io-mon's own writer to retract the preceding pre-flush exec
+  ## from its unmonitored-subtree signal. The engine matches the same token so
+  ## a failed exec never becomes a content input. Keep in step with that emit
+  ## site; a rename there silently turns absent paths into cache inputs here,
+  ## which `t_executed_binary_is_a_recorded_input.nim` pins.
+
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
                           seen: var EvidenceSeenSets;
@@ -2938,6 +2949,65 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
       discard
   of mrFileWrite:
     evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+  of mrProcessExec:
+    # A binary the action EXECUTED. Its bytes decide what the action
+    # computes at least as directly as any file it reads, so it is a
+    # content dependency and belongs in `monitorReads` beside
+    # `mrLibraryLoad`.
+    #
+    # WHY IT NEEDS ITS OWN ARM. It cannot arrive as an `mrFileRead`: the
+    # kernel maps the image, no interposed `open` is involved, and the
+    # loaded-object enumeration explicitly EXCLUDES the main executable
+    # (io-mon `shim/linux_preload.nim` :: `libraryLoadRecordablePath`,
+    # `dlpi_name == ""`), on the stated grounds that it "is already
+    # captured as the process image by `mrProcessExec`". Until this arm
+    # existed, nothing in this engine referenced `mrProcessExec` at all,
+    # so that hand-off landed in the `else: discard` below and the
+    # executed binary was in no cache key.
+    #
+    # Measured before this arm, over four action shapes, all on edges
+    # that declare no tool refs. Only the first was covered, and only by
+    # accident — a bare name invoked through a shell makes bash `stat`
+    # every PATH candidate, and the resolved hit lands as an
+    # `mrPathProbe`, which IS folded:
+    #
+    #   bare name via a shell   -> path-probe + process-exec, in the key
+    #   absolute path in the shell command  -> process-exec ONLY, not in the key
+    #   the action's own argv[0]            -> NOTHING AT ALL
+    #   bare name via glibc `execvp`        -> unresolved name + failed marker
+    #
+    # Rows 2 and 4 are what this arm addresses. Row 3 cannot be: io-mon's
+    # `execve` hook lives in the CHILD, so the launcher's exec of the
+    # action's ROOT image precedes the shim constructor and there is no
+    # record here to fold. That one is closed on the launcher side by
+    # `executedToolImagePath`.
+    #
+    # TWO GUARDS, both load-bearing.
+    #
+    # (1) ABSOLUTE PATHS ONLY. `execvp`/`execlp`/`execvpe` record the
+    #     name the CALLER passed, unresolved — io-mon's
+    #     `dispatch_execvp` emits before handing off to glibc, which
+    #     then does the PATH walk internally where no interposer can see
+    #     it. Folding `execdep-helper3` would send it through
+    #     `materialPath`, which joins a relative path onto the action's
+    #     cwd and MANUFACTURES `<cwd>/execdep-helper3` — a path that
+    #     does not exist, is not what ran, and would be a fabricated
+    #     dependency layered on top of the gap rather than a fix for it.
+    #     Skipping is the conservative choice: it leaves the gap exactly
+    #     where it was and invents nothing. Resolving here is not
+    #     available — the search PATH that glibc used is the CHILD's
+    #     environment at the moment of the call, which this fold does
+    #     not have and must not guess at.
+    # (2) NO FAILED EXECS. io-mon emits a follow-up `mrProcessExec`
+    #     carrying `execstatus=failed` when the syscall returned
+    #     (`shim/linux_preload.nim`, M9.R.68.3). A failed exec ran no
+    #     bytes, and its path frequently does not exist at all — bash's
+    #     platform-probe cascade alone execs a dozen absent paths per
+    #     `configure`. Existence-of-absent-paths is what `mrPathProbe`
+    #     is for; it must not enter the key as a content read.
+    if record.path.isAbsolute and
+        not record.detail.contains(FailedExecDetailToken):
+      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
   of mrPathProbe:
     evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
   of mrDirectoryEnumerate:
@@ -3182,8 +3252,116 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     if action.cacheable:
       col.publishable = false
 
+proc monitorPayloadArgIndex(argv: openArray[string]): int
+proc preparedRunQuotaCommand(action: BuildAction;
+                             config: BuildEngineConfig;
+                             shellUmaskWrap = true): ReproCommandSpec
+
+proc isExecutableFile(path: string): bool =
+  ## `execvp`'s candidate test, as close as a consumer can get to it: the
+  ## entry must exist and carry an execute bit. `execvp` itself asks the
+  ## kernel and keeps walking on `EACCES`; asking for any execute bit is the
+  ## same decision for every candidate a build action can plausibly hit, and
+  ## it never opens the file.
+  if not fileExists(extendedPath(path)):
+    return false
+  try:
+    let perms = getFilePermissions(extendedPath(path))
+    {fpUserExec, fpGroupExec, fpOthersExec} * perms != {}
+  except OSError, IOError:
+    false
+
+proc executedToolImagePath(action: BuildAction;
+                           config: ptr BuildEngineConfig): string =
+  ## The on-disk image this action's OWN root command names, resolved the way
+  ## the launcher resolves it.
+  ##
+  ## WHY THE LAUNCHER HAS TO ANSWER THIS. io-mon's `execve` hook lives in the
+  ## CHILD — it is installed by the preloaded shim's constructor, which runs
+  ## only once the new image is already mapped. The launcher's exec of the
+  ## action's ROOT image therefore happens strictly BEFORE any hook exists, so
+  ## `mrProcessExec` covers NESTED execs and nothing else. Measured: an action
+  ## whose `argv[0]` IS the tool produced a 19-record depfile containing that
+  ## binary's six glibc shared objects and NOT the binary itself. No arm in
+  ## `foldOneMonitorRecord` can close that, because there is no record.
+  ##
+  ## This is the untyped analogue of `resolvedExecutableDigest`
+  ## (`repro_tool_profiles`), which already pins exactly this fact for
+  ## DECLARED tools — the profile keys on what the resolution found rather
+  ## than on the search path that found it. An edge that declares no tool refs
+  ## had no equivalent, so its root image was in no cache key at all.
+  ##
+  ## RESOLUTION, AND WHAT IT IS AND IS NOT.
+  ##
+  ## * An absolute name needs no resolution and no environment — the launcher
+  ##   execs exactly that path.
+  ## * A name containing a separator is resolved against the action's `cwd`,
+  ##   which is what POSIX `exec` does with it and what the launcher's own
+  ##   `chdir` makes true.
+  ## * A BARE name is the only case that needs a search, and the search runs
+  ##   over the PATH that `preparedRunQuotaCommand` — the single authority
+  ##   every launch path shares for the child's argv+env contract — puts in
+  ##   the child's environment. Same string, same POSIX first-match rule.
+  ##   It is a reconstruction of the launcher's resolution, not an observation
+  ##   of the kernel's; `t_executed_binary_is_a_recorded_input.nim` is what
+  ##   holds the two together end to end on a real build.
+  ##
+  ## `shellUmaskWrap = false` deliberately: the `/bin/sh -c 'umask 022 && …'`
+  ## the wrapped launch paths add is the ENGINE's own scaffolding, sits ABOVE
+  ## the monitor, and is identical for every action. Recording it would put
+  ## one constant in every key and say nothing about the action.
+  ##
+  ## Returns "" when the image cannot be identified without guessing — a
+  ## monitored argv that is not the canonical `repro internal io monitor … --`
+  ## shape, a bare name that no PATH entry supplies, or no config to ask.
+  ## Returning nothing leaves the pre-existing gap exactly as it was; it never
+  ## invents a path.
+  if action.argv.len == 0:
+    return ""
+  let payloadIndex = monitorPayloadArgIndex(action.argv)
+  if payloadIndex < 0 and action.argv.len >= 4 and
+      action.argv[1] == "internal" and action.argv[2] == "io" and
+      action.argv[3] == "monitor":
+    # Monitor-wrapped but not in the shape `monitorPayloadArgIndex` accepts.
+    # The root image would be the `repro` binary, which is the launcher, not
+    # the action. Say nothing rather than record the wrong thing.
+    return ""
+  let base = if payloadIndex >= 0: payloadIndex else: 0
+  if base >= action.argv.len:
+    return ""
+  let name = action.argv[base]
+  if name.len == 0:
+    return ""
+  if name.isAbsolute:
+    return name
+  if name.contains(DirSep) or name.contains(AltSep):
+    return os.normalizedPath(materialPath(action.cwd, name))
+  if config == nil:
+    return ""
+  var searchPath = ""
+  try:
+    let command = preparedRunQuotaCommand(action, config[],
+      shellUmaskWrap = false)
+    for entry in command.env:
+      if entry.startsWith("PATH="):
+        searchPath = entry.substr("PATH=".len)
+  except CatchableError:
+    return ""
+  if searchPath.len == 0:
+    return ""
+  for dir in searchPath.split(PathSep):
+    # POSIX: an empty PATH element names the current working directory.
+    let dirBase = if dir.len == 0: action.cwd else: dir
+    if dirBase.len == 0:
+      continue
+    let candidate = materialPath(action.cwd, dirBase) / name
+    if isExecutableFile(candidate):
+      return os.normalizedPath(candidate)
+  ""
+
 proc collectEvidence(action: BuildAction; strict: bool;
-                     hostedRecords: ptr seq[MonitorRecord] = nil):
+                     hostedRecords: ptr seq[MonitorRecord] = nil;
+                     config: ptr BuildEngineConfig = nil):
                      EvidenceCollection =
   ## ``hostedRecords`` (HM-5) is the in-memory record set for an action the
   ## engine hosted the monitor for. When it is non-nil the monitor evidence is
@@ -3204,6 +3382,20 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # legacy linear ``find`` made the per-action wrap-up the dominant
   # term on the 14-app / ~1044-action collections from B1/B3/B5.
   var seen: EvidenceSeenSets
+  # The action's OWN root image, which no monitor record can supply — see
+  # `executedToolImagePath`. Folded as a content read, beside `mrLibraryLoad`
+  # and the `mrProcessExec` arm that covers this action's NESTED execs.
+  #
+  # SCOPED TO THE AUTOMATIC-MONITOR CLASS on purpose. That is the class where
+  # the ENGINE promises to discover the input set, so a missing input is the
+  # engine's defect. On an edge whose inputs are declared by its author, the
+  # author owns that set and the engine adding an undeclared path to the key
+  # behind their back is a different decision, with a different blast radius,
+  # and it is not the one this change makes.
+  if action.dependencyPolicy.kind in MonitorPolicyKinds:
+    let rootImage = executedToolImagePath(action, config)
+    if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
+      result.evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
   let reports = action.reportSpecsForPolicy()
   if action.dependencyPolicy.kind in RecognizedPolicyKinds and reports.len == 0:
     result.evidence.diagnostics.add(
@@ -8099,7 +8291,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             not config.forceRebuild and
             not action.needsExecutionForPolicy():
           let evidenceStart = statStart()
-          let evidence = collectEvidence(action, strict = true)
+          let evidence = collectEvidence(action, strict = true,
+            config = addr config)
           finishStat("repro evidence collect", evidenceStart)
           runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence
           if not evidence.publishable:
@@ -8215,7 +8408,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if status == asSucceeded:
             invalidateCachedOutputs(action)
             let evidenceStart = statStart()
-            let evidence = collectEvidence(action, strict = true)
+            let evidence = collectEvidence(action, strict = true,
+              config = addr config)
             finishStat("repro evidence collect", evidenceStart)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
@@ -8389,7 +8583,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if finished.status == asSucceeded:
             invalidateCachedOutputs(plan.action)
             let evidenceStart = statStart()
-            let evidence = collectEvidence(plan.action, strict = true)
+            let evidence = collectEvidence(plan.action, strict = true,
+              config = addr config)
             finishStat("repro evidence collect", evidenceStart)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
@@ -8943,9 +9138,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # HM-5 — fold from the records the host already has. The ``.iomon``
             # for this action may not exist yet; that is the point.
             collectEvidence(action, strict = true,
-              hostedRecords = addr hostedMonitorRecords)
+              hostedRecords = addr hostedMonitorRecords,
+              config = addr config)
           else:
-            collectEvidence(action, strict = true)
+            collectEvidence(action, strict = true,
+              config = addr config)
         hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
         # HM-5 — a publication that FAILED means this action's ``.iomon`` never
