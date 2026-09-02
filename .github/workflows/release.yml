@@ -319,6 +319,17 @@ jobs:
           # existed, clingo.dll was picked up only if the runner happened to
           # carry a hand-provisioned C:\clingo on its machine PATH.
 
+          # Raise nim.exe's OWN stack BEFORE any nim compile. The `.#release`
+          # interface-extract compiles the entire DSL-stdlib closure in a single
+          # nim.exe whose deep sem/macro recursion overruns nim's linker-default
+          # ~1 MB stack, crashing the COMPILER with STATUS_STACK_BUFFER_OVERRUN
+          # (0xC0000409 / exit -1073740791) -- confirmed as nim.exe's own exit
+          # code. This patches nim.exe's PE SizeOfStackReserve to 128 MB (exactly
+          # what `editbin /STACK` writes, but MSVC/editbin is absent on
+          # windows-diy: `vswhere.exe not found`). Idempotent; covers both
+          # `just bootstrap` and the `.#release` extract below.
+          & ./windows/raise-nim-stack.ps1
+
           # Provision `just`: the reprobuild dev-env summary reports
           # `just = (not on PATH)` on the windows-diy runners (the repo-workspaces
           # framework provisions nim/gcc but not just here), yet both builds below
