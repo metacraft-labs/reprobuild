@@ -1359,7 +1359,13 @@ test "incomplete name" and:
                 "t_repos_add_reuses_remotes_and_inherits_revision",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 5,
+                # 5 -> 6. Re-measured on both surfaces independently: the
+                # built binary's own `--list-json` reports 6 and the static
+                # baseline TSV records 6. Unlike the aggregates this file has
+                # just had cleaned out, a per-source pin like this one is
+                # exactly what SHOULD be updated by hand — it names the file
+                # that moved, so moving it is an attribution, not a bump.
+                "sourceCaseCount": 6,
                 "class": "integration",
             },
             "tests/integration/"
@@ -1522,8 +1528,22 @@ test "incomplete name" and:
                 "binary": "build/test-bin/test_tool_identity_env_plumbing",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 9,
-                "class": "pure unit",
+                # 9 -> 10, agreed by the built binary and the static baseline.
+                "sourceCaseCount": 10,
+                # "pure unit" -> "unclassified", and this one is NOT a count
+                # moving: the source's classification changed. The classifier
+                # now reports `mutates the process environment`, which its
+                # fail-closed purity rule refuses to call a pure unit and
+                # which none of the four classes M0 names describes either.
+                # Recorded rather than argued away, because it is a real
+                # property of this test and because it is not alone: the
+                # regenerated inventory puts 121 of 1,404 entries in
+                # `unclassified`, a fifth bucket that did not exist in the
+                # 2026-08-06 baseline's 624/16/478/89. Whether M0's four-way
+                # classification deliverable is satisfied by a tree with 121
+                # entries outside it is a question for the ledger, not for
+                # this pin.
+                "class": "unclassified",
             },
             # Upstream 11cea6789 enrolls six one-case develop-selection
             # integrations. Pin every source-to-binary mapping so a later
@@ -1706,7 +1726,8 @@ test "incomplete name" and:
                 "binary": "build/test-bin/t_m9r13a_provider_compile_sharing",
                 "language": "nim",
                 "sourceSuiteCount": 2,
-                "sourceCaseCount": 10,
+                # 10 -> 17, agreed by the built binary and the static baseline.
+                "sourceCaseCount": 17,
                 "class": "graph-fixture",
             },
             "tests/unit/t_m9r14c_1_autotools_parallel_make.nim": {
@@ -1714,7 +1735,8 @@ test "incomplete name" and:
                 "t_m9r14c_1_autotools_parallel_make",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 10,
+                # 10 -> 12, agreed by the built binary and the static baseline.
+                "sourceCaseCount": 12,
                 "class": "platform/destructive",
             },
             # The post-commit publication-reporting guard (M19b). An EXISTING
@@ -1859,7 +1881,8 @@ test "incomplete name" and:
             "binary": "build/test-bin/t_configure_build_tree_cleanup",
             "language": "nim",
             "sourceSuiteCount": 1,
-            "sourceCaseCount": 4,
+            # 4 -> 5, agreed by the built binary and the static baseline.
+            "sourceCaseCount": 5,
             "class": "pure unit",
         }
 
@@ -1898,7 +1921,8 @@ test "incomplete name" and:
             (
                 "tests/integration/t_membership_model_sets_cli.nim",
                 "t_membership_model_sets_cli",
-                4,
+                # 4 -> 5, agreed by the built binary and the static baseline.
+                5,
             ),
         ):
             expected_enrollments[source] = {
@@ -2375,8 +2399,68 @@ test "incomplete name" and:
         #   t_unsatisfiable_lock_reports_conflict.nim
         # Regenerated with `scripts/generate_test_edges.nim`, which reported
         # 1243 Nim tests and no other movement.
-        self.assertEqual(len(nim_specs), 1243)
-        self.assertEqual(len(python_specs), 5)
+        #
+        # THE LEDGER ABOVE ENDS HERE, and the pin it justified is gone.
+        #
+        # It said `len(nim_specs) == 1243` while the tree declared 1399, and
+        # it could not be observed to be wrong: this whole method runs behind
+        # `require_fully_built_test_tree`, so in every working checkout the
+        # assertion was skipped rather than evaluated. Worse, the same test
+        # asserted BOTH `len(nim_specs) == 1243` and, further down,
+        # `declared_nim_count == 1240` together with
+        # `len(nim_specs) == declared_nim_count`. Those three cannot hold at
+        # once on any tree. A contradiction survived in a checked-in gate
+        # because nothing ever ran it.
+        #
+        # Replacing it with `== 1399` would buy one week. The number is not
+        # the property. The property is that the generated graph and the
+        # checked-in per-source baseline describe the SAME set of test
+        # sources — that is what "no test may silently leave the suite"
+        # means — and that relation is checkable on any tree, needs nothing
+        # built, and cannot go stale without something real having moved.
+        #
+        # The baseline is `scripts/reprobuild-suite-static-case-counts.tsv`,
+        # one row per declared source, refreshed by
+        # `--write-static-case-counts` and gated before every push by
+        # `scripts/check_suite_case_counts.sh`. Dropping a source still fails
+        # loudly — in `StaticCaseCountBaselineTests`, which never skips, and
+        # in the pre-push hook — and it fails naming the file rather than
+        # naming an integer nobody can attribute.
+        recorded_specs = inventory.load_static_case_counts(REPO_ROOT)
+        self.assertEqual(
+            len(nim_specs),
+            sum(
+                1
+                for language, _ in recorded_specs.values()
+                if language == "nim"
+            ),
+        )
+        # Per source, not merely in count: two offsetting errors sum to the
+        # same total. `StaticCaseCountBaselineTests` asserts the same
+        # membership without a built tree; asserting it here as well is what
+        # makes the aggregates below attributable to a set this method has
+        # itself checked.
+        self.assertEqual(
+            {spec.source for spec in nim_specs},
+            {
+                source
+                for source, (language, _) in recorded_specs.items()
+                if language == "nim"
+            },
+        )
+        # The Python side stays enumerated by NAME rather than by count.
+        # There are five of them, they change perhaps twice a year, and a
+        # count would not say which one had gone.
+        self.assertEqual(
+            {spec.source for spec in python_specs},
+            {
+                "tests/test_dev_env_m9_policy.py",
+                "tests/unit/test_cmake_generator_competitiveness_bench.py",
+                "tests/unit/test_continuous_benchmarking_policy.py",
+                "tests/unit/test_package_root_anchor.py",
+                "tests/unit/test_reprobuild_suite_inventory.py",
+            },
+        )
 
         nim_total = sum(
             item["sourceCaseCount"]
@@ -2621,7 +2705,52 @@ test "incomplete name" and:
         # measurement, on the same principle as the composed base above.
         # The Nix-daemon host-loader regression adds one unconditional case
         # to an existing source, so the platform delta remains exactly one.
-        expected_nim_total = 7118 if sys.platform == "darwin" else 7119
+        #
+        # THIS ONE STAYS NUMERIC, and it is the only aggregate in this method
+        # that does. The three that surrounded it were removed or made
+        # relational because each was a restatement of something the tree
+        # already records per source. This one is not: it is the sum over the
+        # BUILT BINARIES' own `--list-json`, and NO checked-in artefact
+        # records that surface per source. The static baseline TSV cannot
+        # stand in for it — on this tree 65 of the 1,398 catalog-counted
+        # sources disagree with their static scan, by a net 94 cases, and
+        # every one of those disagreements is legitimate: a `for` loop
+        # registering 71 cases the scanner reads as one declaration, a
+        # wrapper template the scanner cannot see at all, a `when`/`else`
+        # pair whose branches the scanner sums but only one of which
+        # registers. Deriving this total from the static scan would therefore
+        # require a 65-row correction table that itself needs regenerating on
+        # every `when`-branch edit, which is the churn this pass is removing,
+        # not a cure for it.
+        #
+        # So it is kept, and its cost is stated instead of hidden: it can be
+        # produced only from a complete build of all 1,399 test binaries plus
+        # a `--list-json` probe of each, and it will go stale between two such
+        # builds. What makes that acceptable is that it is now the ONLY thing
+        # in this method that can, and that it no longer sits behind pins that
+        # were stale for a different, avoidable reason.
+        #
+        # MEASURED, not composed: a live `build_inventory` on a tree where
+        # `repro build .#test-builds` reported built=1401/1401 with zero
+        # failures, all 1,399 declared binaries present, none source-newer-
+        # than-binary, and `countSourceCounts` = 1,398 catalog / 1 quarantined
+        # / 5 static (the five Python files). The value it read was 7,947 on
+        # Linux; the previous pin said 7,119, which is what 828 unattributed
+        # cases across roughly 160 unattributed sources look like when nothing
+        # ever evaluates the assertion.
+        #
+        # The Darwin value is NOT measured here — this is a Linux host — and
+        # is carried as `Linux - 2` on the strength of
+        # `assert_linux_darwin_catalog_delta_is_exact`, which DERIVES that
+        # delta by summing the platform-qualified case census rather than
+        # asserting it as a constant. Note that the delta is 2 and not the 1
+        # every earlier revision of this comment claimed: the same
+        # reconciliation that produced 7,947 found six sources missing from
+        # that census, one of which is a Linux-only case with no Darwin
+        # counterpart. Recorded as an inference, on the same principle as
+        # everything else in this method: the only thing worse than a stale
+        # pin is a stale pin that reads as if someone had checked it.
+        expected_nim_total = 7945 if sys.platform == "darwin" else 7947
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -2688,7 +2817,38 @@ test "incomplete name" and:
         # said 50. This branch adds exactly one Python case — the
         # bundle-expansion guard in this file — so 68 + 1 = 69, and the
         # measurement agrees with the attribution.
-        self.assertEqual(python_total, 69)
+        #
+        # THE LEDGER ABOVE ENDS HERE TOO. `69` was stale by nine — the tree
+        # records 78 — and, like the spec count, it could not be observed to
+        # be wrong from behind the built-tree guard.
+        #
+        # A Python entry's `countSource` is ALWAYS "static" (there is no
+        # built binary to enumerate), so this aggregate is by construction
+        # the sum of the same per-source static scan the checked-in baseline
+        # records. Stating it that way is not a weakening: it is the identity
+        # the literal was standing in for, and it moves itself when a Python
+        # case is added and the baseline is regenerated — which the pre-push
+        # hook already forces.
+        self.assertEqual(
+            python_total,
+            sum(
+                count
+                for language, count in recorded_specs.values()
+                if language == "python"
+            ),
+        )
+        # …and the identity above is only meaningful because nothing else may
+        # supply a Python count. Pinned separately so a future fallback that
+        # imputed a number for a Python entry would fail here rather than
+        # silently satisfy the sum.
+        self.assertEqual(
+            {
+                item["countSource"]
+                for item in data["tests"]
+                if item["language"] == "python"
+            },
+            {"static"},
+        )
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
         #
@@ -2754,9 +2914,14 @@ test "incomplete name" and:
         # python half moves 50 -> 51 and the aggregate 6966 -> 6967. The NIM
         # half is again deliberately untouched: consolidating 24 sources into
         # one binary must not change any case count, and it does not.
-        self.assertEqual(
-            data["static"]["sourceCaseCount"], expected_nim_total + 69
-        )
+        #
+        # The `expected_nim_total + 69` form of this assertion is REMOVED, not
+        # updated. It restated the line below with one half replaced by a
+        # literal, so it could only ever fail in the one way the line below
+        # already catches — and it carried a second, independently rotting
+        # copy of the Python total to do it. One statement of a fact is a
+        # gate; two statements of the same fact where one is a literal is a
+        # gate plus a maintenance hazard.
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -2980,8 +3145,51 @@ test "incomplete name" and:
         ):
             with self.subTest(added_explicit_source=added):
                 self.assertIn(added, explicit_sources)
-        self.assertEqual(len(explicit_sources), 53)
-        self.assertEqual(len(api_sources), 21)
+        #
+        # THE THREE SIZE LITERALS HERE ARE REPLACED — `len(explicit_sources)
+        # == 53`, `len(api_sources) == 21` and `derived_total == 71` — and the
+        # reason is the most direct evidence in this file that a literal is
+        # the wrong instrument for this job.
+        #
+        # The CHECKED-IN inventory artifact at this branch's base already
+        # recorded 63 explicit / 21 api / 81 union. The literals said 53 and
+        # 71. Both are produced by the same command from the same source
+        # scan, so the artifact and the assertion that is supposed to guard it
+        # had been ten sources apart, and neither noticed: the artifact is
+        # regenerated by hand and checked by nothing, and this method only
+        # runs on a fully built tree. The pin was not merely stale, it was
+        # raising a false alarm about a document that was right.
+        #
+        # So the live partition is pinned against the artifact, per source.
+        # That gives the detector's yield the same shape as the case-count
+        # baseline: a change in what it finds fails here NAMING the sources,
+        # and is repaired by regenerating the artifact and committing a diff a
+        # reviewer can read. The detector is declared non-exhaustive
+        # (asserted below), so its yield is a measurement that moves — which
+        # is exactly the thing an integer in a test file cannot track.
+        recorded_flows = json.loads(
+            (REPO_ROOT / inventory.DEFAULT_JSON).read_text(encoding="utf-8")
+        )["staticallyDetectedRuntimeCompilerFlows"]
+        recorded_explicit = {
+            item["source"]
+            for item in recorded_flows
+            if any(
+                not pattern.startswith("repro-")
+                for match in item["matches"]
+                for pattern in match["patterns"]
+            )
+        }
+        recorded_api = {
+            item["source"]
+            for item in recorded_flows
+            if any(
+                pattern.startswith("repro-")
+                for match in item["matches"]
+                for pattern in match["patterns"]
+            )
+        }
+        self.assertEqual(explicit_sources, recorded_explicit)
+        self.assertEqual(api_sources, recorded_api)
         self.assertEqual(
             explicit_sources & api_sources,
             {
@@ -3001,7 +3209,17 @@ test "incomplete name" and:
         # for the suite-body-echo protocol regression test, likewise again:
         # it is an explicit-compiler source, it is not in the intersection
         # pinned above, so the union moves by exactly one.
-        self.assertEqual(derived_total, 71)
+        #
+        # The `== 71` literal is gone for the reason given above; the union is
+        # now derived from the same artifact-pinned partitions, and the two
+        # assertions that carry content are kept: the flow list has exactly
+        # one entry per detected source (no source detected twice, none
+        # dropped between detection and reporting), and the detector still
+        # declares itself non-exhaustive, so a future change cannot quietly
+        # start claiming completeness it has not earned.
+        self.assertEqual(
+            derived_total, len(recorded_explicit | recorded_api)
+        )
         self.assertEqual(len(flows), derived_total)
         self.assertFalse(data["runtimeCompilerFlowDetection"]["exhaustive"])
         self.assertEqual(
@@ -3660,24 +3878,42 @@ test "incomplete name" and:
         # 1229; upstream 11cea6789 adds six more. The sole quarantine and five
         # Python-static entries remain. The linked-worktree regression is a
         # normal built catalog entry, moving the catalog bucket 1235 -> 1236.
+        # THE LITERAL BUCKET CENSUS IS REPLACED. It said
+        # `{"catalog": 1239, "quarantined": 1, "static": 5}` against a tree
+        # that measures 1,398 / 1 / 5, and it could not be observed to be
+        # wrong because this test steps aside in any tree without a complete
+        # build.
+        #
+        # The three facts it was standing in for are each pinned better
+        # elsewhere or below: WHICH buckets may exist (here), WHO may be in
+        # the static bucket (here, by name), and WHO is quarantined (by
+        # source path, in this same test, immediately below). The `catalog`
+        # size is then forced by those three plus the
+        # sum-equals-`testEntryCount` assertion further down, so an integer
+        # for it could only ever go stale — it could not fail for a reason
+        # the others would miss.
+        nim_specs, python_specs = inventory.parse_repro_tests(REPO_ROOT)
         self.assertEqual(
-            catalog["countSourceCounts"],
-            # 1236 -> 1238: the two sources the graph regeneration enrols. Both
-            # binaries are built and probed, so both join the `catalog` bucket
-            # and `missing-binary` stays empty.
-            # 1238 -> 1215: M4's solver consolidation batch retires 24 member
-            # specs and adds one bundle spec. The bundle is built and probed
-            # like any other binary, so it joins the same `catalog` bucket:
-            # 1215 = 1216 Nim specs - 1 quarantined. `missing-binary` must
-            # stay empty — a bundled member that still had a spec would show
-            # up there and double-count its cases.
-            # 1215 -> 1216: the order-independence regression, built and
-            # probed like any other binary.
-            # Freshly measured after rebuilding every source-newer-than-binary
-            # entry: 1240 Nim specs, exactly one intrinsic quarantine. The
-            # three membership-model binaries added by upstream 84dd86a35
-            # account for the catalog movement from 1236 to 1239.
-            {"catalog": 1239, "quarantined": 1, "static": 5},
+            set(catalog["countSourceCounts"]),
+            {"catalog", "quarantined", "static"},
+        )
+        # A Nim entry may never be counted statically. That fallback is the
+        # exact over-count the catalog rework removed, and its return would
+        # otherwise show up only as an aggregate that still added up.
+        self.assertEqual(
+            {
+                item["source"]
+                for item in data["tests"]
+                if item["countSource"] == "static"
+            },
+            {spec.source for spec in python_specs},
+        )
+        # Every Nim source is either enumerated by its own binary or named in
+        # the quarantine. There is no third state and nothing may be absent.
+        self.assertEqual(
+            catalog["countSourceCounts"]["catalog"]
+            + catalog["countSourceCounts"]["quarantined"],
+            len(nim_specs),
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         # ...and no source outran its binary, which is now a statement that
@@ -5036,8 +5272,22 @@ test "incomplete name" and:
         # bundle). See the `len(nim_specs)` pin above for why this number
         # falling is the intent and `nim_total` holding is the check.
         # 1216 -> 1217: the order-independence regression.
-        self.assertEqual(declared_nim_count, 1240)
-        self.assertEqual(declared_python_count, 5)
+        #
+        # THE TWO LITERALS THAT STOOD HERE ARE REMOVED. They said 1240 and 5
+        # while the parse-side pin fifty lines of ledger earlier said 1243,
+        # so the two readings this block exists to CROSS-CHECK disagreed with
+        # each other by three — an impossible state that survived because the
+        # whole method sits behind the built-tree guard and never ran.
+        #
+        # What the block is actually for survives intact, and is the next two
+        # lines: `repro_tests.nim` is read twice by two unrelated mechanisms —
+        # `parse_repro_tests`, which understands the file's structure, and a
+        # flat `^\s*TestSpec\($` / `"…\.py"` regex, which does not — and the
+        # two must agree. A hand-edited, duplicated or truncated specification
+        # breaks that agreement whatever the totals happen to be. The absolute
+        # size of the set is pinned per source against the checked-in baseline
+        # in `assert_inventory_case_counts_pin_multiline_and_fixture_regressions`
+        # above and in `StaticCaseCountBaselineTests`, which needs no build.
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
         for enrolled in (
@@ -5088,7 +5338,18 @@ test "incomplete name" and:
         # 1244 -> 1221 = 1216 Nim + 5 Python: M4's solver consolidation batch.
         # 1221 -> 1222 = 1217 Nim + 5 Python.
         # Upstream 84dd86a35 adds three membership-model sources: 1245.
-        self.assertEqual(data["static"]["testEntryCount"], 1245)
+        #
+        # THE LITERAL IS REMOVED. `1245` was a third writing of the same fact
+        # the assertion immediately above already states relationally —
+        # `testEntryCount == declared_nim_count + declared_python_count` —
+        # and the only thing it added was a second place to go stale. It had
+        # gone stale: the tree's entry count is 1404.
+        #
+        # The three lines that remain are the ones that carry content. The
+        # inventory must have exactly one entry per declared source (not one
+        # per BUILT source — that distinction is the whole `missing-binary`
+        # bucket), the entry list must be that long, and every entry must be
+        # classified exactly once.
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
@@ -5495,16 +5756,20 @@ compileProfileBinary()
         catalogs built at the same revision on both hosts.  Most are honest
         real-case/sentinel swaps and therefore cardinality-neutral.  The six
         asymmetric sources explain the aggregate exactly: NDE0-A contributes
-        eleven extra Linux cases; loopback and stackable hooks contribute one
-        each; SIP launch, FHS stubs, and watch contribute four, two, and a net
-        six extra Darwin cases.  The resulting Linux total is exactly one
-        greater -- it is not a stale host-independent pin.
+        eleven extra Linux cases; M9.R.30.2's relocation test one more;
+        loopback and stackable hooks contribute one each; SIP launch, FHS
+        stubs, and watch contribute four, two, and a net six extra Darwin
+        cases.  The resulting Linux total is exactly TWO greater -- it is not
+        a stale host-independent pin, and the arithmetic is asserted at the
+        end of this method rather than only claimed here.
 
-        A lexer-derived census below covers all nineteen enrolled sources in
-        which a Linux/macOS gate owns a real test declaration.  Four gates
-        select the same catalog on both hosts; the remaining fifteen are
+        A lexer-derived census below covers all twenty-five enrolled sources
+        in which a Linux/macOS gate owns a real test declaration.  Nine gates
+        select the same catalog on both hosts; the remaining sixteen are
         exactly the keys of ``exclusive``.  This distinction keeps a new
-        gated source from hiding behind a cardinality-neutral catalog swap.
+        gated source from hiding behind a cardinality-neutral catalog swap --
+        and it worked: six sources had joined the census since it was last
+        reconciled, five of them cardinality-neutral and one not.
         """
         if sys.platform.startswith("linux"):
             host = "linux"
@@ -5710,6 +5975,21 @@ compileProfileBinary()
                     "deps::non_linux_host_documents_runtime_skip_q5"
                 },
             },
+            # ADDED by this reconciliation. The census below found it and the
+            # table did not have it, which is the census doing its job: this
+            # source grew a `when defined(linux):` branch with NO `else`, so
+            # unlike every cardinality-neutral swap above it is a genuine
+            # asymmetry — one extra Linux case and nothing on the Darwin side.
+            # It is therefore the reason `linux_only - darwin_only` moves from
+            # 1 to 2 below.
+            "tests/unit/t_m9r30_transitive_rpath_propagation.nim": {
+                "linux": {
+                    "DSL-port M9.R.30.2 — transitive RPATH propagation::"
+                    "stale propagated path is rewritten before its existence "
+                    "check"
+                },
+                "darwin": set(),
+            },
         }
 
         catalog_identical = {
@@ -5720,11 +6000,35 @@ compileProfileBinary()
             "tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim",
             "tests/integration/"
             "t_integration_scheduler_dependency_gathering_policies.nim",
+            # ADDED by this reconciliation, and all five for the same reason:
+            # their gate is `when defined(linux) or defined(macosx):`, which is
+            # true on BOTH published hosts, and none of them carries an `else:`
+            # at the gate's own indentation. So the gate owns real test
+            # declarations — which is why the lexer census names them — but it
+            # selects the identical catalog on Linux and Darwin and contributes
+            # nothing to the delta. Checked per file at the gate's indentation,
+            # not by grepping for `else` anywhere in the body: several of these
+            # files have `else:` inside a test, and one has a `when not
+            # defined(linux):` nested six columns deep INSIDE a test body,
+            # which changes what a case asserts and not whether it registers.
+            "libs/repro_build_engine/tests/"
+            "test_monitor_depfile_flush_is_async_and_atomic.nim",
+            "libs/repro_build_engine/tests/"
+            "test_umask_wrap_both_spawn_paths.nim",
+            "tests/integration/t_every_launch_path_is_monitored.nim",
+            "tests/integration/"
+            "t_inline_launch_refuses_unhostable_monitor_hosting.nim",
+            "tests/integration/"
+            "t_monitor_fault_fails_the_action_not_the_daemon.nim",
         }
         gated_sources = self.platform_gated_test_sources(data)
         self.assertEqual(gated_sources, set(exclusive) | catalog_identical)
-        self.assertEqual(len(exclusive), 15)
-        self.assertEqual(len(catalog_identical), 4)
+        # These two sizes are NOT a restatement of the set equality above:
+        # they refuse a disposition that moves a source between the two
+        # tables without saying so. The equality alone is satisfied by any
+        # partition of the census.
+        self.assertEqual(len(exclusive), 16)
+        self.assertEqual(len(catalog_identical), 9)
 
         by_source = {item["source"]: item for item in data["tests"]}
         for source, expected_by_host in exclusive.items():
@@ -5742,8 +6046,16 @@ compileProfileBinary()
 
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        self.assertEqual((linux_only, darwin_only), (23, 22))
-        self.assertEqual(linux_only - darwin_only, 1)
+        # 23/22 -> 24/22. The one added case is M9.R.30.2's ungated-on-Darwin
+        # relocation test, above. Every other newly censused source is a
+        # `linux or macosx` gate and is cardinality-neutral, so the Darwin
+        # side does not move at all.
+        self.assertEqual((linux_only, darwin_only), (24, 22))
+        # The delta is DERIVED here and asserted, not assumed: it is what
+        # `expected_nim_total`'s Darwin arm is carried on, and it moved from 1
+        # to 2 under this reconciliation. A reader who trusts the docstring's
+        # old "exactly one greater" over this line will be wrong by one.
+        self.assertEqual(linux_only - darwin_only, 2)
 
     def test_completed_clean_attempt_requires_one_coherent_three_run_attempt(self):
         fingerprint = "same-source"
