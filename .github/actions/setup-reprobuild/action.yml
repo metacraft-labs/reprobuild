@@ -239,7 +239,7 @@ runs:
 
     - name: Install Nix (Linux/macOS, to build repro)
       if: ${{ steps.decide.outputs.need-source == 'true' && runner.os != 'Windows' }}
-      uses: metacraft-labs/metacraft-github-actions/setup-nix@main
+      uses: metacraft-labs/metacraft-github-actions/setup-nix@dev
       with:
         gh-token: ${{ inputs.gh-token }}
         substituters: ${{ inputs.substituters }}

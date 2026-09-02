@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Declared OS and filesystem facts, with citations and observability markers"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

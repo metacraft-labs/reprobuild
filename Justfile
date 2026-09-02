@@ -9,27 +9,36 @@ build:
     mkdir -p test-logs
     bash ./scripts/build_apps.sh 2>&1 | tee test-logs/build.log
 
-# Bootstrap-And-Self-Build B5: materialise ./build/bin/repro from nim
-# when not already on disk. Idempotent — no-op when the binary already
-# exists; otherwise drives scripts/build_apps.sh to compile every
+# Bootstrap-And-Self-Build B5: materialise the host's ./build/bin/repro
+# artefact from nim when it is not already on disk, of this platform's
+# machine format, and newer than the sources the bootstrap build reads.
+# Idempotent; otherwise drives scripts/build_apps.sh to compile every
 # entrypoint in apps/entrypoints.txt (including ``repro``) via the
 # same path the engine-built ``apps`` collection uses. The ``test``
 # recipe + ``scripts/run_tests.sh`` call this first so a fresh checkout
 # without a pre-built engine binary still boots.
+#
+# The decision lives in scripts/bootstrap_guard.sh, not here. It used to
+# be inline and it named ``./build/bin/repro`` on every platform — the
+# LINUX artefact — so on Windows, where ``build/`` is shared with a WSL
+# checkout of the same tree, it tested the wrong file for existence AND
+# compared source freshness against the wrong file's mtime. Moving it out
+# is what makes it testable: tests/integration/
+# t_bootstrap_guard_names_the_host_artefact.nim drives the script against
+# staged fixture trees, so a guard that silently does nothing is a red
+# case rather than a quiet full rebuild (or a quiet skipped one).
 bootstrap:
-    @needs_bootstrap=0; \
-    if [ ! -x ./build/bin/repro ]; then \
-        needs_bootstrap=1; \
-    elif find apps libs config.nims flake.nix repro.nim -type f -newer ./build/bin/repro -print -quit | grep -q .; then \
-        needs_bootstrap=1; \
-    fi; \
-    if [ "${needs_bootstrap}" -eq 1 ]; then \
-        echo "bootstrapping ./build/bin/repro from nim..."; \
-        mkdir -p test-logs; \
-        bash ./scripts/build_apps.sh 2>&1 | tee test-logs/bootstrap.log; \
-    else \
-        echo "./build/bin/repro already exists; skipping bootstrap"; \
-    fi
+    @decision="$(bash ./scripts/bootstrap_guard.sh decide .)"; \
+    case "${decision}" in \
+        bootstrap*) \
+            echo "bootstrapping $(bash ./scripts/bootstrap_guard.sh host-exe ./build/bin/repro) from nim (${decision#bootstrap })..."; \
+            mkdir -p test-logs; \
+            bash ./scripts/build_apps.sh 2>&1 | tee test-logs/bootstrap.log; \
+            ;; \
+        *) \
+            echo "$(bash ./scripts/bootstrap_guard.sh host-exe ./build/bin/repro) already built; skipping bootstrap (${decision#skip })"; \
+            ;; \
+    esac
 
 test:
     mkdir -p test-logs
@@ -431,8 +440,21 @@ lint:
     # same reason as the case-count gate below: it reads .envrc and .direnv and
     # needs nothing compiled, and the failure it catches — a cached dev shell
     # built from a source that has since moved — is the failure that makes
-    # every OTHER lint step below it report a fiction.
+    # every OTHER lint step below it report a fiction. First, for that reason.
     bash ./scripts/check_dev_shell_env.sh 2>&1 | tee -a test-logs/lint.log
+    # The "poEvalCommand is not a shell" gate. Same shape as the ambient
+    # check above and for the same reason: it is a source scan, so it can
+    # answer before anything is compiled. Five defects in one campaign came
+    # from a shell operator inside a command string that Windows never gives
+    # to a shell; see scripts/check_shell_command_strings.sh.
+    bash ./scripts/check_shell_command_strings.sh 2>&1 | tee -a test-logs/lint.log
+    # …and the proof that it still has the power it claims. Every exemption in
+    # that scanner is a licence to ignore a real defect, so each is probed with
+    # a complete, genuine instance and each documented blind spot is PINNED —
+    # a blind spot cannot close silently and a closed one cannot re-open
+    # silently. Runs here rather than in the suite for the same reason as the
+    # gate itself: it compiles nothing.
+    bash ./scripts/check_shell_command_strings.sh --self-test 2>&1 | tee -a test-logs/lint.log
     # The suite case-count gate. Deliberately here and not only in the test
     # suite: it reads the sources and needs nothing compiled, so it is the
     # one coverage check that can answer before a six-hour build phase.

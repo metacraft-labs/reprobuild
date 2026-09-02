@@ -1,0 +1,8 @@
+## Lexically inside a POSIX-only `when`. The string only ever reaches a shell.
+import std/[osproc]
+
+proc quietKill(pid: int): int =
+  when defined(posix):
+    execCmdEx("kill -KILL " & $pid & " 2>/dev/null").exitCode
+  else:
+    0

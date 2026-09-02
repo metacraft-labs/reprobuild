@@ -18,11 +18,17 @@
 ## result here.
 ##
 ## WHAT IS STILL SYNTHETIC, stated rather than glossed: the graph is
-## constructed here instead of being loaded from repro.nim, because
-## `BuildEngineConfig.monitorHosting` has NO CLI or environment
-## surface — no construction site outside three test files sets it — so
-## `repro build` cannot be asked to host and the two arms cannot be
-## compared through the CLI at all. That is itself a finding; see HM-6.
+## constructed here instead of being loaded from repro.nim. When this
+## harness was written that was FORCED — `BuildEngineConfig.monitorHosting`
+## had no CLI or environment surface at all, so `repro build` could not be
+## asked to host and the two arms could not be compared through the CLI.
+## That finding is now acted on: `repro build --no-runquota
+## --monitor-hosting=where-supported` (or `REPROBUILD_MONITOR_HOSTING`)
+## drives the hosted arm through the shipped binary, which is how the
+## verdict below can be re-measured on other hardware without this file.
+## What remains synthetic is only the GRAPH — an in-process graph keeps the
+## arms identical apart from the one field, and that is a choice here rather
+## than a limitation of the product.
 ##
 ## NO MOCKS: real gcc, real files, real shared memory, real monitor.
 

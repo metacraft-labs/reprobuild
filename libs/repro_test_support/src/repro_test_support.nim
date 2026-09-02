@@ -487,6 +487,41 @@ proc fileUrl*(path: string): string =
   else:
     "file://" & path
 
+proc tomlBasicString*(value: string): string =
+  ## ``value`` spelled as the BODY of a TOML basic string (``"..."``).
+  ##
+  ## The sibling of ``fileUrl`` for values that are NOT URLs: a native
+  ## filesystem path written into a fixture manifest (``program = "..."``,
+  ## ``local_path = "..."``), or an expected value asserted against TOML that
+  ## reprobuild itself wrote.
+  ##
+  ## On POSIX this is the identity for every path a test produces, which is
+  ## exactly why the omission is invisible there. On Windows a path is
+  ## ``C:\Users\...`` and a lone ``\`` is not legal inside a basic string —
+  ## ``\U`` starts an 8-hex-digit Unicode escape, ``\b`` / ``\t`` / ``\n`` are
+  ## control escapes, and anything else is a hard parse error which the
+  ## toml-serialization library reports with an EMPTY message.
+  ##
+  ## Matches what reprobuild's own writers emit (``repro_lock.tomlEscape``,
+  ## ``develop_overrides.tomlEscape``, ``workspace_branch.tomlEscape``), so it
+  ## is equally the right spelling for an assertion of the form
+  ## ``check ("url = \"" & tomlBasicString(u) & "\"") in lockBody``.
+  ##
+  ## The alternative the reader's own diagnostic offers — a TOML LITERAL
+  ## string ``'...'`` — is not used here because a literal string cannot
+  ## express a value containing ``'`` and gives no escape hatch.
+  result = newStringOfCap(value.len + 8)
+  for ch in value:
+    case ch
+    of '\\': result.add("\\\\")
+    of '"': result.add("\\\"")
+    of '\n': result.add("\\n")
+    of '\r': result.add("\\r")
+    of '\t': result.add("\\t")
+    of '\b': result.add("\\b")
+    of '\f': result.add("\\f")
+    else: result.add(ch)
+
 proc daemonSocketEndpoint*(name: string): string =
   ## Portable per-test endpoint name. AF_UNIX socket paths are picked
   ## under ``/tmp`` on POSIX; on Windows the equivalent name lives in
@@ -564,6 +599,158 @@ proc runquotaEndpointReachable*(endpoint: string): bool =
     endpoint.startsWith(r"\\.\pipe\") or endpoint.startsWith(r"\\?\pipe\")
   else:
     fileExists(endpoint)
+
+const ReprobuildRepoRoot* =
+  currentSourcePath().parentDir().parentDir().parentDir().parentDir()
+  ## ``libs/repro_test_support/src/repro_test_support.nim`` -> the checkout
+  ## root. ``currentSourcePath()`` is absolute on both compilers (measured in
+  ## W14 on stock 2.2.8 and on the codetracer fork, from two working
+  ## directories, with the source given both relatively and absolutely), so
+  ## this is the repository that CONTAINS this file — never the directory the
+  ## test process happened to be launched from.
+
+type HostBinaryFormat* = enum
+  ## Machine format of a file on disk, decided by its magic bytes.
+  ##
+  ## This exists because neither the NAME nor the mode bit answers the
+  ## question a test actually needs answered before it executes something.
+  ## ``build/`` is gitignored and shared between this host's Windows
+  ## checkout (``M:\m\dev\reprobuild``) and the WSL view of the same tree
+  ## (``/mnt/m/m/dev/reprobuild``), so a ``nix develop`` build drops an ELF
+  ## beside the PE and 12 names exist in both forms. An extension-less path
+  ## therefore names *whichever platform built last*, and on Windows
+  ## ``fileExists`` says true, ``executableFile`` says true, and the exec
+  ## then fails with "%1 is not a valid Win32 application" — a product-shaped
+  ## error with a filesystem-residue cause.
+  hbfMissing    ## no such file
+  hbfUnknown    ## a file, but not a machine image this repo produces
+  hbfElf
+  hbfPe
+  hbfMachO
+
+proc binaryFormatOf*(path: string): HostBinaryFormat =
+  ## Classify ``path`` by its header bytes. Reads at most 68 bytes.
+  if path.len == 0 or not fileExists(path):
+    return hbfMissing
+  var f: File
+  if not open(f, path, fmRead):
+    return hbfUnknown
+  defer: f.close()
+  var head: array[64, uint8]
+  let n = f.readBuffer(addr head[0], head.len)
+  if n < 4:
+    return hbfUnknown
+  if head[0] == 0x7f'u8 and head[1] == uint8('E') and
+      head[2] == uint8('L') and head[3] == uint8('F'):
+    return hbfElf
+  let magic32 = uint32(head[0]) or (uint32(head[1]) shl 8) or
+    (uint32(head[2]) shl 16) or (uint32(head[3]) shl 24)
+  case magic32
+  of 0xfeedface'u32, 0xfeedfacf'u32, 0xcefaedfe'u32, 0xcffaedfe'u32,
+     0xcafebabe'u32, 0xbebafeca'u32:
+    return hbfMachO
+  else: discard
+  if head[0] == uint8('M') and head[1] == uint8('Z'):
+    # A DOS stub is not a PE image. The PE signature sits at the offset
+    # stored in the little-endian uint32 at 0x3C; a bare ``MZ`` (a truncated
+    # copy, or a DOS-era stub) must NOT be accepted as this platform's
+    # artefact just because the first two bytes look right.
+    if n < 0x40:
+      return hbfUnknown
+    let lfanew = int(uint32(head[0x3c]) or (uint32(head[0x3d]) shl 8) or
+      (uint32(head[0x3e]) shl 16) or (uint32(head[0x3f]) shl 24))
+    if lfanew <= 0 or lfanew > int(getFileSize(f)) - 4:
+      return hbfUnknown
+    f.setFilePos(int64(lfanew))
+    var sig: array[4, uint8]
+    if f.readBuffer(addr sig[0], sig.len) != 4:
+      return hbfUnknown
+    if sig[0] == uint8('P') and sig[1] == uint8('E') and
+        sig[2] == 0'u8 and sig[3] == 0'u8:
+      return hbfPe
+    return hbfUnknown
+  hbfUnknown
+
+func hostBinaryFormat*(): HostBinaryFormat =
+  ## The machine format an executable must have to run on THIS host.
+  when defined(windows): hbfPe
+  elif defined(macosx): hbfMachO
+  else: hbfElf
+
+func hostBinaryName*(stem: string): string =
+  ## ``stem`` with the host's executable suffix. The one spelling.
+  stem.addFileExt(ExeExt)
+
+proc reproBinaryPath*(repoRoot = ReprobuildRepoRoot;
+                      stem = "repro"): string =
+  ## The single supported way for a test to name a binary that
+  ## ``scripts/build_apps.sh`` / the ``apps`` collection produced.
+  ##
+  ## ONE proc with TWO parameters, because two independent analyses each
+  ## need one of them and each used to have its own overload. Both took a
+  ## single ``string``, so every one-argument call was ambiguous and the
+  ## module did not compile; the parameters are what tell the two uses
+  ## apart, and the defaults are what keep the common call a bare
+  ## ``reproBinaryPath()``.
+  ##
+  ## ``repoRoot`` — absolute path to the graph-built ``repro`` CLI inside
+  ## it, produced by build-graph edge ``reprobuild.apps.repro``. Every
+  ## helper in this module that needs the CLI goes through here, and that
+  ## funnel is load-bearing, not tidiness:
+  ## ``scripts/repro_binary_reachability.nim`` decides which tests get
+  ## ``build/bin/repro`` declared as a typed input on their EXECUTE edge,
+  ## and it SEEDS on a source spelling the binary's location — this one.
+  ## Taint then propagates along symbol references, so a test that only
+  ## calls ``prepareMonitorTools`` still gets the dependency, and a rebuild
+  ## of the CLI invalidates it instead of the engine serving the test as up
+  ## to date against a stale binary. Consequence for anyone adding a helper
+  ## here: resolve the CLI through this proc and the analysis follows you
+  ## for free; assemble the path some other way and every test calling your
+  ## helper silently loses its dependency on the binary.
+  ##
+  ## ``stem`` — which produced binary. Source-anchored (not cwd-relative)
+  ## and extension-correct. W14 fixed 69 files that each spelled
+  ## ``build/bin/repro`` their own way; this is the helper it recommended
+  ## so there is ONE spelling left to search for. The literal
+  ## ``build/bin/repro`` in this comment is load-bearing for
+  ## ``scripts/generate_test_edges.nim``'s ``detectReproBinaryUsage``,
+  ## which substring-scans sources to decide ``requiresReproBinary``.
+  ##
+  ## Spelled componentwise rather than by joining a ``"build/bin/repro"``
+  ## const so the result carries the host path separator — callers compare
+  ## this against paths they built the same way, and on Windows the two
+  ## spellings are not equal.
+  repoRoot / "build" / "bin" / hostBinaryName(stem)
+
+proc describeBinaryFormat*(path: string): string =
+  ## A diagnostic that names what is actually on disk, for the failure
+  ## message of ``requireHostBinary``.
+  case binaryFormatOf(path)
+  of hbfMissing: "missing"
+  of hbfUnknown: "not a recognised executable image"
+  of hbfElf: "ELF (Linux)"
+  of hbfPe: "PE (Windows)"
+  of hbfMachO: "Mach-O (macOS)"
+
+proc requireHostBinary*(path: string): string {.discardable.} =
+  ## Prove the binary about to be executed is THIS platform's — presence is
+  ## not the property. Deliberately ``doAssert`` and not ``check``: this is
+  ## called from helper procs, and on stock Nim 2.2.8 (the Windows pin) a
+  ## ``check`` outside a ``test`` body prints and then reports ``[OK]``.
+  let actual = binaryFormatOf(path)
+  doAssert actual != hbfMissing,
+    "required binary not found: " & path &
+    "\n  build it with `just bootstrap` (or `bash scripts/build_apps.sh`)."
+  doAssert actual == hostBinaryFormat(),
+    "wrong machine format for this host: " & path &
+    "\n  on disk: " & describeBinaryFormat(path) &
+    "\n  required: " & (case hostBinaryFormat()
+                        of hbfPe: "PE (Windows)"
+                        of hbfMachO: "Mach-O (macOS)"
+                        else: "ELF (Linux)") &
+    "\n  `build/` is gitignored and shared across platforms on this host," &
+    " so an artefact of the other platform can occupy this path."
+  path
 
 proc executableFile*(path: string): bool =
   if path.len == 0 or not fileExists(path):
@@ -783,31 +970,6 @@ proc ctInterposeSrcPath*(repoRoot: string): string =
   ""
 
 type MissingTestFixtureError* = object of CatchableError
-
-proc reproBinaryPath*(repoRoot: string): string =
-  ## Absolute path to the graph-built ``repro`` CLI inside ``repoRoot``,
-  ## produced by build-graph edge ``reprobuild.apps.repro``. Every helper
-  ## in this module that needs the CLI goes through here.
-  ##
-  ## That funnel is load-bearing, not tidiness.
-  ## ``scripts/repro_binary_reachability.nim`` decides which tests get
-  ## ``build/bin/repro`` declared as a typed input on their EXECUTE edge,
-  ## and it SEEDS on a source spelling the binary's location — this one.
-  ## Taint then propagates along symbol references, so a test that only
-  ## calls ``prepareMonitorTools`` still gets the dependency, and a
-  ## rebuild of the CLI invalidates it instead of the engine serving the
-  ## test as up to date against a stale binary.
-  ##
-  ## Consequence for anyone adding a helper here: resolve the CLI through
-  ## this proc and the analysis follows you for free. Assemble the path
-  ## some other way and every test calling your helper silently loses its
-  ## dependency on the binary.
-  ##
-  ## Spelled componentwise rather than by joining a ``"build/bin/repro"``
-  ## const so the result carries the host path separator — callers compare
-  ## this against paths they built the same way, and on Windows the two
-  ## spellings are not equal.
-  repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
 
 proc requireBinary*(path, edgeName: string): string {.discardable.} =
   ## Test-Fixtures-In-Build-Graph: assert that a graph-built fixture binary

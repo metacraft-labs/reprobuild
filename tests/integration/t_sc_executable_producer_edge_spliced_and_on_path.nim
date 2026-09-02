@@ -49,7 +49,18 @@
 
 import std/[json, os, osproc, strutils, unittest]
 
-const reproBinary = "./build/bin/repro"
+const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory.
+  ##
+  ## The previous spelling (``"./build/bin/" & addFileExt("repro", ExeExt)``)
+  ## made the working directory an unstated fixture input: from the repo root
+  ## the case ran, from any other directory ``fileExists`` was false and it
+  ## SKIPPED, and from a scratch directory that happened to carry a staged
+  ## ``build/bin/repro`` it ran against THAT binary and reported failures that
+  ## read as product refusals. ``currentSourcePath()`` is absolute on both
+  ## platforms, so this constant is the same from every cwd.
+const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
 
 # The producer's UNIQUE stamp — the built ``prod`` binary echoes exactly this.
 # It cannot appear unless the sibling was built from source AND its binary ran.
@@ -69,17 +80,20 @@ package prod:
 
   uses:
     "sh"
+    "mkdir"
+    "chmod"
 
   executable prod:
     name: "prod"
 
   build:
-    discard shell(
+    let buildProd = shell(
       command = "mkdir -p build/bin && " &
         "printf '#!/bin/sh\necho """ & producerStamp & """\n' > build/bin/prod && " &
         "chmod +x build/bin/prod",
       actionId = "prod.build.prod",
       extraOutputs = @["build/bin/prod"])
+    appendRegisteredActionToolIdentityRefs(buildProd.id, ["mkdir", "chmod"])
 """
 
 # The consumer repo. ``uses: "prod"`` names the sibling producer; the develop
@@ -100,6 +114,7 @@ package consumer:
 
   uses:
     "sh"
+    "mkdir"
     "prod"
 
   build:
@@ -107,11 +122,13 @@ package consumer:
       command = "mkdir -p build && printf 'base\n' > build/base.txt",
       actionId = "consumer.build.base",
       extraOutputs = @["build/base.txt"])
+    appendRegisteredActionToolIdentityRefs(base.id, ["mkdir"])
     let consume = shell(
       command = "mkdir -p build && prod > build/consumed.txt",
       actionId = "consumer.build.consume",
       deps = @[base.id],
-      extraOutputs = @["build/consumed.txt"]).withToolIdentities(["prod"])
+      extraOutputs = @["build/consumed.txt"]).withToolIdentities(
+        ["prod", "mkdir"])
     let baseTarget = target("base", [base])
     discard target("consume", [base, consume])
     discard collect("test", actions = @[consume])
@@ -132,7 +149,10 @@ suite "SC-2: executable producer edge spliced and on PATH":
       checkpoint("skipped — sh missing on PATH or repro unbuilt")
       skip()
     else:
-      let repoRoot = getCurrentDir()
+      let repoRoot = ReprobuildRepoRoot
+        ## NOT `getCurrentDir()`: the repo root is a property of
+        ## THIS CHECKOUT, not of the directory the runner happened
+        ## to be launched from.
       let reproAbs = absolutePath(reproBinary)
       let scratch = getTempDir() / "sc2-" & $getCurrentProcessId()
       removeDir(scratch)

@@ -8,19 +8,41 @@
 
 import std/[json, os, osproc, streams, strutils, tables]
 
+from repro_test_support import requireHostBinary, binaryFormatOf,
+  hostBinaryFormat, describeBinaryFormat, HostBinaryFormat
+
 const
-  ReproBinRelative* = "build/bin/repro"
+  # The executable extension has to be resolved HERE, not at the use site:
+  # this constant is both the sentinel `repoRoot` walks up looking for and
+  # the binary `reproBin` returns. Spelled without `.exe` it made the two
+  # fail together on Windows — `fileExists` was false at every level, so the
+  # walk ran to the DRIVE ROOT and the assertion then reported
+  # `repro binary missing at M:\build\bin\repro`, naming a path that was
+  # wrong in two independent ways.
+  ReproBinRelative* = "build/bin/" & addFileExt("repro", ExeExt)
+
+const SourceAnchoredRepoRoot =
+  currentSourcePath().parentDir().parentDir().parentDir().parentDir()
+  ## ``tests/e2e/sharding/sharding_test_support.nim`` -> the checkout root.
+  ## ``currentSourcePath()`` is absolute on both platforms, so this is the
+  ## repo that CONTAINS this file, not the repo the launcher happened to be
+  ## standing in.
 
 proc repoRoot*(): string =
   ## The reprobuild repo root, irrespective of the test's working
-  ## directory.  Falls back to ``getCurrentDir()`` when the path lookup
-  ## fails (e.g. a sandbox without the source tree, in which case the
-  ## test would fail at the binary-existence check anyway).
+  ## directory.
+  ##
+  ## The walk used to START at ``getCurrentDir()``, which made the process
+  ## working directory an unstated fixture input: launched from a scratch
+  ## directory carrying a staged ``build/bin/repro`` it returned THAT
+  ## directory, and every case below then drove a binary the test did not
+  ## build. Anchor on the source path instead and keep the walk only as the
+  ## answer to "did somebody move this file", not to "where was the shell".
   let env = getEnv("REPRO_REPO_ROOT")
   if env.len > 0 and dirExists(env):
     return env
-  result = getCurrentDir()
-  # Walk up until we find ``build/bin/repro`` or a sentinel.
+  result = SourceAnchoredRepoRoot
+  # Walk up until we find the repro binary or a sentinel.
   for _ in 0 .. 6:
     if fileExists(result / ReproBinRelative):
       return result
@@ -28,9 +50,32 @@ proc repoRoot*(): string =
     if parent.len == 0 or parent == result:
       break
     result = parent
+  # The walk found nothing: the source-anchored root is still the honest
+  # answer, and the binary-existence check below reports the real problem.
+  result = SourceAnchoredRepoRoot
 
 proc reproBin*(): string =
   repoRoot() / ReproBinRelative
+
+proc reprobuildRepoRoot*(): string =
+  ## Readable alias for ``repoRoot()`` at call sites that bind the result to
+  ## a local also called ``repoRoot``. Added by W15 when
+  ## ``t_e2e_repro_test_shard_workspace_integration.nim`` stopped carrying its
+  ## own private, differently-broken copy of the root walk.
+  repoRoot()
+
+proc requireShardingReproBinary*(): string {.discardable.} =
+  ## Prove the binary this family is about to execute is THIS platform's.
+  ##
+  ## ``fileExists`` was the only check here, and it is not the property:
+  ## ``build/`` is gitignored and shared between this host's Windows checkout
+  ## and the WSL view of the same tree, so ``build/bin/repro`` can be a Linux
+  ## ELF while ``build/bin/repro.exe`` is the PE, and an extension-less
+  ## spelling picks up whichever platform built last. ``doAssert`` rather than
+  ## ``check`` on purpose: this is a helper proc, and on the Windows toolchain
+  ## pin (stock Nim 2.2.8) a ``check`` outside a ``test`` body prints its
+  ## failure and still reports ``[OK]``.
+  requireHostBinary(reproBin())
 
 proc writeTrueScript*(path: string; exitCode = 0) =
   ## Writes a tiny POSIX shell script that exits with ``exitCode``.
@@ -156,9 +201,11 @@ proc runRepro*(args: openArray[string]; cwd: string):
     tuple[code: int; output: string] =
   ## Invoke the built ``repro`` binary with ``args``, capturing merged
   ## stdout+stderr.  ``cwd`` is the workspace the test created.
-  let bin = reproBin()
-  doAssert fileExists(bin), "repro binary missing at " & bin &
-    "; run ``just build`` in the reprobuild repo before this test."
+  # W15: presence was the only check, and presence is not the property — an
+  # artefact of the OTHER platform satisfies ``fileExists`` and then fails at
+  # exec with "%1 is not a valid Win32 application", which reads as a product
+  # refusal. Prove the machine format instead.
+  let bin = requireShardingReproBinary()
   let p = startProcess(bin,
     workingDir = cwd,
     args = @args,

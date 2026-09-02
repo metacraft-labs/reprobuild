@@ -30,10 +30,22 @@
 ## ``./build/bin/repro`` absent.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import fileUrl
 
 import repro_workspace_manifests
 
-const reproBinary = "./build/bin/repro"
+const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
+  ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
+  ## rather than from the process working directory.
+  ##
+  ## The previous spelling (``"./build/bin/" & addFileExt("repro", ExeExt)``)
+  ## made the working directory an unstated fixture input: from the repo root
+  ## the case ran, from any other directory ``fileExists`` was false and it
+  ## SKIPPED, and from a scratch directory that happened to carry a staged
+  ## ``build/bin/repro`` it ran against THAT binary and reported failures that
+  ## read as product refusals. ``currentSourcePath()`` is absolute on both
+  ## platforms, so this constant is the same from every cwd.
+const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
 
 proc q(value: string): string = quoteShell(value)
 
@@ -42,11 +54,17 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
   (code: res.exitCode, output: res.output)
 
 proc requireGit(command: string; cwd = ""): string =
+  ## `doAssert`, not `check` or `quit`: this is a HELPER, outside any
+  ## `test` body. `unittest.check` there cannot see the `testStatusIMPL`
+  ## the `test` template injects, so it prints "Check failed" and the case
+  ## still reports `[OK]`; `quit 1` tears the process down mid-case, so
+  ## `unittest` emits no `[FAILED]` marker and every later case in the file
+  ## silently never runs. `doAssert` raises an `AssertionDefect`, which the
+  ## `test` template's own `except Exception` catches and reports as a
+  ## failure from any call depth.
   let res = run(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+  doAssert res.code == 0, "command failed: " & command & "\nexit=" &
+    $res.code & "\n" & res.output
   res.output
 
 proc gitConfig(gitBin, repo: string) =
@@ -69,7 +87,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
 
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " &
-    q("file://" & originPath) & " " & q(targetPath))
+    q(fileUrl(originPath)) & " " & q(targetPath))
   gitConfig(gitBin, targetPath)
 
 proc seedGitCheckoutBackend(gitBin, checkoutRoot, bare: string) =
@@ -186,7 +204,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         createDir(manifestsRoot / "projects")
         createDir(manifestsRoot / "repos")
         writeFile(manifestsRoot / "projects" / "solo.toml",
-          projectToml("file://" & coreOrigin, "solo"))
+          projectToml(fileUrl(coreOrigin), "solo"))
         writeFile(manifestsRoot / "repos" / "core.toml",
           repoFragment("core", "core-origin"))
         seedManifestGitLayer(gitBin, manifestsRoot, scratch / "manifest.git")
@@ -275,14 +293,14 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         # skipped entirely. The ONLY way the routed personal backend can be
         # published is the per-backend publish loop, whose ``manifestLayerRoot >
         # 0`` gate HL-3 lifted.
-        # The bare is named after the REPO, not after the remote alias. A
-        # committed-lock workspace derives its repo (and project) name from the
-        # canonical remote URL, so a bare called ``origin.git`` makes the
-        # derived name literally "origin" — which then matches neither the
-        # route's ``repos = ["work"]`` nor the ``locks/work/work/`` path this
-        # case asserts, and the routed personal publish silently degrades to
-        # the public committed-lock no-op. Naming the bare ``work.git`` keeps
-        # the fixture's own names consistent with what the lock records.
+        # The bare is named ``work.git`` deliberately. A committed-lock repo's
+        # LOCK IDENTITY is the leaf of its remote URL, not its checkout
+        # directory name (`repositoryNameFromUrl`, so a repo cloned into a
+        # differently named directory keeps one identity). The route below
+        # names ``work`` and the assertion at the end of this block expects
+        # ``locks/work/work/``; with the bare called ``origin.git`` the repo
+        # locked as ``origin``, the route matched nothing, the personal
+        # backend was never selected, and the assertion could not hold.
         let origin = scratch / "work.git"
         discard requireGit(q(gitBin) & " init -q --bare -b main " & q(origin))
         let ws = scratch / "work"

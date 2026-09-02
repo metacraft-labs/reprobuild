@@ -34,6 +34,14 @@ import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
+# M8: the OpenSSL library channel, declared by the openssl package rather than
+# probed by each consumer. Imported as the LAYOUT module, not as
+# ``packages/openssl`` — importing the package module would run its
+# ``package openssl:`` registration as a side effect of importing ``nim``,
+# putting a catalog entry into every recipe's registry that did not ask for
+# one.
+import repro_dsl_stdlib/openssl_layout
+
 # L3 PUBLISH-SCOPE (public-interface publishing for hand-authored
 # ``build:`` blocks). ``blake3`` composes the recipe-revision digest;
 # ``repro_core`` resolves the recipe file bytes. ``repro_project_dsl``
@@ -114,6 +122,37 @@ package nim:
     cli:
       dependencyPolicy automaticMonitor
 
+      # Windows-Build-Correctness M6 — the entropy blessing, declared HERE,
+      # on the tool, once. Every ``nim.c(...)`` and ``nim.js(...)`` edge in
+      # every recipe inherits it with nothing on the edge, which is the
+      # whole design: a recipe author writes ``nim.c(...)`` and gets the
+      # right answer without knowing that entropy exists.
+      #
+      # The blessing is scoped to ENTROPY, not to determinism in general. It
+      # says an ``mrNonDeterministic`` record from a nim process is not a
+      # reason to withhold a cache entry. It does not touch the file,
+      # library-load, ipc or external-content evidence that decides whether
+      # the capture is complete, and it says nothing about clock reads
+      # (``mrTimeRead``), which are a separate signal for exactly the reason
+      # that blessing them would mean blessing every program alive.
+      nonDeterminism entropyBlessed,
+        justification = "The nim compiler's randomness is confined to " &
+          "naming things it then throws away -- temporary files and " &
+          "temporary directories under its nimcache -- and to hash-table " &
+          "seeding inside its own process. Neither reaches an output: the " &
+          "generated C, the object files and the linked binary are named " &
+          "from the module path and the --out:/--nimcache: arguments, all " &
+          "of which are in the action's argv and therefore in its cache " &
+          "key. A temp name that differed between two runs would change no " &
+          "byte of the product. Measured on this host against the M5 " &
+          "shim, a full monitored `nim c` (nim driving gcc and ld, 25 206 " &
+          "records, mcComplete, eventLoss=0) in fact emitted ZERO " &
+          "mrNonDeterministic records at all, so the blessing is a " &
+          "declaration about what nim's randomness is FOR rather than a " &
+          "waiver being cashed in today -- which is the point: it must be " &
+          "in place before a nim or CRT revision starts drawing entropy on " &
+          "a path that does not affect the output."
+
       subcmd "c":
         flag defines is seq[string],
           alias = "-d:",
@@ -122,11 +161,31 @@ package nim:
         flag mm is string,
           alias = "--mm:",
           format = concat
+        # Windows-Cacheable-Builds-Session-Residuals S1: ``--cpu:`` makes a
+        # cross-bitness compile expressible in the DSL. The Windows monitor
+        # stack needs a 32-bit shim (``librepro_monitor_shim32.dll``) and a
+        # 32-bit WOW64 probe beside the 64-bit shim; without a typed ``cpu``
+        # flag those two artefacts could only be produced by shelling out to
+        # ``io-mon/scripts/build_shim.sh``, which is neither cacheable nor
+        # described by the graph. The flag is generic - every other
+        # cross-compile target (``--cpu:arm64``, ``--cpu:amd64``) goes through
+        # the same declaration.
+        flag cpu is string,
+          alias = "--cpu:",
+          format = concat
         flag cc is string,
           alias = "--cc:",
           format = concat
         flag gccExe is string,
           alias = "--gcc.exe:",
+          format = concat
+        # ``--gcc.exe:`` selects the COMPILER driver only; nim keeps invoking
+        # whatever ``gcc.linkerexe`` names (default: a bare ``gcc`` resolved
+        # off PATH) for the link step. A cross-bitness build that sets only
+        # ``gccExe`` therefore compiles 32-bit objects and then hands them to
+        # the host's 64-bit linker. Both have to be named.
+        flag gccLinkerExe is string,
+          alias = "--gcc.linkerexe:",
           format = concat
         boolFlag threadsOn is bool, alias = "--threads:on"
         flag parallelBuild is int,
@@ -261,8 +320,35 @@ proc usesSslDefine(defines: openArray[string]): bool =
       return true
 
 proc opensslPassLForSsl(defines: openArray[string]): seq[string] =
+  ## The linker arguments a ``-d:ssl`` edge needs: the two libraries, AND the
+  ## search path that makes them resolvable.
+  ##
+  ## Emitting only ``-lssl -lcrypto`` was the M8 defect. On Linux and macOS the
+  ## ``nixPackage`` arm behind ``uses: "openssl"`` supplies the path; on
+  ## Windows the package declared no arm at all, so every ssl edge linked with
+  ## two names and nowhere to look, and the gap was patched in reprobuild's own
+  ## recipe (``windowsOpensslPassL``) with a hard-coded MSYS2 directory.
+  ##
+  ## ``windowsOpensslLinkSearchDir`` replaces that literal with a derivation:
+  ## the prefix of the ``openssl.exe`` the engine's own path-mode resolver
+  ## picks, inverted through the package's declared ``binDir``/``linkLibDir``
+  ## layout, and accepted only if that directory really holds import libraries
+  ## for both stems. A host that provides no OpenSSL development libraries
+  ## contributes no ``-L`` and fails with the same "cannot find -lssl" as
+  ## before — never a path that resolves nothing.
+  ##
+  ## The flags go on the ARGV rather than into ``LIBRARY_PATH``/``CPATH``. gcc
+  ## honours those, but the engine composes each action's environment
+  ## deliberately instead of inheriting the launching shell's, which is the
+  ## whole point of "not ambient NIX_LDFLAGS"; an env-based fix would
+  ## re-introduce the dependency the declaration exists to remove and leave the
+  ## action's inputs under-described.
   if usesSslDefine(defines):
-    result = @["-lssl", "-lcrypto"]
+    let searchDir = windowsOpensslLinkSearchDir()
+    if searchDir.len > 0:
+      result.add("-L" & searchDir)
+    result.add("-lssl")
+    result.add("-lcrypto")
 
 proc compileDependencyPolicy(cacheDir: string;
                              cacheable: bool;
@@ -271,7 +357,46 @@ proc compileDependencyPolicy(cacheDir: string;
   if policy.kind != bdpDefault:
     return policy
   if cacheable:
-    return defaultDependencyPolicy()
+    # S7 — name the nimcache as machine-local derived state.
+    #
+    # ``nim c`` writes its whole incremental cache (the generated ``.c``,
+    # the ``.o``, the per-entry ``.json`` manifest) into ``cacheDir``, and
+    # the monitor records every one of those as a write. Without this
+    # declaration the engine's restore gate (see
+    # ``undeclaredSurvivingWrites``) sees a compile that produced files its
+    # declared outputs do not account for, concludes that restoring just
+    # the binary would serve an incomplete tree, and withholds the output
+    # payloads — which makes ``repro build --restore-cached-outputs`` inert
+    # for the one edge kind it matters most for.
+    #
+    # ONE measurement, quoted the same way everywhere it appears (this
+    # comment, ``undeclaredSurvivingWrites``, the DSL test's docstring and
+    # the milestone), because the count is program-dependent and three
+    # different numbers in four places is how a reader concludes none of
+    # them was measured. Program: a one-file ``src/hello.nim`` whose whole
+    # body is ``echo "hello from s7"``, built through the real CLI with
+    # ``--tool-provisioning=path --daemon=off --no-runquota`` and a per-run
+    # ``--action-cache-root``. The monitor records 41 writes for that
+    # compile. WITHOUT this declaration: *15 unaccounted paths, every one of
+    # them nimcache* (the ``.c``, the ``.o``, and ``hello.json``), and
+    # ``CAS_BLOBS = 0``. WITH it: 0 unaccounted, one blob, and the binary
+    # deleted from ``build/bin`` is restored by the next build and runs.
+    #
+    # The declaration is true, not a convenience. The nimcache is nim's
+    # private cache: every byte in it was produced by a previous run of
+    # THIS action from inputs that are themselves in the key, a rebuild
+    # regenerates it, and nothing else in the graph reads it. Each edge
+    # gets its own directory (``defaultNimcacheDir``, and every ``cpu``-
+    # varying edge is given one explicitly), so one edge's declaration
+    # cannot exempt another's product.
+    #
+    # It does not change any action-cache KEY today: ``ignoredInputRoots``
+    # compares its entries raw, and this one is relative, so the input
+    # filter never matches it. If that is ever aligned with the write
+    # side's materialization, nim edges' keys change once — which is a
+    # cache invalidation, not a correctness change, and is the same
+    # principle S5 established for an action's own declared output.
+    return defaultDependencyPolicy(@[cacheDir])
   makeDepfilePolicy(cacheDir / "nim-compile.d")
 
 # ---------------------------------------------------------------------------
@@ -392,8 +517,10 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
         imports: seq[string] = @[];
+        cpu = "";
         cc = "";
         gccExe = "";
+        gccLinkerExe = "";
         mm = "";
         passC: seq[string] = @[];
         passL: seq[string] = @[];
@@ -420,6 +547,14 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   ## ``repro.nim`` can express ``nim c --app:lib --threads:on`` and
   ## backend ``--passC:`` / ``--passL:`` flags through the
   ## ``binary``-shorthand surface the rest of the build block uses.
+  ##
+  ## Windows-Cacheable-Builds-Session-Residuals S1: ``cpu`` / ``gccLinkerExe``
+  ## make a cross-bitness compile expressible through this shorthand - the
+  ## 32-bit monitor shim and WOW64 probe are ordinary graph edges rather than
+  ## a shell-out to ``io-mon/scripts/build_shim.sh``. Give every ``cpu``-varying
+  ## edge its OWN ``nimcache``: nim keys the cache directory by nothing but the
+  ## path it is handed, so two bitnesses sharing one would link 32-bit objects
+  ## into a 64-bit image.
   ##
   ## L3 PUBLISH-SCOPE: ``publish`` / ``publishAs`` control binary-cache
   ## publication of the resulting artifact (see the block comment above).
@@ -462,7 +597,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
 
   result = c(pkg = pkg, source = source, output = effectiveBinary,
     defines = defines,
-    cc = cc, gccExe = gccExe, mm = mm,
+    cpu = cpu, cc = cc, gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
     paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
     appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
     actionId = actionId,

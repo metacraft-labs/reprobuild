@@ -232,14 +232,25 @@
 ##
 ## THAT IS A BIJECTION ON KEYS AND NOTHING MORE, which is less than it
 ## sounds and was measured rather than reasoned about. It says nothing
-## about whether a surface's ``sourceRel`` points at the module its key
-## names: a row that keeps the key ``repro_runquota``, points ``sourceRel``
+## about whether a surface's ``sourceRels`` point at the module its key
+## names: a row that keeps the key ``repro_runquota``, points ``sourceRels``
 ## at a file with no exported routines and classifies nothing leaves both
 ## ``unclassified`` and ``vanished`` empty while reading the module not at
 ## all — both lists in perfect bijection, every message silent, and the
 ## same spawn helper green again. So the read is also required to find
 ## something: a capability module has an exported surface by definition,
-## and a read that finds none has read the wrong file.
+## and a read that finds none has read the wrong file. That requirement is
+## per FILE, not per row, so a module split across several files cannot
+## smuggle a path that reads nothing in behind one that reads plenty.
+##
+## A MODULE THAT SPLITS IS AN UPSTREAM CHANGE LIKE ANY OTHER, and this
+## audit is what reports it. io-mon moved ``findShimLibrary`` out of
+## ``fs_snoop.nim`` into ``io_mon/shim_discovery.nim`` and re-exported it:
+## the public surface was unchanged, the file this audit read no longer
+## declared the name, and the case went red naming it. The answer is to
+## read both halves — ``sourceRels`` is a list for exactly this — and not
+## to drop the classification, which would leave the table describing a
+## smaller module than the one the engine imports.
 ##
 ## Two rows are read differently and say so: ``std/posix`` (492 exported
 ## routines) and ``std/winlean`` are gated on their IMPORT LINE instead —
@@ -382,7 +393,26 @@ const EnumeratedLaunchPaths: array[4, LaunchPath] = [
 ## the action's ``cwd`` — which is precisely the defect P6 found (the
 ## wrapped path's ``umask`` wrapper shell set ``PWD=<action cwd>`` while
 ## the hosted path let the child inherit the ENGINE's ``PWD``).
+##
+## AND IT ENUMERATES THAT SAME DIRECTORY, which is a SECOND observation
+## and not a flourish (In-Process-Monitor-Hosting P10).
+## ``PathSetEvidence`` has eight path fields;
+## ``monitorDirectoryEnumerations`` — the membership half of an
+## enumeration, and the input ``cacheEnumeratedDirectories`` invalidates
+## on — was rendered by nothing here and asserted by no test in the
+## suite. P6's verification round MEASURED the consequence: reclassifying
+## one hosted-path ``mrPathProbe`` as ``mrDirectoryEnumerate`` gives L1
+## ``[/tmp]`` against ``[]`` on L2/L3/L3b and the case still reports
+## 11/0/0.
+##
+## THE RENDER LINE ALONE WOULD HAVE BEEN THE VACUOUS FIX, exactly as it
+## was for ``monitorProbes`` one field over: with no ``opendir`` anywhere
+## in the fixture all five recorded paths render
+## ``monitorDirectoryEnumerations=[]`` and the comparison cannot fail for
+## the class it names. So the fixture PRODUCES the class, and the case
+## asserts the enumeration is present before it asserts the sets agree.
 const FixtureSource = r"""
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -390,6 +420,30 @@ const FixtureSource = r"""
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Enumerate a directory the way a globbing tool does: opendir() plus
+   readdir() to exhaustion. The entries are not used — the OBSERVATION is
+   the point, and it is a different one from probe_ancestors() below:
+   io-mon records this as `mrDirectoryEnumerate`, which the engine folds
+   into BOTH `monitorProbes` (existence) and
+   `monitorDirectoryEnumerations` (membership, and the input to
+   `cacheEnumeratedDirectories`).
+
+   IN C, FOR THE SAME SIP REASON THE ANCESTOR WALK IS IN C. Wrapping the
+   action in `/bin/sh -c 'ls'` would be shorter and would be blind on
+   macOS: a SIP-protected `/bin/sh` at the top of a monitored tree strips
+   DYLD_INSERT_LIBRARIES, so the action would record nothing at all and
+   the case would fail for a reason that has nothing to do with launch
+   paths. */
+static void enumerate_directory(const char *path) {
+  DIR *dir;
+  if (path == NULL || path[0] != '/') return;
+  dir = opendir(path);
+  if (dir == NULL) return;
+  while (readdir(dir) != NULL) {
+  }
+  closedir(dir);
+}
 
 /* Resolve an absolute path the way a POSIX shell resolves an inherited
    $PWD: one stat() per ancestor, from the top down. The results are not
@@ -415,6 +469,9 @@ static void probe_ancestors(const char *path) {
 int main(int argc, char **argv) {
   if (argc != 4) return 64;
   probe_ancestors(getenv("PWD"));
+  /* The action's own work root. Enumerated BEFORE the output is written so
+     the observation does not depend on this action's own side effects. */
+  enumerate_directory(getenv("PWD"));
   int fd = open(argv[1], O_RDONLY);
   if (fd < 0) return 80;
   char buffer[256];
@@ -645,7 +702,11 @@ const SpawnCapabilityModules: array[7, tuple[path: string;
 ##
 ## ``io_mon`` is audited through ``io_mon/fs_snoop``: ``io_mon.nim`` itself
 ## defines no routines, it re-exports, and ``fs_snoop`` is the re-exported
-## module that owns the spawn.
+## module that owns the spawn. ``fs_snoop`` has since split in the same
+## way — ``findShimLibrary`` now lives in ``io_mon/shim_discovery.nim`` and
+## is re-exported from ``fs_snoop`` — so that row reads BOTH files and
+## audits their union. A surface is a list of files rather than one file
+## for this reason; see ``CapabilitySurface.sourceRels``.
 ##
 ## EVERY ROW OF ``SpawnCapabilityModules`` MUST HAVE A SURFACE HERE, and the
 ## audit case asserts it by key. Nothing linked the two lists before, and
@@ -678,7 +739,33 @@ type
   CapabilitySurface = object
     key: string             ## which ``SpawnCapabilityModules`` row this is
     audit: CapabilityAudit
-    sourceRel: string       ## path of the module source, inside its own root
+    sourceRels: seq[string]
+      ## The module's source files, inside its own root. Usually one — a
+      ## capability module is normally one file — but it is a SEQUENCE
+      ## because an upstream module is free to split, and when it does the
+      ## surface being audited is the union across the pieces rather than
+      ## whatever stayed in the original file.
+      ##
+      ## THIS IS NOT A WIDENING. Every file listed here is read in full and
+      ## its exports classified, so adding one adds obligations rather than
+      ## removing them, and the two directions the audit is for hold over
+      ## the union exactly as they held over the single file: an export
+      ## this table has not classified reddens ``unclassified``, and a
+      ## classified name that no listed file declares any more reddens
+      ## ``vanished``. Each file must also carry exports of its own, so a
+      ## row cannot be padded with a path that reads nothing.
+      ##
+      ## AND A SPLIT IS STILL A RED TEST rather than a silent hole: moving
+      ## an export into a module NOT listed here removes it from the union,
+      ## which is ``vanished`` — which is exactly how io-mon's
+      ## ``fs_snoop`` → ``shim_discovery`` split was found. What the list
+      ## does NOT see, declared rather than glossed: a BRAND NEW export
+      ## added to a module the primary file re-exports but this row does
+      ## not name. Nothing moves, so nothing vanishes, and the new name is
+      ## not in the union to be unclassified. That is the same scope the
+      ## ``io_mon`` row already declares one level up — ``io_mon.nim``
+      ## re-exports six more modules that this audit does not read, because
+      ## ``fs_snoop`` is the one that owns the spawn.
     spawning: seq[string]
     inert: seq[string]
     allowedSymbols: seq[string]
@@ -689,7 +776,7 @@ type
 proc capabilitySurfaces(): seq[CapabilitySurface] =
   @[
     CapabilitySurface(key: "osproc", audit: caFullSurface,
-      sourceRel: "pure/osproc.nim",
+      sourceRels: @["pure/osproc.nim"],
       spawning: @["execProcess", "execCmd", "startProcess", "execProcesses",
                   "execCmdEx"],
       inert: @["close", "suspend", "resume", "terminate", "kill", "running",
@@ -699,7 +786,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "errorHandle", "countProcessors", "lines", "readLines",
                "hasData"]),
     CapabilitySurface(key: "runquota_process", audit: caFullSurface,
-      sourceRel: "libs/runquota_process/src/runquota_process.nim",
+      sourceRels: @["libs/runquota_process/src/runquota_process.nim"],
       spawning: @["commandSpec", "launchProcess"],
       inert: @["libraryInfo", "backendProfile", "launchResult", "running",
                "pollCompletion", "terminate", "killNow", "waitForCompletion",
@@ -711,7 +798,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # path from "the engine may import it" to "the engine can start a
     # child the enumeration does not describe".
     CapabilitySurface(key: "repro_runquota", audit: caFullSurface,
-      sourceRel: "libs/repro_runquota/src/repro_runquota.nim",
+      sourceRels: @["libs/repro_runquota/src/repro_runquota.nim"],
       spawning: @["startDirect", "startWithRunQuota", "offerWithRunQuota",
                   "offerWithRunQuotaBatch", "startGrantedWithRunQuota",
                   "runWithRunQuota", "runRunQuotaHelperCli",
@@ -749,13 +836,40 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # arm defers the spawn into them, so "can this put a child on the road"
     # is true of both on at least one platform, and the classification has to
     # be the union rather than this machine's answer.
+    #
+    # AND THE AUDIT DID ITS JOB A SECOND TIME, on an upstream change that was
+    # a REFACTOR rather than an addition: io-mon moved `findShimLibrary` (and
+    # `ShimLibOverrideEnv` / `candidateShimLibraries`) out of `fs_snoop.nim`
+    # into `io_mon/shim_discovery.nim` and re-exported it, so the module's
+    # PUBLIC surface did not change by one name while the file this row used
+    # to read stopped declaring it. `vanished` named it and this case went
+    # red — correctly, because a table that says a module exports something
+    # it no longer declares has stopped describing the module.
+    #
+    # THE FIX IS TO FOLLOW THE SPLIT, NOT TO DROP THE NAME. `findShimLibrary`
+    # is still on io-mon's public surface and is still what resolves the
+    # interpose shim every monitored launch loads, so deleting it from
+    # `inert` would have made the audit AGREE with a smaller module than the
+    # one the engine actually imports. Both files are read and their exports
+    # unioned; see `sourceRels`. The two directions still hold: an export
+    # added to EITHER file lands in `unclassified`, and a name that leaves
+    # both lands in `vanished`.
     CapabilitySurface(key: "io_mon", audit: caFullSurface,
-      sourceRel: "io_mon/fs_snoop.nim",
+      sourceRels: @["io_mon/fs_snoop.nim", "io_mon/shim_discovery.nim"],
       spawning: @["runMonitored", "runFsSnoopCli", "startMonitor",
                   "pollMonitor", "finishMonitor"],
       inert: @["appendLauncherEventLoss", "completeness",
                "records", "monitorLifecycleCounts", "live", "hasExited",
-               "rootPid"]),
+               "rootPid",
+               # Moved to `io_mon/shim_discovery.nim` by the same refactor
+               # that motivated `sourceRels`, and re-exported from
+               # `fs_snoop`. Inert: it resolves a path and starts nothing.
+               # Adding `shim_discovery.nim` to `sourceRels` made the audit
+               # SEE the file; classifying the name is the other half, and
+               # it was missed — the case reported `unclassified.len == 1`
+               # until this line, which is the audit doing its job on an
+               # incomplete fix to itself.
+               "findShimLibrary"]),
     # The escape hatches, and the rewrite templates that warn about the
     # stdlib names. The templates are pattern rewrites, but they are also
     # ordinary exported templates that can be called by name, so they are
@@ -768,7 +882,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # linter itself does not, and that is a known limitation rather than
     # something this file fixed.
     CapabilitySurface(key: "ambient_execution", audit: caFullSurface,
-      sourceRel: "libs/repro_core/src/repro_core/ambient_execution.nim",
+      sourceRels: @["libs/repro_core/src/repro_core/ambient_execution.nim"],
       spawning: @["uncontrolledFindExe", "uncontrolledExecCmdEx",
                   "uncontrolledExecProcess", "uncontrolledExecShellCmd",
                   "uncontrolledStartProcess", "warnFindExe", "warnExecCmdEx",
@@ -799,13 +913,13 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # individually, and each had to be classified before the suite would go
     # green again.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
-      sourceRel: "posix/posix.nim",
+      sourceRels: @["posix/posix.nim"],
       spawning: @[],
       inert: @["kill", "setpgid", "umask", "dup", "dup2", "close"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
                         "Mode", "umask", "dup", "dup2", "close"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
-      sourceRel: "windows/winlean.nim",
+      sourceRels: @["windows/winlean.nim"],
       spawning: @[],
       inert: @["openProcess", "closeHandle", "waitForMultipleObjects"],
       allowedSymbols: @["Handle", "DWORD", "WINBOOL", "SYNCHRONIZE",
@@ -1353,6 +1467,13 @@ proc resultById(run: BuildRunResult; id: string): ActionResult =
 ## the case asserts that the walk is present before it asserts the sets
 ## agree — a comparison whose operands are empty is recorded as a failure
 ## here rather than as a pass.
+##
+## THE SAME SHAPE, ONE FIELD OVER, WAS STILL OPEN UNTIL P10:
+## ``monitorDirectoryEnumerations`` — eighth of ``PathSetEvidence``'s
+## eight path fields — was not rendered here at all, and no test in the
+## suite asserted it. It is now rendered, and the fixture ``opendir``s its
+## own work root so that rendering compares something. Both halves are
+## required and neither is sufficient; see ``FixtureSource``.
 ## ---------------------------------------------------------------------
 var recordedEvidence: seq[tuple[label, shape: string]] = @[]
 
@@ -1376,6 +1497,13 @@ proc evidenceShape(res: ActionResult;
     render("monitorReads", ev.monitorReads),
     render("monitorWrites", ev.monitorWrites),
     render("monitorProbes", ev.monitorProbes),
+    # P10. The EIGHTH field, and the last one this rendering was blind to.
+    # An enumeration lands in `monitorProbes` too, so a difference in this
+    # field alone is only visible if it is rendered separately — and the
+    # fixture has to actually enumerate something, or five empty sets
+    # compare equal. Both halves; see `FixtureSource` and the presence pin
+    # in `evidence is identical across launch paths`.
+    render("monitorDirectoryEnumerations", ev.monitorDirectoryEnumerations),
     render("diagnostics", ev.diagnostics)
   ].join("\n")
 
@@ -1390,6 +1518,20 @@ proc shapeList(shape, field: string): seq[string] =
         return @[]
       return inner.split(' ')
   @[]
+
+proc shapeHasField(shape, field: string): bool =
+  ## Whether ``evidenceShape`` rendered a line for ``field`` AT ALL.
+  ##
+  ## DISTINCT FROM ``shapeList``, and that is the whole point.
+  ## ``shapeList`` answers ``@[]`` for a field that rendered empty and
+  ## ``@[]`` for a field that was never rendered, so it cannot tell "the
+  ## action enumerated nothing" from "this rendering has never heard of
+  ## enumerations" — which is exactly the difference P10 turned out to
+  ## be about.
+  for line in shape.splitLines():
+    if line.startsWith(field & "=[") and line.endsWith("]"):
+      return true
+  false
 
 proc looksLikeSharedObject(path: string): bool =
   ## A dynamic object the loader maps into the monitored child. Matched on
@@ -1888,33 +2030,61 @@ suite "every_launch_path_is_monitored":
     let repoRoot = getCurrentDir()
     for surface in surfaces:
       let root = capabilitySurfaceRoot(surface.key, repoRoot)
-      let path = root / surface.sourceRel
-      if not fileExists(path):
-        echo "cannot audit `", surface.key, "`: no source at ", path,
-          "\n  This test compiled, so the module IS on the compiler's",
-          " search path; fix the resolution in `capabilitySurfaceRoot`",
-          " rather than deleting the audit."
-      check fileExists(path)
-      if not fileExists(path): continue
 
-      let declared = exportedRoutineNames(codeOnly(readFile(path)))
+      # A ROW WITH NO FILES READS NOTHING and would sail through every
+      # check below on empty sets, so it is refused before they run.
+      if surface.sourceRels.len == 0:
+        echo "`", surface.key, "` names no source file at all, so its",
+          " surface is never read."
+      check surface.sourceRels.len > 0
 
-      # NOT VACUOUS. Key equality with `SpawnCapabilityModules` says the
-      # right MODULES are audited; it says nothing about whether
-      # `sourceRel` points at the right FILE. A surface that keeps its key
-      # and points `sourceRel` at a file with no exported routines — while
-      # classifying nothing — leaves `unclassified` and `vanished` both
-      # empty and reads the module not at all, with both lists still in
-      # perfect bijection. That was measured, paired with an exported
-      # spawn helper added to `repro_runquota`: the whole gate stayed
-      # green. A capability module has a surface by definition, so requiring
-      # the read to have found one closes it.
-      if declared.len == 0:
-        echo "`", surface.key, "`: reading ", path,
-          " found NO exported routines, so this row audits nothing.",
-          "\n  `sourceRel` is pointing somewhere that is not the module,",
-          " and key equality with `SpawnCapabilityModules` cannot see that."
-      check declared.len > 0
+      # THE UNION ACROSS THE MODULE'S FILES. One entry for a module that is
+      # one file; more when it has been split and re-exports the pieces (see
+      # `sourceRels`). Every listed file is read in full, and every listed
+      # file has to CONTRIBUTE — the per-file emptiness check below is what
+      # stops a path that reads nothing from being added to pad the row.
+      var declared = initHashSet[string]()
+      var readAny = true
+      var paths: seq[string] = @[]
+      for rel in surface.sourceRels:
+        let path = root / rel
+        paths.add path
+        if not fileExists(path):
+          echo "cannot audit `", surface.key, "`: no source at ", path,
+            "\n  This test compiled, so the module IS on the compiler's",
+            " search path; fix the resolution in `capabilitySurfaceRoot`",
+            " rather than deleting the audit."
+        check fileExists(path)
+        if not fileExists(path):
+          readAny = false
+          continue
+
+        let fromFile = exportedRoutineNames(codeOnly(readFile(path)))
+
+        # NOT VACUOUS, AND PER FILE RATHER THAN PER ROW. Key equality with
+        # `SpawnCapabilityModules` says the right MODULES are audited; it
+        # says nothing about whether a `sourceRels` entry points at the
+        # right FILE. A surface that keeps its key and points at a file
+        # with no exported routines — while classifying nothing — leaves
+        # `unclassified` and `vanished` both empty and reads the module not
+        # at all, with both lists still in perfect bijection. That was
+        # measured, paired with an exported spawn helper added to
+        # `repro_runquota`: the whole gate stayed green. A capability
+        # module has a surface by definition, so requiring the read to have
+        # found one closes it — and requiring it of EACH entry rather than
+        # of the union is what keeps the check from being weakened by the
+        # move to a list, where one real file would otherwise cover for any
+        # number of wrong ones.
+        if fromFile.len == 0:
+          echo "`", surface.key, "`: reading ", path,
+            " found NO exported routines, so this file audits nothing.",
+            "\n  The `sourceRels` entry is pointing somewhere that is not",
+            " part of the module, and key equality with",
+            " `SpawnCapabilityModules` cannot see that."
+        check fromFile.len > 0
+        declared.incl fromFile
+      if not readAny: continue
+      let path = paths.join(", ")
 
       var classified = initHashSet[string]()
       for name in surface.spawning: classified.incl name
@@ -2287,6 +2457,44 @@ suite "every_launch_path_is_monitored":
           # stray file that is neither fails it. What it no longer does
           # is pin the exact list of DSOs a particular host maps.
           let shape = recordedEvidence[0].shape
+
+          # EVERY FIELD OF `PathSetEvidence` IS RENDERED, ASKED OF THE TYPE
+          # RATHER THAN OF A LIST SOMEBODY MAINTAINS.
+          #
+          # This case has gone blind twice, and P10's half of it was the
+          # simplest possible cause: `evidenceShape` rendered seven of the
+          # type's eight fields, so a cross-path difference in the eighth
+          # could not appear in the string being compared. Nothing said so.
+          # The field was added to the engine, every launch path started
+          # populating it, and the comparison below went on comparing seven.
+          #
+          # Adding the eighth render line fixes THAT instance and nothing
+          # else: the ninth field will arrive the same way. So the coverage
+          # is asserted against the type's own field list — `fieldPairs`
+          # over a `PathSetEvidence` — and a field the engine grows without
+          # a render line reddens HERE, in the case that would otherwise
+          # have quietly stopped covering it.
+          #
+          # It is `shapeHasField` and not `shapeList` deliberately: a field
+          # that renders EMPTY is fine here (that is what the per-field
+          # non-vacuity pins below are for), a field that renders NOT AT
+          # ALL is not.
+          var fieldProbe: PathSetEvidence
+          var unrenderedFields: seq[string] = @[]
+          for name, value in fieldProbe.fieldPairs:
+            discard value
+            if not shapeHasField(shape, name):
+              unrenderedFields.add name
+          if unrenderedFields.len > 0:
+            echo "`evidenceShape` does not render ",
+              unrenderedFields.join(", "), " of `PathSetEvidence`, so the ",
+              "cross-path comparison below cannot fail for a difference in ",
+              "those fields. Add a `render(...)` line for each — and, ",
+              "because rendering alone is the vacuous half, make the ",
+              "fixture produce the class and pin its presence, exactly as ",
+              "`monitorProbes` and `monitorDirectoryEnumerations` do."
+          check unrenderedFields.len == 0
+
           let reads = shapeList(shape, "monitorReads")
           if "<marker>" notin reads:
             echo "[", recordedEvidence[0].label,
@@ -2338,6 +2546,39 @@ suite "every_launch_path_is_monitored":
           check "<work>" in probes
           check "<case>" in probes
           check "<temp>" in probes
+
+          # AND THE ENUMERATION SET IS NOT EMPTY EITHER — the same pin, one
+          # field over, for the same reason (In-Process-Monitor-Hosting
+          # P10).
+          #
+          # `monitorDirectoryEnumerations` is the membership half of a
+          # directory observation and the input `cacheEnumeratedDirectories`
+          # invalidates on. It was the ONE field of `PathSetEvidence` this
+          # case did not even render, and P6's verification round measured
+          # what that cost: reclassify a single hosted-path `mrPathProbe` as
+          # `mrDirectoryEnumerate` and L1 records `[/tmp]` where L2/L3/L3b
+          # record `[]`, with this case still reporting 11 passes.
+          #
+          # RENDERING IT IS HALF THE FIX AND THE HALF THAT PROVES NOTHING.
+          # Before the fixture enumerated anything, every recorded path
+          # rendered `monitorDirectoryEnumerations=[]`, so the comparison
+          # below would have compared five empty sets — green under exactly
+          # the mutation it is supposed to catch. The fixture now runs
+          # `opendir`/`readdir` over its own work root (see
+          # `FixtureSource`), and this pin is what says the class ARISES: if
+          # the fixture stops enumerating, or io-mon stops classifying
+          # `opendir` as an enumeration, or the engine stops folding it into
+          # this field, it reddens HERE rather than turning the comparison
+          # below into a tautology.
+          let enumerations = shapeList(shape,
+            "monitorDirectoryEnumerations")
+          if "<work>" notin enumerations:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape carries no enumeration of the ",
+              "action's own work root, so the cross-path comparison of ",
+              "`monitorDirectoryEnumerations` below is vacuous:\n", shape
+          check enumerations.len > 0
+          check "<work>" in enumerations
 
           # PRIMARY ASSERTION.
           for i in 1 ..< recordedEvidence.len:

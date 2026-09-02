@@ -1,0 +1,12 @@
+## The operator split across adjacent literals: neither `"&"` is an operator on
+## its own, and operators are matched PER LITERAL, so the `&&` that the
+## concatenation actually produces is invisible to the scanner.
+##
+## Note the shape this probe is careful NOT to be: a lone `">"` or `"|"` in its
+## own literal IS matched (the operator patterns allow the literal to end right
+## after the token), so splitting a single-character operator off does not
+## defeat the scanner. Only a MULTI-character operator torn in half does.
+import std/[os, osproc]
+
+proc chained(first, second: string): string =
+  execCmdEx(quoteShell(first) & " " & "&" & "&" & " " & quoteShell(second)).output

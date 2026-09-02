@@ -230,7 +230,26 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 25'u16
+  BuildActionPayloadVersion = 26'u16
+    ## v26: Windows-Build-Correctness M6 — appends the TOOL's entropy
+    ## blessing: one strict sentinel byte for the ``NonDeterminismPolicy``
+    ## ordinal followed by the length-prefixed justification string.
+    ## v25-and-earlier payloads decode as ``ndpUnblessed`` with an empty
+    ## justification, which is the FAIL-CLOSED direction: a payload written
+    ## before the blessing existed cannot have carried one, and reading a
+    ## missing field as "blessed" would restore cache publication for every
+    ## legacy artefact on the strength of a byte that was never written.
+    ##
+    ## NOTE ON THE NUMBER. The blessing was developed as "v24" on a branch
+    ## that had not yet seen v24/v25 land on mainline, and v24 was taken —
+    ## by a DIFFERENT change, to the dependency policy. Two incompatible
+    ## layouts cannot share a version, so the blessing moved to v26 rather
+    ## than either side renumbering the other's published records. A record
+    ## written as "v24" by that pre-merge branch is not readable here and
+    ## does not pretend to be: it fails the trailing-bytes check at the end
+    ## of ``decodeBuildActionPayload`` with a structured error, so the only
+    ## cost is a cache miss for anyone who ran the branch locally.
+    ##
     ## v25: the dependency policy REPLACES v24's two trailing fields
     ## (``trustedInputs`` + ``trustedReason``, the removed
     ## ``bdpTrustedDeclaredInputs`` payload) with a single trailing
@@ -241,9 +260,10 @@ const
     ## self-describing: a v24 record on disk carries those two fields, and a
     ## reader that stopped consuming them would leave ``pos`` short and
     ## misparse every field after the policy. So v24 records are still read,
-    ## and their two fields read and discarded; only v25 records carry the new
-    ## byte. (Forward-incompatibility is the usual kind: a v24 binary refuses a
-    ## v25 record outright at the version check rather than misreading it.)
+    ## and their two fields read and discarded; only v25-and-later records
+    ## carry the new byte. (Forward-incompatibility is the usual kind: a v24
+    ## binary refuses a v25 record outright at the version check rather than
+    ## misreading it.)
     ##
     ## v24: appended ``trustedInputs`` + ``trustedReason`` to the dependency
     ## policy. REMOVED at v25 along with the policy kind they served.
@@ -1477,6 +1497,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   cacheable = true;
                   commandStatsId = "";
                   dependencyPolicy = defaultDependencyPolicy();
+                  nonDeterminism = ndpUnblessed;
+                  nonDeterminismJustification = "";
                   actionCachePolicy = defaultActionCachePolicy();
                   outputTag = "";
                   env: openArray[(string, string)] = [];
@@ -1545,6 +1567,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     cacheable: cacheable,
     commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
     dependencyPolicy: dependencyPolicy,
+    nonDeterminism: nonDeterminism,
+    nonDeterminismJustification: nonDeterminismJustification,
     actionCachePolicy: actionCachePolicy,
     outputTag: outputTag,
     env: actionEnv,
@@ -2076,6 +2100,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
                           cacheable = true;
                           commandStatsId = "";
                           dependencyPolicy = defaultDependencyPolicy();
+                          nonDeterminism = ndpUnblessed;
+                          nonDeterminismJustification = "";
                           actionCachePolicy = defaultActionCachePolicy();
                           extraEnv: openArray[(string, string)] = []):
     BuildActionDef {.dynOrStatic.} =
@@ -2097,6 +2123,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
     cacheable = cacheable,
     commandStatsId = commandStatsId,
     dependencyPolicy = dependencyPolicy,
+    nonDeterminism = nonDeterminism,
+    nonDeterminismJustification = nonDeterminismJustification,
     actionCachePolicy = actionCachePolicy,
     env = extraEnv)
 
@@ -2308,6 +2336,8 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
                            cacheable = true;
                            commandStatsId = "";
                            dependencyPolicy = defaultDependencyPolicy();
+                           nonDeterminism = ndpUnblessed;
+                           nonDeterminismJustification = "";
                            actionCachePolicy = defaultActionCachePolicy();
                            extraEnv: openArray[(string, string)] = []):
     BuildActionDef {.dynOrStatic.} =
@@ -2329,6 +2359,8 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
     cacheable = cacheable,
     commandStatsId = commandStatsId,
     dependencyPolicy = dependencyPolicy,
+    nonDeterminism = nonDeterminism,
+    nonDeterminismJustification = nonDeterminismJustification,
     actionCachePolicy = actionCachePolicy,
     extraEnv = extraEnv)
 
@@ -3038,6 +3070,12 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   payload.writeU32Le(uint32(action.toolIdentityRefKinds.len))
   for kind in action.toolIdentityRefKinds:
     payload.writeByte(byte(ord(kind)))
+  # v26: Windows-Build-Correctness M6 — the tool's entropy blessing. One
+  # strict enum byte plus the justification the DSL required before it
+  # would accept the blessing, so the engine's diagnostic can quote the
+  # reason rather than merely asserting that one exists.
+  payload.writeByte(byte(ord(action.nonDeterminism)))
+  payload.writeString(action.nonDeterminismJustification)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -3228,6 +3266,23 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
       result.toolIdentityRefKinds[i] = ToolIdentityRefKind(rawKind)
   else:
     result.toolIdentityRefKinds = @[]
+  if version >= 26'u16:
+    # M6 v26: the tool's entropy blessing. Strict 0..ord(high) sentinel —
+    # same strictness as v19's requiresElevation and v21's cwdKind — so a
+    # mutated payload fails closed with a structured error instead of
+    # decoding to whichever ordinal the corrupted byte happens to name.
+    # That matters more here than for the other sentinels: one of the two
+    # ordinals SUPPRESSES a cache-publication guard.
+    let blessingByte = readByte(bytes, pos)
+    if blessingByte > byte(ord(high(NonDeterminismPolicy))):
+      raisePayload("invalid nonDeterminism ordinal in build action payload")
+    result.nonDeterminism = NonDeterminismPolicy(blessingByte)
+    result.nonDeterminismJustification = readString(bytes, pos)
+  else:
+    # v25-and-earlier payloads predate the blessing. Decode as UNBLESSED:
+    # absence of the field is absence of a blessing, never the reverse.
+    result.nonDeterminism = ndpUnblessed
+    result.nonDeterminismJustification = ""
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

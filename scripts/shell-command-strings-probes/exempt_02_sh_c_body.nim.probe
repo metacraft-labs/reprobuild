@@ -1,0 +1,6 @@
+## The operator is INSIDE the `-c` body, packed into one argv element by
+## `quoteShell`. `sh` is argv[0] and the shell it starts honours the redirect.
+import std/[os, osproc]
+
+proc runFixtureCmd(body, log: string): string =
+  execCmdEx("sh -c " & quoteShell(body & " >" & quoteShell(log) & " 2>&1")).output

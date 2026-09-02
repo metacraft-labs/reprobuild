@@ -50,6 +50,16 @@ import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 import repro_dsl_stdlib/fs as dslfs
 import repro_dsl_stdlib/types
+              # Windows-Cacheable-Builds-Session-Residuals S1: the four
+              # side-by-side Windows monitor artefact names live in one module
+              # so the recipe and the regression test spell them once.
+import repro_dsl_stdlib/monitor_shim_artifacts
+              # M8: the openssl package's own library-channel vocabulary. This
+              # recipe offers ONE prefix to it (the MSYS2 install in this
+              # repo's Windows dev-deps tree) and takes no part in deciding
+              # the linker flags — see the ``registerOpensslPrefixCandidate``
+              # call in the ``build:`` block below.
+import repro_dsl_stdlib/openssl_layout
 
 proc sanitizeStaticExec(val: string): string =
   var cleanLines: seq[string] = @[]
@@ -244,6 +254,57 @@ proc newestDirWith(root, probe: string): string =
     if newest.len == 0 or path > newest:
       newest = path
   newest
+
+proc windowsI686Gcc(): string =
+  ## Absolute path to a 32-bit (i686) mingw ``gcc``, or "" when the host has
+  ## none. Mirrors the resolution order in ``io-mon/scripts/build_shim.sh``:
+  ## the ``IO_MON_I686_GCC`` override first, then a cross-prefixed driver on
+  ## PATH, then the MSYS2 ``mingw32`` prefix under the metacraft DIY root.
+  ##
+  ## Deliberately NOT resolved by putting the i686 bin dir on the ambient
+  ## PATH. A bare ``gcc`` there would win over the 64-bit driver for the
+  ## 64-bit shim edge too, and that build then dies on a pointer-size assert
+  ## rather than on anything naming the cause. The path is handed to the
+  ## 32-bit edges explicitly instead (``gccExe`` / ``gccLinkerExe``), and the
+  ## bin directory is scoped to those edges' own env.
+  ##
+  ## ``IO_MON_I686_GCC`` is AUTHORITATIVE when set. A value naming a file
+  ## that does not exist reports "no toolchain" — which takes the
+  ## degradation path and says out loud what will not be monitored — rather
+  ## than falling through to a different compiler than the operator named.
+  ## Silently substituting one would reintroduce the failure shape this
+  ## whole initiative exists to remove.
+  let fromEnv = getEnv("IO_MON_I686_GCC")
+  if fromEnv.len > 0:
+    return (if fileExists(fromEnv): fromEnv else: "")
+  let onPath = uncontrolledFindExe("i686-w64-mingw32-gcc")
+  if onPath.len > 0:
+    return onPath
+  let diyRoot = windowsDiyInstallRoot()
+  if diyRoot.len > 0:
+    let msys2I686 =
+      diyRoot / "msys2" / "msys64" / "mingw32" / "bin" / "gcc.exe"
+    if fileExists(msys2I686):
+      return msys2I686
+  ""
+
+proc missingI686ToolchainNote(): string =
+  ## The degradation message, in one place so the ``build:`` block and the
+  ## ``devEnv:`` block cannot drift apart. It names the artefacts, what stops
+  ## being monitored without them, and the fix — because the failure it
+  ## describes produces no error of its own downstream: the injector meets a
+  ## 32-bit child, finds no shim, refuses, and the subtree simply goes
+  ## unobserved.
+  var missing: seq[string] = @[]
+  for name in windowsCrossBitnessArtifactNames():
+    missing.add(monitorArtifactPath(name))
+  "no i686 (32-bit) toolchain found, so " & missing.join(", ") &
+    " will NOT be built. 32-bit child processes (scoop PATH shims and " &
+    "older toolchain binaries are i386) cannot be injected without them; " &
+    "their subtrees run UNMONITORED, which grades as an unknown-scope " &
+    "evidence loss and makes the owning action uncacheable. Install one " &
+    "with 'pacman -S mingw-w64-i686-gcc', or point IO_MON_I686_GCC at an " &
+    "existing i686 gcc.exe."
 
 proc pinnedToolDir(root, tool, version, probe: string): string =
   ## ``<root>/<tool>/<version>`` when it exists and carries `probe`, else
@@ -501,10 +562,12 @@ package reprobuild:
 
       # OpenSSL's import libraries live in the same MSYS2 mingw64 lib dir
       # (`pacman -S mingw-w64-x86_64-openssl`). Adding it here serves tools
-      # invoked BY HAND from the activated shell; graph-built binaries get
-      # `-L` on their argv instead (see `windowsOpensslPassL` below), because
-      # the engine composes each action's environment rather than inheriting
-      # the shell's, so LIBRARY_PATH would never reach them.
+      # invoked BY HAND from the activated shell and NOTHING ELSE; graph-built
+      # binaries get `-L` on their argv, derived by `nim.c` from the openssl
+      # package's declared layout (M8). LIBRARY_PATH could not serve them
+      # anyway: the engine composes each action's environment rather than
+      # inheriting the shell's, which is the point of the "not ambient"
+      # requirement.
       let msys2OpenSsl = msys2Root / "mingw64" / "lib"
       if fileExists(msys2OpenSsl / "libssl.dll.a") or
           fileExists(msys2OpenSsl / "libssl.a"):
@@ -512,6 +575,22 @@ package reprobuild:
 
       for i in countdown(libraryPath.high, 0):
         prependPath "LIBRARY_PATH", libraryPath[i]
+
+      # Windows-Cacheable-Builds-Session-Residuals S1 — degradation policy.
+      #
+      # Without an i686 toolchain the build still succeeds and still produces
+      # a working 64-bit shim, but the installation it produces cannot
+      # monitor 32-bit children at all. That has to be VISIBLE rather than
+      # latent, because what it produces downstream — an unmonitored subtree
+      # — looks exactly like a process that genuinely had no dependencies,
+      # and no layer below reports it.
+      #
+      # A dev-env diagnostic is the channel that actually renders: the
+      # provider's own stderr is drained by ``runProviderProtocol`` and
+      # replayed only when the provider exits non-zero, so a warning printed
+      # from the ``build:`` block never reaches a successful ``repro build``.
+      if windowsI686Gcc().len == 0:
+        diagnostic(missingI686ToolchainNote(), dedsWarning)
 
   # Library declaration — every ``.nim`` file under ``libs/<name>/src``
   # that ``config.nims`` adds to ``--path`` is importable when this
@@ -661,7 +740,20 @@ package reprobuild:
     # entirely; B3 + B4 land both paths in parallel.
     var reprobuildTestBuildActions: seq[BuildActionDef] = @[]
     var reprobuildTestExecuteActions: seq[BuildActionDef] = @[]
-    const reproBinaryPath = "build/bin/repro"
+    # The path must be spelled EXACTLY as the producing edge declares its
+    # output, because that is how the dependency is inferred:
+    # ``inferDeclaredActionDeps`` indexes actions by declared output path and
+    # matches an action's declared INPUTS against that index by normalized
+    # string equality. Since ``nim.c`` began appending ``.exe`` on Windows,
+    # ``reprobuild.apps.repro`` declares ``build/bin/repro.exe`` — so a
+    # ``build/bin/repro`` input matched nothing and the e2e execute edges
+    # silently lost both halves of the contract the ``requiredBinaries`` slot
+    # exists for: ordering after the CLI build, and re-running when the CLI
+    # changes. No error is produced when the lookup misses; the edge simply
+    # has one fewer dep.
+    const reproBinaryPath =
+      when defined(windows): "build/bin/repro.exe"
+      else: "build/bin/repro"
 
     proc reproTestExecuteId(binary: string): string =
       ## Compute the per-test EXECUTE-edge action id from the build
@@ -747,49 +839,37 @@ package reprobuild:
       else:
         @[]
 
-    proc windowsOpensslPassL(): seq[string] =
-      ## ``-L`` for OpenSSL's import libraries on Windows.
-      ##
-      ## ``uses: "openssl"`` above states the intent: graph-built binaries
-      ## should receive OpenSSL's library channels "instead of depending on
-      ## ambient NIX_LDFLAGS". On Linux and macOS the ``nixPackage`` entry in
-      ## ``packages/openssl.nim`` delivers exactly that. On Windows it
-      ## delivered nothing, because that package declares ONLY a nixPackage:
-      ## path-mode resolution finds whichever ``openssl.exe`` is on PATH --
-      ## typically Git-for-Windows', which ships the executable and no
-      ## development libraries at all.
-      ##
-      ## Meanwhile ``nim.c`` appends ``-lssl -lcrypto`` whenever ``-d:ssl`` is
-      ## set (``opensslPassLForSsl``), with no ``-L`` to go with them. So both
-      ## SSL-linking edges failed with ``ld.exe: cannot find -lssl`` even in a
-      ## fully activated environment -- a declared dependency that reached
-      ## neither the flags nor the paths.
-      ##
-      ## The flags go on the ARGV rather than into LIBRARY_PATH/CPATH. gcc
-      ## does honour those (verified: the same link succeeds with them set),
-      ## but the engine composes each action's environment deliberately
-      ## instead of inheriting the launching shell's -- which is the whole
-      ## point of the "not ambient NIX_LDFLAGS" requirement. An env-var fix
-      ## would re-introduce the dependency the declaration exists to remove,
-      ## and would leave the action's inputs under-described.
-      ##
-      ## MSYS2's mingw64 is where a Windows host actually has these
-      ## (``pacman -S mingw-w64-x86_64-openssl``). Probing for the import
-      ## library rather than assuming the directory means a host without the
-      ## package contributes nothing, and the link fails with the same clear
-      ## "cannot find -lssl" rather than a bogus ``-L`` that resolves nothing.
-      when defined(windows):
-        let libDir = windowsDiyInstallRoot() / "msys2" / "msys64" /
-          "mingw64" / "lib"
-        if fileExists(libDir / "libssl.dll.a") or
-            fileExists(libDir / "libssl.a"):
-          @["-L" & libDir]
-        else:
-          @[]
-      else:
-        @[]
-
-    let opensslPassL = windowsOpensslPassL()
+    # M8 — OpenSSL's search path is the PRODUCER's to supply.
+    #
+    # This used to be ``windowsOpensslPassL()``: a proc right here that
+    # computed ``-L<diyRoot>/msys2/msys64/mingw64/lib`` and threaded it onto
+    # the ``passL`` of every ``-d:ssl`` edge. That worked and was still wrong
+    # twice over. The directory was a literal rather than a layout, and it was
+    # the CONSUMER supplying a path the package should have declared — so
+    # ``uses: "openssl"``'s promise ("graph-built binaries receive OpenSSL's
+    # library channels") stayed false on Windows no matter how many recipes
+    # patched around it.
+    #
+    # ``packages/openssl.nim`` now declares a pinned, hashed Windows arm and
+    # ``repro_dsl_stdlib/openssl_layout`` names the prefix shapes it can have,
+    # so ``nim.c`` derives ``-L`` itself from whichever OpenSSL the engine's
+    # own resolver binds. The ``passL =`` lists below carry no OpenSSL entry at
+    # all any more; there is nothing left for an edge to forget to thread, and
+    # a new ``-d:ssl`` edge is covered the moment it is written.
+    #
+    # What is left here is a PREFIX, not a flag. This repository provisions
+    # MSYS2's ``mingw-w64-x86_64-openssl`` into its Windows dev-deps tree
+    # (``windows/`` + ``repro home apply``) — a location only this recipe
+    # knows — and Git-for-Windows' library-free ``openssl.exe`` is on nearly
+    # every Windows host's PATH ahead of it. Offering the prefix keeps that
+    # host working without giving the consumer a say in the flags: the package
+    # decides whether the prefix satisfies its declared layout, which
+    # directory to name, and that PATH resolution is consulted first (see
+    # ``windowsOpensslLinkSearchDir``'s stated precedence). A prefix with no
+    # OpenSSL in it contributes nothing.
+    when defined(windows):
+      registerOpensslPrefixCandidate(
+        windowsDiyInstallRoot() / "msys2" / "msys64" / "mingw64")
 
     let reproRuntimePassL = nixRuntimePassLForLibraries(@[
       "libclingo.so", "libclingo.dylib"])
@@ -1185,6 +1265,13 @@ package reprobuild:
       binary = "build/bin/repro",
       defines = @["release", "reproVendoredHash", "ssl"],
       paths = ioMonNimPaths & sourceOnlyNimPaths,
+      # ``-d:ssl`` makes ``nim.c`` append ``-lssl -lcrypto`` AND the ``-L``
+      # that resolves them (M8). Nothing OpenSSL-shaped belongs in this list:
+      # the reason this edge once carried one is that the search path was
+      # threaded per-edge and reached only two of the five -- ``.#apps``, the
+      # collection that builds ``repro`` itself, could not link on Windows at
+      # all. Derivation in ``nim.c`` is what makes partial coverage
+      # unexpressible.
       passL = reproRuntimePassL,
       nimcache = "build/nimcache/repro",
       # The public launcher sits on the prompt-time dev-env no-op path.
@@ -1638,7 +1725,7 @@ package reprobuild:
       binary = "build/test-bin/repro_binary_cache_m6",
       defines = @["ssl"],
       paths = sourceOnlyNimPaths,
-      passL = testRuntimePassL & opensslPassL,
+      passL = testRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_m6",
       actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
@@ -1648,7 +1735,7 @@ package reprobuild:
       binary = "build/test-bin/repro_binary_cache_client_cli",
       defines = @["ssl"],
       paths = sourceOnlyNimPaths,
-      passL = testRuntimePassL & opensslPassL,
+      passL = testRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_client_cli",
       actionId = "reprobuild.test_helpers.repro_binary_cache_client_cli"))
@@ -1762,14 +1849,156 @@ package reprobuild:
       # of ``scripts/build_apps.sh`` and io-mon's ``build_shim.sh``.
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "windows_interpose.nim",
-        binary = "build/lib/librepro_monitor_shim.dll",
+        binary = monitorArtifactPath(MonitorShim64Name),
         appLib = true,
         threadsOn = true,
+        # ``-static-libgcc`` is load-bearing, and it is the one flag from
+        # io-mon's ``scripts/build_shim.sh`` that this edge originally did not
+        # mirror -- even though the three cross-bitness edges below all pass
+        # it. Linked dynamically the shim imports ``libgcc_s_seh-1.dll``, which
+        # lives in whichever mingw bin dir built it. That directory is on a
+        # developer's interactive PATH, so the omission is invisible there; it
+        # is NOT on the PATH the engine composes for a monitored action, and
+        # the injected child then dies with
+        # ``repro internal io monitor: error: LoadLibraryW in child returned
+        # NULL`` -- taking every monitored action on Windows with it. Observed
+        # exactly that way while validating S3: the graph-built shim failed to
+        # load where io-mon's script-built one loaded fine, and ``objdump -p``
+        # named the difference. Confirmed since by removing this flag and
+        # rebuilding this very edge: the artefact comes back importing
+        # ``libgcc_s_seh-1.dll``. Whether it does depends on the compiler --
+        # a gcc that links libgcc statically by default hides the omission
+        # entirely -- which is why the flag is pinned here rather than left to
+        # whatever is first on PATH, and why
+        # ``tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim``
+        # asserts it over both this recipe and the lowered graph.
+        passL = @["-static-libgcc"],
         paths = @[ioMonSrc, stackableHooksSrc],
         nimcache = monitorShimNimcache,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
       reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
+
+      # Windows-Cacheable-Builds-Session-Residuals S1 — the cross-bitness
+      # companions.
+      #
+      # A 64-bit shim cannot be injected into a 32-bit child: LoadLibraryW
+      # returns NULL on the machine-type mismatch. The injector then refuses
+      # the child, its whole subtree runs unmonitored, and the action is
+      # graded an unknown-scope loss — which costs the build its cache
+      # publication. 32-bit children are not exotic here: scoop's PATH shims
+      # are i386, so a bare ``nim`` on this host already resolves to one.
+      #
+      # Three artefacts, all located BY CONVENTION beside the 64-bit shim
+      # (see ``monitor_shim_artifacts.nim`` and nim-stackable-hooks'
+      # ``wow64ShimPathFor`` / ``wow64ProbePathFor`` /
+      # ``inject64HelperPathFor``). Until S1 the graph built none of them:
+      # they existed on the developer's host only because they had been
+      # copied out of ``io-mon/build/lib`` by hand after each
+      # ``scripts/build_shim.sh`` run, so on a clean checkout every one of
+      # this session's cross-bitness fixes was inert.
+      let i686Gcc = windowsI686Gcc()
+      if i686Gcc.len > 0:
+        # The i686 ``gcc.exe`` spawns ``cc1.exe`` out of its sibling
+        # ``libexec`` tree, and cc1 links ``libgcc_s_dw2-1.dll`` /
+        # ``libwinpthread-1.dll`` from the compiler's BIN dir. cc1's own
+        # directory is not that bin dir, so without it on PATH cc1 fails to
+        # START: gcc exits 1 emitting nothing, and nim reports it as
+        # "execution of an external compiler program ... failed with exit
+        # code: 1" against whichever .c file happened to be first. Scoped to
+        # these edges' env on purpose — see ``windowsI686Gcc``.
+        let i686PathEnv = @[
+          ("PATH", i686Gcc.parentDir & $PathSep & getEnv("PATH"))]
+
+        # ``--kill-at`` is load-bearing rather than cosmetic. 32-bit mingw
+        # decorates stdcall exports with the callee's argument-byte count, so
+        # ``repro_runtime_init`` ships as ``repro_runtime_init@4`` while the
+        # 64-bit build — where there is no stdcall to decorate — exports it
+        # plain. Every lookup asks for the undecorated name. Without the
+        # flag LoadLibraryW still succeeds, the shim sits in the child with
+        # no hooks installed, the process reports no records at all, and the
+        # run still grades complete: the exact silent-loss shape this whole
+        # initiative exists to remove.
+        let shim32Nimcache = "build/nimcache/repro_monitor_shim32"
+        reprobuildTestFixturesActions.add(nim.c(
+          source = ioMonSrc / "io_mon" / "shim" / "windows_interpose.nim",
+          binary = monitorArtifactPath(MonitorShim32Name),
+          appLib = true,
+          threadsOn = true,
+          mm = "orc",
+          cpu = "i386",
+          cc = "gcc",
+          gccExe = i686Gcc,
+          gccLinkerExe = i686Gcc,
+          passL = @["-static-libgcc", "-Wl,--kill-at"],
+          paths = @[ioMonSrc, stackableHooksSrc],
+          extraEnv = i686PathEnv,
+          nimcache = shim32Nimcache,
+          dependencyPolicy =
+            makeDepfilePolicy(shim32Nimcache / "nim-compile.d"),
+          actionId = "reprobuild.test_fixtures.monitor_shim32"))
+        reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
+
+        # The WOW64 probe. A 64-bit injector cannot load a 32-bit image to
+        # read its export table, so it asks this 32-bit console binary for
+        # the kernel32 addresses it needs and reads the answer off the exit
+        # code.
+        let probe32Nimcache = "build/nimcache/stackable_hooks_wow64_probe32"
+        reprobuildTestFixturesActions.add(nim.c(
+          source = stackableHooksSrc / "stackable_hooks" / "tools" /
+            "wow64_proc_probe.nim",
+          binary = monitorArtifactPath(Wow64Probe32Name),
+          cpu = "i386",
+          cc = "gcc",
+          gccExe = i686Gcc,
+          gccLinkerExe = i686Gcc,
+          passL = @["-static-libgcc"],
+          paths = @[ioMonSrc, stackableHooksSrc],
+          extraEnv = i686PathEnv,
+          nimcache = probe32Nimcache,
+          dependencyPolicy =
+            makeDepfilePolicy(probe32Nimcache / "nim-compile.d"),
+          actionId = "reprobuild.test_fixtures.wow64_probe32"))
+        reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
+
+        # The 64-bit injection helper — built with the DEFAULT toolchain and
+        # deliberately WITHOUT the i686 bin dir on its env, since a 64-bit
+        # link that picks up the i686 driver dies on a pointer-size assert.
+        # It is grouped with the 32-bit block because its only caller is the
+        # 32-bit shim: a WOW64 process cannot inject into a 64-bit child
+        # itself (VirtualAllocEx / CreateRemoteThread go through the WOW64
+        # thunk layer, which does not reach a 64-bit address space), so it
+        # delegates. With no 32-bit shim there is nothing to delegate.
+        let inject64Nimcache = "build/nimcache/stackable_hooks_inject64"
+        reprobuildTestFixturesActions.add(nim.c(
+          source = stackableHooksSrc / "stackable_hooks" / "tools" /
+            "inject_helper.nim",
+          binary = monitorArtifactPath(Inject64HelperName),
+          passL = @["-static-libgcc"],
+          paths = @[ioMonSrc, stackableHooksSrc],
+          nimcache = inject64Nimcache,
+          dependencyPolicy =
+            makeDepfilePolicy(inject64Nimcache / "nim-compile.d"),
+          actionId = "reprobuild.test_fixtures.inject64_helper"))
+        reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
+      else:
+        # DEGRADATION POLICY (S1). The 64-bit shim above still builds and the
+        # build still succeeds — but the resulting installation cannot
+        # monitor 32-bit children, and that has to be VISIBLE rather than
+        # latent. A silent skip is the worst possible outcome here, because
+        # what it produces downstream is an unmonitored subtree, and an
+        # unmonitored subtree is indistinguishable from a process that
+        # genuinely had no dependencies. Name the artefacts, name what stops
+        # being monitored, and name the fix.
+        #
+        # Two channels, because neither one alone reaches everybody. Provider
+        # stdout/stderr is drained by ``runProviderProtocol`` and only
+        # replayed when the provider EXITS NON-ZERO, so this line is visible
+        # to anyone running the provider directly but not during a
+        # successful ``repro build``. The ``devEnv:`` block above therefore
+        # registers the same text as a ``dedsWarning`` diagnostic, which
+        # ``repro dev-env`` renders.
+        stderr.writeLine("reprobuild: warning: " & missingI686ToolchainNote())
     else:
       # The Linux shim exports a version-scripted, interposed ``dlsym``
       # (``.symver …,dlsym@GLIBC_2.2.5`` / ``@GLIBC_2.34`` in

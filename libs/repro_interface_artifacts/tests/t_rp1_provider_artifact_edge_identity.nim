@@ -126,6 +126,18 @@ suite "RP1 provider-artifact-edge identity":
       digestFromText("other"), workDir = root)
     check key != computeProviderCompileActionKey(otherId, sources, sources)
 
+  test "compile configuration ignores output paths but keys semantic flags":
+    let base = @["nim", "c", "-d:release", "--out:/tmp/a/provider",
+      "--nimcache:/tmp/a/nimcache", "repro.nim"]
+    let relocated = @["nim", "c", "-d:release", "--out:/tmp/b/provider",
+      "--nimcache:/tmp/b/nimcache", "repro.nim"]
+    let debug = @["nim", "c", "-d:debug", "--out:/tmp/a/provider",
+      "--nimcache:/tmp/a/nimcache", "repro.nim"]
+    check providerCompileConfigurationIdentity(base) ==
+      providerCompileConfigurationIdentity(relocated)
+    check providerCompileConfigurationIdentity(base) !=
+      providerCompileConfigurationIdentity(debug)
+
   test "SHARING: two consumers of the same dependency version converge":
     # Two DISTINCT consumer project trees whose byte-identical provider
     # source resolves the SAME dependency version compute the SAME

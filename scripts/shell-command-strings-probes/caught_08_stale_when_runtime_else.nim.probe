@@ -1,0 +1,16 @@
+## An `else:` belonging to a RUNTIME `if`, at the same indent as an unrelated
+## `when defined(windows)` earlier in the file. Nothing here is adversarial:
+## it is the ordinary shape of a Nim module.
+import std/[osproc]
+
+proc platformLister(): string =
+  when defined(windows):
+    "dir"
+  else:
+    "ls"
+
+proc listInto(verbose: bool; dest: string): string =
+  if verbose:
+    execCmdEx("ls -la").output
+  else:
+    execCmdEx("ls -la > " & dest).output

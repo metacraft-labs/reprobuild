@@ -32,12 +32,47 @@
 
 import std/[hashes, os, sets, strutils]
 
+import blake3
+from repro_core/paths import extendedPath
+
+# Platform-And-Filesystem-Facts F3. Only ``HostHonoursPosixModeBits`` is
+# used here, and it is a compile-time reading of the OS table's
+# ``honoursPosixModeBits`` — the fact whose own doc comment names this
+# module's ``applyPermissions`` handling as the reason it exists.
+from repro_fs_facts import HostHonoursPosixModeBits
+
 import repro_local_store
 
 # Re-export the error taxonomy the facade may raise. Layer-2 error
 # types (EReceiptMismatch, EStoreSchemaTooNew, ...) are deliberately
 # NOT re-exported — they belong to the prefix layer.
 export StoreError, ECasMissing, ECasDigestMismatch
+
+# Local-CAS-Hardlink-Materialization M2 — the ingest side's named default
+# and its per-call mechanism record. The implementation lives one layer
+# down (``repro_local_store/store.nim``) because it is the module that owns
+# the on-disk staging and commit protocol; the constant is re-exported here
+# so a Layer-1 caller can read the policy without importing Layer 2, and so
+# a test can watch the value the way M1's watches
+# ``CasMaterializeAllowSharedInodeDefault``.
+export CasIngestAllowSharedInodeDefault, CasIngestOutcome,
+  casIngestRaceWindowHook
+
+# Local-CAS-Hardlink-Materialization M0 — the filesystem link-capability
+# model and probe. It lives in ``repro_local_store`` because the ingest
+# side (M2, ``storeCasFileBlobDetailed``) sits below this facade and needs
+# the same answer, but it is a Layer-1 concern end to end: it knows about
+# files and filesystems only, never about prefixes, receipts or roots.
+# Re-exported whole so a Layer-1 caller can implement the spec's
+# reflink → hardlink → copy preference order without importing Layer 2.
+#
+# Both directions are now production callers of the probe, and both have
+# their hardlink arm implemented but DISABLED by default:
+# ``casMaterialize`` below (M1, ``CasMaterializeAllowSharedInodeDefault``)
+# on the way out, and ``casPutPath`` below (M2,
+# ``CasIngestAllowSharedInodeDefault``) on the way in.
+import repro_local_store/link_capability
+export link_capability
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -120,6 +155,60 @@ proc casPut*(cas: var CasStore; payload: openArray[byte]): ContentHash =
   let raw = storeCasBlob(cas.inner, payload)
   ContentHash(raw)
 
+type
+  CasPutPathOutcome* = object
+    ## Per-call record of how ``casPutPath`` got a file into the store.
+    ## Mirrors ``CasMaterializeOutcome`` on the restore side so both
+    ## directions are asserted the same way: on the mechanism actually
+    ## used, never on timing.
+    hash*: ContentHash
+    mechanism*: LinkMechanism
+    perFileFallback*: bool
+    alreadyPresent*: bool
+    sourceChanged*: bool
+    diagnostic*: string
+
+proc casPutPathDetailed*(cas: var CasStore; path: string;
+                         allowSharedInode =
+                           CasIngestAllowSharedInodeDefault):
+    CasPutPathOutcome =
+  ## Insert the file at ``path`` into the CAS *by adopting it* — reflink
+  ## where the filesystem pair supports it, hardlink where it is enabled,
+  ## and the streaming copy otherwise. Returns the same
+  ## ``ContentHash`` ``casPut`` would return for the same bytes, and a
+  ## blob byte-identical to the one ``casPut`` would have written.
+  ##
+  ## This is the entry point Local-CAS-Hardlink-Materialization M2 adds
+  ## because ``casPut`` takes ``openArray[byte]``: a caller holding a
+  ## PATH could not express "adopt this file" without first reading the
+  ## whole payload into memory, which is both the memory cost and — since
+  ## the store then wrote its own second copy — the disk cost the
+  ## milestone exists to remove.
+  ##
+  ## The source is stat'd here for its size, which is also the first half
+  ## of the identity witness the hardlink arm compares. A source that
+  ## cannot be stat'd is an error before anything is staged.
+  let identity = fileIdentity(path)
+  if not identity.known:
+    raise newException(StoreError,
+      "cannot stat CAS ingest source: " & path)
+  let outcome = cas.inner.storeCasFileBlobDetailed(
+    path, identity.sizeBytes, allowSharedInode = allowSharedInode)
+  CasPutPathOutcome(
+    hash: ContentHash(outcome.digest),
+    mechanism: outcome.mechanism,
+    perFileFallback: outcome.perFileFallback,
+    alreadyPresent: outcome.alreadyPresent,
+    sourceChanged: outcome.sourceChanged,
+    diagnostic: outcome.diagnostic)
+
+proc casPutPath*(cas: var CasStore; path: string): ContentHash =
+  ## ``casPutPathDetailed`` with the mechanism record discarded. This is
+  ## the shape a caller that merely holds a path wants; the detailed
+  ## overload exists for callers that want to log or assert on the
+  ## mechanism that was actually used.
+  cas.casPutPathDetailed(path).hash
+
 proc casGet*(cas: CasStore; hash: ContentHash): seq[byte] =
   ## Retrieve the blob whose digest is ``hash``. The bytes are
   ## verified against ``hash`` BEFORE they reach the caller — a
@@ -191,54 +280,436 @@ type
     applyPermissions*: bool
     permissions*: set[FilePermission]
 
+  CasVerifyMode* = enum
+    ## What ``casMaterialize`` checks before it commits a destination.
+    ##
+    ## Before M1 this was not a choice: ``casMaterialize`` read every
+    ## blob's bytes into memory up front, so the BLAKE3 verification
+    ## mandated by ``Local-Content-Addressed-Store.md`` §"Corruption
+    ## Detection" fell out of the read for free. Linking does not read,
+    ## so the check has to be named, and naming it makes the weaker
+    ## setting an explicit opt-in rather than a silent regression.
+    cvmDigest
+      ## DEFAULT. Every materialized result is hash-verified against
+      ## its ``ContentHash`` before ANY destination is committed —
+      ## uniformly, by streaming the STAGED file, in every arm. This is
+      ## the pre-M1 guarantee, unchanged in what it observes and
+      ## stronger in what it covers: the bytes verified are the ones
+      ## that become the destination, so a mechanism that reported
+      ## success while producing a wrong file is caught too, which
+      ## "read the source, then write it again" could not do.
+    cvmExistence
+      ## OPT-IN, weaker. Only the blob's existence is checked; its
+      ## digest is trusted because the CAS verified it at ingest and
+      ## the store is append-only with atomic renames. This is the
+      ## "trust-on-write" mode; it turns a restore into pure link
+      ## calls with no read at all. A caller choosing it accepts that
+      ## on-disk corruption of a blob is propagated to the
+      ## destination rather than raising ``ECasDigestMismatch``.
+
+  CasMaterializeOutcome* = object
+    ## Per-entry record of HOW a destination was produced. Returned by
+    ## ``casMaterializeDetailed`` so callers (and tests) can assert on
+    ## the mechanism actually used instead of inferring it from timing,
+    ## and so a log line can explain a fallback.
+    mechanism*: LinkMechanism
+    perFileFallback*: bool
+      ## ``true`` when a link mechanism was available for this
+      ## filesystem pair but refused THIS file — the NTFS 1024-name cap
+      ## (``ERROR_TOO_MANY_LINKS``) or ReFS's per-extent reference cap.
+      ## Per ``Local-Content-Addressed-Store.md`` §"Per-file limits are
+      ## not pair capabilities" this falls back to copy for the one
+      ## file, never downgrades the cached pair verdict, and never
+      ## surfaces as an error.
+    diagnostic*: string
+      ## Human-readable reason the chosen mechanism was not the first
+      ## one in the preference order. Empty when the best available
+      ## mechanism succeeded. Safe to log; never parsed.
+
+const
+  CasMaterializeAllowSharedInodeDefault* = false
+    ## The hardlink arm is IMPLEMENTED but OFF BY DEFAULT, and this
+    ## constant is where that is decided.
+    ##
+    ## **Local-CAS-Hardlink-Materialization M3 settled this and the
+    ## answer is that it stays ``false``.** M1 made it a named constant
+    ## so the flip would be one reviewable line; M3 measured the arm and
+    ## declined to make it. See
+    ## ``Local-Content-Addressed-Store.md`` §"The shared-inode arm: a
+    ## weaker guarantee, and the conditions for using it" for the
+    ## normative statement, and
+    ## ``tests/t_cas_link_mutation_safety.nim`` for the measurements.
+    ##
+    ## Why off: a materialized hardlink shares an inode with the CAS
+    ## blob, so an action that opens its restored output and writes in
+    ## place edits the cache's copy of somebody else's result. That is
+    ## not an exotic write shape — ``O_WRONLY|O_CREAT|O_TRUNC``, which
+    ## is what every compiler's ``-o`` does, writes THROUGH the existing
+    ## name into the existing inode. Replacing the name by rename is
+    ## safe and truncating it is not, and the store cannot observe which
+    ## one an arbitrary tool will pick.
+    ##
+    ## Why the candidate guard rails do not change that: read-only mode
+    ## bits are per-inode, so the guard lands on the build tree's own
+    ## output, is clearable without privilege through the very name it
+    ## guards against, and makes the output's writability depend on
+    ## which mechanism ran — which is the one thing the spec says
+    ## correctness must never do. A link-count check detects sharing but
+    ## cannot prevent a write through it. Copy-on-materialize for
+    ## declared-mutable outputs would make cache integrity depend on
+    ## every edge declaring correctly, with silent cross-build
+    ## corruption as the cost of a wrong declaration.
+    ##
+    ## Why the reflink arm is nevertheless on: a reflink is
+    ## copy-on-write. A write through it copies the touched extents
+    ## instead of editing the shared ones, so it is indistinguishable
+    ## from a copy to every observer while costing like a link. It has
+    ## no mutation hazard and therefore needs no guard rail at all.
+    ##
+    ## The opt-in still exists, and a caller that takes it accepts the
+    ## weaker guarantee the spec section above spells out: the
+    ## destination MUST NOT be written in place by anything, ever, for
+    ## as long as the blob is in the store. "We think our tools use
+    ## rename" does not satisfy that condition.
+
+  CasStreamChunkSize = 1024 * 1024
+    ## Bounded working buffer for the copy and verify passes. It is the
+    ## reason peak memory is O(chunk) rather than O(sum of every output
+    ## being restored), which is what the pre-M1 ``seq[seq[byte]]``
+    ## cost.
+
 # ---------------------------------------------------------------------------
 # Cache-hit rehydrate helper (R11 Layer-1 primitive)
 # ---------------------------------------------------------------------------
 
-proc casMaterialize*(cas: CasStore;
-                     entries: openArray[CasMaterialization];
-                     createParentDirs = true) =
-  ## R11 Layer-1 cache-hit rehydrate. Reads each ``entries[i].hash``
-  ## from CAS (with the mandatory hash-on-read verification) and
-  ## writes the bytes to ``entries[i].destination`` via temp-file +
-  ## atomic rename so a partial write is never observable.
+var casTmpSerial: int
+
+proc casStageName(dest: string): string =
+  ## A temp name BESIDE ``dest`` — same directory, therefore same
+  ## filesystem, therefore a rename that is atomic. Unique per process
+  ## and per call so two concurrent materializations of one destination
+  ## cannot stage over each other.
+  casTmpSerial.inc
+  dest & ".reprocastmp-" & $getCurrentProcessId() & "-" & $casTmpSerial
+
+proc quietRemoveFile(path: string) =
+  try:
+    if fileExists(extendedPath(path)):
+      removeFile(extendedPath(path))
+  except CatchableError, Defect:
+    discard
+
+proc streamHashFile(path: string): array[32, byte] =
+  ## BLAKE3-256 over ``path`` read in ``CasStreamChunkSize`` chunks. The
+  ## whole file is never resident.
+  var f = open(extendedPath(path), fmRead)
+  let hasher = blake3.initHasher()
+  try:
+    var buffer = newSeq[byte](CasStreamChunkSize)
+    while true:
+      let n = f.readBuffer(addr buffer[0], buffer.len)
+      if n <= 0:
+        break
+      hasher.update(addr buffer[0], n)
+    result = hasher.finalize()
+  finally:
+    try: hasher.close() except CatchableError: discard
+    try: f.close() except CatchableError: discard
+
+proc streamCopyFile(src, dst: string) =
+  ## The always-available final arm. Copies ``src`` to ``dst`` in
+  ## bounded chunks. It deliberately does NOT hash on the way through:
+  ## the digest check runs over the staged RESULT so that every arm is
+  ## verified identically (see ``casMaterializeDetailed``).
+  var input = open(extendedPath(src), fmRead)
+  var output: File
+  var outputOpen = false
+  try:
+    output = open(extendedPath(dst), fmWrite)
+    outputOpen = true
+    var buffer = newSeq[byte](CasStreamChunkSize)
+    while true:
+      let n = input.readBuffer(addr buffer[0], buffer.len)
+      if n <= 0:
+        break
+      if output.writeBuffer(addr buffer[0], n) != n:
+        raise newException(IOError,
+          "short write while materializing CAS blob to " & dst)
+  finally:
+    if outputOpen:
+      try: output.close() except CatchableError: discard
+    try: input.close() except CatchableError: discard
+
+proc describeCopyOnlyPair(cap: LinkCapability;
+                          allowSharedInode: bool): string =
+  ## Why a pair got no link arm at all. Worth spelling out because the
+  ## raw probe record understates one case: a cross-volume reflink on
+  ## Windows fails ``ERROR_INVALID_PARAMETER`` (87), which the probe
+  ## classifies ``loUnsupported``. The capability answer is right — the
+  ## clone genuinely cannot happen — but "unsupported" reads as "this
+  ## filesystem has no clone primitive" when the truth is "not across
+  ## this device boundary". The hardlink attempt on the same pair
+  ## answers ``loCrossDevice`` and settles it, so name that here.
+  if not cap.probed:
+    return "copy: the filesystem pair could not be probed (" &
+      cap.describe() & ")"
+  var reason =
+    if cap.hardlinkAttempt.outcome == loCrossDevice:
+      "copy: destination is on a different filesystem from the CAS " &
+      "(hardlink reported cross-device; the reflink refusal on the " &
+      "same pair is the same boundary, whatever error code it used)"
+    else:
+      "copy: neither reflink nor hardlink is available for this pair"
+  if cap.hardlink and not allowSharedInode:
+    reason = "copy: the pair supports hardlinks but the shared-inode " &
+      "arm is disabled by policy (a write through the restored output " &
+      "would edit the CAS blob; see M3)"
+  reason & " [" & cap.describe() & "]"
+
+proc casProbeSourceDir(cas: CasStore): string =
+  ## The directory the capability probe attempts FROM. It is the blob
+  ## tree's own root rather than one shard, so every shard shares one
+  ## cached answer, and rather than the store's ``tmp/`` so the probe
+  ## measures the filesystem that actually holds the blobs instead of
+  ## assuming ``tmp/`` is mounted with it.
+  cas.casBlobRoot() / "blake3"
+
+proc casMaterializeDetailed*(cas: CasStore;
+                             entries: openArray[CasMaterialization];
+                             createParentDirs = true;
+                             allowSharedInode =
+                               CasMaterializeAllowSharedInodeDefault;
+                             verify = cvmDigest): seq[CasMaterializeOutcome] =
+  ## R11 Layer-1 cache-hit rehydrate, link-based since
+  ## Local-CAS-Hardlink-Materialization M1. Materializes each
+  ## ``entries[i].hash`` at ``entries[i].destination`` by the best
+  ## mechanism the (CAS filesystem → destination filesystem) pair
+  ## supports, in the order
+  ## ``Local-Content-Addressed-Store.md`` §"Hardlink, Reflink, and Copy
+  ## Policy" mandates: reflink → hardlink → copy. Returns one
+  ## ``CasMaterializeOutcome`` per entry, in order.
   ##
   ## This is the seam a future ``repro_build_engine`` migration MUST
-  ## call in place of ``LocalCas.restoreOutputs`` — the current
-  ## engine still uses the pre-M56 API in
-  ## ``libs/repro_local_store/src/repro_local_store.nim``. Migrating
-  ## every callsite is a multi-week effort; ``casMaterialize`` is the
-  ## documented R11-clean replacement that ``opkCasBlobs`` cache-hit
-  ## restore paths route through as they migrate.
+  ## call in place of ``LocalCas.restoreOutputs``; ``casMaterialize``
+  ## is the same operation with the outcomes discarded.
   ##
-  ## Every mismatch / missing blob raises before any destination is
-  ## touched — a missing later blob cannot leave an earlier output on
-  ## disk, matching the "trust the CAS, verify on read" contract from
-  ## ``Local-Content-Addressed-Store.md`` §"Corruption Detection".
-  var payloads: seq[seq[byte]] = @[]
+  ## **Availability is probed, never predicted.** The mechanism list
+  ## comes from ``preferredMechanisms`` over a real
+  ## ``linkCapabilities`` probe of the filesystem pair, cached
+  ## process-wide, so a cross-volume destination degrades to copy
+  ## because ``link()`` said ``EXDEV`` / ``ERROR_NOT_SAME_DEVICE`` and
+  ## not because anyone read a mount table.
+  ##
+  ## **Every arm falls back rather than fails.** A per-file limit
+  ## (``isPerFileFallback`` — NTFS's 1024-name cap, ReFS's per-extent
+  ## reference cap) drops THIS file to copy, records
+  ## ``perFileFallback``, and leaves the cached pair capability alone.
+  ##
+  ## **The hardlink arm is off unless the caller opts in.** See
+  ## ``CasMaterializeAllowSharedInodeDefault``.
+  ##
+  ## The no-partial-materialization contract
+  ## ---------------------------------------
+  ##
+  ## The pre-M1 implementation promised that "a missing or corrupt
+  ## later blob cannot leave an earlier output on disk", and got it for
+  ## free by reading every blob into memory before writing any of them.
+  ## Linking reads nothing, so the promise is now kept by construction
+  ## in three explicit steps rather than as a side effect:
+  ##
+  ## 1. **Existence pre-pass.** Every blob is stat'd before any
+  ##    destination is touched. A missing blob raises ``ECasMissing``
+  ##    with nothing staged and nothing committed — byte-identical
+  ##    observable behaviour to the old up-front ``casGet`` loop.
+  ## 2. **Stage everything, commit nothing.** Each entry is
+  ##    linked/cloned/copied into a temp name BESIDE its destination
+  ##    (same directory ⇒ same filesystem ⇒ atomic rename) and, under
+  ##    ``cvmDigest``, hash-verified there. Any failure — missing,
+  ##    corrupt, unwritable, short write — unwinds every temp staged so
+  ##    far and re-raises. No destination has been written.
+  ## 3. **Commit.** Only once every entry has staged AND verified are
+  ##    the renames performed.
+  ##
+  ## The guarantee is therefore preserved, and step 2 strengthens it:
+  ## the bytes verified are the ones that will BE the destination, so a
+  ## mechanism that silently produced a wrong file is caught, which the
+  ## old "verify the source, then write it again" order could not do.
+  ##
+  ## The one difference: the commit renames themselves are not a single
+  ## transaction, so a rename failing midway (a destination held open
+  ## by another process, say) can leave earlier destinations replaced.
+  ## That window existed before M1 too and is strictly narrower now —
+  ## the old code interleaved write-then-rename per entry, so ANY later
+  ## failure, including a failed write, left earlier outputs committed.
+  result = newSeq[CasMaterializeOutcome](entries.len)
+  if entries.len == 0:
+    return
+
+  # --- Step 1: existence pre-pass. Nothing on disk is touched yet.
   for entry in entries:
-    payloads.add(cas.casGet(entry.hash))
+    if not fileExists(extendedPath(cas.casPath(entry.hash))):
+      raise newException(ECasMissing,
+        "missing CAS blob " & $entry.hash)
+
+  let probeSrc = casProbeSourceDir(cas)
+
+  type StagedEntry = object
+    tmp: string
+    dest: string
+
+  var staged: seq[StagedEntry] = @[]
+
+  template unwind() =
+    ## Remove every temp name this call created. Deliberately
+    ## best-effort: a temp we cannot delete is debris, not a
+    ## half-materialized output, because nothing has been renamed.
+    for s in staged:
+      quietRemoveFile(s.tmp)
+
+  # --- Step 2: stage every entry, commit none of them.
   for i, entry in entries:
-    let bytes = payloads[i]
     let dest = entry.destination
-    if createParentDirs:
-      let parent = parentDir(dest)
-      if parent.len > 0:
-        createDir(parent)
-    let tmp = dest & ".reprocastmp"
-    var raw = newString(bytes.len)
-    for i, b in bytes:
-      raw[i] = char(b)
-    writeFile(tmp, raw)
-    when not defined(windows):
+    let parent = parentDir(dest)
+    if createParentDirs and parent.len > 0:
+      try:
+        createDir(extendedPath(parent))
+      except CatchableError:
+        unwind()
+        raise
+
+    let tmp = casStageName(dest)
+    staged.add(StagedEntry(tmp: tmp, dest: dest))
+    quietRemoveFile(tmp)
+
+    # ``applyPermissions`` says this destination carries its own mode
+    # bits. Mode bits are per-INODE, so honouring that request through
+    # a hardlink would chmod the CAS blob itself — the first of the
+    # three "consequences that follow from one inode" the spec lists,
+    # and normative since M3 as
+    # ``Local-Content-Addressed-Store.md`` §"The shared-inode arm"'s
+    # ``applyPermissions`` clause rather than a convention living only
+    # here. M3 re-confirmed the exclusion and MEASURED the fact it rests
+    # on: a chmod through a linked name moves the blob's own mode (see
+    # ``tests/t_cas_link_mutation_safety.nim``).
+    #
+    # The guard is conditioned on the OS honouring POSIX mode bits at
+    # all, because the permission-applying blocks below are: on Windows
+    # nothing here ever applies ``entry.permissions``, so there is
+    # nothing to leak into the blob. All three
+    # ``when HostHonoursPosixModeBits`` blocks are therefore one group —
+    # if the permission-applying pair ever gains a Windows arm, this one
+    # MUST lose its guard in the same change.
+    #
+    # Platform-And-Filesystem-Facts F3: this used to be a negated
+    # ``defined(windows)``, which is a statement about which PLATFORM
+    # this is standing in for a statement about what the platform
+    # DOES. ``honoursPosixModeBits`` is the declared fact, and
+    # the OS table's own doc comment names this exact call site as the
+    # reason it exists. Substituting it changes no behaviour on any of
+    # the three OSes the table describes — that is the point, since a
+    # migration that changed behaviour would be a different milestone —
+    # but it makes the dependency legible and makes a fourth OS a table
+    # row rather than a hunt for negated ``defined(windows)``.
+    var entryAllowsSharedInode = allowSharedInode
+    when HostHonoursPosixModeBits:
       if entry.applyPermissions:
-        setFilePermissions(tmp, entry.permissions)
-    if fileExists(dest):
-      removeFile(dest)
-    moveFile(tmp, dest)
-    when not defined(windows):
+        entryAllowsSharedInode = false
+
+    let cap =
+      if parent.len > 0: linkCapabilities(probeSrc, parent)
+      else: LinkCapability()
+    let mechanisms = cap.preferredMechanisms(
+      allowSharedInode = entryAllowsSharedInode)
+
+    var outcome = CasMaterializeOutcome(mechanism: lmCopy)
+    if mechanisms == @[lmCopy]:
+      # No link arm was even offered for this pair, so no attempt will
+      # run and no attempt-level message will exist. Record WHY here,
+      # because "it copied" without a reason is the log line that makes
+      # a misconfigured store look like a working one.
+      outcome.diagnostic = describeCopyOnlyPair(cap,
+                                                entryAllowsSharedInode)
+    let blobPath = cas.casPath(entry.hash)
+
+    try:
+      for mech in mechanisms:
+        case mech
+        of lmReflink:
+          let attempt = attemptReflink(blobPath, tmp)
+          if attempt.outcome == loOk:
+            outcome.mechanism = lmReflink
+            break
+          if attempt.isPerFileFallback():
+            outcome.perFileFallback = true
+          outcome.diagnostic = "reflink: " & attempt.message &
+            " [" & cap.describe() & "]"
+          quietRemoveFile(tmp)
+        of lmHardlink:
+          let attempt = attemptHardlink(blobPath, tmp)
+          if attempt.outcome == loOk:
+            outcome.mechanism = lmHardlink
+            break
+          if attempt.isPerFileFallback():
+            outcome.perFileFallback = true
+          outcome.diagnostic = outcome.diagnostic & " hardlink: " &
+            attempt.message
+          quietRemoveFile(tmp)
+        of lmCopy:
+          streamCopyFile(blobPath, tmp)
+          outcome.mechanism = lmCopy
+          break
+
+      if verify == cvmDigest:
+        # Deliberately the STAGED result, uniformly, in every arm —
+        # never the source blob and never the bytes the copy arm
+        # happened to have in a buffer. Verifying per-mechanism would
+        # make integrity depend on which mechanism ran, which is the
+        # one thing ``Local-Content-Addressed-Store.md`` says
+        # correctness must never do. It costs the copy arm one extra
+        # read of a file it just wrote (so, still cache-warm); it buys
+        # the same guarantee for the link arms, which have no read of
+        # their own to piggyback on.
+        let actual = streamHashFile(tmp)
+        if actual != entry.hash.bytes():
+          raise newException(ECasDigestMismatch,
+            "CAS digest mismatch materializing " & $entry.hash &
+            " to " & dest & " via " & $outcome.mechanism)
+
+      when HostHonoursPosixModeBits:
+        if entry.applyPermissions:
+          setFilePermissions(extendedPath(tmp), entry.permissions)
+    except CatchableError:
+      unwind()
+      raise
+
+    result[i] = outcome
+
+  # --- Step 3: commit. Every entry staged and verified.
+  for s in staged:
+    if fileExists(extendedPath(s.dest)):
+      removeFile(extendedPath(s.dest))
+    moveFile(extendedPath(s.tmp), extendedPath(s.dest))
+
+  when HostHonoursPosixModeBits:
+    # Re-applied after the rename, as the pre-M1 code did: some
+    # filesystems drop bits across a rename, and the destination's mode
+    # is what the caller asked about.
+    for entry in entries:
       if entry.applyPermissions:
-        setFilePermissions(dest, entry.permissions)
+        setFilePermissions(extendedPath(entry.destination), entry.permissions)
+
+proc casMaterialize*(cas: CasStore;
+                     entries: openArray[CasMaterialization];
+                     createParentDirs = true;
+                     allowSharedInode =
+                       CasMaterializeAllowSharedInodeDefault;
+                     verify = cvmDigest) =
+  ## ``casMaterializeDetailed`` with the per-entry outcomes discarded.
+  ## This is the shape every existing caller uses; the detailed
+  ## overload exists for callers that want to log or assert on the
+  ## mechanism that was actually used.
+  discard cas.casMaterializeDetailed(entries, createParentDirs,
+                                     allowSharedInode, verify)
 
 # ---------------------------------------------------------------------------
 # Garbage collection

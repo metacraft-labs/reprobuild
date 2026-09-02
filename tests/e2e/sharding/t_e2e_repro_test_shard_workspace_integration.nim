@@ -34,30 +34,33 @@ const LongTestEnv = "REPRO_M1_LONG_TEST"
 const ExpectedTestBinarySample =
   "build/test-bin/t_engine_action_create_dyndep"
 
-proc reprobuildRoot(): string =
-  ## Locate the reprobuild repo root irrespective of the test's cwd.
-  ## Mirrors ``sharding_test_support.repoRoot`` but searches for the
-  ## ``repro.tests.nim`` marker as well as the bin path.
-  let env = getEnv("REPRO_REPO_ROOT")
-  if env.len > 0 and dirExists(env):
-    return env
-  result = getCurrentDir()
-  for _ in 0 .. 6:
-    if fileExists(result / "repro.tests.nim") and
-        fileExists(result / "build" / "bin" / "repro"):
-      return result
-    let parent = parentDir(result)
-    if parent.len == 0 or parent == result:
-      break
-    result = parent
+# W15: this file used to carry a PRIVATE ``reprobuildRoot()`` that walked up
+# from ``getCurrentDir()`` keyed on an extension-less ``build/bin/repro``,
+# plus a ``doAssert fileExists(… / "repro")``. It sits in the same directory
+# as ``sharding_test_support.nim``, whose identical defect W14 fixed, and it
+# bypassed that file's now-correct ``ReproBinRelative`` — so the cwd was an
+# unstated input here, and on Windows the Linux ELF that a ``nix develop``
+# build leaves in the shared, gitignored ``build/bin`` satisfied both the
+# walk's sentinel and the assertion. The diagnostic the assertion exists to
+# print could therefore never fire on Windows, and the walk could anchor on a
+# scratch directory that merely carried a staged binary.
+#
+# There is no second root-finder now: the one in ``sharding_test_support`` is
+# source-anchored, and ``requireShardingReproBinary`` proves the bytes are
+# this platform's machine format before anything is executed.
 
 proc runWorkspaceShard() =
-  let repoRoot = reprobuildRoot()
+  let repoRoot = reprobuildRepoRoot()
   checkpoint("repo root = " & repoRoot)
-  doAssert fileExists(repoRoot / "build" / "bin" / "repro"),
-    "repro binary missing — run ``just build`` first"
-  doAssert fileExists(repoRoot / "repro.tests.nim"),
-    "repro.tests.nim missing — wrong repo root"
+  requireShardingReproBinary()
+  # The sentinel used to be spelled ``repro.tests.nim``, which is not a file
+  # in this repository — the generator writes ``repro_tests.nim``. So the old
+  # private walk could never match at any level, ran to the DRIVE ROOT, and
+  # this assertion would have failed for a reason that has nothing to do with
+  # sharding. It was invisible because the case is gated behind
+  # ``REPRO_M1_LONG_TEST=1`` and therefore normally skips.
+  doAssert fileExists(repoRoot / "repro_tests.nim"),
+    "repro_tests.nim missing — wrong repo root: " & repoRoot
 
   let reportPath = repoRoot / "test-logs" / "shard-1-of-3.json"
   if fileExists(reportPath):
@@ -130,6 +133,26 @@ proc runWorkspaceShard() =
     check report["tests"].len >= 0
 
 suite "CI-Sharding M2 follow-up — workspace integration":
+
+  test "the shard fixture resolves this repository and this platform's binary":
+    ## W15. Deliberately NOT behind ``REPRO_M1_LONG_TEST``.
+    ##
+    ## The preconditions below used to be checked only inside the long-form
+    ## body, which is why they were wrong for as long as they were: the case
+    ## skips by default, so a root-finder that could never match its sentinel
+    ## and a binary assertion an ELF satisfied were both unobservable. A
+    ## precondition that is only evaluated when an expensive gate is on is a
+    ## precondition nobody evaluates.
+    let root = reprobuildRepoRoot()
+    checkpoint("repo root = " & root)
+    check root.isAbsolute()
+    check fileExists(root / "repro_tests.nim")
+    # Not ``fileExists``: ``build/`` is gitignored and shared with a WSL
+    # checkout of this same tree, so the extension-less name can be a Linux
+    # ELF that satisfies presence and then fails at exec.
+    let bin = requireShardingReproBinary()
+    checkpoint("repro binary = " & bin)
+    check bin.startsWith(root)
 
   test "t_e2e_repro_test_shard_workspace_integration":
     if getEnv(LongTestEnv) != "1":
