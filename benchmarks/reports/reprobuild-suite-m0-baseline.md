@@ -26,11 +26,11 @@ REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/
 
 | Field | Value |
 | --- | --- |
-| HEAD | f26f4e9c6af3d64f0237c52faf79f5ef80c34da2 |
-| HEAD short | f26f4e9c6 |
-| Branch | fix/regenerate-inventory-at-merged-head |
-| Source fingerprint | ec4ec8fefe214e8379f2be14996dc6631ca0586e89aad549e8d5c404fcefd00b |
-| External source revisions | {} |
+| HEAD | 247f9b6166988d73a35518cabcc55ca5b530e85c |
+| HEAD short | 247f9b616 |
+| Branch | fix/reconcile-inventory-gate |
+| Source fingerprint | 6090716ce2df41fcd16d0f5ce74ac4eec0859c2b31ba263f3be3d09f8f2e51f1 |
+| External source revisions | {"reprobuild-test-adapters": {"branch": "repro-fixes", "dirty": false, "head": "af0749aa192f48e17e6bfc2072688ceda1f974a3"}} |
 | Inventory JSON | benchmarks/reports/reprobuild-suite-m0-inventory.json |
 | Per-case protocol detail | build/reprobuild-suite-case-catalog.json |
 | Measurement environment | build/reprobuild-suite-m0-environment.md |
@@ -41,14 +41,14 @@ The measurement environment — host kernel and glibc, tool versions, the record
 
 | Metric | Value |
 | --- | --- |
-| Test entries | 1396 |
-| Nim test binaries | 1391 |
+| Test entries | 1404 |
+| Nim test binaries | 1399 |
 | Python test files | 5 |
-| Case count (catalog-authoritative) | 7963 |
+| Case count (catalog-authoritative) | 8025 |
 | Measured protocol-aware cases | not measured (requires runner summary) |
 | Graph-owned helper/fixture artifacts | 15 |
 | Tests with statically detected runtime compiler flows | 81 |
-| Pure-unit consolidation groups | 46 |
+| Pure-unit consolidation groups | 47 |
 
 ## Case Enumeration Provenance
 
@@ -56,9 +56,9 @@ Case counts come from each built binary's `--list-json` catalog (spec §3.2/§6.
 
 | Count source | Test entries | Meaning |
 | --- | --- | --- |
-| catalog | 1386 | authoritative: enumerated from the built binary |
+| catalog | 1398 | authoritative: enumerated from the built binary |
 | static | 5 | Python file, or probing disabled; counted by source scan |
-| missing-binary | 4 | Nim source with no built binary; counted by source scan |
+| missing-binary | 0 | Nim source with no built binary; counted by source scan |
 | quarantined | 1 | binary exists but could not enumerate; contributes 0 cases to the total |
 
 Retained per-case protocol fields: `suite`, `name`, `test`, `file`, `line`, `column`, `kind`, `group`, `threadsRequired`, `xfail`, `tags`, `bodyHash`, `deterministic`.
@@ -85,7 +85,7 @@ Earlier contended or rejected timing attempts are diagnostic only and are intent
 
 ## Theoretical Performance Assessment
 
-The current graph contains 1391 Nim test binaries, 574 statically classified pure-unit entries in 46 compatible consolidation groups, and 81 tests with statically detected runtime compiler flows. These are structural counts, not timing results or an exhaustive semantic proof.
+The current graph contains 1399 Nim test binaries, 576 statically classified pure-unit entries in 47 compatible consolidation groups, and 81 tests with statically detected runtime compiler flows. These are structural counts, not timing results or an exhaustive semantic proof.
 
 - Parallel execution can reduce the serial execution component, but the exclusive lane and longest dependency chain bound the achievable wall-time reduction.
 - Consolidating compatible pure-unit groups should reduce repeated Nim compilation, link, and process-start overhead while preserving logical case identity.
@@ -114,10 +114,10 @@ The following paths are measured on every run: `build/bin`, `build/test-bin`, `b
 | Class | Count |
 | --- | --- |
 | graph-fixture | 16 |
-| integration | 586 |
+| integration | 591 |
 | platform/destructive | 100 |
-| pure unit | 574 |
-| unclassified | 120 |
+| pure unit | 576 |
+| unclassified | 121 |
 
 Every test entry and its class is recorded in the JSON inventory.
 
@@ -157,14 +157,14 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim | integration | 85 | repro-compile-profile-edge | let artifact = compileProfileToRbpi(profilePath, compileOpts(stateDir)) |
 | tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim | platform/destructive | 175 | cc | "cc", "-pthread", sourcePath, "-o", outputPath |
 | tests/e2e/path-only/t_path_only_tool_interfaces.nim | integration | 77 | nim-argv | discard requireSuccess(@["nim", "c", "--verbosity:0", "--hints:off", |
-| tests/e2e/watch/t_e2e_repro_watch.nim | integration | 730 | gcc | let gccPath = binDir / "gcc" |
+| tests/e2e/watch/t_e2e_repro_watch.nim | integration | 731 | gcc | let gccPath = binDir / "gcc" |
 | tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim | integration | 78 | nim-c | execCmdEx("nim c --hints:off --warnings:off --compileOnly" & |
 | tests/integration/t_compiler_scratch_isolation.nim | integration | 149 | repro-extract-interface | let interfaceArtifact = extractInterfaceFromModule(modulePath, |
 | tests/integration/t_d6_runner_test_timeout.nim | integration | 111 | nim-c | let compileCmd = "nim c -d:release --hints:off --warnings:off " & |
 | tests/integration/t_dev_env_artifact.nim | integration | 36 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath, |
 | tests/integration/t_e2e_cross_compilation_aarch64.nim | integration | 155 | dynamic-c-compiler | let compileResult = execProcess(crossGcc, |
 | tests/integration/t_e2e_selectable_toolchain_fixture.nim | integration | 119 | nim-c | let nimcmd = "nim c --hints:off --warnings:off --nimcache:" & cacheDir & |
-| tests/integration/t_every_launch_path_is_monitored.nim | platform/destructive | 1119 | cc | let res = execCmdEx("cc " & quoteShell(sourcePath) & " -o " & |
+| tests/integration/t_every_launch_path_is_monitored.nim | platform/destructive | 1169 | cc | let res = execCmdEx("cc " & quoteShell(sourcePath) & " -o " & |
 | tests/integration/t_ext_test_execution_rows.nim | integration | 192 | nim-c | let cmd = "nim c --threads:on --hints:off --warnings:off " & |
 | tests/integration/t_extension_type_lifted_and_consumed.nim | integration | 127 | repro-extract-interface | let artifact = extractInterfaceFromModule(providerModule, artifactPath, |
 | tests/integration/t_integration_cross_compilation_fixture_compiles.nim | integration | 115 | nim-c | let nimcmd = "nim c --hints:off --warnings:off --nimcache:" & cacheDir & |
@@ -204,8 +204,8 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim | integration | 153 | nim-compile-verb | "c --compileOnly --hints:off --warnings:off -o:" & |
 | tests/integration/t_ti3_fingerprint_split.nim | integration | 164 | nim-compile-verb | "c --compileOnly --hints:off --warnings:off -o:" & |
 | tests/unit/t_hcr_watch_inference.nim | graph-fixture | 34 | cc | "cc", "-c", "-g", "-O0", "-fno-inline", |
-| tests/unit/t_m9r13a_provider_compile_sharing.nim | graph-fixture | 235 | nim-variable-argv | let cmd = @[nimExe, "c", |
-| tests/unit/t_m9r14f_2_rpath_patching.nim | graph-fixture | 155 | cc | if findExe("cc").len > 0: findExe("cc") |
+| tests/unit/t_m9r13a_provider_compile_sharing.nim | graph-fixture | 236 | nim-variable-argv | let cmd = @[nimExe, "c", |
+| tests/unit/t_m9r14f_2_rpath_patching.nim | graph-fixture | 166 | cc | if findExe("cc").len > 0: findExe("cc") |
 | tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim | graph-fixture | 111 | cc | if findExe("cc").len > 0: findExe("cc") |
 | tools/catalog-harvester/tests/test_harvester_app_name_validation.nim | graph-fixture | 53 | nim-c | let cmd = "nim c --hints:off --verbosity:0 --out:" & quoteShell(HarvesterExe) & |
 
@@ -270,9 +270,9 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | recipes/packages/source | repro_project_dsl | 194 | 1042 | recipes/packages/source/adwaita-icon-theme/test_adwaita_icon_theme_source.nim, recipes/packages/source/alsa-lib/test_alsa_lib_source.nim, recipes/packages/source/at-spi2-core/test_at_spi2_core_source.nim, recipes/packages/source/attica/test_attica_source.nim, recipes/packages/source/autoconf/test_autoconf_source.nim, recipes/packages/source/automake/test_automake_source.nim, recipes/packages/source/bash/test_bash_source.nim, recipes/packages/source/binutils/test_binutils_source.nim ... |
 | tests/unit | io_mon | 2 | 8 | tests/unit/t_m9r15c_1_io_monitor_fragment_log_perf.nim, tests/unit/t_m9r15f_1_io_monitor_batched_writes.nim |
 | tests/unit | repro_build_engine, repro_cli_support | 2 | 19 | tests/unit/t_measurement_axes.nim, tests/unit/t_rx_runquotad_forwards_custom_pools.nim |
-| tests/unit | repro_cli_support, repro_interface_artifacts, repro_tool_profiles | 2 | 20 | tests/unit/t_m9r14h_1_auto_recurse_idempotency.nim, tests/unit/t_m9r8_dispatcher_gate.nim |
-| tests/unit | repro_core, repro_dsl_stdlib, repro_project_dsl | 3 | 10 | tests/unit/t_configure_build_tree_cleanup.nim, tests/unit/t_library_stage_alias.nim, tests/unit/t_m9r83_install_mirror_action_shapes.nim |
-| tests/unit | repro_dsl_stdlib, repro_project_dsl | 22 | 162 | tests/unit/t_fribidi_dev_stub.nim, tests/unit/t_m9r10b_synthesis_wiring.nim, tests/unit/t_m9r11_stub_provisioning_widening.nim, tests/unit/t_m9r12_4_autotools_emits_fetch.nim, tests/unit/t_m9r14c_5_autotools_stage_copy.nim, tests/unit/t_m9r14d_7_meson_package_stage_copy.nim, tests/unit/t_m9r14e_2_install_tree_mirror.nim, tests/unit/t_m9r15d_1_libegl_headers_stub.nim ... |
+| tests/unit | repro_cli_support, repro_interface_artifacts, repro_tool_profiles | 3 | 30 | tests/unit/t_m9r14h_1_auto_recurse_idempotency.nim, tests/unit/t_m9r8_dispatcher_gate.nim, tests/unit/t_tool_identity_key_resolves_before_it_keys.nim |
+| tests/unit | repro_core, repro_dsl_stdlib, repro_project_dsl | 4 | 13 | tests/unit/t_configure_build_tree_cleanup.nim, tests/unit/t_constructor_fetch_tool_refs.nim, tests/unit/t_library_stage_alias.nim, tests/unit/t_m9r83_install_mirror_action_shapes.nim |
+| tests/unit | repro_dsl_stdlib, repro_project_dsl | 23 | 165 | tests/unit/t_fribidi_dev_stub.nim, tests/unit/t_host_system_tools.nim, tests/unit/t_m9r10b_synthesis_wiring.nim, tests/unit/t_m9r11_stub_provisioning_widening.nim, tests/unit/t_m9r12_4_autotools_emits_fetch.nim, tests/unit/t_m9r14c_5_autotools_stage_copy.nim, tests/unit/t_m9r14d_7_meson_package_stage_copy.nim, tests/unit/t_m9r14e_2_install_tree_mirror.nim ... |
 
 ## M0 Completion Note
 
