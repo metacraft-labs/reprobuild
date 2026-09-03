@@ -555,7 +555,7 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
         return self.git(repo, "rev-parse", ref).stdout.strip()
 
     def populate(self, root):
-        """A scratch tree the inventory scanner can measure for real.
+        """A scratch tree both halves of the gate can measure for real.
 
         Every source the baseline names, plus `repro_tests.nim` (which
         declares them), the members of every consolidation bundle (whose own
@@ -563,13 +563,33 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
         scripts under test. The scan is a pure function of exactly these
         files, so this is the whole input -- no build directory, no
         binaries, nothing compiled.
+
+        The gate now also checks the tracked entry-set artifact, so its inputs
+        are here too, and they are inputs rather than decoration:
+
+          * `repro.nim` -- `parse_graph_owned_artifacts` reads the test-helper
+            and test-fixture edges out of it. Without it the scan reports zero
+            graph-owned artifacts and disagrees with the artifact by all of
+            them.
+          * every `libs/<name>` DIRECTORY -- `project_module_prefixes` reads
+            the tree, not a hardcoded list, to decide which module roots this
+            repository owns. A library that owns no test source has no file in
+            this scratch tree, so its directory is created empty; otherwise a
+            test importing it is judged to import something unrecognized, and
+            `pure unit` silently becomes `unclassified` for reasons that exist
+            only in the fixture.
+
+        Both are pure source reads. Nothing added here needs a build, which is
+        the property `test_the_gate_needs_nothing_built` exists to hold.
         """
         recorded = inventory.load_static_case_counts(REPO_ROOT)
         wanted = [
             Path("repro_tests.nim"),
+            Path("repro.nim"),
             Path("scripts/reprobuild_suite_inventory.py"),
             self.GATE_SCRIPT,
             inventory.STATIC_CASE_COUNTS_PATH,
+            inventory.SOURCE_INVENTORY_PATH,
         ]
         wanted.extend(Path(source) for source in recorded)
         for source in recorded:
@@ -581,7 +601,39 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO_ROOT / relative, target)
+        for entry in (REPO_ROOT / "libs").iterdir():
+            if entry.is_dir():
+                (root / "libs" / entry.name).mkdir(parents=True, exist_ok=True)
         return recorded
+
+    def regenerate(self, work):
+        """Refresh both tracked artifacts the way a contributor is told to.
+
+        The exact two commands the refusal prints, run from the scratch tree
+        and asserted to succeed there. If either ever grew a dependency on a
+        built binary this would fail here, in a tree that has none -- which is
+        the whole bargain: the gate may only demand a fix the contributor can
+        actually perform.
+        """
+        for flag in ("--write-static-case-counts", "--write-inventory-sources"):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/reprobuild_suite_inventory.py",
+                    flag,
+                ],
+                cwd=str(work),
+                capture_output=True,
+                text=True,
+                env=self.env,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                f"{flag} must succeed in a tree with nothing built:\n"
+                + result.stdout
+                + result.stderr,
+            )
 
     def test_a_stale_baseline_cannot_reach_the_remote(self):
         """Fresh baseline pushes; stale baseline is refused; regenerate fixes it.
@@ -658,22 +710,11 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
                 "the remote advanced despite the refusal",
             )
 
-            regenerated = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/reprobuild_suite_inventory.py",
-                    "--write-static-case-counts",
-                ],
-                cwd=str(work),
-                capture_output=True,
-                text=True,
-                env=self.env,
-            )
-            self.assertEqual(
-                regenerated.returncode,
-                0,
-                regenerated.stdout + regenerated.stderr,
-            )
+            # BOTH artifacts, because a new case moves both: the TSV records
+            # the per-source count and the entry-set artifact records the same
+            # count per entry. Neither regeneration needs anything built,
+            # which is the property that makes the gate survivable.
+            self.regenerate(work)
             self.git(work, "commit", "-am", "record the added case")
 
             fresh = self.git(work, "push", "origin", "main", check=False)
@@ -688,6 +729,203 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
                 self.head_of(remote, "refs/heads/main"),
                 self.head_of(work, "HEAD"),
             )
+
+    def test_a_new_test_source_cannot_reach_the_remote_without_the_inventory(
+        self,
+    ):
+        """The mutation proof for the entry-set half of the gate.
+
+        Every one of the six times
+        `benchmarks/reports/reprobuild-suite-m0-inventory.json` went stale, it
+        went stale the same way: a test SOURCE joined or left
+        `repro_tests.nim`. Nothing refused those pushes, because the only
+        artifact that recorded the entry set could not be regenerated without
+        a complete build of every test binary.
+
+        So this does exactly that mutation -- enrols a new source the way the
+        generator does, with a real test file behind it -- and requires the
+        push to be refused, the refusal to name the source and the exact
+        regeneration command, the remote ref not to have moved, and the same
+        push to succeed once the artifact is regenerated. Nothing is built at
+        any point.
+
+        Deliberately a SOURCE and not a case: `test_a_stale_baseline_cannot_
+        reach_the_remote` above already covers a case added to an existing
+        source, and it is the source-set change that this half exists for.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch = Path(scratch)
+            remote = scratch / "remote.git"
+            work = scratch / "work"
+            work.mkdir()
+            subprocess.run(
+                ["git", "init", "--bare", "-b", "main", str(remote)],
+                check=True,
+                capture_output=True,
+                env=self.env,
+            )
+            self.git(work, "init", "-b", "main")
+            self.populate(work)
+            hook = work / ".git" / "hooks" / "pre-push"
+            hook.parent.mkdir(parents=True, exist_ok=True)
+            hook.write_text(self.PRE_PUSH_HOOK, encoding="utf-8")
+            hook.chmod(0o755)
+            self.git(work, "remote", "add", "origin", str(remote))
+            self.git(work, "add", "-A")
+            self.git(work, "commit", "-m", "import the tree")
+
+            clean = self.git(work, "push", "origin", "main", check=False)
+            self.assertEqual(
+                clean.returncode,
+                0,
+                "a tree whose artifacts match its sources must push:\n"
+                + clean.stdout
+                + clean.stderr,
+            )
+            published = self.head_of(remote, "refs/heads/main")
+
+            # Enrol a new test source, exactly as `generate_test_edges.nim`
+            # does: a real file, and a `TestSpec` row naming it.
+            added = "tests/unit/t_entry_set_gate_mutation_probe.nim"
+            (work / added).parent.mkdir(parents=True, exist_ok=True)
+            (work / added).write_text(
+                "import std/unittest\n"
+                "\n"
+                'suite "entry set gate mutation probe":\n'
+                '  test "a source the tracked entry set has never seen":\n'
+                "    check 1 + 1 == 2\n",
+                encoding="utf-8",
+            )
+            declarations = (work / "repro_tests.nim").read_text(
+                encoding="utf-8"
+            )
+            row = (
+                "  TestSpec(\n"
+                f'    source: "{added}",\n'
+                '    binary: "build/test-bin/'
+                't_entry_set_gate_mutation_probe",\n'
+                "    defines: @[],\n"
+                "    requiresReproBinary: false,\n"
+                "    extraPassC: @[],\n"
+                "    extraPassL: @[],\n"
+                "    targetOs: soAny,\n"
+                "    selfInterposes: false),\n"
+                "]"
+            )
+            marker = "    selfInterposes: false)\n]"
+            self.assertIn(marker, declarations)
+            (work / "repro_tests.nim").write_text(
+                declarations.replace(
+                    marker, "    selfInterposes: false),\n" + row, 1
+                ),
+                encoding="utf-8",
+            )
+            # Refresh ONLY the case-count baseline, which is what a
+            # contributor who knows about the pre-existing gate would do. The
+            # entry-set artifact is the one under test and is left stale.
+            counts = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/reprobuild_suite_inventory.py",
+                    "--write-static-case-counts",
+                ],
+                cwd=str(work),
+                capture_output=True,
+                text=True,
+                env=self.env,
+            )
+            self.assertEqual(
+                counts.returncode, 0, counts.stdout + counts.stderr
+            )
+            self.git(work, "add", "-A")
+            self.git(work, "commit", "-m", "enrol a source, forget the entry set")
+
+            stale = self.git(work, "push", "origin", "main", check=False)
+            transcript = stale.stdout + stale.stderr
+            self.assertNotEqual(
+                stale.returncode,
+                0,
+                "a source missing from the tracked entry set must refuse the "
+                "push:\n" + transcript,
+            )
+            self.assertIn(added, transcript)
+            self.assertIn(
+                inventory.SOURCE_INVENTORY_REGENERATE_COMMAND,
+                transcript,
+                "the refusal must name the exact regeneration command, and it "
+                "must be one that works without a build.",
+            )
+            self.assertEqual(
+                self.head_of(remote, "refs/heads/main"),
+                published,
+                "the remote advanced despite the refusal",
+            )
+
+            self.regenerate(work)
+            self.git(work, "commit", "-am", "record the enrolled source")
+
+            fresh = self.git(work, "push", "origin", "main", check=False)
+            self.assertEqual(
+                fresh.returncode,
+                0,
+                "a regenerated entry set must push:\n"
+                + fresh.stdout
+                + fresh.stderr,
+            )
+            self.assertEqual(
+                self.head_of(remote, "refs/heads/main"),
+                self.head_of(work, "HEAD"),
+            )
+
+    def test_a_removed_test_source_is_refused_in_the_dangerous_direction(self):
+        """A source LEAVING the suite must be refused too, and named as a loss.
+
+        The gain direction is a contributor who forgot to regenerate. The loss
+        direction is coverage leaving, and it is the one a summary statistic
+        hides: an artifact that still lists a source the tree no longer
+        declares reads exactly like a healthy one until someone counts.
+
+        No build, no push machinery: this is the checker's own verdict, so it
+        can state the direction rather than merely the failure.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            recorded = self.populate(root)
+            victim = next(
+                source
+                for source, (language, _) in sorted(recorded.items())
+                if language == "nim"
+            )
+            declarations = (root / "repro_tests.nim").read_text(
+                encoding="utf-8"
+            )
+            row = re.search(
+                r"(?ms)^  TestSpec\(\n    source: "
+                + re.escape(f'"{victim}"')
+                + r",\n.*?\),\n",
+                declarations,
+            )
+            self.assertIsNotNone(
+                row, f"no TestSpec row for {victim} to withdraw"
+            )
+            (root / "repro_tests.nim").write_text(
+                declarations[: row.start()] + declarations[row.end():],
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/reprobuild_suite_inventory.py",
+                    "--check-inventory",
+                ],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                env=self.env,
+            )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("RECORDED BUT NO LONGER DECLARED", result.stderr)
+        self.assertIn(victim, result.stderr)
 
     def test_the_gate_is_wired_where_contributors_and_ci_will_run_it(self):
         """The hook body is only a gate if something installs and runs it.
@@ -729,6 +967,34 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
             "--no-verify, so it cannot be the only line of defence.",
         )
 
+        # The uncancellable hosted job. `ci.yml` supersedes its own branch
+        # runs, so on a busy day it is cancelled before it reaches a verdict;
+        # this is the copy that always answers, and the entry-set check gets
+        # its reach for free by living in the same script.
+        standalone = (
+            REPO_ROOT / ".github/workflows/suite-case-counts.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(str(self.GATE_SCRIPT), standalone)
+
+        # Both checks, in the one script every caller above invokes. Asserted
+        # by FLAG rather than by prose: a rename that dropped one of them
+        # would leave every wiring assertion above still passing while half
+        # the gate silently stopped running.
+        gate = script.read_text(encoding="utf-8")
+        for flag in ("--check-static-case-counts", "--check-inventory"):
+            self.assertIn(
+                flag,
+                gate,
+                f"{self.GATE_SCRIPT} must run {flag}; it is the single place "
+                "the hook, both workflows and `just lint` all reach.",
+            )
+
+        # …and in `just lint`, which is the surface a contributor runs by
+        # hand and the one CI's lint job ends with.
+        justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
+        for flag in ("--check-static-case-counts", "--check-inventory"):
+            self.assertIn(flag, justfile)
+
     def test_the_gate_needs_nothing_built(self):
         """It must stay a source scan, or it stops being hook-affordable.
 
@@ -736,6 +1002,14 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
         no `build/`, no test binaries, no compiler output of any kind. If
         this ever starts needing a build, the hook becomes a multi-minute
         tax and the next contributor disables it.
+
+        This covers BOTH checks the script now runs. The entry-set check is
+        the one with something to prove here: the artifact it guards used to
+        be a slice of a document that could only be produced from a complete
+        build, and the whole point of carving it out was that the slice does
+        not need one. Asserting each check's own success line, rather than
+        just the exit status, is what makes a check that silently stopped
+        running distinguishable from one that passed.
         """
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
@@ -750,6 +1024,192 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("as recorded", result.stdout)
+        self.assertIn(
+            str(inventory.STATIC_CASE_COUNTS_PATH), result.stdout
+        )
+        self.assertIn(str(inventory.SOURCE_INVENTORY_PATH), result.stdout)
+
+
+class SourceInventoryArtifactTests(unittest.TestCase):
+    """The carved-out build-free half, and the line it was carved along.
+
+    `benchmarks/reports/reprobuild-suite-m0-inventory.json` went stale six
+    times. Every one was an entry-set change, and every one was invisible to
+    every gate, because the only artifact recording the entry set could not be
+    regenerated without a complete build of ~1,450 test binaries.
+
+    The fix is a split, not another check on the same file: everything the
+    inventory records that is a pure function of source text now lives in
+    `SOURCE_INVENTORY_PATH`, which a contributor regenerates in a working tree
+    in the time the case-count baseline takes.
+
+    This class holds the split itself -- what is on each side of it, that the
+    cheap side really is cheap, and that regenerating it is deterministic.
+    `SuiteCaseCountPushGateTests` proves the gate is reached; `SuiteInventory
+    Tests.test_the_tracked_inventory_is_current_with_this_tree` holds the
+    expensive side, from the one place that can produce it.
+    """
+
+    # The fields whose values a BUILT BINARY reports, or that describe the
+    # state of the build tree. Naming them here, rather than only naming the
+    # ones that are admitted, is what makes the split a rule instead of a
+    # habit: adding any of these to the projection would silently reintroduce
+    # the build dependency the carve-out exists to remove, and the artifact
+    # would go quietly back to being unregenerable.
+    # One scan shared by every test that only needs to READ the result. The
+    # scan tokenizes ~1,450 Nim sources twice over and costs about two
+    # minutes, so paying for it once per test would make this class the
+    # slowest thing in the suite for no added evidence.
+    #
+    # `test_regeneration_is_a_pure_function_of_the_tree` deliberately does NOT
+    # use it: proving determinism requires two genuinely independent scans,
+    # and a memo would turn that test into a tautology.
+    _SOURCE_INVENTORY = None
+
+    @classmethod
+    def source_inventory(cls):
+        if cls._SOURCE_INVENTORY is None:
+            cls._SOURCE_INVENTORY = inventory.source_inventory(REPO_ROOT)
+        return cls._SOURCE_INVENTORY
+
+    BUILD_DERIVED_ENTRY_FIELDS = (
+        "sourceCaseCount",
+        "countSource",
+        "catalogSuiteCount",
+        "catalogCases",
+        "sourceNewerThanBinary",
+        "sourceMtime",
+        "binaryMtime",
+        "staleBySeconds",
+        "quarantineReason",
+    )
+
+    def test_the_projection_admits_nothing_a_build_produces(self):
+        self.assertEqual(
+            set(inventory.SOURCE_INVENTORY_ENTRY_FIELDS)
+            & set(self.BUILD_DERIVED_ENTRY_FIELDS),
+            set(),
+        )
+        # The group total is the sum of a build-derived field, so it is out
+        # too -- while the group MEMBERSHIP, which is not, stays in.
+        self.assertNotIn(
+            "sourceCaseCount", inventory.SOURCE_INVENTORY_GROUP_FIELDS
+        )
+        self.assertIn("sources", inventory.SOURCE_INVENTORY_GROUP_FIELDS)
+        # `sourceCases` sums the catalog; the rest of the structural facts
+        # count entries and classifications, which are source facts.
+        self.assertNotIn(
+            "sourceCases", inventory.SOURCE_INVENTORY_STRUCTURAL_FACTS
+        )
+
+        document = json.loads(
+            (REPO_ROOT / inventory.SOURCE_INVENTORY_PATH).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertTrue(document["tests"])
+        for entry in document["tests"]:
+            self.assertEqual(
+                sorted(entry), sorted(inventory.SOURCE_INVENTORY_ENTRY_FIELDS)
+            )
+        for group in document["pureUnitConsolidationCandidates"]:
+            self.assertEqual(
+                sorted(group), sorted(inventory.SOURCE_INVENTORY_GROUP_FIELDS)
+            )
+        # Not merely absent from the entries: absent from the whole file. A
+        # `du` figure or a nix store path in a tracked artifact rewrites it on
+        # every host, which is the defect that makes a file unreviewable.
+        for absent in ("footprint", "metadata", "timing", "catalogEnumeration"):
+            self.assertNotIn(absent, document)
+
+    def test_the_tracked_artifact_matches_the_tree_entry_for_entry(self):
+        """The same question `--check-inventory` asks, asked in-process.
+
+        Here as well as in the shell gate because a failure here names the
+        offending source in a Python traceback a contributor can read, and
+        because a check that exists only as a subprocess invocation cannot be
+        debugged from the suite that is supposed to own it.
+        """
+        drift = inventory.source_inventory_drift(
+            inventory.load_source_inventory(REPO_ROOT),
+            self.source_inventory(),
+        )
+        self.assertTrue(
+            drift["clean"],
+            "\n" + inventory.format_source_inventory_drift(drift),
+        )
+
+    def test_regeneration_is_a_pure_function_of_the_tree(self):
+        """Byte-identical, twice, and identical to what is checked in.
+
+        A writer that embedded a timestamp, a `du`, an absolute path or an
+        unordered dict would produce a diff on every regeneration, and a
+        tracked file that always differs is one nobody reads -- which is
+        exactly how the document this was carved out of stopped being read.
+        """
+        first = inventory.render_source_inventory(self.source_inventory())
+        second = inventory.render_source_inventory(
+            inventory.source_inventory(REPO_ROOT)
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first,
+            (REPO_ROOT / inventory.SOURCE_INVENTORY_PATH).read_text(
+                encoding="utf-8"
+            ),
+        )
+
+    def test_the_projection_is_idempotent(self):
+        """Projecting a projection changes nothing.
+
+        Load-bearing, not tidiness: the checker compares the projection of a
+        FULL inventory against the projection of the TRACKED half, and reads
+        the tracked half back through the same function that wrote it. If the
+        two shapes projected differently, the gate would compare a document
+        against a differently-shaped copy of itself and report drift that is
+        not there -- or, worse, miss drift that is.
+        """
+        once = self.source_inventory()
+        self.assertEqual(inventory.inventory_source_projection(once), once)
+
+    def test_a_missing_field_is_an_error_and_not_a_default(self):
+        """A truncated artifact must fail, not compare equal to nothing.
+
+        `sum_field` earned this rule the hard way for the inventory's numeric
+        fields; the same reasoning applies to a document that has never heard
+        of a property. Filling in a default would make an artifact written by
+        an older revision of this script -- or a hand-edited one -- pass a
+        check it has no answer for.
+        """
+        document = json.loads(
+            (REPO_ROOT / inventory.SOURCE_INVENTORY_PATH).read_text(
+                encoding="utf-8"
+            )
+        )
+        truncated = copy.deepcopy(document)
+        del truncated["tests"][0]["class"]
+        with self.assertRaises(inventory.InventoryProjectionError) as raised:
+            inventory.inventory_source_projection(truncated)
+        self.assertIn("class", str(raised.exception))
+
+        without_section = copy.deepcopy(document)
+        del without_section["observedStructuralFacts"]
+        with self.assertRaises(inventory.InventoryProjectionError):
+            inventory.inventory_source_projection(without_section)
+
+    def test_the_regeneration_command_the_failure_prints_is_the_real_one(self):
+        """The command in the message must be the command that works.
+
+        A refusal naming a command that does not exist is worse than a
+        refusal naming none: it costs the contributor the time to find out.
+        """
+        self.assertIn(
+            "--write-inventory-sources",
+            inventory.SOURCE_INVENTORY_REGENERATE_COMMAND,
+        )
+        parsed = inventory.parse_args(["--write-inventory-sources"])
+        self.assertTrue(parsed.write_inventory_sources)
+        self.assertTrue(inventory.parse_args(["--check-inventory"]).check_inventory)
 
 
 class SuiteInventoryTests(unittest.TestCase):
@@ -2706,6 +3166,13 @@ test "incomplete name" and:
         # The Nix-daemon host-loader regression adds one unconditional case
         # to an existing source, so the platform delta remains exactly one.
         #
+        # ------------------------------------------------------------------
+        # SUPERSEDED, and kept because the retraction below only makes sense
+        # against it. Everything from here to "THE LITERAL IS NOW REMOVED TOO"
+        # is the previous pass's argument for keeping one integer, together
+        # with the measurement it rested on. It survived exactly one upstream
+        # week.
+        # ------------------------------------------------------------------
         # THIS ONE STAYS NUMERIC, and it is the only aggregate in this method
         # that does. The three that surrounded it were removed or made
         # relational because each was a restatement of something the tree
@@ -2739,23 +3206,49 @@ test "incomplete name" and:
         # cases across roughly 160 unattributed sources look like when nothing
         # ever evaluates the assertion.
         #
-        # The Darwin value is NOT measured here — this is a Linux host — and
-        # is carried as `Linux - 2` on the strength of
-        # `assert_linux_darwin_catalog_delta_is_exact`, which DERIVES that
-        # delta by summing the platform-qualified case census rather than
-        # asserting it as a constant. Note that the delta is 2 and not the 1
-        # every earlier revision of this comment claimed: the same
-        # reconciliation that produced 7,947 found six sources missing from
-        # that census, one of which is a Linux-only case with no Darwin
-        # counterpart. Recorded as an inference, on the same principle as
-        # everything else in this method: the only thing worse than a stale
-        # pin is a stale pin that reads as if someone had checked it.
-        expected_nim_total = 7945 if sys.platform == "darwin" else 7947
-        self.assertEqual(nim_total, expected_nim_total)
-        # Independently: the total is the sum of what the BINARIES report,
-        # with nothing imputed for a binary that could not report. Stated
-        # as its own equality so a future re-introduction of the static
-        # fallback fails here even if someone also bumps the pin above.
+        # THE LITERAL IS NOW REMOVED TOO, and the reasoning above is retracted
+        # on one point of fact. It said "NO checked-in artefact records that
+        # surface per source". That was wrong:
+        # `benchmarks/reports/reprobuild-suite-m0-inventory.json` records
+        # `countSource` and `sourceCaseCount` for all ~1,450 entries, and
+        # `sourceCaseCount` on a catalog-counted entry IS the built binary's
+        # own `--list-json` total for that source. The surface was checked in
+        # the whole time.
+        #
+        # What was actually missing was not a record but a CHECK: nothing
+        # compared that artifact to anything, `inventory_data()` builds a live
+        # inventory, and so the file sat six commits stale while every
+        # assertion in this class passed. An unverified record is not a record
+        # you may derive from, and treating it as one is how a literal gets
+        # replaced by something worse than a literal.
+        #
+        # That check now exists —
+        # `test_the_tracked_inventory_is_current_with_this_tree`, above, holds
+        # the artifact to a live inventory per entry on a fully built tree,
+        # which is the same place and the same build this literal needed.
+        # With it, the pin has moved there in its strongest form: not one
+        # integer but the whole `{source: (countSource, sourceCaseCount)}` map,
+        # so a change of 828 cases across 160 sources — the size of the drift
+        # the last reconciliation found — cannot present as one number nobody
+        # can attribute.
+        #
+        # The second data point the re-examination asked for is decisive on
+        # its own. Twelve upstream PRs moved the tree between one
+        # reconciliation and the next; the entry set went 1,399 -> 1,441 and
+        # the static scan 8,025 -> 8,317. A hand-typed 7,947 does not survive
+        # that, and re-measuring it costs a four-hour build to produce a value
+        # whose only reader is an equality that the per-source map already
+        # states more precisely.
+        #
+        # `assert_linux_darwin_catalog_delta_is_exact` is untouched and still
+        # DERIVES the Linux/Darwin delta from the platform-qualified census
+        # rather than asserting it as a constant; it no longer has a
+        # `expected_nim_total` Darwin arm to carry, and it never needed one.
+        #
+        # The total is the sum of what the BINARIES report, with nothing
+        # imputed for a binary that could not report. Kept — and now the only
+        # statement of the aggregate here — so a future re-introduction of the
+        # static fallback fails at this line.
         self.assertEqual(
             nim_total,
             sum(
@@ -3752,7 +4245,24 @@ test "incomplete name" and:
         # fallback was still used was the exact over-count this rework
         # exists to eliminate. `staticCaseCount` keeps the number visible;
         # it no longer votes.
+        # TWO sources now, and the second one is the same shape as the first.
+        # `test_m10_observed_env_live_windows.nim` drives the real `where.exe`
+        # under the real Windows shim; at the merged head it guarded itself
+        # with `when not defined(windows): {.error.}`, which does not skip a
+        # test — `repro_tests.nim` declares one build edge per source
+        # unconditionally, so it failed the ENTIRE Linux suite build (measured:
+        # 1442 of 1443 actions succeeded and this one took the build down, so
+        # no complete tree existed to regenerate the M0 inventory from). It now
+        # follows the convention the entry above established: compile
+        # everywhere, register cases only on Windows.
+        #
+        # MEMBERSHIP IS STILL PINNED BY NAME, deliberately, and the list is
+        # still the whole quarantine. A quarantine entry is coverage that the
+        # suite does not have on this host, so a THIRD one appearing must be a
+        # decision somebody makes, not a number that moves.
         expected_quarantine = {
+            "libs/repro_build_engine/tests/"
+            "test_m10_observed_env_live_windows.nim": "no-protocol-support",
             "libs/repro_peer_cache/tests/"
             "t_n7_multicast_windows_smoke.nim": "no-protocol-support",
         }
@@ -3761,9 +4271,23 @@ test "incomplete name" and:
         }
         self.assertEqual(actual_quarantine, expected_quarantine)
         self.assertEqual(catalog["quarantineCount"], len(expected_quarantine))
-        self.assertEqual(
-            catalog["quarantineReasonCounts"], {"no-protocol-support": 1}
-        )
+        # Derived from the pinned membership rather than restated, so the two
+        # cannot disagree: the census above already fixes both the names and
+        # the reasons, and this checks only that the published tally counts
+        # the same set.
+        reason_counts: dict[str, int] = {}
+        for reason in expected_quarantine.values():
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        self.assertEqual(catalog["quarantineReasonCounts"], reason_counts)
+        # And that BOTH are Windows-only by construction rather than by
+        # coincidence: each names a source whose declarations are inside a
+        # `when defined(windows)` gate. This is the rule the two names above
+        # are instances of; without it, "quarantined" could silently come to
+        # mean "a test that stopped enumerating for some other reason".
+        for source in expected_quarantine:
+            with self.subTest(windows_only=source):
+                text = (REPO_ROOT / source).read_text(encoding="utf-8")
+                self.assertIn("when defined(windows):", text)
 
         # Every quarantine entry carries a machine-readable reason drawn
         # from the declared taxonomy, and every quarantined reason must be
@@ -3796,11 +4320,27 @@ test "incomplete name" and:
                 self.assertEqual(
                     entry["staticCaseCount"], item["staticCaseCount"]
                 )
-        # The one quarantined source is the phantom `when`-branch file, and
-        # its static count really is the non-zero one that used to leak
-        # into the total. Pinned explicitly so "0 cases contributed" cannot
-        # be satisfied by the static scan quietly also becoming 0.
-        self.assertEqual(catalog["quarantine"][0]["staticCaseCount"], 1)
+        # Both quarantined sources are phantom `when`-branch files, and both
+        # static counts really are the non-zero ones that would leak into the
+        # total if the fallback ever came back. Pinned so "0 cases
+        # contributed" cannot be satisfied by the static scan quietly also
+        # becoming 0 — and pinned BY SOURCE, not by list position: the
+        # quarantine is sorted by source, so an index was a pin on
+        # alphabetical order as much as on a count, and adding an entry that
+        # sorts first silently moved it to a different file.
+        #
+        # The numbers are not typed here either. They come from the checked-in
+        # per-source baseline, which a source scan regenerates and the
+        # pre-push gate holds to the tree, so they move with the sources
+        # instead of with this file.
+        recorded_static_counts = inventory.load_static_case_counts(REPO_ROOT)
+        for item in catalog["quarantine"]:
+            with self.subTest(quarantined_static=item["source"]):
+                self.assertGreater(item["staticCaseCount"], 0)
+                self.assertEqual(
+                    item["staticCaseCount"],
+                    recorded_static_counts[item["source"]][1],
+                )
         self.assertTrue(catalog["quarantinedCasesExcludedFromTotal"])
         # Published beside it: a source whose binary was never built imputes
         # nothing either, so the total reads BUILT BINARIES ONLY. Asserted on
@@ -5214,6 +5754,78 @@ test "incomplete name" and:
         self.assert_nim_case_counter_resolves_only_imported_unittest_receivers()
         self.assert_nim_case_counter_rejects_compiler_rejected_operator_endings()
 
+    def test_the_tracked_inventory_is_current_with_this_tree(self):
+        """The other half of the split: the artifact only a build can produce.
+
+        `SourceInventoryArtifactTests` holds the build-free half to the tree
+        with a check a contributor can run and fix in seconds. This holds the
+        REST of `benchmarks/reports/reprobuild-suite-m0-inventory.json` -- the
+        authoritative per-binary case counts, the count-source census and the
+        quarantine -- and it is here, behind the built-tree guard, because
+        here is the only place in the repository where the artifact can be
+        both evaluated and regenerated. `scripts/run_tests.sh` has just built
+        `.#test-builds` when this runs, so a disagreement is a stale artifact
+        and not a working-tree state.
+
+        Nothing checked this before. That is why the document was six commits
+        stale: `inventory_data()` builds a LIVE inventory, so every assertion
+        in this class was about the tree and none was about the file. A
+        tracked artifact nothing compares to anything is a document, not
+        evidence.
+
+        `metadata`, `timing`, `runnerSummaries` and `footprint` are excluded:
+        they record the head, the host and the build tree, so they differ on
+        every commit and every machine by design.
+        """
+        self.require_fully_built_test_tree()
+        live = self.inventory_data()
+        tracked = inventory.load_tracked_inventory(REPO_ROOT)
+
+        # The build-free half, compared through the same projection the cheap
+        # gate uses -- so the two tracked artifacts cannot describe different
+        # suites.
+        self.assertEqual(
+            inventory.inventory_source_projection(tracked),
+            inventory.inventory_source_projection(live),
+            "the tracked inventory's build-free half disagrees with this "
+            "tree; regenerate it: python3 "
+            "scripts/reprobuild_suite_inventory.py",
+        )
+
+        # …and the catalog-derived half, which is the part that has no cheap
+        # gate and never can have one.
+        self.assertEqual(
+            tracked["static"]["sourceCaseCount"],
+            live["static"]["sourceCaseCount"],
+        )
+        self.assertEqual(
+            tracked["catalogEnumeration"]["countSourceCounts"],
+            live["catalogEnumeration"]["countSourceCounts"],
+        )
+        self.assertEqual(
+            [
+                (item["source"], item["reason"])
+                for item in tracked["catalogEnumeration"]["quarantine"]
+            ],
+            [
+                (item["source"], item["reason"])
+                for item in live["catalogEnumeration"]["quarantine"]
+            ],
+        )
+        # Per ENTRY, not merely in aggregate: two offsetting errors sum to the
+        # same total. This is the surface `expected_nim_total` pins as a
+        # single integer, held here per source instead.
+        self.assertEqual(
+            {
+                item["source"]: (item["countSource"], item["sourceCaseCount"])
+                for item in tracked["tests"]
+            },
+            {
+                item["source"]: (item["countSource"], item["sourceCaseCount"])
+                for item in live["tests"]
+            },
+        )
+
     def test_static_inventory_covers_every_declared_test(self):
         self.require_fully_built_test_tree()
         data = self.inventory_data()
@@ -6020,6 +6632,14 @@ compileProfileBinary()
             "t_inline_launch_refuses_unhostable_monitor_hosting.nim",
             "tests/integration/"
             "t_monitor_fault_fails_the_action_not_the_daemon.nim",
+            # ADDED at the merged head, same disposition and same evidence:
+            # `test_engine_worker_pool.nim` gates exactly one of its four
+            # declarations on `when defined(linux) or defined(macosx):`, with
+            # no `else:` at the gate's indentation, so the gate selects the
+            # same four cases on both published hosts. It is one of the 42
+            # sources the twelve upstream PRs merged here added, and it is the
+            # only one of the 42 that joined this census at all.
+            "libs/repro_build_engine/tests/test_engine_worker_pool.nim",
         }
         gated_sources = self.platform_gated_test_sources(data)
         self.assertEqual(gated_sources, set(exclusive) | catalog_identical)
@@ -6028,7 +6648,7 @@ compileProfileBinary()
         # tables without saying so. The equality alone is satisfied by any
         # partition of the census.
         self.assertEqual(len(exclusive), 16)
-        self.assertEqual(len(catalog_identical), 9)
+        self.assertEqual(len(catalog_identical), 10)
 
         by_source = {item["source"]: item for item in data["tests"]}
         for source, expected_by_host in exclusive.items():
@@ -6051,10 +6671,12 @@ compileProfileBinary()
         # `linux or macosx` gate and is cardinality-neutral, so the Darwin
         # side does not move at all.
         self.assertEqual((linux_only, darwin_only), (24, 22))
-        # The delta is DERIVED here and asserted, not assumed: it is what
-        # `expected_nim_total`'s Darwin arm is carried on, and it moved from 1
-        # to 2 under this reconciliation. A reader who trusts the docstring's
-        # old "exactly one greater" over this line will be wrong by one.
+        # The delta is DERIVED here and asserted, not assumed. It used to be
+        # what `expected_nim_total`'s Darwin arm was carried on; that literal
+        # is gone (see the note where it stood), so this line no longer
+        # supports anything but itself — which is the right amount. A reader
+        # who trusts the docstring's old "exactly one greater" over this line
+        # will be wrong by one.
         self.assertEqual(linux_only - darwin_only, 2)
 
     def test_completed_clean_attempt_requires_one_coherent_three_run_attempt(self):
