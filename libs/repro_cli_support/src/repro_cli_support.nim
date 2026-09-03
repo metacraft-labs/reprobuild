@@ -28973,7 +28973,7 @@ proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
     of "succeeded": inc result.succeeded
     of "cloned": inc result.cloned
     of "skipped": inc result.skipped
-    of "clone_failed": inc result.cloneFailed
+    of "clone_failed", "declared_branch_missing": inc result.cloneFailed
     of "refused": inc result.refused
     of "failed": inc result.failed
     of "noop":
@@ -29501,6 +29501,24 @@ proc gitRunPlain(identity: GitToolIdentity;
     let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
+
+proc advertisedRemoteHeadBranch(identity: GitToolIdentity;
+                                remoteUrl: string): string =
+  ## Best-effort diagnostic fact for a failed declared-branch clone. A remote
+  ## can legitimately have an unborn/detached HEAD, and a network error here
+  ## must not obscure the original clone failure, so every non-answer is "".
+  if remoteUrl.len == 0:
+    return ""
+  let probe = gitRunPlain(identity,
+    ["ls-remote", "--symref", "--", remoteUrl, "HEAD"])
+  if probe.code != 0:
+    return ""
+  for raw in probe.output.splitLines():
+    let fields = raw.splitWhitespace()
+    if fields.len == 3 and fields[0] == "ref:" and fields[2] == "HEAD" and
+        fields[1].startsWith("refs/heads/"):
+      return fields[1]["refs/heads/".len .. ^1]
+  ""
 
 type
   GitWorktreeDiscovery = object
@@ -33656,25 +33674,48 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         # do NOT abort the whole sync. Consistent with RA-11's no-rollback
         # partial-advance: readable repos still converge, the partial state
         # is reported, nothing is rolled back.
-        # Principle 2: name the offending repo AND a concrete remedy. The
-        # clone failed because the operator cannot read the repo (auth /
-        # private / wrong URL); the remedy is to gain access and re-run
-        # sync, or to drop the unreadable dependency from the workspace.
-        let offender = resolved.repos[repoIdx].path
-        let remedy = "ensure read access to '" &
-          resolved.repos[repoIdx].fetchUrl &
-          "' (auth / network) then 're-run 'repro sync', or " &
-          "'repro remove " & resolved.repos[repoIdx].name &
-          "' to drop the dependency"
-        checkoutStatus[repoIdx] = ("clone_failed",
-          "clone of newly-declared repo failed: " &
-          "status=" & $outcome.status & " reason=" & outcome.reason &
-          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "") &
-          " — remedy: " & remedy)
-        stderr.writeLine("workspace sync: FAILED to clone newly-declared " &
-          "repo '" & offender & "' (continuing with the other repos): " &
-          (if outcome.stderr.len > 0: outcome.stderr.strip()
-           else: outcome.reason) & " — remedy: " & remedy)
+        let repo = resolved.repos[repoIdx]
+        let offender = repo.path
+        if outcome.reason == "clone-branch-missing" and repo.branch.len > 0:
+          # The clone executor preserved Git's otherwise free-form error as a
+          # structured reason. This is a declaration defect, not evidence of
+          # auth/network trouble, so do not send the operator toward access
+          # credentials or dependency removal.
+          let remoteUrl = cloneUrlFor(repo)
+          let remoteHead = advertisedRemoteHeadBranch(identity, remoteUrl)
+          let fragment =
+            if repo.fragmentPath.len > 0: repo.fragmentPath
+            else: "the repo fragment for '" & repo.name & "'"
+          let remoteHeadNote =
+            if remoteHead.len > 0:
+              "; the remote HEAD branch is '" & remoteHead & "'"
+            else: ""
+          let diagnostic = "repo '" & repo.name & "' declares branch '" &
+            repo.branch & "' in '" & fragment & "', but remote '" &
+            remoteUrl & "' does not advertise that branch" & remoteHeadNote &
+            ". Repro did not substitute the remote HEAD. Remedy: update the " &
+            "fragment to a branch the remote advertises, or restore branch '" &
+            repo.branch & "' on the remote; then re-run 'repro sync'."
+          checkoutStatus[repoIdx] =
+            ("declared_branch_missing", diagnostic)
+          stderr.writeLine("workspace sync: DECLARED BRANCH MISSING for repo '" &
+            offender & "' (continuing with the other repos): " & diagnostic)
+        else:
+          # Principle 2: name the offending repo AND a concrete remedy. This
+          # generic path is for auth/network/URL failures; a bad declared
+          # branch was classified above and gets a different remedy.
+          let remedy = "ensure read access to '" & repo.fetchUrl &
+            "' (auth / network), then re-run 'repro sync'; or run " &
+            "'repro remove " & repo.name & "' to drop the dependency"
+          checkoutStatus[repoIdx] = ("clone_failed",
+            "clone of newly-declared repo failed: " &
+            "status=" & $outcome.status & " reason=" & outcome.reason &
+            (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "") &
+            " — remedy: " & remedy)
+          stderr.writeLine("workspace sync: FAILED to clone newly-declared " &
+            "repo '" & offender & "' (continuing with the other repos): " &
+            (if outcome.stderr.len > 0: outcome.stderr.strip()
+              else: outcome.reason) & " — remedy: " & remedy)
       else:
         checkoutStatus[repoIdx] = ("failed",
           "action " & a.id & " status=" & $outcome.status &
@@ -33739,7 +33780,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       status = "noop"
     if status == "refused":
       anyRefusal = true
-    elif status == "failed" or status == "clone_failed":
+    elif status in ["failed", "clone_failed", "declared_branch_missing"]:
       # A clone failure does not abort the run — the other repos still
       # converge (RA-23's partial-advance). It DOES fail the run: the
       # workspace is missing a declared repo, and every consumer that reads
@@ -47923,6 +47964,10 @@ type
     existingSha*: string
     dirtyReason*: string
     diagnostic*: string
+    baselineSource*: string
+      ## Fork form only: ``source_head`` when the source checkout supplied the
+      ## branch point, ``declared_checkout`` when the repo was absent there and
+      ## the target's normally-materialized checkout supplied it.
 
   BranchReport* = object
     ## Structured outcome of one ``repro branch`` invocation.
@@ -47977,6 +48022,7 @@ proc toJsonNode*(report: BranchReport): JsonNode =
     obj["existingSha"] = %entry.existingSha
     obj["dirtyReason"] = %entry.dirtyReason
     obj["diagnostic"] = %entry.diagnostic
+    obj["baselineSource"] = %entry.baselineSource
     repos.add(obj)
   result["repos"] = repos
   result["exitCode"] = %report.exitCode
@@ -48041,6 +48087,7 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     var created: seq[string]
     for entry in report.repos:
       if entry.outcome in ["branched", "branched_with_changes",
+                           "branched_from_declared_baseline",
                            branchOutcomeTag(broCreated)]:
         created.add(entry.path)
       elif entry.outcome != "ready" and
@@ -50900,26 +50947,34 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       srcPath: string
       headSha: string
       isClean: bool
+      sourcePresent: bool
+      baselineSource: string
       probeFailed: bool
       probeReason: string
+      localHasBranch: bool
       remoteHasBranch: bool
 
   var states: seq[ForkSourceState]
   var anyProbeFailed = false
-  var remoteCollisions: seq[string]
-  var missingBranch: seq[string]   ## WV-6 ``--existing-branch``: repos lacking it.
+
+  # Phase 1 is deliberately LOCAL ONLY. A broken checkout must be reported
+  # before a 100+-repo workspace starts any network probe, while an ABSENT
+  # checkout is a valid state: target init will materialize it under the normal
+  # manifest/lock rules and its target HEAD becomes the branch baseline.
   for repo in resolved.repos:
     var state: ForkSourceState
     state.repo = repo
     state.srcPath = parsed.workspaceRoot / repo.path
     state.isClean = true
     if not dirExists(state.srcPath / ".git"):
-      state.probeFailed = true
-      state.probeReason = "no on-disk checkout at '" & state.srcPath &
-        "'; run `repro workspace init` or `repro workspace sync` first"
-      anyProbeFailed = true
+      state.sourcePresent = false
+      if not parsed.existingBranch:
+        state.baselineSource = "declared_checkout"
       states.add(state)
       continue
+    state.sourcePresent = true
+    if not parsed.existingBranch:
+      state.baselineSource = "source_head"
     let headRes = queryGitState(headShaQuery(state.srcPath), identity)
     if headRes.status != gqsOk:
       state.probeFailed = true
@@ -50929,51 +50984,156 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       continue
     state.headSha = headRes.headSha
     let cleanRes = queryGitState(isCleanQuery(state.srcPath), identity)
-    if cleanRes.status == gqsOk:
-      state.isClean = cleanRes.isClean
-    # The default form starts something NEW, so a branch that already exists
-    # upstream is a refusal. ``--existing-branch`` inverts the assertion to
-    # "put a workspace on this branch", where the SAME probe answers the
-    # opposite question: a branch that exists nowhere is the refusal. One probe,
-    # two mirror-image guards, so neither flag can silently do the other's job.
-    let rName = gitRemoteNameFor(repo)
-    let remoteProbe = gitRunPlain(identity,
-      ["-C", state.srcPath, "ls-remote", "--heads", rName, parsed.branchName])
-    if remoteProbe.code == 0 and remoteProbe.output.strip().len > 0:
-      state.remoteHasBranch = true
+    if cleanRes.status != gqsOk:
+      state.probeFailed = true
+      state.probeReason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      anyProbeFailed = true
+      states.add(state)
+      continue
+    state.isClean = cleanRes.isClean
     if parsed.existingBranch:
-      var found = state.remoteHasBranch
-      if not found:
-        let localProbe = gitRunPlain(identity,
-          ["-C", state.srcPath, "rev-parse", "--verify", "--quiet",
-           "refs/heads/" & parsed.branchName])
-        found = localProbe.code == 0 and localProbe.output.strip().len > 0
-      if not found:
-        missingBranch.add(repo.path)
-    elif state.remoteHasBranch:
-      remoteCollisions.add(repo.path)
+      let localProbe = gitRunPlain(identity,
+        ["-C", state.srcPath, "rev-parse", "--verify", "--quiet",
+         "refs/heads/" & parsed.branchName])
+      if localProbe.code == 0 and localProbe.output.strip().len > 0:
+        state.localHasBranch = true
+      elif localProbe.output.strip().len > 0:
+        state.probeFailed = true
+        state.probeReason = "git rev-parse --verify exited " &
+          $localProbe.code & ": " & localProbe.output.strip()
+        anyProbeFailed = true
     states.add(state)
+
+  if anyProbeFailed:
+    for state in states:
+      var entry = BranchRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        baselineSource: state.baselineSource)
+      if state.probeFailed:
+        entry.outcome = "probe_failed"
+        entry.diagnostic = state.probeReason
+      else:
+        entry.outcome = "ready"
+      result.repos.add(entry)
+    result.exitCode = 1
+    return
+
+  # Phase 2 is NETWORK ONLY and bounded. Each present source checkout asks its
+  # configured remote; an absent checkout asks the resolved clone URL directly.
+  # Running these through the build engine removes the long serial silence that
+  # made a large fork look hung before it reported a late local failure.
+  let remoteProbeRoot = createTempDir("repro-branch-preflight-", "")
+  defer:
+    if dirExists(remoteProbeRoot):
+      removeDir(remoteProbeRoot)
+  var remoteProbeActions: seq[BuildAction]
+  var remoteProbeRepoIdx = initTable[string, int]()
+  for idx, state in states:
+    let actionId = "workspace-branch-remote-probe-" &
+      safeRepoIdSegment(state.repo.name) & "-" & $idx
+    let receiptRel = "remote-probe-" & $idx & ".receipt"
+    var probe =
+      if state.sourcePresent:
+        gitRemoteBranchProbeAction(actionId, identity,
+          branchName = parsed.branchName,
+          remoteName = gitRemoteNameFor(state.repo),
+          repoPath = state.srcPath,
+          receiptPath = receiptRel)
+      else:
+        gitRemoteBranchProbeAction(actionId, identity,
+          branchName = parsed.branchName,
+          remoteUrl = cloneUrlFor(state.repo),
+          receiptPath = receiptRel)
+    probe.cwd = remoteProbeRoot
+    probe.pool = "vcs/fetch"
+    probe.poolUnits = 1'u32
+    remoteProbeActions.add(probe)
+    remoteProbeRepoIdx[actionId] = idx
+
+  if remoteProbeActions.len > 0:
+    stderr.writeLine("workspace branch: checking " &
+      $remoteProbeActions.len & " remote(s) for branch '" &
+      parsed.branchName & "' (jobs-network=8) ...")
+    var config = defaultBuildEngineConfig(remoteProbeRoot / "engine-cache")
+    config.suppressTrace = true
+    config.maxParallelism = 8'u32
+    let probeRun = runBuild(graph(remoteProbeActions,
+      @[pool("vcs/fetch", 8'u32)]), config)
+    var remoteOutcomeById = initTable[string, ActionResult]()
+    for outcome in probeRun.results:
+      remoteOutcomeById[outcome.id] = outcome
+    for action in remoteProbeActions:
+      let idx = remoteProbeRepoIdx[action.id]
+      let outcome = remoteOutcomeById.getOrDefault(action.id)
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        states[idx].probeFailed = true
+        states[idx].probeReason = "remote branch probe failed: status=" &
+          $outcome.status & " reason=" & outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
+        anyProbeFailed = true
+      else:
+        # Successful action reasons are engine-owned and may be normalized to
+        # e.g. "executed". The receipt is the action's durable output contract;
+        # read the advertised bit from there rather than smuggling a result in
+        # a transient scheduler field.
+        let receiptPath = remoteProbeRoot /
+          ("remote-probe-" & $idx & ".receipt")
+        try:
+          let receipt = readFile(receiptPath)
+          if not receipt.startsWith(RemoteBranchProbeReceiptHeader & "\n") or
+              not receipt.contains("\nadvertised\t"):
+            states[idx].probeFailed = true
+            states[idx].probeReason =
+              "remote branch probe wrote an invalid receipt: " & receiptPath
+            anyProbeFailed = true
+          else:
+            states[idx].remoteHasBranch =
+              receipt.contains("\nadvertised\ttrue\n")
+        except CatchableError as err:
+          states[idx].probeFailed = true
+          states[idx].probeReason =
+            "remote branch probe receipt could not be read: " & err.msg
+          anyProbeFailed = true
+
+  var remoteCollisions: seq[string]
+  var missingBranch: seq[string] ## WV-6 ``--existing-branch``: repos lacking it.
+  for state in states:
+    if state.probeFailed:
+      continue
+    if parsed.existingBranch:
+      if not state.localHasBranch and not state.remoteHasBranch:
+        missingBranch.add(state.repo.path)
+    elif state.remoteHasBranch:
+      remoteCollisions.add(state.repo.path)
 
   if anyProbeFailed or remoteCollisions.len > 0 or missingBranch.len > 0:
     for state in states:
       var entry = BranchRepoEntry(
         name: state.repo.name,
         path: state.repo.path,
-        headSha: state.headSha)
+        headSha: state.headSha,
+        baselineSource: state.baselineSource)
+      let remoteLabel =
+        if state.sourcePresent:
+          "configured remote '" & gitRemoteNameFor(state.repo) & "'"
+        else:
+          "remote '" & cloneUrlFor(state.repo) & "'"
       if state.probeFailed:
         entry.outcome = "probe_failed"
         entry.diagnostic = state.probeReason
       elif parsed.existingBranch and state.repo.path in missingBranch:
         entry.outcome = "branch_missing"
         entry.diagnostic = "branch '" & parsed.branchName &
-          "' exists neither locally nor on remote '" &
-          gitRemoteNameFor(state.repo) & "'; `--existing-branch` adopts an " &
-          "EXISTING branch — drop the flag to cut a new one"
+          "' exists neither locally nor on " & remoteLabel &
+          "; `--existing-branch` adopts an EXISTING branch — drop the flag " &
+          "to cut a new one"
       elif not parsed.existingBranch and state.remoteHasBranch:
         entry.outcome = "branch_exists_on_remote"
         entry.diagnostic = "branch '" & parsed.branchName &
-          "' already exists on remote '" & gitRemoteNameFor(state.repo) &
-          "'; this creates a NEW branch — pass `--existing-branch` to check " &
+          "' already exists on " & remoteLabel &
+          "; this creates a NEW branch — pass `--existing-branch` to check " &
           "the existing one out into " & parsed.forkPath & " instead"
       else:
         entry.outcome = "ready"
@@ -51015,6 +51175,43 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         "materializing '" & parsed.forkPath & "'; the partial workspace is " &
         "left in place — re-run the same command to finish it (see " &
         "init-report.json there for the per-repo detail)"))
+    return
+
+  # For a repo absent from the SOURCE, target init is the authority for its
+  # baseline. Observe the exact materialized SHA now and branch there. This is
+  # intentionally after init: guessing the remote HEAD here would bypass the
+  # manifest/lock checkout rules, and could turn an invalid declaration into a
+  # silently different workspace.
+  var targetBaselineProbeFailed = false
+  if not parsed.existingBranch:
+    for idx in 0 ..< states.len:
+      if states[idx].sourcePresent:
+        continue
+      let targetPath = parsed.forkPath / states[idx].repo.path
+      let targetHead = queryGitState(headShaQuery(targetPath), identity)
+      if targetHead.status != gqsOk:
+        states[idx].probeFailed = true
+        states[idx].probeReason =
+          "target declared-checkout HEAD probe failed: " &
+            targetHead.diagnostic
+        targetBaselineProbeFailed = true
+      else:
+        states[idx].headSha = targetHead.headSha
+
+  if targetBaselineProbeFailed:
+    for state in states:
+      var entry = BranchRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        baselineSource: state.baselineSource)
+      if state.probeFailed:
+        entry.outcome = "probe_failed"
+        entry.diagnostic = state.probeReason
+      else:
+        entry.outcome = "ready"
+      result.repos.add(entry)
+    result.exitCode = 1
     return
 
   # ---- branch pass (concurrent) -----------------------------------------
@@ -51085,9 +51282,12 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           repoPath = state.repo.path,
           receiptPath = receiptRel)
       else:
+        let baselineRepoPath =
+          if state.sourcePresent: state.srcPath
+          else: parsed.forkPath / state.repo.path
         gitForkBranchAction(actionId, identity,
           branchName = parsed.branchName,
-          sourceRepoPath = state.srcPath,
+          sourceRepoPath = baselineRepoPath,
           targetSha = state.headSha,
           repoPath = state.repo.path,
           receiptPath = receiptRel)
@@ -51119,25 +51319,36 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         result.repos.add(BranchRepoEntry(
           name: "<workspace-root>", path: ".",
           outcome: "fork_failed",
+          headSha: rootHead.headSha,
+          baselineSource:
+          (if parsed.existingBranch: "" else: "source_head"),
           diagnostic: "status=" & $outcome.status & " reason=" &
             outcome.reason & " " & outcome.stderr))
       else:
         result.repos.add(BranchRepoEntry(
           name: "<workspace-root>", path: ".",
+          headSha: rootHead.headSha,
+          baselineSource:
+          (if parsed.existingBranch: "" else: "source_head"),
           outcome: "branched"))
       continue
     let state = states[idx]
     var entry = BranchRepoEntry(
       name: state.repo.name,
       path: state.repo.path,
-      headSha: state.headSha)
+      headSha: state.headSha,
+      baselineSource: state.baselineSource)
     if not ok:
       inc failures
       entry.outcome = "fork_failed"
       entry.diagnostic = "status=" & $outcome.status & " reason=" &
         outcome.reason & " " & outcome.stderr
     else:
-      entry.outcome = "branched"
+      entry.outcome =
+        if state.baselineSource == "declared_checkout":
+          "branched_from_declared_baseline"
+        else:
+          "branched"
       # ---- optional WIP carry-over ------------------------------------
       if parsed.includeChanges and not state.isClean:
         let copied = copyWorkingTreeChanges(identity, state.srcPath,

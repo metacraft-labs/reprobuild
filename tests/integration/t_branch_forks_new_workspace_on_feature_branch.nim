@@ -3,10 +3,11 @@
 ##
 ## The optional second positional is the whole mode switch: with it, the
 ## command materializes a NEW workspace at ``<path>`` and starts ``<branch>``
-## there, cut from the CURRENT workspace's committed HEADs — including commits
-## that exist only locally and were never pushed — while leaving the current
-## workspace untouched. See ``reprobuild-specs/CLI/branch.md`` §"Fork form"
-## and the M27 milestone in
+## there while leaving the current workspace untouched. Existing source
+## checkouts are cut from their committed HEADs — including local-only commits;
+## a source checkout that is absent is materialized only in the target under
+## its declared checkout rules and branched from that exact target HEAD. See
+## ``reprobuild-specs/CLI/branch.md`` §"Fork form" and the M27 milestone in
 ## ``reprobuild-specs/Workspace-Management.milestones.org``.
 ##
 ## Sub-cases:
@@ -39,6 +40,22 @@
 ##      spelling ``repro workspace branch <name> <path>`` is the SAME command.
 ##  10. ``test_m27_include_changes_requires_the_fork_form`` — the flag is a
 ##      usage error in place (nothing to copy into).
+##  11. ``t_workspace_new_derives_branch_from_basename`` — the namespaced
+##      ``workspace new`` spelling derives the branch when no override is set.
+##  12. ``t_branch_refuses_destination_inside_workspace`` — a nested target
+##      is refused with both the switch-in-place and sibling-workspace remedies.
+##  13. ``t_workspace_new_existing_branch_checks_out`` — the adoption form
+##      checks out a branch present on every remote and rejects one absent
+##      everywhere.
+##  14. ``t_workspace_new_requires_a_destination_path`` — unlike the
+##      no-argument show form, the ``new`` verb requires a target path.
+##  15. ``t_branch_fork_materializes_repo_missing_from_source`` — an absent
+##      source checkout is cloned only in the target under the ordinary
+##      declared checkout rules, then branched at that exact target baseline;
+##      the source stays absent and the report records distinct provenance.
+##  16. ``t_branch_fork_rejects_invalid_declared_baseline`` — the same
+##      target-only path fails when the manifest-declared branch is absent;
+##      it does not fall back to the remote's default branch or repair source.
 ##
 ## Real components (NO mocks): the real ``git`` binary, real bare repos on the
 ## real filesystem, and the real engine-built ``build/bin/repro`` spawned as a
@@ -57,7 +74,16 @@
 ##   - If ``--include-changes`` were a no-op, case 4 fails; if it leaked by
 ##     default, case 3 fails.
 ##   - If the destination guards regressed, cases 5/6 would materialize a
-##     workspace and their "untouched" assertions fail.
+##     workspace and their "untouched" assertions fail; case 12 independently
+##     covers the nested-destination diagnostic and remedies.
+##   - If branch derivation, adoption, or verb-specific path validation drift,
+##     cases 11, 13, and 14 fail at their branch/exit/diagnostic assertions.
+##   - If an absent source checkout were still treated as a failed probe, case
+##     15 exits before creating the target. If it silently used a guessed
+##     remote/default revision, the asserted target SHA/provenance fails.
+##   - If target materialization silently fell back from an invalid declared
+##     branch to remote HEAD, case 16 would produce a lib-b checkout and pass
+##     the branch stage instead of failing materialization.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as M9–M16).
 
@@ -292,6 +318,8 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
       check report["sourceWorkspaceRoot"].getStr() == fx.workspaceRoot
       check report["workspaceRoot"].getStr() == forkPath
       check entryByPath(report, "lib-a")["outcome"].getStr() == "branched"
+      check entryByPath(report, "lib-a")["baselineSource"].getStr() ==
+        "source_head"
       check entryByPath(report, ".")["outcome"].getStr() == "branched"
 
       # The SOURCE workspace is untouched: still on main, no feature branch,
@@ -672,3 +700,80 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
       # ...and the diagnostic names the verb the operator actually typed.
       check res.output.contains("repro workspace new ../my-feature")
       check res.output.contains("repro branch")
+
+  test "t_branch_fork_materializes_repo_missing_from_source":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "missing-source")
+      defer: removeDirEventually(fx.scratch)
+
+      let declaredBaseline = headSha(gitBin, fx.workspaceRoot / "lib-b")
+      removeDir(fx.workspaceRoot / "lib-b")
+      check not dirExists(fx.workspaceRoot / "lib-b")
+
+      let forkPath = fx.scratch / "missing-source-fork"
+      let res = invokeFork(fx, "feature-from-declaration", forkPath)
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      # Target init materialized lib-b under its declared main checkout rule,
+      # and the feature branch was cut at that exact observed target HEAD.
+      check dirExists(forkPath / "lib-b" / ".git")
+      check currentBranch(gitBin, forkPath / "lib-b") ==
+        "feature-from-declaration"
+      check headSha(gitBin, forkPath / "lib-b") == declaredBaseline
+
+      # The source is an input, never a repair target.
+      check not dirExists(fx.workspaceRoot / "lib-b")
+
+      let report = readForkReport(forkPath)
+      let missingEntry = entryByPath(report, "lib-b")
+      check missingEntry["outcome"].getStr() ==
+        "branched_from_declared_baseline"
+      check missingEntry["baselineSource"].getStr() == "declared_checkout"
+      check missingEntry["headSha"].getStr() == declaredBaseline
+      check entryByPath(report, "lib-a")["baselineSource"].getStr() ==
+        "source_head"
+
+  test "t_branch_fork_rejects_invalid_declared_baseline":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "invalid-declared-baseline")
+      defer: removeDirEventually(fx.scratch)
+
+      # Publish a root-manifest revision that declares a branch the readable
+      # lib-b remote does not advertise. The target root clone therefore sees
+      # the same invalid bill of materials as source resolution does.
+      writeFile(fx.workspaceRoot / "repos" / "lib-b.toml",
+        libBFragmentToml.replace("revision = \"main\"",
+          "branch = \"missing-declared\""))
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " add repos/lib-b.toml")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " commit -m \"declare unavailable fixture branch\"")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " push origin main")
+
+      removeDir(fx.workspaceRoot / "lib-b")
+      check not dirExists(fx.workspaceRoot / "lib-b")
+
+      let forkPath = fx.scratch / "invalid-declared-fork"
+      let res = invokeFork(fx, "feature-no-fallback", forkPath)
+      checkpoint("output: " & res.output)
+      check res.code == 1
+
+      # A fallback to the remote's default `main` would leave a valid checkout
+      # here and proceed to cut `feature-no-fallback`. The failed clone is
+      # cleaned up, and the source remains absent.
+      check not dirExists(forkPath / "lib-b" / ".git")
+      check not dirExists(fx.workspaceRoot / "lib-b")
+
+      let report = readForkReport(forkPath)
+      check report["exitCode"].getInt() == 1
+      check report["repos"].len == 1
+      check report["repos"][0]["outcome"].getStr() == "clone_failed"
