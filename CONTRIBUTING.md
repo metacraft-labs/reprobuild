@@ -29,18 +29,51 @@ suite, which is the event this file exists to make visible. The check runs in
 `tests/unit/test_reprobuild_suite_inventory.py` and names the source and both
 numbers when it fails, so there is never a total to reconcile by hand.
 
-Forgetting the refresh used to be somebody else's problem: `just lint` went
+## Adding or removing test sources
+
+Enrolling a new test source in `repro_tests.nim` — or renaming or withdrawing
+one — also moves
+`benchmarks/reports/reprobuild-suite-m0-inventory-sources.json`, the tracked
+record of the suite's entry set. Refresh it the same way, and commit the diff
+with the change:
+
+```bash
+python3 scripts/reprobuild_suite_inventory.py --write-inventory-sources
+```
+
+It records, per source: language, owner, output binary, class, classification
+reason, static case count, dependency shape and whether the test body reaches
+a compiler. Like the case-count baseline, it is a pure source scan — no
+compiler, no built binaries, no nix.
+
+It exists as a separate file because the full M0 inventory beside it,
+`benchmarks/reports/reprobuild-suite-m0-inventory.json`, cannot be
+regenerated without building every test binary: its case counts come from
+each built binary's own `--list-json`. That artifact went stale six times, and
+every one of the six was an entry-set change — visible to a source scan, but
+fixable only by a four-hour build, so nothing gated it. Splitting the document
+along that line is what lets the entry set be gated at every push while the
+catalog-derived half stays an output of the job that already builds
+everything. **Do not regenerate the full inventory by hand**; `just test`
+produces it.
+
+## Why these two refreshes are enforced
+
+Forgetting either refresh used to be somebody else's problem: `just lint` went
 red for everyone, and the next branch had to carry the regeneration in order
-to land. `scripts/check_suite_case_counts.sh` now runs at three points, so it
-cannot get that far:
+to land. `scripts/check_suite_case_counts.sh` runs both checks at four points,
+so it cannot get that far:
 
 - as a **pre-push hook** installed by the Nix dev shell (`flake.nix`,
-  `pre-commit-check`), which refuses the push and prints the command above;
+  `pre-commit-check`), which refuses the push and prints the commands above;
+- as its own hosted workflow, `.github/workflows/suite-case-counts.yml`, which
+  has no concurrency cancellation and so reaches a verdict on every commit;
 - as an early step of the CI lint job, ahead of the whole-tree compile;
-- inside `just lint`, where it always ran.
+- inside `just lint`, where the case-count half always ran.
 
-It is a source scan — no compiler, no built binaries, a few seconds on the
-full tree — which is what makes it affordable at every push.
+Both are source scans — no compiler, no built binaries, a couple of minutes on
+the full tree against the hours a build costs — which is what makes them
+affordable at every push.
 
 ## Nix Dev Shell
 

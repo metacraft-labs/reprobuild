@@ -459,6 +459,15 @@ lint:
     # suite: it reads the sources and needs nothing compiled, so it is the
     # one coverage check that can answer before a six-hour build phase.
     python3 ./scripts/reprobuild_suite_inventory.py --check-static-case-counts 2>&1 | tee -a test-logs/lint.log
+    # The suite ENTRY-SET gate, its sibling. Same mechanism, same cost class,
+    # same reason for being here rather than in the suite: it is a source
+    # scan. It holds the build-free half of the tracked inventory --
+    # benchmarks/reports/reprobuild-suite-m0-inventory.json -- to the tree it
+    # claims to describe. That document went stale six times while the TSV
+    # above stayed current at every commit, and every one of the six was an
+    # entry-set change this line refuses. It says nothing about the
+    # catalog-derived half, which needs the build; see the flag's help text.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-inventory 2>&1 | tee -a test-logs/lint.log
     # The vacuous-case gate, sibling to the case-count gate above and for the
     # same reason: a source scan, no compiler, answers in seconds. It refuses
     # a test case whose only assertion is `check true` -- a shape that reports

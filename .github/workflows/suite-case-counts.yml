@@ -10,6 +10,21 @@ name: Suite case counts
 # moment on -- for everyone, not for the author, who has already pushed. Whoever
 # branches next inherits a red tree and someone else's regeneration.
 #
+# Since the same script also runs `--check-inventory`, this job additionally
+# holds the BUILD-FREE half of
+# `benchmarks/reports/reprobuild-suite-m0-inventory.json` -- the entry set and
+# everything each entry records that is a pure function of source text -- to
+# the tree it describes. That artifact went stale six times while the TSV
+# beside it stayed current at every commit, and every one of the six was an
+# entry-set change. It is checked HERE, in the seconds-long uncancellable job,
+# rather than in the Test job that can actually regenerate it, because the Test
+# job builds ~1,450 test binaries first and is routinely consumed before it
+# reaches a verdict -- which is precisely how the artifact went stale.
+#
+# The catalog-derived half is NOT checked here and cannot be: it comes from
+# probing each built binary's `--list-json`. A green run of this job is not a
+# statement about it.
+#
 # WHY IT IS ITS OWN WORKFLOW
 #
 # The check was already an early step of the `lint` job in `ci.yml`, and that
@@ -24,10 +39,10 @@ name: Suite case counts
 # take the better part of an hour, and letting them accumulate starves the
 # pull-request checks people are waiting on without producing timely verdicts.
 #
-# So the cheap gate is separated from the expensive suite. This is a source
-# scan -- no compiler, no built binaries, no nix, no siblings, roughly five
-# seconds on the full tree -- which is what makes it affordable to run on every
-# commit with no cancellation at all.
+# So the cheap gate is separated from the expensive suite. Both checks are
+# source scans -- no compiler, no built binaries, no nix, no siblings, together
+# roughly two minutes on the full ~1,450-source tree -- which is what makes
+# them affordable to run on every commit with no cancellation at all.
 #
 # RUNNER CLASS (CIP-5 exemption)
 #

@@ -105,18 +105,24 @@ jobs:
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
-      # The suite case-count baseline gate, ahead of the whole-tree lint.
+      # The suite case-count and entry-set gates, ahead of the whole-tree lint.
       #
-      # `just lint` runs this same check, but only after several minutes of
-      # `nim check` over every library and entry point. A stale baseline is
-      # the single most common way this job goes red, and it is a source
-      # scan that answers in seconds -- so it is asked first, and the
-      # failure annotation names this step rather than a lint log.
+      # `just lint` runs these same two checks, but only after several minutes
+      # of `nim check` over every library and entry point. A stale baseline is
+      # the single most common way this job goes red, and both checks are
+      # source scans -- so they are asked first, and the failure annotation
+      # names this step rather than a lint log.
+      #
+      # The second check holds the build-free half of
+      # benchmarks/reports/reprobuild-suite-m0-inventory.json to the tree. It
+      # is here rather than in the Test job on purpose: the Test job builds
+      # ~1,450 binaries first and is routinely consumed before it reaches a
+      # verdict, which is how that artifact went stale six times.
       #
       # This copy is a convenience, not the gate: it shares this job's fate,
       # and this workflow supersedes its own branch runs. The gate that
       # always reaches a verdict is `suite-case-counts.yml`.
-      - name: Suite case-count baseline
+      - name: Suite case-count baseline and inventory entry set
         run: dev-exec bash scripts/check_suite_case_counts.sh
       # The vacuous-case gate, for the same reason and at the same point:
       # a source scan that answers in seconds, so it is asked before the

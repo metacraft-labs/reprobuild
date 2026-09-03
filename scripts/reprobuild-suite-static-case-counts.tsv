@@ -1454,7 +1454,7 @@ tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/test_cmake_generator_competitiveness_bench.py	python	9
 tests/unit/test_continuous_benchmarking_policy.py	python	7
 tests/unit/test_package_root_anchor.py	python	3
-tests/unit/test_reprobuild_suite_inventory.py	python	55
+tests/unit/test_reprobuild_suite_inventory.py	python	64
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	6
 tools/catalog-harvester/tests/test_harvester_history.nim	nim	3
