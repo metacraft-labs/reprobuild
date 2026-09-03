@@ -40,7 +40,7 @@
     },
     {
       "os-name": "windows",
-      "runner": "eph-win-x64",
+      "runner": "eph-win-x64-release",
       "env-flavor": "windows-diy",
       "platform": "windows",
       "arch": "x86_64",
