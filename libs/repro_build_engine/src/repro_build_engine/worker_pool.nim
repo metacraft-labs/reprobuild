@@ -198,6 +198,21 @@ proc registerEnginePoolTenant*(name: string): EnginePoolTenant =
   ## which a test binary linking two entry points can do — does not silently
   ## split its pending count across two slots and make ``awaitEnginePool*``
   ## report idle while its own work is still queued.
+  ## A name longer than ``EnginePoolTenantNameLimit - 1`` is REFUSED rather
+  ## than truncated. Truncating broke the idempotence promised above: the
+  ## stored name was cut to fit but compared against the FULL argument, so a
+  ## long name never matched itself and claimed a fresh slot on every call.
+  ## Comparing prefix-to-prefix would be worse — two tenants sharing a
+  ## 47-character prefix would silently share one slot, and each would then
+  ## see the other's pending count. Tenant names are compile-time constants,
+  ## so refusing is a programming error caught on the first call rather than
+  ## a hazard that waits for a long name.
+  if name.len > EnginePoolTenantNameLimit - 1:
+    raise newException(ValueError,
+      "engine pool: tenant name " & name.escape & " is " & $name.len &
+      " characters; the limit is " & $(EnginePoolTenantNameLimit - 1) &
+      ". Names are fixed-size because the tenant table must hold no GC'd " &
+      "memory (a worker touching a GC'd global is refused by the compiler).")
   var stored = -1
   acquire(poolLock)
   for i in 0 ..< tenantCount:
@@ -211,7 +226,7 @@ proc registerEnginePoolTenant*(name: string): EnginePoolTenant =
         "engine pool: more than " & $MaxEnginePoolTenants &
         " tenants registered; raise MaxEnginePoolTenants")
     stored = tenantCount
-    let n = min(name.len, EnginePoolTenantNameLimit - 1)
+    let n = name.len          # bounded by the refusal above
     for i in 0 ..< n:
       tenantNames[stored][i] = name[i]
     tenantNames[stored][n] = '\0'

@@ -122,6 +122,79 @@ proc errorFor(outcomes: seq[EnginePoolOutcome]; key: string): string =
   "<no outcome reported>"
 
 suite "TP-1 engine worker pool":
+  test "a tenant name is deduplicated or refused, never truncated":
+    ## THE DEFECT THIS PINS WAS LATENT AND ITS OWN DOC COMMENT WAS WRONG
+    ## ABOUT IT. ``registerEnginePoolTenant`` promises that registering the
+    ## SAME name twice returns the SAME slot, so a tenant module initialised
+    ## twice — which a test binary linking two entry points does — cannot
+    ## split its pending count across two slots and make ``awaitEnginePool*``
+    ## report idle while its own work is still queued. The name was STORED
+    ## truncated to 47 characters and COMPARED against the full argument, so
+    ## for any longer name the lookup could never match: registering one
+    ## 52-character name twice returned two different slots, and the promise
+    ## was false exactly where it mattered.
+    ##
+    ## THE FIX IS A REFUSAL AND NOT A TRUNCATED COMPARISON, and the second
+    ## half of this case is why. Comparing prefix-to-prefix would make the
+    ## lookup consistent and make the failure WORSE: two distinct tenants
+    ## sharing a 47-character prefix would silently share one slot and each
+    ## would then wait on the other's pending count — the same corruption of
+    ## ``awaitEnginePool*``, arrived at from the other side and with no
+    ## diagnostic. Tenant names are compile-time constants, so a name that
+    ## does not fit is a programming error and is reported as one.
+    ##
+    ## MUTATION TARGETS, one per direction.
+    ## (1) Restore the truncating store
+    ## (``let n = min(name.len, EnginePoolTenantNameLimit - 1)``) and drop the
+    ## refusal: the first arm reddens, because an over-long name is accepted;
+    ## and the second arm reddens on ``sameSlot``, because the truncated name
+    ## never matches itself.
+    ## (2) Keep the refusal but delete the dedup loop: the third arm reddens,
+    ## because a repeated in-range name claims a fresh slot.
+    const TooLong = "engine-pool-name-that-is-deliberately-far-too-long-to-fit"
+    doAssert TooLong.len > 47
+    var refused = false
+    var refusalMessage = ""
+    try:
+      discard registerEnginePoolTenant(TooLong)
+    except ValueError as err:
+      refused = true
+      refusalMessage = err.msg
+    checkOrEcho refused,
+      "a " & $TooLong.len & "-character tenant name was ACCEPTED. It is " &
+      "then stored truncated and compared in full, so it never matches " &
+      "itself and every registration claims a fresh slot — which is " &
+      "precisely the split pending count the dedup exists to prevent."
+    checkOrEcho refusalMessage.contains($TooLong.len),
+      "the refusal does not say how long the offending name was, so it " &
+      "cannot be acted on: " & refusalMessage
+
+    # THE LONGEST NAME THAT DOES FIT IS STILL DEDUPLICATED. This is the arm
+    # that makes the refusal a boundary rather than a blanket: 47 characters
+    # is accepted, and accepted names keep the promise.
+    let atLimit = "engine-pool-probe-at-the-limit" & repeat("x", 17)
+    doAssert atLimit.len == 47
+    let firstAtLimit = registerEnginePoolTenant(atLimit)
+    let secondAtLimit = registerEnginePoolTenant(atLimit)
+    checkOrEcho firstAtLimit == secondAtLimit,
+      "a 47-character name — the longest that fits — was not deduplicated, " &
+      "so its pending count is split across two slots"
+
+    # AND SO IS AN ORDINARY ONE, which is the property the doc comment states
+    # and the only one any shipped tenant relies on today.
+    let firstShort = registerEnginePoolTenant("engine-pool-probe")
+    let secondShort = registerEnginePoolTenant("engine-pool-probe")
+    checkOrEcho firstShort == secondShort,
+      "registering the same tenant name twice returned two different slots"
+    # NOT VACUOUS: the dedup must return the SAME slot, not merely a valid
+    # one, and two DIFFERENT names must still get different slots — a
+    # ``registerEnginePoolTenant`` that returned a constant would satisfy
+    # every assertion above.
+    checkOrEcho firstShort != firstAtLimit,
+      "two different tenant names were given the same slot, so the " &
+      "assertions above cannot distinguish deduplication from a table " &
+      "that hands everybody slot 0"
+
   test "the pool drains on shutdown":
     ## NO WORK IS SILENTLY DROPPED when the pool is stopped. Shutdown is
     ## requested with the queue deliberately still full, and every job must
