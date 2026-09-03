@@ -65,6 +65,8 @@ const
     "reprobuild.workspace-vcs.fork-branch-receipt.v1"
   RefreshBareReceiptHeader* =
     "reprobuild.workspace-vcs.refresh-bare-receipt.v1"
+  RemoteBranchProbeReceiptHeader* =
+    "reprobuild.workspace-vcs.remote-branch-probe-receipt.v1"
   ForcePushRebaseReceiptHeader* =
     "reprobuild.workspace-vcs.force-push-rebase-receipt.v1"
 
@@ -79,6 +81,7 @@ type
     gvoForcePushRebase
     gvoForkBranch
     gvoRefreshBare
+    gvoRemoteBranchProbe
 
   GitVcsPayload* = object
     ## Compact per-action payload encoded into ``builtinText`` so the
@@ -213,6 +216,7 @@ proc opTag(op: GitVcsOp): string =
   of gvoForcePushRebase: "force-push-rebase"
   of gvoForkBranch: "fork-branch"
   of gvoRefreshBare: "refresh-bare"
+  of gvoRemoteBranchProbe: "remote-branch-probe"
 
 proc parseOpTag(tag: string): GitVcsOp =
   case tag
@@ -225,6 +229,7 @@ proc parseOpTag(tag: string): GitVcsOp =
   of "force-push-rebase": gvoForcePushRebase
   of "fork-branch": gvoForkBranch
   of "refresh-bare": gvoRefreshBare
+  of "remote-branch-probe": gvoRemoteBranchProbe
   else:
     raise newException(ValueError,
       "unknown workspace-vcs operation tag: " & tag)
@@ -343,7 +348,8 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   of gvoClone:
     discard
   of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset,
-      gvoForcePushRebase, gvoForkBranch, gvoRefreshBare:
+      gvoForcePushRebase, gvoForkBranch, gvoRefreshBare,
+      gvoRemoteBranchProbe:
     result.writeString(payload.repoPath)
     if payload.op == gvoForcePushRebase:
       result.writeString(payload.baseSha)
@@ -936,6 +942,16 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # error names a filter rather than the repo, so the raw output reads as a
     # reprobuild bug. Say what actually happened and what can be done about it.
     let cloneOut = cloneRes.output.trimmed
+    # Git reports an absent requested branch only as free-form process output.
+    # Preserve it as a STRUCTURED action reason so higher-level commands can
+    # distinguish a bad manifest declaration from authentication, network, or
+    # repository-URL failures and offer the right remedy.
+    if not pinnedCommit and cloneOut.contains("Remote branch ") and
+        cloneOut.contains("not found in upstream"):
+      return failed("clone-branch-missing",
+        "remote " & payload.remoteUrl & " does not advertise requested " &
+          "checkout branch '" & cloneBranchRef(payload.revision) & "': " &
+          cloneOut)
     if cloneOut.contains("smudge filter lfs failed") or
         cloneOut.contains("Object does not exist on the server"):
       return failed("clone-lfs-objects-missing",
@@ -1237,6 +1253,54 @@ proc executeRefreshBare(payload: GitVcsPayload;
   receipt.add("git-version\t" & payload.identityVersion & "\n")
   writeReceipt(receiptPath, receipt)
   succeeded()
+
+proc executeRemoteBranchProbe(payload: GitVcsPayload;
+                              cwd, receiptPath: string): ActionResult =
+  ## Read-only remote branch advertisement used by workspace-branch preflight.
+  ## It is still represented as a non-cacheable VCS action so many independent
+  ## network probes can share the bounded ``vcs/fetch`` pool. The disposable
+  ## receipt gives the build engine its ordinary one-output contract; callers
+  ## place it outside the source workspace and remove it after the probe pass.
+  let branch = payload.branchName.strip()
+  if branch.len == 0:
+    return failed("remote-branch-probe-no-branch",
+      "remote branch probe requires a branch name")
+  var args: seq[string]
+  var source: string
+  if payload.repoPath.len > 0:
+    source = absoluteRepoPath(payload, cwd)
+    if not dirExists(source / ".git"):
+      return failed("remote-branch-probe-source-missing",
+        "remote branch probe source is not a git working tree: " & source)
+    let remote =
+      if payload.remoteName.len > 0: payload.remoteName
+      else: "origin"
+    args = @["-C", source, "ls-remote", "--heads", remote, branch]
+  elif payload.remoteUrl.len > 0:
+    source = payload.remoteUrl
+    args = @["ls-remote", "--heads", "--", payload.remoteUrl, branch]
+  else:
+    return failed("remote-branch-probe-no-source",
+      "remote branch probe requires a checkout or remote URL")
+  let probe = runGit(payload, args)
+  if probe.exitCode != 0:
+    return failed("remote-branch-probe-failed",
+      "git ls-remote --heads failed for '" & source & "' (" &
+        $probe.exitCode & "): " & probe.output.trimmed)
+  let advertised = probe.output.strip().len > 0
+  var receipt = RemoteBranchProbeReceiptHeader & "\n"
+  receipt.add("kind\t" & WorkspaceVcsKind & "\n")
+  receipt.add("operation\tremote-branch-probe\n")
+  receipt.add("source\t" & source & "\n")
+  receipt.add("branch\t" & branch & "\n")
+  receipt.add("advertised\t" & (if advertised: "true" else: "false") & "\n")
+  writeReceipt(receiptPath, receipt)
+  var answer = succeeded()
+  answer.reason =
+    if advertised: "remote-branch-present"
+    else: "remote-branch-absent"
+  answer.stderr = probe.output.trimmed
+  answer
 
 proc executeMergeFf(payload: GitVcsPayload;
                     cwd, receiptPath: string): ActionResult =
@@ -1570,6 +1634,8 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
     result = executeForkBranch(payload, action.cwd, receiptPath)
   of gvoRefreshBare:
     result = executeRefreshBare(payload, action.cwd, receiptPath)
+  of gvoRemoteBranchProbe:
+    result = executeRemoteBranchProbe(payload, action.cwd, receiptPath)
   result.id = action.id
   # ``executeBuiltinAction`` wraps the returned ``ActionResult`` and
   # re-sets ``dependencyPolicyKind`` from the action's declared
@@ -1782,6 +1848,23 @@ proc gitRefreshBareAction*(id: string; identity: GitToolIdentity;
     # that develop-vs-store-installed "is never recorded in the lock" — so
     # no solved package instance governs this edge. See
     # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    text = encodePayload(payload))
+
+proc gitRemoteBranchProbeAction*(id: string; identity: GitToolIdentity;
+                                 branchName, receiptPath: string;
+                                 remoteUrl = ""; remoteName = "";
+                                 repoPath = ""; cwd = "";
+                                 deps: openArray[string] = []): BuildAction =
+  ## Construct a non-cacheable remote branch-advertisement probe. With
+  ## ``repoPath`` it asks that checkout's configured ``remoteName``; otherwise
+  ## it asks ``remoteUrl`` directly. The latter is the missing-source-checkout
+  ## path: no Git command is incorrectly rooted in a directory that is absent.
+  let payload = buildPayload(identity, gvoRemoteBranchProbe, remoteUrl,
+    remoteName, branchName, "", repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = false,
+    weakFingerprint = actionFingerprint(payload),
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 

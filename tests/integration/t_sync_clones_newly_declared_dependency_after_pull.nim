@@ -5,15 +5,18 @@
 ## locked/declared revision, it CLONES any develop-mode dependency that is
 ## declared in the resolved manifest but not yet present on disk — e.g. a
 ## repo a teammate added. Cloning reuses RA-5c's parallel clone/fetch path
-## (the ``vcs/fetch`` pool + the RA-5 shared object cache). An unreadable /
-## private new repo is REPORTED + SKIPPED, not fatal.
+## (the ``vcs/fetch`` pool + the RA-5 shared object cache). A failed clone is
+## reported and fails the overall sync while independent repos still converge.
 ##
-## This test models "a teammate added repos B and C":
+## This test models "a teammate added repos B, C, and D":
 ##   - ``lib-a`` is already CHECKED OUT and fast-forwardable to its upstream.
 ##   - ``lib-b`` is DECLARED (reachable local bare origin) but NOT present —
 ##     sync must CLONE it and converge it to the declared revision.
 ##   - ``lib-c`` is DECLARED with an UNREADABLE origin (the bare repo does
 ##     not exist) — sync must REPORT + SKIP it without aborting.
+##   - ``lib-d`` is DECLARED on ``main``, but its reachable origin advertises
+##     only ``dev`` (which is also remote HEAD) — sync must classify the
+##     declaration defect distinctly from authentication/network failure.
 ##
 ## Assertions:
 ##   - lib-b's working tree + ``.git`` now exist and HEAD is the declared
@@ -22,8 +25,11 @@
 ##     existing update path).
 ##   - The per-repo summary names lib-b as newly-cloned (``action == clone``,
 ##     ``executionStatus == cloned``, ``syncCase == missing_checkout``).
-##   - lib-c is reported (``executionStatus == skipped`` with a reason) and
-##     sync did NOT hard-fail because of it; lib-a and lib-b still succeed.
+##   - lib-c is reported (``executionStatus == clone_failed`` with a reason);
+##     the overall sync fails, but lib-a and lib-b still succeed.
+##   - lib-d is absent; its status is ``declared_branch_missing``; its
+##     diagnostic names ``main``, remote HEAD ``dev``, and the fragment, and
+##     does not recommend changing authentication or dropping the dependency.
 ##
 ## Falsifiability: if sync only UPDATED existing checkouts (the pre-RA-23
 ## behavior), lib-b would stay uncloned (its working tree absent) and its
@@ -98,10 +104,10 @@ proc headSha(gitBin, repoPath: string): string =
 
 # ---- manifest TOML --------------------------------------------------------
 
-proc projectToml(aUrl, bUrl, cUrl: string): string =
-  ## A project that declares lib-a (present), lib-b (reachable, NOT present)
-  ## and lib-c (unreadable origin, NOT present). This is the post-pull state
-  ## a teammate's manifest edit leaves behind.
+proc projectToml(aUrl, bUrl, cUrl, dUrl: string): string =
+  ## A project that declares lib-a (present), lib-b (reachable, NOT present),
+  ## lib-c (unreadable origin), and lib-d (reachable, wrong declared branch).
+  ## This is the post-pull state a teammate's manifest edit leaves behind.
   result =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
@@ -111,10 +117,12 @@ proc projectToml(aUrl, bUrl, cUrl: string): string =
     "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
     "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
     "[[remote]]\nname = \"c-origin\"\nfetch = \"" & cUrl & "\"\n\n" &
+    "[[remote]]\nname = \"d-origin\"\nfetch = \"" & dUrl & "\"\n\n" &
     "includes = [\n" &
     "  \"repos/lib-a.toml\",\n" &
     "  \"repos/lib-b.toml\",\n" &
     "  \"repos/lib-c.toml\",\n" &
+    "  \"repos/lib-d.toml\",\n" &
     "]\n"
 
 const libAFragmentToml = """
@@ -147,6 +155,16 @@ remote = "c-origin"
 revision = "dev"
 """
 
+const libDFragmentToml = """
+schema = "reprobuild.workspace.repo.v1"
+
+[repo]
+name = "lib-d"
+path = "lib-d"
+remote = "d-origin"
+branch = "main"
+"""
+
 type
   Fixture = object
     scratch: string
@@ -155,6 +173,7 @@ type
     aOrigin, aSeed: string
     bOrigin, bSeed: string
     cOriginMissing: string
+    dOrigin: string
 
 proc setupFixture(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-ra23sync-", "")
@@ -172,6 +191,12 @@ proc setupFixture(gitBin: string): Fixture =
   # lib-c's origin path is DECLARED but never created — an unreadable repo.
   result.cOriginMissing = result.scratch / "origin-lib-c-does-not-exist.git"
 
+  # lib-d is readable and its HEAD/default is dev, but the manifest
+  # deliberately declares nonexistent main.
+  result.dOrigin = result.scratch / "origin-lib-d.git"
+  discard seedGitOrigin(gitBin, result.dOrigin,
+    result.scratch / "seed-lib-d", "dev")
+
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
   let manifestsRoot = workspaceRoot
@@ -180,10 +205,11 @@ proc setupFixture(gitBin: string): Fixture =
   writeFile(manifestsRoot / "projects" / "myproject.toml",
     projectToml(
       fileUrl(result.aOrigin), fileUrl(result.bOrigin),
-      fileUrl(result.cOriginMissing)))
+      fileUrl(result.cOriginMissing), fileUrl(result.dOrigin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
+  writeFile(manifestsRoot / "repos" / "lib-d.toml", libDFragmentToml)
   result.workspaceRoot = workspaceRoot
 
 proc invokeSync(fx: Fixture): CmdResult =
@@ -223,6 +249,7 @@ suite "RA-23 — sync clones newly-declared dependencies":
       check dirExists(fx.workspaceRoot / "lib-a" / ".git")
       check not dirExists(fx.workspaceRoot / "lib-b")
       check not dirExists(fx.workspaceRoot / "lib-c")
+      check not dirExists(fx.workspaceRoot / "lib-d")
 
       # Advance lib-a's upstream so the existing-update path has real work.
       let advancedA = seedSecondCommit(gitBin, fx.aOrigin, fx.aSeed, "dev")
@@ -268,3 +295,19 @@ suite "RA-23 — sync clones newly-declared dependencies":
       check cEntry["executionStatus"].getStr() == "clone_failed"
       # A reason is attached so the operator knows WHY it was skipped.
       check cEntry["executionDiagnostic"].getStr().len > 0
+
+      # --- lib-d: a reachable repo with a bad DECLARED branch is not
+      # misdiagnosed as an access problem and does not fall back to dev. ---
+      check not dirExists(fx.workspaceRoot / "lib-d" / ".git")
+      let dEntry = repoEntry(report, "lib-d")
+      check dEntry["syncCase"].getStr() == "missing_checkout"
+      check dEntry["action"].getStr() == "clone"
+      check dEntry["executionStatus"].getStr() ==
+        "declared_branch_missing"
+      let dDiagnostic = dEntry["executionDiagnostic"].getStr()
+      check dDiagnostic.contains("declares branch 'main'")
+      check dDiagnostic.contains("remote HEAD branch is 'dev'")
+      check dDiagnostic.contains("lib-d.toml")
+      check dDiagnostic.contains("did not substitute the remote HEAD")
+      check not dDiagnostic.contains("auth / network")
+      check not dDiagnostic.contains("repro remove")

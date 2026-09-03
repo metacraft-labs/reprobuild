@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1441,
+    "nimTestBinaries": 1443,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 82,
-    "testEntries": 1446
+    "testEntries": 1448
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1117,7 +1117,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 605,
+      "integration": 607,
       "platform/destructive": 107,
       "pure unit": 593,
       "unclassified": 125
@@ -1232,9 +1232,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1441,
+    "nimTestBinaryCount": 1443,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1446
+    "testEntryCount": 1448
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5787,7 +5787,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_engine_worker_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -5955,6 +5955,44 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim",
       "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_monitor_finish_handoff_is_exclusive",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_monitor_finish_is_pooled",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim",
+      "sourceSuiteCount": 2,
       "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
@@ -20602,7 +20640,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -896,7 +896,7 @@ tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	nim	5
 tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	8
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
-tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	14
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
 tests/integration/t_build_machine_and_host_target_are_distinct.nim	nim	9
 tests/integration/t_build_progress_modes.nim	nim	1
 tests/integration/t_buildtype_drives_compile_flags.nim	nim	7
