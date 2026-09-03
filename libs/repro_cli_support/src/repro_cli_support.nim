@@ -56018,22 +56018,41 @@ proc flakeStateSummaryLine(state: FlakeOverrideState): string =
 
 proc flakeReconcileCommand(row: FlakeOverrideStateRow;
     flakeRoot, workspaceRoot: string): string =
-  ## The command that reconciles ONE row, spelled so it runs from anywhere —
-  ## including, necessarily, from the directory the message is printed in.
-  ## §"the named command must RUN where the message is printed", rule 2:
-  ## "spell out the location flag", because `repro flake refresh-lock`
-  ## resolves a bare invocation against the current directory.
+  ## The ONE command that reconciles ONE row — a single command line, spelled
+  ## so it runs unchanged from anywhere, including from the directory the
+  ## message is printed in. §"the named command must RUN where the message is
+  ## printed", rule 2: "spell out the location flag", because
+  ## `repro flake refresh-lock` resolves a bare invocation against the current
+  ## directory.
+  ##
+  ## SINGLE is a hard requirement, not a preference. This string is emitted
+  ## inside backticks for the operator to copy, so anything that is not a
+  ## runnable command line — a parenthesised aside, an "or", a second command
+  ## glued on — becomes `bash: syntax error near unexpected token '('` in the
+  ## hands of the person the message was written for. The alternative remedy a
+  ## BEHIND row also has is returned separately by
+  ## ``flakeReconcileAlternative`` and quoted in its own backticks.
   case row.relation
   of fprBehind:
     # The checkout is the stale half, so the FIRST remedy moves the checkout,
-    # not the lock. Recording a downgrade is still available and named second,
-    # because deliberately testing an older dependency is legitimate (§3.2).
-    "git -C " & row.path & " merge --ff-only " & row.pinnedRev &
-      "  (or, to record the downgrade instead: repro flake refresh-lock " &
-      "--flake=" & flakeRoot & " --workspace-root=" & workspaceRoot & ")"
+    # not the lock.
+    "git -C " & row.path & " merge --ff-only " & row.pinnedRev
   else:
     "repro flake refresh-lock --flake=" & flakeRoot &
       " --workspace-root=" & workspaceRoot
+
+proc flakeReconcileAlternative(row: FlakeOverrideStateRow;
+    flakeRoot, workspaceRoot: string): string =
+  ## The SECOND runnable command a BEHIND row has, and only a behind row.
+  ## Recording a downgrade stays available because deliberately testing an
+  ## older dependency is legitimate (§3.2) — it is named second because a
+  ## checkout behind its pin almost always means the checkout is stale.
+  ## Returned separately so each command is quoted, and pasteable, on its own.
+  if row.relation == fprBehind:
+    "repro flake refresh-lock --flake=" & flakeRoot &
+      " --workspace-root=" & workspaceRoot
+  else:
+    ""
 
 proc flakeRenderDriftReport(state: FlakeOverrideState;
     flakeRoot, workspaceRoot, label: string) =
@@ -56055,7 +56074,9 @@ proc flakeRenderDriftReport(state: FlakeOverrideState;
         "stale rather than that you chose to downgrade, and your dev shell " &
         "is building the OLDER code. This is a warning, not an error: " &
         "deliberately testing an older dependency is legitimate. Reconcile " &
-        "with: `" & flakeReconcileCommand(row, flakeRoot, workspaceRoot) & "`")
+        "with: `" & flakeReconcileCommand(row, flakeRoot, workspaceRoot) &
+        "` — or, to record the downgrade instead, run `" &
+        flakeReconcileAlternative(row, flakeRoot, workspaceRoot) & "`")
     of fprAhead:
       stderr.writeLine(label & ": " & flakeRowSentence(row) &
         " — you are developing; committing here records it in flake.lock.")
@@ -57281,6 +57302,12 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # The command is spelled with BOTH location flags so it runs unchanged from
   # the directory this message is printed in — which is the pushed repo, since
   # the managed pre-push hook `cd`s to the repository root before dispatching.
+  #
+  # EVERY backticked chunk is one runnable command line. A remedy that quoted a
+  # command and a parenthesised alternative inside ONE pair of backticks reads
+  # correctly and produces `bash: syntax error near unexpected token '('` when
+  # the person it was written for pastes it, which is the same class of failure
+  # as printing a command that must be run somewhere else.
   var remedies: seq[string]
   for row in offenders:
     let cmd = flakeReconcileCommand(row, flakeRoot, workspaceRoot)

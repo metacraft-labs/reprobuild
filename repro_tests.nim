@@ -7478,6 +7478,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_a_behind_only_refusal_names_a_pasteable_command.nim",
+    binary: "build/test-bin/t_a_behind_only_refusal_names_a_pasteable_command",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_a_clean_workspace_pushes_without_a_diagnostic.nim",
     binary: "build/test-bin/t_a_clean_workspace_pushes_without_a_diagnostic",
     defines: @[],

@@ -837,6 +837,7 @@ tests/e2e/watch/t_e2e_repro_watch.nim	nim	8
 tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim	nim	2
 tests/e2e/watch/t_repro_watch_infers_tool_provisioning.nim	nim	2
 tests/e2e/watch/t_repro_watch_unknown_target_diagnostic.nim	nim	1
+tests/integration/t_a_behind_only_refusal_names_a_pasteable_command.nim	nim	1
 tests/integration/t_a_clean_workspace_pushes_without_a_diagnostic.nim	nim	1
 tests/integration/t_a_commit_that_moves_no_sibling_does_not_touch_the_lock.nim	nim	1
 tests/integration/t_a_dirty_sibling_leaves_the_lock_alone.nim	nim	1
