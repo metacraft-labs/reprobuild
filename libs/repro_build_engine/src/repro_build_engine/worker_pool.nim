@@ -7,14 +7,24 @@
 ## it serially on the scheduler's single poll loop. The spawn was buying
 ## concurrency. This module buys it back for the price of a thread handoff.
 ##
-## TP-1 IS THE POOL AND NOTHING ELSE. ``finishMonitor`` does NOT run here yet —
-## that is TP-2, and it has its own unsolved problem (``MonitorHandle`` is
-## non-copyable AND ``createThread``'s ``param`` is not ``sink``, so a handle
-## cannot be handed to a worker at all; 16 of DH-2's 19 attacks were refused by
-## the compiler for exactly this reason). What ships here is the pool, its
-## shutdown discipline, its backpressure, and ONE tenant: HM-5's depfile flush,
-## absorbed from ``monitor_flush.nim`` rather than left beside it as a second
-## bespoke thread.
+## WHAT SHIPS HERE is the pool, its shutdown discipline, its backpressure, and
+## its tenant table. TWO tenants use it today: HM-5's depfile flush
+## (``monitor_flush.nim``, absorbed from a bespoke thread by TP-1) and TP-2's
+## ``finishMonitor`` (the TP-2 block in ``repro_build_engine.nim``, which
+## lives there rather than in a leaf module of its own because
+## ``t_every_launch_path_is_monitored`` requires every ``finishMonitor``
+## call site — and every import of ``io_mon`` — to be in that one file).
+##
+## TP-2 SOLVED THE HANDOFF PROBLEM THIS HEADER USED TO CALL UNSOLVED, and it
+## did so WITHOUT relaxing anything. ``MonitorHandle`` is still non-copyable
+## and ``createThread``'s ``param`` is still not ``sink`` — 16 of DH-2's 19
+## attacks are still refused by the compiler, and TP-2's own probes re-check
+## that against its carrier. The way out was that this pool never hands a
+## worker a ``createThread`` payload in the first place: a job is a ``ptr`` to
+## an intrusive node in ``allocShared0`` memory, so a handle is MOVED into the
+## node on one thread and MOVED out of it on another, and a copy is refused at
+## every step. See the TP-2 block's header for the LF-2 argument in
+## full, and for the one rule of this module that tenant has to break.
 ##
 ## NOTHING GARBAGE-COLLECTED CROSSES THE BOUNDARY, AND THAT IS PROVED BY THE
 ## COMPILER RATHER THAN ASSERTED HERE.
@@ -50,23 +60,27 @@
 ## descriptors 0/1/2 and sets ``umask(0022)`` around a hosted spawn, and its
 ## doc-comment says in so many words that this is safe only while the engine is
 ## single-threaded and that a worker thread is the first thing to break it.
-## It still holds, and it holds for a REASON that is a property of today's one
-## tenant rather than of the pool:
+## It still holds, and it holds for REASONS that are properties of the tenants
+## rather than of the pool — so EVERY NEW TENANT OWES THIS PARAGRAPH AN ANSWER:
 ##
-##   * ``dup2`` on 0/1/2 — the flush worker opens NOTHING. io-mon creates the
-##     scratch file; the worker renames it. ``dup2`` never leaves a standard
-##     descriptor closed, so there is no window in which an ``open`` here could
-##     be handed 1 or 2.
-##   * ``umask(0022)`` — the worker creates no file, so no mode is decided
-##     inside the window.
+##   * ``dup2`` on 0/1/2 — ``dup2`` never leaves a standard descriptor closed,
+##     so there is no window in which an ``open`` on a worker could be handed
+##     1 or 2. The flush worker opens nothing at all (io-mon creates the
+##     scratch file; the worker renames it). The FINISH worker does create a
+##     file — io-mon's canonical iomon — at an absolute path the scheduler
+##     chose, which is safe for the reason just given.
+##   * ``umask(0022)`` — the flush worker creates no file, so no mode is
+##     decided inside the window. The finish worker can create one inside it,
+##     and the consequence is bounded and declared in
+##     the TP-2 block's header: 0022 is the canonical mask this
+##     repository pins for every spawned tool, so a depfile created inside the
+##     window is masked MORE canonically, never less.
 ##
-## A FUTURE TENANT THAT OPENS OR CREATES A FILE RE-OPENS BOTH QUESTIONS. That
-## is the concrete obligation this module hands to whoever adds the second
-## tenant; it is not a style note.
-##
-## THE WORKERS NEVER WRITE TO ``stdout`` OR ``stderr``, for the same reason:
-## a diagnostic emitted inside the redirect window would land in some action's
-## captured output. Failures come back as outcomes.
+## THE WORKERS NEVER WRITE TO ``stdout``, and write to ``stderr`` on exactly
+## one error-only path (io-mon's ``MonitorHandle`` destructor warning, declared
+## in the TP-2 block). The reason for the rule is that a diagnostic
+## emitted inside the redirect window would land in some action's captured
+## output. Failures come back as outcomes.
 
 import std/[cpuinfo, locks, os, strutils]
 
@@ -78,8 +92,8 @@ const
     ## ``seq`` so this module keeps no GC'd global at all (see the header).
 
   MaxEnginePoolTenants* = 8
-    ## Fixed tenant table, same reason. Today there is one tenant; TP-2 adds
-    ## the monitor finish and P5 may add a chain provider.
+    ## Fixed tenant table, same reason. Two tenants today — HM-5's depfile
+    ## flush and TP-2's monitor finish — and P5 may add a chain provider.
 
   EnginePoolWorkersEnvVar* = "REPROBUILD_ENGINE_POOL_WORKERS"
   EnginePoolQueueLimitEnvVar* = "REPROBUILD_ENGINE_POOL_QUEUE_LIMIT"
@@ -237,8 +251,8 @@ proc registerEnginePoolTenant*(name: string): EnginePoolTenant =
 proc defaultWorkerCount(): int =
   ## SIZING, and the number is a floor rather than a guess at the optimum.
   ##
-  ## The work a tenant puts here is post-exit: HM-5's publication today, and
-  ## TP-2's ``finishMonitor`` next, whose §4.1 ``/proc`` sweep cannot run until
+  ## The work a tenant puts here is post-exit: HM-5's publication and TP-2's
+  ## ``finishMonitor``, whose §4.1 ``/proc`` sweep cannot run until
   ## the monitored root has exited. Its natural concurrency is therefore the
   ## number of actions finishing at once, which is bounded by the build's
   ## parallelism — but this pool is a process-global started lazily on first

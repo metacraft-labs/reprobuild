@@ -1,5 +1,5 @@
-import std/[algorithm, json, options, os, osproc, net, nativesockets, sets, streams, strtabs,
-    strutils, tables, times]
+import std/[algorithm, json, locks, monotimes, options, os, osproc, net,
+    nativesockets, sets, streams, strtabs, strutils, tables, times]
 
 # The OS is reached through a named symbol list on both platforms, never
 # wholesale. ``std/posix`` exports ``fork`` / ``execvp`` / ``posix_spawn``
@@ -57,12 +57,23 @@ import repro_build_engine/action_extension
 # the scheduler. Read its header before changing anything here that touches
 # ``depTempPath`` / ``depDestPath``.
 import repro_build_engine/monitor_flush
-# Engine-Threadpool TP-1: the flush above is one TENANT of the engine's worker
-# pool, not a thread of its own. The scheduler needs only the pool's
-# whole-pool drain here; every flush-shaped call goes through
-# ``monitor_flush``. Imported narrowly so the pool's shared-memory helpers
-# (``sharedDup`` / ``sharedFree``) do not enter this module's namespace.
-from repro_build_engine/worker_pool import awaitEnginePoolIdle
+# Engine-Threadpool TP-1/TP-2: the flush above is one TENANT of the engine's
+# worker pool, not a thread of its own, and TP-2's monitor finish is the
+# second. The flush's tenancy is entirely inside ``monitor_flush``, so the
+# scheduler needed only the pool's whole-pool drain from here and the import
+# was narrowed to it — deliberately, so the pool's shared-memory helpers did
+# not enter this module's namespace.
+#
+# THAT NARROWING IS GONE, and the reason is a gate rather than a preference.
+# TP-2's tenant has to name ``MonitorHandle`` and CALL ``finishMonitor``, and
+# ``t_every_launch_path_is_monitored`` requires both to live in THIS module —
+# so the tenant is written below (see the TP-2 block above
+# ``InProcessMonitorHostSupported``) and it needs the pool's job header, its
+# submit, its per-tenant waits and its ``sharedDup`` / ``sharedFree``. What
+# the narrow import bought is preserved by the tenant instead: the only place
+# in this file that touches shared memory is the TP-2 block, and every node it
+# allocates is freed in one proc (``dropMonitorFinishNode``).
+import repro_build_engine/worker_pool
 export action_extension
 
 # M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
@@ -6276,11 +6287,24 @@ proc preparedRunQuotaCommand(action: BuildAction;
 # ``mcIncomplete`` — on identical inputs, with nothing wrong. Finishing on the
 # observing pass pins the window's opening to root-exit DETECTION, so it is
 # one poll interval (~1 ms) after the real exit and does not vary with how
-# many other actions happen to be in flight. What it costs: a monitor whose
-# descendants are still alive blocks this loop for the grace window (500 ms by
-# default) where the spawned form blocked a separate process. That
-# serialisation is real, and it is the price of the evidence agreeing with the
-# reference rather than with the scheduler's queue depth.
+# many other actions happen to be in flight.
+#
+# ENGINE-THREADPOOL TP-2 CHANGED WHERE THAT WORK RUNS AND NOT WHEN IT STARTS.
+# The pass that first observes the exit now HANDS THE MONITOR OFF to a worker
+# (``handOffMonitorFinish``) instead of finishing it inline; the outcome comes
+# back through ``drainMonitorFinishesInto`` on a later pass. The paragraph
+# above is unchanged in substance and is now MEASURED rather than argued: the
+# interval between the pass's start and the worker entering ``finishMonitor``
+# is stamped on every finish (``MonitorFinishOutcome.openDelayNs``) and
+# ``a pooled finish does not widen the grace window`` asserts it stays under
+# one §4.1 grace, against a one-worker sensitivity control that shows the same
+# instrument reporting a delay of several.
+#
+# What that removed is the cost this comment used to end with: a monitor whose
+# descendants are still alive no longer blocks the loop for the grace window
+# (500 ms by default) — it blocks a worker, exactly as the spawned form
+# blocked a separate process, and the k-th monitor of a pass no longer waits
+# for its k-1 predecessors.
 #
 # AND THIS IS WHY ``BuildEngineConfig.monitorHosting`` DEFAULTS TO ``mhmNever``.
 # The case for hosting is latency: one process spawn per monitored action
@@ -6327,6 +6351,15 @@ proc preparedRunQuotaCommand(action: BuildAction;
 # make hosting viable and not enough to make it preferable. An async flush, or
 # a finish that does not block the poll loop, is the remaining item; re-measure
 # at the parallelism the build actually uses before flipping the default.
+#
+# BOTH OF THOSE HAVE NOW SHIPPED — HM-5's async flush and TP-2's pooled finish
+# — SO THE NUMBERS ABOVE ARE A RECORD OF THE FORM THAT WAS MEASURED AND NOT OF
+# THE ONE THAT SHIPS. They are deliberately left as they were: re-measuring
+# them is Engine-Threadpool TP-3's acceptance, which inherits HM-6's controls
+# (interleaved arms, rotating order, a drift control and a sensitivity
+# control) precisely because a null from a blind instrument is worthless.
+# Nothing here should be read as a claim that hosting is now faster, and
+# `monitorHosting` stays `mhmNever` by default until TP-3 says otherwise.
 #
 # ---------------------------------------------------------------------------
 # In-Process-Monitor-Hosting HM-5 — the depfile flush, and WHAT IT COULD AND
@@ -6395,6 +6428,516 @@ proc preparedRunQuotaCommand(action: BuildAction;
 # and re-encoding on the flush worker was measured and rejected — it saves the
 # ~114 ms of I/O and spends ~470 ms of duplicated CPU per action to do it.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Engine-Threadpool TP-2 — ``finishMonitor`` moved off the scheduler's poll
+# loop and onto the engine's worker pool.
+#
+# WHY THIS LIVES IN THIS MODULE AND NOT IN A LEAF ONE OF ITS OWN, which is
+# the shape HM-5's flush established and the shape this was first written in.
+# The tenant has to name ``MonitorHandle``, ``MonitorRecord`` and
+# ``finishMonitor``, i.e. it has to import ``io_mon`` and CALL a spawn
+# primitive — and ``t_every_launch_path_is_monitored`` forbids both outside
+# this file, twice over and deliberately: ``io_mon`` is a
+# ``SpawnCapabilityModule`` only this module may import, and every call site
+# of ``finishMonitor`` (a ``SpawnPrimitive``, because on the Windows arm the
+# spawn is DEFERRED into it) must be in this module. A leaf module would have
+# reddened that gate on both rules, and the fix for that is not to widen the
+# gate — the audit exists because a launch path outside the enumeration is
+# the failure it was written for. So the tenant sits next to the
+# ``MonitorHostPool`` it serves.
+#
+# WHAT THIS IS FOR. HM-4 measured in-process monitor hosting as a null at the
+# default parallelism and a 1.5-2.4x REGRESSION on cheap actions, and TP-2's
+# milestone attributes both to one cause: the SPAWNED form pays its post-exit
+# evidence assembly inside N concurrent monitor PROCESSES, while the hosted
+# form pays it serially on one poll loop. ``finishMonitor`` costs ~6 ms fixed
+# (the §4.1 ``/proc`` sweep) plus 13-19 µs per record, and a hosted build paid
+# that one action at a time. This module is the second tenant of TP-1's pool
+# and the thing that buys the concurrency back.
+#
+# ===========================================================================
+# THE HANDOFF: OPTION (b), A SHARED-MEMORY CARRIER, AND WHY NOT (a) OR (c)
+# ===========================================================================
+#
+# ``MonitorHandle`` cannot cross a thread boundary the obvious way:
+# ``=copy`` is ``{.error.}`` and DH-2's verification measured that even
+# ``createThread(t, worker, move(h))`` is refused, because ``typedthreads``'s
+# ``param`` is not ``sink``. The milestone names three ways out.
+#
+#   (a) THE WORKER OWNS THE HANDLE FOR ITS WHOLE LIFE — ``startMonitor`` on
+#       the worker too, so nothing crosses. REJECTED, and not on taste.
+#       ``startMonitor`` must run inside ``beginMonitorSpawnContext``'s
+#       window (``repro_build_engine.nim``), which ``dup2``s descriptors
+#       0/1/2 onto this action's stdio captures and sets ``umask(0022)``.
+#       Both are PROCESS-global. Opening that window on a worker would make
+#       every OTHER thread's ``stdout``/``stderr`` — the scheduler's own
+#       diagnostics included — land in some action's capture file, and two
+#       workers opening it concurrently would interleave two actions' stdio
+#       irrecoverably. Serialising the window with a lock does not rescue
+#       (a) either: the window would then be held across a spawn while the
+#       main thread is blocked out of its own output. (a) is a redesign of
+#       how a hosted action captures stdio (``posix_spawn`` file actions,
+#       which io-mon does not expose), not a handoff.
+#
+#   (c) MAKE ``param`` ``sink``-COMPATIBLE UPSTREAM. Out of this repository,
+#       and unnecessary: TP-1's pool does not hand a worker a
+#       ``createThread`` payload at all. Its jobs are intrusive nodes in
+#       ``allocShared0`` memory reached through a ``ptr``, so the
+#       ``typedthreads`` limitation is not on this path.
+#
+#   (b) A SHARED-MEMORY CARRIER IN ``monitor_flush``'s STYLE. CHOSEN. The
+#       scheduler ``move``s the handle out of its slot and into a node this
+#       module allocates; a worker ``move``s it out of the node and into
+#       ``finishMonitor``; the node carries the evidence back. Nothing is
+#       copied at any step, so the type's refusal is never even approached.
+#
+# ===========================================================================
+# LF-2 IS STILL STRUCTURAL, NOT MERELY UNLIKELY
+# ===========================================================================
+#
+# LF-2 — "a producer never runs without a consumer" — is held by DH-2 through
+# two properties of ``MonitorHandle``, and this module RELAXES NEITHER:
+#
+#   1. ``=copy`` is ``{.error.}``, so two owners of one consumer cannot be
+#      WRITTEN DOWN. That is what makes an orphan unrepresentable rather than
+#      forbidden, and it propagates into this module unchanged: the handle
+#      field of ``MonitorFinishNodeObj`` is reached only by ``move``, and
+#      every alternative — reading it out by value, assigning one node's
+#      handle to another's, taking it as a by-value parameter, or handing it
+#      to ``createThread`` — is a COMPILE ERROR. That is pinned out of
+#      process, by driving the compiler and reading its exit code, in
+#      ``test_monitor_finish_handoff_is_exclusive.nim``: ``compiles()``
+#      cannot see a ``{.error.}`` ``=copy`` (DH-2 correction 3), so an
+#      in-process ``static: doAssert not compiles(…)`` would be a test that
+#      cannot fail.
+#
+#   2. ``=destroy`` runs ``endMonitor`` — reap the root, THEN release the
+#      consumer. Unchanged, and it is what makes every exit path from this
+#      module safe rather than merely intended. The carrier is
+#      ``allocShared0`` memory, whose deallocation runs NO destructor, so
+#      ``dropMonitorFinishNode`` below ``move``s the handle into an ordinary
+#      Nim binding and lets THAT die — the destructor runs on the ordinary
+#      binding, exactly as it does for a handle a scheduler slot drops. A
+#      node is destroyed through that one proc and no other, so the "the
+#      handle field was forgotten" defect is not reachable by adding an exit
+#      path.
+#
+# The ordering that makes the whole thing safe is unchanged from HM-4's:
+# a job is submitted only AFTER ``pollMonitor`` has answered true, so the
+# monitored root has already been reaped by ``recordRootExit`` before the
+# handle leaves the scheduler's thread. A worker therefore never waits for a
+# root, and ``MonitorHandle.process`` — the only ``ref`` the type carries on
+# an arm that hosts — is already ``nil`` when the handle crosses. (The Windows
+# arm has a second, ``spawnEnv: StringTableRef``; that arm does not host at
+# all, see ``InProcessMonitorHostSupported``.)
+#
+# ===========================================================================
+# THE ONE PLACE THIS MODULE BREAKS TP-1's RULE, AND THE EVIDENCE FOR IT
+# ===========================================================================
+#
+# ``worker_pool.nim``'s header says a ``{.cast(gcsafe).}`` in it would be a
+# defect, and that is still true OF IT. This module needs one, in exactly one
+# place — ``runMonitorFinishJob``'s call to ``finishMonitor`` — because
+# **io-mon's ``finishMonitor`` is not ``gcsafe``** and no amount of care on
+# this side changes that. Measured, not assumed: a ``{.nimcall, gcsafe.}``
+# proc calling it fails ``nim check`` with
+# ``'finishMonitor' is not GC-safe as it calls 'collectMonitorEvidence'``.
+#
+# WHAT THE CAST IS COVERING, ENUMERATED EXHAUSTIVELY RATHER THAN ARGUED. The
+# compiler names only ONE offending global per proc, so reading its warnings
+# is not an enumeration. The set was obtained by CONSTRUCTION instead: a
+# writable copy of the pinned io-mon source, with each global the compiler
+# named turned into a ``{.threadvar.}`` and the check re-run, until the probe
+# compiled clean. Three rounds, three globals, all in io-mon's ``writer.nim``,
+# and all three are PRODUCER-side state that a HOST process never attaches:
+#
+#   1. ``setProducer`` and 2. ``setElemImage`` — reached through
+#      ``settleMonitorDescendants`` → ``waitForLinuxInjectedDescendants`` →
+#      ``appendLauncherEventLoss`` → ``appendFragmentRecord``. Both are read
+#      and written only under ``if setProducerAttached:``, and
+#      ``setProducerAttached`` is set by ``attachDepQueueForShim``, whose only
+#      caller is the SHIM — i.e. code running in the monitored child, not in
+#      the engine. On Linux ``appendLauncherEventLoss`` does not even reach
+#      ``appendFragmentRecord``: it publishes the loss through a
+#      STACK-LOCAL ``SetProducer`` (``emitLauncherLossToSet`` attaches, emits
+#      and detaches) and returns, because ``hostUsesFileFallback`` is
+#      ``not defined(linux)``.
+#   3. ``fragmentRunToken`` — reached through ``mergeFragments`` →
+#      ``closeFragmentSlot`` → ``clearReadingSentinel`` →
+#      ``writeReadTailMarker``, which returns at its FIRST statement unless
+#      ``fragmentSlot.isOpen``. ``fragmentSlot`` is a ``{.threadvar.}``, zero
+#      on a thread that has never opened a fragment, which no engine thread
+#      does. Its only writer is ``setFragmentRunToken``, whose only caller in
+#      the tree is the macOS shim's init.
+#
+# So on the host side none of the three is ever WRITTEN, and the only one
+# that is even read is behind a per-thread gate that is false. The runtime
+# half of that is not left as prose: ``depSetIsActive()`` is io-mon's own
+# exported reading of ``setProducerAttached and setProducer.available``, and
+# the tests assert it is false in the engine's process.
+#
+# Two further procs the compiler flags on this path — ``fragmentPath`` and
+# ``fragmentHandleIsCurrent`` / ``reopenFragmentHandle`` — access no global
+# at all; they are forward-declared without ``gcsafe``, which the analysis
+# treats conservatively. Annotating the three forward declarations and the
+# three globals upstream would let the cast be deleted outright, and that is
+# the io-mon change worth asking for.
+#
+# NOTHING REFERENCE-COUNTED CROSSES, so HM-3's finding does not apply here.
+# ORC's counts are atomic only under ``-d:gcAtomicArc``, and HM-3 shipped a
+# ``ref`` across six threads and got 12 TSAN races on ``nimIncRef``. What
+# crosses this boundary is a ``MonitorHandle`` (strings, a ``seq``, an
+# ``FsSnoopRequest`` of strings, a ``SetHost`` of strings and a ``seq``) and a
+# ``seq[MonitorRecord]`` (``MonitorRecord`` is PODs plus two ``string``s).
+# Strings and seqs are unique-owner value types under ORC with no shared
+# refcount; the one ``ref`` in ``MonitorHandle`` — ``process`` — is ``nil``
+# before the handle crosses, because ``recordRootExit`` closed and cleared it
+# when ``pollMonitor`` observed the exit. Every crossing is a MOVE, so no
+# value is ever reachable from two threads at once.
+#
+# ===========================================================================
+# THE OBLIGATION TP-1 HANDED THE SECOND TENANT, DISCHARGED
+# ===========================================================================
+#
+# ``worker_pool.nim`` states plainly that its ``dup2``/``umask`` reasoning
+# holds because its FIRST tenant creates no file, and that "a future tenant
+# that opens or creates a file re-opens both questions". This tenant does
+# create a file: ``finishMonitor`` writes the canonical iomon through
+# ``writeCanonicalInPlace``. Both questions, answered:
+#
+#   * ``dup2`` on 0/1/2 — ``dup2`` never leaves a standard descriptor
+#     closed, so an ``open`` on a worker inside the window cannot be handed
+#     1 or 2, and the file io-mon writes is named by an absolute path the
+#     scheduler chose. The residual is the OTHER direction: io-mon's
+#     ``=destroy`` writes ONE warning line to ``stderr`` if a dropped handle
+#     cannot be released, and a line emitted inside the window would land in
+#     some action's captured stderr. It is an error-only path that no test
+#     and no normal build reaches; it is DECLARED here rather than hidden.
+#   * ``umask(0022)`` — a depfile io-mon creates while the window is open is
+#     masked with 0022 instead of the ambient mask. 0022 is the canonical
+#     mask this repository pins for every spawned tool (``umaskWrappedArgv``,
+#     M9.R.36.3), so the difference can only ever make the artefact MORE
+#     canonical, never less; and the artefact is a debugging depfile in the
+#     cache root, not a secret. Declared, bounded, and not worth a
+#     process-global lock that would serialise the very spawn this milestone
+#     exists to speed up.
+#
+# LIKE THE FLUSH WORKER, THE FINISH WORKER NEVER WRITES TO ``stdout`` — see
+# above for the single ``stderr`` residual. Failures come back as outcomes.
+#
+# ===========================================================================
+# WHY THE NODE OUTLIVES ITS ``EnginePoolRelease``
+# ===========================================================================
+#
+# TP-1's ``EnginePoolRelease`` is documented as "free the tenant's own node".
+# This tenant's release hook does NOT free it — it hands it to a
+# tenant-owned completed list that the SCHEDULER drains. The reason is the
+# payload: a flush reports one ``cstring``, which the pool's own outcome can
+# carry, while a finish reports a ``seq[MonitorRecord]`` — up to 97 000
+# records and 18 MB for a real ``nim c`` action — that must reach the
+# scheduler as a Nim value without a copy. So the node is the carrier in both
+# directions and the pool's outcome is used only for what it is good at:
+# the pending count that makes ``awaitEnginePoolTenantIdle`` mean something,
+# and the fault attribution.
+#
+# The hook chosen is ``release`` and not the tail of the task, deliberately:
+# ``runOneEnginePoolJob`` calls ``release`` on EVERY path, including after a
+# task raised, so a node cannot be stranded by a fault. That is what keeps
+# the scheduler from waiting forever for a slot whose worker died.
+# ---------------------------------------------------------------------------
+
+
+type
+  MonitorFinishOutcome = object
+    ## One completed ``finishMonitor``, as the SCHEDULER learns about it.
+    actionId: string
+    slot: int
+      ## The ``MonitorHostPool`` slot this finish belongs to. Carried back so
+      ## the scheduler does not have to keep a side table keyed on action id.
+    exitCode: int
+    failure: string
+      ## Empty on success. Non-empty is the same
+      ## ``io-monitor host failed: …`` sentence the serial form produced, so
+      ## the fault surface an action sees is unchanged by where the work ran.
+    records: seq[MonitorRecord]
+      ## The canonical records ``finishMonitor`` returned. MOVED all the way
+      ## from the worker: allocated on the worker's heap, transferred through
+      ## the node, and moved out here. Never copied — a real provider compile
+      ## carries 18 MB of them.
+    openDelayNs: int64
+      ## THE EVIDENCE-TIMING NUMBER, not a performance counter. DH-3/DH-4
+      ## measured that the §4.1 detached-descendant grace window OPENS when
+      ## ``finishMonitor`` runs, so a monitor left sitting grades a descendant
+      ## that dies in the interval ``mcComplete`` where the batch reference
+      ## grades it ``mcIncomplete`` — on identical inputs, with nothing wrong.
+      ## This is the interval between the START of the poll pass that first
+      ## observed the root's exit and the moment the worker entered
+      ## ``finishMonitor``: the amount by which hosting delays the window's
+      ## opening, measured the same way for a pool of one worker and a pool of
+      ## many. It is what
+      ## ``a pooled finish does not widen the grace window`` reads.
+    queueDelayNs: int64
+      ## The handoff alone — submit to worker entry. ``openDelayNs`` minus
+      ## this is the time the poll pass itself took to reach the submit.
+
+  MonitorFinishNode = ptr MonitorFinishNodeObj
+  MonitorFinishNodeObj = object
+    ## One pending finish, in ``allocShared0`` memory.
+    ##
+    ## ``base`` MUST be first: the pool hands a task a ``ptr
+    ## EnginePoolJobObj`` and the task casts it back to this type, which is an
+    ## identity on the address only while the header sits at offset 0. The
+    ## ``static`` assertion below makes a reordering a compile error rather
+    ## than a memory-corruption bug.
+    base: EnginePoolJobObj
+    handle: MonitorHandle
+      ## THE CARRIER. Written once, by ``move``, on the scheduler's thread;
+      ## consumed once, by ``move``, on a worker. Never read by value — that
+      ## is a compile error, and the point (see the header's LF-2 section).
+    nextCompleted: MonitorFinishNode
+    slot: int
+    actionId: cstring
+    failure: cstring
+    records: seq[MonitorRecord]
+    exitCode: int
+    passStartedAtNs: int64
+    submittedAtNs: int64
+    startedAtNs: int64
+
+static:
+  doAssert offsetOf(MonitorFinishNodeObj, base) == 0,
+    "the pool job header must be the first field of MonitorFinishNodeObj"
+
+var finishLock: Lock
+var completedHead: MonitorFinishNode = nil
+var statSamples: int = 0
+var statMaxOpenDelayNs: int64 = 0
+var statMaxQueueDelayNs: int64 = 0
+
+initLock(finishLock)
+
+let monitorFinishTenant = registerEnginePoolTenant("monitor-finish")
+
+proc monotonicNowNs(): int64 =
+  ## The clock BOTH sides of the handoff are stamped with. Monotonic on
+  ## purpose: ``openDelayNs`` is a duration measured across threads, and a
+  ## wall clock that steps backwards would report a negative grace-window
+  ## delay rather than a real one.
+  cast[int64]((getMonoTime() - MonoTime()).inNanoseconds)
+
+proc runMonitorFinishJob(job: EnginePoolJob): cstring {.nimcall, gcsafe.} =
+  ## THE WORK, on a pool worker: consume the handle, produce the evidence.
+  ##
+  ## The ``{.cast(gcsafe).}`` is the one the header enumerates and justifies.
+  ## It is deliberately as SMALL as it can be — it wraps the ``finishMonitor``
+  ## call and nothing else — so that any other global this module ever grew
+  ## would still be caught by the compiler.
+  let node = cast[MonitorFinishNode](job)
+  node.startedAtNs = monotonicNowNs()
+  try:
+    {.cast(gcsafe).}:
+      var outcome = finishMonitor(move(node.handle))
+      node.exitCode = outcome.exitCode
+      # MOVE, not copy: this is the seq ``writeCanonicalInPlace`` just
+      # emitted, and it is the engine's whole evidence source on this path.
+      node.records = move(outcome.depFile.records)
+  except CatchableError as err:
+    # A monitor fault must fail ONE action, never the host. The sentence is
+    # byte-identical to the one the serial form produced, so
+    # ``t_monitor_fault_fails_the_action_not_the_daemon`` keeps its meaning
+    # now that the fault happens on another thread.
+    node.failure = sharedDup("io-monitor host failed: " & err.msg)
+  except Exception as err:
+    # A ``Defect`` under the default ``--panics:off``. The pool would catch
+    # this too and attribute it to the JOB, but a job-level error has no route
+    # into the ACTION's result — so it is caught here, where it becomes the
+    # same action failure any other monitor fault is. Letting the pool have it
+    # would leave the slot finished with exit code 0, i.e. a silently
+    # successful action whose evidence never arrived.
+    node.failure = sharedDup("io-monitor host failed (defect): " &
+      $err.name & ": " & err.msg)
+  # The pool's own outcome carries no error: a finish that failed is not a
+  # POOL fault, it is an ACTION failure, and it travels in ``node.failure``
+  # so the scheduler attributes it to the action exactly as before.
+  nil
+
+proc releaseMonitorFinishJob(job: EnginePoolJob) {.nimcall, gcsafe.} =
+  ## Hand the node to the scheduler rather than freeing it — see the header.
+  ##
+  ## Called on EVERY path, including after ``runMonitorFinishJob`` raised
+  ## something it did not catch (a ``Defect`` under ``--panics:off``), which is
+  ## exactly why the transfer is here and not at the tail of the task: a node
+  ## stranded by a fault would leave the scheduler waiting forever for a slot
+  ## that never finishes.
+  let node = cast[MonitorFinishNode](job)
+  let openDelay = node.startedAtNs - node.passStartedAtNs
+  let queueDelay = node.startedAtNs - node.submittedAtNs
+  acquire(finishLock)
+  node.nextCompleted = completedHead
+  completedHead = node
+  inc statSamples
+  if openDelay > statMaxOpenDelayNs: statMaxOpenDelayNs = openDelay
+  if queueDelay > statMaxQueueDelayNs: statMaxQueueDelayNs = queueDelay
+  release(finishLock)
+
+proc dropMonitorFinishNode(node: MonitorFinishNode) =
+  ## THE ONE PLACE A NODE IS DESTROYED, and the reason it is one place.
+  ##
+  ## ``deallocShared`` runs no destructor, so the ``MonitorHandle`` in the
+  ## node has to be destroyed EXPLICITLY — by moving it into an ordinary Nim
+  ## binding whose scope ends here. For a node whose task completed, that
+  ## handle was already consumed by ``finishMonitor`` and the destructor is a
+  ## no-op; for a node whose task faulted before reaching it, the destructor
+  ## runs ``endMonitor`` (reap the root, THEN release the consumer) and LF-2
+  ## holds on the fault path for the same reason it holds everywhere else.
+  ## Freeing a node anywhere but here is how that would stop being true.
+  block:
+    let orphan = move(node.handle)
+    discard orphan.live
+  # ``move`` leaves the source default-initialised, so nothing below is
+  # holding a payload the deallocation would strand.
+  var records = move(node.records)
+  records.setLen(0)
+  sharedFree(node.actionId)
+  sharedFree(node.failure)
+  deallocShared(node)
+
+proc submitMonitorFinish(actionId: string; slot: int;
+                          handle: sink MonitorHandle;
+                          passStartedAtNs: int64) =
+  ## Hand one finish to the pool. Returns as soon as it is queued.
+  ##
+  ## ``passStartedAtNs`` is the start of the poll pass that OBSERVED the
+  ## root's exit, not the time of this call: what the grace-window property is
+  ## about is how long after the scheduler noticed the window opens, and a
+  ## serial settle loop spends that interval inside its predecessors'
+  ## ``finishMonitor`` calls rather than in a queue. Stamping at the pass makes
+  ## the two shapes measurable on one scale.
+  let node = cast[MonitorFinishNode](allocShared0(sizeof(MonitorFinishNodeObj)))
+  node.slot = slot
+  node.actionId = sharedDup(actionId)
+  node.passStartedAtNs = passStartedAtNs
+  node.submittedAtNs = monotonicNowNs()
+  # THE HANDOFF ITSELF. A move, into zeroed shared memory whose ``=destroy``
+  # for the destination is a no-op on an inactive handle. There is no copy
+  # here and the type would refuse one.
+  node.handle = move(handle)
+  submitEnginePoolJob(monitorFinishTenant, actionId, addr node.base,
+    runMonitorFinishJob, releaseMonitorFinishJob)
+
+proc takeCompleted(alreadyTaken: seq[EnginePoolOutcome] = @[]):
+    seq[MonitorFinishOutcome] =
+  ## SCHEDULER-THREAD ONLY. The ``Table`` below is a local of an ordinary Nim
+  ## proc, not a global a worker could reach, so it does not weaken anything
+  ## the header claims about what crosses the boundary.
+  ##
+  ## The POOL's own outcome list is drained here as well as this module's, for
+  ## two reasons. It should never carry an error — ``runMonitorFinishJob``
+  ## catches both arms itself, precisely so the sentence an action sees is the
+  ## one the serial form produced — but a pool-level fault that WAS somehow
+  ## produced must not be dropped on the floor, and an undrained list would
+  ## otherwise grow one node per monitored action for the length of a build.
+  var poolErrors = initTable[string, string]()
+  for outcome in alreadyTaken:
+    if outcome.error.len > 0:
+      poolErrors[outcome.key] = outcome.error
+  for outcome in drainEnginePoolOutcomes(monitorFinishTenant):
+    if outcome.error.len > 0:
+      poolErrors[outcome.key] = outcome.error
+
+  var head: MonitorFinishNode = nil
+  acquire(finishLock)
+  head = completedHead
+  completedHead = nil
+  release(finishLock)
+
+  # The list is built head-first by the workers, so walking it yields
+  # newest-first; the reversal below puts outcomes in completion order,
+  # because a diagnostic naming several actions should read in the order they
+  # happened.
+  var collected: seq[MonitorFinishOutcome] = @[]
+  var node = head
+  while node != nil:
+    let nxt = node.nextCompleted
+    let actionId = $node.actionId
+    let failure =
+      if node.failure != nil: $node.failure
+      else: poolErrors.getOrDefault(actionId, "")
+    collected.add MonitorFinishOutcome(
+      actionId: actionId,
+      slot: node.slot,
+      exitCode: node.exitCode,
+      failure: failure,
+      records: move(node.records),
+      openDelayNs: node.startedAtNs - node.passStartedAtNs,
+      queueDelayNs: node.startedAtNs - node.submittedAtNs)
+    dropMonitorFinishNode(node)
+    node = nxt
+  result = @[]
+  for i in countdown(collected.len - 1, 0):
+    result.add move(collected[i])
+
+proc drainMonitorFinishes(): seq[MonitorFinishOutcome] =
+  ## Every finish that has COMPLETED since the last drain, without blocking on
+  ## the ones that have not. This is what the scheduler's poll loop calls.
+  takeCompleted()
+
+proc monitorFinishPending(): int =
+  ## Finishes queued or in flight. Zero does NOT mean "drained" — a completed
+  ## node waits on this module's own list until the scheduler takes it.
+  enginePoolPending(monitorFinishTenant)
+
+proc awaitMonitorFinishes(timeoutSeconds = 120.0): seq[MonitorFinishOutcome] =
+  ## Wait for every queued finish and return the outcomes not yet drained.
+  ##
+  ## Called at the end of a build and before a slot is abandoned. The timeout
+  ## is a guard against a worker wedged on a hung filesystem and is generous
+  ## on purpose: a real finish is bounded below by the §4.1 grace window (500
+  ## ms by default) and above by the record count, and a build that has
+  ## already succeeded must not be failed because a depfile merge was slow.
+  # The pool's outcomes are TAKEN by the wait, not left for the drain below,
+  # so they are passed in rather than discarded: a pool-level fault reported
+  # for one of them would otherwise be swallowed by the very call that waited
+  # for it.
+  takeCompleted(awaitEnginePoolTenantIdle(monitorFinishTenant, timeoutSeconds))
+
+proc awaitMonitorFinish(actionId: string; timeoutSeconds = 120.0):
+    seq[MonitorFinishOutcome] =
+  ## Wait until ONE named action's finish has completed, then drain everything
+  ## that has accumulated. Returns early when nothing of this tenant's is in
+  ## flight, for ``awaitEnginePoolOutcome``'s reason: with nothing pending, the
+  ## outcome was either drained by an earlier call or never queued, and
+  ## waiting longer would answer neither.
+  takeCompleted(
+    awaitEnginePoolOutcome(monitorFinishTenant, actionId, timeoutSeconds))
+
+proc resetMonitorFinishStats*() =
+  ## Forget the handoff timings. Exists so a test that measures one build's
+  ## grace-window delay does not read another's.
+  acquire(finishLock)
+  statSamples = 0
+  statMaxOpenDelayNs = 0
+  statMaxQueueDelayNs = 0
+  release(finishLock)
+
+proc monitorFinishStats*(): tuple[samples: int; maxOpenDelayNs: int64;
+                                  maxQueueDelayNs: int64] =
+  ## The timing evidence, accumulated across every finish since the last
+  ## reset. Read by ``a pooled finish does not widen the grace window``.
+  acquire(finishLock)
+  result = (samples: statSamples, maxOpenDelayNs: statMaxOpenDelayNs,
+            maxQueueDelayNs: statMaxQueueDelayNs)
+  release(finishLock)
+
+proc monitorFinishTenantIsAttachedToADepSet*(): bool =
+  ## io-mon's OWN reading of the two globals the ``{.cast(gcsafe).}`` above
+  ## covers — ``setProducerAttached and setProducer.available``. It must be
+  ## false in a HOST process, which is the runtime half of the header's
+  ## argument that the cast covers nothing a worker can race. Exported so a
+  ## test asserts it rather than a comment claiming it. Deliberately io-mon's
+  ## predicate and not a reimplementation of it.
+  depSetIsActive()
 
 const InProcessMonitorHostSupported* = defined(linux) or defined(macosx)
   ## Windows is deliberately excluded. ``pollMonitor`` BLOCKS on that arm
@@ -6514,6 +7057,18 @@ type
     ## it is non-copyable and this record is not.
     inUse: bool
     finished: bool
+    actionId: string
+      ## TP-2 — the key this slot's finish is submitted to the pool under, and
+      ## what the returning outcome is checked against before it is applied.
+      ## Kept on the slot because the handoff outlives the scheduler local the
+      ## id used to come from.
+    finishPending: bool
+      ## TP-2 — this slot's handle has been MOVED into a pool job and the
+      ## finish has not come back yet. Distinct from ``finished`` (the outcome
+      ## has been applied) and from ``handleLive`` (the slot still owns a
+      ## consumer): between the handoff and the drain the slot owns NEITHER a
+      ## handle nor an outcome, and a slot in that state must not be released,
+      ## re-polled, or handed off a second time.
     handleLive: bool
       ## This slot's ``MonitorHandle`` still owns a consumer and a monitored
       ## tree — i.e. it has NOT been moved into ``finishMonitor`` and has not
@@ -6752,7 +7307,14 @@ proc releaseMonitorHostSlot(pool: var MonitorHostPool; slot: int) =
   ## ordering is what makes an orphaned producer unrepresentable, and it is
   ## also what would otherwise let a still-running child hold the build open
   ## for as long as it liked.
+  ## TP-2 — a slot whose finish is IN FLIGHT is not releasable and this is not
+  ## the place that waits for it. The two callers that can reach such a slot
+  ## (``finishMonitorHostAction`` and ``abandonMonitorHost``) call
+  ## ``awaitMonitorHostFinished`` first; the guard below is what makes a third
+  ## caller that forgot fail loudly — by leaving the slot allocated — instead
+  ## of recycling a slot whose ``MonitorHandle`` is living inside a pool job.
   if slot < 0 or slot >= pool.records.len: return
+  if pool.records[slot].finishPending: return
   if pool.records[slot].handleLive:
     when defined(posix):
       let pid = pool.records[slot].rootPid
@@ -6793,6 +7355,10 @@ proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
   var slot = -1
   try:
     slot = allocMonitorHostSlot(pool)
+    # TP-2 — the key this slot's finish will be submitted under, recorded
+    # before anything can raise so the failure paths below release a slot the
+    # drain can still recognise.
+    pool.records[slot].actionId = action.id
     pool.records[slot].stdoutPath = outPath
     pool.records[slot].stderrPath = errPath
     pool.records[slot].depTempPath = depTemp
@@ -6812,41 +7378,93 @@ proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
     endMonitorSpawnContext(ctx)
   slot
 
-proc completeMonitorHost(pool: var MonitorHostPool; slot: int) =
-  ## Consume the handle and record the outcome. ``finishMonitor`` waits for the
-  ## root itself when it has not exited — exactly what ``runMonitored`` relies
-  ## on — so there is no spin here.
+proc handOffMonitorFinish(pool: var MonitorHostPool; slot: int;
+                          passStartedAtNs: int64) =
+  ## Engine-Threadpool TP-2 — GIVE the handle to a pool worker, which runs
+  ## ``finishMonitor`` and hands the evidence back.
+  ##
+  ## THIS IS THE WHOLE MILESTONE, and what it replaces is a synchronous
+  ## ``finishMonitor`` call on this line. ``finishMonitor`` costs ~6 ms fixed
+  ## (the §4.1 ``/proc`` sweep) plus 13-19 µs per record, and the settle pass
+  ## below runs over EVERY hosted monitor, so a serial finish made the k-th
+  ## monitor of a pass wait for its k-1 predecessors. The spawned form paid
+  ## the same work inside N concurrent monitor PROCESSES; this buys that
+  ## concurrency back for the price of a thread handoff.
+  ##
+  ## THE MOVE IS THE HANDOFF AND IT IS ALSO THE SAFETY ARGUMENT.
+  ## ``MonitorHandle``'s ``=copy`` is ``{.error.}`` (DH-2), so "the scheduler
+  ## kept a second owner" is not a state that can be WRITTEN DOWN, here or in
+  ## ``monitor_finish``. ``move`` leaves the slot's handle inactive, which is
+  ## why ``handleLive`` drops on this line and not on the outcome's return.
+  ##
+  ## ``passStartedAtNs`` is stamped by the caller at the START of the settle
+  ## pass, not here: see ``MonitorFinishOutcome.openDelayNs`` for why the
+  ## grace window's opening is measured from there.
   if slot < 0 or slot >= pool.records.len: return
-  if not pool.records[slot].inUse or pool.records[slot].finished: return
-  # ``finishMonitor`` consumes the handle whether it returns or raises, so the
-  # slot stops owning one the moment the ``move`` is evaluated.
+  if not pool.records[slot].inUse: return
+  if pool.records[slot].finished or pool.records[slot].finishPending: return
   pool.records[slot].handleLive = false
-  try:
-    var outcome = finishMonitor(move(pool.handles[slot]))
-    pool.records[slot].exitCode = outcome.exitCode
-    # HM-5 — take the canonical records ``finishMonitor`` already built. This
-    # is a MOVE, not a decode and not a copy: ``depFileFromOwnedRecords`` owns
-    # the very seq ``writeCanonicalInPlace`` just emitted, so the engine's
-    # evidence source costs nothing here and the ``.iomon`` stops being read
-    # back at all. ``outcome`` dies at the end of this statement list, so
-    # nothing retains the ``MonitorDepFile`` object — the rule
-    # ``foldMonitorDepFileEvidence``'s doc-comment states is unchanged.
-    pool.records[slot].records = move(outcome.depFile.records)
-  except CatchableError as err:
+  pool.records[slot].finishPending = true
+  submitMonitorFinish(pool.records[slot].actionId, slot,
+    move(pool.handles[slot]), passStartedAtNs)
+
+proc applyMonitorFinishOutcome(pool: var MonitorHostPool;
+                               outcome: var MonitorFinishOutcome) =
+  ## Fold one returned finish back into its slot. The scheduler's poll loop
+  ## calls this immediately after the settle pass, so a monitor is reapable on
+  ## the very next iteration once its worker is done.
+  ##
+  ## The action id is checked as well as the slot index because slots are
+  ## RECYCLED. It cannot mismatch today — a slot with ``finishPending`` set is
+  ## never released, which is the invariant ``releaseMonitorHostSlot`` and
+  ## ``abandonMonitorHost`` maintain — and the check is here so that a future
+  ## release path which broke it would produce a diagnostic rather than
+  ## silently attribute one action's evidence to another.
+  let slot = outcome.slot
+  if slot < 0 or slot >= pool.records.len: return
+  if not pool.records[slot].inUse: return
+  if pool.records[slot].actionId != outcome.actionId: return
+  pool.records[slot].finishPending = false
+  if outcome.failure.len > 0:
     # A monitor fault must fail ONE action, never the host — see
     # tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim,
     # which states that as a property of the engine precisely so it keeps its
-    # meaning now that the process boundary is gone.
-    pool.records[slot].failure = "io-monitor host failed: " & err.msg
+    # meaning now that the process boundary is gone. The sentence is built on
+    # the worker so it is byte-identical to the one the serial form produced.
+    pool.records[slot].failure = outcome.failure
+  else:
+    pool.records[slot].exitCode = outcome.exitCode
+    # HM-5 — take the canonical records ``finishMonitor`` already built. This
+    # is a MOVE, not a decode and not a copy: it is the very seq
+    # ``writeCanonicalInPlace`` emitted, carried across the handoff without a
+    # copy, so the engine's evidence source costs nothing here and the
+    # ``.iomon`` stops being read back at all.
+    pool.records[slot].records = move(outcome.records)
   pool.records[slot].finished = true
 
-proc settleMonitorHost(pool: var MonitorHostPool; slot: int): bool =
-  ## Advance one hosted monitor without blocking, and FINISH it the moment its
-  ## root has exited. See the header for why finishing is not deferred to the
-  ## point where the scheduler reaps the action.
+proc drainMonitorFinishesInto(pool: var MonitorHostPool) =
+  ## ``mitems`` and a ``var`` parameter, not a ``for`` value: the outcome
+  ## carries the action's whole record set — 18 MB for a real provider
+  ## compile — and it is MOVED into the slot. A by-value loop variable would
+  ## copy it.
+  var outcomes = drainMonitorFinishes()
+  for outcome in outcomes.mitems:
+    applyMonitorFinishOutcome(pool, outcome)
+
+proc settleMonitorHost(pool: var MonitorHostPool; slot: int;
+                       passStartedAtNs: int64): bool =
+  ## Advance one hosted monitor without blocking, and HAND ITS FINISH OFF the
+  ## moment its root has exited. See the header for why the handoff is not
+  ## deferred to the point where the scheduler reaps the action.
+  ##
+  ## Returns whether the slot is REAPABLE, which since TP-2 is no longer the
+  ## same statement as "its root has exited": a handed-off monitor is neither
+  ## polled again nor finished here, and becomes reapable when its outcome is
+  ## drained.
   if slot < 0 or slot >= pool.records.len: return false
   if not pool.records[slot].inUse: return false
   if pool.records[slot].finished: return true
+  if pool.records[slot].finishPending: return false
   var exited = false
   try:
     exited = pollMonitor(pool.handles[slot])
@@ -6856,8 +7474,30 @@ proc settleMonitorHost(pool: var MonitorHostPool; slot: int): bool =
     return true
   if not exited:
     return false
-  completeMonitorHost(pool, slot)
-  true
+  handOffMonitorFinish(pool, slot, passStartedAtNs)
+  false
+
+proc awaitMonitorHostFinished(pool: var MonitorHostPool; slot: int) =
+  ## Block until this slot's handed-off finish has come back, then fold it in.
+  ##
+  ## The scheduler does not normally reach this: it selects a hosted action
+  ## only once ``records[slot].finished`` is set, which the poll loop's drain
+  ## does. It exists for the two paths that do not go through the poll loop —
+  ## reaping and abandonment — so neither can free a slot whose handle is
+  ## living inside a pool job.
+  if slot < 0 or slot >= pool.records.len: return
+  if not pool.records[slot].inUse: return
+  if not pool.records[slot].finishPending: return
+  var named = awaitMonitorFinish(pool.records[slot].actionId)
+  for outcome in named.mitems:
+    applyMonitorFinishOutcome(pool, outcome)
+  if pool.records[slot].finishPending:
+    # The named outcome was not among what the wait returned. Fall back to the
+    # whole-tenant drain, which is bounded by the same guard and cannot leave
+    # the slot half-owned.
+    var rest = awaitMonitorFinishes()
+    for outcome in rest.mitems:
+      applyMonitorFinishOutcome(pool, outcome)
 
 proc readCapturedStdio(path: string; limit: int): string =
   ## Read back one of the in-process host's stdio captures, applying the same
@@ -6900,7 +7540,14 @@ proc finishMonitorHostAction(pool: var MonitorHostPool; id: string; slot: int;
   ## and the publication is queued on the flush worker, so by the time this
   ## returns the scheduler owns everything it needs and the file has not
   ## necessarily landed.
-  completeMonitorHost(pool, slot)
+  ##
+  ## TP-2 — the finish itself already ran, on a pool worker, and its outcome
+  ## was folded into the slot by the poll loop's drain. The wait below is
+  ## therefore normally a no-op; it is here because the scheduler is not the
+  ## only way a hosted action gets reaped, and a slot released while its
+  ## handle is inside a pool job would be a use-after-free of the very handle
+  ## LF-2 is about.
+  awaitMonitorHostFinished(pool, slot)
   hostedRecords = @[]
   result = ActionResult(
     id: id,
@@ -6937,7 +7584,7 @@ proc finishMonitorHostAction(pool: var MonitorHostPool; id: string; slot: int;
       removeFile(extendedPath(record.depTempPath))
     except CatchableError:
       discard
-  # ``completeMonitorHost`` above normally leaves the handle dead, but not when
+  # The handoff above normally leaves the handle dead, but not when
   # ``settleMonitorHost`` already marked the slot finished on a POLL failure —
   # that path never consumed it. ``releaseMonitorHostSlot`` is what closes that
   # gap; going through it is why this is not a bare record reset.
@@ -6975,8 +7622,17 @@ proc abandonMonitorHost(pool: var MonitorHostPool; slot: int) =
   ## its scratch depfile was never queued for publication and nothing else will
   ## ever look at it. Remove it here; a cancelled build must not leave the
   ## depfile directory growing dot-files nobody collects.
+  ##
+  ## TP-2 — a monitor whose finish is already on a worker is WAITED FOR rather
+  ## than abandoned. It cannot be killed out from under the worker (the root
+  ## has already exited; that is the precondition for the handoff) and its
+  ## handle is not the scheduler's to drop any more, so the only honest
+  ## teardown is to let the finish complete and fold its outcome in. That is
+  ## also what keeps the scratch depfile removal below correct: the finish is
+  ## what creates it.
   if slot < 0 or slot >= pool.records.len: return
   if not pool.records[slot].inUse: return
+  awaitMonitorHostFinished(pool, slot)
   let temp = pool.records[slot].depTempPath
   if temp.len > 0:
     try:
@@ -9900,9 +10556,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # died in between would be graded ``mcComplete`` here and
         # ``mcIncomplete`` by the reference form — a divergence produced by
         # queue depth rather than by anything about the action.
+        #
+        # Engine-Threadpool TP-2 — the settle pass now HANDS OFF rather than
+        # finishing. What has not changed is WHEN: the handoff still happens
+        # on the pass that first observes the exit, and the pass's own start
+        # is the instant every finish's grace-window delay is measured from
+        # (``MonitorFinishOutcome.openDelayNs``). What has changed is that the
+        # k-th monitor of a pass no longer waits for its k-1 predecessors'
+        # ``finishMonitor`` calls before its own window opens, which is the
+        # direction the evidence wants: waiting longer errs toward
+        # ``mcComplete``.
+        let settlePassStartedAtNs = monotonicNowNs()
         for j in 0 ..< running.len:
           if running[j].processKind == rpkMonitorHost:
-            discard settleMonitorHost(monitorHosts, running[j].monitorSlot)
+            discard settleMonitorHost(monitorHosts, running[j].monitorSlot,
+              settlePassStartedAtNs)
+        # Fold back every finish a worker has completed. Done in its own pass,
+        # immediately after the handoffs, so a monitor whose worker was
+        # already done becomes reapable on this iteration rather than the next.
+        drainMonitorFinishesInto(monitorHosts)
         # Cheap inline-only checks first: queued/failed inline-runquota
         # entries are not handle-based and the OS won't wake us for them.
         # Inline-RunQuota processes do their own pipe / handle wait in
@@ -10152,6 +10824,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             asWouldRun, asFailed, asBlocked}:
           inc completed
   finally:
+    # Engine-Threadpool TP-2 — every handed-off finish comes back BEFORE the
+    # teardown below touches a slot. A worker owns a ``MonitorHandle`` for the
+    # length of its job, so abandoning a slot whose finish is in flight would
+    # be a release of a handle this thread does not own; and the finish is
+    # what creates the scratch depfile ``abandonMonitorHost`` removes, so
+    # abandoning first would leave one behind. This runs on the unwinding path
+    # too, which is the case that makes it load-bearing rather than tidy.
+    var pendingFinishes = awaitMonitorFinishes()
+    for outcome in pendingFinishes.mitems:
+      applyMonitorFinishOutcome(monitorHosts, outcome)
     for item in running.mitems:
       case item.processKind
       of rpkInlineRunQuotaPending:
@@ -10212,9 +10894,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # depfile never appeared and the dot-prefixed scratch file was left
     # behind.
     #
-    # A no-op today beyond the flush, because the flush is the pool's only
-    # tenant; it is here so that adding TP-2's monitor finish does not depend
-    # on someone remembering to add a drain.
+    # TP-2's monitor finish is the second tenant and is already drained above
+    # — by ``awaitMonitorFinishes``, which has to run BEFORE the teardown
+    # because it also folds evidence back into slots. This line is what keeps
+    # the guarantee whole for the tenant AFTER that one.
     awaitEnginePoolIdle()
   finishStat("repro scheduler total", totalStart)
   finishMetadataCacheStats(fileMetadataCache)

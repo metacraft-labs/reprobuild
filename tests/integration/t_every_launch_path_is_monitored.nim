@@ -1695,7 +1695,31 @@ suite "every_launch_path_is_monitored":
       "startMonitorHost(monitorHosts, plan.action, config,") == 1
     check countOccurrences(src, "startMonitor(monitorHostRequest(") == 1
     check countOccurrences(src, "pollMonitor(pool.handles[slot])") == 1
-    check countOccurrences(src, "finishMonitor(move(pool.handles[slot]))") == 1
+
+    # ``finishMonitor`` NO LONGER RUNS ON THE POLL LOOP — Engine-Threadpool
+    # TP-2 — so the single pin that used to read
+    # ``finishMonitor(move(pool.handles[slot]))`` is now TWO, one at each end
+    # of the handoff. That is not a weakening: the property this seam is for
+    # is that a hosted monitor has exactly one place where the handle leaves
+    # the scheduler's slot and exactly one place where it is consumed, and
+    # splitting the pin says so at both ends instead of at the one point
+    # where they used to coincide.
+    #
+    # A THIRD ``move`` OUT OF THE SLOT would be a second owner of one
+    # consumer — the LF-2 orphan shape — and a second ``finishMonitor`` call
+    # would be a second route to a ``MonitorResult``, which is the shape DH-3
+    # made unreachable so the §4.1 descendant guard cannot be skipped. Either
+    # moves one of these numbers.
+    #
+    # The slot's handle leaves it along exactly TWO paths and they are pinned
+    # separately rather than as a total, so one turning into the other is a
+    # red test: the HANDOFF (TP-2) and the TEARDOWN
+    # (``releaseMonitorHostSlot``, HM-4's kill-then-drop, which is what makes
+    # a cancelled build reap the root before releasing the consumer).
+    check countOccurrences(src, "move(pool.handles[slot]), passStartedAtNs)") == 1
+    check countOccurrences(src, "let handle = move(pool.handles[slot])") == 1
+    check countOccurrences(src, "move(pool.handles[slot])") == 2
+    check countOccurrences(src, "finishMonitor(move(node.handle))") == 1
 
     # Every spawn site NAMED IN THE TABLE really exists in the engine —
     # so a row cannot describe a path that was deleted or renamed.
