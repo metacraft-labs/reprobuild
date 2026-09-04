@@ -287,8 +287,38 @@ when defined(linux) or defined(macosx):
       ## against the CLI wrapper on a real parallel build: indistinguishable
       ## at the default parallelism (median ratio 1.013 against a +-4%
       ## within-arm spread, reproduced independently at 0.988 against a
-      ## wider one) and measurably SLOWER on cheap actions — 1.5-2.4x on one
-      ## machine, 1.1-1.9x on a more loaded one, always in that direction.
+      ## wider one) and measurably SLOWER on cheap actions.
+      ##
+      ## THE CHEAP-ACTION BAND HM-6 MEASURED IS RETIRED, and citing it here
+      ## would now be citing a number that has been superseded by the very
+      ## work that was aimed at it. HM-6 read 1.5-2.4x on one machine and
+      ## 1.1-1.9x on a more loaded one, always slower. Engine-Threadpool TP-2
+      ## moved `finishMonitor` off the scheduler's poll loop and onto the
+      ## worker pool, which is exactly the serialisation that band was
+      ## measuring, and TP-3 re-measured the same harness with a third arm
+      ## that reconstructs the pre-TP-2 serial shape in the SAME binary
+      ## (`REPROBUILD_FORCE_SERIAL_MONITOR_FINISH`). Pooled, on cheap actions,
+      ## `hosted/wrapped` is **0.942 at parallelism 8** — 10 of 17 rounds
+      ## below 1.0 — and **0.643 at parallelism 1**. The pool roughly HALVES
+      ## the hosted form's cost (`pooled/serial` 0.492 at p=8, 16 of 17 rounds
+      ## below 1.0), which buys parity with the wrapper rather than a win.
+      ##
+      ## THE DEFAULT IS STILL `mhmNever`, and the reasons are now these
+      ## rather than a slowdown band:
+      ##   * NO MEASURED GAIN ON REAL WORK. On the real build the null holds:
+      ##     12 paired rounds at p=8 gave a median `hosted/wrapped` of 1.008
+      ##     with the sign splitting 6/12, against a drift control that itself
+      ##     moved 835-1543 ms per action. Defaulting a mechanism on for a
+      ##     result indistinguishable from zero is not a trade, it is a bet.
+      ##   * A RESIDUAL LOSS ABOVE p=8. 13-21% at higher parallelism
+      ##     (`hosted/wrapped` 1.129 at p=16), so the direction reverses
+      ##     exactly where a build is widest.
+      ##   * L1-ONLY REACHABILITY. Production takes L3/L3b, which cannot host
+      ##     at all, so turning the default on changes nothing where the
+      ##     product actually runs and changes everything where it does not.
+      ##   * THE UNBOUNDED STDIO-CAPTURE PEAK below, which no amount of
+      ##     scheduling fixes.
+      ##
       ## So the
       ## default is a decision, not an accident — and it is a decision no
       ## test could see being reversed. `t_every_launch_path_is_monitored`
