@@ -12359,11 +12359,41 @@ proc ensureExecutable(path: string) =
   setFilePermissions(extendedPath(path), permissions)
 
 proc writeExecutableIfChanged(path, content: string): bool =
+  ## Replace `path` ATOMICALLY, because the file being replaced is very often
+  ## the script currently executing.
+  ##
+  ## A hook dispatcher repairs itself: `repro hooks ensure` runs from inside a
+  ## hook, notices drift, and rewrites the hook. Writing in place truncated
+  ## and rewrote the SAME INODE while `sh` still had it open, and `sh` reads a
+  ## script incrementally by byte offset -- so it resumed at its old offset
+  ## inside new content and mis-parsed. The observed symptom is a hook dying
+  ## with a syntax error on a line whose syntax is fine:
+  ##
+  ##   .git/hooks/post-checkout: line 23: syntax error near unexpected token `then'
+  ##
+  ## THE COST IS NOT COSMETIC. A hook that dies mid-run has not done its job,
+  ## and git propagates its failure -- a failed post-checkout makes
+  ## `git checkout -b` exit non-zero, which silently breaks any `&&` chain
+  ## built on it. This function's own repair of a checkout hook did exactly
+  ## that to a commit while the fix was being written.
+  ##
+  ## A rename swaps the directory entry and leaves the running shell's inode
+  ## untouched, so the executing script reads to its end from the bytes it
+  ## started with and the next invocation gets the new file. The temp file is
+  ## a sibling so the rename stays within one filesystem, and it is made
+  ## executable BEFORE the rename so no observer can see a non-executable
+  ## hook at the final path.
   if fileExists(extendedPath(path)) and readFile(extendedPath(path)) == content:
     ensureExecutable(path)
     return false
-  writeFile(extendedPath(path), content)
-  ensureExecutable(path)
+  let staging = path & ".repro-staged-" & $getCurrentProcessId()
+  writeFile(extendedPath(staging), content)
+  ensureExecutable(staging)
+  try:
+    moveFile(extendedPath(staging), extendedPath(path))
+  except OSError:
+    discard tryRemoveFile(extendedPath(staging))
+    raise
   true
 
 proc removeFileIfExists(path: string): bool =
