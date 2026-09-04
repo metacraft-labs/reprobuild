@@ -6912,6 +6912,27 @@ proc awaitMonitorFinish(actionId: string; timeoutSeconds = 120.0):
   takeCompleted(
     awaitEnginePoolOutcome(monitorFinishTenant, actionId, timeoutSeconds))
 
+var serialFinishKnob = -1
+
+proc monitorFinishForcedSerial(): bool =
+  ## MEASUREMENT SEAM, Engine-Threadpool TP-3 — when
+  ## ``REPROBUILD_FORCE_SERIAL_MONITOR_FINISH=1`` is set, the settle pass
+  ## BLOCKS on each handed-off finish instead of letting the pass continue.
+  ## That reproduces the pre-TP-2 shape (the k-th monitor of a pass waits for
+  ## its k-1 predecessors) so the two hosted forms can be measured against
+  ## each other in one binary, which is the only way an A/B is not also a
+  ## comparison of two builds.
+  ##
+  ## IT IS NOT A PRODUCT SWITCH. Nothing in ``apps/`` or ``libs/`` sets it and
+  ## no default reaches it: the environment is read ONCE, lazily, and the
+  ## result is a single ``bool`` load on the one line per action that can see
+  ## it. The wrapped path never constructs a ``MonitorHostPool`` at all, so
+  ## the seam is unreachable there rather than merely inert.
+  if serialFinishKnob < 0:
+    serialFinishKnob =
+      if getEnv("REPROBUILD_FORCE_SERIAL_MONITOR_FINISH") == "1": 1 else: 0
+  serialFinishKnob == 1
+
 proc resetMonitorFinishStats*() =
   ## Forget the handoff timings. Exists so a test that measures one build's
   ## grace-window delay does not read another's.
@@ -7475,6 +7496,13 @@ proc settleMonitorHost(pool: var MonitorHostPool; slot: int;
   if not exited:
     return false
   handOffMonitorFinish(pool, slot, passStartedAtNs)
+  if monitorFinishForcedSerial():
+    # TP-3 arm 2 — see ``monitorFinishForcedSerial``. Reached once per hosted
+    # action and only when the seam is armed.
+    var named = awaitMonitorFinish(pool.records[slot].actionId)
+    for outcome in named.mitems:
+      applyMonitorFinishOutcome(pool, outcome)
+    return pool.records[slot].finished
   false
 
 proc awaitMonitorHostFinished(pool: var MonitorHostPool; slot: int) =

@@ -20,6 +20,37 @@ sign-stability contrast, not the band. `monitorHosting` stays
 evidence comparison are recorded under HM-6 in
 `reprobuild-specs/In-Process-Monitor-Hosting.milestones.org`.
 
+## TP-3 acceptance: does a POOLED finish change that answer?
+
+`tp3_run.sh` drives the same harness with a **third arm** for
+Engine-Threadpool TP-3:
+
+| arm | what it is |
+|---|---|
+| `wrapped` | the spawned `repro internal io monitor` form — today's default, and the **drift control**, since it contains none of the code under test |
+| `hosted-serial` | in-process hosting with the settle pass BLOCKING on each finish, i.e. hosting as it was before TP-2 |
+| `hosted-pooled` | in-process hosting with TP-2's worker tenancy |
+
+All three are one binary and one graph. `hosted-serial` differs from
+`hosted-pooled` by one environment variable —
+`REPROBUILD_FORCE_SERIAL_MONITOR_FINISH=1`, a measurement seam read once by
+`repro_build_engine`'s `monitorFinishForcedSerial` — and `wrapped` differs
+from both by `monitorHosting`. The order ROTATES by round rather than
+alternating, so over three rounds each arm runs first, second and third once.
+
+**Measured answer.** On the real build the null holds: 12 paired rounds at
+parallelism 8 gave a median `hosted-pooled/wrapped` of 1.008 with the sign
+splitting 6/12, against a wrapped arm that itself moved 835–1543 ms per
+action. On **cheap** actions the picture does move, and that is the milestone's
+own claim: `hosted-pooled/hosted-serial` was 0.492 (16/17 rounds below 1.0) at
+parallelism 8 and 0.474 (14/15) at 16 — the pool roughly HALVES the hosted
+form's cost. It buys parity with the wrapper rather than a win:
+`hosted-pooled/wrapped` was 0.942 at parallelism 8 and 1.129 at 16.
+Pool width was swept 1/2/4/8/16 and the knee is at 4, which is what the
+engine already defaults to.
+
+Read the ratios and the sign stability, never the band.
+
 ### What it runs
 
 The actions are the real compile commands reprobuild's own build issues, read

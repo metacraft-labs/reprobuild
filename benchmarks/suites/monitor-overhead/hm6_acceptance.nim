@@ -168,9 +168,17 @@ when isMainModule:
   let outPath = argValue("out")
   if runRoot.len == 0 or outPath.len == 0:
     quit("--runroot and --out are required", 2)
-  let ccFlags = realCompileFlags(repoRoot)
-
-  let hosted = arm == "hosted"
+  # Engine-Threadpool TP-3 — a THIRD arm. ``hosted-serial`` is the same
+  # hosted configuration with the engine's measurement seam armed, so the
+  # settle pass blocks on each finish exactly as it did before TP-2 moved
+  # ``finishMonitor`` onto a worker. One binary, one graph, three arms: the
+  # only differences are one config field and one environment variable, so an
+  # arm-to-arm comparison is not also a comparison of two builds.
+  let hosted = arm.startsWith("hosted")
+  if arm == "hosted-serial":
+    putEnv("REPROBUILD_FORCE_SERIAL_MONITOR_FINISH", "1")
+  else:
+    delEnv("REPROBUILD_FORCE_SERIAL_MONITOR_FINISH")
   let workRoot = runRoot / "work"
   let cacheRoot = runRoot / "cache"
   createDir(workRoot)
@@ -194,6 +202,15 @@ when isMainModule:
   # both modes and a reader comparing two records is not comparing two
   # schemas.
   let trivial = argValue("work", "real") == "trivial"
+  # READ ONLY WHERE IT IS USED. `repro.json`'s `compile` array is EMPTY after
+  # an incremental `just build` that had no translation unit to recompile, and
+  # `realCompileFlags` refuses to guess — correctly, since a benchmark that
+  # invented a flag list would be measuring something other than the build.
+  # Hoisting the call above this line made that refusal fail the SENSITIVITY
+  # CONTROL too, which does not compile anything and needs no flags. Measured:
+  # every trivial arm-round aborted with `has no non-empty compile array`
+  # after a second `just build`.
+  let ccFlags = if trivial: @[] else: realCompileFlags(repoRoot)
   let sources = corpus(repoRoot, want, stride)
   var actions: seq[BuildAction] = @[]
   for i, src in sources:
@@ -229,6 +246,7 @@ when isMainModule:
     monitorHosting:
       if hosted: mhmWhereSupported else: mhmNever)
 
+  resetMonitorFinishStats()
   let loadBefore = loadAvg()
   let pidsBefore = livePids()
   let t0 = epochTime()
@@ -236,6 +254,7 @@ when isMainModule:
   let wallMs = (epochTime() - t0) * 1000.0
   let loadAfter = loadAvg()
   let pidsAfter = livePids()
+  let finishStats = monitorFinishStats()
 
   # Every action monitored, and monitored COMPLETELY. Counted rather
   # than asserted so a shortfall is reported with its reason instead of
@@ -307,6 +326,10 @@ when isMainModule:
     "readTheSource": readTheSource,
     "completeEvidence": complete,
     "hostCaptureFiles": hostCaptureFiles(cacheRoot),
+    "poolWorkers": getEnv("REPROBUILD_ENGINE_POOL_WORKERS", "<default>"),
+    "finishSamples": finishStats.samples,
+    "finishMaxOpenDelayMs": float(finishStats.maxOpenDelayNs) / 1_000_000.0,
+    "finishMaxQueueDelayMs": float(finishStats.maxQueueDelayNs) / 1_000_000.0,
     "runQuotaBypassed": run.runQuotaBypassed,
     "loadBefore": loadBefore,
     "loadAfter": loadAfter,
@@ -328,6 +351,9 @@ when isMainModule:
       ffDecimal, 2), "ms",
     " ok=", succeeded, " dep=", withDepfile, " reads=", withReads,
     " src=", readTheSource, " hostCaptures=", hostCaptureFiles(cacheRoot),
+    " finish=", finishStats.samples,
+    " openMax=", formatFloat(float(finishStats.maxOpenDelayNs) / 1e6,
+      ffDecimal, 1), "ms",
     " load=", loadBefore, "->", loadAfter, " pids=", pidsBefore
   if failures.len > 0:
     echo "FAILURES(", failures.len, "): ", failures[0 .. min(2, failures.high)].join(" | ")
