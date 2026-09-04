@@ -309,11 +309,66 @@ else:
     ## above are what io-mon produced, this is what the engine made of them,
     ## and the two arms reach it by different folds (from records on the
     ## hosted path, from the file on the wrapped one).
+    ##
+    ## FIELD BY FIELD FROM THE TYPE, AND EVERY SHAPE THE TYPE CAN HAVE.
+    ## This walk used to assume every `PathSetEvidence` field was a
+    ## `seq[string]` — it ran `normalisePath(entry, workDir)` over `value`
+    ## unconditionally. That assumption stopped being true when `afebdcd2`
+    ## added `entropyObservations: seq[EntropyObservation]` and
+    ## `entropyObservability: EntropyObservability`, and the walk stopped
+    ## COMPILING, which is the only reason anybody noticed.
+    ##
+    ## THE TEMPTING FIX IS THE DEFECT. Writing `when value is seq[string]`
+    ## with a bare `else: discard` would compile immediately and would drop
+    ## both new fields out of the comparison silently — a field the
+    ## comparison ignores, which is In-Process-Monitor-Hosting P6 (a
+    ## `monitorProbes` difference nothing rendered) and P10
+    ## (`monitorDirectoryEnumerations` rendered by nothing at all) for the
+    ## third time in this campaign, and the second time in this one type.
+    ## So the `else` arm is a COMPILE ERROR instead: a twelfth field of a
+    ## shape this walk has never seen cannot enter the type without someone
+    ## deciding here how the two arms should be compared for it. A red
+    ## build is a decision that has to be made; a silent `discard` is one
+    ## that never is.
+    ##
+    ## WHAT EACH ARM IS WORTH ON THIS FIXTURE, said plainly, because
+    ## rendering is not comparing:
+    ##   * the `seq[string]` arms — non-vacuous, the fixture populates
+    ##     `declaredInputs`/`declaredOutputs`/`monitorReads`/`monitorWrites`
+    ##     /`monitorProbes`/`monitorEnvReads` and the case asserts the
+    ##     marker is among the reads before it asserts the arms agree;
+    ##   * `entropyObservability` — a SCALAR, and a decided one
+    ##     (`entObserved`/`entNotObserved` rather than the `entUnknown`
+    ##     zero) whenever the capture carried a backend profile, so it
+    ##     compares an answer against an answer;
+    ##   * `entropyObservations` — VACUOUS on this fixture, which reads no
+    ##     randomness: both arms render `[]`. It is rendered anyway so the
+    ##     field cannot be silently dropped, and it is NOT claimed here that
+    ##     the two arms were shown to attribute entropy identically. They
+    ##     were not. Producing the class would need a fixture that draws
+    ##     randomness, and `t_every_launch_path_is_monitored` records the
+    ##     same limitation for the same reason.
     var lines: seq[string] = @[]
     for name, value in evidence.fieldPairs:
       var entries: seq[string] = @[]
-      for entry in value:
-        entries.add normalisePath(entry, workDir)
+      when value is seq[string]:
+        for entry in value:
+          entries.add normalisePath(entry, workDir)
+      elif value is seq[EntropyObservation]:
+        # BOTH components. `EntropyCallerOrigin` is the axis on which a
+        # hosted monitor (io-mon running inside the ENGINE process) could
+        # plausibly attribute the same read differently from a monitor in a
+        # process of its own, so rendering only `source` would drop exactly
+        # the difference this case exists to find.
+        for entry in value:
+          entries.add entry.source & "@" & $entry.origin
+      elif value is EntropyObservability:
+        entries.add $value
+      else:
+        {.error: "renderEvidence has no rendering for a new " &
+          "PathSetEvidence field of this shape. Add an arm — do NOT add " &
+          "an `else: discard`, which is how a field stops being compared " &
+          "without anything going red (In-Process-Monitor-Hosting P6/P10).".}
       entries.sort()
       lines.add name & "=[" & entries.join(" ") & "]"
     lines.join("\n")

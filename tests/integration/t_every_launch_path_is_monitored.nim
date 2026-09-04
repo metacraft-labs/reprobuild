@@ -411,6 +411,27 @@ const EnumeratedLaunchPaths: array[4, LaunchPath] = [
 ## ``monitorDirectoryEnumerations=[]`` and the comparison cannot fail for
 ## the class it names. So the fixture PRODUCES the class, and the case
 ## asserts the enumeration is present before it asserts the sets agree.
+##
+## AND IT DRAWS RANDOMNESS, for the third time the same argument, over the
+## eleventh field. ``PathSetEvidence`` grew ``entropyObservations`` and
+## ``entropyObservability`` with ``afebdcd2`` and ``monitorEnvReads`` with
+## ``ba86940a``; all three were populated by the engine on every launch
+## path and rendered by nothing here until now. Two of the three already
+## arose from what the fixture did anyway — ``$PWD`` is read twice, and a
+## backend profile is in every capture — but an entropy observation is not
+## something a file-copying fixture produces by accident, so the fixture
+## asks for eight bytes from ``getentropy`` on purpose.
+##
+## ``getentropy`` and not ``getrandom`` or ``arc4random_buf``: it is the
+## one entry point BOTH shims hook by name (Linux's ENTROPY-PARITY set in
+## ``shim/linux_preload.nim``, macOS's ``repro_hook_getentropy``), it is
+## declared in ``<unistd.h>`` on Linux and ``<sys/random.h>`` on macOS with
+## nothing else needed, and it does not depend on a glibc new enough for
+## the BSD ``arc4random*`` family. The bytes are discarded; the OBSERVATION
+## is the point, and its ATTRIBUTION is the part no other field can carry —
+## the hosted arm runs io-mon inside the ENGINE process, which is the only
+## arrangement where "was this read made by the main image" could plausibly
+## be answered differently for the same call.
 const FixtureSource = r"""
 #include <dirent.h>
 #include <fcntl.h>
@@ -420,6 +441,9 @@ const FixtureSource = r"""
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/random.h>
+#endif
 
 /* Enumerate a directory the way a globbing tool does: opendir() plus
    readdir() to exhaustion. The entries are not used — the OBSERVATION is
@@ -468,6 +492,16 @@ static void probe_ancestors(const char *path) {
 
 int main(int argc, char **argv) {
   if (argc != 4) return 64;
+  /* Draw randomness so `entropyObservations` is a set with something in
+     it. io-mon records this as `mrNonDeterministic` and the engine folds it
+     into `PathSetEvidence.entropyObservations` WITH its caller origin; the
+     bytes are never used. Without it that field renders `[]` on every
+     launch path and the identity comparison below cannot fail for a
+     difference in it. See the header. */
+  {
+    unsigned char entropy[8];
+    if (getentropy(entropy, sizeof(entropy)) != 0) return 83;
+  }
   probe_ancestors(getenv("PWD"));
   /* The action's own work root. Enumerated BEFORE the output is written so
      the observation does not depend on this action's own side effects. */
@@ -1412,6 +1446,58 @@ proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
   of lpInlineRunQuota, lpInlineRunQuotaQueued:
     result.inlineRunQuota = true
 
+proc comparableInterestPolicy(): DependencyGatheringPolicy =
+  ## EVERY LAUNCH PATH ASKS IO-MON FOR THE SAME EVENT CATEGORIES, and this
+  ## is not a formality — it is the workaround for a live engine defect,
+  ## recorded here with the measurement that promoted it.
+  ##
+  ## `DependencyGatheringPolicy` defaults `captureNonDeterminism` to false on
+  ## the stated grounds that an edge depends on the files it reads and not on
+  ## the clock or the environment a tool happens to touch, so the engine asks
+  ## for `{ecFileDeps, ecProcessTree, ecLibraryLoads}` only. That reduction is
+  ## carried on `FsSnoopRequest.interest` and TAKES EFFECT on the HOSTED
+  ## path. On the WRAPPED path the engine can only seed
+  ## `REPRO_MONITOR_INTEREST` into the action's environment, and io-mon's
+  ## `composeInjectionEnv` OVERWRITES that variable with its own request's
+  ## interest — which for `repro internal io monitor` is `FullInterest`,
+  ## because `parseRun` takes no interest flag. So the engine's reduction is
+  ## live on one path and dead on the other. That is Engine-Threadpool
+  ## FINDING 2, and `test_monitor_finish_is_pooled` carries the same
+  ## workaround for the same reason.
+  ##
+  ## WHAT IS NEW HERE, AND IT CONTRADICTS THAT FINDING'S OWN CONCLUSION.
+  ## FINDING 2 recorded the divergence as visible in the published `.iomon`
+  ## RECORD STREAM and NOT in `PathSetEvidence`, because the two records it
+  ## measured — `mrSysctlRead` and `mrTimeRead` — "produce no path, so they
+  ## land in no field HM-6's field-by-field comparison has", leaving the
+  ## divergence "latent in the artefact rather than live in the dependency
+  ## set". `ba86940a` ended that: `mrEnvRead` is in the SAME `ecNonDeterminism`
+  ## category and now lands in `PathSetEvidence.monitorEnvReads`, which
+  ## `cacheEnvInputs` folds into the ACTION CACHE KEY.
+  ##
+  ## MEASURED, on this fixture, with this opt-in REMOVED and everything else
+  ## unchanged: L1 (hosted) renders `monitorEnvReads=[]` while L2, L3 and L3b
+  ## (wrapped) render `monitorEnvReads=[PWD]`, and the identity comparison
+  ## fails on that one line. The fixture reads `$PWD` — so the two hosting
+  ## mechanisms key the SAME action on DIFFERENT environment sets, and
+  ## hosting is the side that loses the entry. The same filter applies to
+  ## `mrNonDeterministic`, so a hosted action that read entropy would have
+  ## its records dropped by interest while the backend profile still reported
+  ## `entObserved` — "observable, and nothing observed" — which is the input
+  ## `applyEntropyBlessingPolicy` reads to decide an action is deterministic
+  ## enough to publish.
+  ##
+  ## This file cannot fix that; the fix is either an interest flag on the
+  ## monitor CLI (io-mon's side) or a decision that the hosted path must ask
+  ## for `ecNonDeterminism` unconditionally, and both are engine/spec changes
+  ## rather than test changes. What it does instead is make all four paths
+  ## ask for the same thing, so the identity comparison is about WHO HOSTS
+  ## and not about who asked for which categories — and record the
+  ## measurement above so the divergence is reported rather than absorbed.
+  result = automaticMonitorGatheringPolicy()
+  result.captureNonDeterminism = true
+  result.captureIpc = true
+
 proc monitoredFixtureAction(id, fixtureBin, marker, outPath, workRoot: string;
                             holdMs: int; cpuMilli: uint32): BuildAction =
   action(id, [fixtureBin, marker, outPath, $holdMs],
@@ -1421,7 +1507,7 @@ proc monitoredFixtureAction(id, fixtureBin, marker, outPath, workRoot: string;
     commandStatsId = id,
     cpuMilli = cpuMilli,
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
-    dependencyPolicy = automaticMonitorGatheringPolicy())
+    dependencyPolicy = comparableInterestPolicy())
 
 proc mentionsPath(paths: seq[string]; wanted: string): bool =
   for p in paths:
@@ -1477,6 +1563,22 @@ proc resultById(run: BuildRunResult; id: string): ActionResult =
 ## ---------------------------------------------------------------------
 var recordedEvidence: seq[tuple[label, shape: string]] = @[]
 
+proc renderEntropyObservations(observations: seq[EntropyObservation]):
+    seq[string] =
+  ## `entropyObservations` is the one `PathSetEvidence` field that is not a
+  ## `seq[string]`, so it needs its own flattening before the generic
+  ## `render` below can put it in the shape.
+  ##
+  ## BOTH COMPONENTS, not just the source. `EntropyCallerOrigin` is exactly
+  ## the axis on which the two hosting mechanisms could plausibly disagree —
+  ## the hosted arm runs io-mon INSIDE the engine process, so an attribution
+  ## that leaned on "which image is the main one" could grade the same read
+  ## differently there than in a separate monitor process. Rendering only
+  ## `source` would drop that difference on the floor, which is the P6/P10
+  ## defect restated in a field whose elements happen to be objects.
+  for observation in observations:
+    result.add observation.source & "@" & $observation.origin
+
 proc evidenceShape(res: ActionResult;
                    subs: seq[(string, string)]): string =
   proc render(name: string; paths: seq[string]): string =
@@ -1504,7 +1606,56 @@ proc evidenceShape(res: ActionResult;
     # compare equal. Both halves; see `FixtureSource` and the presence pin
     # in `evidence is identical across launch paths`.
     render("monitorDirectoryEnumerations", ev.monitorDirectoryEnumerations),
-    render("diagnostics", ev.diagnostics)
+    render("diagnostics", ev.diagnostics),
+
+    # THE THREE FIELDS `PathSetEvidence` GREW AFTER P10, and the ninth /
+    # tenth / eleventh instance of the same shape. `monitorEnvReads` arrived
+    # with ba86940a (observed environment reads folded into the cache key)
+    # and `entropyObservations` / `entropyObservability` with afebdcd2 (the
+    # entropy blessing policy). All three were populated by the engine on
+    # every launch path and rendered by nothing here, so a cross-path
+    # difference in any of them was invisible to the comparison below — the
+    # exact hole P10 closed one field over. The `fieldPairs` coverage
+    # assertion in `evidence is identical across launch paths` is what named
+    # them; it reddened at 3 unrendered fields the moment they landed.
+    #
+    # WHAT EACH RENDER LINE IS ACTUALLY WORTH, stated per field rather than
+    # claimed collectively, because a render line over a class the fixture
+    # never produces compares `[]` with `[]` and is vacuous:
+    #
+    #   * `monitorEnvReads` — NOT vacuous. The fixture already reads `$PWD`
+    #     (twice, for the ancestor walk and the enumeration), so the class
+    #     arises on every path and the presence pin below requires `PWD` to
+    #     be in it before the identity comparison runs.
+    #
+    #   * `entropyObservability` — NOT vacuous, and it is a SCALAR, so
+    #     "produced" means "not the zero value". `entUnknown` is the
+    #     deliberate zero of that enum ("no `mrBackendProfile` record, so no
+    #     claim either way"), and the pin below requires the rendered value
+    #     to be something else — i.e. that the capture really carried a
+    #     backend profile on every launch path and this line is comparing a
+    #     decided value rather than an unset one. It is rendered in the same
+    #     `<field>=[...]` shape as the sequences so `shapeHasField` and
+    #     `shapeList` can read it back like any other line.
+    #
+    #   * `entropyObservations` — NOT vacuous, and it is the one that had to
+    #     be measured rather than reasoned about. The draft of this comment
+    #     said the class could not be produced here, because an unblessed
+    #     action that reads entropy collects `applyEntropyBlessingPolicy`'s
+    #     "action-cache publish skipped" diagnostic and that would cost the
+    #     `diagnostics=[]` pin. FALSE: the policy returns at
+    #     `if not action.cacheable`, and `monitoredFixtureAction` leaves
+    #     `cacheable` at its `false` default. `FixtureSource` therefore
+    #     draws eight bytes from `getentropy` — io-mon hooks it on BOTH
+    #     platforms (`shim/linux_preload.nim`'s ENTROPY-PARITY set,
+    #     `shim/macos_interpose.nim`'s `repro_hook_getentropy`) and emits
+    #     `mrNonDeterministic` — and all five recorded actions render
+    #     `entropyObservations=[getentropy@ecoUnattributed]` with
+    #     `diagnostics=[]` intact. The presence pin below is what says so.
+    render("monitorEnvReads", ev.monitorEnvReads),
+    render("entropyObservations", renderEntropyObservations(
+      ev.entropyObservations)),
+    render("entropyObservability", @[$ev.entropyObservability])
   ].join("\n")
 
 proc shapeList(shape, field: string): seq[string] =
@@ -1679,12 +1830,35 @@ suite "every_launch_path_is_monitored":
     check countOccurrences(src,
       "monitoredAction(action, config, cacheRoot,") == 1
 
-    # SEAM 2 (argv+env contract): one definition + FOUR uses. Three are the
-    # non-deferred launch paths (L3b reuses L3's spec); the fourth is the
-    # in-process host, which takes the same contract with the shell umask
-    # wrapper switched off — see ``preparedRunQuotaCommand``'s doc-comment
-    # for why that wrapper cannot survive into a monitored tree.
-    check countOccurrences(src, "preparedRunQuotaCommand(") == 5
+    # SEAM 2 (argv+env contract): one definition, one forward declaration,
+    # and FIVE uses — SEVEN occurrences. Three uses are the non-deferred
+    # launch paths (L3b reuses L3's spec); the fourth is the in-process host,
+    # which takes the same contract with the shell umask wrapper switched
+    # off — see ``preparedRunQuotaCommand``'s doc-comment for why that
+    # wrapper cannot survive into a monitored tree.
+    #
+    # THE FIFTH USE DOES NOT SPAWN, and a bare total of 7 would not say so.
+    # `947c50fc` (the executed binary is a cache input) added
+    # `executedToolImagePath`, which builds a command spec for ONE purpose:
+    # to read the `PATH=` entry out of `command.env` so a bare command name
+    # can be resolved the way the launcher would resolve it. Nothing is
+    # started from it. It also had to be forward-declared, because
+    # `executedToolImagePath` is defined some 2400 lines above the real
+    # definition — and a declaration is not a use at all.
+    #
+    # So the count is DECOMPOSED rather than bumped. The point of this pin is
+    # to notice new launch plumbing, and a single number that went 5 -> 7 can
+    # absorb a genuine new spawn site the next time it moves. The three
+    # assertions below cannot: a new spawn site raises the total without
+    # raising either of the two named counts, and reddens here.
+    check countOccurrences(src, "preparedRunQuotaCommand(") == 7
+    # Definition + forward declaration. Both are spelled `proc`; neither is
+    # a use.
+    check countOccurrences(src, "proc preparedRunQuotaCommand(") == 2
+    # The non-spawning use, discriminated by the pointer form of `config`
+    # that only `executedToolImagePath` has — every launch site holds the
+    # config by value or by ref, never as `config[]`.
+    check countOccurrences(src, "preparedRunQuotaCommand(action, config[],") == 1
 
     # SEAM 3 (HM-4, hosting): the engine becomes io-mon's host in exactly
     # one proc, called from exactly one site, and the three decomposed
@@ -2525,15 +2699,43 @@ suite "every_launch_path_is_monitored":
               "] the shared evidence shape does not read the marker:\n",
               shape
           check "<marker>" in reads
+
+          # THE ACTION'S OWN EXECUTED IMAGE IS A READ, and it is REQUIRED to
+          # be one rather than merely tolerated.
+          #
+          # `947c50fc` made the binary an action executes one of its cache
+          # inputs, and the shape this fixture is in is that commit's `argv0`
+          # row — the row it measured as `cdHit, STALE` before the fix, and
+          # the row `mrProcessExec` CANNOT cover: io-mon's `execve` hook is
+          # installed by the preloaded shim's constructor, which runs after
+          # the root image is already mapped, so the launcher contributes
+          # `executedToolImagePath` instead. That is why `<temp>/fixture`
+          # appears here and why it appears on all five recorded actions.
+          #
+          # The exemption below is therefore written as a PIN first. Listing
+          # the fixture binary as "explained" and stopping there would let
+          # the contribution disappear — a launcher that stopped recording
+          # its root image, or a launch path that never got it — with this
+          # case still green, which is the whole failure mode this block
+          # exists to prevent. Presence is asserted BEFORE the entry is
+          # excused, exactly as the marker is.
+          if "<temp>/fixture" notin reads:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape does not read the action's own ",
+              "executed image, so the launcher's `executedToolImagePath` ",
+              "contribution is not reaching this launch path:\n", shape
+          check "<temp>/fixture" in reads
+
           var unexplained: seq[string] = @[]
           for entry in reads:
-            if entry != "<marker>" and not looksLikeSharedObject(entry):
+            if entry != "<marker>" and entry != "<temp>/fixture" and
+                not looksLikeSharedObject(entry):
               unexplained.add entry
           if unexplained.len > 0:
             echo "[", recordedEvidence[0].label,
               "] the shared evidence shape reads paths that are neither ",
-              "the fixture's marker nor a mapped shared object: ",
-              unexplained.join(" "), "\n", shape
+              "the fixture's marker, the fixture BINARY, nor a mapped ",
+              "shared object: ", unexplained.join(" "), "\n", shape
           check unexplained.len == 0
           check shape.contains("\nmonitorWrites=[<out>]\n")
           check shape.contains("\ndiagnostics=[]")
@@ -2603,6 +2805,105 @@ suite "every_launch_path_is_monitored":
               "`monitorDirectoryEnumerations` below is vacuous:\n", shape
           check enumerations.len > 0
           check "<work>" in enumerations
+
+          # AND THE OBSERVED-ENVIRONMENT SET IS NOT EMPTY — the ninth field,
+          # the same pin, the same reason.
+          #
+          # `monitorEnvReads` is the NAMES of the variables the action was
+          # observed reading, and since `ba86940a` those names (paired with
+          # the values the action saw) are part of the ACTION CACHE KEY. A
+          # launch path that composed a different environment, or whose
+          # capture lost `mrEnvRead` records, would serve results made under
+          # a different `$PWD` — and it would be invisible to the comparison
+          # below if every path rendered `[]`.
+          #
+          # The class already arises, and it arises for a reason that is not
+          # decoration: `FixtureSource` reads `$PWD` — not `getcwd()` — twice
+          # over, once to seed the ancestor walk and once to seed the
+          # enumeration, precisely because `PWD` is the variable P6 measured
+          # the two hosting mechanisms disagreeing about. So this pin and the
+          # `monitorProbes` pin above are two independent views of the same
+          # engine promise: the probes say the walk HAPPENED, this says the
+          # variable that drove it was OBSERVED and is in the key.
+          let envReads = shapeList(shape, "monitorEnvReads")
+          if "PWD" notin envReads:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape records no read of `PWD`, so ",
+              "the cross-path comparison of `monitorEnvReads` below is ",
+              "vacuous:\n", shape
+          check envReads.len > 0
+          check "PWD" in envReads
+
+          # AND THE ENTROPY OBSERVABILITY IS A DECIDED VALUE, which is what
+          # "the class arises" means for a field that is a SCALAR rather
+          # than a set.
+          #
+          # `entUnknown` is the deliberate zero of `EntropyObservability`:
+          # "the capture carries no `mrBackendProfile` record, so it makes
+          # no claim either way". A `PathSetEvidence` that was never folded
+          # starts there, so `entropyObservability=[entUnknown]` is this
+          # field's spelling of `[]` — rendered, compared, and empty of
+          # information. Requiring a decided value is what makes the render
+          # line above worth its place: it says every launch path's capture
+          # really carried a backend profile and the comparison is between
+          # two answers rather than between two absences.
+          #
+          # NOT pinned to `entObserved` specifically. Which answer a host
+          # gives is a property of the shim's declared capabilities, not of
+          # the launch path, and this file's subject is whether the paths
+          # AGREE — the identity comparison below is what enforces that.
+          let observability = shapeList(shape, "entropyObservability")
+          if observability != @["entObserved"] and
+              observability != @["entNotObserved"]:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape carries no decided entropy ",
+              "observability (", observability.join(" "), "), so the ",
+              "cross-path comparison of that field below is vacuous:\n",
+              shape
+          check observability.len == 1
+          check observability[0] != $entUnknown
+
+          # AND THE ENTROPY OBSERVATION SET IS NOT EMPTY — the eleventh
+          # field, the last one, and the one this pin was nearly written to
+          # excuse.
+          #
+          # THE EXCUSE WAS DRAFTED AND THEN MEASURED FALSE, which is the only
+          # reason it is not here. The reasoning was: an unblessed action
+          # that reads entropy collects `applyEntropyBlessingPolicy`'s
+          # "action-cache publish skipped" diagnostic, so making the fixture
+          # draw randomness would cost the `diagnostics=[]` pin above, and
+          # the render line would have to stand as the vacuous half. That is
+          # wrong, and the compiler was not going to say so. That policy
+          # opens with `if not action.cacheable: return`, and
+          # `monitoredFixtureAction` does not pass `cacheable`, whose default
+          # is false — so the diagnostic is never reached for this action.
+          # Measured, not reasoned: with the `getentropy` call below in
+          # `FixtureSource`, all five recorded actions carry
+          # `entropyObservations=[getentropy@ecoUnattributed]` AND
+          # `diagnostics=[]`, and this case is 11/0/0.
+          #
+          # So the class is produced, exactly as `monitorProbes` and
+          # `monitorDirectoryEnumerations` produce theirs, and the render
+          # line above is not comparing `[]` with `[]`.
+          #
+          # WHAT IT COVERS THAT NOTHING ELSE DOES. `EntropyCallerOrigin` is
+          # attribution, and the hosted arm runs io-mon INSIDE the engine
+          # process — the one arrangement in which "was the return address in
+          # the main image" has a different answer for the same read. A
+          # hosted path that graded the fixture's own `getentropy` as
+          # anything but the program's own use would feed
+          # `applyEntropyBlessingPolicy` a different input on L1 than on
+          # L2/L3/L3b, and the cache-publish decision would depend on who
+          # hosted. That is the difference this line exists to fail on, and
+          # `renderEntropyObservations` renders the origin and not just the
+          # source so it can.
+          let entropyObservations = shapeList(shape, "entropyObservations")
+          if entropyObservations.len == 0:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape carries no entropy observation, ",
+              "so the cross-path comparison of `entropyObservations` below ",
+              "is vacuous:\n", shape
+          check entropyObservations.len > 0
 
           # PRIMARY ASSERTION.
           for i in 1 ..< recordedEvidence.len:
