@@ -260,23 +260,74 @@ else
     fi
   done
 
+  # A row that no longer matches a finding is one of two very different
+  # things, and conflating them is what made this gate impossible to satisfy.
+  #
+  # Every finding above begins with "the sibling exists", so the finding set is
+  # a function of WHICH REPOSITORIES THIS WORKSPACE HAPPENS TO HAVE CHECKED
+  # OUT. The declaration file is one file for all of them. Held to an exact
+  # match in both directions, a row for a sibling that CI does not clone fails
+  # in CI, and deleting it fails in the workspace that does clone it — the same
+  # row, both polarities, no possible content. `nim-stew-src` and
+  # `nim-results-src` were deleted on 2026-09-01 to fix the CI half; from that
+  # day a CodeTracer-flavoured workspace (which checks both out) failed the
+  # other half, and since the pre-commit hook runs `just lint`, this repository
+  # accepted NO COMMIT AT ALL in such a workspace.
+  #
+  # So the arm asks the shape question first: is the sibling this row is about
+  # even here? If it is not, the row describes another workspace, which is not
+  # evidence of decay — it is reported by name and passed over. If it IS here
+  # and the check still does not report it, the row has genuinely stopped
+  # describing anything (the input was renamed, removed, or the sibling now
+  # resolves) and that is the failure this arm exists for. The detection the
+  # arm was built for is untouched: it turns on the sibling being present,
+  # which is the same condition every finding turns on.
+  inapplicable=()
   while IFS=$'\t' read -r d_input d_kind _d_reason; do
     [[ -n "$d_input" ]] || continue
     # Rows the loop above already rejected have had their say; reporting them
     # again as "stopped describing anything" would only bury the real reason.
     [[ -n "${declared_kind[$d_input]:-}" ]] || continue
-    if [[ -z "${declared_seen[$d_input]:-}" ]]; then
-      fail "scripts/dev-shell-pinned-siblings.tsv still excuses flake input
-      '$d_input' as '$d_kind', but the check no longer reports it — the input
-      was renamed, removed, or its sibling now resolves. A declaration that
-      has stopped describing anything is how a list of real exceptions turns
-      into a list nobody reads. Remedy: delete the row."
+    [[ -z "${declared_seen[$d_input]:-}" ]] || continue
+    # Decay that is true in EVERY workspace, so it is asked first and is not
+    # subject to the shape question at all: the row names an input this flake
+    # does not declare with a REPOSITORY url, which is an input no shape can
+    # ever produce a finding for.
+    if ! dev_shell_flake_declares_input "$REPO_ROOT/flake.nix" "$d_input"; then
+      fail "scripts/dev-shell-pinned-siblings.tsv excuses flake input
+      '$d_input' as '$d_kind', but flake.nix declares no such input with a
+      repository url — it was renamed or removed, it is a pure 'follows', or
+      its url is a 'path:'/'file:' that names no repository. Every finding
+      starts from a sibling repository checkout, so this row can never match a
+      finding in any workspace. Remedy: delete the row, or point it at the
+      input's new name."
+      continue
     fi
+    if ! dev_shell_declared_row_is_applicable \
+      "$REPO_ROOT/flake.nix" "$envrc" "$REPO_ROOT" "$d_input"; then
+      inapplicable+=("$d_input")
+      continue
+    fi
+    fail "scripts/dev-shell-pinned-siblings.tsv still excuses flake input
+      '$d_input' as '$d_kind', but the check no longer reports it while the
+      sibling it is about IS checked out beside this repository — its sibling
+      now resolves, or the finding changed kind. A declaration that has stopped
+      describing anything is how a list of real exceptions turns into a list
+      nobody reads. Remedy: delete the row."
   done < <(declared_unreached)
 
   printf 'dev-shell: %d flake input(s) examined for auto-override reachability; %d unreached (%d declared, %d NOT declared).\n' \
     "${#input_repos[@]}" "${#unreached[@]}" \
     "$(( ${#unreached[@]} - undeclared ))" "$undeclared"
+  if [[ ${#inapplicable[@]} -gt 0 ]]; then
+    # Named, not dropped. A row can only be passed over because its subject is
+    # absent HERE; a reader of this output has to be able to see which rows are
+    # describing some other workspace, or a file that has become inapplicable
+    # in every shape would decay unobserved — which is the concern the
+    # stale-declaration arm was written for in the first place.
+    printf 'dev-shell: %d declared row(s) describe siblings not checked out in this workspace (not stale, not applicable here): %s\n' \
+      "${#inapplicable[@]}" "${inapplicable[*]}"
+  fi
 fi
 
 # --- 4. cache freshness ---------------------------------------------------

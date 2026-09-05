@@ -23,19 +23,38 @@
 #
 # A ROW DESCRIBES A SIBLING THAT IS ON DISK, NOT AN INPUT THAT IS PINNED. Both
 # kinds above begin with "the sibling exists", so an input whose sibling is not
-# checked out beside this repository produces no finding at all and must have no
-# row: `nim-results-src` and `nim-stew-src` sat here as `unflakeable` while
-# neither `../nim-results` nor `../nim-stew` existed in this workspace or in the
-# set `.github/sibling-repos` clones, and the stale-declaration arm below failed
-# on both — on `dev`, in CI, and in every fresh checkout — from the day the
-# check landed. They were removed on 2026-09-01 rather than made true, because
-# there is nothing here to make them true about.
+# checked out beside this repository produces no finding at all.
 #
-# The consequence is that this list is a function of which siblings a given
-# workspace happens to carry, and the check demands an EXACT match in both
-# directions. A CodeTracer-flavoured workspace that does check out `../nim-stew`
-# will see it reported here as undeclared; that is the gate working, and the
-# answer is a row saying so, not a row kept warm against the possibility.
+# THIS FILE IS THEREFORE THE UNION ACROSS WORKSPACE SHAPES, NOT A SNAPSHOT OF
+# ONE. It used to be read as a snapshot, and that made it unsatisfiable:
+# `nim-results-src` and `nim-stew-src` sat here as `unflakeable` while neither
+# `../nim-results` nor `../nim-stew` existed on `dev` or in the set
+# `.github/sibling-repos` clones, so the stale-declaration arm failed on both
+# in CI; they were removed on 2026-09-01 to fix that, and from that day every
+# CodeTracer-flavoured workspace — which DOES check both out — failed the other
+# way, on two undeclared findings. Same file, opposite polarities, no possible
+# content. Because the pre-commit hook runs `just lint`, which runs this check,
+# the practical result was that reprobuild accepted no commit at all in such a
+# workspace.
+#
+# The stale-declaration arm is shape-aware as of 2026-09-04: a row whose
+# sibling is not checked out here describes a workspace other than this one, is
+# reported by name in the check's summary, and is not treated as decay. A row
+# whose sibling IS here and which no longer produces a finding still fails,
+# because that row really has stopped describing anything. So a row belongs
+# here as soon as ANY workspace shape produces the finding, and the rows below
+# are read only by the shapes they apply to.
+#
+# THE SHAPE QUESTION IS ABOUT PRESENCE, AND PRESENCE IS NOT THE ONLY AXIS.
+# Two workspaces can both have the sibling and still disagree, because they
+# have it at different REVISIONS — one before the commit that added its
+# flake.nix and one after. `nim-shm-gset-src` is exactly that, live, today:
+# `.github/sibling-repos` clones 8a9f2f13, which has no flake.nix, while the
+# repository's `dev` tip has had one since dc9f239. CI needs the row; a
+# workspace tracking that tip is told the row is stale. The row is kept,
+# because the shape that needs it is the shared one, and the residue is
+# written down in the row itself rather than resolved by deleting it. Read
+# this before deleting any row on the evidence of one checkout.
 #
 # All three columns are required, and the check refuses a row without a reason
 # or with a kind it does not recognise. That is not pedantry about format: a
@@ -50,5 +69,7 @@
 # renaming, which is why it is not in this file.
 
 nim-shm-queue-src	unflakeable	../nim-shm-queue has no flake.nix, and the plugin refuses a sibling that is not a flake. Not fixable here; it needs a flake.nix in nim-shm-queue. reprobuild reaches shm_queue only through io_mon's --path, so the pinned source is what both the dev shell and CI compile.
-reprobuild-test-adapters-src	unflakeable	../reprobuild-test-adapters has no flake.nix. `.github/workflows/release.yml` overrides this input to the sibling BY HAND for exactly that reason; the dev shell cannot, so the pin is what it builds from. Fixing it means adding a flake.nix to reprobuild-test-adapters.
+nim-shm-gset-src	unflakeable	../nim-shm-gset has no flake.nix at the `.github/sibling-repos` pin 8a9f2f13 or at the flake pin 360bfc15, so in CI and in every workspace whose checkout predates dc9f239 the plugin will not emit an --override-input for it and the input builds from its pin. Exactly the nim-shm-queue-src case above: reprobuild never imports shm_gset itself, it arrives transitively through io_mon (fs_snoop / writer) on Nim's --path. Declared, not silenced: release.yml hand-overrides nim-shm-queue-src to its sibling clone and does NOT do the same for this input, and .github/sibling-repos pins 8a9f2f13 while flake.nix pins 360bfc15, so the two spellings of "this repository's shm_gset" are not the same source and only the flake pin reaches a flake-driven build. THIS ROW WAS DELETED ON 2026-09-04 (da4eb91b) AND IS RESTORED HERE. The deletion was correct about its own workspace and wrong about the file: nim-shm-gset's mainline DID gain a flake.nix, at dc9f239 (2026-08-22), so a checkout tracking `dev` resolves and reports nothing — but `.github/sibling-repos` still clones 8a9f2f13, which does not have one, so the lint job produces this finding and with no row here it fails on it as undeclared. Verified by extracting both trees: `git ls-tree 8a9f2f13` carries no flake.nix; `origin/dev` does. THIS IS ALSO THE ONE SHAPE THE SHAPE-AWARE ARM DOES NOT COVER, and it is recorded rather than fixed: the sibling is PRESENT in both shapes and differs only by REVISION, so this row is required by CI and simultaneously reported as stale by any workspace whose checkout is current. The arm distinguishes absent from present; it cannot distinguish two revisions of present. Closing it needs a decision that is not this file's to make — bump the `.github/sibling-repos` pin past dc9f239 (which changes WHAT CI compiles for shm_gset, from the flake pin to the clone), or widen the applicability question from presence to reachability (which retires `t_gate_still_catches_a_real_stale_row`).
+nim-stew-src	unflakeable	../nim-stew has no flake.nix, so the plugin will not emit an --override-input for it and the input builds from its pin. Only CodeTracer-flavoured workspaces check it out; `.github/sibling-repos` does not clone it, so CI never produces this finding — which is why the row is passed over there rather than failing as stale. NOT fixed the way reprobuild-test-adapters-src was (by adding a flake.nix upstream), because it is not the same case: the input pins `status-im/nim-stew`, an upstream this organisation does not own, while `../nim-stew` is the `metacraft-labs/nim-stew` fork whose other workspace branch (`codetracer`) carries patches the pin deliberately does not have. Making it override would switch reprobuild's stew from the upstream revision it pins to whatever branch that checkout happens to sit on — a change of WHAT is compiled, which wants its own change and its own build, exactly like ct-trace-format-src below. reprobuild reaches stew only through the Nim --path seeded from this input.
+nim-results-src	unflakeable	../nim-results has no flake.nix, so the plugin will not emit an --override-input for it. Only CodeTracer-flavoured workspaces check it out; `.github/sibling-repos` does not clone it. Stronger than the nim-stew-src case above: the sibling is not the same REPOSITORY as the input. The input pins `metacraft-labs/nim-result` at df8113dd; `../nim-results` is a checkout of `arnetheduck/nim-results`, the upstream, which this organisation does not own and cannot add a flake.nix to. The auto arm pairs them only because the input name strips to that directory name, so "make it override" here would substitute one repository's source for another's rather than refresh the pinned one. Declared, not fixed.
 ct-trace-format-src	unreachable	SECOND LIVE INSTANCE of the stackable-hooks defect, found by this check on the day it was added and deliberately not fixed in the same change. The input strips to `ct-trace-format`; the repository is `codetracer-trace-format-nim`, and it IS checked out beside us WITH a flake.nix, so renaming the input to `codetracer-trace-format-nim-src` would immediately switch reprobuild's trace-format source from the pin to the working tree. That is not a refresh: the sibling sits on a branch from which the pinned bc7c5d25 is not even reachable, so the rename changes WHAT is compiled. It wants its own change, with its own build and its own gates.

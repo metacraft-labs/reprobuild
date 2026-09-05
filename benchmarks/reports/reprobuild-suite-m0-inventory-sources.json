@@ -2919,7 +2919,9 @@
             "died",
             "dir",
             "engineImports",
+            "entropyObservations",
             "enumerations",
+            "envReads",
             "ev",
             "executedPaths",
             "fixtureBin",
@@ -2946,6 +2948,7 @@
             "mentioned",
             "moduleKeys",
             "n",
+            "observability",
             "orphaned",
             "output",
             "p",
@@ -2992,7 +2995,7 @@
             "vanished",
             "workRoot"
           ],
-          "line": 1283,
+          "line": 1317,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -21443,7 +21446,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_dev_shell_override_guards.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

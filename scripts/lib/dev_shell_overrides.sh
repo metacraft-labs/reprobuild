@@ -436,6 +436,100 @@ dev_shell_unreached_siblings() {
   return "$found"
 }
 
+# Whether `flake.nix` declares an input this check could ever report on: one
+# that appears in `dev_shell_flake_input_repos` — the same listing
+# `dev_shell_unreached_siblings` walks — WITH a repository url. A row naming
+# anything else describes an input that was renamed away or deleted, one that
+# carries no `url` at all (a pure `follows`), or one whose url names no
+# repository (`path:` / `file:`, listed as `-`). Every finding begins by
+# resolving the input to a sibling repository checkout, so an input in any of
+# those states can never produce a finding in ANY workspace, and a row excusing
+# it is decay wherever it is read.
+#
+# The `-` case is why this asks for a url rather than mere presence. A
+# `path:`-url input is skipped by `dev_shell_unreached_siblings` outright, so
+# without this it would fall through to the shape question below and be excused
+# in any workspace that happens to have no directory of that name — a row that
+# describes nothing anywhere, passed over as though it described somewhere
+# else.
+#
+# Kept separate from the shape question below on purpose. "This input can never
+# be reported on" is decay that is true everywhere and must fail everywhere;
+# "this input's sibling is not checked out here" is a statement about one
+# workspace. Folding the first into the second would have let a row survive a
+# rename in every workspace that happens not to clone the sibling, which is a
+# weakening, and the point of the shape fix is that it is not one.
+dev_shell_flake_declares_input() {
+  local flake="$1" input="$2" f_input f_repo
+  while IFS=$'\t' read -r f_input f_repo; do
+    [[ "$f_input" == "$input" ]] || continue
+    # `-` is a url that names no repository at all, the same rows
+    # `dev_shell_unreached_siblings` skips. Declared, but never reportable.
+    [[ "$f_repo" == "-" || -z "$f_repo" ]] && return 1
+    return 0
+  done < <(dev_shell_flake_input_repos "$flake")
+  return 1
+}
+
+# Whether a `scripts/dev-shell-pinned-siblings.tsv` row can describe anything
+# in THIS workspace: is the sibling checkout it is about on disk at all?
+#
+# Exit 0 = the sibling is here, so the row is a claim about this tree and the
+# caller may hold it to it. Exit 1 = it is not, so the row describes a
+# workspace shape other than this one.
+#
+# THIS IS THE SHAPE-AWARENESS THE STALE-DECLARATION ARM WAS MISSING, and its
+# absence made the gate unsatisfiable rather than merely wrong. Every finding
+# `dev_shell_unreached_siblings` produces begins with "the sibling exists", so
+# the finding set is a function of which repositories a given workspace happens
+# to have checked out — while the stale arm demanded an EXACT match against a
+# list committed once for every workspace. A row for a sibling CI does not
+# clone fails in CI; delete it and the workspace that DOES clone that sibling
+# fails instead, on an undeclared finding. Both are the same file, so no
+# content satisfied both shapes: `nim-stew-src` / `nim-results-src` were
+# removed on 2026-09-01 for the CI half and this workspace failed on the other
+# half from that day, which — because the pre-commit hook runs `just lint` —
+# meant this repository accepted no commit at all here.
+#
+# A row whose subject is absent is not evidence of decay; it is evidence of a
+# different workspace. Only a row whose sibling IS here and no longer produces
+# a finding has genuinely stopped describing something, and that row still
+# fails. The caller reports the skipped rows by name rather than dropping them
+# silently, so a list that has quietly become inapplicable in EVERY shape is
+# still visible to a reader.
+#
+# "The sibling" is looked for under both spellings a row can be about, matching
+# the two finding kinds: the name the auto arm strips the input to
+# (`unflakeable`, and the directory the arm actually probes), and the
+# repository the input's url names (`unreachable`, where the two spellings
+# differ and the checkout is under the repository's). An input no longer in
+# `flake.nix` at all has no url to consult, so only the stripped name applies —
+# which is correct: that is the directory whose presence would have produced
+# the finding the row claims to excuse. Callers ask
+# `dev_shell_flake_declares_input` FIRST, so by the time this runs the input is
+# known to be one a finding could name.
+dev_shell_declared_row_is_applicable() {
+  local flake="$1" envrc="$2" repo_root="$3" input="$4"
+  local suffixes=()
+  mapfile -t suffixes < <(dev_shell_auto_strip_suffixes "$envrc")
+
+  local root
+  root="$(dev_shell_siblings_root "$repo_root")"
+
+  local stripped
+  stripped="$(dev_shell_strip_input_suffix "$input" "${suffixes[@]}")"
+  [[ -d "$root/$stripped" ]] && return 0
+
+  local f_input f_repo
+  while IFS=$'\t' read -r f_input f_repo; do
+    [[ "$f_input" == "$input" ]] || continue
+    [[ "$f_repo" == "-" || -z "$f_repo" ]] && continue
+    [[ -d "$root/$f_repo" ]] && return 0
+  done < <(dev_shell_flake_input_repos "$flake")
+
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Override-source fingerprint
 # ---------------------------------------------------------------------------

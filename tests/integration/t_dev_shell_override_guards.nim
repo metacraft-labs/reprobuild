@@ -831,3 +831,124 @@ suite "dev-shell override guards":
       checkpoint("declared properly:\n" & declared.output)
       check declared.code == 0
       check declared.output.contains("1 unreached (1 declared, 0 NOT declared)")
+
+  test "t_dev_shell_lint_gate_declaration_arm_is_workspace_shape_aware":
+    ## Defect 4, and the reason this gate could not be satisfied at all.
+    ##
+    ## Every finding the reachability check produces begins with "the sibling
+    ## exists", so the finding set is a function of WHICH REPOSITORIES A GIVEN
+    ## WORKSPACE HAPPENS TO HAVE CHECKED OUT. The declaration file is one file
+    ## for all of them, and the stale-declaration arm demanded an exact match in
+    ## both directions — so a row for a sibling CI does not clone failed in CI,
+    ## and deleting it failed in the workspace that does clone it. Same row,
+    ## opposite polarities, no possible content. `nim-stew-src` /
+    ## `nim-results-src` were deleted on 2026-09-01 for the CI half, and from
+    ## that day a workspace carrying `../nim-stew` and `../nim-results` failed
+    ## on two undeclared findings; since the pre-commit hook runs `just lint`,
+    ## which runs this gate, reprobuild accepted NO COMMIT AT ALL there.
+    ##
+    ## Both polarities are asserted here, because a fix verified in one shape
+    ## is just a different one-shape gate. And the two ways the arm must still
+    ## bite are asserted with them: a row whose sibling IS present and DOES
+    ## resolve is genuinely stale, and a row naming an input the flake no longer
+    ## declares is stale in every shape, sibling or no sibling. The shape
+    ## question is allowed to excuse a row only when the thing the row is about
+    ## is absent — never when it is present and fixed.
+    if findExe("bash").len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-devshell-shape-", "")
+      defer: removeDirEventually(scratch)
+      let root = scratch / "repo"
+      createDir(root / "scripts" / "lib")
+      copyFile(libPath(), root / "scripts" / "lib" / "dev_shell_overrides.sh")
+      copyFile(checkScript(), root / "scripts" / "check_dev_shell_env.sh")
+      copyFile(repoRoot() / ".envrc", root / ".envrc")
+      writeFile(root / "flake.nix",
+        "{\n  inputs = {\n    nim-widget-src = {\n" &
+        "      url = \"github:metacraft-labs/nim-widget/deadbeef\";\n" &
+        "      flake = false;\n    };\n" &
+        # A url that names no repository, for case 5 below.
+        "    local-thing-src = {\n" &
+        "      url = \"path:/nowhere/local-thing\";\n" &
+        "      flake = false;\n    };\n  };\n" &
+        "  outputs = _: { };\n}\n")
+
+      let declFile = root / "scripts" / "dev-shell-pinned-siblings.tsv"
+      let sibling = scratch / "nim-widget"
+
+      let bash = findExe("bash")
+      proc gate(): CmdResult =
+        runShell(shellCommand(@[bash,
+          root / "scripts" / "check_dev_shell_env.sh"]), cwd = root)
+
+      # 1. THE SHAPE THAT USED TO FAIL: the row is present, the sibling it
+      #    describes is not checked out here. It describes another workspace,
+      #    which is not evidence of decay — and the rows it passed over are
+      #    named in the output rather than dropped, so a file that has become
+      #    inapplicable everywhere is still visible to a reader.
+      writeFile(declFile,
+        "nim-widget-src\tunflakeable\t../nim-widget has no flake.nix where it is cloned\n")
+      let absent = gate()
+      checkpoint("sibling absent:\n" & absent.output)
+      check absent.code == 0
+      check absent.output.contains(
+        "declared row(s) describe siblings not checked out in this workspace")
+      check absent.output.contains("nim-widget-src")
+
+      # 2. THE OTHER POLARITY, same file: the sibling IS here and still cannot
+      #    be reached, so the row is doing its job and the gate is green.
+      createDir(sibling)
+      let present = gate()
+      checkpoint("sibling present, unflakeable:\n" & present.output)
+      check present.code == 0
+      check present.output.contains("1 unreached (1 declared, 0 NOT declared)")
+
+      # 3. The detection this arm exists for, unblunted: the sibling is present
+      #    AND now resolves, so the row has genuinely stopped describing
+      #    anything and must fail. This is the case the shape question must
+      #    never excuse.
+      writeFile(sibling / "flake.nix", "{ outputs = _: { }; }\n")
+      let resolved = gate()
+      checkpoint("sibling present and resolving:\n" & resolved.output)
+      check resolved.code != 0
+      check resolved.output.contains("still excuses flake input")
+      check resolved.output.contains("IS checked out beside this repository")
+
+      # 4. Decay that no workspace shape can excuse: the row names an input
+      #    `flake.nix` does not declare. Asserted with the sibling ABSENT —
+      #    the shape in which the arm is most permissive — because folding this
+      #    case into the shape question would have let a row outlive a rename
+      #    in every workspace that does not clone the sibling.
+      removeDir(sibling)
+      writeFile(declFile,
+        "renamed-away-src\tunflakeable\ta row that outlived its input\n")
+      let renamed = gate()
+      checkpoint("input no longer declared:\n" & renamed.output)
+      check renamed.code != 0
+      check renamed.output.contains("flake.nix declares no such input")
+
+      # 5. The hole the shape question opens if "declared" is read as "appears
+      #    in flake.nix" rather than "appears with a repository url". A
+      #    `path:`/`file:` input names no repository, so
+      #    `dev_shell_unreached_siblings` skips it and NO workspace can ever
+      #    produce a finding for it — a row excusing one describes nothing
+      #    anywhere. Asserted in the shape where the shape question is most
+      #    willing to forgive (no directory of that name on disk), because that
+      #    is the shape in which such a row would otherwise be waved through as
+      #    "describes another workspace". Review found this passing; it is the
+      #    one place the shape fix had removed detection instead of adding it.
+      writeFile(declFile,
+        "local-thing-src\tunflakeable\ta row for an input that names no repository\n")
+      let pathUrl = gate()
+      checkpoint("path: url input, no such directory:\n" & pathUrl.output)
+      check pathUrl.code != 0
+      check pathUrl.output.contains("flake.nix declares no such input")
+
+      # And it stays a failure when a directory of that name IS present, so the
+      # verdict does not turn on workspace shape at all.
+      createDir(scratch / "local-thing")
+      let pathUrlPresent = gate()
+      checkpoint("path: url input, directory present:\n" & pathUrlPresent.output)
+      check pathUrlPresent.code != 0
+      check pathUrlPresent.output.contains("flake.nix declares no such input")
