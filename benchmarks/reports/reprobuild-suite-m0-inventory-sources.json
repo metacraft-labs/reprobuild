@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1444,
+    "nimTestBinaries": 1445,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 82,
-    "testEntries": 1449
+    "testEntries": 1450
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1117,7 +1117,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 608,
+      "integration": 609,
       "platform/destructive": 107,
       "pure unit": 593,
       "unclassified": 125
@@ -1232,9 +1232,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1444,
+    "nimTestBinaryCount": 1445,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1449
+    "testEntryCount": 1450
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -21450,6 +21450,23 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dev_shell_one_glibc_reaches_subprocesses",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {

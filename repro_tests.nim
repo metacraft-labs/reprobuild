@@ -8424,6 +8424,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
+    binary: "build/test-bin/t_dev_shell_one_glibc_reaches_subprocesses",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_dev_shell_override_guards.nim",
     binary: "build/test-bin/t_dev_shell_override_guards",
     defines: @[],

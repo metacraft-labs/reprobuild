@@ -1,11 +1,15 @@
 # shellcheck shell=bash
 #
-# scripts/lib/dev_shell_overrides.sh — the two invariants that keep this
-# repository's dev shell honest about what it is built from.
+# scripts/lib/dev_shell_overrides.sh — the invariants that keep this
+# repository's dev shell honest.
 #
-# Both exist because of the same failure shape: a mechanism that LOOKS
-# authoritative while being ignored, so the shell a developer is standing in
-# is built from something other than what the configuration says.
+# The first two are about what the shell is BUILT FROM, and both exist because
+# of the same failure shape: a mechanism that LOOKS authoritative while being
+# ignored, so the shell a developer is standing in is built from something
+# other than what the configuration says. The third — at the bottom of this
+# file, under "Loader injection" — is about what the shell DOES TO the
+# processes started inside it, which is a different question with a different
+# blast radius: it reaches binaries the shell neither built nor provides.
 #
 #   1. `.envrc` sets `NIX_FLAKE_OVERRIDE_*` knobs that only the flake-overrides
 #      plugin can act on. If the plugin that actually gets loaded predates a
@@ -29,10 +33,12 @@
 #      turning "what the overridden sources are at right now" into a FILE, so
 #      direnv's existing staleness machinery can watch it like any other input.
 #
-# Sourced from three places, which is why it is a library and not inline in
+# Sourced from four places, which is why it is a library and not inline in
 # `.envrc`: `.envrc` itself (guard + fingerprint, at shell entry),
-# `scripts/check_dev_shell_env.sh` (the `just lint` gate, offline), and
-# `tests/integration/t_dev_shell_override_guards.nim` (the regression tests).
+# `scripts/check_dev_shell_env.sh` (the `just lint` gate, offline),
+# `tests/integration/t_dev_shell_override_guards.nim` (the regression tests for
+# the first two invariants) and
+# `tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim` (the third).
 
 # ---------------------------------------------------------------------------
 # Knob declaration
@@ -647,4 +653,282 @@ dev_shell_fingerprint_drift() {
     fi
   done <"$path"
   return "$drifted"
+}
+
+# ---------------------------------------------------------------------------
+# Loader injection: one glibc per dev-shell subprocess
+# ---------------------------------------------------------------------------
+#
+# The dev shell does not only hand its subprocesses a PATH. It hands them
+# LOADER STATE, and loader state is process-global: it applies to every binary
+# started from the shell, including binaries the shell did not build and does
+# not own.
+#
+# There are two such channels in this repository and they are independent:
+#
+#   A. `LD_LIBRARY_PATH`, set in `flake.nix`'s devShell so that Nim's
+#      `{.dynlib.}` bindings can `dlopen` clingo / zstd / OpenSSL / pcre by
+#      bare soname (the `.rodata`-bake guard in `config.nims` deliberately
+#      keeps those paths out of the binaries). It is consulted BEFORE any
+#      DT_RUNPATH, so a shell library shadows the copy a foreign binary was
+#      linked against.
+#
+#   B. `LD_PRELOAD` of `build/lib/librepro_monitor_shim.so`, which automatic
+#      monitoring injects into every process a build action starts. The shim is
+#      a DSO with its own DT_RUNPATH, so its `libm`/`librt`/`libdl`/`libpthread`
+#      come from the shell's glibc regardless of what the program being
+#      monitored links against.
+#
+# Both channels can put a SECOND glibc into a process whose `libc.so.6` is the
+# first one, and glibc's satellite libraries carry symbol-version requirements
+# that an older `libc.so.6` cannot satisfy. That is not a theory. On the host
+# that motivated this check, `git` came from the developer's ambient
+# `~/.nix-profile` (glibc-2.40-66) while the shell's libraries came from the
+# flake's nixpkgs (glibc-2.42-61), and BOTH channels were fatal:
+#
+#   channel A:  git-remote-https: .../glibc-2.40-66/lib/libc.so.6: version
+#               `GLIBC_ABI_DT_X86_64_PLT' not found (required by
+#               .../glibc-2.42-61/lib/libdl.so.2)
+#               fatal: remote helper 'https' aborted session
+#
+#   channel B:  git: .../glibc-2.40-66/lib/libc.so.6: version
+#               `GLIBC_ABI_DT_X86_64_PLT' not found (required by
+#               .../glibc-2.42-61/lib/libm.so.6)
+#
+# so no fetch, clone or push over https worked in the shell, and no git-using
+# test could run under `repro build '.#test#<name>'` — the loop for iterating
+# on one test at a time.
+#
+# WHY THIS IS A VERSION COMPARISON AND NOT A STORE-PATH COMPARISON. "Two
+# different glibc store paths" is the wrong predicate: it is both too weak and
+# too strong. Measured on the same host, the system's `ssh`, `perl` and `rsync`
+# run on glibc-2.40-224 — a different store path, a different build, and
+# perfectly fine under both channels, because that build DEFINES
+# `GLIBC_ABI_DT_X86_64_PLT` even though its version number is older. The thing
+# that actually decides the outcome is whether the host `libc.so.6` defines
+# every symbol version the injected glibc's satellite libraries require, so
+# that is what is compared. A check keyed on store paths would have shouted
+# about three healthy tools and taught everyone to ignore it.
+#
+# SCOPE: the programs reprobuild itself spawns to reach a remote — `git` and
+# the `git-remote-*` helpers it execs. `ssh` is deliberately NOT in the list:
+# every remote this workspace declares is `https://`, git's ssh transport is
+# not on reprobuild's path to them, and the system `ssh` measured here
+# satisfies both channels anyway. If that ever changes the remedy is the same
+# one this check prescribes for `git` — have the dev shell provide the tool
+# instead of inheriting it — so add `ssh` here and `pkgs.openssh` to the
+# devShell's `packages` together.
+
+# The programs the dev shell must be able to hand its own loader state to.
+DEV_SHELL_SUBPROCESS_TOOLS=(
+  git
+)
+
+# glibc satellite libraries: the ones that are separate `.so` files carrying
+# their own `libc.so.6` version requirements. These are what get dragged into a
+# foreign process; `libc.so.6` itself is already loaded (it is the process's
+# PT_INTERP) and is never re-resolved through either channel.
+DEV_SHELL_GLIBC_SATELLITES=(
+  libm.so.6
+  librt.so.1
+  libdl.so.2
+  libpthread.so.0
+  libanl.so.1
+  libresolv.so.2
+  libutil.so.1
+  libnsl.so.1
+  libcrypt.so.1
+)
+
+# The `/nix/store/<hash>-glibc-<version>` prefixes mentioned by a string.
+_dev_shell_glibc_prefixes() {
+  grep -oE '/nix/store/[a-z0-9]{32}-glibc-[0-9][^/[:space:]:]*' <<<"${1:-}" |
+    sort -u
+}
+
+# The glibc an executable will actually run on: the store path of its
+# PT_INTERP. Prints nothing when the file is not an ELF with a nix-store
+# interpreter (a script, a static binary, a non-nix host).
+dev_shell_elf_glibc() {
+  local file="$1" interp
+  [[ -f "$file" ]] || return 0
+  interp="$(patchelf --print-interpreter "$file" 2>/dev/null)" || return 0
+  _dev_shell_glibc_prefixes "$interp"
+}
+
+# The glibc(s) a library directory would drag in: the store paths its shared
+# objects name in their own RPATH/RUNPATH.
+dev_shell_libdir_glibc() {
+  local dir="$1" file rpath
+  [[ -d "$dir" ]] || return 0
+  for file in "$dir"/*.so "$dir"/*.so.*; do
+    [[ -f "$file" ]] || continue
+    rpath="$(patchelf --print-rpath "$file" 2>/dev/null)" || continue
+    _dev_shell_glibc_prefixes "$rpath"
+  done | sort -u
+}
+
+# The symbol versions a glibc's `libc.so.6` DEFINES.
+#
+# Read out of `.gnu.version_d` only. `readelf -V` prints the version NEEDS
+# section in the same output and with the same `Name:` key, and libc.so.6 has
+# one (it needs `GLIBC_PRIVATE` from `ld-linux`), so an unrestricted grep would
+# report a version as defined because something else requires it. The section
+# heading is matched on its stem — binutils writes "Version definition section"
+# and has written "Version definitions section"; a pattern that assumed either
+# spelling parses to the EMPTY SET against the other, and an empty defined-set
+# reads exactly like "this libc defines nothing", i.e. a conflict against every
+# injected glibc. Hence also the non-zero return below: a caller must be able
+# to tell "nothing defined" from "nothing parsed".
+dev_shell_glibc_defined_versions() {
+  local prefix="$1" libc="$1/lib/libc.so.6" out
+  [[ -f "$libc" ]] || return 0
+  out="$(readelf -V "$libc" 2>/dev/null |
+    sed -n "/Version definition/,/^\$/p" |
+    grep -oE 'Name: GLIBC_[A-Za-z0-9_.]+' |
+    sed 's/^Name: //' | sort -u)"
+  [[ -n "$out" ]] || return 2
+  printf '%s\n' "$out"
+}
+
+# The symbol versions a glibc's satellite libraries REQUIRE FROM `libc.so.6`.
+#
+# `.gnu.version_r` groups its entries under a `File:` line, so the file each
+# requirement is against has to be tracked while scanning; a flat grep would
+# attribute a requirement on `ld-linux-x86-64.so.2` to `libc.so.6`.
+dev_shell_glibc_required_versions() {
+  local prefix="$1" soname file
+  for soname in "${DEV_SHELL_GLIBC_SATELLITES[@]}"; do
+    file="$prefix/lib/$soname"
+    [[ -f "$file" ]] || continue
+    readelf -V "$file" 2>/dev/null |
+      sed -n "/Version need/,/^\$/p" |
+      awk '
+        /File: / {
+          current = ""
+          if (match($0, /File: [^ ]+/)) {
+            current = substr($0, RSTART + 6, RLENGTH - 6)
+          }
+          next
+        }
+        current == "libc.so.6" && match($0, /Name: GLIBC_[A-Za-z0-9_.]+/) {
+          print substr($0, RSTART + 6, RLENGTH - 6)
+        }
+      '
+  done | sort -u
+}
+
+# Every glibc the dev shell can inject into a subprocess, one `channel<TAB>
+# origin<TAB>glibc-prefix` row per finding.
+#
+# `origin` is the concrete thing that carries it — a directory off
+# `LD_LIBRARY_PATH`, or the monitor shim — so a report can name what to change
+# rather than only what is wrong.
+dev_shell_injected_glibcs() {
+  local repo_root="${1:-.}" dir glibc shim
+  local -a dirs=()
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    IFS=: read -r -a dirs <<<"$LD_LIBRARY_PATH"
+  fi
+  for dir in ${dirs[@]+"${dirs[@]}"}; do
+    [[ -n "$dir" ]] || continue
+    while read -r glibc; do
+      [[ -n "$glibc" ]] || continue
+      printf 'LD_LIBRARY_PATH\t%s\t%s\n' "$dir" "$glibc"
+    done < <(dev_shell_libdir_glibc "$dir")
+  done
+  shim="$repo_root/build/lib/librepro_monitor_shim.so"
+  if [[ -f "$shim" ]]; then
+    while read -r glibc; do
+      [[ -n "$glibc" ]] || continue
+      printf 'LD_PRELOAD\t%s\t%s\n' "$shim" "$glibc"
+    done < <(_dev_shell_glibc_prefixes \
+      "$(patchelf --print-rpath "$shim" 2>/dev/null)")
+  fi
+}
+
+# The programs in `DEV_SHELL_SUBPROCESS_TOOLS`, resolved on PATH, plus the
+# helpers `git` execs for a remote — `git-remote-https` is the binary that
+# actually died on this host, and it lives in `git --exec-path`, not on PATH.
+dev_shell_subprocess_tool_binaries() {
+  local tool path exec_path helper
+  for tool in "${DEV_SHELL_SUBPROCESS_TOOLS[@]}"; do
+    path="$(command -v "$tool" 2>/dev/null)" || continue
+    [[ -n "$path" ]] || continue
+    path="$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")"
+    printf '%s\t%s\n' "$tool" "$path"
+    if [[ "$tool" == "git" ]]; then
+      exec_path="$("$path" --exec-path 2>/dev/null)" || exec_path=""
+      for helper in git-remote-https git-remote-http; do
+        if [[ -n "$exec_path" && -f "$exec_path/$helper" ]]; then
+          printf '%s\t%s\n' "$helper" "$exec_path/$helper"
+        fi
+      done
+    fi
+  done
+}
+
+# The check itself. Prints one row per finding, tab-separated, with the first
+# field naming the KIND so the caller can report each with its own remedy:
+#
+#   conflict<TAB>tool<TAB>binary<TAB>host-glibc<TAB>channel<TAB>origin<TAB>injected-glibc<TAB>missing-versions
+#   unreadable<TAB>glibc-prefix<TAB>which
+#
+# Returns 1 when there is at least one row of either kind. `unreadable` is a
+# finding and not a silent skip on purpose: every comparison here is "the host
+# libc does not define X", so a libc whose version table could not be read
+# would otherwise present as a libc that defines NOTHING — a conflict against
+# every injected glibc, with a missing-list naming every version there is. That
+# is what a wrong `readelf` section heading produced while this was being
+# written, and it is indistinguishable from a real finding to anyone reading
+# the output.
+dev_shell_loader_glibc_conflicts() {
+  local repo_root="${1:-.}"
+  local -a injected=()
+  mapfile -t injected < <(dev_shell_injected_glibcs "$repo_root")
+  [[ ${#injected[@]} -gt 0 ]] || return 0
+
+  local tool binary host channel origin glibc missing row found=0 rc
+  local -A defined_cache=() required_cache=() unreadable=()
+  while IFS=$'\t' read -r tool binary; do
+    [[ -n "$binary" ]] || continue
+    host="$(dev_shell_elf_glibc "$binary")"
+    # No nix-store interpreter: a script, a static binary, or a non-nix host.
+    # Nothing here can say anything about it, and saying nothing is the
+    # honest answer rather than a pass or a fail.
+    [[ -n "$host" ]] || continue
+    if [[ -z "${defined_cache[$host]+set}" ]]; then
+      rc=0
+      defined_cache["$host"]="$(dev_shell_glibc_defined_versions "$host")" ||
+        rc=$?
+      if [[ "$rc" -ne 0 ]]; then
+        if [[ -z "${unreadable[$host]+set}" ]]; then
+          unreadable["$host"]=1
+          printf 'unreadable\t%s\t%s\n' "$host" \
+            'defined versions of lib/libc.so.6'
+          found=1
+        fi
+        continue
+      fi
+    elif [[ -n "${unreadable[$host]+set}" ]]; then
+      continue
+    fi
+    for row in "${injected[@]}"; do
+      IFS=$'\t' read -r channel origin glibc <<<"$row"
+      [[ -n "$glibc" ]] || continue
+      [[ "$glibc" != "$host" ]] || continue
+      if [[ -z "${required_cache[$glibc]+set}" ]]; then
+        required_cache["$glibc"]="$(dev_shell_glibc_required_versions "$glibc")"
+      fi
+      missing="$(comm -23 \
+        <(printf '%s\n' "${required_cache[$glibc]}" | grep -v '^$' | sort -u) \
+        <(printf '%s\n' "${defined_cache[$host]}" | grep -v '^$' | sort -u) |
+        paste -sd, -)"
+      [[ -n "$missing" ]] || continue
+      printf 'conflict\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$tool" "$binary" "$host" "$channel" "$origin" "$glibc" "$missing"
+      found=1
+    done
+  done < <(dev_shell_subprocess_tool_binaries)
+  return $((found == 0 ? 0 : 1))
 }

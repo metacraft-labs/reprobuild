@@ -588,7 +588,33 @@
                     pkgs.just
                     pkgs.python3
                     pkgs.shellcheck
+                    # `check_dev_shell_env.sh`'s one-glibc check reads ELF
+                    # headers: `patchelf` for PT_INTERP and DT_RUNPATH,
+                    # `readelf` (binutils, last in this list) for the
+                    # `.gnu.version_d` / `.gnu.version_r` tables. It REFUSES
+                    # rather than skips when they are absent — an environment
+                    # that injects loader state but cannot be inspected is the
+                    # state the check exists for — so they are part of this
+                    # hook's contract, not something to find on the ambient
+                    # PATH.
+                    pkgs.patchelf
+                    # …and git, for the same reason: the check asks whether
+                    # the git this environment resolves runs on the same glibc
+                    # as the libraries it injects. Left to the ambient PATH,
+                    # that question would be answered by whichever git the
+                    # contributor's profile happens to carry, and the hook
+                    # would pass or fail on something the repository does not
+                    # control.
+                    pkgs.git
                     nimFork
+                    # LAST on purpose. binutils is here only for `readelf`,
+                    # but it also ships `ld` / `as` / `ar` / `nm`, and this
+                    # list is prepended to PATH. Ahead of `nimFork` it would
+                    # shadow the toolchain any future compiling step in
+                    # `just lint` resolves; behind it, `readelf` is still
+                    # found (nothing else in the list provides one) and
+                    # nothing else moves.
+                    pkgs.binutils
                   ]
                 }:$PATH
                 export BLAKE3_PREFIX=${blake3Prefix}
@@ -1359,6 +1385,19 @@
             # against the calling binary's link map; that lives in io-mon's
             # repo, not this one. `scripts/check_toolchain_dlopen.sh` guards
             # this whole class (see `just check-toolchain-dlopen`).
+            #
+            # THE INVARIANT THIS VARIABLE PUTS EVERY SHELL SUBPROCESS UNDER:
+            # one glibc reaches a process. `LD_LIBRARY_PATH` is process-global
+            # and is consulted BEFORE any DT_RUNPATH, so every directory listed
+            # here is offered to binaries this shell did not build — and the
+            # glibc those libraries were built against comes with them. A
+            # program on PATH that runs on a DIFFERENT glibc then has two in
+            # its address space and dies before `main` if the older `libc.so.6`
+            # is missing a symbol version the newer one requires. The remedy is
+            # never to trim this list (see `pkgs.git` in `packages` below for
+            # why that does not work): it is for the shell to PROVIDE the
+            # programs it does this to, so they come from the same nixpkgs.
+            # `scripts/check_dev_shell_env.sh` holds that invariant.
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
               pkgs.clingo
               pkgs.zstd
@@ -1453,6 +1492,49 @@
               pkgs.cmake
               pkgs.pkg-config
               pkgs.nix
+              # git, from THIS flake's nixpkgs — the same evaluation the
+              # libraries below and `LD_LIBRARY_PATH` above come from.
+              #
+              # Not a convenience. Every developer machine already has a `git`
+              # somewhere on PATH, and that is exactly the problem: this shell
+              # hands its subprocesses process-global LOADER STATE, and a `git`
+              # the shell does not provide is a binary that state was never
+              # meant for. Two independent channels carry it — the exported
+              # `LD_LIBRARY_PATH` (consulted before any DT_RUNPATH, so a shell
+              # library shadows the copy a foreign binary was linked against)
+              # and the `LD_PRELOAD` of `build/lib/librepro_monitor_shim.so`
+              # that automatic monitoring injects into every process a build
+              # action starts. Both put this nixpkgs' glibc into whatever git
+              # is on PATH.
+              #
+              # Measured on the host that motivated this: an ambient
+              # `~/.nix-profile` git on glibc-2.40-66 against this shell's
+              # glibc-2.42-61. The older `libc.so.6` does not define
+              # `GLIBC_ABI_DT_X86_64_PLT`, which the newer `libdl.so.2` /
+              # `libpthread.so.0` / `libm.so.6` / `librt.so.1` require, so:
+              #
+              #   * `git-remote-https` aborted on every https fetch, clone and
+              #     PUSH from this shell (channel: LD_LIBRARY_PATH), and
+              #   * `git` itself would not start inside a `test_execute` action
+              #     (channel: LD_PRELOAD), which took away
+              #     `repro build '.#test#<name>'` for every git-using test —
+              #     the loop for iterating on one test at a time.
+              #
+              # Reprobuild shells out to git for its own work (`repro sync`,
+              # `repro workspace pull`, the clone pass of `repro workspace init`
+              # and `repro branch`, the publication probe the pre-push gate
+              # runs), so a shell that injects loader state and does NOT supply
+              # git is a shell that has broken its own tooling and cannot see
+              # that it did. `scripts/check_dev_shell_env.sh` refuses that
+              # state; this line is what satisfies it.
+              #
+              # Do not "fix" the same class by trimming LD_LIBRARY_PATH: the
+              # entries there serve `dlopen`s by bare soname that the
+              # `.rodata`-bake guard in `config.nims` deliberately leaves
+              # unresolved (a hand `nim c -d:ssl` in this shell aborts with
+              # `could not load: libcrypto.so(...)` the moment openssl leaves
+              # the path), and it would not touch the LD_PRELOAD channel at all.
+              pkgs.git
               pkgs.libsodium
               pkgs.boost
               pkgs.libgit2

@@ -398,6 +398,122 @@ else
   fi
 fi
 
+# --- 5. one glibc reaches a dev-shell subprocess ---------------------------
+#
+# Checks 1-4 are all about what the shell is BUILT from. This one is about what
+# the shell DOES to the processes started inside it, which is a separate way
+# for it to lie: `flake.nix` exports `LD_LIBRARY_PATH`, and automatic
+# monitoring `LD_PRELOAD`s `build/lib/librepro_monitor_shim.so`. Both are
+# process-global and both apply to binaries the shell neither built nor
+# provides — including `git`, which reprobuild shells out to for every remote
+# operation it performs.
+#
+# When the shell's libraries come from a newer glibc than the `git` on PATH,
+# the older `libc.so.6` cannot satisfy the newer satellite libraries' symbol
+# versions and git dies before `main`. That is not hypothetical: it is what
+# made `git fetch` / `git push` / `git clone` over https impossible in this
+# shell, and what made `repro build '.#test#<name>'` — the loop for iterating
+# on one test at a time — unable to run ANY git-using test, since the
+# first `git init` inside a monitored `test_execute` action could not start.
+#
+# See scripts/lib/dev_shell_overrides.sh for why the comparison is on symbol
+# VERSIONS and not on glibc store paths.
+case "$(uname -s)" in
+  Linux)
+    llp_dirs=0
+    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+      llp_dirs="$(awk -F: '{ n = 0; for (i = 1; i <= NF; i++) if ($i != "") n++; print n }' <<<"$LD_LIBRARY_PATH")"
+    fi
+    shim_present=no
+    [[ -f "$REPO_ROOT/build/lib/librepro_monitor_shim.so" ]] && shim_present=yes
+    if [[ "$llp_dirs" -eq 0 && "$shim_present" == "no" ]]; then
+      # Not a pass dressed up as one: with neither channel present there is no
+      # loader state to inject, so there is nothing this check could be wrong
+      # about. It is reported so that a reader of a green log can tell "no
+      # injection configured" from "injection checked and clean" — those are
+      # very different states and a bare "ok" would conflate them.
+      printf 'dev-shell: no loader injection in this environment %s\n' \
+        '(LD_LIBRARY_PATH empty and no build/lib/librepro_monitor_shim.so); nothing to check.'
+    elif ! command -v patchelf >/dev/null 2>&1 ||
+      ! command -v readelf >/dev/null 2>&1; then
+      # A missing tool is a failure, not a skip. This environment DOES inject
+      # loader state (that is the branch we are in), so "we could not look" is
+      # exactly the answer that let the defect live: the shell keeps handing
+      # its glibc to foreign binaries and the gate says nothing.
+      fail "this environment injects loader state into subprocesses
+      (LD_LIBRARY_PATH has $llp_dirs directory/ies, monitor shim present:
+      $shim_present) but patchelf and/or readelf is not on PATH, so the
+      one-glibc invariant cannot be evaluated. Remedy: run this from the dev
+      shell (\`direnv exec . just lint\`), which provides both."
+    else
+      mapfile -t glibc_findings < <(dev_shell_loader_glibc_conflicts "$REPO_ROOT")
+      if [[ ${#glibc_findings[@]} -eq 0 ]]; then
+        printf 'dev-shell: one glibc reaches a subprocess %s\n' \
+          "(LD_LIBRARY_PATH: $llp_dirs dir(s), monitor shim: $shim_present; $(dev_shell_subprocess_tool_binaries | wc -l) tool binar(y/ies) checked)."
+      else
+        # Two kinds of finding with two different remedies, reported apart.
+        # Printing one trailer for both would tell someone whose `readelf`
+        # output this script cannot parse to go and change flake.nix.
+        conflicts=()
+        unreadables=()
+        for finding in "${glibc_findings[@]}"; do
+          case "$finding" in
+            unreadable*) unreadables+=("$finding") ;;
+            *) conflicts+=("$finding") ;;
+          esac
+        done
+        if [[ ${#conflicts[@]} -gt 0 ]]; then
+          printf 'FAIL: this dev shell injects a second glibc into a program it does not provide:\n' >&2
+          for finding in "${conflicts[@]}"; do
+            IFS=$'\t' read -r _kind f2 f3 f4 f5 f6 f7 f8 <<<"$finding"
+            printf '  %s\n      binary:   %s\n      runs on:  %s\n      %s injects: %s\n      via:      %s\n      missing:  %s\n' \
+              "$f2" "$f3" "$f4" "$f5" "$f7" "$f6" "$f8" >&2
+          done
+          # shellcheck disable=SC2016  # backticks quote command names for a
+          # human reader; nothing here is meant to be expanded.
+          printf '%s\n' \
+            '  Each program above runs on one glibc while this shell forces libraries' \
+            '  built against another into its address space, and the older libc.so.6' \
+            '  does not define the symbol versions the newer one requires. The program' \
+            '  aborts before main; for git that means no fetch, clone or push over' \
+            '  https, and no git-using test under `repro build ".#test#<name>"`.' \
+            '  Remedy: have the dev shell PROVIDE the program (add it to the devShell'"'"'s' \
+            '  `packages` in flake.nix) so it comes from the same nixpkgs as the' \
+            '  libraries this shell exports. Widening LD_LIBRARY_PATH, or dropping one' \
+            '  entry from it, fixes at most one channel for one library.' >&2
+          failures=$((failures + 1))
+        fi
+        if [[ ${#unreadables[@]} -gt 0 ]]; then
+          printf 'FAIL: a glibc on this dev shell'"'"'s loader path could not be read:\n' >&2
+          for finding in "${unreadables[@]}"; do
+            IFS=$'\t' read -r _kind f2 f3 <<<"$finding"
+            printf '  %s\n      could not read: %s\n' "$f2" "$f3" >&2
+          done
+          # shellcheck disable=SC2016  # as above: quoted names, not expansions.
+          printf '%s\n' \
+            '  This is reported as a failure and not as a skip because every' \
+            '  comparison here is "the host libc does not define X": a libc whose' \
+            '  version table cannot be read would otherwise present as a libc that' \
+            '  defines NOTHING, i.e. as a conflict against every injected glibc.' \
+            '  Remedy: this is a bug in dev_shell_glibc_defined_versions (in' \
+            '  scripts/lib/dev_shell_overrides.sh) against the `readelf` on this' \
+            '  PATH — most likely its .gnu.version_d section heading. Fix the' \
+            '  parser; do not relax the check.' >&2
+          failures=$((failures + 1))
+        fi
+      fi
+    fi
+    ;;
+  *)
+    # Stated rather than skipped in silence. dyld ignores DYLD_LIBRARY_PATH for
+    # anything in a protected location and this repository's darwin binaries
+    # carry LC_RPATHs instead (see flake.nix's `fixup_macho_runtime.sh`), so
+    # the injection channels this check is about do not exist here.
+    printf 'dev-shell: %s on %s; the loader-injection channels this check is about are linux-only.\n' \
+      'one-glibc check not applicable' "$(uname -s)"
+    ;;
+esac
+
 if [[ "$failures" -gt 0 ]]; then
   printf '\ncheck_dev_shell_env: %d failure(s)\n' "$failures" >&2
   exit 1
