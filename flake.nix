@@ -207,7 +207,29 @@
       # different builds. 41ab1b9 is the revision that carries the explicit
       # Windows child environment (``6a53408``) io-mon's ``fs_snoop`` Windows
       # arm compiles against; 30f69b6 predates it.
-      url = "github:metacraft-labs/nim-stackable-hooks/41ab1b987aba67e8bcc34a5945ac33e17b6418ed";
+      #
+      # Bumped from 41ab1b9 to 34b9b3c, which cherry-picks the arm64e
+      # pointer-authentication (PAC) fix for the macOS body-patch primitive
+      # (``stackable_hooks/platform/macos_bodypatch``) onto 41ab1b9. Without it
+      # the shim's arm64e slice used PAC-signed code pointers as raw addresses
+      # and SIGSEGV'd (exit 139) in the shim constructor's body-patch pass the
+      # instant it was injected into any arm64e child (Apple's clang/ld and the
+      # macOS system toolchain), crashing every monitored ``clang`` on Apple
+      # silicon and failing the darwin ``.#release`` leg. See
+      # metacraft-labs/nim-stackable-hooks#6.
+      #
+      # Bumped from 34b9b3c to d51b571 (nim-stackable-hooks dev tip, the PR #6
+      # merge) to unblock the windows-x86_64 release leg. io-mon's pin
+      # (``io-mon-src`` above, e2ee15a) calls ``inlineHookTransactionCapacity()``
+      # in ``windows_interpose.nim`` -- a proc added in stackable-hooks ca39dad
+      # -- and 34b9b3c predates it, so the Windows monitor-shim compile failed
+      # with ``undeclared identifier: 'inlineHookTransactionCapacity'``. The bump
+      # is darwin/linux-NEUTRAL: the whole 34b9b3c..d51b571 diff is CI files plus
+      # the Windows inline-hook sources (``windows_inline_hook.nim``,
+      # ``install_windows.c``/``.h``); ``macos_bodypatch.nim`` (the PAC fix above)
+      # and the Linux syscall-scanner are byte-identical between the two revs, so
+      # the darwin and linux legs compile exactly the same shim as before.
+      url = "github:metacraft-labs/nim-stackable-hooks/d51b571a3d53f92a3200541e8267f7bb25d36c6c";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {

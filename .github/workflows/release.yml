@@ -280,14 +280,56 @@ jobs:
 
       - name: Bootstrap and Build (Windows)
         if: matrix.os-name == 'windows'
-        shell: pwsh
+        # Fail-fast guard. The `.#release` build's interface-extraction phase
+        # (a single `nim c` of the full DSL-stdlib closure) has hung for 4+
+        # HOURS on Windows -- nim.exe wedged on the large compile, holding a
+        # runner slot indefinitely. A healthy Windows leg (app build + extract
+        # + package + verify) completes well inside an hour, so cap the step:
+        # a wedged extract now fails in bounded time with the runner's timeout
+        # annotation instead of blocking the pool for hours. Remove/raise once
+        # the Windows interface-extract hang is root-caused and fixed (it is
+        # release-only and has no CI coverage today -- see ci.yml).
+        # The Windows runner is slow and cache-less (windows-diy recompiles the
+        # whole tree from scratch): app build 43-65 min + interface-extract ~13
+        # min + the `.#release` build of 20 artifacts ~61 min (the repro app
+        # alone is 435k lines of C / 1.9 GiB / 12 min) ≈ 115-140 min. A 120-min
+        # cap guillotined the LAST still-compiling artifact (reprobuild.apps.repro)
+        # at exactly 120 min -- a killed process with empty stderr, not a real
+        # failure. The phases PROGRESS (proven: extract completes in 13 min, the
+        # earlier "hang" was that too-tight cap), they are just slow, so give the
+        # whole leg room to finish. The interface-extract still has its own tight
+        # 40-min inner cap (REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS) to catch a
+        # genuine extract wedge fast, so this outer cap need not be tight.
+        timeout-minutes: 240
         env:
-          # Promote scripts/build_apps.sh's runtime-DLL staging warnings to hard
-          # errors. A dev build missing libzstd/sqlite3 is merely degraded; a
-          # RELEASE missing them is broken for every user who unpacks it, and
-          # the failure surfaces far from the cause. clingo is fatal regardless
-          # (module-init dlopen), so it does not depend on this flag.
-          REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS: "1"
+          # Cap the interface `nim c` (inside runCommand) above a healthy-but-slow
+          # extract (~11 min observed; 40 min gives wide margin) so genuine
+          # slowness passes while a true multi-hour wedge is still killed fast
+          # with a dumped partial sink. LIST_CMD keeps nim echoing each gcc
+          # sub-command so any future wedge names itself. Both are retained as
+          # durable guards, not just debug scaffolding.
+          REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS: "2400"
+          REPRO_INTERFACE_LIST_CMD: "1"
+          # Cap the `.#release` engine's action parallelism on this leg.
+          #
+          # `repro build` defaults to 8-wide (buildMaxParallelism()). On the
+          # ephemeral Linux/macOS runners that fits; on the memory-constrained
+          # windows-diy runner it does not. The engine scheduled all eight heavy
+          # `nim c` edges at once, and `nim.exe`'s codegen alone peaks at ~1.9 GiB
+          # for the repro app (435k lines of C) -- eight such peaks plus their gcc
+          # children exhaust the box. The largest edge, `reprobuild.apps.repro`,
+          # lost the memory race: its gcc/cc1 died mid-compile, `nim` reported the
+          # failure on STDOUT (where nim writes compiler diagnostics), and the edge
+          # exited 1. It ran ~60 min under contention before failing, versus the
+          # 15 min the SAME compile takes when `just bootstrap` builds it SERIALLY
+          # (which is exactly why bootstrap succeeds and `.#release` did not).
+          #
+          # Two is the balance point: it keeps peak RAM to ~2 concurrent nim
+          # codegens (~4 GiB) so nothing OOMs, while still overlapping the long
+          # tail of small edges so the leg finishes comfortably inside the 240-min
+          # cap. Raise once the windows-diy image carries more RAM headroom.
+          REPROBUILD_MAX_PARALLELISM: "2"
+        shell: pwsh
         run: |
           # env.ps1 from setup-dev-env is already sourced in GITHUB_ENV/PATH.
           # That is what provisions the pinned conda-forge clingo via
@@ -295,6 +337,42 @@ jobs:
           # which build_apps.sh stages into build/bin. Before that provisioner
           # existed, clingo.dll was picked up only if the runner happened to
           # carry a hand-provisioned C:\clingo on its machine PATH.
+
+          # Raise nim.exe's OWN stack BEFORE any nim compile. The `.#release`
+          # interface-extract compiles the entire DSL-stdlib closure in a single
+          # nim.exe whose deep sem/macro recursion overruns nim's linker-default
+          # ~1 MB stack, crashing the COMPILER with STATUS_STACK_BUFFER_OVERRUN
+          # (0xC0000409 / exit -1073740791) -- confirmed as nim.exe's own exit
+          # code. This patches nim.exe's PE SizeOfStackReserve to 128 MB (exactly
+          # what `editbin /STACK` writes, but MSVC/editbin is absent on
+          # windows-diy: `vswhere.exe not found`). Idempotent; covers both
+          # `just bootstrap` and the `.#release` extract below.
+          & ./windows/raise-nim-stack.ps1
+
+          # Provision `just`: the reprobuild dev-env summary reports
+          # `just = (not on PATH)` on the windows-diy runners (the repo-workspaces
+          # framework provisions nim/gcc but not just here), yet both builds below
+          # invoke it. Fetch the single static just.exe and put it on PATH. Pinned
+          # to the version the windows dev-env docs record.
+          if (-not (Get-Command just -ErrorAction SilentlyContinue)) {
+            $justVersion = "1.51.0"
+            $justRoot = if ($env:WINDOWS_DIY_INSTALL_ROOT) { $env:WINDOWS_DIY_INSTALL_ROOT } else { $env:RUNNER_TEMP }
+            $justDir = Join-Path $justRoot "just\$justVersion"
+            $justExe = Join-Path $justDir "just.exe"
+            if (-not (Test-Path $justExe)) {
+              New-Item -ItemType Directory -Force -Path $justDir | Out-Null
+              $justZip = Join-Path $env:RUNNER_TEMP "just.zip"
+              $justUrl = "https://github.com/casey/just/releases/download/$justVersion/just-$justVersion-x86_64-pc-windows-msvc.zip"
+              Write-Host "Provisioning just $justVersion from $justUrl"
+              Invoke-WebRequest -Uri $justUrl -OutFile $justZip
+              Expand-Archive -Path $justZip -DestinationPath $justDir -Force
+            }
+            if (-not (Test-Path $justExe)) { throw "failed to provision just.exe" }
+            $env:Path = $justDir + [IO.Path]::PathSeparator + $env:Path
+            Add-Content -Path $env:GITHUB_PATH -Value $justDir
+            Write-Host "just provisioned at $justExe"
+          }
+
           Push-Location ../runquota
           just build
           Pop-Location
@@ -302,37 +380,97 @@ jobs:
           $runquotaBin = Join-Path $runquotaRoot "build\bin"
           Add-Content -Path $env:GITHUB_PATH -Value $runquotaBin
           $env:Path = $runquotaBin + [IO.Path]::PathSeparator + $env:Path
+
+          # `just bootstrap` runs scripts/build_apps.sh to compile the engine and
+          # every app entry point. That script stages clingo.dll (fatal if absent
+          # -- the dev-env exports REPRO_WINDOWS_CLINGO_DIR) and best-effort stages
+          # libzstd/sqlite3/cacert next to the binaries.
+          #
+          # We deliberately do NOT set REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS=1 for
+          # this step. Those runtime-DLL sources are not all present on the PATH
+          # the windows-diy runner provisions (no zstd.exe is installed, and the
+          # prebuilt Nim does not reliably carry sqlite3_64.dll), so promoting a
+          # miss to a hard error would abort bootstrap before the deterministic
+          # staging below could supply them. Release self-containment is instead
+          # guaranteed by windows/stage-release-dlls.ps1 (explicit, toolchain-
+          # source-first with a pinned-download fallback) and independently gated
+          # by scripts/verify_release.sh against the packaged archive.
           just bootstrap
 
-          # Find and stage required dynamic libraries (OpenSSL & Zstd) so repro.exe can run and be packaged
-          $opensslDll = Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Filter "libcrypto-3-x64.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($null -ne $opensslDll) {
-            $dllDir = Split-Path -Parent $opensslDll.FullName
-            Copy-Item -Path (Join-Path $dllDir "libcrypto-3-x64.dll") -Destination "build\bin\" -Force
-            Copy-Item -Path (Join-Path $dllDir "libssl-3-x64.dll") -Destination "build\bin\" -Force
-            Write-Host "Staged OpenSSL DLLs from $dllDir"
-          } else {
-            # Hard error, not a warning: the archive is published from whatever
-            # build\bin holds at packaging time, so a warning here becomes a
-            # broken download rather than a failed build.
-            throw "libcrypto-3-x64.dll not found on system; cannot produce a self-contained release archive"
+          # Put the MSYS coreutils on PATH for the pwsh-side `repro build`.
+          # repro's recipe declares `uses: "mkdir"/"cp"/"chmod"/"sh"` (the
+          # reprobuild-nix-daemon staging edge shells them) and resolves them from
+          # PATH under --tool-provisioning=path. On Windows `mkdir` is a cmd
+          # builtin, not an executable -- the coreutils live in Git for Windows'
+          # `<git>\usr\bin`. setup-dev-env's env.ps1 puts `<git>\bin` on PATH
+          # (bash/sh/git, which is why `sh`/`openssl` already resolve) but NOT
+          # `usr\bin`, and build_apps.sh only saw them because it runs under bash.
+          # `.#release` runs here in pwsh, so add `usr\bin` -- the whole dir, so
+          # every coreutil any edge shells (cp, rm, mv, cat, ...) resolves at
+          # once. The path-mode resolver just needs to FIND each declared tool on
+          # PATH; it composes each action's own PATH from the resolved dirs.
+          $gitExe = (Get-Command git -ErrorAction Stop).Source
+          $gitUsrBin = Join-Path (Split-Path -Parent (Split-Path -Parent $gitExe)) "usr\bin"
+          if (-not (Test-Path -LiteralPath (Join-Path $gitUsrBin "mkdir.exe"))) {
+            throw "coreutils not found at $gitUsrBin (repro path-mode resolution needs mkdir.exe/cp.exe/chmod.exe); is this MinGit rather than full Git for Windows?"
+          }
+          $env:Path = $gitUsrBin + [IO.Path]::PathSeparator + $env:Path
+          Add-Content -Path $env:GITHUB_PATH -Value $gitUsrBin
+          Write-Host "coreutils on PATH via $gitUsrBin"
+
+          # Stage every required runtime DLL into build\bin BEFORE running the
+          # engine. The orchestrating repro.exe (built by bootstrap) dlopens
+          # clingo.dll and sqlite3_64.dll at MODULE INIT and imports
+          # libcrypto/libssl through its PE import table, so it will not even
+          # start unless those sit beside it -- Win32 LoadLibrary searches the
+          # exe's own directory first. This same script runs again after the
+          # build (next step) because `.#release` rewrites build\bin.
+          & ./windows/stage-release-dlls.ps1
+
+          # Run the `.#release` build from a COPY of repro.exe at a different
+          # path. That build's `reprobuild.apps.repro` edge RELINKS
+          # build\bin\repro.exe -- the very binary orchestrating the build -- and
+          # on Windows a running .exe holds an exclusive lock on its own image
+          # file, so the linker cannot open it for output:
+          #
+          #   ld.exe: cannot open output file ...\build\bin\repro.exe: Permission denied
+          #   collect2.exe: error: ld returned 1 exit status
+          #   Error: execution of an external program failed: 'gcc.exe @repro_linkerArgs.txt'
+          #
+          # (POSIX has no such lock: `ld` unlinks the old inode and creates a new
+          # file, so a running process keeps executing the old image while the new
+          # binary lands -- which is exactly why the Linux/macOS legs relink repro
+          # without trouble and only Windows fails here. This is also why the DSL
+          # runtime library is already built as `librepro_project_dsl_runtime.new.dll`
+          # and swapped: the same self-lock, handled for the .dll but not the .exe.)
+          #
+          # The copy lives NEXT TO the staged runtime DLLs in build\bin so
+          # clingo.dll / sqlite3_64.dll / libcrypto-3-x64.dll / libssl / vcruntime
+          # etc. still resolve from the orchestrator's own directory at load time
+          # (Win32 LoadLibrary searches the exe's dir first). It is removed in the
+          # `finally` so the packaged archive carries only repro.exe, never the
+          # orchestrator copy.
+          $orchestrator = "build\bin\repro-orchestrator.exe"
+          Copy-Item -LiteralPath "build\bin\repro.exe" -Destination $orchestrator -Force
+          try {
+            & ".\$orchestrator" build --tool-provisioning=path --daemon=off --no-runquota .#release
+            if ($LASTEXITCODE -ne 0) {
+              throw "repro .#release build failed (exit code $LASTEXITCODE)"
+            }
+          } finally {
+            Remove-Item -LiteralPath $orchestrator -Force -ErrorAction SilentlyContinue
           }
 
-          $zstdSearchPaths = @()
-          if ($env:WINDOWS_DIY_INSTALL_ROOT) {
-            $zstdSearchPaths += Join-Path $env:WINDOWS_DIY_INSTALL_ROOT "msys2"
-          }
-          $zstdSearchPaths += "C:\Program Files", "C:\Program Files (x86)"
-          $zstdDll = Get-ChildItem -Path $zstdSearchPaths -Filter "libzstd.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($null -ne $zstdDll) {
-            $dllDir = Split-Path -Parent $zstdDll.FullName
-            Copy-Item -Path (Join-Path $dllDir "libzstd.dll") -Destination "build\bin\" -Force
-            Write-Host "Staged libzstd.dll from $dllDir"
-          } else {
-            throw "libzstd.dll not found on system; cannot produce a self-contained release archive"
-          }
-
-          .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#release
+      # Re-stage after `.#release`: that build rewrites build\bin, so the DLLs
+      # staged above may not survive into the packaged tree. Idempotent -- it
+      # re-copies from the runner toolchain sources (cheap) and skips the pinned
+      # downloads when a DLL is already present. This is the state the packaging
+      # step zips and scripts/verify_release.sh asserts against.
+      - name: Stage Windows runtime DLLs into the release tree
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          & ./windows/stage-release-dlls.ps1
 
       # Package the artifacts preserving the bin/ and lib/ structures.
       #
@@ -351,6 +489,14 @@ jobs:
             mkdir -p "${pkg_name}/bin" "${pkg_name}/lib"
             cp -a build/bin/* "${pkg_name}/bin/"
             cp -a build/lib/* "${pkg_name}/lib/"
+
+            # Make the tree run OFF nix: raw-copied release binaries carry a
+            # nix-store ELF interpreter (linux) / install names (darwin) and do
+            # not bundle their runtime libs, so the tarball fails the ubuntu
+            # smoke test in verify_release.sh. Relocate + bundle so it is
+            # portable. (No apostrophes/backticks in this block: it is inside a
+            # single-quoted dev-exec bash -c, where a stray quote truncates it.)
+            bash scripts/relocate_release_posix.sh "${pkg_name}"
 
             tar -czf "${pkg_name}.tar.gz" "${pkg_name}"
             echo "ASSET_PATH=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
@@ -378,16 +524,38 @@ jobs:
       # to the system directories, so the build host cannot satisfy a dlopen
       # the archive omits.
       #
-      # The Linux leg's multi-distro glibc sweep needs Docker, which the
-      # `eph-linux-x64` class does not have -- it is skipped loudly rather than
-      # failing the job (that `docker: command not found` was aborting every
-      # release before the tarball could be uploaded). To restore the sweep,
-      # move the linux matrix row to `eph-linux-x64-nested` (nested Docker) and
-      # set REPRO_VERIFY_REQUIRE_DOCKER=1 here so a future regression is loud.
+      # The Linux leg's multi-distro glibc sweep is the ONLY check that the
+      # tarball runs off the machine that built it, so we now gate on it:
+      # REPRO_VERIFY_REQUIRE_DOCKER=1 turns a missing/unusable Docker into a hard
+      # failure instead of a silent skip (the skip is what let non-portable Linux
+      # tarballs ship v0.1.0..v0.1.3). `eph-linux-x64` now carries a usable
+      # Docker, so the ubuntu:24.04..almalinux:9 sweep runs and proves the
+      # relocate step in packaging. The flag is a no-op on macOS/Windows (the
+      # sweep is Linux-only).
       - name: Verify release assets
         shell: bash
+        env:
+          REPRO_VERIFY_REQUIRE_DOCKER: "1"
         run: |
-          bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+          # macOS runs this under `dev-exec` so the nix dev shell supplies the
+          # POSIX userland the script shells out to (find, coreutils, ...). The
+          # static nix-darwin runners do NOT carry `find` on the bare step PATH
+          # -- unlike the ephemeral image, whose system /usr/bin leaked in -- so
+          # a bare `bash scripts/verify_release.sh` dies at the first `find` with
+          # `find: command not found` (exit 127) even though the archive built,
+          # packaged, and re-signed cleanly. This mirrors the POSIX packaging
+          # step above, which already runs under `dev-exec` for the same reason.
+          #
+          # Linux stays BARE on purpose: its verify runs the multi-distro Docker
+          # sweep (REPRO_VERIFY_REQUIRE_DOCKER=1), and the host `docker` CLI is
+          # not in the nix dev shell -- routing it through `dev-exec` would turn
+          # a green leg red. Windows stays bare too (Git-for-Windows bash already
+          # supplies find/grep/etc.; there is no `dev-exec` on windows-diy).
+          if [ "${{ matrix.os-name }}" = "macos" ]; then
+            dev-exec bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+          else
+            bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+          fi
 
       # Checksum at the point of production. The publish job RE-computes this
       # from the downloaded artifact and compares, which is what makes the

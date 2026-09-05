@@ -7275,6 +7275,19 @@ proc emitFailedActionSummaries(buildResult: BuildRunResult;
     if item.stderr.len > 0:
       summary.add('\n')
       summary.add(strip(item.stderr, leading = false))
+    # nim writes its compiler diagnostics -- including the terminal ``Error:``
+    # line and the failing ``gcc``/``cc1`` invocation -- to STDOUT, not stderr.
+    # A failed ``nim.c`` edge therefore surfaced only "exit code 1" with an empty
+    # stderr, so the actual cause (e.g. an out-of-memory cc1 under too much build
+    # parallelism) was invisible in CI and could only be recovered from
+    # build-failure-report.json. Surface the TAIL of stdout too: bounded, because
+    # a large C compile's stdout is megabytes of ``CC:`` lines and only the final
+    # lines carry the error.
+    if item.stdout.len > 0:
+      let outLines = strip(item.stdout, leading = false).splitLines()
+      let tailStart = max(0, outLines.len - 200)
+      summary.add('\n')
+      summary.add(outLines[tailStart .. ^1].join("\n"))
     if eventSink != nil:
       # The client routes ``"stream":"stderr"`` diagnostics to its stderr.
       eventSink("diagnostic", summary, "{\"stream\":\"stderr\"}")

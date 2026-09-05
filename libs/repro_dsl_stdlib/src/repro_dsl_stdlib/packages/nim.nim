@@ -638,7 +638,21 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   # An unmatched ref is inert: the resolver returns ``none`` for a name
   # no ``uses:`` entry declares, so a recipe that does not declare its C
   # compiler is left exactly as it was.
-  let backendCompiler = if cc.len > 0: cc else: "gcc"
+  #
+  # The DEFAULT here must be the compiler ``nim c`` actually invokes on this
+  # platform, because that is the name whose directory has to land on the
+  # edge PATH. Nim's default C backend is ``gcc`` on Linux (and the mingw
+  # ``gcc`` on Windows) but ``clang`` on macOS -- so a hardcoded ``gcc``
+  # default declared the WRONG sub-tool on darwin: the graph injected gcc's
+  # directory while ``nim c`` shelled out to ``clang``, and the edge died
+  # with ``clang: command not found`` even though clang was installed. Match
+  # nim's per-platform default so the declared ref names the compiler that
+  # is really run. ``defined(macosx)`` reflects the host the engine is
+  # compiled on, which for these native release builds is also the target.
+  let backendCompiler =
+    if cc.len > 0: cc
+    elif defined(macosx): "clang"
+    else: "gcc"
   appendRegisteredActionToolIdentityRefs(result.id, [backendCompiler])
   maybeTagPublicInterface(result, publish, publishAs)
 
