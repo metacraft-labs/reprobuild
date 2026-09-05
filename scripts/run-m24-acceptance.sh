@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This run records which revision of four separate checkouts the evidence came
+# from, and it may itself be started from inside git — a hook, `rebase --exec`,
+# `bisect run`. Git exports `GIT_DIR` and friends to everything it starts, and
+# those beat the working directory when git decides which repository a command
+# is about, so `git -C ../runquota rev-parse HEAD` would answer with the
+# repository that launched us and all four rows would agree on a revision none
+# of them is at. A provenance record that quietly names the wrong commits is
+# worse than one that is missing.
+#
+# This file is a script, not a library: it owns its whole process, so the
+# honest fix is to clear the redirection once on the way in rather than to
+# remember a guard at each of the four call sites below. The sub-gates this
+# script spawns inherit the cleared environment too, which is what they want —
+# every one of them is about this checkout, not about a caller's.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 cd "${repo_root}"
