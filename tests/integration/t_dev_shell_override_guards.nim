@@ -952,3 +952,221 @@ suite "dev-shell override guards":
       checkpoint("path: url input, directory present:\n" & pathUrlPresent.output)
       check pathUrlPresent.code != 0
       check pathUrlPresent.output.contains("flake.nix declares no such input")
+
+  test "t_dev_shell_source_state_ignores_an_ambient_git_environment":
+    ## The gate ran from a git hook and manufactured a failure no edit could
+    ## clear.
+    ##
+    ## `git -C <dir>` sets the working directory, and the working directory is
+    ## the last thing git consults when it decides which repository a command
+    ## is about. `GIT_DIR` is consulted first and wins. Git exports it — with
+    ## `GIT_INDEX_FILE`, `GIT_PREFIX`, sometimes `GIT_WORK_TREE` — to every
+    ## hook it runs, so `just lint` fired from `pre-commit` asked eight
+    ## siblings for their revision and got the HOOKING repository's back eight
+    ## times. Every row mismatched at once and the gate demanded a `direnv
+    ## reload` that could not change a single one of those answers.
+    ##
+    ## The cost was never the noise. A gate that cannot be satisfied is a gate
+    ## developers learn to pass with `--no-verify`, and `--no-verify` does not
+    ## skip one check — it skips all of them, including the deterministic ones
+    ## that were doing real work. This test is what keeps the answer a question
+    ## about the directory named.
+    ##
+    ## Constructed so that a leak is a visibly WRONG answer rather than merely
+    ## a different one: the two checkouts are at different commits, and the
+    ## sibling additionally carries an uncommitted edit. A query that resolves
+    ## the wrong repository reports the wrong commit; a query that survives
+    ## into the wrong tree or the wrong index reports the wrong dirty state;
+    ## and a query that simply DIES reports empty output, whose digest is the
+    ## digest of "clean" — which is why the expected answer is asserted to be
+    ## neither the other repository's nor a clean one before it is used.
+    if findExe("bash").len == 0 or findExe("git").len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-devshell-gitenv-", "")
+      defer: removeDirEventually(scratch)
+      let gitBin = findExe("git")
+      let bash = findExe("bash")
+
+      # Stands in for reprobuild: the repository whose hook is running.
+      let hooking = scratch / "hooking-repo"
+      # Stands in for `../runquota`: the sibling the fingerprint is about.
+      let sibling = scratch / "runquota"
+      seedGitTree(gitBin, hooking, "hooking\n")
+      seedGitTree(gitBin, sibling, "one\n")
+      # Move the sibling off the seed commit so the two HEADs differ, then
+      # leave an uncommitted edit behind so its dirty digest is non-empty.
+      writeFile(sibling / "src.txt", "two\n")
+      gitCommitAll(gitBin, sibling, "advance")
+      writeFile(sibling / "src.txt", "two-dirty\n")
+
+      proc headOf(path: string): string =
+        runShell(shellCommand(@[gitBin, "-C", path,
+          "rev-parse", "HEAD"])).output.strip()
+
+      let hookingHead = headOf(hooking)
+      let siblingHead = headOf(sibling)
+      # If these ever coincided the whole test would be vacuous.
+      check hookingHead.len == 40
+      check siblingHead.len == 40
+      check hookingHead != siblingHead
+
+      # Exactly what git puts in a hook's environment. `GIT_PREFIX` is in the
+      # list although the fix does not clear it: it is what a hook really
+      # carries, and including it says the fix does not depend on removing it.
+      let hookEnv = @[
+        ("GIT_DIR", hooking / ".git"),
+        ("GIT_WORK_TREE", hooking),
+        ("GIT_INDEX_FILE", hooking / ".git" / "index"),
+        ("GIT_PREFIX", "")]
+
+      proc sourceState(dir: string;
+                       env: seq[tuple[name, value: string]]): string =
+        runShell(shellCommand(@[bash, "-c",
+          "set -uo pipefail\n" &
+          "source " & quoteShell(libPath()) & "\n" &
+          "dev_shell_source_state " & quoteShell(dir) & "\n"], env),
+          cwd = scratch).output.strip()
+
+      # The digest of no output at all, computed by the same helper that
+      # digests `git status`, so the "it only passes because everything
+      # errored" case has a name to be compared against instead of a
+      # hard-coded constant that would rot with the hash choice.
+      let emptyDigest = runShell(shellCommand(@[bash, "-c",
+        "set -uo pipefail\n" &
+        "source " & quoteShell(libPath()) & "\n" &
+        "printf '' | _dev_shell_digest\n"]), cwd = scratch).output.strip()
+      check emptyDigest.len > 0
+
+      let expected = sourceState(sibling, @[])
+      checkpoint("sibling state, clean environment: " & expected)
+      check expected.contains(siblingHead)
+      check not expected.contains(hookingHead)
+      # A dirty tree, so a dead `git status` cannot pass for the right answer.
+      check not expected.endsWith("+" & emptyDigest)
+
+      let underHook = sourceState(sibling, hookEnv)
+      checkpoint("sibling state, hook environment: " & underHook)
+      check not underHook.contains(hookingHead)
+      check underHook == expected
+
+      # The same question about the hooking repository still answers about the
+      # hooking repository, under both environments — the fix removes a
+      # redirection, it does not make every directory report the same thing.
+      let hookingState = sourceState(hooking, @[])
+      check hookingState.contains(hookingHead)
+      check sourceState(hooking, hookEnv) == hookingState
+      check hookingState != expected
+
+      # And the whole gate path, which is where the spurious failure surfaced:
+      # a fingerprint recorded outside a hook, reconciled from inside one.
+      let args =
+        "'--override-input' 'runquota-src' 'path:" & sibling & "' "
+      let record = runShell(shellCommand(@[bash, "-c",
+        "set -uo pipefail\n" &
+        "source " & quoteShell(libPath()) & "\n" &
+        "printf '%s' " & quoteShell(args) &
+        " | dev_shell_override_path_pairs_from_args" &
+        " | dev_shell_render_fingerprint > fp.txt\n" &
+        "grep -c . fp.txt\n"]), cwd = scratch)
+      checkpoint("recorded:\n" & record.output)
+      # Header plus the one pair: a fingerprint that recorded nothing would
+      # have nothing to drift.
+      check record.output.strip() == "2"
+
+      let driftScript =
+        "set -uo pipefail\n" &
+        "source " & quoteShell(libPath()) & "\n" &
+        "dev_shell_fingerprint_drift fp.txt\n" &
+        "printf 'drift_exit=%s\\n' \"$?\"\n"
+
+      let quiet = runShell(shellCommand(@[bash, "-c", driftScript], hookEnv),
+        cwd = scratch)
+      checkpoint("drift under a hook environment:\n" & quiet.output)
+      check quiet.output.contains("drift_exit=0")
+      check not quiet.output.contains("runquota-src\t")
+
+      # The other direction, and the reason this is not a test that the drift
+      # check has simply been switched off inside hooks: with the sibling
+      # genuinely moved, the same hook environment must still catch it.
+      writeFile(sibling / "src.txt", "three\n")
+      gitCommitAll(gitBin, sibling, "really advance")
+      let loud = runShell(shellCommand(@[bash, "-c", driftScript], hookEnv),
+        cwd = scratch)
+      checkpoint("real drift under a hook environment:\n" & loud.output)
+      check loud.output.contains("drift_exit=1")
+      check loud.output.contains("runquota-src")
+
+  test "t_dev_shell_git_queries_go_through_the_one_guarded_entry_point":
+    ## The guard above is only as good as the next call site to remember it,
+    ## and "remember it at every call site" is the shape of the defect it
+    ## fixes. So the library is required to reach git through exactly one
+    ## door, and the script that asks the same question about four checkouts
+    ## is required to clear the same variables on the way in.
+    ##
+    ## Static, and deliberately so: the failure being prevented is a NEW `git
+    ## -C` written next to the old ones, which no runtime test of today's call
+    ## sites can see.
+    let lib = readFile(libPath())
+
+    # The variable names actually passed to `unset`, read out of the body
+    # rather than out of the prose around it — a comment naming six
+    # variables and an `unset` clearing one must not read as agreement.
+    proc unsetNames(text, marker: string): seq[string] =
+      let start = text.find(marker)
+      if start < 0: return
+      var i = start
+      while i < text.len:
+        let stop = text.find('\n', i)
+        let line = if stop < 0: text[i .. ^1] else: text[i ..< stop]
+        for word in line.split():
+          if word.startsWith("GIT_"):
+            result.add(word)
+        if not line.strip().endsWith("\\"): break
+        if stop < 0: break
+        i = stop + 1
+
+    let guarded = unsetNames(lib, "unset GIT_DIR")
+    checkpoint("cleared by dev_shell_git: " & guarded.join(" "))
+    # Every variable that redirects which repository, tree, index or object
+    # store git answers from. `GIT_PREFIX` and `GIT_NAMESPACE` are absent on
+    # purpose: neither steers repository resolution, and clearing a hook's
+    # variables that do no harm is scope this function has not earned.
+    for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+                 "GIT_ALTERNATE_OBJECT_DIRECTORIES"]:
+      checkpoint("dev_shell_git must clear " & name)
+      check guarded.contains(name)
+
+    proc codeLines(text: string): seq[string] =
+      ## Lines that run, as opposed to lines that talk about lines that run.
+      for line in text.splitLines():
+        let bare = line.strip()
+        if bare.len > 0 and not bare.startsWith("#"):
+          result.add(bare)
+
+    # Exactly one door in the library.
+    var offenders: seq[string]
+    for bare in codeLines(lib):
+      if bare.contains("git -C") and not bare.contains("dev_shell_git -C"):
+        offenders.add(bare)
+    checkpoint("unguarded git -C call sites:\n" & offenders.join("\n"))
+    check offenders.len == 0
+    # ...and the door is actually used, so a library that had simply stopped
+    # asking git anything could not satisfy the line above.
+    check lib.contains("dev_shell_git -C")
+
+    # The acceptance runner asks the same question about four checkouts. It is
+    # a script and not a library, so it clears the redirection once on the way
+    # in instead of per call site — but it must clear the SAME set, or the two
+    # places that answer "which revision is that sibling at" answer differently
+    # under a hook.
+    let acceptance = readFile(repoRoot() / "scripts" / "run-m24-acceptance.sh")
+    # It still asks the question — a runner that had stopped querying git
+    # would satisfy the clearing assertions below for the wrong reason.
+    check codeLines(acceptance).filterIt(it.contains("git -C")).len > 0
+    let cleared = unsetNames(acceptance, "unset GIT_DIR")
+    checkpoint("cleared by run-m24-acceptance.sh: " & cleared.join(" "))
+    for name in guarded:
+      checkpoint("acceptance runner must clear " & name)
+      check cleared.contains(name)

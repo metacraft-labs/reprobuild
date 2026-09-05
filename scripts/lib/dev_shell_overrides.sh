@@ -542,6 +542,64 @@ dev_shell_declared_row_is_applicable() {
 
 DEV_SHELL_FINGERPRINT_HEADER='# reprobuild dev-shell override-source fingerprint v1'
 
+# Ask git about the directory NAMED, not about whatever repository the ambient
+# environment points at.
+#
+# `git -C <dir>` only changes the working directory, and the working directory
+# is the LAST thing git consults. `GIT_DIR` and its companions are read first
+# and win outright, so under an environment that sets them `git -C ../sibling
+# rev-parse HEAD` cheerfully answers with the other repository's commit. Git
+# hooks are exactly such an environment — git exports `GIT_DIR` (and usually
+# `GIT_INDEX_FILE`, `GIT_PREFIX`, sometimes `GIT_WORK_TREE`) to every hook it
+# runs — so a `just lint` fired from `pre-commit` saw every sibling report the
+# hooking repository's HEAD, the whole fingerprint mismatched at once, and the
+# gate demanded a `direnv reload` that could not possibly help. A failure no
+# edit can clear is worse than no gate at all: it teaches `--no-verify`, which
+# turns off the gates that DO work.
+#
+# What is neutralised, and why each earns its place — measured, not copied out
+# of the manual:
+#
+#   GIT_DIR                            replaces discovery outright: both the
+#                                      commit and the dirty state become the
+#                                      other repository's.
+#   GIT_WORK_TREE                      commit stays right, `status` compares
+#                                      the sibling's index against a foreign
+#                                      tree — every file reads as deleted.
+#   GIT_INDEX_FILE                     `status` dies on a foreign index; the
+#                                      digest of the empty output is the
+#                                      digest of "clean", so a genuinely
+#                                      dirty source silently stops drifting.
+#   GIT_COMMON_DIR                     refs and objects resolve elsewhere;
+#                                      same silent false-clean.
+#   GIT_OBJECT_DIRECTORY               same, via the object store.
+#   GIT_ALTERNATE_OBJECT_DIRECTORIES   alone it only ADDS object sources and
+#                                      changed no answer under test, but git
+#                                      sets it together with
+#                                      GIT_OBJECT_DIRECTORY (push quarantine);
+#                                      honouring half of a paired redirection
+#                                      is less defensible than honouring none.
+#
+# Deliberately left alone: `GIT_PREFIX` is informational — it tells a hook
+# where the user was standing and steers no lookup (verified: no effect on
+# either query). `GIT_NAMESPACE` namespaces refs for the pack protocol, not
+# `rev-parse HEAD` or `status` (verified likewise). `GIT_CEILING_DIRECTORIES`
+# bounds the upward walk, and this function only ever names a directory that
+# holds its own `.git`, so discovery stops before a ceiling is consulted
+# (verified with the ceiling set to the checkout itself).
+#
+# The unsets live in a subshell so nothing escapes into the caller. That
+# matters: `.envrc` SOURCES this file into the developer's interactive shell,
+# where stripping git variables would be a side effect on their session rather
+# than a fix for ours.
+dev_shell_git() {
+  (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
+      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    git "$@"
+  )
+}
+
 # Describe one overridden source in a way that changes whenever the bytes nix
 # would copy change. `path:` inputs copy the working tree, so the commit alone
 # is not enough — an uncommitted edit is just as much a different input.
@@ -558,8 +616,9 @@ dev_shell_source_state() {
   fi
   if [[ -e "$dir/.git" ]] && command -v git >/dev/null 2>&1; then
     local head status
-    head="$(git -C "$dir" rev-parse HEAD 2>/dev/null)" || head=unborn
-    status="$(git -C "$dir" status --porcelain 2>/dev/null | _dev_shell_digest)"
+    head="$(dev_shell_git -C "$dir" rev-parse HEAD 2>/dev/null)" || head=unborn
+    status="$(dev_shell_git -C "$dir" status --porcelain 2>/dev/null |
+      _dev_shell_digest)"
     printf 'git:%s+%s' "$head" "$status"
     return 0
   fi
