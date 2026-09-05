@@ -8019,6 +8019,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_branch_unpublished_source_head.nim",
+    binary: "build/test-bin/t_branch_unpublished_source_head",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_build_machine_and_host_target_are_distinct.nim",
     binary: "build/test-bin/t_build_machine_and_host_target_are_distinct",
     defines: @[],

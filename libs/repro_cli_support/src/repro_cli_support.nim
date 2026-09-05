@@ -42296,6 +42296,128 @@ proc unpublishedHeadEvidence*(headSha, requestedRemote,
       "was accepted)"
   head & " not on any remote-tracking branch"
 
+type
+  HeadPublicationStatus* = enum
+    ## F0.3 — the answer to "is this checkout's HEAD published?", with the two
+    ## cases the bare predicate cannot tell apart kept SEPARATE.
+    ##
+    ## ``git branch -r --contains HEAD`` answers "is HEAD on a remote-tracking
+    ## branch **that this checkout has fetched**". Two very different states
+    ## come back as the same "no":
+    ##
+    ##   * the commit exists on a remote nobody has fetched here (a stale
+    ##     ``upstream``, a colleague's push we have not seen) — nothing is at
+    ##     risk and there is nothing to do;
+    ##   * the commit exists nowhere but this working tree — the state that
+    ##     makes every push in a workspace refuse.
+    ##
+    ## Reporting the first as the second is how a safety check earns a
+    ## reputation for crying wolf and gets switched off, so the fetch happens
+    ## BEFORE the judgement and the two answers are named differently.
+    hpsPublished = "published"
+      ## On a remote-tracking branch already present.
+    hpsPublishedAfterFetch = "published_after_fetch"
+      ## Looked unpublished; a fetch produced the ref.
+    hpsUnpublished = "unpublished"
+      ## Fetched, and it still exists nowhere but here.
+    hpsUnknown = "unknown"
+      ## The probe, or the fetch it needed, failed.
+
+  HeadPublication* = object
+    ## One checkout's publication verdict plus everything a diagnostic needs.
+    status*: HeadPublicationStatus
+    headSha*: string
+    branch*: string      ## Local branch name, "" when HEAD is detached.
+    remoteName*: string  ## The remote the caller asked about.
+    scope*: string       ## ``GitQueryResult.publishedScope`` (see above).
+    diagnostic*: string  ## Evidence sentence; empty when published.
+
+proc headPublicationOf*(identity: GitToolIdentity;
+                        repoAbsPath, remoteName: string;
+                        allowFetch = true): HeadPublication =
+  ## F0.3 — classify a checkout's HEAD with the SAME predicate the pre-push
+  ## gate uses (``isPublishedQuery`` → ``remoteBranchContainsHead``), then
+  ## resolve the fetchable false-negative described on
+  ## ``HeadPublicationStatus``.
+  ##
+  ## Reusing the gate's predicate is deliberate: `repro branch` refuses
+  ## precisely so the workspace it creates can pass ``repro check
+  ## --mode=pre-push``, and a second, subtly different notion of "published"
+  ## would let one command bless what the other refuses.
+  ##
+  ## ``allowFetch = false`` performs NO network I/O, so a caller with a
+  ## local-only phase can order its probes: run the cheap pass first, then
+  ## re-ask only about the repos it flagged. The fetch touches remote-tracking
+  ## refs only — no branch, no HEAD, no working tree — so it is safe on a
+  ## source workspace the caller has promised not to modify.
+  result.remoteName = remoteName
+  let headRes = queryGitState(headShaQuery(repoAbsPath), identity)
+  if headRes.status == gqsOk:
+    result.headSha = headRes.headSha
+  let branchRes = gitRunPlain(identity,
+    ["-C", repoAbsPath, "symbolic-ref", "--short", "-q", "HEAD"])
+  if branchRes.code == 0:
+    result.branch = branchRes.output.strip()
+
+  let first = queryGitState(isPublishedQuery(repoAbsPath, remoteName), identity)
+  result.scope = first.publishedScope
+  if first.status != gqsOk:
+    result.status = hpsUnknown
+    result.diagnostic = "publish-probe-failed: " & first.diagnostic
+    return
+  if first.isPublished:
+    result.status = hpsPublished
+    return
+  if not allowFetch:
+    result.status = hpsUnpublished
+    result.diagnostic = unpublishedHeadEvidence(
+      result.headSha, remoteName, result.scope) &
+      " (no remote was contacted for this answer)"
+    return
+
+  # Not published as far as this checkout has FETCHED. Ask the remotes before
+  # calling it unpublished. ``--all`` rather than a fetch scoped to
+  # ``remoteName``: the aim is to leave NO configured remote stale before the
+  # verdict, and a checkout that has drifted onto a differently-named remote is
+  # exactly the shape that produced the false negative. The verdict itself
+  # stays scoped exactly as the pre-push gate scopes it — this widens what gets
+  # refreshed, never what counts as published.
+  let fetched = gitRunPlain(identity,
+    ["-C", repoAbsPath, "fetch", "--all", "--quiet"])
+  let second = queryGitState(isPublishedQuery(repoAbsPath, remoteName),
+    identity)
+  result.scope = second.publishedScope
+  if second.status != gqsOk:
+    result.status = hpsUnknown
+    result.diagnostic = "publish-probe-failed after fetch: " &
+      second.diagnostic
+    return
+  if second.isPublished:
+    result.status = hpsPublishedAfterFetch
+    return
+  let evidence = unpublishedHeadEvidence(
+    result.headSha, remoteName, result.scope)
+  if fetched.code != 0:
+    # "It is not there" and "we could not look" are different answers and only
+    # the first is safe to act on. Say which one this is.
+    #
+    # git's failure text is multi-line and can run to a dynamic-linker essay;
+    # this string lands in a one-line health-table cell and in a JSON field, so
+    # collapse it to a single line and keep only enough to identify the cause.
+    var why = fetched.output.strip().splitLines().join(" | ")
+    while "  " in why:
+      why = why.replace("  ", " ")
+    const MaxFetchDiagnostic = 300
+    if why.len > MaxFetchDiagnostic:
+      why = why[0 ..< MaxFetchDiagnostic] & " …"
+    result.status = hpsUnknown
+    result.diagnostic = evidence & ", and `git fetch --all` exited " &
+      $fetched.code & " (" & why &
+      "), so a remote that could hold it was never reached"
+    return
+  result.status = hpsUnpublished
+  result.diagnostic = evidence & " (every configured remote was fetched first)"
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
@@ -46844,6 +46966,101 @@ proc gatherHealthChecks(parsed: HealthArgs):
         remedy: self & " health --fix",
         fixKind: hfWorkspaceErgonomics))
 
+  # 13. F0.3 — participating checkouts whose HEAD is on no remote.
+  #
+  #     ``repro check --mode=pre-push`` refuses a push when ANY repo in the
+  #     PUSHED repo's transitive develop-set closure (RA-21's ``prePushScope``)
+  #     has an unpublished HEAD, exempting only the repo whose push is being
+  #     gated. In a workspace whose repos depend on each other that closure is
+  #     most of the workspace, so one unpublished HEAD blocks pushes in repos
+  #     the operator never touched. That is exactly the state `repro branch`
+  #     used to manufacture, and workspaces forked before this check existed
+  #     are still in it, which is why the doctor has to be able to name it.
+  #
+  #     Reported as ``warn``, not ``fail``: "I committed and have not pushed
+  #     yet" is a legitimate, extremely common state, and a doctor that goes
+  #     red on it is a doctor people stop running. The detail names every repo,
+  #     its branch and its commit, which is the information whose absence made
+  #     the original incident take a reflog archaeology session to diagnose.
+  #
+  #     Network cost: ZERO in a healthy workspace. The first pass is the purely
+  #     local ``git branch -r --contains HEAD``; only a repo that pass flags is
+  #     fetched, and the fetch can then only turn a warn into an ok. This does
+  #     not contradict check 8's "no live round-trip in the gatherer" rule,
+  #     which exists so that being offline cannot make a healthy workspace look
+  #     broken — an unreachable remote here degrades to a distinct
+  #     "cannot confirm" wording, never to a false alarm.
+  block unpublishedHeadsCheck:
+    if not ctx.resolvedOk or not ctx.gitOk:
+      checks.add(HealthCheck(
+        name: "unpublished-heads",
+        status: hsWarn,
+        detail: "skipped: " &
+          (if not ctx.resolvedOk: "manifest unresolved"
+           else: "no usable git tool"),
+        remedy: self & " health",
+        fixKind: hfNone))
+      break unpublishedHeadsCheck
+    var candidates: seq[ResolvedRepo]
+    var inspected = 0
+    for repo in ctx.resolved.repos:
+      let abs = parsed.workspaceRoot / repo.path
+      if not dirExists(abs / ".git"):
+        continue
+      inc inspected
+      let local = headPublicationOf(ctx.gitIdentity, abs,
+        gitRemoteNameFor(repo), allowFetch = false)
+      if local.status != hpsPublished:
+        candidates.add(repo)
+    var offenders: seq[string]
+    var unconfirmed: seq[string]
+    var remedies: seq[string]
+    for repo in candidates:
+      let abs = parsed.workspaceRoot / repo.path
+      let verdict = headPublicationOf(ctx.gitIdentity, abs,
+        gitRemoteNameFor(repo), allowFetch = true)
+      let shortSha =
+        if verdict.headSha.len >= 8: verdict.headSha[0 ..< 8]
+        else: verdict.headSha
+      let where =
+        repo.path & " (" &
+        (if verdict.branch.len > 0: "branch '" & verdict.branch & "'"
+         else: "detached HEAD") & " at " & shortSha & ")"
+      case verdict.status
+      of hpsPublished, hpsPublishedAfterFetch:
+        discard
+      of hpsUnpublished:
+        offenders.add(where)
+        remedies.add("git -C " & repo.path & " push")
+      of hpsUnknown:
+        unconfirmed.add(where & ": " & verdict.diagnostic)
+    if offenders.len == 0 and unconfirmed.len == 0:
+      checks.add(HealthCheck(
+        name: "unpublished-heads",
+        status: hsOk,
+        detail: "every one of " & $inspected &
+          " participating checkout(s) has a published HEAD",
+        remedy: "", fixKind: hfNone))
+    else:
+      var detail: seq[string]
+      if offenders.len > 0:
+        detail.add($offenders.len &
+          " checkout(s) have a HEAD on no remote; `repro check " &
+          "--mode=pre-push` refuses every push whose develop-set closure " &
+          "reaches one of them: " & offenders.join(", "))
+      if unconfirmed.len > 0:
+        detail.add($unconfirmed.len &
+          " checkout(s) could not be confirmed published: " &
+          unconfirmed.join("; "))
+      checks.add(HealthCheck(
+        name: "unpublished-heads",
+        status: hsWarn,
+        detail: detail.join("; "),
+        remedy:
+          if remedies.len > 0: remedies.join(" && ")
+          else: "re-run with the remotes reachable",
+        fixKind: hfNone))
+
   result = (checks: checks, ctx: ctx)
 
 proc healthHasFailure(checks: seq[HealthCheck]): bool =
@@ -47968,6 +48185,18 @@ type
       ## Fork form only: ``source_head`` when the source checkout supplied the
       ## branch point, ``declared_checkout`` when the repo was absent there and
       ## the target's normally-materialized checkout supplied it.
+    publication*: string
+      ## F0.3 fork form only: the source HEAD's publication verdict —
+      ## ``published``, ``published_after_fetch``, ``unpublished`` or
+      ## ``unknown``. Empty when the question was not asked
+      ## (``--existing-branch``, or a repo with no source checkout). Recorded so
+      ## an audit can tell a fork that carried unpublished work from one that
+      ## did not, months later.
+    sourceBranch*: string
+      ## F0.3 fork form only: the branch the SOURCE checkout was on. Always
+      ## recorded when known; additionally re-created as a local branch in the
+      ## new workspace when unpublished work was carried, so the commits keep
+      ## the name that gives them meaning.
 
   BranchReport* = object
     ## Structured outcome of one ``repro branch`` invocation.
@@ -48023,6 +48252,8 @@ proc toJsonNode*(report: BranchReport): JsonNode =
     obj["dirtyReason"] = %entry.dirtyReason
     obj["diagnostic"] = %entry.diagnostic
     obj["baselineSource"] = %entry.baselineSource
+    obj["publication"] = %entry.publication
+    obj["sourceBranch"] = %entry.sourceBranch
     repos.add(obj)
   result["repos"] = repos
   result["exitCode"] = %report.exitCode
@@ -48109,12 +48340,37 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     result.add(summary)
 
 type
+  UnpublishedPolicy* = enum
+    ## F0.3 — what the fork form does with a source repo whose committed HEAD
+    ## is on no remote.
+    ##
+    ## Three answers, one flag, because they are mutually exclusive and a
+    ## developer facing the situation has to pick one. ``--include-changes``
+    ## next door is a boolean because uncommitted work has only two answers
+    ## (carry it or leave it); unpublished COMMITS have three, and the third —
+    ## "give me those repos at their manifest revision instead" — is not the
+    ## negation of the second.
+    upRefuse = "refuse"
+      ## Default. Refuse before creating anything, naming every offending repo
+      ## and commit. A fork that silently carried them produced a workspace in
+      ## which `repro check --mode=pre-push` refused every push whose
+      ## develop-set closure reached one of those repos, from the moment the
+      ## workspace existed — in repos the operator never touched.
+    upCarry = "carry"
+      ## Carry the commits, and preserve the originating branch name in the new
+      ## workspace so they stay attributable.
+    upDeclared = "declared"
+      ## Start those repos from their manifest-declared revision instead,
+      ## leaving the unpublished work behind in the source workspace.
+
   BranchArgs = object
     workspaceRoot: string
     projectName: string
     branchName: string
     forkPath: string        ## WV-6: the positional — the fork destination.
     includeChanges: bool    ## M27: also copy the source's uncommitted work.
+    unpublished: UnpublishedPolicy
+      ## F0.3 ``--unpublished=refuse|carry|declared``; ``refuse`` by default.
     existingBranch: bool    ## WV-6: adopt an existing branch instead of cutting one.
     projects: seq[string]
       ## PS-6 ``--projects=A,B`` — the project set the NEW workspace should
@@ -48209,6 +48465,19 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       result.existingBranch = true
     elif arg == "--include-changes":
       result.includeChanges = true
+    elif arg == "--unpublished" or arg.startsWith("--unpublished="):
+      let raw = valueFromFlag(args, i, "--unpublished").strip().toLowerAscii()
+      case raw
+      of "refuse": result.unpublished = upRefuse
+      of "carry": result.unpublished = upCarry
+      of "declared": result.unpublished = upDeclared
+      else:
+        raise newException(ValueError,
+          "unsupported `--unpublished=" & raw & "` value; expected one of " &
+            "refuse (the default: stop and name the repos), carry (bring the " &
+            "unpublished commits, preserving their source branch name) or " &
+            "declared (start those repos from their manifest-declared " &
+            "revision instead)")
     elif arg == "--projects" or arg.startsWith("--projects="):
       # Comma-separated and repeatable both work, so the flag reads the same
       # whether it is typed by hand or assembled by a script.
@@ -48241,10 +48510,11 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
     # The read-only show form. Every flag below only means something for a
     # destination, so accepting them here would silently do nothing.
     if explicitBranch.len > 0 or result.existingBranch or
-        result.includeChanges or result.projects.len > 0:
+        result.includeChanges or result.projects.len > 0 or
+        result.unpublished != upRefuse:
       raise newException(ValueError,
         "`--branch` / `--existing-branch` / `--include-changes` / " &
-          "`--projects` require a " &
+          "`--unpublished` / `--projects` require a " &
           "destination path (`" & verb & " <path>`); with no path " &
           "`repro branch` only reports the current workspace branch")
     return
@@ -48705,7 +48975,8 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
   ## ``--projects=A,B`` replaces it. See ``executeBranchFork``.
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo verb & " [<path>] [--branch=NAME] [--existing-branch] " &
-      "[--include-changes] [--projects=A,B] [--workspace-root=PATH] " &
+      "[--include-changes] [--unpublished=refuse|carry|declared] " &
+      "[--projects=A,B] [--workspace-root=PATH] " &
       "[--json] [--write-report[=PATH]]"
     echo "  (no argument)     print the current workspace branch"
     echo "  <path>            fork into a NEW workspace directory at <path>;"
@@ -48713,6 +48984,10 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
     echo "  --branch=NAME     name the branch something other than the basename"
     echo "  --existing-branch check out an EXISTING branch instead of creating one"
     echo "  --include-changes also copy the source's uncommitted work"
+    echo "  --unpublished=…   what to do with a source repo whose HEAD is on"
+    echo "                    no remote: refuse (default), carry (bring it,"
+    echo "                    keeping its source branch name) or declared"
+    echo "                    (start that repo from its manifest revision)"
     echo "  --projects=A,B    give the new workspace THIS project set instead"
     echo "                    of inheriting the current one (repeatable)"
     echo ""
@@ -50831,10 +51106,18 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## cutting a new one.
   ##
   ## Cutting from committed HEADs (not the remote tips, not the recorded lock)
-  ## is the point of the command: "branch off exactly what I have right now",
-  ## including commits that have never been pushed. Those are transferred by
-  ## the M27 fork-branch action, which fetches a missing object straight from
-  ## the source checkout.
+  ## is the point of the command: "branch off exactly what I have right now".
+  ## Commits are transferred by the M27 fork-branch action, which fetches a
+  ## missing object straight from the source checkout.
+  ##
+  ## F0.3 — a source HEAD that is on NO REMOTE is the one thing this does not
+  ## do silently. Carrying it manufactures a workspace in which every push is
+  ## refused (``repro check --mode=pre-push`` requires a published HEAD in
+  ## every repo of the develop-set closure), so the pre-flight fetches the
+  ## candidates and then refuses by default, naming the repos, their branches
+  ## and their commits. ``--unpublished=carry`` brings them anyway and
+  ## preserves the source branch name; ``--unpublished=declared`` starts those
+  ## repos from their manifest-declared revision instead.
   ##
   ## The source's uncommitted work is deliberately NOT carried unless
   ## ``--include-changes`` says so — which is also why a dirty source is not a
@@ -50953,6 +51236,18 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       probeReason: string
       localHasBranch: bool
       remoteHasBranch: bool
+      useDeclaredBaseline: bool
+        ## F0.3 — take this repo's branch point from the TARGET's
+        ## manifest/lock checkout rather than from the source HEAD. True for a
+        ## repo absent from the source (the original ``declared_checkout``
+        ## case) and, under ``--unpublished=declared``, for a source repo whose
+        ## HEAD is on no remote.
+      publication: HeadPublication
+      publicationAsked: bool
+      sourceBranch: string
+        ## F0.3 — the branch the SOURCE checkout is on. The name that gives a
+        ## carried commit its meaning, and the thing the original defect threw
+        ## away by naming every new branch after the destination directory.
 
   var states: seq[ForkSourceState]
   var anyProbeFailed = false
@@ -50970,6 +51265,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       state.sourcePresent = false
       if not parsed.existingBranch:
         state.baselineSource = "declared_checkout"
+        state.useDeclaredBaseline = true
       states.add(state)
       continue
     state.sourcePresent = true
@@ -50991,6 +51287,21 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       states.add(state)
       continue
     state.isClean = cleanRes.isClean
+    # F0.3 — the CHEAP half of the publication question, kept in the local
+    # phase where it belongs: ``git branch -r --contains HEAD`` touches no
+    # network. A repo that answers "published" here is finished with; only the
+    # ones that do not get the network round-trip below. That is what keeps the
+    # ordinary, healthy fork exactly as fast and as quiet as it was before this
+    # check existed.
+    #
+    # Skipped under ``--existing-branch``: there the branch point comes from a
+    # branch that already exists on a remote, so there is no source HEAD being
+    # propagated and nothing to judge.
+    if not parsed.existingBranch:
+      state.publication = headPublicationOf(identity, state.srcPath,
+        gitRemoteNameFor(repo), allowFetch = false)
+      state.publicationAsked = true
+      state.sourceBranch = state.publication.branch
     if parsed.existingBranch:
       let localProbe = gitRunPlain(identity,
         ["-C", state.srcPath, "rev-parse", "--verify", "--quiet",
@@ -51010,7 +51321,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         name: state.repo.name,
         path: state.repo.path,
         headSha: state.headSha,
-        baselineSource: state.baselineSource)
+        baselineSource: state.baselineSource,
+        publication:
+          (if state.publicationAsked: $state.publication.status else: ""),
+        sourceBranch: state.sourceBranch)
       if state.probeFailed:
         entry.outcome = "probe_failed"
         entry.diagnostic = state.probeReason
@@ -51097,6 +51411,66 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
             "remote branch probe receipt could not be read: " & err.msg
           anyProbeFailed = true
 
+  # ---- F0.3: source HEADs that are on no remote --------------------------
+  # Still in the pre-flight, still before anything is created.
+  #
+  # A fork cuts each new branch at the source workspace's committed HEAD. When
+  # that HEAD is on no remote, the fork MANUFACTURES a workspace that cannot
+  # push: ``repro check --mode=pre-push`` requires a published HEAD in every
+  # repo of the PUSHED repo's transitive develop-set closure, so one carried
+  # commit refuses every push whose closure reaches it — in repos the operator
+  # never touched. The shared bare cache makes this silent, because the objects
+  # come across and the clone succeeds.
+  #
+  # The local pass above narrowed the field for free; now FETCH the survivors
+  # before judging them. A commit sitting on a remote nobody fetched here (a
+  # stale ``upstream``) is not the same condition as a commit that exists
+  # nowhere but this working tree, and reporting the first as the second is how
+  # this check would get itself disabled. Serial is deliberate: the list is
+  # normally empty, and when it is not it is a handful of repos.
+  var unpublishedPaths = initHashSet[string]()
+  var unconfirmedPaths = initHashSet[string]()
+  if not parsed.existingBranch:
+    var pending: seq[int]
+    for idx, state in states:
+      if state.probeFailed or not state.publicationAsked:
+        continue
+      if state.publication.status != hpsPublished:
+        pending.add(idx)
+    if pending.len > 0:
+      stderr.writeLine("workspace branch: " & $pending.len &
+        " source checkout(s) carry a HEAD no fetched remote has; " &
+        "fetching their remotes before judging ...")
+    for idx in pending:
+      states[idx].publication = headPublicationOf(identity,
+        states[idx].srcPath, gitRemoteNameFor(states[idx].repo),
+        allowFetch = true)
+      case states[idx].publication.status
+      of hpsPublished, hpsPublishedAfterFetch:
+        discard
+      of hpsUnpublished:
+        unpublishedPaths.incl(states[idx].repo.path)
+      of hpsUnknown:
+        unconfirmedPaths.incl(states[idx].repo.path)
+    if parsed.unpublished == upDeclared:
+      # "Give me those repos at their manifest revision instead." The
+      # unpublished work stays in the source workspace, untouched; the new
+      # workspace starts these repos where the manifest says, which is by
+      # construction a published commit.
+      for idx in 0 ..< states.len:
+        if states[idx].repo.path in unpublishedPaths or
+            states[idx].repo.path in unconfirmedPaths:
+          states[idx].useDeclaredBaseline = true
+          states[idx].baselineSource = "declared_checkout"
+      unpublishedPaths.clear()
+      unconfirmedPaths.clear()
+    elif parsed.unpublished == upCarry:
+      # Carrying is a choice the operator made explicitly; it is not refused.
+      # Attribution is preserved after the branch pass (see the carry block
+      # further down), which is the other half of making it safe.
+      unpublishedPaths.clear()
+      unconfirmedPaths.clear()
+
   var remoteCollisions: seq[string]
   var missingBranch: seq[string] ## WV-6 ``--existing-branch``: repos lacking it.
   for state in states:
@@ -51108,13 +51482,17 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     elif state.remoteHasBranch:
       remoteCollisions.add(state.repo.path)
 
-  if anyProbeFailed or remoteCollisions.len > 0 or missingBranch.len > 0:
+  if anyProbeFailed or remoteCollisions.len > 0 or missingBranch.len > 0 or
+      unpublishedPaths.len > 0 or unconfirmedPaths.len > 0:
     for state in states:
       var entry = BranchRepoEntry(
         name: state.repo.name,
         path: state.repo.path,
         headSha: state.headSha,
-        baselineSource: state.baselineSource)
+        baselineSource: state.baselineSource,
+        publication:
+          (if state.publicationAsked: $state.publication.status else: ""),
+        sourceBranch: state.sourceBranch)
       let remoteLabel =
         if state.sourcePresent:
           "configured remote '" & gitRemoteNameFor(state.repo) & "'"
@@ -51123,6 +51501,28 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       if state.probeFailed:
         entry.outcome = "probe_failed"
         entry.diagnostic = state.probeReason
+      elif state.repo.path in unpublishedPaths or
+          state.repo.path in unconfirmedPaths:
+        # F0.3 — name the repo, the branch and the commit. The original
+        # incident cost a reflog archaeology session precisely because none of
+        # the three was ever printed; the remedies are spelled out in full so
+        # the operator picks a policy rather than reaching for `--no-verify`
+        # in the new workspace a week later.
+        entry.outcome =
+          if state.repo.path in unpublishedPaths: "source_head_unpublished"
+          else: "source_head_publication_unknown"
+        entry.diagnostic = state.publication.diagnostic &
+          (if state.sourceBranch.len > 0:
+             "; the source workspace is on branch '" & state.sourceBranch & "'"
+           else: "; the source workspace has a detached HEAD") &
+          ". Forking here would create a workspace in which `repro check " &
+          "--mode=pre-push` refuses every push whose develop-set closure " &
+          "reaches this repo. Choose: publish it first " &
+          "(`git -C " & state.repo.path & " push`), or re-run with " &
+          "`--unpublished=carry` to bring the commits (the source branch " &
+          "name is preserved in the new workspace), or " &
+          "`--unpublished=declared` to start this repo from its " &
+          "manifest-declared revision instead"
       elif parsed.existingBranch and state.repo.path in missingBranch:
         entry.outcome = "branch_missing"
         entry.diagnostic = "branch '" & parsed.branchName &
@@ -51185,7 +51585,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   var targetBaselineProbeFailed = false
   if not parsed.existingBranch:
     for idx in 0 ..< states.len:
-      if states[idx].sourcePresent:
+      if not states[idx].useDeclaredBaseline:
         continue
       let targetPath = parsed.forkPath / states[idx].repo.path
       let targetHead = queryGitState(headShaQuery(targetPath), identity)
@@ -51204,7 +51604,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         name: state.repo.name,
         path: state.repo.path,
         headSha: state.headSha,
-        baselineSource: state.baselineSource)
+        baselineSource: state.baselineSource,
+        publication:
+          (if state.publicationAsked: $state.publication.status else: ""),
+        sourceBranch: state.sourceBranch)
       if state.probeFailed:
         entry.outcome = "probe_failed"
         entry.diagnostic = state.probeReason
@@ -51283,8 +51686,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           receiptPath = receiptRel)
       else:
         let baselineRepoPath =
-          if state.sourcePresent: state.srcPath
-          else: parsed.forkPath / state.repo.path
+          if state.useDeclaredBaseline: parsed.forkPath / state.repo.path
+          else: state.srcPath
         gitForkBranchAction(actionId, identity,
           branchName = parsed.branchName,
           sourceRepoPath = baselineRepoPath,
@@ -51337,7 +51740,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       name: state.repo.name,
       path: state.repo.path,
       headSha: state.headSha,
-      baselineSource: state.baselineSource)
+      baselineSource: state.baselineSource,
+      publication:
+        (if state.publicationAsked: $state.publication.status else: ""),
+      sourceBranch: state.sourceBranch)
     if not ok:
       inc failures
       entry.outcome = "fork_failed"
@@ -51349,6 +51755,37 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           "branched_from_declared_baseline"
         else:
           "branched"
+      # ---- F0.3: attribution for carried unpublished work --------------
+      # The commits are here only because ``--unpublished=carry`` said so, and
+      # the branch they are now on is named after the DESTINATION DIRECTORY.
+      # That is what threw away the meaning last time: six repos arrived on a
+      # branch called `reproos` and nothing recorded that they had been
+      # `migrate-to-self-hosted-runners`, `live`, `codetracer` and so on.
+      #
+      # So re-create the source branch name here, pointing at the same commit.
+      # It is a plain local ref — HEAD stays on the workspace branch — but
+      # `git branch --contains` names it, and pushing it publishes the work
+      # under the name it was written with. Recorded in the report either way.
+      if state.publicationAsked and
+          state.publication.status in {hpsUnpublished, hpsUnknown} and
+          not state.useDeclaredBaseline and
+          state.sourceBranch.len > 0 and
+          state.sourceBranch != parsed.branchName:
+        let targetRepo = parsed.forkPath / state.repo.path
+        let existing = gitRunPlain(identity,
+          ["-C", targetRepo, "rev-parse", "--verify", "--quiet",
+           "refs/heads/" & state.sourceBranch])
+        if existing.code != 0 or existing.output.strip().len == 0:
+          let made = gitRunPlain(identity,
+            ["-C", targetRepo, "branch", state.sourceBranch, state.headSha])
+          if made.code != 0:
+            # Attribution is additive: failing to record the name must not
+            # undo a fork whose commits are already in place. Say so and move
+            # on rather than failing the repo.
+            entry.diagnostic = "carried unpublished work, but could not " &
+              "record the source branch name '" & state.sourceBranch &
+              "': git branch exited " & $made.code & ": " &
+              made.output.strip()
       # ---- optional WIP carry-over ------------------------------------
       if parsed.includeChanges and not state.isClean:
         let copied = copyWorkingTreeChanges(identity, state.srcPath,

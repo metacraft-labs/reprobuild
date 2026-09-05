@@ -19,7 +19,11 @@
 ##      (still on its old branch, no new branch, no ``.repro`` churn).
 ##   2. ``test_m27_fork_cuts_from_local_only_commit`` — a commit that exists
 ##      ONLY in the source checkout (never pushed) is the branch point in the
-##      fork. Falsifies "the fork just clones the remote tip".
+##      fork. Falsifies "the fork just clones the remote tip". Requires the
+##      F0.3 ``--unpublished=carry`` opt-in, since the default is now to refuse
+##      rather than to manufacture a workspace that cannot push; the refusal
+##      and the other two policies are gated in
+##      ``t_branch_unpublished_source_head.nim``.
 ##   3. ``test_m27_fork_leaves_uncommitted_work_behind_by_default`` — a dirty
 ##      source is NOT refused (unlike the in-place form) and its uncommitted
 ##      changes do NOT appear in the fork.
@@ -355,7 +359,14 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
       let localSha = headSha(gitBin, libA)
 
       let forkPath = fx.scratch / "feature-workspace"
-      let res = invokeFork(fx, "feature-local", forkPath)
+      # F0.3: carrying an unpublished commit is now an EXPLICIT choice — the
+      # default refuses, because a workspace forked at an unpublished HEAD
+      # cannot push (see ``t_branch_unpublished_source_head.nim``). What this
+      # case still asserts is unchanged and is the reason it exists: when the
+      # commit IS carried, the branch point is the source HEAD and not the
+      # remote tip.
+      let res = invokeFork(fx, "feature-local", forkPath,
+        @["--unpublished=carry"])
       if res.code != 0:
         checkpoint("output: " & res.output)
       check res.code == 0
