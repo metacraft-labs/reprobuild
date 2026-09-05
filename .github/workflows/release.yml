@@ -378,12 +378,20 @@ jobs:
       # to the system directories, so the build host cannot satisfy a dlopen
       # the archive omits.
       #
-      # The Linux leg's multi-distro glibc sweep needs Docker, which the
-      # `eph-linux-x64` class does not have -- it is skipped loudly rather than
-      # failing the job (that `docker: command not found` was aborting every
-      # release before the tarball could be uploaded). To restore the sweep,
-      # move the linux matrix row to `eph-linux-x64-nested` (nested Docker) and
-      # set REPRO_VERIFY_REQUIRE_DOCKER=1 here so a future regression is loud.
+      # The Linux leg's multi-distro glibc sweep needs Docker. It is currently
+      # skipped loudly rather than failing the job (that `docker: command not
+      # found` was aborting every release before the tarball could be uploaded).
+      #
+      # STALE PREMISE, 2026-09-05: the skip was justified by `eph-linux-x64` not
+      # having Docker. That is no longer true -- the runner-image consolidation
+      # bakes docker + qemu/KVM + fuse3 into the single `vmh-linux-runner` image
+      # and turns on nesting for every `eph-linux-x64` container, so the sweep's
+      # dependency is satisfied on the class this job already runs on. No matrix
+      # move is needed; restoring the sweep is now just setting
+      # REPRO_VERIFY_REQUIRE_DOCKER=1 here so a future regression is loud.
+      # Deliberately NOT flipped in this change: turning a skipped verification
+      # into a required one is a release-gating change and belongs with the
+      # v0.1.4 release work, not with a runner-label migration.
       - name: Verify release assets
         shell: bash
         run: |
