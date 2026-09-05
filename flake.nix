@@ -1540,6 +1540,32 @@
               pkgs.qemu
               pkgs.grub2_efi
               pkgs.kmod
+              # ReproOS attestation boot gates: they boot a
+              # disk image under QEMU through vm-harness's
+              # QemuBootBackend and assert on its serial console.  The
+              # gates themselves live in their owning repositories --
+              # vm-harness (tests/integration/t_boot_smoke_harness_*.nim)
+              # and reproos (tests/test_reproos_image_boot_smoke.nim) --
+              # but this is the shell much of the campaign's tooling runs
+              # in, so it must be able to host a boot.  Two host inputs
+              # were missing:
+              #
+              #   * ``OVMF.fd`` -- the edk2 firmware pair.  The image
+              #     under test is UEFI (``uefi-ext4``), so a Gen-2 boot
+              #     needs an OVMF_CODE.fd loader plus an OVMF_VARS.fd
+              #     NVRAM template.  It carries no binaries; it is here
+              #     so the pair is realised in the store, and the
+              #     shellHook below names it through VMH_OVMF_CODE /
+              #     VMH_OVMF_VARS rather than leaving the harness to
+              #     glob /nix/store for whatever it finds.
+              #   * ``swtpm`` -- the software TPM 2.0 emulator that
+              #     backs QEMU's ``-tpmdev emulator``.  Attaching a
+              #     vTPM to the libvirt backend is what lets the
+              #     attestation gates read PCRs out of the guest;
+              #     without swtpm on PATH those gates cannot run at
+              #     all.
+              pkgs.OVMF.fd
+              pkgs.swtpm
             ];
             shellHook = ''
               # Lend pre-commit back its own chained shim BEFORE its installer
@@ -1595,6 +1621,19 @@
               # never ran.
               PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
                 ${./scripts/pre_commit_hook_handoff.sh} after --hook pre-push || true
+            ''
+            + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              # ReproOS attestation: name the exact edk2 firmware pair the
+              # boot gates should use. vm-harness's firmware resolver
+              # (src/vm_harness/firmware.nim) reads these two variables ahead
+              # of any conventional path, and its last-resort fallback is a
+              # /nix/store glob whose winner is the lexically greatest store
+              # hash -- i.e. not a stable choice. Pinning the pair to this
+              # shell's own OVMF means a boot gate asserts against the
+              # firmware the flake pins rather than whatever a prior GC root
+              # happened to leave behind. Respects an operator override.
+              export VMH_OVMF_CODE="''${VMH_OVMF_CODE:-${pkgs.OVMF.fd}/FV/OVMF_CODE.fd}"
+              export VMH_OVMF_VARS="''${VMH_OVMF_VARS:-${pkgs.OVMF.fd}/FV/OVMF_VARS.fd}"
             '';
           };
 

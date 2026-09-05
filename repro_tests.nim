@@ -8712,8 +8712,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/t_executed_binary_is_a_recorded_input.nim",
-    binary: "build/test-bin/t_executed_binary_is_a_recorded_input",
+    source: "tests/integration/t_execute_edge_gives_tests_a_usable_path.nim",
+    binary: "build/test-bin/t_execute_edge_gives_tests_a_usable_path",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -8721,8 +8721,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/t_execute_edge_gives_tests_a_usable_path.nim",
-    binary: "build/test-bin/t_execute_edge_gives_tests_a_usable_path",
+    source: "tests/integration/t_executed_binary_is_a_recorded_input.nim",
+    binary: "build/test-bin/t_executed_binary_is_a_recorded_input",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
