@@ -91,7 +91,12 @@ const BuiltSourcePackageRoots = [
   ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
   ("REPRO_CT_TEST_RUNNER_SRC",
     compileTimeSourceRoot("REPRO_CT_TEST_RUNNER_SRC")),
-  ("CODETRACER_SRC", compileTimeSourceRoot("CODETRACER_SRC")),
+  # The PIN, not ``CODETRACER_SRC``. This table is re-exported into every
+  # nested compile through ``seedSourcePackageEnvironment``, so an entry here
+  # becomes a set environment variable in the child. Carrying ``CODETRACER_SRC``
+  # would hand the child a "user override" the user never wrote, and the
+  # sibling checkout ``config.nims`` prefers would stop being consulted.
+  ("CODETRACER_PINNED_SRC", compileTimeSourceRoot("CODETRACER_PINNED_SRC")),
   ("RUNQUOTA_SRC", compileTimeSourceRoot("RUNQUOTA_SRC")),
 ]
 
@@ -2696,8 +2701,15 @@ proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
   ""
 
 proc resolveCtIncrementalAdapterPath(anchorRoot: string): string =
+  ## Mirrors ``config.nims``'s incremental-test-seam order and must keep
+  ## mirroring it: the user override first, then the live sibling working tree,
+  ## then the materialised ``codetracer-src`` pin, then the standalone copy in
+  ## ``reprobuild-ct-test-runner``. The sibling has to outrank the pin here for
+  ## the same reason it does there — an edit to the seam in a workspace
+  ## checkout must reach the next compile without re-materialising an input.
   for codeTracerRoot in [getEnv("CODETRACER_SRC"),
-                         anchorRoot.parentDir / "codetracer" / "src"]:
+                         anchorRoot.parentDir / "codetracer" / "src",
+                         getEnv("CODETRACER_PINNED_SRC")]:
     let candidate = markedPackageRoot(
       codeTracerRoot, "ct_incremental_adapter.nim")
     if candidate.len > 0:

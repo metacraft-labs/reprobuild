@@ -15510,7 +15510,11 @@ const
     "REPROBUILD_RUNTIME_LIBRARY_PATH",
     "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC",
     "REPRO_TEST_ADAPTERS_SRC", "REPRO_CT_TEST_RUNNER_SRC",
-    "CODETRACER_SRC",
+    # Both spellings of "where the incremental-test seam comes from", and they
+    # are not interchangeable: CODETRACER_SRC is the user's override and is
+    # usually unset, CODETRACER_PINNED_SRC is the flake pin the daemon must
+    # still be able to fall back to when there is no sibling checkout.
+    "CODETRACER_SRC", "CODETRACER_PINNED_SRC",
     # CT_INTERPOSE_SRC threads the ct_interpose package (monitor hooks /
     # SIP-rewrite helpers) onto config.nims's --path. REPROBUILD_SOURCE_ROOT
     # lets reprobuildLibraryWorkDir() locate reprobuild's OWN libs
