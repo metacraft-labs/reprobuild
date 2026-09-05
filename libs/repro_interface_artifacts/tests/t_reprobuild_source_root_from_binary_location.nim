@@ -87,13 +87,27 @@ suite "reprobuild source root from binary location":
     let hadRunner = existsEnv("REPRO_CT_TEST_RUNNER_SRC")
     let oldRunquota = getEnv("RUNQUOTA_SRC")
     let hadRunquota = existsEnv("RUNQUOTA_SRC")
+    # The incremental-test seam resolves the user override and then the flake
+    # pin BEFORE this runner-hosted copy, and both are ordinarily set in the
+    # environment this test runs in. Clear them, or the assertion below reads
+    # a higher tier and says nothing about the arm it names.
+    let oldCtSrc = getEnv("CODETRACER_SRC")
+    let hadCtSrc = existsEnv("CODETRACER_SRC")
+    let oldCtPinned = getEnv("CODETRACER_PINNED_SRC")
+    let hadCtPinned = existsEnv("CODETRACER_PINNED_SRC")
     putEnv("REPRO_CT_TEST_RUNNER_SRC", runnerRoot)
     putEnv("RUNQUOTA_SRC", runquotaRoot)
+    delEnv("CODETRACER_SRC")
+    delEnv("CODETRACER_PINNED_SRC")
     defer:
       if hadRunner: putEnv("REPRO_CT_TEST_RUNNER_SRC", oldRunner)
       else: delEnv("REPRO_CT_TEST_RUNNER_SRC")
       if hadRunquota: putEnv("RUNQUOTA_SRC", oldRunquota)
       else: delEnv("RUNQUOTA_SRC")
+      if hadCtSrc: putEnv("CODETRACER_SRC", oldCtSrc)
+      else: delEnv("CODETRACER_SRC")
+      if hadCtPinned: putEnv("CODETRACER_PINNED_SRC", oldCtPinned)
+      else: delEnv("CODETRACER_PINNED_SRC")
 
     let flags = bootstrapSiblingPackagePathFlags(root / "reprobuild", root)
     check "--path:" & adapterRoot in flags

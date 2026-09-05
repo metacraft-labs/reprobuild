@@ -131,52 +131,88 @@ if dirExists(ctTestRunnerAdapterSrc):
 # as the std-only process seam for codetracer's canonical incremental engine.
 # It reaches the engine by EXECUTING the ``ct`` binary as a subprocess (the
 # ``ct test --incremental --watch-decide`` / ``--watch-record`` protocol), NOT
-# by compiling the engine in-process. Resolve it from ``$CODETRACER_SRC`` /
-# the normal sibling checkout first, then from the standalone copy in the
-# ``reprobuild-ct-test-runner`` flake input. Read the note on that fallback
-# below before touching either copy: they are two files, not one.
-let codeTracerSrc = block:
-  let fromEnv = getEnv("CODETRACER_SRC")
-  if fromEnv.len > 0:
-    fromEnv
-  else:
-    ".." / "codetracer" / "src"
-if fileExists(codeTracerSrc / "ct_incremental_adapter.nim"):
-  switch("path", codeTracerSrc)
+# by compiling the engine in-process.
+#
+# RESOLUTION ORDER, AND WHY IT IS THIS ORDER:
+#
+#   1. ``$CODETRACER_SRC`` — a USER override, and only that. Nothing in the
+#      flake sets it and nothing in the flake may start setting it: the moment
+#      a dev shell, a hook or an installed wrapper seeds it, "unset" stops
+#      being a state a developer can be in, and every tier below becomes
+#      unreachable.
+#   2. ``../codetracer/src`` — the sibling working tree, when it really carries
+#      the module. THE LIVE TREE, NOT A COPY OF IT: an edit to the seam in a
+#      workspace checkout takes effect on the very next compile, with no shell
+#      reload and no input re-materialisation. That is the reason this tier
+#      sits above the pin rather than below it.
+#   3. ``$CODETRACER_PINNED_SRC`` — the materialised ``codetracer-src`` flake
+#      input, seeded by the dev shell, the lint hook, the packaged build and
+#      the installed wrappers. Same repository and same file as tier 2, at the
+#      pinned revision instead of the working tree. This is what a checkout
+#      that is NOT sitting beside CodeTracer compiles, and having it is what
+#      stops a directory layout from silently deciding which of two files the
+#      build gets.
+#   4. the standalone copy shipped in ``reprobuild-ct-test-runner`` — a
+#      genuinely different file. Read the note on it below before touching
+#      either copy.
+#
+# The flake exports the pin under its own name for exactly this reason. Naming
+# it ``CODETRACER_SRC`` would collapse tiers 1 and 3 into one and make the pin
+# beat the sibling everywhere it is set, which is every environment the flake
+# builds.
+let ctIncrementalSrc = block:
+  var found = ""
+  for candidate in [getEnv("CODETRACER_SRC"),
+                    ".." / "codetracer" / "src",
+                    getEnv("CODETRACER_PINNED_SRC")]:
+    if candidate.len > 0 and
+        fileExists(candidate / "ct_incremental_adapter.nim"):
+      found = candidate
+      break
+  found
+if ctIncrementalSrc.len > 0:
+  switch("path", ctIncrementalSrc)
 else:
-  # Sandboxed / no-sibling builds still need the seam to compile
-  # ``repro_cli_support``, so fall back to the standalone copy that ships in the
-  # pinned ``reprobuild-ct-test-runner`` source input.
+  # Last resort: the standalone copy that ships in the pinned
+  # ``reprobuild-ct-test-runner`` source input, for a build that has neither an
+  # override, nor a sibling, nor the CodeTracer pin.
   #
-  # THIS IS NOT A RARE PATH — IT IS WHAT THE NIX PACKAGE BUILD COMPILES. The
-  # ``reprobuild`` derivation seeds ``REPRO_CT_TEST_RUNNER_SRC`` but sets no
-  # ``CODETRACER_SRC``, and its pure environment has no ``../codetracer``
-  # checkout, so the branch above cannot be taken there. The dev shell and the
-  # Test job take the CodeTracer copy; the packaged build takes this one. Two
-  # builds, two files.
+  # THIS USED TO BE WHAT THE NIX PACKAGE BUILD COMPILED, AND IT NO LONGER IS.
+  # The ``reprobuild`` derivation now seeds ``CODETRACER_PINNED_SRC``, so the
+  # packaged build takes tier 3 — the canonical file — like every other build
+  # in the flake. What is left down here is the case where even the pin is
+  # absent: a checkout compiled outside the flake entirely, with only
+  # ``REPRO_CT_TEST_RUNNER_SRC`` or a ``../reprobuild-ct-test-runner`` sibling
+  # to go on. THAT MAY WELL BE NOBODY, and if it is, this copy is dead weight
+  # and should be deleted rather than kept warm by a comment — but establishing
+  # that is a separate change from the one that stopped the layout deciding.
   #
   # The two files are SEMANTICALLY EQUIVALENT, NOT IDENTICAL. They differ in
   # import order, doc comments and statement layout, and they live in separate
   # repositories with separate histories, so nothing mechanically holds them
   # together. A byte-compare would fail today on formatting alone, and a gate
   # that goes red for formatting is a gate that gets switched off; it also could
-  # not run where the drift actually bites, since the sandbox that compiles this
-  # copy is precisely the environment with no CodeTracer checkout to compare
-  # against. Deleting the copy is not available either: it would leave the
-  # package build with no adapter at all.
+  # not run where the drift actually bites.
   #
   # So the invariant is a human one, stated here rather than pretended away:
   # CODETRACER OWNS THE SEAM, AND A BEHAVIOUR CHANGE TO IT MUST LAND IN BOTH
-  # COPIES, with the ``reprobuild-ct-test-runner`` pin bumped, before the
-  # packaged build sees it. The Nim compiler still checks the half that can be
-  # checked — a copy that loses an exported symbol fails this compile — but it
-  # cannot tell you that the two disagree about what a symbol DOES.
+  # COPIES, with the ``reprobuild-ct-test-runner`` pin bumped, before anything
+  # compiling this copy sees it. The Nim compiler still checks the half that
+  # can be checked — a copy that loses an exported symbol fails this compile —
+  # but it cannot tell you that the two disagree about what a symbol DOES.
   #
-  # Pointing the package build at CodeTracer instead was considered and
-  # rejected: ``codetracer-src`` is auto-overridden to the local sibling in a
-  # workspace checkout, and overriding a source input to a path copies the whole
-  # tree into the store. That is several gigabytes of CodeTracer added to every
-  # packaged reprobuild build, to avoid duplicating a hundred-odd lines.
+  # Pointing the package build at CodeTracer was previously rejected on a cost
+  # that was never measured: "several gigabytes", from the observation that
+  # overriding a source input to a local path copies the whole working tree
+  # into the store. THAT FIGURE IS ABOUT THE OVERRIDE, NOT ABOUT THE PIN, and
+  # the two are two orders of magnitude apart. Measured at the current pin:
+  # the pinned ``codetracer-src`` input is 25 MB on disk / 47 MiB of store
+  # closure, with no dependencies. The multi-gigabyte number is real but
+  # belongs to the auto-override — a store copy of a working ``../codetracer``,
+  # measured at 6.1 GiB — which only a workspace shell realises, and which such
+  # a shell has already realised for ``ctTestTools`` regardless. Tens of
+  # megabytes is what tier 3 costs the packaged build, and it buys the
+  # canonical file.
   let ctIncrementalFallbackSrc = ctTestRunnerRoot / "libs" /
     "ct_incremental_adapter" / "src"
   if dirExists(ctIncrementalFallbackSrc):

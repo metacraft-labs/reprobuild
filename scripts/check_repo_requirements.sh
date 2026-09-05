@@ -107,6 +107,32 @@ require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_f
 require_contains tests/fixtures/codetracer-subset/config-602e7bb7.nims \
   'addPathIfDir(getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC"))'
 
+# The incremental-test seam (``ct_incremental_adapter.nim``), for the same
+# reason and with one extra requirement the trace-format case does not have.
+#
+# ``config.nims`` resolves the seam from ``$CODETRACER_SRC`` (a USER override),
+# then a ``../codetracer`` sibling, then ``$CODETRACER_PINNED_SRC`` (the flake
+# pin), then a standalone copy in ``reprobuild-ct-test-runner``. Nothing fails
+# when a tier is missing — the build just silently compiles a DIFFERENT file —
+# so the tiers have to be asserted here, where the answer is instant, rather
+# than discovered by two builds disagreeing about what they compiled.
+#
+# THE FIRST FOUR LINES ARE NEGATIVE AND THAT IS THE POINT. The flake must never
+# export ``CODETRACER_SRC``: seeding the user's override from the flake makes
+# "unset" unreachable, and the sibling checkout a developer is editing stops
+# being consulted. The pin gets its own name so both can exist at once.
+require_count flake.nix 'export CODETRACER_SRC=' 0
+require_count flake.nix 'CODETRACER_SRC = "' 0
+require_count flake.nix '--set-default CODETRACER_SRC ' 0
+require_count flake.nix 'CODETRACER_SRC|' 0
+require_count flake.nix 'export CODETRACER_PINNED_SRC=${codetracer-src}/src' 1
+require_count flake.nix 'CODETRACER_PINNED_SRC = "${codetracer-src}/src";' 2
+require_count flake.nix '--set-default CODETRACER_PINNED_SRC ${codetracer-src}/src \' 1
+require_count flake.nix 'CODETRACER_PINNED_SRC|${codetracer-src}/src' 1
+require_count flake.nix '                                      ${codetracer-src} \' 1
+require_contains config.nims 'getEnv("CODETRACER_SRC")'
+require_contains config.nims 'getEnv("CODETRACER_PINNED_SRC")'
+
 # Compiler macro source maps are package data. If they regain executable mode
 # or enter the wrapper loop, the Darwin runtime audit sees a hidden non-Mach-O
 # "entry point" and the packaged-runtime gate cannot reach its compile checks.

@@ -275,7 +275,23 @@
       # that costs before leaning on it: overriding a source input to a plain
       # path copies the whole directory into the store, and a working
       # CodeTracer checkout is several gigabytes. An override-free shell builds
-      # the pin, which is the cheap and reproducible default.
+      # the pin, which is the cheap and reproducible default — and cheap is
+      # meant literally. Measured at the current pin: 25 MB on disk, 47 MiB of
+      # store closure with no dependencies, against 6.1 GiB for the override
+      # copy. The gigabytes belong to the override, not to the input.
+      #
+      # CodeTracer also owns ``src/ct_incremental_adapter.nim``, the process
+      # seam ``config.nims`` puts on Nim's ``--path``, and this input is what
+      # every build here offers as the DEFAULT source for it, exported as
+      # ``CODETRACER_PINNED_SRC`` from the dev shell, the lint hook, the
+      # packaged build and the installed-runtime wrapper defaults.
+      #
+      # THE NAME IS DELIBERATELY NOT ``CODETRACER_SRC``. That variable is a
+      # user override and has to stay one: ``config.nims`` reads it first, a
+      # detected ``../codetracer`` sibling second, and this pin only third, so
+      # that a developer editing the seam in a workspace checkout sees the edit
+      # immediately and an unset variable still means unset. Exporting the pin
+      # as ``CODETRACER_SRC`` would put it permanently ahead of both.
       url = "github:metacraft-labs/codetracer/dev";
       flake = false;
     };
@@ -625,6 +641,7 @@
                 export IO_MON_SRC=${io-mon-src}/src
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
+                export CODETRACER_PINNED_SRC=${codetracer-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
                 export CT_INTERPOSE_SRC=${ctInterposeSrc}
@@ -765,6 +782,20 @@
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
+            # Tier 3 of ``config.nims``'s incremental-test-seam resolution, and
+            # the tier this build has always needed. It runs in a pure sandbox
+            # with no ``../codetracer`` in reach, so before this variable
+            # existed the packaged build was the one build that compiled the
+            # standalone copy in ``reprobuild-ct-test-runner`` instead of the
+            # file CodeTracer actually owns — silently, and only because of
+            # where the sandbox happens to sit.
+            #
+            # NOT ``CODETRACER_SRC``: that name belongs to the user override,
+            # and seeding it here would also mean seeding it in the dev shell
+            # for consistency, which is precisely what takes the sibling
+            # checkout out of play. See the note on the ``codetracer-src``
+            # input.
+            CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
@@ -896,6 +927,7 @@
                   --set-default IO_MON_SRC ${io-mon-src}/src \
                   --set-default SHM_GSET_SRC ${nim-shm-gset-src}/src \
                   --set-default SHM_QUEUE_SRC ${nim-shm-queue-src}/src \
+                  --set-default CODETRACER_PINNED_SRC ${codetracer-src}/src \
                   --set-default REPRO_CT_TEST_RUNNER_SRC ${reprobuild-ct-test-runner-src} \
                   --set-default REPRO_TEST_ADAPTERS_SRC ${reprobuild-test-adapters-src}/src \
                   --set-default CT_INTERPOSE_SRC ${ctInterposeSrc} \
@@ -1033,6 +1065,7 @@
                 IO_MON_SRC|${io-mon-src}/src
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
                 SHM_QUEUE_SRC|${nim-shm-queue-src}/src
+                CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
                 CT_INTERPOSE_SRC|${ctInterposeSrc}
@@ -1238,6 +1271,7 @@
                                       ${io-mon-src} \
                                       ${nim-shm-gset-src} \
                                       ${nim-shm-queue-src} \
+                                      ${codetracer-src} \
                                       ${reprobuild-ct-test-runner-src} \
                                       ${reprobuild-test-adapters-src} \
                                       ${codetracer-native-recorder} \
@@ -1412,6 +1446,7 @@
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
+            CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
