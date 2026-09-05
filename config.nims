@@ -132,8 +132,9 @@ if dirExists(ctTestRunnerAdapterSrc):
 # It reaches the engine by EXECUTING the ``ct`` binary as a subprocess (the
 # ``ct test --incremental --watch-decide`` / ``--watch-record`` protocol), NOT
 # by compiling the engine in-process. Resolve it from ``$CODETRACER_SRC`` /
-# the normal sibling checkout first, then from the standalone
-# ``reprobuild-ct-test-runner`` flake input used by isolated test worktrees.
+# the normal sibling checkout first, then from the standalone copy in the
+# ``reprobuild-ct-test-runner`` flake input. Read the note on that fallback
+# below before touching either copy: they are two files, not one.
 let codeTracerSrc = block:
   let fromEnv = getEnv("CODETRACER_SRC")
   if fromEnv.len > 0:
@@ -143,13 +144,39 @@ let codeTracerSrc = block:
 if fileExists(codeTracerSrc / "ct_incremental_adapter.nim"):
   switch("path", codeTracerSrc)
 else:
-  # Sandboxed / no-sibling builds (the Nix ``reprobuild`` package build, whose
-  # pure environment has no ``../codetracer`` checkout) still need the seam to
-  # compile ``repro_cli_support``. Fall back to the copy in the pinned
-  # ``reprobuild-ct-test-runner`` source input — the same std-only adapter the
-  # package build compiled before the seam was rehomed to CodeTracer, byte-for-
-  # byte on the pinned revision. CodeTracer stays canonical wherever its
-  # checkout is present (dev shell, the Test job).
+  # Sandboxed / no-sibling builds still need the seam to compile
+  # ``repro_cli_support``, so fall back to the standalone copy that ships in the
+  # pinned ``reprobuild-ct-test-runner`` source input.
+  #
+  # THIS IS NOT A RARE PATH — IT IS WHAT THE NIX PACKAGE BUILD COMPILES. The
+  # ``reprobuild`` derivation seeds ``REPRO_CT_TEST_RUNNER_SRC`` but sets no
+  # ``CODETRACER_SRC``, and its pure environment has no ``../codetracer``
+  # checkout, so the branch above cannot be taken there. The dev shell and the
+  # Test job take the CodeTracer copy; the packaged build takes this one. Two
+  # builds, two files.
+  #
+  # The two files are SEMANTICALLY EQUIVALENT, NOT IDENTICAL. They differ in
+  # import order, doc comments and statement layout, and they live in separate
+  # repositories with separate histories, so nothing mechanically holds them
+  # together. A byte-compare would fail today on formatting alone, and a gate
+  # that goes red for formatting is a gate that gets switched off; it also could
+  # not run where the drift actually bites, since the sandbox that compiles this
+  # copy is precisely the environment with no CodeTracer checkout to compare
+  # against. Deleting the copy is not available either: it would leave the
+  # package build with no adapter at all.
+  #
+  # So the invariant is a human one, stated here rather than pretended away:
+  # CODETRACER OWNS THE SEAM, AND A BEHAVIOUR CHANGE TO IT MUST LAND IN BOTH
+  # COPIES, with the ``reprobuild-ct-test-runner`` pin bumped, before the
+  # packaged build sees it. The Nim compiler still checks the half that can be
+  # checked — a copy that loses an exported symbol fails this compile — but it
+  # cannot tell you that the two disagree about what a symbol DOES.
+  #
+  # Pointing the package build at CodeTracer instead was considered and
+  # rejected: ``codetracer-src`` is auto-overridden to the local sibling in a
+  # workspace checkout, and overriding a source input to a path copies the whole
+  # tree into the store. That is several gigabytes of CodeTracer added to every
+  # packaged reprobuild build, to avoid duplicating a hundred-odd lines.
   let ctIncrementalFallbackSrc = ctTestRunnerRoot / "libs" /
     "ct_incremental_adapter" / "src"
   if dirExists(ctIncrementalFallbackSrc):
