@@ -1,23 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This run records which revision of four separate checkouts the evidence came
-# from, and it may itself be started from inside git — a hook, `rebase --exec`,
-# `bisect run`. Git exports `GIT_DIR` and friends to everything it starts, and
-# those beat the working directory when git decides which repository a command
-# is about, so `git -C ../runquota rev-parse HEAD` would answer with the
-# repository that launched us and all four rows would agree on a revision none
-# of them is at. A provenance record that quietly names the wrong commits is
-# worse than one that is missing.
-#
-# This file is a script, not a library: it owns its whole process, so the
-# honest fix is to clear the redirection once on the way in rather than to
-# remember a guard at each of the four call sites below. The sub-gates this
-# script spawns inherit the cleared environment too, which is what they want —
-# every one of them is about this checkout, not about a caller's.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
-  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 cd "${repo_root}"
@@ -34,20 +17,46 @@ rm -rf "${acceptance_dir}"
 mkdir -p "${acceptance_dir}"
 : > "${subgates_json}"
 
+# Ask git about the checkout NAMED, not about whatever repository the ambient
+# environment points at.
+#
+# The four rows below record which revision of four separate checkouts this
+# evidence came from, and this script may be started from inside git — a hook,
+# `rebase --exec`, `bisect run`. Git exports `GIT_DIR` and its companions to
+# everything it starts, and those beat the working directory when git decides
+# which repository a command is about, so `git -C ../runquota rev-parse HEAD`
+# would answer with the repository that launched us and all four rows would
+# agree on a revision none of them is at. A provenance record that quietly
+# names the wrong commits is worse than one that is missing.
+#
+# The clearing is per-invocation, in a subshell, rather than once at the top of
+# the file. This script spawns the sub-gates whose output it records, and
+# clearing the variables process-wide would silently change the environment
+# every one of THEM runs under — a much larger contract than the four queries
+# that actually need it, and not one this script has any business editing on
+# their behalf.
+git_in() {
+  (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
+      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    git "$@"
+  )
+}
+
 repo_revision() {
   local path="$1"
-  git -C "${path}" rev-parse HEAD 2>/dev/null || printf 'unknown'
+  git_in -C "${path}" rev-parse HEAD 2>/dev/null || printf 'unknown'
 }
 
 repo_dirty() {
   local path="$1"
-  if ! git -C "${path}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! git_in -C "${path}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     printf 'true'
     return
   fi
-  if git -C "${path}" diff --quiet &&
-     git -C "${path}" diff --cached --quiet &&
-     [ -z "$(git -C "${path}" ls-files --others --exclude-standard)" ]; then
+  if git_in -C "${path}" diff --quiet &&
+     git_in -C "${path}" diff --cached --quiet &&
+     [ -z "$(git_in -C "${path}" ls-files --others --exclude-standard)" ]; then
     printf 'false'
   else
     printf 'true'

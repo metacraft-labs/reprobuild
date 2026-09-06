@@ -601,6 +601,21 @@
                     pkgs.bash
                     pkgs.coreutils
                     pkgs.gnugrep
+                    # The text tools every check here scans with. They were
+                    # absent, and absence did not present as absence: with
+                    # only this PATH, `check_dev_shell_env.sh` reported nine
+                    # failures — no parseable flake input, and five declared
+                    # rows excusing inputs "flake.nix does not declare" —
+                    # because `awk` and `sed` were not there to parse either
+                    # file. Nothing in that report was true and nothing in it
+                    # could be fixed by editing the repository. `find` is the
+                    # quieter one: without it the override-source fingerprint
+                    # falls back to `mtime:none` for any source that is not a
+                    # git checkout, which never drifts and so never fails.
+                    # coreutils supplies neither `awk`, `sed`, nor `find`.
+                    pkgs.gawk
+                    pkgs.gnused
+                    pkgs.findutils
                     pkgs.just
                     pkgs.python3
                     pkgs.shellcheck
