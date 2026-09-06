@@ -348,6 +348,29 @@ jobs:
           path: ${{ github.workspace }}/../vm-harness
           gh-token: ${{ steps.ci_token.outputs.token }}
 
+      # metacraft-github-actions hosts the shared CI composite actions. Two of
+      # them (``reprobuild-provision``, ``setup-reprobuild``) used to live in
+      # THIS repo under ``.github/actions/``; they were moved out because
+      # GitHub materialises a composite action by downloading its WHOLE
+      # repository, so any consumer that referenced one had to pull this repo's
+      # ~546 MB archive during ``Set up job``, against the runner's fixed
+      # 100-second per-action timeout — which the Windows lane could not
+      # sustain and which failed before its first step.
+      #
+      # ``tests/e2e/codetracer-subset/`` asserts a contract on
+      # ``reprobuild-provision``'s action.yml (that it provisions the CodeTracer
+      # Nim gitlinks the subset build needs), so it now reads that file from
+      # this sibling. The assertion raises ``MissingTestFixtureError`` rather
+      # than skipping when the checkout is absent, so without this clone the
+      # test fails loudly instead of silently asserting nothing.
+      - name: Clone metacraft-github-actions sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/metacraft-github-actions
+          ref: dev
+          path: ${{ github.workspace }}/../metacraft-github-actions
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
       # codetracer's .envrc loads its flake-override direnv plugin from a
       # ``../direnv-nix-flake-overrides`` sibling when present, and only falls
       # back to a hash-pinned URL otherwise. That URL pin has drifted, so the

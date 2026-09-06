@@ -16,8 +16,16 @@ const
     "2a98164dfa3a03b42d3cdd440ce0ebc4a22ef592bf7a1161e267706e4d50a363"
   PinnedCodeTracerConfigPayloadSha256 =
     "3ce6cff73a75c6bfed6e3ed9d0fe1128dff8bca2ef5ef0e23caa5450305d299e"
+  # `reprobuild-provision` used to live in THIS repo, at
+  # `.github/actions/reprobuild-provision/action.yml`. It was moved to the
+  # shared-actions repo because GitHub materialises a composite action by
+  # downloading its WHOLE repository: any consumer that referenced it had to
+  # pull reprobuild's ~546 MB archive during `Set up job`, against the runner's
+  # fixed 100-second per-action timeout, which the Windows lane could not
+  # sustain. The contract below is unchanged; only where the file is read from
+  # has moved, and it is now resolved from the sibling checkout.
   CodeTracerProvisionAction =
-    ".github/actions/reprobuild-provision/action.yml"
+    "reprobuild-provision/action.yml"
   CodeTracerRequiredNimGitlinks = [
     (
       path: "libs/nim-serialization",
@@ -483,7 +491,8 @@ proc requireCodeTracerNimGitlinkProvisioningText(actionText,
         dependency.path & "' from " & actionPath)
 
 proc requireCodeTracerNimGitlinkProvisioning(repoRoot: string) =
-  let actionPath = repoRoot / CodeTracerProvisionAction
+  let actionPath =
+    requireMetacraftGithubActionsRoot(repoRoot) / CodeTracerProvisionAction
   if not fileExists(actionPath):
     raise newException(MissingTestFixtureError,
       "CodeTracer CI provisioning action is missing: " & actionPath)
@@ -499,7 +508,8 @@ proc requireCodeTracerProvisioningParserRejection(actionText, actionPath,
     "CodeTracer provisioning parser accepted unsafe " & mutation)
 
 proc requireCodeTracerNimGitlinkProvisioningContract(repoRoot: string) =
-  let actionPath = repoRoot / CodeTracerProvisionAction
+  let actionPath =
+    requireMetacraftGithubActionsRoot(repoRoot) / CodeTracerProvisionAction
   if not fileExists(actionPath):
     raise newException(MissingTestFixtureError,
       "CodeTracer CI provisioning action is missing: " & actionPath)
