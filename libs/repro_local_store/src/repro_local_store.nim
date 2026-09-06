@@ -1,5 +1,5 @@
-import std/[algorithm, monotimes, options, os, osproc, sets, strutils,
-            tables, times]
+import std/[algorithm, monotimes, nativesockets, options, os, osproc, sets,
+            strutils, tables, times]
 
 when defined(posix):
   import std/posix
@@ -159,6 +159,32 @@ type
     present*: bool
     value*: string
 
+  EntryDeterminism* = object
+    ## The determinism metadata one cache entry carries, per §3's table.
+    ##
+    ## `declared = false` is the state of every record written before this
+    ## existed, and of every edge whose tool declares no `determinism`
+    ## directive. It is NOT the same as `class = edWeak`: an undeclared entry
+    ## has no host fingerprint and no write time either, so a consumer that
+    ## needs one of those must fail closed rather than assume.
+    declared*: bool
+    class*: EdgeDeterminism
+    retention*: CacheRetention
+    writeTimeUnix*: int64
+      ## Wall-clock seconds at which the entry was written. §3's `volatile`
+      ## write column. 0 when unknown, which `retentionVerdict` treats as
+      ## `rvUnknownWriteTime` — a miss, never a hit.
+    hostFingerprint*: string
+      ## §3's `host-bound` write column: machine-id / OS / architecture,
+      ## enough to say WHICH host's realization this is. Empty when
+      ## undeclared. It is not a security token and is never compared for
+      ## equality on the local read path — a local hit is by definition on
+      ## the producing host. It exists so a cross-machine substitution can be
+      ## REFUSED with the producing host named, rather than refused blankly.
+    buildEpoch*: string
+      ## Identifies the `repro build` invocation that wrote the entry, for
+      ## §2.2's `this-build` clause. Empty when undeclared.
+
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
     policy*: FileFingerprintPolicy
@@ -173,6 +199,24 @@ type
     strongFingerprint*: ContentDigest
     outputPayloadKind*: OutputPayloadKind
     outputs*: seq[OutputBlob]
+    determinism*: EntryDeterminism
+      ## `Edge-Determinism-And-Soft-Rebuild.md` §3's per-class cache metadata:
+      ## the producing action's determinism class, the host fingerprint that
+      ## makes a `host-bound` realization attributable, and the wall-clock
+      ## write time + retention clause that bound a `volatile` one.
+      ##
+      ## NOT serialized into the RBAR frame and NOT part of either
+      ## fingerprint. It travels in a SIDECAR file next to the `.rec`, exactly
+      ## as the output witnesses do and for exactly the same reason (see
+      ## `ActionRecordVersion`'s "DELIBERATELY NOT BUMPED" comment): growing
+      ## the frame would lock every older `repro` sharing the per-user cache
+      ## root out of the records this binary writes.
+      ##
+      ## Keeping it out of the KEY is also a spec requirement, not just a
+      ## compatibility convenience — §10.2: "The class is NOT part of the
+      ## cache key (so a relabel from `weak` to `strong` does not invalidate
+      ## existing entries) — it is metadata that gates HOW the cached bytes
+      ## are used."
 
   EnvResolver* = proc(name: string): tuple[present: bool, value: string]
     {.gcsafe, raises: [].}
@@ -251,6 +295,18 @@ type
     aclHit
     aclHybridCutoff
     aclRejectedCorruptOutput
+    aclMissRetentionExpired
+      ## `Edge-Determinism-And-Soft-Rebuild.md` §4.4. The record matched on
+      ## every input, its outputs verified, and it was still not served:
+      ## its producing action is `volatile` and its `cacheRetention` clause
+      ## says this realization is no longer good. Deliberately a DISTINCT
+      ## status from `aclMissInputChanged`, because the operator question
+      ## it answers is different -- nothing changed, the answer simply
+      ## aged out -- and collapsing the two would make a retention that is
+      ## set too tight indistinguishable from a real invalidation storm.
+      ##
+      ## APPENDED, not inserted. `aclHit` and its neighbours keep their
+      ## ordinals so nothing that persisted or compared one shifts.
 
   ActionCacheLookup* = object
     status*: ActionCacheLookupStatus
@@ -1503,6 +1559,144 @@ proc attachWitnesses(record: var ActionResultRecord;
     record.outputs[i].treeDigest = w.treeDigest
     record.outputs[i].hasTreeDigest = w.hasTreeDigest
 
+# ---------------------------------------------------------------------------
+# Determinism sidecar (`Edge-Determinism-And-Soft-Rebuild.md` §3).
+#
+# Same mechanism as the output-witness sidecar above, and chosen for the same
+# reason: the RBAR frame cannot grow. `decodeRecord` raises
+# `eeMalformed` on trailing bytes and `eeUnsupportedVersion` on an unknown
+# version, and `decodePerEdgeFileWithSeq` swallows both with `break` -- so a
+# frame an older `repro` cannot parse makes that binary see ZERO records for
+# the edge, silently and permanently. A sidecar is invisible to every reader
+# that filters on `PerEdgeRecFileExt`, which all of them do.
+#
+# One difference from the witness sidecar: this one is written ONLY for an
+# entry whose producing action actually DECLARED a class. The overwhelming
+# majority of edges declare nothing, write no sidecar, and cost nothing.
+# ---------------------------------------------------------------------------
+
+const
+  DeterminismMagic = "RBDM"
+  DeterminismVersion = 1'u16
+  DeterminismFileExt* = ".det"
+    ## Exported so the retention GC can enumerate sidecars without
+    ## re-deriving the extension.
+
+proc determinismFileName*(strongHex: string): string =
+  strongHex & DeterminismFileExt
+
+proc encodeDeterminism(meta: EntryDeterminism;
+                       recordWriteSequence: uint64): seq[byte] =
+  for i in 0 ..< 4:
+    result.add(byte(ord(DeterminismMagic[i])))
+  result.writeU16Le(DeterminismVersion)
+  # Same back-reference as the witness sidecar: names the `.rec` this
+  # describes so a rewrite by a binary that knows nothing about sidecars
+  # invalidates it instead of leaving it paired with a record it no longer
+  # describes.
+  result.writeU64Le(recordWriteSequence)
+  result.add(byte(ord(meta.class)))
+  result.add(byte(ord(meta.retention.kind)))
+  result.writeU64Le(uint64(max(0'i64, meta.retention.seconds)))
+  result.writeU64Le(uint64(max(0'i64, meta.writeTimeUnix)))
+  result.writeString(meta.hostFingerprint)
+  result.writeString(meta.buildEpoch)
+
+proc decodeDeterminism(raw: openArray[byte]):
+    tuple[recordWriteSequence: uint64; meta: EntryDeterminism] =
+  ## Returns `meta.declared == false` on any problem. A sidecar that cannot be
+  ## read is exactly a sidecar that is not there; it must never abort a build.
+  if raw.len < 14:
+    return
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(DeterminismMagic[i])):
+      return
+  var pos = 4
+  let version = readU16Le(raw, pos)
+  if version != DeterminismVersion:
+    return
+  try:
+    result.recordWriteSequence = readU64Le(raw, pos)
+    let cls = readByte(raw, pos)
+    if cls > byte(ord(high(EdgeDeterminism))):
+      return (0'u64, EntryDeterminism())
+    let retKind = readByte(raw, pos)
+    if retKind > byte(ord(high(CacheRetentionKind))):
+      return (0'u64, EntryDeterminism())
+    var meta = EntryDeterminism(declared: true)
+    meta.class = EdgeDeterminism(cls)
+    meta.retention = CacheRetention(kind: CacheRetentionKind(retKind),
+      seconds: int64(readU64Le(raw, pos)))
+    meta.writeTimeUnix = int64(readU64Le(raw, pos))
+    meta.hostFingerprint = readString(raw, pos)
+    meta.buildEpoch = readString(raw, pos)
+    result.meta = meta
+  except EnvelopeError, CatchableError:
+    return (0'u64, EntryDeterminism())
+
+proc metaOf(records: openArray[ActionResultRecord]): EntryDeterminism =
+  ## All records in one `.rec` share a strong fingerprint and therefore one
+  ## producing action, so they share one class. A declared entry wins over an
+  ## undeclared one, for the same reason a non-empty witness wins over an
+  ## empty one: a republish that lost the metadata must not erase it.
+  for record in records:
+    if record.determinism.declared:
+      return record.determinism
+  EntryDeterminism()
+
+var cachedHostFingerprint = ""
+
+proc hostFingerprint*(): string =
+  ## §3's `host-bound` write column: "the host fingerprint (machine-id, OS,
+  ## architecture)".
+  ##
+  ## STRICTLY READ-ONLY. `repro_profile`'s `ensureMachineId` would be the
+  ## richer answer, but it PERSISTS a UUID to `/etc/repro/machine-id` when it
+  ## finds none, and writing to `/etc` to label a cache entry is not a trade
+  ## this metadata is worth. `/etc/machine-id` is read if it happens to be
+  ## there and simply skipped if it is not.
+  ##
+  ## This value is never a security boundary and is never compared for
+  ## equality on the local read path -- a local hit is by construction on the
+  ## producing host. Its whole job is to let a cross-machine substitution be
+  ## refused with the producing host NAMED rather than refused blankly.
+  if cachedHostFingerprint.len > 0:
+    return cachedHostFingerprint
+  var parts: seq[string] = @[]
+  when defined(posix):
+    try:
+      if fileExists("/etc/machine-id"):
+        let mid = readFile("/etc/machine-id").strip()
+        if mid.len > 0:
+          parts.add("machine-id=" & mid)
+    except OSError, IOError:
+      discard
+  try:
+    let host = getHostname()
+    if host.len > 0:
+      parts.add("host=" & host)
+  except OSError, CatchableError:
+    discard
+  parts.add("os=" & hostOS)
+  parts.add("arch=" & hostCPU)
+  cachedHostFingerprint = parts.join(" ")
+  cachedHostFingerprint
+
+proc declaredDeterminism*(class: EdgeDeterminism;
+                          retention = forever();
+                          nowUnix: int64 = 0;
+                          buildEpoch = ""): EntryDeterminism =
+  ## Build the metadata a producing action stamps onto its cache entry.
+  ## `nowUnix = 0` means "read the wall clock now"; a caller with an injected
+  ## clock (every test that asserts on expiry) passes its own.
+  EntryDeterminism(
+    declared: true,
+    class: class,
+    retention: retention,
+    writeTimeUnix: (if nowUnix != 0: nowUnix else: toUnix(getTime())),
+    hostFingerprint: hostFingerprint(),
+    buildEpoch: buildEpoch)
+
 proc resetOutputStateCheckStats*() =
   ## Zero the accumulators. The engine calls this at the start of every build:
   ## these are process-global, and a process that runs more than one build
@@ -2135,6 +2329,19 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest):
       if witnesses.len > 0:
         for i in 0 ..< decoded.records.len:
           decoded.records[i].attachWitnesses(witnesses)
+      # The determinism sidecar, same shape and same back-reference rule as
+      # the witness one. Absent / undecodable / mismatched sequence all mean
+      # "this entry declared nothing", which is the pre-change behaviour.
+      let detPath = dirPath / determinismFileName(strongHex)
+      if fileExists(extendedPath(detPath)):
+        try:
+          let det = decodeDeterminism(bytes(readFile(detPath)))
+          if det.meta.declared and
+              det.recordWriteSequence == decoded.writeSequence:
+            for i in 0 ..< decoded.records.len:
+              decoded.records[i].determinism = det.meta
+        except OSError, IOError, EnvelopeError:
+          discard
       recFiles.add((seq: decoded.writeSequence, strongHex: strongHex,
         recs: decoded.records))
     recFiles.sort(proc (a, b: tuple[seq: uint64; strongHex: string;
@@ -2262,6 +2469,45 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
           try: removeFile(extendedPath(witnessTmp))
           except OSError: discard
 
+    # The determinism sidecar. Same carry-forward rule as the witness one and
+    # for the same reason: the cache daemon and the peer-cache installer both
+    # republish records decoded from a plain frame, which is
+    # determinism-metadata-free by construction. Letting such a republish
+    # write an UNDECLARED sidecar would erase the class of a `volatile` entry
+    # seconds after it was recorded, and the entry would then be served
+    # forever with no retention at all -- the exact defect this metadata
+    # exists to prevent, arrived at silently.
+    let detPath = dirPath / determinismFileName(finalName.splitFile.name)
+    let meta = metaOf(records)
+    var detPayload: seq[byte] = @[]
+    var writeDet = false
+    if meta.declared:
+      detPayload = encodeDeterminism(meta, writeSequence)
+      writeDet = true
+    elif priorWriteSequence != 0'u64 and fileExists(extendedPath(detPath)):
+      try:
+        let prior = decodeDeterminism(bytes(readFile(detPath)))
+        if prior.meta.declared and
+            prior.recordWriteSequence == priorWriteSequence:
+          detPayload = encodeDeterminism(prior.meta, writeSequence)
+          writeDet = true
+      except OSError, IOError, EnvelopeError:
+        discard
+    if writeDet:
+      let detTmp = tmpPath & DeterminismFileExt
+      try:
+        writeFile(extendedPath(detTmp), byteString(detPayload))
+        moveFile(extendedPath(detTmp), extendedPath(detPath))
+      except OSError, IOError:
+        if fileExists(extendedPath(detTmp)):
+          try: removeFile(extendedPath(detTmp))
+          except OSError: discard
+    elif fileExists(extendedPath(detPath)):
+      # No metadata to write and none worth keeping: drop the stale sidecar
+      # so no later reader pairs it with an unrelated record.
+      try: removeFile(extendedPath(detPath))
+      except OSError: discard
+
 proc capRecFiles(cache: ActionCache; dirPath: string) =
   ## Bound the per-edge directory: keep at most `MaxRecFilesPerEdge` `.rec`
   ## files, evicting the OLDEST by DURABLE write sequence beyond the cap (the
@@ -2284,7 +2530,8 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
   # edge directory almost never holds more than `MaxRecFilesPerEdge` files --
   # so a reap placed after the early return below would essentially never run.
   for kind, path in walkDir(extendedPath(dirPath)):
-    if kind == pcFile and path.endsWith(WitnessFileExt):
+    if kind == pcFile and
+        (path.endsWith(WitnessFileExt) or path.endsWith(DeterminismFileExt)):
       let owner = path.parentDir / (path.splitFile.name & PerEdgeRecFileExt)
       if not fileExists(extendedPath(owner)):
         try:
@@ -2302,14 +2549,16 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
       removeFile(entries[i].path)
     except OSError:
       discard
-    # Drop the evicted record's witness sidecar too, or it leaks.
-    let witness = entries[i].path.parentDir /
-      witnessFileName(entries[i].strongHex)
-    if fileExists(extendedPath(witness)):
-      try:
-        removeFile(extendedPath(witness))
-      except OSError:
-        discard
+    # Drop the evicted record's sidecars too, or they leak.
+    for sidecar in [entries[i].path.parentDir /
+                      witnessFileName(entries[i].strongHex),
+                    entries[i].path.parentDir /
+                      determinismFileName(entries[i].strongHex)]:
+      if fileExists(extendedPath(sidecar)):
+        try:
+          removeFile(extendedPath(sidecar))
+        except OSError:
+          discard
 
 
 proc migrateLegacyFile(cache: ActionCache; weak: ContentDigest) =
@@ -3000,10 +3249,16 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
                          storeOutputBlobs = true;
                          metadataCache: ptr FileMetadataCache = nil;
                          envInputs: openArray[EnvFingerprint] = [];
-                         enumeratedDirectories: openArray[string] = []):
+                         enumeratedDirectories: openArray[string] = [];
+                         determinism = EntryDeterminism()):
                          ActionResultRecord =
   result.weakFingerprint = weak
   result.policy = policy
+  # §3's write column. Stamped here, at the one moment the wall clock means
+  # what the retention clause needs it to mean: the instant the realization
+  # was produced. Defaulted-empty, so every existing caller records exactly
+  # what it recorded before and writes no sidecar.
+  result.determinism = determinism
   var enumerated = initHashSet[string]()
   for path in enumeratedDirectories:
     enumerated.incl(path.replace('\\', '/'))
@@ -3063,10 +3318,16 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
                          storeOutputBlobs = true;
                          metadataCache: ptr FileMetadataCache = nil;
                          envInputs: openArray[EnvFingerprint] = [];
-                         enumeratedDirectories: openArray[string] = []):
+                         enumeratedDirectories: openArray[string] = [];
+                         determinism = EntryDeterminism()):
                          ActionResultRecord =
   result.weakFingerprint = weak
   result.policy = policy
+  # §3's write column. Stamped here, at the one moment the wall clock means
+  # what the retention clause needs it to mean: the instant the realization
+  # was produced. Defaulted-empty, so every existing caller records exactly
+  # what it recorded before and writes no sidecar.
+  result.determinism = determinism
   var enumerated = initHashSet[string]()
   for path in enumeratedDirectories:
     enumerated.incl(path.replace('\\', '/'))
@@ -3322,19 +3583,89 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
     ActionCacheLookup(status: aclMissNoRecord,
       message: "no matching cache record for policy")
 
+proc determinismMetaFor*(cache: ActionCache; weak, strong: ContentDigest):
+    EntryDeterminism =
+  ## Read the determinism sidecar for one (edge, path-set) pair directly.
+  ##
+  ## `loadPerEdgeRecords` already attaches this to every record it returns,
+  ## and it validates the sidecar's write-sequence back-reference before doing
+  ## so. This entry point deliberately does NOT validate that back-reference,
+  ## because the callers that need it -- the shared-memory hot tier, which
+  ## decodes a plain frame and has no write sequence, and the retention GC,
+  ## which walks sidecars rather than records -- do not have one to compare.
+  ##
+  ## Skipping the check is sound HERE and only here, because of which
+  ## direction it errs in. A mismatched sequence means an older binary
+  ## rewrote the `.rec` after this sidecar was written, so the sidecar's
+  ## `writeTimeUnix` is EARLIER than the entry's true write time. Under a
+  ## `max-age` clause an earlier write time makes the entry look OLDER, i.e.
+  ## more expired, i.e. a miss. The failure mode is a redundant re-run, never
+  ## a stale realization served as fresh.
+  let dirPath = cache.perEdgeDirPath(weak)
+  let detPath = dirPath / determinismFileName(digestHex(strong))
+  if not fileExists(extendedPath(detPath)):
+    return EntryDeterminism()
+  try:
+    decodeDeterminism(bytes(readFile(detPath))).meta
+  except OSError, IOError, EnvelopeError:
+    EntryDeterminism()
+
+proc applyRetention(cache: ActionCache; weak: ContentDigest;
+                    lookup: var ActionCacheLookup;
+                    retention: CacheRetention;
+                    nowUnix: int64; buildEpoch: string) =
+  ## `Edge-Determinism-And-Soft-Rebuild.md` §4.4: an expired `volatile` entry
+  ## becoming a cache miss is "the only automatic invalidation the default
+  ## mode does". This is that invalidation, and it is deliberately the LAST
+  ## gate: an entry that already failed on inputs, env, or output integrity
+  ## keeps the more specific diagnosis it earned.
+  ##
+  ## `crkForever` -- every non-`volatile` class, and every caller that passes
+  ## nothing -- returns before touching the filesystem, so the hot path is
+  ## byte-for-byte the path it was before this existed.
+  if retention.kind == crkForever:
+    return
+  if lookup.status notin {aclHit, aclHybridCutoff}:
+    return
+  var meta = lookup.record.determinism
+  if not meta.declared:
+    # The shared-memory tier decodes a plain record frame, which carries no
+    # sidecar data. Fall back to reading it by (edge, path-set).
+    meta = cache.determinismMetaFor(weak, lookup.record.strongFingerprint)
+  let now = if nowUnix != 0: nowUnix else: toUnix(getTime())
+  let verdict = retentionVerdict(retention, meta.writeTimeUnix, now,
+    entryBuildEpoch = meta.buildEpoch, currentBuildEpoch = buildEpoch)
+  if servesCachedBytes(verdict):
+    return
+  lookup.status = aclMissRetentionExpired
+  lookup.message =
+    case verdict
+    of rvUnknownWriteTime:
+      "cached entry carries no recorded write time; retention '" &
+        $retention & "' cannot be evaluated, so the entry is not served"
+    of rvRevalidate:
+      "retention '" & $retention & "' requires revalidation on every read"
+    else:
+      "cached entry expired under retention '" & $retention & "' (written " &
+        $max(0'i64, now - meta.writeTimeUnix) & "s ago)"
+
 proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
                          verifyOutputBlobs = true;
                          allowMetadataOnlyHit = false;
                          metadataCache: ptr FileMetadataCache = nil;
                          envResolver: EnvResolver = nil;
-                         outputRoot = ""): ActionCacheLookup =
-  cache.lookupActionResultImpl(cas, weak, policy,
+                         outputRoot = "";
+                         retention = forever();
+                         nowUnix: int64 = 0;
+                         buildEpoch = ""): ActionCacheLookup =
+  result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
     outputRoot = outputRoot)
+  cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
@@ -3342,10 +3673,259 @@ proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          allowMetadataOnlyHit = false;
                          metadataCache: ptr FileMetadataCache = nil;
                          envResolver: EnvResolver = nil;
-                         outputRoot = ""): ActionCacheLookup =
-  cache.lookupActionResultImpl(cas, weak, policy,
+                         outputRoot = "";
+                         retention = forever();
+                         nowUnix: int64 = 0;
+                         buildEpoch = ""): ActionCacheLookup =
+  result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
     outputRoot = outputRoot)
+  cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
+
+# ===========================================================================
+# Retention-aware GC (`Edge-Determinism-And-Soft-Rebuild.md` §9's deferred
+# follow-up, and §10.2's "retention-driven eviction runs before size-driven
+# eviction").
+#
+# §9 named exactly one gap and deferred it: "A `volatile` entry with
+# `max-age = 1` clutters the cache fast. A retention-aware GC that evicts
+# stale `volatile` entries preferentially is a follow-up; the current spec
+# leaves it to the existing reprobuild GC." The existing GC could not do it,
+# and not because nobody had wired it up: NOTHING in reprobuild evicted on
+# age. The reaper evicts on lease deadline + holder liveness, the store GC on
+# root reachability, and the home GC on keep-last-N-generations. None of the
+# three can express "this realization has aged out of its declared window".
+#
+# What this is NOT: a replacement for any of those three. It runs at the
+# ACTION-CACHE ENTRY level and deletes records and their sidecars. It never
+# unlinks a CAS blob, because a blob is shared and the only component that
+# knows whether one is still referenced is the reachability GC in
+# `store.nim`. Instead it REPORTS the digests the evicted entries referenced,
+# so an `evictToSoftCap` pass afterwards reclaims whatever genuinely became
+# unreachable. Two owners, one direction, no double authority over deletion.
+# ===========================================================================
+
+type
+  CacheEntryRef* = object
+    ## One action-cache entry as the retention GC sees it: a `.rec` file, its
+    ## sidecars, and the determinism metadata that decides its fate.
+    weakDirName*: string       ## `hot-records/<this>` — the per-edge directory
+    strongHex*: string         ## the `.rec` basename, i.e. the path-set nonce
+    recPath*: string
+    recordBytes*: int64        ## the `.rec` plus its sidecars
+    payloadBytes*: int64       ## the output blobs this entry references
+    mtimeUnix*: int64
+    meta*: EntryDeterminism
+    expired*: bool
+    blobDigests*: seq[string]
+
+  RetentionGcPolicy* = object
+    nowUnix*: int64
+      ## Injected clock. Every test that asserts on expiry passes its own;
+      ## 0 means read the wall clock. There is no `sleep` anywhere in this
+      ## mechanism and there must not be.
+    currentBuildEpoch*: string
+      ## For §2.2's `this-build` clause. Empty means "no build in progress",
+      ## under which every `this-build` entry is expired — which is right:
+      ## the invocation that owned it is over.
+    softCapBytes*: int64
+      ## 0 disables the size pass entirely, leaving a pure retention sweep.
+      ## That is the useful default for a periodic hook: §10.2 says a stale
+      ## `volatile` entry "should leave even if the cache is below quota".
+    dryRun*: bool
+
+  RetentionGcReport* = object
+    scannedEntries*: int
+    expiredEvicted*: int
+    sizeEvicted*: int
+    bytesBefore*: int64
+    bytesAfter*: int64
+    evicted*: seq[string]        ## `<weakDirName>/<strongHex>`
+    releasedBlobs*: seq[string]  ## CAS digests the evicted entries referenced
+    orderViolation*: bool
+      ## Set if the size pass was ever about to evict an unexpired entry
+      ## while an expired one was still on disk. It must never be true; the
+      ## field exists so a test can assert on the INVARIANT rather than on
+      ## the incidental fact that phase 1 happens to run first.
+
+proc hotRecordsRoot*(cache: ActionCache): string =
+  ## The directory holding one per-edge subdirectory per cached edge. Exposed
+  ## for the retention GC and for tooling that must walk the whole cache; the
+  ## per-edge read path deliberately never does (the anti-wedge invariant).
+  cache.hotRoot
+
+proc fileSizeOrZero(path: string): int64 =
+  try: getFileSize(extendedPath(path))
+  except OSError, IOError: 0'i64
+
+proc scanCacheEntries*(cache: ActionCache;
+                       policy: RetentionGcPolicy): seq[CacheEntryRef] =
+  ## Walk `hot-records/` and classify every entry. This IS a whole-cache scan
+  ## — the one place in this module that does one — because a GC has no
+  ## smaller honest question to ask. It is never on a build's critical path.
+  result = @[]
+  let root = cache.hotRecordsRoot
+  if not dirExists(extendedPath(root)):
+    return
+  let now = if policy.nowUnix != 0: policy.nowUnix else: toUnix(getTime())
+  for edgeKind, edgeDir in walkDir(extendedPath(root)):
+    if edgeKind != pcDir:
+      continue
+    let weakDirName = extractFilename(edgeDir)
+    for kind, path in walkDir(edgeDir):
+      if kind != pcFile or not path.endsWith(PerEdgeRecFileExt):
+        continue
+      let strongHex = path.splitFile.name
+      var entry = CacheEntryRef(
+        weakDirName: weakDirName,
+        strongHex: strongHex,
+        recPath: path,
+        recordBytes: fileSizeOrZero(path))
+      for ext in [WitnessFileExt, DeterminismFileExt]:
+        entry.recordBytes += fileSizeOrZero(edgeDir / (strongHex & ext))
+      try:
+        entry.mtimeUnix = toUnix(getLastModificationTime(extendedPath(path)))
+      except OSError, IOError:
+        entry.mtimeUnix = 0
+      let detPath = edgeDir / determinismFileName(strongHex)
+      if fileExists(extendedPath(detPath)):
+        try:
+          entry.meta = decodeDeterminism(bytes(readFile(detPath))).meta
+        except OSError, IOError, EnvelopeError:
+          discard
+      # Payload size + the blob digests this entry holds a claim on. A record
+      # this binary cannot decode contributes 0 bytes and no digests rather
+      # than aborting the sweep: an undecodable record is one an OLDER or
+      # NEWER reprobuild wrote, and a GC must not delete what it cannot read.
+      var decodable = true
+      try:
+        let decoded = decodePerEdgeFileWithSeq(bytes(readFile(path)))
+        for record in decoded.records:
+          if record.outputPayloadKind != opkCasBlobs:
+            continue
+          for output in record.outputs:
+            entry.payloadBytes += int64(output.blob.sizeBytes)
+            entry.blobDigests.add(digestHex(output.blob.digest))
+      except OSError, IOError, EnvelopeError:
+        decodable = false
+      if not decodable:
+        entry.payloadBytes = 0
+        entry.blobDigests = @[]
+      entry.expired =
+        entry.meta.declared and
+        isExpired(entry.meta.retention, entry.meta.writeTimeUnix, now,
+          entryBuildEpoch = entry.meta.buildEpoch,
+          currentBuildEpoch = policy.currentBuildEpoch)
+      result.add(entry)
+
+proc removeEntry(entry: CacheEntryRef): bool =
+  ## Unlink one entry's `.rec` and both sidecars. Best-effort on the
+  ## sidecars: an orphaned one is reaped by `capRecFiles` anyway, whereas a
+  ## `.rec` that survives is a live cache entry, so only its removal decides
+  ## success.
+  let dir = entry.recPath.parentDir
+  for ext in [WitnessFileExt, DeterminismFileExt]:
+    let sidecar = dir / (entry.strongHex & ext)
+    if fileExists(extendedPath(sidecar)):
+      try: removeFile(extendedPath(sidecar))
+      except OSError: discard
+  try:
+    removeFile(extendedPath(entry.recPath))
+    true
+  except OSError:
+    false
+
+proc runRetentionGc*(cache: ActionCache;
+                     policy: RetentionGcPolicy): RetentionGcReport =
+  ## Two passes, in this order and never the other:
+  ##
+  ##   1. RETENTION. Every entry whose declared `cacheRetention` says it has
+  ##      aged out goes, whatever the size budget says. §10.2: "a stale
+  ##      `volatile` entry should leave even if the cache is below quota."
+  ##      By construction this pass touches only `volatile` entries —
+  ##      `isExpired` is false for `crkForever`, and `crkForever` is what
+  ##      every non-`volatile` class carries — but the code does not rely on
+  ##      that: it asks the retention clause, which is the thing that
+  ##      actually decides.
+  ##
+  ##   2. SIZE. Only if a soft cap was given and the footprint is still over
+  ##      it. Oldest-mtime-first over what remains, which is exactly the
+  ##      existing LRU order. An entry is never evicted here while an expired
+  ##      entry is still on disk; that is asserted rather than assumed (see
+  ##      `orderViolation`).
+  var entries = scanCacheEntries(cache, policy)
+  result.scannedEntries = entries.len
+  for entry in entries:
+    result.bytesBefore += entry.recordBytes + entry.payloadBytes
+  result.bytesAfter = result.bytesBefore
+
+  var survivors: seq[CacheEntryRef] = @[]
+  for entry in entries:
+    if not entry.expired:
+      survivors.add(entry)
+      continue
+    if policy.dryRun:
+      inc result.expiredEvicted
+      result.evicted.add(entry.weakDirName & "/" & entry.strongHex)
+      # Decrement here too, not only on the real path. The size pass below
+      # reads `bytesAfter` to decide how much more it must take; a dry run
+      # that left it at the pre-sweep total would plan a size eviction the
+      # real run would not perform, and a preview that over-reports is a
+      # preview nobody can act on.
+      result.bytesAfter -= entry.recordBytes + entry.payloadBytes
+      continue
+    if removeEntry(entry):
+      inc result.expiredEvicted
+      result.bytesAfter -= entry.recordBytes + entry.payloadBytes
+      result.evicted.add(entry.weakDirName & "/" & entry.strongHex)
+      for d in entry.blobDigests:
+        result.releasedBlobs.add(d)
+    else:
+      survivors.add(entry)
+
+  if policy.softCapBytes <= 0 or result.bytesAfter <= policy.softCapBytes:
+    return
+
+  # The invariant, checked rather than trusted: nothing expired may still be
+  # on disk when the size pass begins. If it is, the size pass does not run —
+  # evicting a `strong` entry to make room while an aged-out `volatile` one
+  # survives is precisely the inversion this milestone exists to prevent, and
+  # a silently-inverted GC is worse than one that declines.
+  for entry in survivors:
+    if entry.expired:
+      result.orderViolation = true
+      return
+
+  survivors.sort(proc (a, b: CacheEntryRef): int =
+    # Primary key is the `.rec` file's mtime, which is what the existing
+    # `evictToSoftCap` uses and therefore what "LRU" already means here.
+    result = cmp(a.mtimeUnix, b.mtimeUnix)
+    if result == 0 and a.meta.writeTimeUnix > 0 and b.meta.writeTimeUnix > 0:
+      # Two entries written inside the same clock second tie on mtime, and
+      # a whole cache warmed by one build ties on ALL of them -- at which
+      # point a strongHex tie-break makes the eviction order effectively
+      # arbitrary. The recorded write time is a strictly finer statement of
+      # the same fact, so it breaks the tie when BOTH entries carry one.
+      # Guarded on both being non-zero because an undeclared entry has no
+      # write time, and treating its 0 as "oldest" would evict the
+      # unlabelled corpus first for no reason.
+      result = cmp(a.meta.writeTimeUnix, b.meta.writeTimeUnix)
+    if result == 0:
+      result = cmp(a.strongHex, b.strongHex))
+  for entry in survivors:
+    if result.bytesAfter <= policy.softCapBytes:
+      break
+    if policy.dryRun:
+      inc result.sizeEvicted
+      result.evicted.add(entry.weakDirName & "/" & entry.strongHex)
+      result.bytesAfter -= entry.recordBytes + entry.payloadBytes
+      continue
+    if removeEntry(entry):
+      inc result.sizeEvicted
+      result.bytesAfter -= entry.recordBytes + entry.payloadBytes
+      result.evicted.add(entry.weakDirName & "/" & entry.strongHex)
+      for d in entry.blobDigests:
+        result.releasedBlobs.add(d)
