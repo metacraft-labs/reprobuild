@@ -43884,6 +43884,28 @@ proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
       location: asg.store.storeLocationLabel(), store: asg.store,
       repoNames: @[asg.repoName]))
 
+proc manifestPublicationEnabled(workspaceRoot: string): bool =
+  ## MO-14 — central lock PUBLICATION is OPT-IN. Return true ONLY when the host
+  ## bootstrap config (`.repro-workspace.toml`) explicitly sets
+  ## `[manifest] publish_locks = true`. Absent config file, absent key, or an
+  ## explicit `false` all mean COMMITTED-LOCK-ONLY: the pre-push gate still
+  ## writes/refreshes and passes, but must NOT publish to the central manifest
+  ## repo. Any read/parse error is treated as "not enabled" (fail closed toward
+  ## the safe, non-publishing default) — this gates PUBLICATION only and never
+  ## affects manifest FETCH / refresh / augmentation.
+  # Resolve the config the SAME way ``loadLockingRouting`` resolves the
+  # ``[locking]`` table (``findBootstrapConfigPath``: ``REPRO_WORKSPACE_CONFIG``
+  # override → ``<workspaceRoot>/.repro-workspace.toml`` → ancestors), since
+  # ``publish_locks`` lives in that very file.
+  let configPath = findBootstrapConfigPath(workspaceRoot)
+  if configPath.len == 0: return false
+  try:
+    let cfg = readWorkspaceBootstrap(configPath)
+    result = cfg.manifest.publish_locks.isSome and
+             cfg.manifest.publish_locks.get()
+  except CatchableError:
+    result = false
+
 proc manifestBackendParticipates(parsed: CheckArgs; manifestLayerRoot: string;
     identity: GitToolIdentity): bool =
   ## A legacy, unrouted workspace owns all of its generated records in the
@@ -44013,7 +44035,19 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
       # workspace's personal/team-on-their-own-remote backends still publish
       # (spec §5/§9). The manifest-present behavior below is byte-identical to
       # HL-2 (same store, same policy, same offer-to-run remedy).
+      # MO-14: central lock publication is OPT-IN. Even with a `.repo/manifests`
+      # checkout present and the backend participating, only PUBLISH when the
+      # host bootstrap config explicitly enables it via
+      # `[manifest] publish_locks = true`. Otherwise the workspace is
+      # committed-lock-only: the gate has already passed and the lock is written
+      # locally, so we simply skip publication (a clean pass, no hard error).
       if report.manifestLayerRoot.len > 0 and
+          not manifestPublicationEnabled(parsed.workspaceRoot):
+        when defined(reproVerboseLockPublish):
+          stderr.writeLine(
+            "repro check: lock publish disabled by config " &
+            "([manifest] publish_locks not set)")
+      elif report.manifestLayerRoot.len > 0 and
           manifestBackendParticipates(
             parsed, report.manifestLayerRoot, identity):
         # MO-10: route the RA-7/RA-21 pre-push publish through the abstract

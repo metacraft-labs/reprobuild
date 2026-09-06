@@ -165,6 +165,16 @@ suite "the pre-push gate writes the lock record it demands":
         "schema = \"reprobuild.workspace.local.v1\"\n\n" &
         "[workspace]\nproject = \"mix\"\nbranch = \"main\"\n")
 
+      # MO-14 — central lock publication is opt-in. This test proves the
+      # published lock record is reachable from the store's upstream, so the
+      # workspace opts in via `[manifest] publish_locks = true`.
+      writeFile(ws / ".repro-workspace.toml",
+        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+        "[manifest]\n" &
+        "url = \"file://" & storeOrigin & "\"\n" &
+        "branch = \"main\"\n" &
+        "publish_locks = true\n")
+
       discard requireRun(git & " init -q -b main " & q(ws))
       gitCfg(ws)
       writeFile(ws / ".gitignore", "/.repro/\n/anchored/\n/unanchored/\n")

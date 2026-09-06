@@ -294,6 +294,17 @@ proc seedManifestGitLayer(gitBin: string; fx: var Fixture) =
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(fx.manifestsRoot) &
     " config user.name \"RA28 Tester\"")
+  # MO-14 — central lock publication is opt-in. This test asserts the gate
+  # attempts a publish push (and refuses loud when it fails), so opt in via
+  # `[manifest] publish_locks = true` in the host bootstrap config. The config
+  # lives at the workspace root (not inside the manifest checkout); the gate
+  # reads it from disk, so it need not be tracked by any repo.
+  writeFile(fx.workspaceRoot / ".repro-workspace.toml",
+    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+    "[manifest]\n" &
+    "url = \"" & fileUrl(fx.manifestBare) & "\"\n" &
+    "branch = \"main\"\n" &
+    "publish_locks = true\n")
   discard requireGit(q(gitBin) & " -C " & q(fx.manifestsRoot) &
     " add projects repos")
   discard requireGit(q(gitBin) & " -C " & q(fx.manifestsRoot) &
