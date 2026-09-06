@@ -313,6 +313,22 @@ const
   LegacyHookSentinelEnv* = "REPROBUILD_HOOK_ACTIVE"
   InternalHookContextEnv* = "REPROBUILD_INTERNAL_HOOK_CONTEXT"
   InternalLockCommitContext* = "reprobuild.lock-commit.v1"
+  HookGitIndexFileEnv* = "REPROBUILD_HOOK_GIT_INDEX_FILE"
+    ## NF-2 — the managed `pre-commit` body's private carrier for git's
+    ## `GIT_INDEX_FILE`.
+    ##
+    ## The body scrubs the whole of `GitRepositoryLocalEnv` before dispatching,
+    ## because a `git -C <sibling>` inside `repro` must not be bound to the
+    ## repository whose commit fired the hook. `GIT_INDEX_FILE` is on that list
+    ## and is also the ONE binding the `flake.lock` refresh has to reach: it
+    ## names the index the commit in flight is being built from, and for
+    ## `git commit -a` / `git commit -- <paths>` that is a temporary file, not
+    ## `.git/index`.
+    ##
+    ## Carrying it under a name that is not a git variable is what keeps both
+    ## properties: git binds nothing from it, so every sibling operation still
+    ## runs against a clean git environment, and the single call that stages
+    ## into the invoking repository's own index can opt in explicitly.
   V2DispatcherMarker* = "reprobuild hook dispatcher protocol=2"
   V2ManagedMarker* = "reprobuild managed pre-push hook protocol=2"
   CapabilitySchema* = "reprobuild.hook-capability.v2"
