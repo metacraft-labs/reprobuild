@@ -305,6 +305,30 @@ type
       ## diagnostics so ``repro why`` can answer "why did this keep caching
       ## despite reading randomness?" without the reader having to go and
       ## find the package spec.
+    determinism*: Option[EdgeDeterminism]
+      ## ``Edge-Determinism-And-Soft-Rebuild.md`` §2 — the edge's declared
+      ## determinism class, from the tool's ``cli:`` block or a per-edge
+      ## strengthening override.
+      ##
+      ## An ``Option`` and not a bare enum ON PURPOSE. §2.1's default for an
+      ## unlabelled tool is ``weak``, but the enum's ZERO value is
+      ## ``edStrong`` — the one class the trust model lets cross a machine
+      ## boundary unverified. A bare field would hand every legacy and
+      ## hand-constructed action a silent ``strong`` label, which is an
+      ## over-promise waiting for the binary-cache slice to read it.
+      ## ``none`` means "unlabelled"; ``effectiveDeterminism`` resolves it to
+      ## ``edWeak``. Do not "simplify" this to a plain enum.
+      ##
+      ## This is DISTINCT from ``nonDeterminism`` above, which is a narrow
+      ## policy about whether an OBSERVED entropy read costs the action its
+      ## cache publication. This field is the action's declared
+      ## reproducibility class and drives retention, cross-machine
+      ## substitution, and the ``--soft-rebuild`` family.
+    cacheRetention*: CacheRetention
+      ## §2.2's clause, meaningful only for a ``volatile`` edge (for which
+      ## §2.2 makes its ABSENCE an error). ``crkForever`` — the zero value —
+      ## is what every other class carries and what every existing action
+      ## keeps, so the cache read path for them is byte-for-byte unchanged.
     builtinText*: string
     builtinEntries*: seq[string]
     targetNames*: seq[string]
@@ -561,6 +585,33 @@ type
     stderrLimit*: int
     rebuildMissingOutputsOnCacheHit*: bool
     forceRebuild*: bool
+    rebuildClass*: RebuildClass
+      ## ``Edge-Determinism-And-Soft-Rebuild.md`` §4.1–§4.3, i.e. which of
+      ## ``--soft-rebuild`` / ``--rebuild-host-bound`` / ``--hard-rebuild``
+      ## the invocation carries. ``rbNone`` (the zero value, and what every
+      ## existing caller gets) is §4.4's unchanged default path.
+      ##
+      ## Deliberately SEPARATE from ``forceRebuild`` rather than folded into
+      ## it. ``forceRebuild`` means "ignore the cache for every edge in this
+      ## graph" and predates the determinism model; ``rbHard`` means the same
+      ## thing arrived at through the class lattice and is additionally
+      ## scopable by ``rebuildOnly``. Collapsing them would make
+      ## ``--force-rebuild --only X`` silently mean ``--force-rebuild``.
+    rebuildOnly*: seq[string]
+      ## §4.5's ``--only <pattern>`` selector. EMPTY means "no selector",
+      ## which selects every edge — so ``rebuildClass`` alone behaves exactly
+      ## as §4.1 describes it unqualified. Matched against ``action.id`` and
+      ## ``action.targetNames`` by ``matchesOnlySelector``.
+    nowUnix*: int64
+      ## Injected wall clock for retention decisions. 0 means read the real
+      ## one. Exists so ``t_volatile_retention_expiry_is_a_miss`` can assert
+      ## on an expiry boundary without sleeping through it; a retention test
+      ## that slept would be both slow and flaky.
+    buildEpoch*: string
+      ## Identifies THIS ``repro build`` invocation, for §2.2's
+      ## ``this-build`` retention clause. Empty means the engine has not been
+      ## given one, under which a ``this-build`` entry is never a hit — the
+      ## fail-closed direction.
     # When true, successful actions record input/output metadata for local
     # invalidation but do not synchronously hash and copy output payloads into
     # the local CAS. This is only appropriate for modes that rebuild missing
@@ -1776,6 +1827,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
              nonDeterminism = ndpUnblessed;
              nonDeterminismJustification = "";
+             determinism = none(EdgeDeterminism);
+             cacheRetention = forever();
              env: openArray[string] = [];
              envPassthrough: openArray[string] = [];
              requiresElevation = false;
@@ -1823,6 +1876,14 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     dependencyPolicy: effectiveDependencyPolicy,
     nonDeterminism: nonDeterminism,
     nonDeterminismJustification: nonDeterminismJustification,
+    # Edge-Determinism-And-Soft-Rebuild.md §2. `none` + `forever()` is the
+    # unlabelled default: every existing call site keeps the exact behaviour
+    # it had, writes no determinism sidecar, and takes the same cache path.
+    # The `weakFingerprint` above deliberately does NOT mix either field in —
+    # §10.2: "The class is NOT part of the cache key (so a relabel from
+    # `weak` to `strong` does not invalidate existing entries)."
+    determinism: determinism,
+    cacheRetention: cacheRetention,
     requiresElevation: requiresElevation)
 
 proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
@@ -2366,6 +2427,48 @@ proc allOutputsExist(action: BuildAction): bool =
 
 proc declaresNoOutputs(action: BuildAction): bool {.inline.} =
   action.outputs.len == 0
+
+proc determinismClass*(action: BuildAction): EdgeDeterminism {.inline.} =
+  ## The class this edge is treated as. `none` is §2.1's unlabelled case and
+  ## resolves to `weak`; see `BuildAction.determinism` for why the field is an
+  ## `Option`.
+  effectiveDeterminism(action.determinism)
+
+proc effectiveRetention*(action: BuildAction): CacheRetention {.inline.} =
+  ## Retention applies only to `volatile` edges. §1's table gives every other
+  ## class "cache forever" / "cache forever, per host", and honouring a
+  ## retention clause that someone attached to a non-volatile edge would be
+  ## inventing an invalidation the spec does not admit.
+  if action.determinismClass == edVolatile: action.cacheRetention
+  else: forever()
+
+proc rebuildSelectorInvalidates*(config: BuildEngineConfig;
+                                 action: BuildAction): bool =
+  ## `Edge-Determinism-And-Soft-Rebuild.md` §4.1–§4.3 crossed with §4.5.
+  ## An edge is invalidated when the invocation's rebuild verb covers its
+  ## class AND the `--only` selector (if any) names it.
+  if config.rebuildClass == rbNone:
+    return false
+  if not config.rebuildClass.invalidates(action.determinismClass):
+    return false
+  matchesOnlySelector(config.rebuildOnly, action.id, action.targetNames)
+
+proc entryDeterminismFor*(config: BuildEngineConfig;
+                          action: BuildAction): EntryDeterminism =
+  ## The §3 write-column metadata this action stamps onto its cache entry:
+  ## the class, the host fingerprint, the wall-clock write time and the
+  ## retention clause.
+  ##
+  ## An UNLABELLED edge stamps nothing. That is the difference between "this
+  ## action is `weak`" and "nobody said": the first is a claim a later
+  ## substitution decision may rely on, the second is silence, and a cache
+  ## that cannot tell them apart will eventually mistake one for the other.
+  ## It also means the overwhelming majority of edges write no sidecar and
+  ## pay nothing for this milestone existing.
+  if action.determinism.isNone:
+    return EntryDeterminism()
+  declaredDeterminism(action.determinismClass, action.effectiveRetention,
+    nowUnix = config.nowUnix, buildEpoch = config.buildEpoch)
 
 proc cachedResultReusableInPlace(action: BuildAction;
                                  declaredOutputsPresent: bool): bool =
@@ -8810,6 +8913,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return
     if record.outputPayloadKind != opkCasBlobs:
       return
+    # `Edge-Determinism-And-Soft-Rebuild.md` §3 / §5 / §10.4. A peer cache is
+    # a binary-cache topology, and a `host-bound` or `volatile` entry is one
+    # host's realization: no consumer on another machine can verify it, and
+    # §10.4 says an advertiser of one is treated as MISCONFIGURED. The honest
+    # place to enforce that is the advertiser, not the consumer, so such an
+    # entry is never published in the first place.
+    #
+    # Read from the RECORD rather than from a `BuildAction`, because this
+    # hook is also reached with a record loaded from the cache. An
+    # UNDECLARED record is `weak` by §2.1's default and publishes as it
+    # always has -- this gate narrows nothing that was previously published
+    # unless someone labelled the edge.
+    if record.determinism.declared and
+        not record.determinism.class.allowsCrossMachineSubstitution():
+      return
     let publishStart = statStart()
     var bundleBytes: seq[byte] = @[]
     proc writeU32Le(dst: var seq[byte]; value: uint32) =
@@ -8875,6 +8993,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return
     if record.outputPayloadKind != opkCasBlobs and
         not allowMaterializedOutputs:
+      return
+    # §10.3's "Preferred Publishing Model" edit: "An action classified
+    # `host-bound` or `volatile` MAY be cached locally BUT MUST NOT be
+    # published to a binary cache." Here the ACTION is in hand, so the class
+    # comes from the declaration rather than from whatever a record happens
+    # to carry -- an action labelled `volatile` must not publish even if the
+    # record it produced somehow lost its sidecar.
+    if not action.determinismClass.allowsCrossMachineSubstitution():
       return
     let publishStart = statStart()
     var recordOutputs: seq[string] = @[]
@@ -8973,6 +9099,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # the flag dropped on the floor.
     if config.forceRebuild:
       return none(BuildRunResult)
+    # The `--soft-rebuild` family has EXACTLY the defect described above, and
+    # for exactly the same reason: `rebuildClass` is read only in the
+    # scheduler's per-action decision, so a whole-graph short-circuit that
+    # returns before the scheduler runs discards the request and reports
+    # every edge as a cache hit. Retention is the same story — an expired
+    # `volatile` entry must become a miss (§4.4), and this path never
+    # consults a retention clause. Bail out for both.
+    if config.rebuildClass != rbNone:
+      return none(BuildRunResult)
+    for action in buildGraph.actions:
+      if action.effectiveRetention.kind != crkForever:
+        return none(BuildRunResult)
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
     var metadataCache = initFileMetadataCache()
@@ -9703,6 +9841,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # would be recorded as `cdRejected` and then immediately overridden
         # by `asUpToDate`, and the corrupt artifact would survive.
         var cacheRejectedOutput = false
+        # Set when the cache was bypassed by DETERMINISM POLICY rather than by
+        # anything observable on disk: a `--soft-rebuild`-family selector
+        # covering this edge's class (§4.1–§4.3), or a `volatile` entry past
+        # its `cacheRetention` window (§4.4). It must suppress the same
+        # "outputs are present, call it up to date" shortcut
+        # `cacheRejectedOutput` does, and for a sharper version of the same
+        # reason: here the outputs exist AND are internally consistent, and
+        # the operator has asked for a fresh realization anyway. Reusing
+        # `cacheMissInputChanged` for this would have worked mechanically and
+        # then lied in every diagnostic that reads it.
+        var cacheInvalidatedByPolicy = false
         var dependencyLaunched = false
         var outputsPresentBeforeLookup = false
         var outputsPresentKnown = false
@@ -9725,6 +9874,28 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if action.cacheable: cdMiss else: cdNotCacheable
           runResult.results[idToIndex.resultIndex(id)].reason = "force-rebuild"
           runResult.trace(id, "cache-skipped", "force-rebuild")
+        elif config.rebuildSelectorInvalidates(action):
+          # `Edge-Determinism-And-Soft-Rebuild.md` §4.1–§4.3. The shape
+          # mirrors `forceRebuild` above, but the REASON names the class that
+          # earned the invalidation, so an operator reading the trace can see
+          # why `--soft-rebuild` re-ran this edge and left its neighbour
+          # cached. That distinction is the whole point of the verb.
+          #
+          # `cacheInvalidatedByPolicy` is set for the same reason
+          # `aclMissInputChanged` sets `cacheMissInputChanged`: without it,
+          # the "outputs are present, call it up to date" shortcut further
+          # down re-declares this action up to date and the rebuild silently
+          # does NOTHING. That shortcut only asks whether the declared output
+          # paths exist, and after a `--soft-rebuild` they all still do —
+          # which is precisely the case where the operator asked for a fresh
+          # realization of bytes that are already sitting there.
+          runResult.results[idToIndex.resultIndex(id)].cacheDecision =
+            if action.cacheable: cdMiss else: cdNotCacheable
+          let reason = config.rebuildClass.flagSpelling & " " &
+            $action.determinismClass
+          runResult.results[idToIndex.resultIndex(id)].reason = reason
+          runResult.trace(id, "cache-skipped", reason)
+          cacheInvalidatedByPolicy = true
         elif action.cacheable and cacheLookupBlockedByMonitorLoss(action):
           # M9.R.73.2 — an earlier action in this session hit a monitor
           # loss whose invalidated-path set intersects this action's
@@ -9759,7 +9930,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               reusableInPlace,
             metadataCache = addr fileMetadataCache,
             envResolver = action.actionEnvResolver(),
-            outputRoot = action.cwd)
+            outputRoot = action.cwd,
+            retention = action.effectiveRetention,
+            nowUnix = config.nowUnix,
+            buildEpoch = config.buildEpoch)
           finishStat("repro cache lookup", lookupStart)
           # Peer-Cache M1: on local miss, consult the LAN peer cache.
           # `peerCacheActionFetcher` is nil when ``--peer-cache=…`` was
@@ -9791,7 +9965,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                     reusableInPlace,
                   metadataCache = addr fileMetadataCache,
                   envResolver = action.actionEnvResolver(),
-                  outputRoot = action.cwd)
+                  outputRoot = action.cwd,
+                  retention = action.effectiveRetention,
+                  nowUnix = config.nowUnix,
+                  buildEpoch = config.buildEpoch)
                 finishStat("repro peer-cache lookup-retry", retryStart)
                 runResult.trace(id, "peer-cache-hit", $lookup.status)
               else:
@@ -9876,6 +10053,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               if lookup.message.len > 0: lookup.message else: "input-changed"
             recordCacheLookupFacts(id, lookup)
             cacheMissInputChanged = true
+          of aclMissRetentionExpired:
+            # §4.4's one automatic invalidation: nothing changed, the cached
+            # realization simply aged out of its declared window. It must set
+            # `cacheInvalidatedByPolicy` — the outputs are all still on disk
+            # and internally consistent, so the up-to-date shortcut below
+            # would otherwise swallow the expiry whole and serve the stale
+            # realization forever.
+            runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+            runResult.results[idToIndex.resultIndex(id)].reason =
+              if lookup.message.len > 0: lookup.message
+              else: "retention-expired"
+            runResult.trace(id, "cache-expired",
+              runResult.results[idToIndex.resultIndex(id)].reason)
+            recordCacheLookupFacts(id, lookup)
+            cacheInvalidatedByPolicy = true
           else:
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
@@ -9893,6 +10085,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishStat("repro output stat", outputStatStart)
         if outputsPresent and not cacheMissInputChanged and
             not cacheRejectedOutput and
+            not cacheInvalidatedByPolicy and
             not dependencyLaunched and
             not config.forceRebuild and
             not action.needsExecutionForPolicy():
@@ -10063,7 +10256,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 # already collected two lines up; only the hand-off was
                 # missing.
                 enumeratedDirectories =
-                  action.cacheEnumeratedDirectories(evidence.evidence))
+                  action.cacheEnumeratedDirectories(evidence.evidence),
+                determinism = entryDeterminismFor(config, action))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, action.id), record)
@@ -10241,7 +10435,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 # direct engine caller prewired — both of which
                 # `collectEvidence` has already folded by this point.
                 enumeratedDirectories =
-                  plan.action.cacheEnumeratedDirectories(evidence.evidence))
+                  plan.action.cacheEnumeratedDirectories(evidence.evidence),
+                determinism = entryDeterminismFor(config, plan.action))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
@@ -10828,7 +11023,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             metadataCache = addr fileMetadataCache,
             envInputs = action.cacheEnvInputs(evidence.evidence),
             enumeratedDirectories =
-              action.cacheEnumeratedDirectories(evidence.evidence))
+              action.cacheEnumeratedDirectories(evidence.evidence),
+            determinism = entryDeterminismFor(config, action))
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)

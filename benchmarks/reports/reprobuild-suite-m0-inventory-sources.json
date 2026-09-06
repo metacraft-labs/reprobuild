@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1446,
+    "nimTestBinaries": 1449,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 593,
+    "pureUnitTests": 596,
     "staticallyDetectedRuntimeCompilerFlowTests": 82,
-    "testEntries": 1451
+    "testEntries": 1454
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -129,7 +129,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_core"
@@ -137,6 +137,7 @@
       "owner": "libs/repro_core",
       "sources": [
         "libs/repro_core/tests/t_convention_attribution.nim",
+        "libs/repro_core/tests/t_edge_determinism_vocabulary.nim",
         "libs/repro_core/tests/t_smoke_repro_core.nim"
       ],
       "targetOs": "soAny"
@@ -1119,7 +1120,7 @@
       "graph-fixture": 16,
       "integration": 610,
       "platform/destructive": 107,
-      "pure unit": 593,
+      "pure unit": 596,
       "unclassified": 125
     },
     "graphOwnedTestArtifacts": [
@@ -1232,9 +1233,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1446,
+    "nimTestBinaryCount": 1449,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1451
+    "testEntryCount": 1454
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5604,6 +5605,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_soft_rebuild_and_retention",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_workspace_declaring_nothing_unchanged",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -6817,6 +6838,23 @@
       "source": "libs/repro_core/tests/t_deps_refresh_check.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_edge_determinism_vocabulary",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_edge_determinism_vocabulary.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9084,6 +9122,25 @@
       "owner": "libs/repro_local_store",
       "requiresReproBinary": false,
       "source": "libs/repro_local_store/tests/t_m8_multi_output_realize.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_retention_gc",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_retention_gc.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -12580,7 +12637,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_l3_reaper.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -12609,6 +12666,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_interface_artifacts",
         "repro_project_dsl",
         "repro_resources"
@@ -12617,7 +12675,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_rp4_resource_type_macro.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

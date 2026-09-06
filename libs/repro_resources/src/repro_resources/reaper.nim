@@ -274,7 +274,7 @@ proc reapExpiredAtReconcileStart*(store: StateStore; now: Time = getTime();
   ## scan, `force = false`). This is fallback (a) of §4.3: the store enforces
   ## the lease even with NO daemon running. `force` is never set here (a
   ## reconcile must not reap a still-leased state out from under itself); the
-  ## `--hard-rebuild` force path is a distinct, explicit call.
+  ## `repro reap --force` path is a distinct, explicit call.
   reapOnce(store, now, transport, force = false)
 
 # ---------------------------------------------------------------------------
@@ -297,19 +297,60 @@ proc runReapCli*(args: seq[string];
   ## The `repro reap [--once] [--force] [--state-root=PATH] [address...]`
   ## entry. Returns a process exit code. `--once` is accepted (and is the
   ## only mode here — a single sweep; the daemon-hosted repeated schedule is
-  ## L4). `--force` selects every present record regardless of lease
-  ## (`--hard-rebuild`). Bare address args restrict the sweep to a group.
+  ## L4). `--force` selects every present record regardless of lease. Bare
+  ## address args restrict the sweep to a group.
   ##
   ## Pure w.r.t. output: `echoLine` (default: `echo`) receives each report
   ## line, so a test can capture output without a process.
+  ##
+  ## ## Why `--hard-rebuild` and `--rebuild-host-bound` are NOT accepted here
+  ##
+  ## They used to be, as bare aliases of `--force`. They were removed when
+  ## `Edge-Determinism-And-Soft-Rebuild.md` §4.2/§4.3 claimed both spellings
+  ## for `repro build`, where they mean something ELSE: which determinism
+  ## classes to invalidate in the ACTION CACHE. Here they meant "ignore an
+  ## unexpired lease and destroy the state anyway" — a destructive operation
+  ## on live infrastructure, not a cache invalidation.
+  ##
+  ## One spelling, two verbs, two meanings, one of them destructive is not a
+  ## collision worth documenting around. The resolution is to give the
+  ## spellings to `repro build` (where the spec defines them) and leave this
+  ## verb with `--force`, which is what it always did and what its own
+  ## semantics actually describe. Three facts made removal the cheap
+  ## direction rather than the expensive one:
+  ##
+  ##   1. Nothing dispatches `repro reap` yet. There is no `"reap"` arm in
+  ##      `runThinAppDispatch` and no `reap` entry in the usage text -- the
+  ##      comment above this proc says the CLI wiring is still the L4
+  ##      integration point. No operator can have typed either spelling.
+  ##   2. The only caller in the tree is this library's own test, and it
+  ##      exercises `force` through `reapOnce(force = true)`, never through
+  ##      a flag string.
+  ##   3. Keeping them as aliases would have made
+  ##      `repro reap --rebuild-host-bound` and
+  ##      `repro build --rebuild-host-bound` do unrelated things, one of
+  ##      which deletes a VM.
+  ##
+  ## Both are refused EXPLICITLY rather than falling through the generic
+  ## unknown-flag arm, so an operator who reaches for one is told where the
+  ## verb went instead of getting a bare exit 2.
   var force = false
   var storeRoot = storeRootOverride
   var targets: seq[string] = @[]
+  # Resolved BEFORE the parse loop, not after it, because the two refusals
+  # below report through it and they happen during parsing.
+  let emit = if echoLine != nil: echoLine
+             else: (proc (line: string) = echo line)
   for raw in args:
     if raw == "--once":
       discard                    # single sweep is the only mode here (L4 = repeat)
-    elif raw == "--force" or raw == "--hard-rebuild" or raw == "--rebuild-host-bound":
+    elif raw == "--force":
       force = true
+    elif raw == "--hard-rebuild" or raw == "--rebuild-host-bound":
+      emit("repro reap: " & raw & " is a `repro build` verb (it selects " &
+        "which determinism classes to invalidate in the action cache). To " &
+        "reap a still-leased state, use `repro reap --force`.")
+      return 2
     elif raw.startsWith("--state-root="):
       storeRoot = raw[len("--state-root=") .. ^1]
     elif raw.startsWith("--"):
@@ -318,7 +359,6 @@ proc runReapCli*(args: seq[string];
       targets.add(raw)
 
   let root = if storeRoot.len > 0: storeRoot else: defaultUserStateStoreRoot()
-  let emit = if echoLine != nil: echoLine else: (proc (line: string) = echo line)
 
   if not dirExists(root):
     emit("repro reap: no state store at " & root & " (nothing to reap)")

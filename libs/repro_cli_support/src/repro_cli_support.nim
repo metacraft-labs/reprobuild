@@ -254,7 +254,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -531,6 +531,55 @@ var actionCacheRootOverride: string = ""
 
 proc setActionCacheRootOverride*(value: string) =
   actionCacheRootOverride = value
+
+# Process-wide rebuild selection, set by the ``--soft-rebuild`` /
+# ``--rebuild-host-bound`` / ``--hard-rebuild`` / ``--only`` flags and
+# consumed by every BuildEngineConfig constructor in this module.
+# ``Edge-Determinism-And-Soft-Rebuild.md`` §4.
+#
+# A process-wide override rather than a parameter, deliberately, and by
+# precedent: ``--action-cache-root`` (above), ``--lock``
+# (``setActiveLockBindings``) and ``--unicode`` all take this shape. The
+# alternative is threading three more parameters through
+# ``executeBuildTarget``'s thirty-parameter signature and the six nested
+# procs below it, each of which is a place to forget one — and the flag that
+# gets forgotten in one branch is a flag that silently does nothing, which is
+# exactly the class of defect this milestone had to fix in the whole-graph
+# short-circuit.
+#
+# The daemon path re-parses ``rawArgs`` through ``runBuildCommand`` in the
+# daemon process, so the selection is established there too rather than
+# needing to cross the wire.
+var rebuildClassOverride: RebuildClass = rbNone
+var rebuildOnlyOverride: seq[string] = @[]
+var buildEpochOverride: string = ""
+var buildEpochSerial: int = 0
+
+proc setRebuildSelection*(cls: RebuildClass; only: seq[string] = @[]) =
+  rebuildClassOverride = cls
+  rebuildOnlyOverride = only
+  # A new invocation is a new build epoch. Clearing it here rather than
+  # generating it lazily-once-per-process is what makes ``this-build``
+  # correct inside the user daemon, which is ONE process serving MANY
+  # sequential ``repro build`` invocations: a per-process epoch would make
+  # every entry written by the first build look like it belonged to the
+  # fiftieth.
+  buildEpochOverride = ""
+
+proc activeRebuildClass*(): RebuildClass = rebuildClassOverride
+proc activeRebuildOnly*(): seq[string] = rebuildOnlyOverride
+
+proc currentBuildEpoch*(): string =
+  ## Identifies this ``repro build`` invocation for §2.2's ``this-build``
+  ## retention clause. Stable for the whole invocation and distinct across
+  ## invocations: pid (distinct across processes) plus a sub-second wall
+  ## clock and a per-process serial (distinct within one process, even for
+  ## two builds that start inside the same clock tick).
+  if buildEpochOverride.len == 0:
+    inc buildEpochSerial
+    buildEpochOverride = $getCurrentProcessId() & "-" &
+      $int64(epochTime() * 1000.0) & "-" & $buildEpochSerial
+  buildEpochOverride
 
 var unicodeOverride: Option[bool] = none(bool)
 
@@ -7888,6 +7937,15 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     inlineRunQuota: true,
     dryRun: validateExistingOnly,
     forceRebuild: forceRebuild,
+    # Edge-Determinism-And-Soft-Rebuild.md §4. Wired into EVERY
+    # user-facing config constructor in this module for the reason
+    # the neighbouring comment gives about `monitorHosting`: these
+    # are alternative entry points into the SAME build, and a flag
+    # wired to only one of them works or not depending on which
+    # path the graph happened to take.
+    rebuildClass: activeRebuildClass(),
+    rebuildOnly: activeRebuildOnly(),
+    buildEpoch: currentBuildEpoch(),
     suppressTrace: suppressTrace,
     skipCacheHitEvidence: skipCacheHitEvidence,
     cancelCallback: cancelCheck)
@@ -8286,6 +8344,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       monitorHosting: monitorHosting,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
+      # Edge-Determinism-And-Soft-Rebuild.md §4. Wired into EVERY
+      # user-facing config constructor in this module for the reason
+      # the neighbouring comment gives about `monitorHosting`: these
+      # are alternative entry points into the SAME build, and a flag
+      # wired to only one of them works or not depending on which
+      # path the graph happened to take.
+      rebuildClass: activeRebuildClass(),
+      rebuildOnly: activeRebuildOnly(),
+      buildEpoch: currentBuildEpoch(),
       publishCachedResults: publishCacheHits,
       suppressTrace: mcTrace notin measureSet,
       skipCacheHitEvidence: mcCacheEvidence notin measureSet,
@@ -8504,6 +8571,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         inlineRunQuota: true,
         dryRun: false,
         forceRebuild: forceRebuild,
+        # Edge-Determinism-And-Soft-Rebuild.md §4. Wired into EVERY
+        # user-facing config constructor in this module for the reason
+        # the neighbouring comment gives about `monitorHosting`: these
+        # are alternative entry points into the SAME build, and a flag
+        # wired to only one of them works or not depending on which
+        # path the graph happened to take.
+        rebuildClass: activeRebuildClass(),
+        rebuildOnly: activeRebuildOnly(),
+        buildEpoch: currentBuildEpoch(),
         suppressTrace: mcTrace notin measureSet,
         skipCacheHitEvidence: mcCacheEvidence notin measureSet,
         cancelCallback: cancelCheck)
@@ -9325,6 +9401,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         inlineRunQuota: true,
         dryRun: false,
         forceRebuild: forceRebuild,
+        # Edge-Determinism-And-Soft-Rebuild.md §4. Wired into EVERY
+        # user-facing config constructor in this module for the reason
+        # the neighbouring comment gives about `monitorHosting`: these
+        # are alternative entry points into the SAME build, and a flag
+        # wired to only one of them works or not depending on which
+        # path the graph happened to take.
+        rebuildClass: activeRebuildClass(),
+        rebuildOnly: activeRebuildOnly(),
+        buildEpoch: currentBuildEpoch(),
         suppressTrace: mcTrace notin measureSet,
         skipCacheHitEvidence: mcCacheEvidence notin measureSet,
         cancelCallback: cancelCheck)
@@ -9605,6 +9690,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       monitorHosting: monitorHosting,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
+      # Edge-Determinism-And-Soft-Rebuild.md §4. Wired into EVERY
+      # user-facing config constructor in this module for the reason
+      # the neighbouring comment gives about `monitorHosting`: these
+      # are alternative entry points into the SAME build, and a flag
+      # wired to only one of them works or not depending on which
+      # path the graph happened to take.
+      rebuildClass: activeRebuildClass(),
+      rebuildOnly: activeRebuildOnly(),
+      buildEpoch: currentBuildEpoch(),
       publishCachedResults: publishCacheHits,
       suppressTrace: mcTrace notin measureSet,
       skipCacheHitEvidence: mcCacheEvidence notin measureSet,
@@ -18449,6 +18543,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var prepareOnly = false
   var dryRun = false
   var forceRebuild = false
+  # Edge-Determinism-And-Soft-Rebuild.md §4.1-§4.3 and §4.5. `rbNone` +
+  # an empty selector is §4.4's unchanged default.
+  var rebuildClass = rbNone
+  var rebuildClassFlag = ""
+  var rebuildOnly: seq[string] = @[]
   var noOutputCleanup = false
   var publishCacheHits = false
   var publishMaterialized = false
@@ -18618,6 +18717,29 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       dryRun = true
     elif arg in ["--force-rebuild", "--rebuild"]:
       forceRebuild = true
+    elif arg in ["--soft-rebuild", "--rebuild-host-bound", "--hard-rebuild"]:
+      # §4.1-§4.3. The three are mutually exclusive rather than cumulative:
+      # they are not additive filters, they are three points on one lattice,
+      # and `--soft-rebuild --hard-rebuild` has no meaning that is not either
+      # of the two alone. Saying so is better than silently keeping the last
+      # one, because the two orders would then do different things.
+      var parsed: RebuildClass
+      discard parseRebuildClass(arg, parsed)
+      if rebuildClass != rbNone and rebuildClass != parsed:
+        raise newException(ValueError,
+          "repro build: " & rebuildClassFlag & " and " & arg &
+          " are mutually exclusive rebuild verbs; pass one")
+      rebuildClass = parsed
+      rebuildClassFlag = arg
+    elif arg == "--only" or arg.startsWith("--only="):
+      # §4.5. Repeatable; each occurrence adds a pattern, and an edge is
+      # selected when ANY pattern matches. Plain text is a substring match,
+      # a pattern containing `*` or `?` is an anchored glob -- see
+      # `matchesOnlySelector`.
+      let raw = valueFromFlag(args, i, "--only")
+      if raw.len == 0:
+        raise newException(ValueError, "--only requires a pattern")
+      rebuildOnly.add(raw)
     elif arg == "--no-output-cleanup":
       noOutputCleanup = true
     elif arg == "--publish-cache-hits":
@@ -18725,6 +18847,17 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       # fold name-shaped selectors into one engine pass.
       positionalSelectors.add(arg)
     inc i
+
+  # Edge-Determinism-And-Soft-Rebuild.md §4.5: `--only` is a selector ON a
+  # rebuild verb, and on its own it selects nothing to do. Refusing it is
+  # better than accepting it, because the accepting version of this command
+  # is one that looks like it scoped a rebuild and in fact ran the default
+  # build.
+  if rebuildOnly.len > 0 and rebuildClass == rbNone:
+    stderr.writeLine("repro build: --only scopes a rebuild verb; pass one of " &
+      "--soft-rebuild, --rebuild-host-bound or --hard-rebuild")
+    return 2
+  setRebuildSelection(rebuildClass, rebuildOnly)
 
   # ----------------------------------------------------------------
   # MO-1 — ``--print-solved-graph`` no-build inspection. Resolved BEFORE

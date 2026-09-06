@@ -59,6 +59,7 @@ libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity
 libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim	nim	3
 libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
+libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim	nim	6
 libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	6
 libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
@@ -125,6 +126,7 @@ libs/repro_core/tests/t_ambient_execution_external_import.nim	nim	1
 libs/repro_core/tests/t_convention_attribution.nim	nim	40
 libs/repro_core/tests/t_cpp_dep_scanner.nim	nim	10
 libs/repro_core/tests/t_deps_refresh_check.nim	nim	5
+libs/repro_core/tests/t_edge_determinism_vocabulary.nim	nim	15
 libs/repro_core/tests/t_go_dep_scanner.nim	nim	13
 libs/repro_core/tests/t_jsts_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_nim_dep_scanner.nim	nim	19
@@ -249,6 +251,7 @@ libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	12
 libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
+libs/repro_local_store/tests/t_retention_gc.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
 libs/repro_lock/tests/t_lock_identity_feature_change_differs.nim	nim	3
 libs/repro_lock/tests/t_lock_identity_rename_invalidates_nothing.nim	nim	2
@@ -447,9 +450,9 @@ libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim	nim	1
 libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
 libs/repro_resources/tests/t_l1_state_store.nim	nim	6
 libs/repro_resources/tests/t_l2_lease_edge.nim	nim	5
-libs/repro_resources/tests/t_l3_reaper.nim	nim	9
+libs/repro_resources/tests/t_l3_reaper.nim	nim	10
 libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
-libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	4
+libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	5
 libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim	nim	4
 libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim	nim	4
 libs/repro_solver/tests/t_unselected_package_is_recorded_as_unselected.nim	nim	3

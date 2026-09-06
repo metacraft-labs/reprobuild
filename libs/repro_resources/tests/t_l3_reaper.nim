@@ -259,15 +259,20 @@ suite "L3: crash-safe reaper":
     check second.reaped.len == 0
     check destroyLog == @["cluster"]                 # no SECOND destroy
 
-  test "(8) force reap ignores an UNEXPIRED lease (--hard-rebuild)":
+  test "(8) force reap ignores an UNEXPIRED lease (--force)":
     let store = scratchStore("force")
     let t0 = fromUnix(1_700_000_000)
     let ttl = initDuration(minutes = 30)
     materialize(store, "cluster", "smoke", delayed(ttl), t0)
 
     # BEFORE the deadline: a normal sweep keeps it (case 2). A force sweep
-    # over the NAMED group reaps it anyway — the `--hard-rebuild cluster`
+    # over the NAMED group reaps it anyway — the `repro reap --force cluster`
     # re-materialize-from-clean path — ignoring the unexpired lease.
+    #
+    # This case used to be named after `--hard-rebuild`, which `runReapCli`
+    # accepted as a bare alias of `--force`. That spelling now belongs to
+    # `repro build` (Edge-Determinism-And-Soft-Rebuild.md §4.3), where it
+    # means something entirely different; see case (10) for the refusal.
     let keepReport = reapOnce(store, now = t0 + initDuration(minutes = 1))
     check keepReport.reaped.len == 0
     check hasStateRecord(store, "cluster")
@@ -299,3 +304,49 @@ suite "L3: crash-safe reaper":
     for l in lines:
       if l.contains("cluster"): mentioned = true
     check mentioned
+
+  test "(10) `repro reap` REFUSES the two `repro build` rebuild verbs":
+    ## The negative control for the verb-collision resolution.
+    ## `runReapCli` used to accept `--hard-rebuild` and
+    ## `--rebuild-host-bound` as bare aliases of `--force`, i.e. as a
+    ## request to destroy a still-leased state. Those two spellings are now
+    ## `repro build`'s, where they select which determinism classes to
+    ## invalidate in the ACTION CACHE and destroy nothing.
+    ##
+    ## Both arms are required. Asserting only the refusal would pass against
+    ## a parser that refused every flag, so the second arm proves `--force`
+    ## still does the destructive thing the refused spellings used to do --
+    ## the capability was RELOCATED, not removed.
+    let store = scratchStore("verbs")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 30)
+    materialize(store, "cluster", "smoke", delayed(ttl), t0)
+    let inLease = t0 + initDuration(minutes = 1)
+
+    for spelling in ["--hard-rebuild", "--rebuild-host-bound"]:
+      var lines: seq[string] = @[]
+      let capture = proc (line: string) = lines.add(line)
+      let rc = runReapCli(@[spelling, "--state-root=" & store.root],
+                          now = inLease, echoLine = capture)
+      # Refused, with a non-zero exit...
+      check rc == 2
+      # ...and the state is STILL THERE. A refusal that destroyed anything
+      # would be worse than the alias it replaced.
+      check hasStateRecord(store, "cluster")
+      check destroyLog.len == 0
+      # ...and the operator is told where the verb went, rather than getting
+      # a bare exit 2 that reads as a typo.
+      var explained = false
+      for l in lines:
+        if l.contains("repro build") and l.contains("--force"):
+          explained = true
+      check explained
+
+    # The other arm: `--force` is unaffected and still reaps the unexpired
+    # lease it always reaped. Scoped to the named group, exactly as case (8)
+    # scopes it, so the consumer record is not swept in as collateral.
+    let rc = runReapCli(@["--force", "cluster", "--state-root=" & store.root],
+                        now = inLease)
+    check rc == 0
+    check not hasStateRecord(store, "cluster")
+    check destroyLog == @["cluster"]
