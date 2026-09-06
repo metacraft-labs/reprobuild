@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1445,
+    "nimTestBinaries": 1446,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 82,
-    "testEntries": 1450
+    "testEntries": 1451
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1117,7 +1117,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 609,
+      "integration": 610,
       "platform/destructive": 107,
       "pure unit": 593,
       "unclassified": 125
@@ -1232,9 +1232,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1445,
+    "nimTestBinaryCount": 1446,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1450
+    "testEntryCount": 1451
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20790,6 +20790,21 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cache_push_cannot_publish_a_branch",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_cache_push_cannot_publish_a_branch.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
