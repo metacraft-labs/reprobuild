@@ -38133,7 +38133,15 @@ proc runCachePushCommand*(args: openArray[string]): int =
     if fetchUrl.len == 0:
       return 0
     let cacheRoot = defaultCacheRoot(workspaceRoot)
-    let bare = sharedBarePath(cacheRoot, fetchUrl)
+    # Absolutized here because ``pushCacheRef`` will only push to an absolute
+    # path — that is what makes a remote name or URL unreachable as a
+    # destination. The cache root has two branches that can be relative (an
+    # operator's ``REPRO_WORKSPACE_CLONES`` override, and the no-``HOME``
+    # fallback), and both denote a directory relative to this process's
+    # working directory, which is exactly what ``absolutePath`` resolves. So
+    # this changes no destination; it only keeps the relative spellings
+    # eligible instead of silently dropping their propagation.
+    let bare = absolutePath(sharedBarePath(cacheRoot, fetchUrl))
     # No shared bare on disk → nothing to push into. Common before the
     # first ``init``/``shared-clones rewire`` wires the cache.
     if not dirExists(bare / "objects"):

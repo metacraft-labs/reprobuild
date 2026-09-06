@@ -926,6 +926,173 @@ proc currentBranch*(gitBin, repoPath: string): string =
   let name = res.output.strip()
   if name == "HEAD": "" else: name
 
+# ---- the cache push may only ever write the cache namespace ---------------
+#
+# The eager post-commit push exists to move OBJECTS between sibling checkouts
+# that share one bare. It is not a publication: nothing it writes is meant to
+# be visible to anyone but this machine, and it deliberately runs
+# ``--force --no-verify`` so no gate can slow it down. Those two properties
+# are safe together only for as long as its destination cannot be an ordinary
+# branch on an ordinary remote. If it ever could, an unattended background
+# process would be force-pushing unreviewed work to a shared remote with every
+# safety check switched off — and, being detached and fire-and-forget, it
+# would do so silently.
+#
+# Nothing about the refspec construction below announces that it is
+# load-bearing, and a reader who changes it will not be warned by the type
+# system, by git, or by the caller (which discards the result). So the
+# constraint is stated once, as data, and enforced on the ARGUMENT VECTOR
+# immediately before the process starts. An edit that retargets the push —
+# whether by changing the ref, the destination, or by hand-building a
+# different command — has to get past a check that reads what is actually
+# about to be executed, not what the author intended.
+
+const
+  cacheRefNamespace* = "refs/cache/"
+    ## The ONE ref namespace the eager cache push may write
+    ## (Unified-Locking-And-Hooks.md §7.2). Anything else — and
+    ## ``refs/heads/`` above all — is out of bounds by construction.
+
+type
+  CacheRefPushPlan* = object
+    ## The fully-resolved git invocation for one cache-ref push, kept
+    ## separate from the act of running it so it can be asserted on
+    ## without a repository, a network, or a subprocess.
+    ok*: bool
+    destination*: string   ## the shared bare's own path; never a remote name
+    cacheRef*: string      ## ``refs/cache/<workspace>/<branch>``
+    diagnostic*: string    ## why not, when ``ok`` is false
+
+proc refComponentFault(value: string): string =
+  ## "" when ``value`` is usable as ONE path component of a ref name.
+  ## Non-empty describes why it is not — the components are what decide
+  ## whether the assembled ref can leave its namespace.
+  if value.len == 0: return "is empty"
+  if value == "." or value == "..": return "is '" & value & "'"
+  if value.startsWith("-"): return "starts with '-'"
+  if value.endsWith(".lock"): return "ends with '.lock'"
+  for ch in value:
+    if ch in {'/', '\\', ':', '?', '[', '*', '~', '^', ' ', '\t'} or
+        ch < ' ' or ch == '\x7F':
+      return "contains '" & $ch & "'"
+  ""
+
+proc cacheRefPushPlan*(sharedBarePath, workspaceName, branch: string):
+    CacheRefPushPlan =
+  ## PURE: build (and validate) the cache-ref push for one repo. Refuses,
+  ## rather than pushing something else, whenever the destination would not
+  ## be a shared bare on this filesystem or the ref would not land inside
+  ## ``refs/cache/``.
+  ##
+  ## The destination must be an ABSOLUTE path to a git directory. That single
+  ## rule is what makes a remote impossible to reach from here: a remote alias
+  ## (``origin``), an ``https://`` or ``ssh://`` URL, and git's scp-like
+  ## ``git@host:org/repo`` form are none of them absolute paths, so each is
+  ## refused before any process starts.
+  ##
+  ## ``workspaceName`` is ONE component — it is a directory basename, and a
+  ## name carrying a separator could otherwise reposition the ref (``..`` most
+  ## obviously). ``branch`` may contain '/' (``fix/some-thing``), so it is
+  ## checked component by component and may not itself be a full ref name.
+  result.destination = sharedBarePath
+  if branch.len == 0:
+    result.diagnostic = "no branch to cache-push (detached HEAD?)"
+    return
+  if sharedBarePath.len == 0 or not sharedBarePath.isAbsolute:
+    result.diagnostic = "cache-push destination must be an absolute path to " &
+      "a shared bare, not a remote or URL: '" & sharedBarePath & "'"
+    return
+  if not looksLikeGitDir(sharedBarePath):
+    result.diagnostic = "shared bare missing for cache-push: " & sharedBarePath
+    return
+  let wsFault = refComponentFault(workspaceName)
+  if wsFault.len > 0:
+    result.diagnostic = "workspace name " & wsFault &
+      ", so it cannot name a cache ref: '" & workspaceName & "'"
+    return
+  if branch.startsWith("refs/"):
+    result.diagnostic = "cache-push branch must be a branch name, not a full " &
+      "ref: '" & branch & "'"
+    return
+  for component in branch.split('/'):
+    let fault = refComponentFault(component)
+    if fault.len > 0:
+      result.diagnostic = "branch component '" & component & "' " & fault &
+        ", so it cannot name a cache ref: '" & branch & "'"
+      return
+  # A git ref name is NOT a filesystem path: its separator is '/' on every
+  # platform, including Windows. Nim's ``/`` is ``DirSep``-aware, so building
+  # this with it produced ``refs\cache\<ws>\<branch>`` on Windows — ``joinPath``
+  # rewrites the ``/`` already inside the left operand too, so the WHOLE ref
+  # name came back backslashed — and git rejected the push with
+  # ``fatal: invalid refspec``. The push is best-effort
+  # and the caller discards its result, so the whole RA-5 cache-ref mechanism
+  # was a silent no-op on Windows — found while proving W4's detached child
+  # actually runs. The readers below (``cacheRefWorkspaces``,
+  # ``pruneDeadCacheRefs``) already split on '/', so this is the one site that
+  # disagreed with the rest of the file.
+  result.cacheRef = cacheRefNamespace & workspaceName & "/" & branch
+  result.ok = true
+
+proc cacheRefPushArgvFault*(argv: openArray[string];
+                            expectedDestination: string): string =
+  ## "" when ``argv`` is a git push that writes ONLY inside
+  ## ``refs/cache/`` on ``expectedDestination``. Non-empty names what is
+  ## wrong with it.
+  ##
+  ## This reads the vector that is about to be handed to the process, so it
+  ## holds for a command assembled anywhere, by anyone, however it was built.
+  ## It is the reason a future retargeting of this push cannot ship quietly.
+  var sawPush = false
+  var destination = ""
+  var refspecs: seq[string]
+  var i = 0
+  while i < argv.len:
+    let arg = argv[i]
+    if not sawPush:
+      if arg == "push": sawPush = true
+      elif arg == "-C": inc i          # its value is a path, not an operand
+      inc i
+      continue
+    if arg.startsWith("-"):
+      inc i
+      continue
+    if destination.len == 0: destination = arg
+    else: refspecs.add(arg)
+    inc i
+  if not sawPush:
+    return "not a 'git push'"
+  if destination.len == 0:
+    return "no push destination; git would fall back to a configured remote"
+  if destination != expectedDestination:
+    return "pushes to '" & destination & "' instead of the shared bare '" &
+      expectedDestination & "'"
+  if refspecs.len == 0:
+    return "no refspec; git would push whatever the branch's upstream is"
+  for spec in refspecs:
+    let colon = spec.rfind(':')
+    if colon < 0:
+      return "refspec '" & spec &
+        "' names no destination ref, so git chooses one"
+    let dest = spec[(colon + 1) .. ^1]
+    if not dest.startsWith(cacheRefNamespace) or
+        dest.len == cacheRefNamespace.len or ".." in dest or "//" in dest:
+      return "refspec '" & spec & "' writes '" & dest & "', which is outside " &
+        cacheRefNamespace
+  ""
+
+proc cacheRefPushArgv*(repoPath: string; plan: CacheRefPushPlan): seq[string] =
+  ## The argv for a validated plan. ``--force --no-verify`` is correct only
+  ## because the destination is this machine's own object cache: the
+  ## publication gate has nothing to say about an internal object write, and
+  ## the ref is workspace-namespaced so it cannot collide with a sibling's
+  ## same-named branch. Both of those justifications depend on the plan
+  ## having been validated, which is why the argv is built from it and not
+  ## from raw arguments.
+  if not plan.ok: return @[]
+  @["-C", repoPath, "push", "--force", "--no-verify", plan.destination,
+    "HEAD:" & plan.cacheRef]
+
 proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
                    branch = ""): SharedCloneResult =
   ## Push ``repoPath``'s current branch (or the explicit ``branch``) into
@@ -941,32 +1108,29 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
   ## This is the RA-5 mechanism. RA-4 calls it from the post-commit hook
   ## (detached, fire-and-forget, never blocking the commit); RA-5 exposes
   ## it and tests it directly.
+  ##
+  ## It writes the cache namespace or it writes nothing: a destination or a
+  ## ref it cannot vouch for is refused here rather than pushed somewhere
+  ## else. See ``cacheRefPushPlan`` for why that has to be a rule and not a
+  ## convention.
   let useBranch =
     if branch.len > 0: branch else: currentBranch(gitBin, repoPath)
   if useBranch.len == 0:
     return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
       diagnostic: "cannot determine branch to cache-push in " & repoPath &
         " (detached HEAD?)")
-  if not looksLikeGitDir(sharedBarePath):
+  let plan = cacheRefPushPlan(sharedBarePath, workspaceName, useBranch)
+  if not plan.ok:
     return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
-      diagnostic: "shared bare missing for cache-push: " & sharedBarePath)
-  # A git ref name is NOT a filesystem path: its separator is '/' on every
-  # platform, including Windows. Nim's ``/`` is ``DirSep``-aware, so building
-  # this with it produced ``refs\cache\<ws>\<branch>`` on Windows — ``joinPath``
-  # rewrites the ``/`` already inside the left operand too, so the WHOLE ref
-  # name came back backslashed — and git rejected the push with
-  # ``fatal: invalid refspec``. The push is best-effort
-  # and the caller discards its result, so the whole RA-5 cache-ref mechanism
-  # was a silent no-op on Windows — found while proving W4's detached child
-  # actually runs. The readers below (``cacheRefWorkspaces``,
-  # ``pruneDeadCacheRefs``) already split on '/', so this is the one site that
-  # disagreed with the rest of the file.
-  let cacheRef = "refs/cache/" & workspaceName & "/" & useBranch
+      diagnostic: plan.diagnostic)
+  let argv = cacheRefPushArgv(repoPath, plan)
+  let fault = cacheRefPushArgvFault(argv, plan.destination)
+  if fault.len > 0:
+    return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+      diagnostic: "refusing to run the cache-ref push: it " & fault)
   # ``HEAD:<cacheRef>`` pushes whatever the working tree currently has
   # checked out; the cache ref is the destination in the bare.
-  let res = runGit(gitBin,
-    ["-C", repoPath, "push", "--force", "--no-verify", sharedBarePath,
-     "HEAD:" & cacheRef])
+  let res = runGit(gitBin, argv)
   if res.code != 0:
     return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
       diagnostic: "cache-ref push failed (" & $res.code & "): " &

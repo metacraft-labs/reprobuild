@@ -8064,6 +8064,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_cache_push_cannot_publish_a_branch.nim",
+    binary: "build/test-bin/t_cache_push_cannot_publish_a_branch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim",
     binary: "build/test-bin/t_cache_daemon_drains_dedups_persists_and_warms_from_disk",
     defines: @[],
