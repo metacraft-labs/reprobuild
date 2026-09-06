@@ -485,6 +485,16 @@ type
       ## When signature verification is also required, the SIGNATURE is checked
       ## against this pinned revision (a tag's signature, or the pinned commit's
       ## signature) rather than whatever the branch currently points at.
+    publish_locks*: Option[bool]
+      ## MO-14 — OPT-IN to central workspace-lock PUBLICATION. When true, a
+      ## passing pre-push gate commits + pushes the `locks/` subtree to the
+      ## manifest repo (the RA-7/RA-21 publication boundary). When absent or
+      ## false, the workspace operates COMMITTED-LOCK-ONLY: the pre-push gate
+      ## still writes/refreshes the lock locally and passes, but never publishes
+      ## to the central manifest repo (Workspace-Manifests.md §"Lock
+      ## publication"). This gates PUBLICATION ONLY — manifest FETCH / refresh /
+      ## augmentation for private deps (via `[manifest] url` / `private_url`) is
+      ## independent and unaffected.
 
   BootstrapProjectsBody* = object
     default*: seq[string]

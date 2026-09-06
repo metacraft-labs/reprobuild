@@ -3043,7 +3043,8 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
           escForCode(cmd.providerEntrypointId) & ", @[" & argCalls.join(", ") &
           "])\n")
 
-proc workspaceProducerModule(selector, consumerSourceFile: string): string =
+proc workspaceProducerLocation(selector, consumerSourceFile: string):
+    tuple[workspaceRoot, modulePath: string] =
   ## Cross-Repo-Source-Consumption SC-9 — compile-time discovery of a
   ## workspace/sibling PROJECT's ``repro.nim`` for a ``uses:`` selector that
   ## names a workspace producer, so ``usesImportCode`` can IMPORT that
@@ -3064,14 +3065,24 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
   ## selector names no on-disk workspace sibling. Empty for an unsafe spelling
   ## (a selector carrying a path separator / dot / colon is not a bare
   ## workspace project name — the caller keeps its existing branch).
+  ##
+  ## ``workspaceRoot`` is the ANCESTOR the producer was found under — the
+  ## directory that holds the consumer's and the producer's projects as
+  ## siblings. It is returned because it is the only defensible anchor for
+  ## anything cached PER PRODUCER: the cache is shared by every consumer that
+  ## resolves this selector, and those are exactly the consumers whose walk
+  ## lands on this ancestor. Deriving it independently (say, two levels up
+  ## from the consumer source) would agree only for a consumer whose recipe
+  ## sits directly in its project root, and would silently split the cache for
+  ## a consumer whose ``uses:`` lives in a submodule.
   if selector.len == 0 or consumerSourceFile.len == 0:
-    return ""
+    return
   for ch in selector:
     if ch == '/' or ch == '\\' or ch == '.' or ch == ':':
-      return ""
+      return
   let anchorDir = consumerSourceFile.parentDir
   if anchorDir.len == 0:
-    return ""
+    return
   # Walk UP the directory chain from the consumer, probing ``<ancestor>/<selector>``
   # at each level. The first level (``anchorDir.parentDir / selector``) is the
   # direct-sibling convention the SC-9/RP5a/TI2 reference tests rely on
@@ -3096,9 +3107,15 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
         if fileExists(candidate):
           # Return the extension-stripped path so the emitted
           # ``import "<path>" as <alias>`` resolves the module by file path.
-          return candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
+          result.modulePath =
+            candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
+          result.workspaceRoot = parent
+          return
     dir = parent
-  ""
+
+proc workspaceProducerModule(selector, consumerSourceFile: string): string =
+  ## The producer module path alone. See `workspaceProducerLocation`.
+  workspaceProducerLocation(selector, consumerSourceFile).modulePath
 
 type
   ProducerResourceModuleDecl* = object
@@ -3387,6 +3404,124 @@ proc producerSourceStamp(producerReproPath: string;
   hex
 
 const ResourceAccessorCacheVersion = "2"
+
+const DslScratchRootEnv* = "REPRO_DSL_SCRATCH_ROOT"
+  ## Operator override for `dslScratchRootFor`. Names a directory the DSL's
+  ## macro-expansion machinery may create subdirectories under. It exists so
+  ## that a project whose own tree must stay pristine (or is itself read-only)
+  ## still has somewhere to put the resource-accessor cache, and so that the
+  ## unwritable-root diagnostic can name a remedy that always works.
+
+proc dslScratchRootFor*(workspaceRoot, consumerSourceFile: string): string =
+  ## The writable scratch root the DSL may create directories under, derived
+  ## from **the project being built** — never from the engine's own source
+  ## checkout.
+  ##
+  ## ## Why this proc exists
+  ##
+  ## The resource-accessor cache used to be anchored at
+  ## ``<reprobuild checkout>/build/nimcache``, where "the reprobuild checkout"
+  ## was found by walking up from *this module's own* ``currentSourcePath()``
+  ## to the nearest ``config.nims`` + ``reprobuild.nimble`` pair. That anchor
+  ## is correct for READING (it names the checkout whose config wires the
+  ## generator compile) and wrong for WRITING: an engine installed from a
+  ## binary cache has its source in ``/nix/store/<hash>-source``, which is
+  ## read-only, so every ``repro`` verb run in a project that does not shadow
+  ## the installed engine died with
+  ##
+  ##     Error: unhandled exception: Read-only file system
+  ##     Additional info: /nix/store/…-source/build/ [OSError]
+  ##
+  ## ## Why the WORKSPACE root and not the consumer project root
+  ##
+  ## The accessor cache is keyed by the PRODUCER, and every consumer of that
+  ## producer is meant to share one lift and one cached splice — that sharing
+  ## is the whole TI2 win over RP5a's ~2m-per-consumer generator. Anchoring on
+  ## the consumer project would give each consumer a private cache and
+  ## silently reinstate the per-consumer generator.
+  ##
+  ## ``workspaceRoot`` therefore comes from `workspaceProducerLocation` — the
+  ## ancestor whose child the producer actually is — and NOT from counting
+  ## directories up from the consumer's source file. Those two agree only when
+  ## the consumer's ``uses:`` sits in its project's root module. ReproOS's does
+  ## not: its ``uses: "vm-harness"`` is in ``reproos/repro/workflows.nim`` and
+  ## the producer resolves two levels up, at the workspace root.
+  ##
+  ## The fallback is the consumer's own project directory, used only when no
+  ## producer resolved — in which case nothing is cached per producer anyway.
+  let overrideRoot = getEnv(DslScratchRootEnv)
+  if overrideRoot.len > 0:
+    return overrideRoot
+  let anchor =
+    if workspaceRoot.len > 0: workspaceRoot
+    else: consumerSourceFile.parentDir
+  if anchor.len == 0:
+    # Nothing to anchor on. Do NOT fall back to a relative path, which would
+    # create `.repro` wherever the compiler happens to be standing.
+    return getTempDir() / "repro-dsl-scratch"
+  anchor / ".repro" / "build" / "dsl"
+
+proc deepestExistingDir(path: string): string =
+  ## The nearest ancestor of ``path`` (inclusive) that exists as a directory.
+  var dir = path
+  while dir.len > 0 and not dirExists(dir):
+    let parent = dir.parentDir
+    if parent == dir:
+      return ""
+    dir = parent
+  dir
+
+proc dirLooksWritable(dir: string): bool =
+  ## Whether a new entry can be created in ``dir``.
+  ##
+  ## This has to be a PROBE and cannot be "try it and catch the failure". The
+  ## Nim VM runs ``os.createDir`` as a compiler-side callback, and an
+  ## ``OSError`` raised inside that callback unwinds past the VM's own
+  ## ``try``/``except`` and out of the compiler as an unhandled exception — the
+  ## bare ``Traceback from system`` this module used to produce. So the check
+  ## must happen BEFORE anything is created.
+  ##
+  ## The composition names no executable that must be found on ``PATH``:
+  ## ``test`` / ``[`` and ``echo`` are POSIX shell builtins, and ``echo`` is
+  ## internal to ``cmd.exe``. That matters because a macro shelling out at
+  ## compile time runs inside a Nim compile action whose ``PATH`` is only
+  ## ``<nim>/bin:<gcc-wrapper>/bin`` — see ``compile_time_shell.nim``.
+  if dir.len == 0:
+    return false
+  when defined(windows):
+    # ``cmd.exe`` has no ``test``; ``mkdir`` is internal to cmd, so create and
+    # remove a probe directory instead. ``rd`` is internal too.
+    let probe = "reprobuild-write-probe"
+    let out0 = staticExec("cmd.exe /d /c " & quoteShell(
+      "cd /d " & quoteShell(dir) & " && mkdir " & probe &
+      " && rd " & probe & " && echo REPRO_RW"))
+    result = out0.contains("REPRO_RW")
+  else:
+    let out0 = staticExec("test -w " & quoteShell(dir) & " && echo REPRO_RW")
+    result = out0.contains("REPRO_RW")
+
+proc requireDslScratchDir(dir, scratchRoot, consumerSourceFile: string) =
+  ## Create ``dir`` (and its parents), or fail with a diagnostic that names the
+  ## path, why that path was chosen, and what to do about it.
+  if dirExists(dir):
+    return
+  let existing = deepestExistingDir(dir)
+  if existing.len == 0 or not dirLooksWritable(existing):
+    error(
+      "reprobuild: the build scratch directory cannot be created.\n" &
+      "  path:      " & dir & "\n" &
+      "  blocked at: " & (if existing.len > 0: existing else: "<no existing ancestor>") &
+      "\n" &
+      "  reason:    that directory is not writable by this user (read-only " &
+      "filesystem, or permissions).\n" &
+      "  chosen:    it is the scratch root of the PROJECT BEING BUILT, " &
+      "derived from the\n" &
+      "             consumer recipe " & consumerSourceFile & "\n" &
+      "             whose workspace scratch root is " & scratchRoot & ".\n" &
+      "  remedy:    make that directory writable, or point the scratch root " &
+      "somewhere\n" &
+      "             writable with " & DslScratchRootEnv & "=<dir>.")
+  createDir(dir)
 
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   proc isBundledStdlibSelector(selector: string): bool =
@@ -3780,17 +3915,12 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
           if parent == dir:
             break
           dir = parent
-    # The emitted-accessor cache is keyed by the PRODUCER, not the consumer, so
-    # every consumer of the same producer shares ONE lift + ONE cached splice.
-    # Anchor it under ``<repoRoot>/build/nimcache`` (Nim's config walk keys off
-    # the compiled generator file's directory chain, so it must live under the
-    # reprobuild tree to resolve ``import repro_cli_support``); fall back to
-    # $TMPDIR only when the repo root could not be located (best effort).
-    let cacheBase =
-      if repoRoot.len > 0:
-        repoRoot / "build" / "nimcache" / "ti2-resource-accessors"
-      else:
-        getTempDir() / "repro-resource-accessors"
+    # ``repoRoot`` above is the ENGINE's own source checkout. It has exactly one
+    # legitimate job from here on: it is the working directory of the generator
+    # compile and the checkout whose ``config.nims`` supplies that compile's
+    # switches. It is READ from, never written to. Everything WRITTEN below is
+    # anchored per selector on the project being built (see the loop).
+
     # A test may redirect the witness log to observe whether the generator ran.
     let witnessOverride =
       if existsEnv("REPRO_TI2_ACCESSOR_WITNESS"):
@@ -3808,9 +3938,21 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
     # implementation.
     result.add("import repro_resources\n")
     for selector in resourceProducerSelectors:
-      let producerModule = workspaceProducerModule(selector, consumerSourceFile)
+      let producerLocation =
+        workspaceProducerLocation(selector, consumerSourceFile)
+      let producerModule = producerLocation.modulePath
       let producerRepro =
         if producerModule.len > 0: producerModule & ".nim" else: ""
+      # The emitted-accessor cache is keyed by the PRODUCER, not the consumer,
+      # so every consumer of the same producer shares ONE lift + ONE cached
+      # splice. It is anchored on the PROJECT BEING BUILT — specifically on the
+      # workspace the producer resolved under, so that every consumer sharing
+      # this cache computes the same anchor. See ``dslScratchRootFor``, which
+      # also records why this used to be ``<repoRoot>/build/nimcache`` and why
+      # that made an engine installed from a binary cache unusable.
+      let dslScratchRoot =
+        dslScratchRootFor(producerLocation.workspaceRoot, consumerSourceFile)
+      let cacheBase = dslScratchRoot / "resource-accessors"
       # TI2 (separate-module producer): fold the producer's DECLARED resource
       # module + its extra ``--path`` closure into the freshness stamp, so a
       # subdirectory resource-module schema edit invalidates the cached accessor
@@ -3827,8 +3969,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
           ""
       let selectorKey = selectorModuleName(selector)
       let accDir = cacheBase / selectorKey
-      if not dirExists(accDir):
-        createDir(accDir)
+      requireDslScratchDir(accDir, dslScratchRoot, consumerSourceFile)
       let accessorCachePath = accDir / (selectorKey & ".accessors.nim")
       let stampPath = accDir / (selectorKey & ".stamp")
       # TI3: the InterfaceFingerprint (impl-EXCLUDING — TI1) the cached accessor
@@ -3894,12 +4035,55 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         # ``PATH`` is exactly ``<nim>/bin:<gcc-wrapper>/bin``, and neither
         # directory holds a shell. The composition names no executable that has
         # to be searched for. See that module's header.
+        #
+        # HOW THE GENERATOR RESOLVES ``import repro_cli_support``. Nim discovers
+        # ``config.nims`` by walking the PROJECT FILE's directory chain — not the
+        # process cwd — so while the generator lived under the reprobuild
+        # checkout the walk found that checkout's config and wired every lib
+        # ``--path`` for free. Now that the generator lives in the scratch root
+        # of the project being built, that only still holds when the project
+        # happens to sit inside the engine checkout (which is the shape of this
+        # repository's own fixtures). When it does not, the same wiring is handed
+        # over explicitly:
+        #
+        #   * a wrapper ``config.nims`` staged next to the generator that
+        #     ``include``s the engine checkout's own config — the mechanism
+        #     ``repro_profile_compile`` already uses to compile an out-of-tree
+        #     profile, and the reason that config anchors everything it must
+        #     denote on ``currentSourcePath()`` rather than ``thisDir()``. It
+        #     carries the ``passC``/``passL``/``define``/``undef`` switches.
+        #   * every search path of THIS compile, passed as ``--path``. The
+        #     wrapper cannot supply those: a relative ``switch("path", …)`` in an
+        #     ``include``d config resolves against the INCLUDING config's
+        #     directory, so the engine's in-tree ``libs/*/src`` entries would
+        #     resolve under the scratch dir and silently not be added. The
+        #     consuming compile already carries the fully-resolved set.
+        let genUnderRepoRoot =
+          repoRoot.len > 0 and accDir.isRelativeTo(repoRoot)
+        var extraPathFlags = ""
+        if not genUnderRepoRoot:
+          if repoRoot.len > 0:
+            let stagedConfig = accDir / "config.nims"
+            let stagedContent =
+              "include " & escape(
+                (repoRoot / "config.nims").replace('\\', '/')) & "\n"
+            if (not fileExists(stagedConfig)) or
+                readFile(stagedConfig) != stagedContent:
+              writeFile(stagedConfig, stagedContent)
+          for searchPath in querySettingSeq(searchPaths):
+            extraPathFlags.add(" --path:" & quoteShell(searchPath))
         let nimCmd =
           quoteShell(compilerExe) &
-          " c -r --hints:off --warnings:off " &
+          " c -r --hints:off --warnings:off" & extraPathFlags & " " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
-        let genCmd = compileTimeShellCommand(repoRoot, nimCmd)
+        # The working directory has to be WRITABLE as well as config-bearing:
+        # ``nim c`` drops a ``<project>_linkerArgs.txt`` beside itself in the
+        # cwd. When the generator can inherit the engine checkout's config walk
+        # the cwd stays there, as before; otherwise it is the generator's own
+        # scratch dir, whose writability was checked above.
+        let genWorkDir = if genUnderRepoRoot: repoRoot else: accDir
+        let genCmd = compileTimeShellCommand(genWorkDir, nimCmd)
         let genOut = staticExec(genCmd)
         # Split the framed output: first ``IFP:<hex>`` line, then the accessor
         # source. A generator that failed / was killed returns empty/partial

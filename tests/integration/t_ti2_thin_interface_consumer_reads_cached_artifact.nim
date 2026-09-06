@@ -39,6 +39,15 @@ import std/[os, osproc, strutils, unittest]
 
 const repoRoot = currentSourcePath().parentDir.parentDir.parentDir
 
+proc accessorCacheDir(workspaceRoot, producerSelector: string): string =
+  ## Where ``usesImportCode`` caches a producer's emitted resource accessors.
+  ## Anchored on the WORKSPACE that holds the consumer/producer siblings — the
+  ## project being built — and NOT on the engine's own source checkout, which
+  ## is read-only whenever reprobuild was installed from a binary cache. See
+  ## ``dslScratchRootFor`` in ``repro_project_dsl/macros_a.nim``.
+  workspaceRoot / ".repro" / "build" / "dsl" / "resource-accessors" /
+    producerSelector
+
 # ---------------------------------------------------------------------------
 # The producer ``repro.nim`` — a resourceType producer discovered by a consumer
 # as ``../producer``. Its inline ``resourceType`` block is the contract the
@@ -173,8 +182,7 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
     # Use a process-unique producer selector so the separate-module TI2 binary
     # can run concurrently without either test deleting the other's cache.
     let producerSelector = "producer_" & $getCurrentProcessId()
-    let accCache = repoRoot / "build" / "nimcache" / "ti2-resource-accessors" /
-      producerSelector
+    let accCache = accessorCacheDir(base, producerSelector)
     removeDir(accCache)
 
     let producerDir = base / producerSelector

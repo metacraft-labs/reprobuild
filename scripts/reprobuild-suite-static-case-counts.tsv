@@ -59,6 +59,7 @@ libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity
 libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim	nim	3
 libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
+libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim	nim	6
 libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	6
 libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
@@ -125,6 +126,7 @@ libs/repro_core/tests/t_ambient_execution_external_import.nim	nim	1
 libs/repro_core/tests/t_convention_attribution.nim	nim	40
 libs/repro_core/tests/t_cpp_dep_scanner.nim	nim	10
 libs/repro_core/tests/t_deps_refresh_check.nim	nim	5
+libs/repro_core/tests/t_edge_determinism_vocabulary.nim	nim	15
 libs/repro_core/tests/t_go_dep_scanner.nim	nim	13
 libs/repro_core/tests/t_jsts_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_nim_dep_scanner.nim	nim	19
@@ -249,6 +251,7 @@ libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	12
 libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
+libs/repro_local_store/tests/t_retention_gc.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
 libs/repro_lock/tests/t_lock_identity_feature_change_differs.nim	nim	3
 libs/repro_lock/tests/t_lock_identity_rename_invalidates_nothing.nim	nim	2
@@ -447,9 +450,9 @@ libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim	nim	1
 libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
 libs/repro_resources/tests/t_l1_state_store.nim	nim	6
 libs/repro_resources/tests/t_l2_lease_edge.nim	nim	5
-libs/repro_resources/tests/t_l3_reaper.nim	nim	9
+libs/repro_resources/tests/t_l3_reaper.nim	nim	10
 libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
-libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	4
+libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	5
 libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim	nim	4
 libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim	nim	4
 libs/repro_solver/tests/t_unselected_package_is_recorded_as_unselected.nim	nim	3
@@ -919,6 +922,7 @@ tests/integration/t_buildtype_drives_output_dir.nim	nim	4
 tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim	nim	39
 tests/integration/t_cache_daemon_grows_via_cas_resize_and_survives_crash.nim	nim	2
 tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim	nim	1
+tests/integration/t_cache_push_cannot_publish_a_branch.nim	nim	1
 tests/integration/t_cache_refuses_to_serve_an_unsatisfiable_floor.nim	nim	1
 tests/integration/t_cas_restore_outputs_cleans_temp_on_failure.nim	nim	3
 tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim	nim	1
@@ -1016,6 +1020,7 @@ tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	1
 tests/integration/t_host_binary_format_is_proven_before_execution.nim	nim	7
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	6
+tests/integration/t_installed_engine_read_only_source_tree.nim	nim	2
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18
 tests/integration/t_integration_build_report_target_resolution_kind.nim	nim	5
 tests/integration/t_integration_cli_variant_flag_drives_solver.nim	nim	3
@@ -1156,6 +1161,7 @@ tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim	nim	1
 tests/integration/t_pre_push_protocol_v2_policy_regressions.nim	nim	5
 tests/integration/t_pre_push_protocol_v2_ref_validation.nim	nim	3
 tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim	nim	1
+tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim	nim	1
 tests/integration/t_pre_push_refuses_an_undeclared_depends_edge.nim	nim	1
 tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim	nim	1
 tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim	nim	1

@@ -24,6 +24,12 @@ import std/[tables, options, unittest]
 import repro_resources
 import repro_project_dsl
 import repro_interface_artifacts
+# The third mirror of the determinism lattice, for the ordinal-alignment
+# case at the end of this file. This is the only module in the tree that can
+# see all three at once. The submodule is imported directly rather than the
+# `repro_core` umbrella so this test does not acquire the solver's runtime
+# closure (libclingo) for four `ord` comparisons.
+import repro_core/edge_determinism
 
 # ---------------------------------------------------------------------------
 # A mock provider driver, authored exactly as slice 2's lane requires:
@@ -213,3 +219,37 @@ suite "RP4: resourceType macro":
     let pi = toProjectInterface(hostPkg)
     check pi.publicResources.len == 0
     check pi.publicExecutables.len == 1
+
+  test "the three determinism enums are ordinal-aligned (the RP4 invariant)":
+    ## `ResourceDeterminism`, `InterfaceResourceDeterminism` and
+    ## `EdgeDeterminism` are three self-contained mirrors of one four-value
+    ## lattice, deliberately kept out of each other's import closure and
+    ## mapped across by `int(ord(...))`. All three modules' docstrings say a
+    ## reorder silently corrupts a lifted class; until this case existed,
+    ## none of them said it anywhere a compiler or a test could hear it.
+    ##
+    ## `t_edge_determinism_vocabulary` pins `EdgeDeterminism`'s own ordinals,
+    ## but it lives in `repro_core` and cannot see the other two — so a
+    ## reorder of `ResourceDeterminism` would leave it green. This is the one
+    ## place in the tree that can import all three at once, which is why the
+    ## cross-check belongs here.
+    check ord(rdStrong) == ord(irdStrong)
+    check ord(rdWeak) == ord(irdWeak)
+    check ord(rdHostBound) == ord(irdHostBound)
+    check ord(rdVolatile) == ord(irdVolatile)
+
+    check ord(rdStrong) == ord(edStrong)
+    check ord(rdWeak) == ord(edWeak)
+    check ord(rdHostBound) == ord(edHostBound)
+    check ord(rdVolatile) == ord(edVolatile)
+
+    # ...and all three are the SAME four values, not merely pairwise equal on
+    # the four names above: an inserted fifth case would keep every line
+    # above true and still shift every `int(ord(...))` map that crosses a
+    # module boundary.
+    check ord(high(ResourceDeterminism)) == 3
+    check ord(high(InterfaceResourceDeterminism)) == 3
+    check ord(high(EdgeDeterminism)) == 3
+    check ord(low(ResourceDeterminism)) == 0
+    check ord(low(InterfaceResourceDeterminism)) == 0
+    check ord(low(EdgeDeterminism)) == 0

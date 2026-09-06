@@ -160,6 +160,15 @@ proc setupFixture(gitBin, slug: string): Fixture =
   cloneInto(gitBin, result.libAOrigin, workspaceRoot / "lib-a")
   result.workspaceRoot = workspaceRoot
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
+  # MO-14 — central lock publication is opt-in. This test asserts the gate
+  # PUBLISHES (and retries a non-fast-forward invisibly), so the workspace must
+  # opt in via the host bootstrap config's `[manifest] publish_locks = true`.
+  writeFile(workspaceRoot / ".repro-workspace.toml",
+    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+    "[manifest]\n" &
+    "url = \"" & fileUrl(result.manifestBare) & "\"\n" &
+    "branch = \"main\"\n" &
+    "publish_locks = true\n")
 
 proc writeRefsFile(path: string; localSha: string) =
   let zeroSha = "0000000000000000000000000000000000000000"

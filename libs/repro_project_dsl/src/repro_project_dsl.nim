@@ -27,6 +27,14 @@
 
 import std/[algorithm, json, macros, options, os, strutils, tables]
 
+# ``querySettingSeq(searchPaths)`` — the consuming compile's own resolved
+# ``--path`` set. ``macros_a``'s resource-accessor generator hands it to the
+# out-of-tree generator compile, which can no longer inherit it from Nim's
+# ``config.nims`` directory walk now that the generator's scratch is anchored
+# on the project being built rather than on the engine's own checkout. The
+# module's procs are compile-time-only; importing it costs nothing at runtime.
+import std/compilesettings
+
 # DSL-port M9.A: ``nimcrypto/sha2`` powers the content-addressed sha256
 # hashing path for ``consumeConfigFile`` / ``consumeManagedBlock``. We
 # import-alias it under ``ncSha2`` so the M9.A wrappers below can
