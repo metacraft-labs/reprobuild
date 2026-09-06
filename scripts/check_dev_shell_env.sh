@@ -47,6 +47,53 @@ fail() {
   failures=$((failures + 1))
 }
 
+# --- 0. this gate's tool contract ------------------------------------------
+#
+# STATED, AND CHECKED, BECAUSE AN UNSATISFIED CONTRACT HERE DOES NOT LOOK LIKE
+# ONE. Every assertion below is a text scan, and a text scan whose scanner is
+# missing does not come back empty-handed — it comes back with the WRONG
+# ANSWER, dressed as a finding about this repository:
+#
+#   * without `awk`, no flake input parses, so the gate reports that no input
+#     with an upstream url could be found AND that every declared row in
+#     dev-shell-pinned-siblings.tsv excuses an input flake.nix does not
+#     declare. Measured on the hook's own PATH: nine failures, all fiction,
+#     none of them clearable by editing anything.
+#   * without `sed`, the same for the knob scan and the glibc version tables.
+#   * without `find`, `dev_shell_source_state`'s mtime fallback returns
+#     `mtime:none` for every non-git source — a source that can never drift.
+#     That one is SILENT, which is worse: the gate passes and means nothing.
+#
+# Hence a named list, checked first, reported as itself. The list is the small
+# set whose absence would corrupt an answer on every platform; the ELF tools
+# the one-glibc check needs are deliberately NOT here, because that check is
+# Linux-only and already refuses by name when they are missing.
+#
+# This is also the contract whoever supplies the environment has to meet. The
+# dev shell meets it; so must the pre-commit hook's own PATH, which is built
+# in flake.nix and is the reason this check exists — that PATH is what a
+# contributor who does not use direnv actually gets.
+DEV_SHELL_GATE_TOOLS=(
+  awk sed grep sort head tr cut wc cat comm mktemp dirname basename readlink
+  stat find git
+)
+missing_tools=()
+for _tool in "${DEV_SHELL_GATE_TOOLS[@]}"; do
+  command -v "$_tool" >/dev/null 2>&1 || missing_tools+=("$_tool")
+done
+if [[ ${#missing_tools[@]} -gt 0 ]]; then
+  printf 'FAIL: this check cannot run: %d tool(s) it reads with are not on PATH:\n' \
+    "${#missing_tools[@]}" >&2
+  printf '        %s\n' "${missing_tools[*]}" >&2
+  printf '%s\n' \
+    '      Everything below is a text scan, so running without these would not' \
+    '      report less — it would report a different repository. Refusing.' \
+    '      Remedy: run inside the dev shell, or add the missing tool(s) to the' \
+    "      PATH the caller supplies. If this is the pre-commit hook, they" \
+    '      belong in the hook tool list in flake.nix, which is that PATH.' >&2
+  exit 1
+fi
+
 envrc="$REPO_ROOT/.envrc"
 if [[ ! -f "$envrc" ]]; then
   fail ".envrc is missing; the dev-shell contract has nothing to check"

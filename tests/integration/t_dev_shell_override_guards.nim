@@ -1156,17 +1156,143 @@ suite "dev-shell override guards":
     # asking git anything could not satisfy the line above.
     check lib.contains("dev_shell_git -C")
 
-    # The acceptance runner asks the same question about four checkouts. It is
-    # a script and not a library, so it clears the redirection once on the way
-    # in instead of per call site — but it must clear the SAME set, or the two
-    # places that answer "which revision is that sibling at" answer differently
-    # under a hook.
+    # The acceptance runner asks the same question about four checkouts and
+    # must clear the SAME set, or the two places that answer "which revision is
+    # that sibling at" answer differently under a hook.
     let acceptance = readFile(repoRoot() / "scripts" / "run-m24-acceptance.sh")
+    let acceptanceCode = codeLines(acceptance)
     # It still asks the question — a runner that had stopped querying git
     # would satisfy the clearing assertions below for the wrong reason.
-    check codeLines(acceptance).filterIt(it.contains("git -C")).len > 0
+    check acceptanceCode.filterIt(it.contains("-C ")).len > 0
     let cleared = unsetNames(acceptance, "unset GIT_DIR")
     checkpoint("cleared by run-m24-acceptance.sh: " & cleared.join(" "))
     for name in guarded:
       checkpoint("acceptance runner must clear " & name)
       check cleared.contains(name)
+
+    # ...through its own guarded entry point, and NOT by clearing the variables
+    # process-wide. That distinction is the point: this script spawns the
+    # sub-gates whose results it records, and a top-level `unset` would edit
+    # the environment every one of them runs under — a far larger contract than
+    # the four queries that need it, and not this script's to change on their
+    # behalf. So the clearing must live inside a function.
+    var acceptanceOffenders: seq[string]
+    for bare in acceptanceCode:
+      if bare.contains("git -C") and not bare.contains("git_in -C"):
+        acceptanceOffenders.add(bare)
+    checkpoint("unguarded git -C in the acceptance runner:\n" &
+      acceptanceOffenders.join("\n"))
+    check acceptanceOffenders.len == 0
+    check acceptance.contains("git_in -C")
+    # The `unset` is indented, i.e. nested inside the helper, rather than
+    # sitting at column zero where it would apply to the whole process.
+    var topLevelUnset = false
+    for line in acceptance.splitLines():
+      if line.startsWith("unset ") and line.contains("GIT_DIR"):
+        topLevelUnset = true
+    check not topLevelUnset
+
+  test "t_dev_shell_git_helpers_are_the_resolved_binarys_own":
+    ## The one-glibc check pairs a tool with the helper binaries that tool
+    ## execs. For git those live in `git --exec-path` — which answers with
+    ## `GIT_EXEC_PATH` when the environment sets one, and git exports
+    ## `GIT_EXEC_PATH` to every hook it runs.
+    ##
+    ## So from a commit hook the check paired the `git` the dev shell provides
+    ## with a `git-remote-https` belonging to the CONTRIBUTOR'S git, found the
+    ## two built against different glibcs, and reported that as this shell
+    ## injecting a second glibc into a program it does not provide. The remedy
+    ## it printed — have the dev shell provide the program — could not clear
+    ## it: the shell already provided the git that was checked. Same shape as
+    ## the drift failure above, in a different arm, and just as unfixable.
+    if findExe("bash").len == 0 or findExe("git").len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-devshell-execpath-", "")
+      defer: removeDirEventually(scratch)
+      let bash = findExe("bash")
+
+      # A decoy exec-path: a directory that is not any git's, holding a file
+      # with the helper's name. If the ambient value is honoured, the check
+      # reports THIS path; if the binary is asked about itself, it does not.
+      let decoy = scratch / "someone-elses-git" / "libexec" / "git-core"
+      createDir(decoy)
+      writeFile(decoy / "git-remote-https", "#!/bin/sh\nexit 0\n")
+      writeFile(decoy / "git-remote-http", "#!/bin/sh\nexit 0\n")
+
+      proc helperRows(env: seq[tuple[name, value: string]]): string =
+        runShell(shellCommand(@[bash, "-c",
+          "set -uo pipefail\n" &
+          "source " & quoteShell(libPath()) & "\n" &
+          "dev_shell_subprocess_tool_binaries\n"], env),
+          cwd = scratch).output
+
+      let plain = helperRows(@[])
+      checkpoint("tool binaries, clean environment:\n" & plain)
+      # The check must have something to say at all, or "does not mention the
+      # decoy" would be satisfied by silence.
+      check plain.contains("git\t")
+
+      let underHook = helperRows(@[("GIT_EXEC_PATH", decoy)])
+      checkpoint("tool binaries, GIT_EXEC_PATH set:\n" & underHook)
+      check not underHook.contains(decoy)
+      check underHook == plain
+
+  test "t_dev_shell_lint_gate_refuses_when_its_own_tools_are_absent":
+    ## Every assertion in the gate is a text scan, and a text scan whose
+    ## scanner is missing does not report less — it reports a different
+    ## repository. On the PATH the pre-commit hook actually supplies, `awk`
+    ## and `sed` were absent, and the gate answered with nine failures: no
+    ## parseable flake input, and five declared rows excusing inputs
+    ## "flake.nix does not declare". None of it was true and none of it could
+    ## be fixed by editing anything in the repository — the third unfixable
+    ## failure this file now guards against.
+    ##
+    ## The contributor who meets this is the one NOT using direnv, which is
+    ## precisely who the hook's own tool list exists for.
+    if findExe("bash").len == 0 or findExe("awk").len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-devshell-tools-", "")
+      defer: removeDirEventually(scratch)
+      let root = scratch / "repo"
+      createDir(root / "scripts" / "lib")
+      copyFile(libPath(), root / "scripts" / "lib" / "dev_shell_overrides.sh")
+      copyFile(checkScript(), root / "scripts" / "check_dev_shell_env.sh")
+      copyFile(repoRoot() / ".envrc", root / ".envrc")
+      copyFile(repoRoot() / "flake.nix", root / "flake.nix")
+      copyFile(repoRoot() / "scripts" / "dev-shell-pinned-siblings.tsv",
+        root / "scripts" / "dev-shell-pinned-siblings.tsv")
+
+      # A PATH holding every tool the gate needs EXCEPT awk, assembled by
+      # symlink so the shell itself still works normally.
+      let binDir = scratch / "bin"
+      createDir(binDir)
+      var linked = 0
+      for tool in ["sed", "grep", "sort", "head", "tr", "cut", "wc", "cat",
+                   "comm", "mktemp", "dirname", "basename", "readlink",
+                   "stat", "find", "git", "bash", "uname", "date", "cp",
+                   "rm", "mkdir", "ls", "sha256sum", "printf", "env"]:
+        let real = findExe(tool)
+        if real.len > 0:
+          createSymlink(real, binDir / tool)
+          inc linked
+      # If the fixture linked nothing the refusal below would be trivially
+      # produced by a broken PATH rather than by the missing scanner.
+      check linked >= 20
+      check not fileExists(binDir / "awk")
+
+      let bash = findExe("bash")
+      let res = runShell(shellCommand(@[bash,
+        root / "scripts" / "check_dev_shell_env.sh"],
+        @[("PATH", binDir)]), cwd = root)
+      checkpoint("gate without awk:\n" & res.output)
+      check res.code != 0
+      # It says what is actually wrong...
+      check res.output.contains("not on PATH")
+      check res.output.contains("awk")
+      # ...and does not invent findings about the repository instead. These
+      # are the exact fictions the missing scanner produced.
+      check not res.output.contains("declares no such input")
+      check not res.output.contains(
+        "no flake input with an upstream url could be parsed")

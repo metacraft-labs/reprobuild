@@ -917,7 +917,22 @@ dev_shell_subprocess_tool_binaries() {
     path="$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")"
     printf '%s\t%s\n' "$tool" "$path"
     if [[ "$tool" == "git" ]]; then
-      exec_path="$("$path" --exec-path 2>/dev/null)" || exec_path=""
+      # `GIT_EXEC_PATH` is cleared for this one question, and only this one.
+      # The question is "where does THE BINARY WE JUST RESOLVED keep its
+      # helpers", and `git --exec-path` answers with the environment's value
+      # when there is one. Git exports it to every hook it runs, so from a
+      # commit hook this paired a `git` taken from the dev shell with
+      # `git-remote-https` taken from the CONTRIBUTOR'S git — two different
+      # installations — and then reported the mismatch between them as though
+      # this shell had caused it. The remedy it printed (have the dev shell
+      # provide the program) could not clear it, because the shell already
+      # provided the git that was checked; the helper came from somewhere the
+      # repository does not control.
+      #
+      # Nothing is lost by clearing it. The dev shell's own git is still
+      # checked as `git` above, which is the subject this whole check is about.
+      exec_path="$( (unset GIT_EXEC_PATH; "$path" --exec-path) 2>/dev/null)" ||
+        exec_path=""
       for helper in git-remote-https git-remote-http; do
         if [[ -n "$exec_path" && -f "$exec_path/$helper" ]]; then
           printf '%s\t%s\n' "$helper" "$exec_path/$helper"
