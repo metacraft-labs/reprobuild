@@ -239,11 +239,8 @@
     "codetracer-native-recorder": {
       "flake": false,
       "locked": {
-        "lastModified": 1780948552,
-        "narHash": "sha256-wNr+jtXbOWYeWhiOpHR8jYP8+KnxZbeiaOYmB/EUljI=",
         "ref": "stable",
-        "rev": "505b7433faf278bbf8a1b7dc297418f501baea7d",
-        "revCount": 973,
+        "rev": "4559dd741d05cb739e8bb2b7cc71a18894112a79",
         "type": "git",
         "url": "https://github.com/metacraft-labs/codetracer-native-recorder"
       },
@@ -256,11 +253,9 @@
     "codetracer-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1786483483,
-        "narHash": "sha256-VwszCAMM/MnfCcutisBiZsg6oz3SATUhTBBpsrK+CI4=",
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "602e7bb728311c230c9a42fa7fd8aab546b6467a",
+        "rev": "e1b5280a2755f4c5016679610d208e5b94d1d5ec",
         "type": "github"
       },
       "original": {
@@ -1353,11 +1348,9 @@
     "nim-shm-gset-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1785434757,
-        "narHash": "sha256-2pj2v1SPlMLg6CJ72Nt4Axhu0G25FL1lX5JPNSjvz3g=",
         "owner": "metacraft-labs",
         "repo": "nim-shm-gset",
-        "rev": "360bfc15cadab1ff583e6d1cbc20b389d5d6825f",
+        "rev": "c646982b354cb5b1fa8734f94b951a660419d75c",
         "type": "github"
       },
       "original": {
@@ -2078,11 +2071,9 @@
         "vscode-server": "vscode-server"
       },
       "locked": {
-        "lastModified": 1776845907,
-        "narHash": "sha256-UmVjz1nAWtMqLdTR+guaNyP1qKFgMMOOYhIfzYefFb4=",
         "owner": "metacraft-labs",
         "repo": "nixos-modules",
-        "rev": "b4c1815dc46dbf8d91882a70404f8c621805add9",
+        "rev": "e52732b990f77f48acc97431f2ef5515cb4bff0c",
         "type": "github"
       },
       "original": {
@@ -2366,11 +2357,9 @@
     "reprobuild-test-adapters-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1787957298,
-        "narHash": "sha256-ZkGaZ3sSPVc3w8Ft/xN3VWX11NFt79yVpoU3iPF2ShM=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "4ecc53e9bb2a5d16fff2b20b860edfdf95a9a994",
+        "rev": "360cd50767e548556a0a7510d879f28c87eb3e34",
         "type": "github"
       },
       "original": {
@@ -2438,11 +2427,9 @@
         ]
       },
       "locked": {
-        "lastModified": 1787755082,
-        "narHash": "sha256-/oP/IwHRtjpbjSlj9cq1G/+MvyavhCP28kFUWdE66iw=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "f1ca742d19c7b981eeea0fba8b4e029207f43778",
+        "rev": "1e141c603b853455d71a906d1fca3e1fcfe1e4c8",
         "type": "github"
       },
       "original": {
