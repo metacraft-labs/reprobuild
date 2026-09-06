@@ -17453,11 +17453,17 @@ proc resolveProducerTypedContract*(selector: string;
   # SC-3 pre-pass already drives. The interface artifact + stub scratch land in
   # a workspace-local, selector-keyed dir under the consumer's ``.repro`` tree
   # (hermetic to the consumer; never $HOME).
+  let contractsRoot =
+    if workspaceRoot.len > 0:
+      absolutePath(workspaceRoot) / ".repro"
+    else:
+      sourceRootAbs / ".repro"
   let scratchRoot =
     if workspaceRoot.len > 0:
-      absolutePath(workspaceRoot) / ".repro" / "typed-contracts" / selector
+      contractsRoot / "typed-contracts" / selector
     else:
-      sourceRootAbs / ".repro" / "typed-contract"
+      contractsRoot / "typed-contract"
+  let liftScratchRoot = contractsRoot / "interface-lift"
   createDir(extendedPath(scratchRoot))
   let ifacePath = scratchRoot / "producer-typed-contract.rbsz"
   let stubPath = scratchRoot / "producer-typed-contract.nim"
@@ -17488,7 +17494,17 @@ proc resolveProducerTypedContract*(selector: string;
       let plan = interfaceLiftPlan(projectFile, ifacePath, stubPath,
         resourceModule = resDecl.resourceModule,
         extraPaths = resDecl.extraPaths,
-        workDir = reprobuildLibraryWorkDir())
+        workDir = reprobuildLibraryWorkDir(),
+        # ``workDir`` names the reprobuild checkout the extraction compile
+        # resolves libraries and config against — which, for an engine
+        # installed from a binary cache, is a READ-ONLY ``/nix/store`` path.
+        # The lift's scratch must therefore be anchored where the artifact and
+        # stub above already are: on the project being built, never on the
+        # engine's own source. One level ABOVE the per-selector dir so every
+        # producer lifted for this workspace keeps sharing one interface
+        # nimcache, which is where the bulk of the standard-library compile
+        # cost is amortized.
+        scratchDir = liftScratchRoot)
       liftInterfaceArtifact(plan)
     except CatchableError as ex:
       # The producer's interface could not be extracted. Keep the caller's

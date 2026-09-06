@@ -41,6 +41,15 @@ import std/[os, osproc, strutils, unittest]
 
 const repoRoot = currentSourcePath().parentDir.parentDir.parentDir
 
+proc accessorCacheDir(workspaceRoot, producerSelector: string): string =
+  ## Where ``usesImportCode`` caches a producer's emitted resource accessors.
+  ## Anchored on the WORKSPACE that holds the consumer/producer siblings — the
+  ## project being built — and NOT on the engine's own source checkout, which
+  ## is read-only whenever reprobuild was installed from a binary cache. See
+  ## ``dslScratchRootFor`` in ``repro_project_dsl/macros_a.nim``.
+  workspaceRoot / ".repro" / "build" / "dsl" / "resource-accessors" /
+    producerSelector
+
 # ---------------------------------------------------------------------------
 # The SEPARATE resource module — carries the ``resourceType`` block + its
 # driver. Lives in a SUBDIRECTORY (``repro/resources.nim``), the vm-harness
@@ -198,8 +207,7 @@ suite "TI2: separate-module producer (vm-harness shape)":
     defer: removeDir(base)
 
     let producerSelector = "producer_external_" & $getCurrentProcessId()
-    let accCache = repoRoot / "build" / "nimcache" /
-      "ti2-resource-accessors" / producerSelector
+    let accCache = accessorCacheDir(base, producerSelector)
     removeDir(accCache)
     defer: removeDir(accCache)
     writeProducer(base / producerSelector, resourcesModule)
@@ -223,8 +231,7 @@ suite "TI2: separate-module producer (vm-harness shape)":
     # Use a process-unique producer selector so the inline TI2 binary can run
     # concurrently without either test deleting the other's accessor cache.
     let producerSelector = "producer_sep_" & $getCurrentProcessId()
-    let accCache = repoRoot / "build" / "nimcache" / "ti2-resource-accessors" /
-      producerSelector
+    let accCache = accessorCacheDir(base, producerSelector)
     removeDir(accCache)
 
     let producerDir = base / producerSelector

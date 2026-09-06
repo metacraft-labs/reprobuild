@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1449,
+    "nimTestBinaries": 1451,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 596,
     "staticallyDetectedRuntimeCompilerFlowTests": 82,
-    "testEntries": 1454
+    "testEntries": 1456
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1118,7 +1118,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 610,
+      "integration": 612,
       "platform/destructive": 107,
       "pure unit": 596,
       "unclassified": 125
@@ -1233,9 +1233,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1449,
+    "nimTestBinaryCount": 1451,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1454
+    "testEntryCount": 1456
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4492,7 +4492,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 168,
+          "line": 177,
           "path": "tests/integration/t_ti2_separate_module_producer.nim",
           "patterns": [
             "nim-compile-verb"
@@ -4512,7 +4512,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 153,
+          "line": 162,
           "path": "tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim",
           "patterns": [
             "nim-compile-verb"
@@ -4532,7 +4532,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 164,
+          "line": 173,
           "path": "tests/integration/t_ti3_fingerprint_split.nim",
           "patterns": [
             "nim-compile-verb"
@@ -4546,7 +4546,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "liftFingerprint",
           "executedVariables": [],
-          "line": 353,
+          "line": 360,
           "path": "tests/integration/t_ti3_fingerprint_split.nim",
           "patterns": [
             "repro-lift-interface-artifact"
@@ -22487,6 +22487,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_installed_engine_read_only_source_tree",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_installed_engine_read_only_source_tree.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_integration_build_engine_api_ready_queue",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -24918,6 +24936,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_push_publishes_only_when_publish_locks_opted_in",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

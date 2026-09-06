@@ -8946,6 +8946,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_installed_engine_read_only_source_tree.nim",
+    binary: "build/test-bin/t_installed_engine_read_only_source_tree",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_integration_build_engine_api_ready_queue.nim",
     binary: "build/test-bin/t_integration_build_engine_api_ready_queue",
     defines: @[],
@@ -10190,6 +10199,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim",
     binary: "build/test-bin/t_pre_push_public_only_writes_no_manifest_lock",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim",
+    binary: "build/test-bin/t_pre_push_publishes_only_when_publish_locks_opted_in",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

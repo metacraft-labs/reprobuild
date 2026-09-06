@@ -46,6 +46,15 @@ import repro_interface_artifacts
 
 const repoRoot = currentSourcePath().parentDir.parentDir.parentDir
 
+proc accessorCacheDir(workspaceRoot, producerSelector: string): string =
+  ## Where ``usesImportCode`` caches a producer's emitted resource accessors.
+  ## Anchored on the WORKSPACE that holds the consumer/producer siblings — the
+  ## project being built — and NOT on the engine's own source checkout, which
+  ## is read-only whenever reprobuild was installed from a binary cache. See
+  ## ``dslScratchRootFor`` in ``repro_project_dsl/macros_a.nim``.
+  workspaceRoot / ".repro" / "build" / "dsl" / "resource-accessors" /
+    producerSelector
+
 # ---------------------------------------------------------------------------
 # The producer's SEPARATE resource module — a ``resourceType`` block plus its
 # driver. The ``rp8Private*`` procs are PRIVATE impl helpers: they must NOT
@@ -168,8 +177,7 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
     # cold-cache setup cannot delete another case's live accessor cache.
     let producerSelector = "producer_rp8_typecheck_" &
       $getCurrentProcessId()
-    let accCache = repoRoot / "build" / "nimcache" / "ti2-resource-accessors" /
-      producerSelector
+    let accCache = accessorCacheDir(base, producerSelector)
     removeDir(accCache)
     defer: removeDir(accCache)
 

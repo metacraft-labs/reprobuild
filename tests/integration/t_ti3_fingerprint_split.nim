@@ -37,6 +37,15 @@ import repro_hash
 
 const repoRoot = currentSourcePath().parentDir.parentDir.parentDir
 
+proc accessorCacheDir(workspaceRoot, producerSelector: string): string =
+  ## Where ``usesImportCode`` caches a producer's emitted resource accessors.
+  ## Anchored on the WORKSPACE that holds the consumer/producer siblings — the
+  ## project being built — and NOT on the engine's own source checkout, which
+  ## is read-only whenever reprobuild was installed from a binary cache. See
+  ## ``dslScratchRootFor`` in ``repro_project_dsl/macros_a.nim``.
+  workspaceRoot / ".repro" / "build" / "dsl" / "resource-accessors" /
+    producerSelector
+
 # ---------------------------------------------------------------------------
 # The producer ``repro.nim`` — a resourceType producer whose driver bodies are
 # its PRIVATE implementation. ``$DRIVER_BODY$`` / ``$ATTR2$`` are substitution
@@ -181,8 +190,7 @@ suite "TI3: interface/provider fingerprint split":
 
     let producerSelector =
       "producer_ti3_a_" & $getCurrentProcessId()
-    let accCache = repoRoot / "build" / "nimcache" /
-      "ti2-resource-accessors" / producerSelector
+    let accCache = accessorCacheDir(base, producerSelector)
     let accessorFile = accCache / (producerSelector & ".accessors.nim")
     let ifpFile = accCache / (producerSelector & ".ifp")
     # The producer's own provider artifact is implementation-including. The
@@ -254,8 +262,7 @@ suite "TI3: interface/provider fingerprint split":
 
     let producerSelector =
       "producer_ti3_b_" & $getCurrentProcessId()
-    let accCache = repoRoot / "build" / "nimcache" /
-      "ti2-resource-accessors" / producerSelector
+    let accCache = accessorCacheDir(base, producerSelector)
     let accessorFile = accCache / (producerSelector & ".accessors.nim")
     let ifpFile = accCache / (producerSelector & ".ifp")
 

@@ -380,6 +380,16 @@ type
     liftEdge*: InterfaceLiftEdge
     interfaceLiftActionKey*: ContentDigest
     workDir*: string
+    scratchDir*: string
+      ## Where the lift's temp tree and shared interface nimcache go.
+      ## SEPARATE from ``workDir`` on purpose: ``workDir`` names the reprobuild
+      ## checkout the extraction compile resolves its libraries and config
+      ## against, and for an engine installed from a binary cache that checkout
+      ## is a READ-ONLY ``/nix/store`` path. Empty keeps the historical
+      ## ``<workDir>/build`` default, which is right only while the engine is
+      ## running out of a writable develop checkout. Deliberately NOT part of
+      ## ``interfaceLiftActionKey``: it is scratch, so keying on it would make
+      ## the same lift a miss in every workspace.
 
   FileStampKind = enum
     fskMissing
@@ -5660,7 +5670,8 @@ proc interfaceLiftMetadata(declaredInputs, declaredOutputs: openArray[string];
 proc interfaceLiftPlan*(modulePath, artifactPath, stubPath: string;
                         resourceModule = "";
                         extraPaths: openArray[string] = [];
-                        workDir = getCurrentDir()): InterfaceLiftPlan =
+                        workDir = getCurrentDir();
+                        scratchDir = ""): InterfaceLiftPlan =
   ## TI1: build the interface-lift edge plan for a producer. The declared
   ## inputs are the producer's source closure (plus the resource-module
   ## closure when declared); the declared outputs are the interface artifact +
@@ -5693,7 +5704,8 @@ proc interfaceLiftPlan*(modulePath, artifactPath, stubPath: string;
     inputSources: sources,
     liftEdge: edge,
     interfaceLiftActionKey: actionKey,
-    workDir: workDir)
+    workDir: workDir,
+    scratchDir: scratchDir)
 
 proc interfaceArtifactFresh*(plan: InterfaceLiftPlan): bool =
   ## TI1: is the on-disk interface artifact a cache HIT for this plan? Fresh
@@ -5729,7 +5741,8 @@ proc liftInterfaceArtifact*(plan: InterfaceLiftPlan): ProjectInterfaceArtifact =
   # would compile the producer's recipe with the consumer's root baked in —
   # and would give a different answer for every consumer that lifted it.
   result = extractInterfaceFromModule(plan.modulePath, plan.artifactPath,
-    plan.stubPath, plan.workDir, requireStub = plan.stubPath.len > 0,
+    plan.stubPath, plan.workDir, scratchDir = plan.scratchDir,
+    requireStub = plan.stubPath.len > 0,
     resourceModule = plan.resourceModule, extraPaths = plan.extraPaths,
     consumerRoot = parentDir(absolutePath(plan.modulePath)))
   try:
