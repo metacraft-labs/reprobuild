@@ -170,6 +170,26 @@ remote = "lib-origin"
 revision = "main"
 """
 
+proc libFragmentTomlPinned(sha: string; branch = ""): string =
+  ## Fragment variant pinned to an explicit SHA rather than a branch
+  ## name. This is the shape every vendored / third-party reference tree
+  ## in a real workspace uses (``repos/mold.toml``, ``repos/llvm-project.toml``,
+  ## …): ``revision`` names the exact commit the workspace is pinned to,
+  ## and the branch it came from is not the correctness boundary.
+  ##
+  ## ``branch`` adds the declared tracking branch alongside the pin — the
+  ## two-field form those real fragments actually use ("`branch` says what
+  ## this tracks; `revision` says where it sits").
+  result =
+    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "[repo]\n" &
+    "name = \"lib\"\n" &
+    "path = \"lib\"\n" &
+    "remote = \"lib-origin\"\n"
+  if branch.len > 0:
+    result.add("branch = \"" & branch & "\"\n")
+  result.add("revision = \"" & sha & "\"\n")
+
 # ---- fixture builder ------------------------------------------------------
 
 type
@@ -199,6 +219,13 @@ proc setupFixture(gitBin, slug: string): M10Fixture =
     projectTomlWithRemote(fileUrl(libOrigin)))
   writeFile(manifestsRoot / "repos" / "lib.toml", libFragmentToml)
   result.workspaceRoot = workspaceRoot
+
+proc repinFragment(fixture: M10Fixture; sha: string; branch = "") =
+  ## Rewrite the fixture's repo fragment to pin an explicit SHA. Called
+  ## after ``setupFixture`` because the SHA only exists once the origin
+  ## has been seeded.
+  writeFile(fixture.workspaceRoot / "repos" / "lib.toml",
+    libFragmentTomlPinned(sha, branch))
 
 proc readReport(fixture: M10Fixture): JsonNode =
   let reportPath = fixture.workspaceRoot / ".repro" / "build" / "reports" /
@@ -298,6 +325,183 @@ suite "M10 — repro workspace sync (seven sync corner cases)":
       check entry["syncCase"].getStr() == "detached_at_locked_revision"
       check entry["action"].getStr() == "attach_branch"
       check entry["executionStatus"].getStr() == "succeeded"
+
+  test "test_m10_sync_detached_sha_pin_attaches_when_branch_tip_matches":
+    ## A SHA-pinned fragment whose pin happens to BE the tip of ``main``.
+    ## The branch is a faithful name for the locked revision, so the
+    ## re-attach must still happen — this is the regression guard for the
+    ## fix below, which must not turn every SHA pin into a permanent
+    ## detached HEAD.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "detached-sha-pin-match")
+      defer: removeDir(fx.scratch)
+
+      cloneInto(gitBin, fx.libOrigin, fx.workspaceRoot / "lib")
+      detachAtHead(gitBin, fx.workspaceRoot / "lib")
+      repinFragment(fx, fx.libSha)
+
+      let res = invokeSync(fx)
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      let branchRes = runCmd(q(gitBin) & " -C " &
+        q(fx.workspaceRoot / "lib") & " symbolic-ref --short -q HEAD")
+      check branchRes.code == 0
+      check branchRes.output.strip() == "main"
+
+      # Attaching must not have moved the checkout off the pin.
+      let postHead = requireGit(q(gitBin) & " -C " &
+        q(fx.workspaceRoot / "lib") & " rev-parse HEAD").strip()
+      check postHead == fx.libSha
+
+      let entry = onlyRepoEntry(readReport(fx))
+      check entry["syncCase"].getStr() == "detached_at_locked_revision"
+      check entry["action"].getStr() == "attach_branch"
+      check entry["executionStatus"].getStr() == "succeeded"
+
+  test "test_m10_sync_detached_sha_pin_stays_detached_when_no_branch_matches":
+    ## The bug this suite previously missed. A vendored reference tree is
+    ## pinned to an OLD commit while ``main`` has moved on; the checkout is
+    ## correctly detached AT the pin. ``attach_branch`` used to hardcode
+    ## ``main`` as the target whenever the manifest revision looked like a
+    ## SHA, without ever checking that ``main``'s tip matched — so sync
+    ## silently moved the checkout OFF its pin and onto the branch tip.
+    ##
+    ## Workspace-And-Develop-Mode.md §"Branch Preservation Policy" qualifies
+    ## every attach candidate with "if its tip matches the locked revision",
+    ## and §"Detached checkout at the locked revision" says to "only leave it
+    ## detached as a last resort" — a last resort is still permitted, and is
+    ## the only correct outcome when no branch names the pinned commit.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "detached-sha-pin-stale")
+      defer: removeDir(fx.scratch)
+
+      cloneInto(gitBin, fx.libOrigin, fx.workspaceRoot / "lib")
+      let pinnedSha = fx.libSha
+      let advancedSha = seedSecondCommit(gitBin, fx.libOrigin, fx.libSeedPath)
+      check pinnedSha != advancedSha
+
+      # Bring the clone into the shape a real vendored reference tree has:
+      # ``main`` (and its upstream) at the advanced tip, HEAD detached at
+      # the older pinned commit.
+      let libPath = fx.workspaceRoot / "lib"
+      discard requireGit(q(gitBin) & " -C " & q(libPath) & " fetch origin")
+      discard requireGit(q(gitBin) & " -C " & q(libPath) &
+        " switch --detach " & pinnedSha)
+      discard requireGit(q(gitBin) & " -C " & q(libPath) &
+        " branch -f main " & advancedSha)
+      repinFragment(fx, pinnedSha)
+
+      let res = invokeSync(fx)
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      # THE load-bearing assertion: the checkout must still be at the pin.
+      let postHead = requireGit(q(gitBin) & " -C " & q(libPath) &
+        " rev-parse HEAD").strip()
+      check postHead == pinnedSha
+
+      # And it must have stayed detached rather than being attached to a
+      # branch that names a different commit.
+      let branchRes = runCmd(q(gitBin) & " -C " & q(libPath) &
+        " symbolic-ref --short -q HEAD")
+      check branchRes.code != 0
+
+      let entry = onlyRepoEntry(readReport(fx))
+      check entry["syncCase"].getStr() == "detached_at_locked_revision"
+      check entry["action"].getStr() == "none"
+      check entry["executionStatus"].getStr() == "noop"
+
+  test "test_m10_sync_orphan_remote_tracking_ref_is_not_an_attach_candidate":
+    ## Found in a real workspace: ``reprobuild-ct-test-runner`` carried a
+    ## ``refs/remotes/m/latest`` left behind by a remote that no longer
+    ## exists, and it was the only ref naming the pinned commit. Such a ref
+    ## cannot be tracked — ``git switch latest`` has no remote to DWIM from —
+    ## so treating it as an attach candidate would turn a harmless detached
+    ## checkout into a reported sync failure. It must not be a candidate.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "orphan-remote-ref")
+      defer: removeDir(fx.scratch)
+
+      cloneInto(gitBin, fx.libOrigin, fx.workspaceRoot / "lib")
+      let pinnedSha = fx.libSha
+      let advancedSha = seedSecondCommit(gitBin, fx.libOrigin, fx.libSeedPath)
+
+      let libPath = fx.workspaceRoot / "lib"
+      discard requireGit(q(gitBin) & " -C " & q(libPath) & " fetch origin")
+      discard requireGit(q(gitBin) & " -C " & q(libPath) &
+        " switch --detach " & pinnedSha)
+      discard requireGit(q(gitBin) & " -C " & q(libPath) &
+        " branch -f main " & advancedSha)
+      # An orphan remote-tracking ref: no remote named ``gone`` is configured.
+      discard requireGit(q(gitBin) & " -C " & q(libPath) &
+        " update-ref refs/remotes/gone/latest " & pinnedSha)
+      repinFragment(fx, pinnedSha)
+
+      let res = invokeSync(fx)
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      let postHead = requireGit(q(gitBin) & " -C " & q(libPath) &
+        " rev-parse HEAD").strip()
+      check postHead == pinnedSha
+
+      let branchRes = runCmd(q(gitBin) & " -C " & q(libPath) &
+        " symbolic-ref --short -q HEAD")
+      check branchRes.code != 0
+
+      let entry = onlyRepoEntry(readReport(fx))
+      check entry["action"].getStr() == "none"
+
+  test "test_m10_sync_declared_branch_does_not_override_the_pin":
+    ## The exact shape of every vendored fragment in a real workspace —
+    ## ``branch = "main"`` AND ``revision = <sha>`` together, where the
+    ## tracked branch has moved past the pin. The declared branch says what
+    ## the repo TRACKS; it does not license moving the checkout to that
+    ## branch's tip. Sync must respect the pin and leave the tree alone.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "declared-branch-vs-pin")
+      defer: removeDir(fx.scratch)
+
+      cloneInto(gitBin, fx.libOrigin, fx.workspaceRoot / "lib")
+      let pinnedSha = fx.libSha
+      let advancedSha = seedSecondCommit(gitBin, fx.libOrigin, fx.libSeedPath)
+
+      let libPath = fx.workspaceRoot / "lib"
+      discard requireGit(q(gitBin) & " -C " & q(libPath) & " fetch origin")
+      discard requireGit(q(gitBin) & " -C " & q(libPath) &
+        " switch --detach " & pinnedSha)
+      discard requireGit(q(gitBin) & " -C " & q(libPath) &
+        " branch -f main " & advancedSha)
+      repinFragment(fx, pinnedSha, branch = "main")
+
+      let res = invokeSync(fx)
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      let postHead = requireGit(q(gitBin) & " -C " & q(libPath) &
+        " rev-parse HEAD").strip()
+      check postHead == pinnedSha
+
+      let entry = onlyRepoEntry(readReport(fx))
+      check entry["syncCase"].getStr() == "detached_at_locked_revision"
+      check entry["action"].getStr() == "none"
 
   test "test_m10_sync_dirty_refuses_and_reports":
     let gitBin = findExe("git")

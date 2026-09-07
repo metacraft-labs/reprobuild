@@ -33269,6 +33269,78 @@ proc observeRepoForSync(identity: GitToolIdentity;
       result.lockedRevisionTip = expectedBranchTip(identity, repoPath,
         resolved.revision, remoteName = rName)
 
+  # Which branches could this checkout be re-attached to WITHOUT moving it?
+  # Only meaningful for a detached HEAD sitting on a resolvable lock; the
+  # planner ignores the field in every other case, so we skip the two git
+  # calls rather than paying for them 128 times per sync.
+  #
+  # "Attachable" is defined by what ``git switch <name>`` would actually do,
+  # not by what refs exist:
+  #
+  #   - a LOCAL branch is attachable when its own tip is the locked revision;
+  #   - a REMOTE-TRACKING branch is attachable under its short name only when
+  #     git's DWIM would create a local branch from it, which requires that
+  #     (a) no local branch shadows the name — otherwise the switch silently
+  #     lands on that local branch, which may point anywhere; (b) the ref sits
+  #     under a CONFIGURED remote — ``refs/remotes/<gone>/...`` outlives the
+  #     remote that created it and cannot be tracked; and (c) exactly one
+  #     configured remote offers the name — ``git switch`` refuses an
+  #     ambiguous DWIM rather than picking one.
+  #
+  # Anything that fails those tests is not a candidate. Being left detached at
+  # the pin is a documented, harmless outcome; a failed ``git switch`` is a
+  # reported sync failure, so guessing here is strictly worse than abstaining.
+  if result.currentBranch.len == 0 and result.lockedRevisionTip.len > 0:
+    var localBranchNames = initHashSet[string]()
+    let allLocal = gitRunPlain(identity, ["-C", repoPath, "for-each-ref",
+      "--format=%(refname:short)", "refs/heads"])
+    if allLocal.code == 0:
+      for line in allLocal.output.splitLines():
+        let name = line.strip()
+        if name.len > 0:
+          localBranchNames.incl(name)
+    var configuredRemotes = initHashSet[string]()
+    let remotesRes = gitRunPlain(identity, ["-C", repoPath, "remote"])
+    if remotesRes.code == 0:
+      for line in remotesRes.output.splitLines():
+        let name = line.strip()
+        if name.len > 0:
+          configuredRemotes.incl(name)
+    let pointingAt = gitRunPlain(identity, ["-C", repoPath, "for-each-ref",
+      "--format=%(refname)", "--points-at", result.lockedRevisionTip,
+      "refs/heads", "refs/remotes"])
+    if pointingAt.code == 0:
+      var seen = initHashSet[string]()
+      var localCandidates: seq[string]
+      var remoteOffers = initCountTable[string]()
+      var remoteOrder: seq[string]
+      for line in pointingAt.output.splitLines():
+        let refName = line.strip()
+        if refName.startsWith("refs/heads/"):
+          let name = refName["refs/heads/".len .. ^1]
+          if name.len > 0 and not seen.containsOrIncl(name):
+            localCandidates.add(name)
+        elif refName.startsWith("refs/remotes/"):
+          let rest = refName["refs/remotes/".len .. ^1]
+          # Split off the remote name; skip ``<remote>/HEAD``, which is a
+          # symbolic alias rather than a branch anyone can switch to.
+          let slash = rest.find('/')
+          if slash <= 0: continue
+          let remoteName = rest[0 ..< slash]
+          let name = rest[slash + 1 .. ^1]
+          if name.len == 0 or name == "HEAD": continue
+          if remoteName notin configuredRemotes: continue
+          if name in localBranchNames: continue
+          if not remoteOffers.hasKey(name):
+            remoteOrder.add(name)
+          remoteOffers.inc(name)
+      # Local candidates first: they need no DWIM and cannot be ambiguous
+      # across multiple remotes.
+      result.attachableBranches = localCandidates
+      for name in remoteOrder:
+        if remoteOffers[name] == 1 and not seen.containsOrIncl(name):
+          result.attachableBranches.add(name)
+
   # Unpublished commits: the M2 ``isPublished`` query already answers
   # "is HEAD on any remote tracking branch". We also fall back to the
   # local-vs-remote tip compare when ``isPublished`` cannot be probed
@@ -33445,18 +33517,20 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
     return (true, a, "", "")
   of saAttachBranch:
     # Detached HEAD at the locked revision — re-attach by switching to the
-    # manifest's pinned branch. ``gitSwitchAction`` (gvoSwitch) is the
+    # branch the planner chose. ``gitSwitchAction`` (gvoSwitch) is the
     # engine action; it refuses on a dirty tree, but the detached-at-locked
     # case the planner emits this for is clean by construction.
-    let targetBranch =
-      if resolved.revision.len > 0 and not looksLikeSha(resolved.revision):
-        resolved.revision
-      else:
-        "main"
+    #
+    # ``decision.branch`` is load-bearing, not decorative: the planner only
+    # emits ``saAttachBranch`` for a branch whose tip IS the locked revision
+    # (see ``chooseAttachBranch``), so switching to it cannot move the
+    # checkout. Deriving the target here instead — as this used to, from the
+    # manifest revision with a hardcoded "main" fallback — is what made sync
+    # walk SHA-pinned repos off their pins.
     let receiptRel = ".repro" / "workspace" / "receipts" /
       ("sync-attach-" & idSeg & ".receipt")
     var a = gitSwitchAction("workspace-sync-attach-" & idSeg, identity,
-      branchName = targetBranch,
+      branchName = decision.branch,
       repoPath = resolved.path,
       receiptPath = receiptRel,
       cacheable = false)
