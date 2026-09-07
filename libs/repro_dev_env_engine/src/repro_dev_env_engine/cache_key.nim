@@ -47,7 +47,18 @@ proc canonicalProjectFilePath(projectRoot: string): string =
   elif hasLegacy:
     legacy
   else:
-    ""
+    # NF-4 — a project with no project file of its own may still be running a
+    # SYNTHESISED one (`repro_dsl_stdlib/foreign_env/auto_load`), whose body
+    # names which foreign environment is activated. It has to be in the key:
+    # without it, flipping an auto-load flag from `.envrc` to `flake.nix`
+    # would leave the previous decision's cached interface artifact in place,
+    # and the shell would keep activating the environment the operator just
+    # turned off. Spelled literally rather than imported for the same reason
+    # the two project-file names above are: this module is the prompt-time
+    # fast path and takes no dependency it does not have to.
+    let synthesized = projectRoot / ".repro" / "foreign-env" /
+      CanonicalProjectFileName
+    if fastFileExists(synthesized): synthesized else: ""
 
 proc lockSliceFilePart(projectRoot: string): string =
   let lockPath = projectRoot / ".repro" / "dev-env.lock"

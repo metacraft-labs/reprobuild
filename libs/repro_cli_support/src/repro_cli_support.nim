@@ -42,6 +42,10 @@ import repro_dsl_stdlib/configurables/variants as solver_variants
 # instructions a binary may execute -- the exact shape PMC-3 removed when
 # it made the psABI level sugar over feature sets.
 import repro_dsl_stdlib/packages_schema
+              # NF-4: the auto-load precedence rule and the synthesised
+              # `repro.nim` are stdlib, not CLI. The CLI reads the two flags
+              # out of the layered configuration and calls into it.
+import repro_dsl_stdlib/foreign_env/auto_load
 import repro_home_apply/package_catalog
 import repro_standard_provider_protocol
 import repro_runquota
@@ -10687,6 +10691,12 @@ proc writeDevelopOverrides(path, projectRoot: string;
 
 proc findDevEnvProjectRoot(startPath: string): string
 
+proc synthesizeForeignEnvProjectFile(projectRoot: string): string
+  ## NF-4 forward declaration: the body composes the HL-1 configuration layers
+  ## for the two auto-load flags, and the layer-path helpers
+  ## (``systemConfigPath`` / ``userConfigPath`` / ``vcsPrivateConfigPath``)
+  ## are declared with the rest of the layered-configuration plane far below.
+
 proc replacedSolvedVersion(projectRoot, dependency: string): string
   ## Forward declaration: the body needs ``committedLockPath``, which is
   ## declared with the rest of the lock plumbing far below this section.
@@ -10773,14 +10783,29 @@ proc resolveDevEnvSelection(selection: var DevEnvCliSelection) =
     selection.selector = "."
   if selection.activity.len == 0:
     selection.activity = "default"
-  selection.modulePath = absolutePath(moduleForTarget(selection.selector))
-  if not fileExists(extendedPath(selection.modulePath)):
-    raise newException(IOError,
-      "dev-env target module not found: " & selection.modulePath)
-  selection.projectRoot = projectRootForModule(selection.modulePath)
+  # ``declaredModulePath`` is where a project file WOULD be. Everything derived
+  # from the project's location — the project root, the develop-overrides file,
+  # the dev-env out dir — is derived from it and not from whatever module the
+  # edge ends up compiling, so NF-4's synthesised recipe (which lives under
+  # ``.repro/``) cannot move any of them.
+  let declaredModulePath = absolutePath(moduleForTarget(selection.selector))
+  selection.modulePath = declaredModulePath
+  selection.projectRoot = projectRootForModule(declaredModulePath)
+  if not fileExists(extendedPath(declaredModulePath)):
+    # NF-4 (Nix-Flake-Coexistence.md §2b) — no project file. If a
+    # configuration layer has enabled auto-load for a foreign environment this
+    # directory carries, synthesise the minimal ``repro.nim`` that activates
+    # it and proceed down the ORDINARY dev-env path with it. Auto-load is not
+    # a second activation mechanism; it is this one, entered from a recipe
+    # Reprobuild wrote instead of one the user wrote.
+    let synthesized = synthesizeForeignEnvProjectFile(selection.projectRoot)
+    if synthesized.len == 0:
+      raise newException(IOError,
+        "dev-env target module not found: " & declaredModulePath)
+    selection.modulePath = synthesized
   selection.developOverridesPath =
     developOverridesMetadataPath(selection.projectRoot)
-  selection.outDir = defaultDevEnvOutDir(selection.modulePath,
+  selection.outDir = defaultDevEnvOutDir(declaredModulePath,
     selection.workRoot, selection.activity)
 
 proc parseDevEnvExecArgs(args: openArray[string]): ParsedDevEnvExec =
@@ -31372,6 +31397,57 @@ proc vcsPrivateConfigPath(repoRoot, gitBin: string): string =
   let o = getEnv("REPROBUILD_VCS_PRIVATE_CONFIG")
   if o.len > 0: return o
   vcsPrivateMetadataDir(repoRoot, gitBin) / "config.toml"
+
+# ---------------------------------------------------------------------------
+# NF-4 (Nix-Flake-Coexistence.md §2b) — the two foreign-environment auto-load
+# flags, over the SAME configuration layers HL-1 defines above.
+# ---------------------------------------------------------------------------
+#
+# Reusing the layers rather than inventing a knob is what keeps "may
+# Reprobuild run this directory's `.envrc`?" answerable the way every other
+# site policy is: an IT-maintained system file, a user's dotfiles, the
+# workspace, and a never-pushed VCS-private file, in increasing precedence.
+#
+# Precedence is by LAYER, and within a layer by FLAG: a layer that sets only
+# `auto_load_flake` leaves a lower layer's `auto_load_envrc` standing. That is
+# what the `Option[bool]` in `BootstrapForeignEnvBody` buys — a plain `bool`
+# would decode `false` in every layer, and the highest-precedence file present
+# would silently overrule every layer beneath it by saying nothing at all.
+
+proc foldForeignEnvLayer(body: BootstrapForeignEnvBody;
+                         acc: var ForeignEnvAutoLoad) =
+  if body.auto_load_envrc.isSome:
+    acc.envrc = body.auto_load_envrc.get()
+  if body.auto_load_flake.isSome:
+    acc.flake = body.auto_load_flake.get()
+
+proc composeForeignEnvAutoLoad*(projectRoot: string; gitBin = ""):
+    ForeignEnvAutoLoad =
+  ## Resolve the two flags for `projectRoot`. Both default to OFF: activating
+  ## a foreign environment because a directory happens to contain a file is an
+  ## operator's decision, not Reprobuild's.
+  let root = absolutePath(projectRoot)
+  # Layer 2 — system config. Layer 3 — user dotfiles.
+  for path in [systemConfigPath(), userConfigPath()]:
+    if path.len > 0 and fileExists(extendedPath(path)):
+      foldForeignEnvLayer(readReprobuildConfig(path).foreign_env, result)
+  # Layer 4 — the parent workspace's `.repro-workspace.toml`.
+  let bootstrapPath = findBootstrapConfigPath(root)
+  if bootstrapPath.len > 0:
+    foldForeignEnvLayer(readWorkspaceBootstrap(bootstrapPath).foreign_env,
+      result)
+  # Layer 5 — the VCS-private, never-pushed config.
+  let privatePath = vcsPrivateConfigPath(root, gitBin)
+  if privatePath.len > 0 and fileExists(extendedPath(privatePath)):
+    foldForeignEnvLayer(readReprobuildConfig(privatePath).foreign_env, result)
+
+proc synthesizeForeignEnvProjectFile(projectRoot: string): string =
+  ## Decide which foreign environment (if any) `projectRoot` auto-loads, and
+  ## materialise the minimal `repro.nim` that activates it. Returns the empty
+  ## string when nothing is auto-loaded, which is the caller's signal to raise
+  ## the ordinary "no project file" diagnostic.
+  ensureSynthesizedProjectFile(projectRoot,
+    detectForeignEnvSource(projectRoot, composeForeignEnvAutoLoad(projectRoot)))
 
 proc normalizeScopePath(p: string): string =
   ## Q-B normalization: expand ``~``, make absolute, symlink-resolve when the
