@@ -601,6 +601,28 @@ type
     ## store backend is constructed.
     route*: seq[LockingRouteEntry]
 
+  BootstrapForeignEnvBody* = object
+    ## NF-4 (Nix-Flake-Coexistence.md §2b) — the `[foreign_env]` table: whether
+    ## a directory with NO `repro.nim` may still get a dev environment by
+    ## activating a foreign one.
+    ##
+    ## TWO flags, not one tri-state. They govern different trust decisions: an
+    ## `.envrc` is arbitrary shell that Reprobuild would be causing to run,
+    ## while a `flake.nix` is evaluated by `nix` under its own sandboxing
+    ## rules. A site may reasonably want the second without the first, and one
+    ## knob cannot express that.
+    ##
+    ## `Option` rather than plain `bool` so an unset key means "this layer has
+    ## no opinion" and a lower-precedence layer's answer survives. A plain
+    ## `bool` would decode a silent `false` in every layer, and the
+    ## highest-precedence file present would then always win by saying nothing.
+    ##
+    ## Both default to absent, i.e. OFF: activating a foreign environment
+    ## because a directory happens to contain a file is a decision an operator
+    ## makes, not one Reprobuild makes for them.
+    auto_load_envrc*: Option[bool]
+    auto_load_flake*: Option[bool]
+
   WorkspaceBootstrap* = object
     schema*: string
     manifest*: BootstrapManifestBody
@@ -608,6 +630,7 @@ type
     verify*: BootstrapVerifyBody
     develop*: BootstrapDevelopBody
     locking*: BootstrapLockingBody
+    foreign_env*: BootstrapForeignEnvBody
     extensions*: Extensions
 
   # --- reprobuild.config.v1 (HL-1 layered configuration file) -----------------
@@ -666,6 +689,7 @@ type
     schema*: string
     apply_if*: seq[ApplyIfEntry]
     locking*: BootstrapLockingBody
+    foreign_env*: BootstrapForeignEnvBody
     extensions*: Extensions
 
   # --- <host-repo>/.repro-workspace-private.toml (RA-8 private companion) -----

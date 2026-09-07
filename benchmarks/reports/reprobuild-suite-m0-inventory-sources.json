@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1475,
+    "nimTestBinaries": 1477,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 596,
     "staticallyDetectedRuntimeCompilerFlowTests": 82,
-    "testEntries": 1480
+    "testEntries": 1482
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1118,7 +1118,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 636,
+      "integration": 638,
       "platform/destructive": 107,
       "pure unit": 596,
       "unclassified": 125
@@ -1233,9 +1233,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1475,
+    "nimTestBinaryCount": 1477,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1480
+    "testEntryCount": 1482
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17585,6 +17585,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_nf4_flake_dev_shell",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_dev_env_artifacts",
+        "repro_dev_env_engine",
+        "repro_provider_runtime",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_provider_dev_env_implicit_floor",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -24794,6 +24815,25 @@
       "source": "tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nf4_foreign_env_contract",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_engine",
+        "repro_dsl_stdlib",
+        "repro_local_store"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_nf4_foreign_env_contract.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

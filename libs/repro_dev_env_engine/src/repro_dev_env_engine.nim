@@ -302,6 +302,70 @@ proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig): string =
   devEnvCacheKey.computeDevEnvEdgeCacheKey(config.projectRoot, config.activity,
     config.lockSliceId, config.developOverridesPath)
 
+proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string):
+    seq[string] =
+  ## Prefixes the dev-env introspection edge's monitor must NOT record as
+  ## inputs. The same shape as `providerCompileIgnoredInputPrefixes`, and for
+  ## the same reason: derived state a tool writes and reads back is not an
+  ## input, and recording it makes a warm entry miss its cache for no reason a
+  ## user can act on.
+  ##
+  ## Two entries, and both are MEASURED — from the `.iomon` of a real
+  ## `useFlakeDevShell()` edge, not from what a foreign tool might plausibly
+  ## do. Each one is a licence for a cached dev shell to survive a change it
+  ## was built from, so the set is kept to what an edge demonstrably rewrites
+  ## and reads back, and it is asserted in
+  ## `tests/integration/t_nf4_foreign_env_contract.nim`.
+  ##
+  ##   * `<projectRoot>/.repro/foreign-env` — Reprobuild's own scratch for this
+  ##     edge: the script the foreign command produced, the profile gcroot, the
+  ##     two stdout/stderr side-channels. Written by the edge and read back by
+  ##     it, exactly like the provider compile's scratch tree. Scoped to THIS
+  ##     project, because a sibling project's scratch is somebody else's state.
+  ##   * `nix`'s own cache directory. NF-4's `useFlakeDevShell` runs
+  ##     `nix print-dev-env` inside this edge, and the depfile carried
+  ##
+  ##       ~/.cache/nix/eval-cache-v6/<flake-fingerprint>.sqlite{,-shm,-wal}
+  ##       ~/.cache/nix/fetcher-cache-v4.sqlite{,-shm,-wal}
+  ##
+  ##     which `nix` opens read-write on every invocation, so every entry into
+  ##     the shell invalidated the previous one and the cached artifact was
+  ##     never once reused. That is the whole value of §2b's observed manifest
+  ##     lost to a file that describes `nix`'s memory of its own past runs.
+  ##
+  ## *Deliberately NOT the user cache directory as a whole, and this is the
+  ## load-bearing part.* Reprobuild's OWN content-addressed store and action
+  ## cache live under it — `repro_local_store.defaultUserStoreRoot()` is
+  ## `$XDG_CACHE_HOME/repro/store` and `resolveActionCacheRoot` puts the action
+  ## cache in its sibling `repro/action-cache` — so a `getCacheDir()`-wide
+  ## prefix would make this edge blind to the artifacts Reprobuild itself
+  ## materialises for it. The usual defence of a broad ignore ("a dev
+  ## environment that depends on `~/.cache` was never reproducible anyway")
+  ## does not apply to those: the store is content-addressed, it is exactly
+  ## what a binary cache ships, and it IS reproducible on another machine.
+  ## The user STATE directory is likewise absent, and that one is not a
+  ## precaution either: the same depfile records
+  ## `~/.local/state/nix/profile/etc/xdg/nix/nix.conf` — the `nix.conf` the
+  ## user's nix PROFILE supplies, which decides what `nix` evaluates. It does
+  ## not churn and it is a real input, so a `~/.local/state` prefix would drop
+  ## it and let a cached dev shell survive a change to the configuration it
+  ## was built under. That is the failure this campaign exists to stop, just
+  ## reached from the ignore list instead of from a `watch_file` list.
+  ##
+  ## The two are resolved the way `nix` resolves them (`$XDG_CACHE_HOME/nix`,
+  ## else `$HOME/.cache/nix`) rather than through Nim's `getCacheDir()`, which
+  ## answers `~/Library/Caches` on macOS while `nix` keeps using `~/.cache`
+  ## there.
+  if projectRoot.len > 0:
+    result.add(absolutePath(projectRoot) / ".repro" / "foreign-env")
+  let xdgCache = getEnv("XDG_CACHE_HOME")
+  if xdgCache.len > 0:
+    result.add(absolutePath(xdgCache) / "nix")
+  else:
+    let home = getEnv("HOME")
+    if home.len > 0:
+      result.add(absolutePath(home) / ".cache" / "nix")
+
 proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
                                provider: ProviderCompileArtifact;
                                providerArtifactPath, providerArtifactId,
@@ -353,9 +417,8 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
     commandStatsId = "repro dev-env introspection edge",
     cacheable = true,
     weakFingerprint = weak,
-    dependencyPolicy = DependencyGatheringPolicy(
-      kind: dgAutomaticMonitor,
-      completeness: decComplete))
+    dependencyPolicy = automaticMonitorGatheringPolicy(
+      devEnvIntrospectionIgnoredInputPrefixes(config.projectRoot)))
 
 proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
                        shellFragmentPath, navigatorStatsPath: string): BuildAction =
