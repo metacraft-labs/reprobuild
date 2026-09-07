@@ -112,10 +112,27 @@ proc partedMklabel*(device: string; kind: string): ExecResult
         " (expected gpt | mbr | msdos)")
   execTool("parted", @["parted", "-s", device, "mklabel", canonical])
 
+proc sgdiskZapCreate*(device: string; diskGuid: string = ""): ExecResult
+    {.discardable.} =
+  ## ``sgdisk -o [-U <guid>] <device>`` — zap any existing GPT and write
+  ## a fresh empty one in a single operation, which avoids the
+  ## parted-then-sgdisk metadata race the apply driver used to hit.
+  ##
+  ## ``diskGuid`` empty leaves sgdisk to draw the disk GUID from the
+  ## system RNG, so the table differs on every run. Passing one makes the
+  ## primary and backup GPT headers a function of the caller's inputs.
+  var argv = @["sgdisk", "-o"]
+  if diskGuid.len > 0:
+    argv.add "-U"; argv.add diskGuid
+  argv.add device
+  execTool("sgdisk", argv)
+
 proc sgdiskCreatePartition*(device: string; num: int;
-                            start, size, gptType, label: string):
+                            start, size, gptType, label: string;
+                            partitionGuid: string = ""):
                             ExecResult {.discardable.} =
-  ## ``sgdisk -n <num>:<start>:<size> [-t <num>:<type>] [-c <num>:<label>] <device>``.
+  ## ``sgdisk -n <num>:<start>:<size> [-t <num>:<type>] [-c <num>:<label>]
+  ##  [-u <num>:<guid>] <device>``.
   ##
   ## ``num`` is the GPT partition number (1-based). ``start`` and
   ## ``size`` are sgdisk-format sectors / sizes — empty string means
@@ -123,6 +140,10 @@ proc sgdiskCreatePartition*(device: string; num: int;
   ## ``gptType`` is the GPT type-GUID short code (``EF00`` for ESP,
   ## ``8300`` for Linux data, ``8200`` for swap, ``8E00`` for LVM,
   ## ``8309`` for LUKS, ``FD00`` for RAID, ``BF00`` for ZFS).
+  ##
+  ## ``partitionGuid`` is the partition's *unique* GUID (distinct from
+  ## the type GUID above, which says what the partition is for). Left
+  ## empty, sgdisk draws it from the system RNG.
   if num < 1:
     raise newException(DiskToolError,
       "sgdiskCreatePartition: partition number must be >= 1, got " &
@@ -135,6 +156,8 @@ proc sgdiskCreatePartition*(device: string; num: int;
     argv.add "-t"; argv.add $num & ":" & gptType
   if label.len > 0:
     argv.add "-c"; argv.add $num & ":" & label
+  if partitionGuid.len > 0:
+    argv.add "-u"; argv.add $num & ":" & partitionGuid
   argv.add device
   execTool("sgdisk", argv)
 
@@ -250,52 +273,96 @@ proc cryptsetupClose*(name: string): ExecResult {.discardable.} =
 # ---------------------------------------------------------------------
 # mkfs.* — filesystem creation. Each is a thin shim around the
 # corresponding ``mkfs.<format>`` binary.
+#
+# Every one of them takes an optional identifier. Left empty, the tool
+# invents one from the clock and the system RNG and two runs over
+# identical inputs produce different bytes; ``./disk_identity.nim``
+# derives the values the apply driver passes here. The parameters
+# default to "" so that a caller with no interest in reproducibility
+# keeps exactly the behaviour it had.
 # ---------------------------------------------------------------------
 
-proc mkfsExt4*(device: string; label: string = ""): ExecResult
+proc mkfsExt4*(device: string; label: string = "";
+               uuid: string = ""; hashSeed: string = ""): ExecResult
     {.discardable.} =
-  ## ``mkfs.ext4 -F [-L <label>] <device>``. ``-F`` forces overwrite
-  ## of any existing signature (the apply pipeline already wipes, but
-  ## ``-F`` makes the tool non-interactive on rare residue cases).
+  ## ``mkfs.ext4 -F [-L <label>] [-U <uuid>] [-E hash_seed=<seed>]
+  ##  <device>``. ``-F`` forces overwrite of any existing signature (the
+  ## apply pipeline already wipes, but ``-F`` makes the tool
+  ## non-interactive on rare residue cases).
+  ##
+  ## ``uuid`` and ``hashSeed`` are two *separate* random values in
+  ## ``mke2fs``: the superblock UUID and the seed for the directory
+  ## hashing function. Pinning one and not the other still leaves the
+  ## filesystem's bytes different between runs.
+  ##
+  ## The superblock also carries creation and last-write timestamps.
+  ## Those come from ``SOURCE_DATE_EPOCH`` when it is set, so an apply
+  ## that wants byte-identical filesystems has to pin that too — there is
+  ## no ``mke2fs`` flag for it.
   var argv = @["mkfs.ext4", "-F"]
   if label.len > 0:
     argv.add "-L"; argv.add label
+  if uuid.len > 0:
+    argv.add "-U"; argv.add uuid
+  if hashSeed.len > 0:
+    argv.add "-E"; argv.add "hash_seed=" & hashSeed
   argv.add device
   execTool("mkfs.ext4", argv)
 
-proc mkfsVfat*(device: string; label: string = ""): ExecResult
+proc mkfsVfat*(device: string; label: string = "";
+               volumeId: string = ""): ExecResult
     {.discardable.} =
-  ## ``mkfs.vfat -F 32 [-n <label>] <device>`` — FAT32 for the ESP.
+  ## ``mkfs.vfat -F 32 [-n <label>] [-i <volid>] <device>`` — FAT32 for
+  ## the ESP. ``volumeId`` is the 32-bit volume serial as eight hex
+  ## digits. Without it the serial is derived from the wall clock
+  ## (``mkfs.vfat`` honours ``SOURCE_DATE_EPOCH``, so a pinned epoch
+  ## covers it as a side effect; ``-i`` makes it independent of that).
   var argv = @["mkfs.vfat", "-F", "32"]
   if label.len > 0:
     argv.add "-n"; argv.add label
+  if volumeId.len > 0:
+    argv.add "-i"; argv.add volumeId
   argv.add device
   execTool("mkfs.vfat", argv)
 
-proc mkfsBtrfs*(device: string; label: string = ""): ExecResult
+proc mkfsBtrfs*(device: string; label: string = "";
+                uuid: string = ""): ExecResult
     {.discardable.} =
-  ## ``mkfs.btrfs -f [-L <label>] <device>``. ``-f`` forces overwrite.
+  ## ``mkfs.btrfs -f [-L <label>] [-U <uuid>] <device>``. ``-f`` forces
+  ## overwrite.
   var argv = @["mkfs.btrfs", "-f"]
   if label.len > 0:
     argv.add "-L"; argv.add label
+  if uuid.len > 0:
+    argv.add "-U"; argv.add uuid
   argv.add device
   execTool("mkfs.btrfs", argv)
 
-proc mkfsSwap*(device: string; label: string = ""): ExecResult
+proc mkfsSwap*(device: string; label: string = "";
+               uuid: string = ""): ExecResult
     {.discardable.} =
-  ## ``mkswap [-L <label>] <device>``.
+  ## ``mkswap [-L <label>] [-U <uuid>] <device>``. ``mkswap`` does not
+  ## honour ``SOURCE_DATE_EPOCH``, so without ``-U`` the swap header is
+  ## different on every run even under a pinned epoch.
   var argv = @["mkswap"]
   if label.len > 0:
     argv.add "-L"; argv.add label
+  if uuid.len > 0:
+    argv.add "-U"; argv.add uuid
   argv.add device
   execTool("mkswap", argv)
 
-proc mkfsXfs*(device: string; label: string = ""): ExecResult
+proc mkfsXfs*(device: string; label: string = "";
+              uuid: string = ""): ExecResult
     {.discardable.} =
-  ## ``mkfs.xfs -f [-L <label>] <device>``. ``-f`` forces overwrite.
+  ## ``mkfs.xfs -f [-L <label>] [-m uuid=<uuid>] <device>``. ``-f``
+  ## forces overwrite. XFS spells its UUID option as a metadata option
+  ## rather than as ``-U``.
   var argv = @["mkfs.xfs", "-f"]
   if label.len > 0:
     argv.add "-L"; argv.add label
+  if uuid.len > 0:
+    argv.add "-m"; argv.add "uuid=" & uuid
   argv.add device
   execTool("mkfs.xfs", argv)
 

@@ -7,7 +7,7 @@
 ## still builds the argv that *would* have run, which is the unit
 ## that matters at this layer.
 ##
-## Eight cases cover the argv shape across the wrapper matrix:
+## Nine cases cover the argv shape across the wrapper matrix:
 ##   1. partedMklabel + partedSetBootable + sgdiskCreatePartition
 ##   2. cryptsetupFormat + cryptsetupOpen (mapper path return)
 ##   3. mkfs.{ext4,vfat,btrfs,swap,xfs}
@@ -16,6 +16,8 @@
 ##   6. zpoolCreate + zfsCreate (sorted property emission)
 ##   7. mdadmCreate
 ##   8. losetupCreate / losetupDetach + partitionDevicePath conventions
+##   9. the identifier arguments every wrapper accepts, and the
+##      derivation they are fed from
 
 import std/[os, strutils, tables, unittest]
 
@@ -289,3 +291,96 @@ suite "M9.R.22b.1: typed Nim wrappers for the disko underlying tools":
 
     let umounted = umountFs("/mnt/repro")
     check umounted.argv == @["umount", "/mnt/repro"]
+
+  test "Test#9: identifier arguments and their derivation":
+    ## Without an identifier every tool below invents one from the clock
+    ## and the system RNG, and two runs over identical inputs write
+    ## different bytes. These are the arguments that close that, plus
+    ## the property that makes them usable: the derivation is a pure
+    ## function of (seed, purpose).
+    let ext4 = mkfsExt4("/dev/loop0p2", "rootfs",
+      "11111111-2222-5333-8444-555555555555",
+      "aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee")
+    check ext4.argv == @["mkfs.ext4", "-F",
+      "-L", "rootfs",
+      "-U", "11111111-2222-5333-8444-555555555555",
+      "-E", "hash_seed=aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee",
+      "/dev/loop0p2"]
+
+    # The UUID and the hash seed are separate values in mke2fs; pinning
+    # one must not be mistaken for pinning both.
+    let uuidOnly = mkfsExt4("/dev/loop0p2", "",
+      "11111111-2222-5333-8444-555555555555")
+    check "-E" notin uuidOnly.argv
+
+    let vfat = mkfsVfat("/dev/loop0p1", "ESP", "DEADBEEF")
+    check vfat.argv == @["mkfs.vfat", "-F", "32",
+      "-n", "ESP", "-i", "DEADBEEF", "/dev/loop0p1"]
+
+    let swap = mkfsSwap("/dev/loop0p3", "swap",
+      "99999999-8888-5777-8666-555555555555")
+    check swap.argv == @["mkswap", "-L", "swap",
+      "-U", "99999999-8888-5777-8666-555555555555", "/dev/loop0p3"]
+
+    let btrfs = mkfsBtrfs("/dev/loop0p2", "",
+      "99999999-8888-5777-8666-555555555555")
+    check btrfs.argv == @["mkfs.btrfs", "-f",
+      "-U", "99999999-8888-5777-8666-555555555555", "/dev/loop0p2"]
+
+    # XFS spells it as a metadata option rather than -U.
+    let xfs = mkfsXfs("/dev/loop0p2", "",
+      "99999999-8888-5777-8666-555555555555")
+    check xfs.argv == @["mkfs.xfs", "-f",
+      "-m", "uuid=99999999-8888-5777-8666-555555555555", "/dev/loop0p2"]
+
+    # The partition table: the disk GUID and each partition's unique
+    # GUID, both otherwise drawn from the system RNG.
+    let zap = sgdiskZapCreate("/dev/loop0",
+      "11111111-2222-5333-8444-555555555555")
+    check zap.argv == @["sgdisk", "-o",
+      "-U", "11111111-2222-5333-8444-555555555555", "/dev/loop0"]
+    check sgdiskZapCreate("/dev/loop0").argv == @["sgdisk", "-o", "/dev/loop0"]
+
+    let part = sgdiskCreatePartition("/dev/loop0", 1, "1MiB", "+512MiB",
+      "EF00", "ESP", "aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee")
+    check part.argv == @["sgdisk",
+      "-n", "1:1MiB:+512MiB",
+      "-t", "1:EF00",
+      "-c", "1:ESP",
+      "-u", "1:aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee",
+      "/dev/loop0"]
+
+    # Every parameter above defaults to "" so a caller that does not
+    # pin keeps exactly the argv it had.
+    check mkfsExt4("/dev/loop0p2").argv == @["mkfs.ext4", "-F", "/dev/loop0p2"]
+    check mkfsVfat("/dev/loop0p1").argv ==
+      @["mkfs.vfat", "-F", "32", "/dev/loop0p1"]
+    check mkfsSwap("/dev/loop0p3").argv == @["mkswap", "/dev/loop0p3"]
+
+    # The derivation: same seed and purpose → same value, always;
+    # different purpose or different seed → different value.
+    let a = DiskIdentity(seed: "a-seed")
+    let b = DiskIdentity(seed: "b-seed")
+    check a.deriveUuid(filesystemUuidPurpose("main.root")) ==
+          a.deriveUuid(filesystemUuidPurpose("main.root"))
+    check a.deriveUuid(filesystemUuidPurpose("main.root")) !=
+          a.deriveUuid(filesystemHashSeedPurpose("main.root"))
+    check a.deriveUuid(filesystemUuidPurpose("main.root")) !=
+          a.deriveUuid(filesystemUuidPurpose("main.var"))
+    check a.deriveUuid(filesystemUuidPurpose("main.root")) !=
+          b.deriveUuid(filesystemUuidPurpose("main.root"))
+    check a.deriveUuid(diskGuidPurpose("main")) !=
+          a.deriveUuid(partitionGuidPurpose("main", "esp"))
+
+    # RFC 4122 shape: version 5, variant 0b10.
+    let derived = a.deriveUuid(diskGuidPurpose("main"))
+    check derived.len == 36
+    check derived[14] == '5'
+    check derived[19] in {'8', '9', 'a', 'b'}
+    check a.deriveVolumeId(filesystemVolumeIdPurpose("main.esp")).len == 8
+
+    # No seed → no arguments, which is what leaves every default alone.
+    check not DiskIdentity().isPinned
+    check DiskIdentity().deriveUuid(diskGuidPurpose("main")) == ""
+    check DiskIdentity().deriveVolumeId(
+      filesystemVolumeIdPurpose("main.esp")) == ""

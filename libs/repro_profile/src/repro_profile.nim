@@ -18,6 +18,7 @@ import repro_profile/macros_system
 import repro_profile/hardware_id
 import repro_profile/hardware_probe
 import repro_profile/disk_tools
+import repro_profile/disk_identity
 import repro_profile/disk_apply
 import repro_profile/build_actions
 
@@ -31,5 +32,6 @@ export macros_system
 export hardware_id
 export hardware_probe
 export disk_tools
+export disk_identity
 export disk_apply
 export build_actions

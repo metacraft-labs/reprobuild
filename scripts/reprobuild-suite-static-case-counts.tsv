@@ -1440,8 +1440,8 @@ tests/unit/t_m9r21_3_probe_command.nim	nim	5
 tests/unit/t_m9r22_1_disko_btrfs_subvols.nim	nim	6
 tests/unit/t_m9r22_2_disko_macro_emit.nim	nim	4
 tests/unit/t_m9r22_3_repro_disk_plan.nim	nim	5
-tests/unit/t_m9r22b_1_disk_tools.nim	nim	8
-tests/unit/t_m9r22b_3_apply_cli.nim	nim	5
+tests/unit/t_m9r22b_1_disk_tools.nim	nim	9
+tests/unit/t_m9r22b_3_apply_cli.nim	nim	6
 tests/unit/t_m9r22b_4_mount_cli.nim	nim	3
 tests/unit/t_m9r23_1_installer_state_install_sequence.nim	nim	6
 tests/unit/t_m9r2_typed_cli_surfaces.nim	nim	18

@@ -32,11 +32,37 @@
 ## Partition-table tools can return before devtmpfs exposes the new partition
 ## nodes. The apply path therefore waits for every expected node before
 ## entering the filesystem/encryption steps.
+##
+## ## Identifiers
+##
+## Every tool below invents an identifier when it is not given one, and
+## invents it from the clock plus the system RNG. Pass a
+## ``DiskIdentity`` carrying a seed and this driver derives all of them
+## from it instead (see ``./disk_identity.nim``): the GPT disk GUID, each
+## partition's unique GUID, each filesystem UUID, the ext4 directory-hash
+## seed, and the FAT volume serial. Two applies of the same layout under
+## the same seed then write the same bytes.
+##
+## Three things a seed does NOT cover, named here so their absence is not
+## mistaken for coverage:
+##
+##   * **ext4/vfat superblock timestamps.** They come from
+##     ``SOURCE_DATE_EPOCH``; there is no ``mke2fs`` flag. A caller that
+##     wants identical bytes has to pin that variable too.
+##   * **The MBR disk signature.** Only the GPT path is covered;
+##     ``parted mklabel msdos`` has no signature argument.
+##   * **LUKS headers.** ``cryptsetup luksFormat`` writes a random master
+##     key and random salts. That is a property of the format, not an
+##     omission, and no amount of seeding makes an encrypted container
+##     byte-reproducible.
 
 import std/[algorithm, options, os, osproc, sequtils, strutils, tables, times]
 
 import ./types
 import ./disk_tools
+import ./disk_identity
+
+export DiskIdentity, isPinned
 
 type
   DiskApplyResult* = object
@@ -59,6 +85,12 @@ type
       ## Per-disk-or-partition LUKS passphrases, keyed by the disk name
       ## + "." + partition name (e.g. "main.luks"). Tests supply
       ## "swordfish" for every key.
+    identity: DiskIdentity
+      ## The seed every filesystem and partition-table identifier this
+      ## apply creates is derived from. The zero value means "not
+      ## pinned": each tool keeps its own clock-and-RNG default, which is
+      ## the behaviour every caller had before identifiers were
+      ## derivable, and the result is not byte-reproducible.
     result: DiskApplyResult
 
 const
@@ -71,9 +103,11 @@ const
 # ---------------------------------------------------------------------
 
 proc newApplyContext*(layout: DiskLayout;
-                     passphrases: Table[string, string]):
+                     passphrases: Table[string, string];
+                     identity: DiskIdentity = DiskIdentity()):
                      ApplyContext =
-  ApplyContext(layout: layout, passphrases: passphrases)
+  ApplyContext(layout: layout, passphrases: passphrases,
+               identity: identity)
 
 proc recordOperation(ctx: ApplyContext; ex: ExecResult) =
   ctx.result.operations.add ex
@@ -233,14 +267,22 @@ proc waitForPartitionDevices*(devices: openArray[string];
 
 proc applyDiskLayout*(layout: DiskLayout;
                      passphrases: Table[string, string] =
-                       initTable[string, string]()): DiskApplyResult =
+                       initTable[string, string]();
+                     identity: DiskIdentity = DiskIdentity()):
+                     DiskApplyResult =
   ## Drive the full create-from-scratch apply per spec §7. Returns a
   ## ``DiskApplyResult`` whose ``operations`` field captures every
   ## subprocess invocation that ran (or would have run, under
   ## dry-run). On the first ``DiskToolError`` the function captures
   ## the failure step + message and returns immediately — no
   ## "graceful continue" or partial apply.
-  let ctx = newApplyContext(layout, passphrases)
+  ##
+  ## ``identity``, when it carries a seed, makes every identifier this
+  ## apply writes a function of that seed and of the layout's own names:
+  ## the GPT disk GUID, every partition GUID, every filesystem UUID, the
+  ## ext4 directory-hash seed and the FAT volume serial. Without it each
+  ## tool invents its own from the clock and the system RNG.
+  let ctx = newApplyContext(layout, passphrases, identity)
   try:
     # Step 1: best-effort unmount of every disk + its partitions.
     for diskName, d in ctx.layout.disks:
@@ -267,8 +309,8 @@ proc applyDiskLayout*(layout: DiskLayout;
         # `sgdisk -o` zaps any existing GPT and creates a fresh empty
         # GPT in one operation, which avoids the parted-then-sgdisk
         # metadata race.
-        ctx.recordOperation(execTool("sgdisk",
-          @["sgdisk", "-o", d.device]))
+        ctx.recordOperation(sgdiskZapCreate(d.device,
+          ctx.identity.deriveUuid(diskGuidPurpose(diskName))))
       else:
         # MBR path: parted is the right tool for the label.
         ctx.recordOperation(partedMklabel(d.device, tableKind))
@@ -290,7 +332,8 @@ proc applyDiskLayout*(layout: DiskLayout;
           "0"
         diagSnapshot("before-sgdisk-n-" & pName, d.device)
         ctx.recordOperation(sgdiskCreatePartition(d.device, num,
-          startArg, sizeArg, gptType, pName))
+          startArg, sizeArg, gptType, pName,
+          ctx.identity.deriveUuid(partitionGuidPurpose(diskName, pName))))
         diagSnapshot("after-sgdisk-n-" & pName, d.device)
         if p.bootable:
           ctx.recordOperation(partedSetBootable(d.device, num, true))
@@ -352,14 +395,22 @@ proc applyDiskLayout*(layout: DiskLayout;
 # Content-node walker — handles each ContentKind recursively.
 # ---------------------------------------------------------------------
 
-proc applyFilesystem(ctx: ApplyContext; device: string;
+proc applyFilesystem(ctx: ApplyContext; device, ctxKey: string;
                     c: ContentSpec) =
+  ## ``ctxKey`` is this content node's path in the layout
+  ## (``main.root``, ``main.luks.inner``), and it is what the pinned
+  ## identifiers below are derived from — so a nested filesystem gets its
+  ## own identifiers without this walker knowing the nesting rules.
+  let uuid = ctx.identity.deriveUuid(filesystemUuidPurpose(ctxKey))
   case c.format
-  of "ext4":  ctx.recordOperation(mkfsExt4(device, c.label))
+  of "ext4":
+    ctx.recordOperation(mkfsExt4(device, c.label, uuid,
+      ctx.identity.deriveUuid(filesystemHashSeedPurpose(ctxKey))))
   of "vfat", "fat32":
-              ctx.recordOperation(mkfsVfat(device, c.label))
+    ctx.recordOperation(mkfsVfat(device, c.label,
+      ctx.identity.deriveVolumeId(filesystemVolumeIdPurpose(ctxKey))))
   of "btrfs":
-    ctx.recordOperation(mkfsBtrfs(device, c.label))
+    ctx.recordOperation(mkfsBtrfs(device, c.label, uuid))
     # Subvolumes need the btrfs to be mounted; the apply driver
     # mounts under /tmp/disko-mount-<basename>, creates the subvols,
     # then unmounts. The mount path is captured in operations[].
@@ -372,8 +423,8 @@ proc applyFilesystem(ctx: ApplyContext; device: string;
       for s in c.subvols:
         ctx.recordOperation(btrfsCreateSubvol(scratchDir, s.path))
       ctx.recordOperation(umountFs(scratchDir))
-  of "xfs":   ctx.recordOperation(mkfsXfs(device, c.label))
-  of "swap":  ctx.recordOperation(mkfsSwap(device, c.label))
+  of "xfs":   ctx.recordOperation(mkfsXfs(device, c.label, uuid))
+  of "swap":  ctx.recordOperation(mkfsSwap(device, c.label, uuid))
   else:
     raise newException(DiskToolError,
       "applyFilesystem: unsupported filesystem format: " & c.format)
@@ -413,7 +464,7 @@ proc applyContentNode*(ctx: ApplyContext; device, ctxKey: string;
   of cfsNone:
     discard  # User declared no content for this slot; nothing to do.
   of cfsFilesystem:
-    applyFilesystem(ctx, device, content)
+    applyFilesystem(ctx, device, ctxKey, content)
   of cfsEncrypted:
     applyEncrypted(ctx, device, ctxKey, content)
   of cfsLvm:
@@ -421,7 +472,8 @@ proc applyContentNode*(ctx: ApplyContext; device, ctxKey: string;
   of cfsZfs:
     applyZfsDataset(ctx, content)
   of cfsSwap:
-    ctx.recordOperation(mkfsSwap(device))
+    ctx.recordOperation(mkfsSwap(device, "",
+      ctx.identity.deriveUuid(filesystemUuidPurpose(ctxKey))))
 
 # ---------------------------------------------------------------------
 # Mount driver — separate from the apply path. Walks the layout in

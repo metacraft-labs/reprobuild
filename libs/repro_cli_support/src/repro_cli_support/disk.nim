@@ -5,7 +5,7 @@
 ## Surface::
 ##
 ##   repro disk plan <disko.nim>            (M9.R.22, v1)
-##   repro disk apply <disko.nim> --confirm (stub, M9.R.22b)
+##   repro disk apply <disko.nim> --confirm [--identity <seed.json>]
 ##   repro disk mount <disko.nim> --target /mnt (stub, M9.R.22b)
 ##   repro disk unmount <disko.nim> --target /mnt (stub, M9.R.22b)
 ##   repro disk generate --probe /          (stub, M9.R.22c)
@@ -29,6 +29,7 @@ import repro_profile/emit
 import repro_profile/types
 import repro_profile/disk_tools
 import repro_profile/disk_apply
+import repro_profile/disk_identity
 
 const CompiledReprobuildRoot = currentSourcePath().parentDir.parentDir.
   parentDir.parentDir.parentDir
@@ -297,6 +298,7 @@ type
     output*: string         ## --output for image
     probe*: string          ## --probe root for generate
     sizeStr*: string        ## --size for image
+    identity*: string       ## --identity override for apply
     confirm*: bool
 
 proc parseDiskArgs*(args: seq[string]): DiskCliOptions =
@@ -339,6 +341,10 @@ proc parseDiskArgs*(args: seq[string]): DiskCliOptions =
       if i + 1 >= args.len:
         raise newException(ValueError, "--size requires a value")
       result.sizeStr = args[i + 1]; inc i
+    of "--identity":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--identity requires a PATH")
+      result.identity = args[i + 1]; inc i
     else:
       if a.startsWith("--target="):
         result.target = a["--target=".len .. ^1]
@@ -350,6 +356,8 @@ proc parseDiskArgs*(args: seq[string]): DiskCliOptions =
         result.probe = a["--probe=".len .. ^1]
       elif a.startsWith("--size="):
         result.sizeStr = a["--size=".len .. ^1]
+      elif a.startsWith("--identity="):
+        result.identity = a["--identity=".len .. ^1]
       elif a.startsWith("--"):
         raise newException(ValueError,
           "unknown `repro disk " & $result.sub & "` flag: " & a)
@@ -383,10 +391,54 @@ proc runDiskPlan(opts: DiskCliOptions): int =
   stdout.write outcome.text
   return 0
 
+type
+  ResolvedIdentity* = object
+    ## What ``repro disk apply`` decided about identifier pinning, and
+    ## where the decision came from. ``source`` is empty exactly when no
+    ## identity document was found.
+    identity*: DiskIdentity
+    source*: string
+    failure*: bool
+    failureMsg*: string
+
+proc resolveDiskIdentity*(layoutPath, explicitPath: string;
+                          exists: proc(p: string): bool {.closure.};
+                          read: proc(p: string): string {.closure.}):
+                          ResolvedIdentity =
+  ## Decide which identity document (if any) governs this apply.
+  ##
+  ## An explicit ``--identity PATH`` must exist: asking for a document
+  ## and silently getting none would produce an unpinned apply that looks
+  ## pinned. Otherwise the sibling of the layout document is used when it
+  ## is there, and its absence is a legitimate "leave the identifiers to
+  ## the tools" — reported by the caller, never inferred silently.
+  ##
+  ## Filesystem access is injected so the decision itself is testable
+  ## without a filesystem; the caller below passes the real ones.
+  if explicitPath.len > 0:
+    if not exists(explicitPath):
+      return ResolvedIdentity(failure: true,
+        failureMsg: "--identity " & explicitPath & ": no such file")
+    result.source = explicitPath
+  else:
+    let sibling = diskIdentitySiblingPath(layoutPath)
+    if not exists(sibling):
+      return ResolvedIdentity()
+    result.source = sibling
+  try:
+    result.identity = parseDiskIdentityDocument(read(result.source),
+                                                result.source)
+  except ValueError as e:
+    return ResolvedIdentity(failure: true, failureMsg: e.msg)
+  except CatchableError as e:
+    return ResolvedIdentity(failure: true,
+      failureMsg: result.source & ": " & e.msg)
+
 proc runDiskApply(opts: DiskCliOptions): int =
   if opts.source.len == 0:
     stderr.writeLine("repro disk apply: missing source file argument\n" &
-      "usage: repro disk apply <disko.nim> [--device DEV] --confirm")
+      "usage: repro disk apply <disko.nim> [--device DEV] " &
+      "[--identity PATH] --confirm")
     return 2
   if not opts.confirm:
     # --confirm is the explicit destructive opt-in. Print the plan
@@ -437,8 +489,27 @@ proc runDiskApply(opts: DiskCliOptions): int =
       if allMatch: scoped.pools.add pool
   else:
     scoped = dl
+  let resolved = resolveDiskIdentity(opts.source, opts.identity,
+    proc(p: string): bool = fileExists(p),
+    proc(p: string): string = readFile(p))
+  if resolved.failure:
+    stderr.writeLine("repro disk apply: " & resolved.failureMsg)
+    return 2
+  if resolved.identity.isPinned:
+    stderr.writeLine("repro disk apply: filesystem and partition-table " &
+      "identifiers are derived from " & resolved.source)
+  else:
+    # Said out loud, every time. An apply that leaves the identifiers to
+    # the tools produces a different disk on every run, and the only
+    # symptom is that two builds of the same inputs stop comparing equal
+    # — which nobody notices until something downstream hashes the disk.
+    stderr.writeLine("repro disk apply: no identity document (looked for " &
+      diskIdentitySiblingPath(opts.source) & "); filesystem UUIDs, the " &
+      "ext4 directory-hash seed, the FAT volume serial and the GPT GUIDs " &
+      "will be taken from the clock and the system RNG, so this apply is " &
+      "not reproducible")
   let passphrases = initTable[string, string]()
-  let r = applyDiskLayout(scoped, passphrases)
+  let r = applyDiskLayout(scoped, passphrases, resolved.identity)
   # Log every operation that ran so the user can audit.
   for op in r.operations:
     stderr.writeLine("[apply] " & op.tool & ": " & op.cmd &
@@ -508,7 +579,11 @@ proc runDiskImage(opts: DiskCliOptions): int =
 proc renderDiskUsage(): string =
   "usage: repro disk {plan|apply|mount|unmount|generate|image} ...\n" &
   "  repro disk plan <disko.nim>            (v1: full)\n" &
-  "  repro disk apply <disko.nim> --confirm [--device DEV] (M9.R.22b: full)\n" &
+  "  repro disk apply <disko.nim> --confirm [--device DEV] [--identity PATH] (M9.R.22b: full)\n" &
+  "     --identity PATH   seed document for the filesystem and GPT\n" &
+  "                       identifiers; defaults to <disko>.identity.json\n" &
+  "                       beside the layout, and to unpinned (and so\n" &
+  "                       irreproducible) identifiers when neither exists\n" &
   "  repro disk mount <disko.nim> --target /mnt [--confirm] (M9.R.22b: full)\n" &
   "  repro disk unmount <disko.nim> --target /mnt (M9.R.22b: full)\n" &
   "  repro disk generate --probe /          (M9.R.22c: pending)\n" &

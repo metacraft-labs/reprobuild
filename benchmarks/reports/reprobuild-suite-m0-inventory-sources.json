@@ -30207,7 +30207,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r22b_1_disk_tools.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30225,7 +30225,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r22b_3_apply_cli.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
