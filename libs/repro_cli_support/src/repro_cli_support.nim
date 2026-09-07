@@ -7330,6 +7330,15 @@ proc emitFailedActionSummaries(buildResult: BuildRunResult;
     if item.stderr.len > 0:
       summary.add('\n')
       summary.add(strip(item.stderr, leading = false))
+      # A child that died in the dynamic loader names the two libraries the
+      # loader was reconciling, and neither is the one automatic monitoring
+      # injected — see `repro_core/injected_libraries`. We are the only party
+      # that knows an injection happened, so we are the only one who can say
+      # so. The shim is passed explicitly: the engine composes the injection
+      # for the ACTION's environment, not for its own, so nothing about it is
+      # visible in `getEnv` here.
+      summary.add(injectedLibraryNote(item.stderr,
+        [resolveMonitorShimLibPath()]))
     if eventSink != nil:
       # The client routes ``"stream":"stderr"`` diagnostics to its stderr.
       eventSink("diagnostic", summary, "{\"stream\":\"stderr\"}")

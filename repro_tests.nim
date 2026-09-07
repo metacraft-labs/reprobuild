@@ -10503,6 +10503,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim",
+    binary: "build/test-bin/t_preloaded_monitor_shim_is_loader_inert",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim",
     binary: "build/test-bin/t_private_repo_participates_via_evidence_without_source_exposure",
     defines: @[],

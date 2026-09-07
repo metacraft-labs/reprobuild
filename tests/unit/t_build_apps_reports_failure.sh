@@ -41,8 +41,17 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="$( cd "${SCRIPT_DIR}/../.." && pwd )"
 BUILD_APPS="${REPO_ROOT}/scripts/build_apps.sh"
 SOURCE_PATHS="${REPO_ROOT}/scripts/source_paths.sh"
+# ``build_apps.sh`` sources these two before it does anything, so the sandbox
+# has to carry them: the loader-inertness library it uses to refuse a monitor
+# shim that imposes a C runtime, and the dev-shell library that one falls back
+# to for the glibc symbol-version readers. Copied verbatim, like the two
+# scripts under test — a stub would let the sandbox disagree with the code that
+# ships about when a shim is refused.
+PRELOADED_SHIM_LOADER="${REPO_ROOT}/scripts/lib/preloaded_shim_loader.sh"
+DEV_SHELL_OVERRIDES="${REPO_ROOT}/scripts/lib/dev_shell_overrides.sh"
 
-for required in "${BUILD_APPS}" "${SOURCE_PATHS}"; do
+for required in "${BUILD_APPS}" "${SOURCE_PATHS}" \
+  "${PRELOADED_SHIM_LOADER}" "${DEV_SHELL_OVERRIDES}"; do
   if [ ! -f "${required}" ]; then
     echo "FIXTURE ERROR: missing ${required}" >&2
     exit 2
@@ -109,6 +118,7 @@ new_sandbox() {
   local sandbox="${SANDBOX_ROOT}/$1"
   mkdir -p \
     "${sandbox}/scripts" \
+    "${sandbox}/scripts/lib" \
     "${sandbox}/apps/alpha" \
     "${sandbox}/apps/beta" \
     "${sandbox}/tools/reprobuild-nix-daemon" \
@@ -120,6 +130,8 @@ new_sandbox() {
 
   cp "${BUILD_APPS}" "${sandbox}/scripts/build_apps.sh"
   cp "${SOURCE_PATHS}" "${sandbox}/scripts/source_paths.sh"
+  cp "${PRELOADED_SHIM_LOADER}" "${sandbox}/scripts/lib/preloaded_shim_loader.sh"
+  cp "${DEV_SHELL_OVERRIDES}" "${sandbox}/scripts/lib/dev_shell_overrides.sh"
 
   cat > "${sandbox}/apps/entrypoints.txt" <<'ENTRYPOINTS'
 # name path [extra-nim-flags...]

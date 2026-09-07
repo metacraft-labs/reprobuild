@@ -14,6 +14,7 @@ import repro_core/go_dep_scanner
 import repro_core/python_dep_scanner
 import repro_core/jsts_dep_scanner
 import repro_core/convention_attribution
+import repro_core/injected_libraries
 
 export types
 export paths
@@ -31,6 +32,7 @@ export go_dep_scanner
 export python_dep_scanner
 export jsts_dep_scanner
 export convention_attribution
+export injected_libraries
 
 const ReprobuildVersion* = "0.1.3"
 

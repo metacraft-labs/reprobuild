@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1477,
+    "nimTestBinaries": 1478,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 596,
-    "staticallyDetectedRuntimeCompilerFlowTests": 82,
-    "testEntries": 1482
+    "staticallyDetectedRuntimeCompilerFlowTests": 83,
+    "testEntries": 1483
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1118,7 +1118,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 638,
+      "integration": 639,
       "platform/destructive": 107,
       "pure unit": 596,
       "unclassified": 125
@@ -1233,9 +1233,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1477,
+    "nimTestBinaryCount": 1478,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1482
+    "testEntryCount": 1483
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3496,6 +3496,34 @@
         }
       ],
       "source": "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "subject",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd",
+            "fabShim",
+            "lib",
+            "needed",
+            "pair",
+            "probe",
+            "reproBin",
+            "scratch",
+            "subject"
+          ],
+          "line": 300,
+          "path": "tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let subject = tempRoot / \"cc\""
+        }
+      ],
+      "source": "tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim"
     },
     {
       "class": "integration",
@@ -25476,6 +25504,25 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_preloaded_monitor_shim_is_loader_inert",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

@@ -2016,6 +2016,31 @@ package reprobuild:
         threadsOn = true,
         paths = @[ioMonSrc, stackableHooksSrc],
         passL = @["-Wl,--version-script=" & linuxShimVersionScript],
+        # ``NIX_DONT_SET_RPATH`` is as load-bearing here as ``-static-libgcc``
+        # is on the Windows arm above, and for the same reason: this library is
+        # injected into processes NOBODY HERE BUILT, so it must resolve with no
+        # help from — and no imposition on — the host process's loader state.
+        #
+        # The nixpkgs ``ld`` wrapper adds an rpath entry for every ``-L``
+        # directory that supplies a library the link asked for. The C runtime's
+        # own ``lib`` directory always is one, so without this the shim ships
+        # with a DT_RUNPATH naming the C runtime it was linked against, and the
+        # loader then takes the shim's ``libm`` / ``librt`` / ``libpthread``
+        # from there into a process whose ``libc.so.6`` came from a different
+        # build. The symbol versions do not line up and the process dies before
+        # ``main``. What that looked like: every compile the engine started
+        # through a wrapper script on another C runtime failed with three
+        # loader lines and an "execution of an external program failed" naming
+        # the compiler, while the shim — the actual cause — appeared nowhere.
+        #
+        # The shim's DT_NEEDED list is the C runtime and nothing else, so it
+        # needs no rpath at all. The variable is understood by one family of
+        # toolchains and inert elsewhere, which is why it is not the guarantee:
+        # ``scripts/lib/preloaded_shim_loader.sh`` states the property, the
+        # ``build_apps.sh`` publish step refuses a shim that violates it, and
+        # ``tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim``
+        # gates it on the artifact this edge produces.
+        extraEnv = @[("NIX_DONT_SET_RPATH", "1")],
         nimcache = monitorShimNimcache,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))

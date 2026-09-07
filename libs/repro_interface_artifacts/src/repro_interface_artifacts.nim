@@ -2416,7 +2416,8 @@ proc runCommand(command: openArray[string];
   if result.exitCode != 0:
     let quoted = command.mapIt(shellQuote(it)).join(" ")
     raise newException(OSError, "command failed (" & $result.exitCode &
-      "): " & quoted & "\n" & result.output)
+      "): " & quoted & "\n" & result.output &
+      injectedLibraryNote(result.output))
 
 proc nimCompilerPath(): string =
   if cachedNimCompilerPath.len > 0:

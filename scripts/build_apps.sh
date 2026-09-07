@@ -11,6 +11,11 @@ mkdir -p build/bin build/lib build/nimcache
 # shellcheck source=scripts/source_paths.sh
 source scripts/source_paths.sh
 
+# The loader invariant the monitor shim has to satisfy before it may become the
+# library every monitored child is injected with. See the shim section below.
+# shellcheck source=scripts/lib/preloaded_shim_loader.sh
+source scripts/lib/preloaded_shim_loader.sh
+
 # ---------------------------------------------------------------------------
 # Artifact accounting: this script must never end a run that produced nothing
 # while leaving the previous run's binaries behind to answer for it.
@@ -253,6 +258,25 @@ esac
 # write its nimcache into its own source — pass an absolute writable dir.
 mkdir -p build/lib/tmp
 io_mon_status=0
+# NIX_DONT_SET_RPATH: the shim must not carry a C runtime of its own.
+#
+# The shim is LD_PRELOADed into processes this repository did not build —
+# compilers, linkers, shells, package tools — each linked against whatever C
+# runtime produced it. The nixpkgs `ld` wrapper adds an rpath entry for every
+# `-L` directory that supplies a library the link asked for, and the C
+# runtime's own `lib` directory always is one, so WITHOUT this the shim comes
+# out with a DT_RUNPATH naming the C runtime it was linked against. The loader
+# then resolves the shim's `libm` / `librt` / `libpthread` out of THAT
+# directory inside a process whose `libc.so.6` came from elsewhere, the symbol
+# versions do not line up, and the process dies before `main` with three loader
+# lines that name the compiler rather than the shim.
+#
+# The shim's only DT_NEEDED entries are the C runtime's own, so it needs no
+# rpath at all: every one of them must come from the host process. The variable
+# is nixpkgs-specific and inert under any other toolchain, which is why it is
+# not the guarantee — the refusal below is. See
+# `scripts/lib/preloaded_shim_loader.sh`.
+NIX_DONT_SET_RPATH=1 \
 IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib/tmp" \
 IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
 IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
@@ -292,6 +316,53 @@ fi
 # inline, which is what puts the shim in place before an engine build begins.
 staged_shim="build/lib/tmp/librepro_monitor_shim.${dll_ext}"
 verify_fresh_artifact "${staged_shim}" "io-mon monitor shim" || abort_if_failed
+
+# The staged shim must be observationally inert for the loader before it is
+# allowed to become the library every monitored child is injected with.
+#
+# This is the enforcement half of the NIX_DONT_SET_RPATH note above. That
+# variable is an opt-out understood by one family of toolchains; this is the
+# property itself, read off the artifact that was actually produced. Refusing
+# here rather than warning is deliberate: a shim that imposes a C runtime does
+# not fail visibly at build time at all — it fails much later, inside somebody
+# else's compile, as a loader error naming two directories and no cause.
+verify_shim_loader_inert() {
+  local shim="$1" imposed dir sonames
+  case "${REPRO_HOST_PLATFORM}" in
+    linux) ;;
+    *)
+      # DT_RUNPATH is an ELF concept. macOS carries LC_RPATH (handled by the
+      # dylib fixups) and Windows resolves by search order with no analogue.
+      return 0 ;;
+  esac
+  if ! command -v patchelf >/dev/null 2>&1; then
+    record_failure "monitor shim: patchelf is not on PATH, so the staged ${shim} cannot be checked for an imposed C runtime. This is refused rather than skipped: a shim that carries one loads fine here and kills every monitored compile that runs on a different C runtime. Install patchelf, or build from the dev shell, which provides it."
+    return 1
+  fi
+  imposed="$(preload_shim_imposed_runtime_dirs "${shim}")"
+  [ -n "${imposed}" ] || return 0
+  echo "" >&2
+  echo "monitor shim: ${shim} carries a C runtime on its own DT_RUNPATH:" >&2
+  while IFS="$(printf '\t')" read -r dir sonames; do
+    [ -n "${dir}" ] || continue
+    echo "  ${dir}" >&2
+    echo "      provides: ${sonames}" >&2
+  done <<EOF
+${imposed}
+EOF
+  echo "  This library is LD_PRELOADed into processes built elsewhere. With that" >&2
+  echo "  directory on its search path the loader takes the shim's libm/librt/" >&2
+  echo "  libpthread from it, into a process whose libc.so.6 came from another" >&2
+  echo "  build; the symbol versions do not line up and the process dies before" >&2
+  echo "  main, with a loader error naming the compiler instead of the shim." >&2
+  echo "  Remedy: the link must not add it. NIX_DONT_SET_RPATH=1 is set for the" >&2
+  echo "  shim build above; if it stopped working, see" >&2
+  echo "  scripts/lib/preloaded_shim_loader.sh rather than deleting this check." >&2
+  record_failure "monitor shim: the staged library imposes a C runtime on every process it is preloaded into"
+  return 1
+}
+verify_shim_loader_inert "${staged_shim}" || abort_if_failed
+
 if [ "${REPRO_DEFER_SHIM_PUBLISH:-0}" = "1" ]; then
   # Intentional skip, not a failure: the caller has taken responsibility for
   # publishing the staged library in a follow-up edge.

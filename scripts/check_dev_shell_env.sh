@@ -32,6 +32,11 @@
 #
 # Every assertion is positive: each one names something it must FIND, so a
 # scan that matches nothing fails rather than passing quietly.
+#
+# Two further checks, 5 and 6, are about LOADER STATE rather than about what
+# the shell is built from, and 6 is not about the shell at all — it is about
+# the monitor shim, which travels wherever an engine built here is run. They
+# are documented at length where they are, at the bottom of this file.
 
 set -uo pipefail
 
@@ -40,6 +45,8 @@ cd "$REPO_ROOT" || exit 1
 
 # shellcheck source=scripts/lib/dev_shell_overrides.sh
 source "$REPO_ROOT/scripts/lib/dev_shell_overrides.sh"
+# shellcheck source=scripts/lib/preloaded_shim_loader.sh
+source "$REPO_ROOT/scripts/lib/preloaded_shim_loader.sh"
 
 failures=0
 fail() {
@@ -558,6 +565,125 @@ case "$(uname -s)" in
     # the injection channels this check is about do not exist here.
     printf 'dev-shell: %s on %s; the loader-injection channels this check is about are linux-only.\n' \
       'one-glibc check not applicable' "$(uname -s)"
+    ;;
+esac
+
+# --- 6. the monitor shim imposes no C runtime on what it is preloaded into --
+#
+# Check 5 asks whether THIS SHELL hands a second C runtime to the programs
+# reprobuild spawns to reach a remote. This one asks a question with a much
+# wider blast radius and no shell in it at all: does the monitor shim, wherever
+# it is preloaded and by whomever, bring its own?
+#
+# It is a different question because the shim's reach is not the shell's.
+# Automatic monitoring injects it into every process a build action starts,
+# including builds of OTHER repositories driven by an engine built here — and
+# those processes run whatever compilers, linkers and wrapper scripts that
+# repository's toolchain happens to be, on whatever C runtime built them. The
+# shell the developer is standing in does not enter into it.
+#
+# What it cost, measured: an engine built from this tree could not run a single
+# `repro build` in a consumer repository. Every compile the engine started
+# through a wrapper script whose interpreter came from a different C runtime
+# died with three loader lines and an "execution of an external program failed"
+# naming the compiler — while the shim, which was the cause, appeared nowhere
+# in the output. The engine installed from a package survived only because ITS
+# shim happened to name a C runtime the wrapper could satisfy. That is a near
+# miss, not a safety margin, and it moves whenever either side is rebuilt.
+#
+# TWO ASSERTIONS, IN THIS ORDER, AND THE FIRST IS THE ONE THAT HOLDS BY
+# CONSTRUCTION:
+#
+#   a. the shim's DT_RUNPATH must name no directory that provides a C runtime.
+#      Decidable from the artifact alone, true or false on every host, and
+#      independent of which C runtimes a given machine happens to carry.
+#
+#   b. for any runtime it does impose, compare SYMBOL VERSIONS against the
+#      compiler drivers a build action can end up running here (and against
+#      their `#!` interpreters, which on this host is the process that actually
+#      has to survive the preload). This is what makes (a) worth enforcing
+#      rather than a style rule — and it is deliberately not a store-path
+#      comparison, for the reason set out at length in
+#      scripts/lib/dev_shell_overrides.sh: a different build is not a defect,
+#      an unsatisfiable symbol version is.
+#
+# (b) passing tells you very little on its own: it passes on any host whose
+# runtimes happen to be compatible, which is exactly the state that let this
+# go unseen. (a) is the invariant.
+case "$(uname -s)" in
+  Linux)
+    shim_path="$REPO_ROOT/build/lib/librepro_monitor_shim.so"
+    if [[ ! -f "$shim_path" ]]; then
+      # shellcheck disable=SC2016  # backticks quote a command for a human
+      # reader; nothing here is meant to be expanded.
+      printf 'monitor shim: %s\n' \
+        'not built (build/lib/librepro_monitor_shim.so); run `just build` for the loader-inertness check.'
+    elif ! preload_shim_have_elf_tools; then
+      # A missing tool is a failure, not a skip: the shim IS present, so this
+      # environment does inject loader state into every monitored child, and
+      # "we could not look" is the answer that let the defect ship.
+      fail "build/lib/librepro_monitor_shim.so is present, so every monitored
+      child is preloaded with it, but patchelf and/or readelf is not on PATH
+      and its DT_RUNPATH cannot be read. Remedy: run this from the dev shell
+      (\`direnv exec . just lint\`), which provides both."
+    else
+      mapfile -t shim_imposed < <(preload_shim_imposed_runtime_dirs "$shim_path")
+      mapfile -t shim_subjects < <(preload_shim_toolchain_subjects)
+      if [[ ${#shim_imposed[@]} -eq 0 ]]; then
+        printf 'monitor shim: %s (%d toolchain subject(s) on PATH).\n' \
+          'imposes no C runtime on the processes it is preloaded into' \
+          "${#shim_subjects[@]}"
+      else
+        printf 'FAIL: the monitor shim carries a C runtime on its own DT_RUNPATH:\n' >&2
+        for finding in "${shim_imposed[@]}"; do
+          IFS=$'\t' read -r f2 f3 <<<"$finding"
+          printf '  %s\n      provides: %s\n' "$f2" "$f3" >&2
+        done
+        mapfile -t shim_conflicts < <(
+          preload_shim_loader_conflicts "$shim_path" \
+            ${shim_subjects[@]+"${shim_subjects[@]}"})
+        if [[ ${#shim_conflicts[@]} -eq 0 ]]; then
+          printf '%s\n' \
+            '  No compiler driver resolvable from HERE is broken by it today — which is' \
+            '  the whole reason this is reported on the RUNPATH and not on a symptom.' \
+            '  The processes this shim is injected into are not this shell'"'"'s: they are' \
+            '  whatever a consumer repository'"'"'s toolchain spawns, on whatever C runtime' \
+            '  built it.' >&2
+        else
+          printf '%s\n' '  It already cannot be satisfied by:' >&2
+          for finding in "${shim_conflicts[@]}"; do
+            case "$finding" in
+              unreadable*)
+                IFS=$'\t' read -r _kind f2 f3 <<<"$finding"
+                printf '  %s\n      could not read: %s\n' "$f2" "$f3" >&2
+                ;;
+              *)
+                IFS=$'\t' read -r _kind f2 f3 f4 f5 f6 <<<"$finding"
+                printf '  %s\n      runs on: %s\n      shim imposes: %s\n      via: %s\n      missing: %s\n' \
+                  "$f2" "$f3" "$f5" "$f4" "$f6" >&2
+                ;;
+            esac
+          done
+        fi
+        # shellcheck disable=SC2016  # backticks quote a file name for a human
+        # reader; nothing here is meant to be expanded.
+        printf '%s\n' \
+          '  A preloaded library must be observationally inert for the loader: it is a' \
+          '  guest in a process built by somebody else and must take its C runtime from' \
+          '  that process, never supply one. Remedy: the shim'"'"'s link must not add the' \
+          '  entry (NIX_DONT_SET_RPATH=1 on the shim build in scripts/build_apps.sh and' \
+          '  on the monitor-shim edge in repro.nim). See' \
+          '  scripts/lib/preloaded_shim_loader.sh; do not relax the check.' >&2
+        failures=$((failures + 1))
+      fi
+    fi
+    ;;
+  *)
+    # Stated rather than skipped. DT_RUNPATH is an ELF concept: macOS carries
+    # LC_RPATH (see flake.nix's `fixup_macho_runtime.sh`) and Windows resolves
+    # DLLs by search order, with no per-library path baked into the artifact.
+    printf 'monitor shim: %s on %s; DT_RUNPATH is an ELF concept.\n' \
+      'loader-inertness check not applicable' "$(uname -s)"
     ;;
 esac
 
