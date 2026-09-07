@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1478,
-    "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 596,
+    "nimTestBinaries": 1480,
+    "pureUnitConsolidationGroups": 51,
+    "pureUnitTests": 598,
     "staticallyDetectedRuntimeCompilerFlowTests": 83,
-    "testEntries": 1483
+    "testEntries": 1485
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -324,6 +324,21 @@
       "sources": [
         "libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim",
         "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 3,
+      "defines": [],
+      "dependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "sources": [
+        "libs/repro_local_store/tests/t_sqlite_smoke.nim",
+        "libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim",
+        "libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1120,7 +1135,7 @@
       "graph-fixture": 16,
       "integration": 639,
       "platform/destructive": 107,
-      "pure unit": 596,
+      "pure unit": 598,
       "unclassified": 125
     },
     "graphOwnedTestArtifacts": [
@@ -1233,9 +1248,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1478,
+    "nimTestBinaryCount": 1480,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1483
+    "testEntryCount": 1485
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9189,6 +9204,42 @@
       "source": "libs/repro_local_store/tests/t_sqlite_smoke.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_win_store_gc_refuses_referenced_entry",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_win_store_hardlink_cap_falls_back_per_file",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
