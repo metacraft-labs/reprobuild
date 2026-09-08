@@ -8,6 +8,26 @@ const
   HcrAgentTransportScope* = "hcr-agent-protocol"
   HcrPatchRequestSchemaId* = "reprobuild.hcr.agent-protocol.patch-request.v1"
 
+  HcrMacosArm64DirectSupportProfile* =
+    "macos-arm64-direct-hcr-in-codetracer-v1"
+    ## The Mach-O/arm64 direct-patch profile (M26-M28).
+  HcrLinuxX86_64DirectSupportProfile* = "linux-x86_64-elf-direct-hcr-v1"
+    ## HLX-M0: the ELF/x86_64 direct-patch profile. Registered on the agent
+    ## wire alongside the macOS profile; the two are not interchangeable and
+    ## the session rejects a mismatch during negotiation. Must stay in sync
+    ## with `REPRO_HCR_AGENT_SUPPORT_PROFILE_LINUX_X86_64` in
+    ## `libs/repro_hcr_agent/c/repro_hcr_agent.h`.
+
+proc defaultDirectSupportProfile*(): string =
+  ## The profile a C agent compiled for this host advertises in its hello.
+  ## Empty when the host has no direct-patch arm at all.
+  when defined(macosx) and defined(arm64):
+    HcrMacosArm64DirectSupportProfile
+  elif defined(linux) and defined(amd64):
+    HcrLinuxX86_64DirectSupportProfile
+  else:
+    ""
+
 type
   HcrPatchMode* = enum
     hpmDirect

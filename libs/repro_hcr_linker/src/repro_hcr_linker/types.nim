@@ -21,6 +21,13 @@ type
 
   TrampolineKind* = enum
     tkAarch64BranchImm26
+    tkX86_64JmpRel32
+      ## HLX-M0: the Linux x86_64 published trampoline. Five bytes
+      ## (``E9 rel32``) stored inside a single naturally aligned 8-byte
+      ## window, per ``HCR/Linux-ELF-Provider.md`` §4.2. The kind exists so a
+      ## selection that would need a non-atomically-publishable 13- or 14-byte
+      ## encoding has no representation to fall into; far targets route through
+      ## an island in HLX-M2 and the published store stays this shape.
 
   TrampolinePlan* = object
     kind*: TrampolineKind

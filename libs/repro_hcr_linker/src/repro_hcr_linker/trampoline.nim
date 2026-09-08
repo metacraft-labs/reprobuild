@@ -1,3 +1,5 @@
+import std/strutils
+
 import repro_hcr_linker/types
 
 const
@@ -65,6 +67,71 @@ proc aarch64BranchImm26*(sourceAddress, destinationAddress: uint64;
     bytes: @[]
   )
   writeU32Le(result.bytes, encoded)
+
+const
+  X86_64JmpRel32Opcode* = 0xe9'u8
+  X86_64JmpRel32Bytes* = 5
+  X86_64PublicationWindowBytes* = 8
+  X86_64Nop* = 0x90'u8
+
+proc x86_64JmpRel32*(windowAddress, destinationAddress: uint64;
+                     nopSledBytes: uint32): TrampolinePlan =
+  ## Encode the Linux x86_64 published trampoline of design §4.2.
+  ##
+  ## ``windowAddress`` is the naturally aligned 8-byte publication window, not
+  ## the function entry: under ``-fcf-protection`` the entry holds ``endbr64``
+  ## and the window sits further in. The displacement is measured from the end
+  ## of the five-byte instruction, as the ISA specifies.
+  if nopSledBytes < uint32(X86_64PublicationWindowBytes):
+    raise newException(ValueError,
+      "x86_64 E9 rel32 publication requires an 8-byte aligned NOP window")
+  if (windowAddress and 7'u64) != 0:
+    raise newException(ValueError,
+      "x86_64 publication window is not 8-byte aligned: 0x" &
+        toHex(windowAddress, 16))
+  let displacement =
+    int64(destinationAddress) - int64(windowAddress + uint64(X86_64JmpRel32Bytes))
+  if displacement < low(int32).int64 or displacement > high(int32).int64:
+    raise newException(ValueError, "x86_64 E9 rel32 target is out of range")
+  let rel = uint32(cast[uint32](int32(displacement)))
+  result = TrampolinePlan(
+    kind: tkX86_64JmpRel32,
+    sourceAddress: windowAddress,
+    destinationAddress: destinationAddress,
+    displacementBytes: displacement,
+    bytes: @[X86_64JmpRel32Opcode]
+  )
+  result.bytes.add byte(rel and 0xff'u32)
+  result.bytes.add byte((rel shr 8) and 0xff'u32)
+  result.bytes.add byte((rel shr 16) and 0xff'u32)
+  result.bytes.add byte((rel shr 24) and 0xff'u32)
+
+proc x86_64PublishedWindowBytes*(plan: TrampolinePlan): seq[byte] =
+  ## The full 8-byte word actually stored: ``E9 dd dd dd dd 90 90 90``.
+  if plan.kind != tkX86_64JmpRel32:
+    raise newException(ValueError,
+      "publication window bytes are only defined for tkX86_64JmpRel32")
+  result = plan.bytes
+  while result.len < X86_64PublicationWindowBytes:
+    result.add X86_64Nop
+
+proc x86_64PublishedWindowWord*(plan: TrampolinePlan): uint64 =
+  ## The same word as an integer, in the little-endian order the single aligned
+  ## store writes it.
+  let bytes = x86_64PublishedWindowBytes(plan)
+  for i in countdown(X86_64PublicationWindowBytes - 1, 0):
+    result = (result shl 8) or uint64(bytes[i])
+
+proc decodeX86_64JmpRel32Destination*(windowAddress: uint64;
+                                      bytes: openArray[byte]): uint64 =
+  if bytes.len < X86_64JmpRel32Bytes:
+    raise newException(ValueError, "truncated x86_64 E9 rel32 trampoline")
+  if bytes[0] != X86_64JmpRel32Opcode:
+    raise newException(ValueError, "bytes do not encode an x86_64 E9 rel32 jump")
+  let rel = uint32(bytes[1]) or (uint32(bytes[2]) shl 8) or
+    (uint32(bytes[3]) shl 16) or (uint32(bytes[4]) shl 24)
+  let displacement = int64(cast[int32](rel))
+  uint64(int64(windowAddress + uint64(X86_64JmpRel32Bytes)) + displacement)
 
 proc decodeAarch64BranchImm26Destination*(sourceAddress: uint64;
                                           bytes: openArray[byte]): uint64 =
