@@ -26203,13 +26203,34 @@ proc runStoreCommand*(args: seq[string]): int =
   ##              SQLite index.
   ##   roots    — list the currently-registered roots.
   ##   list     — list every realized prefix recorded in the index.
+  ##   materialize <src-dir> <dst-dir>
+  ##            — reproduce a directory tree at another path using the
+  ##              store's OWN materialiser (hardlink per file, copy per
+  ##              file on failure), and report what it actually did.
+  ##
+  ## ``materialize`` exists so a consumer that composes a tree out of
+  ## store entries has ONE code path to compose it WITH. The alternative
+  ## is a bespoke copy loop, and a bespoke copy loop is the shape in
+  ## which a link tier degrades silently: the output is correct, the cost
+  ## is N times the disk and the I/O, nothing fails and nothing logs.
+  ## Because the composition goes through ``materializeDirectory``, the
+  ## per-file fallbacks and their CAUSES (per-file link cap /
+  ## cross-device / unsupported / shared-inode arm disabled) are counted
+  ## at the point the decision is taken and reported here, rather than
+  ## being inferred later from a tree that turned out to be fat.
+  ##
+  ## It is deliberately a plain directory→directory operation and does
+  ## not open the SQLite index: the source is a store entry only by
+  ## convention, and refusing to run against an unindexed directory would
+  ## make the verb useless for exactly the composition it exists for.
   ##
   ## Each subcommand accepts an optional `--store-root=PATH` to
   ## override the per-user default; the `$REPRO_STORE_ROOT` env var
   ## is honoured otherwise.
   if args.len == 0:
-    echo "usage: repro store {gc | recover | roots | list} " &
-      "[--store-root=PATH] [--grace-seconds=N]"
+    echo "usage: repro store {gc | recover | roots | list | " &
+      "materialize <src-dir> <dst-dir>} " &
+      "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode]"
     return 2
   if args[0] == "serve":
     # Executable-Consolidation M3: `repro store serve` is the store daemon
@@ -26222,23 +26243,55 @@ proc runStoreCommand*(args: seq[string]): int =
     return runStoreDaemonCommand(daemonArgs)
   var storeRootOverride = ""
   var graceSeconds = DefaultGcGraceSeconds
-  var sub = ""
+  var emitJson = false
+  # Materialisation defaults to the shared-inode arm being ALLOWED. The
+  # opposite default is the single most likely way for a composed tree to
+  # be a full byte copy on a filesystem where links work perfectly well,
+  # and it produces no error to notice. Declining it is therefore an
+  # explicit flag rather than something a caller inherits by silence.
+  var allowSharedInode = true
+  var positionals: seq[string] = @[]
   for raw in args:
     if raw.startsWith("--store-root="):
       storeRootOverride = raw[len("--store-root=") .. ^1]
     elif raw.startsWith("--grace-seconds="):
       graceSeconds = parseInt(raw[len("--grace-seconds=") .. ^1])
+    elif raw == "--json":
+      emitJson = true
+    elif raw == "--no-shared-inode":
+      allowSharedInode = false
     elif raw.startsWith("--"):
       stderr.writeLine("repro store: unknown flag: " & raw)
       return 2
-    elif sub.len == 0:
-      sub = raw
     else:
-      stderr.writeLine("repro store: unexpected argument: " & raw)
-      return 2
-  if sub.len == 0:
+      positionals.add raw
+  if positionals.len == 0:
     stderr.writeLine("repro store: missing subcommand")
     return 2
+  let sub = positionals[0]
+  if sub != "materialize" and positionals.len > 1:
+    stderr.writeLine("repro store: unexpected argument: " & positionals[1])
+    return 2
+
+  if sub == "materialize":
+    if positionals.len != 3:
+      stderr.writeLine("usage: repro store materialize <src-dir> <dst-dir> " &
+        "[--json] [--no-shared-inode]")
+      return 2
+    let srcDir = positionals[1]
+    let dstDir = positionals[2]
+    try:
+      var report: MaterializeReport
+      materializeDirectory(srcDir, dstDir, report,
+                           allowSharedInode = allowSharedInode)
+      if emitJson:
+        echo renderMaterializeReportJson(report, srcDir, dstDir)
+      else:
+        echo renderMaterializeReportText(report, srcDir, dstDir)
+      return 0
+    except CatchableError as err:
+      stderr.writeLine("repro store materialize: error: " & err.msg)
+      return 1
 
   let root = resolveStoreRoot(storeRootOverride)
   try:

@@ -285,6 +285,18 @@ proc cmdSubstitute(args: seq[string]): int =
   let res = substituteInProcess(hex, storeRoot, endpoints)
   if not res.ok:
     stderr.writeLine("substitute failed: " & res.reason)
+    # The per-action reasons, which is where the ANSWER is. The summary
+    # above names the endpoint and nothing else, so an operator whose
+    # substitute misses cannot tell "the key is not published" from
+    # "the producer key is not trusted for this cache" from "this build
+    # has no codec for the payload's compression" — three different
+    # problems with three different fixes, all reported identically.
+    # A consumer that falls back to a local build on a miss then records
+    # "substitute missed" for all three, and the operator has nothing to
+    # act on.
+    for outcome in res.outcomes:
+      if not outcome.ok and outcome.reason.len > 0:
+        stderr.writeLine("  " & outcome.reason)
     return 1
   if res.outcomes.len == 0:
     stderr.writeLine("substitute returned no outcomes for " & hex)
