@@ -630,6 +630,8 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     var definesList: seq[string] = @[]
     if edge.needsProviderMode: definesList.add("reproProviderMode")
     if edge.needsSsl: definesList.add("ssl")
+    if edge.source == "tests/unit/t_source_fetch_tool_metadata.nim":
+      definesList.add("reproInterfaceMode")
     if edge.source == BootIdUnavailableTest:
       definesList.add("reproShmIndexTestBootIdUnavailable")
     let definesLit = seqLiteral(definesList)

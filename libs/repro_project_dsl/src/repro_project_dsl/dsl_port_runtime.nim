@@ -3582,6 +3582,11 @@ proc registeredFetchSpec*(packageName: string): DslFetchSpec =
     extractStrip: 1,
     extractedRoot: "")
 
+proc sourceFetchHashTool*(hashAlg: DslSourceHashAlg): string =
+  case hashAlg
+  of dshaSha256: "sha256sum"
+  of dshaBlake3: "b3sum"
+
 # ---------------------------------------------------------------------------
 # DSL-port M9.R.6.1 — M9.I per-package flag-injection registry RETIRED.
 # ---------------------------------------------------------------------------
@@ -4022,9 +4027,7 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
       "\" | sha256sum -c -; ")
   of dshaBlake3:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
-      "\" | b2sum -a blake3 -c - || ")
-    script.add("echo \"" & escapedHash & "  " & escapedTarball &
-      "\" | blake3sum -c -; ")
+      "\" | b3sum -c -; ")
   if spec.kind == dfkDataFile:
     script.add("cp \"" & escapedTarball & "\" \"" &
       escapedStaged & "/source\"; ")
@@ -4135,10 +4138,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       of dshaBlake3: "blake3"
     let fetchScript = dslPortCustomFetchScriptShell(spec, fetchPath,
       extracted, fetchStamp)
-    let hashTools =
-      case spec.hashAlg
-      of dshaSha256: @["sha256sum"]
-      of dshaBlake3: @["b2sum", "blake3sum"]
+    let hashTools = @[sourceFetchHashTool(spec.hashAlg)]
     let fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
       copiesDataFile = spec.kind == dfkDataFile,
       archiveUrl = spec.url)

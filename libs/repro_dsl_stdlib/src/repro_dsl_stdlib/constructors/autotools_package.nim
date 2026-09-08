@@ -166,10 +166,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     case spec.hashAlg
     of dshaSha256: "sha256"
     of dshaBlake3: "blake3"
-  let hashTools =
-    case spec.hashAlg
-    of dshaSha256: @["sha256sum"]
-    of dshaBlake3: @["b2sum", "blake3sum"]
+  let hashTools = @[sourceFetchHashTool(spec.hashAlg)]
   # M9.R.15q.5.4 — support a relative ``file:./vendor/...`` URL form so
   # recipes that vendor a tarball can reference it without baking the
   # host's absolute path into the recipe. The relative path is resolved
@@ -204,9 +201,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
       "\" | sha256sum -c -; ")
   of dshaBlake3:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
-      "\" | b2sum -a blake3 -c - || ")
-    script.add("echo \"" & escapedHash & "  " & escapedTarball &
-      "\" | blake3sum -c -; ")
+      "\" | b3sum -c -; ")
   # M9.R.13b.4 — ``--force-local`` is the standard GNU/MSYS2 tar flag
   # that tells the extractor not to interpret a leading ``X:`` (drive
   # letter) as ``host:`` -- without it, ``tar -xf D:/.../foo.tar``

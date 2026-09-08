@@ -4754,36 +4754,24 @@ proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
 
 proc readPathOnlyBuildIdentity*(path: string): PathOnlyBuildIdentity
 
-proc mergeRecordedSourceProviderProfiles(profile: var PathOnlyToolProfile;
-                                         recipeDir: string) =
-  ## A source-built tool can itself rely on a non-source bootstrap adapter.
-  ## Carry those exact recorded profiles into consumers of the source tool.
-  ## Source profiles are recomputed from their install mirrors by the regular
-  ## transitive walk, so only non-source profiles are inherited here.
-  let identityPath = recipeDir / ".repro" / "build" / "repro" /
-    "from-source-tool-identities.rbtp"
-  if not fileExists(extendedPath(identityPath)):
-    return
-  try:
-    let identity = readPathOnlyBuildIdentity(identityPath)
-    for inherited in identity.profiles:
-      if inherited.installMethod == "from-source":
-        continue
-      for path in inherited.realizedStorePaths:
-        if path.len > 0 and path notin profile.realizedStorePaths:
-          profile.realizedStorePaths.add(path)
-      for path in inherited.pathSearchList:
-        addUniquePath(profile.pathSearchList, path)
-      for path in inherited.pkgConfigSearchList:
-        addUniquePath(profile.pkgConfigSearchList, path)
-      for path in inherited.cmakePrefixList:
-        addUniquePath(profile.cmakePrefixList, path)
-      for path in inherited.cpathList:
-        addUniquePath(profile.cpathList, path)
-      for path in inherited.libraryPathList:
-        addUniquePath(profile.libraryPathList, path)
-  except CatchableError:
-    discard
+proc mergeSourceDependencyProfile(profile: var PathOnlyToolProfile;
+                                  dependency: PathOnlyToolProfile) =
+  for path in dependency.realizedStorePaths:
+    if path.len > 0 and path notin profile.realizedStorePaths:
+      profile.realizedStorePaths.add(path)
+  if dependency.resolvedExecutablePath.len > 0:
+    addUniquePath(profile.pathSearchList, parentDir(dependency.resolvedExecutablePath))
+  if dependency.installMethod != "path":
+    for path in dependency.pathSearchList:
+      addUniquePath(profile.pathSearchList, path)
+  for path in dependency.pkgConfigSearchList:
+    addUniquePath(profile.pkgConfigSearchList, path)
+  for path in dependency.cmakePrefixList:
+    addUniquePath(profile.cmakePrefixList, path)
+  for path in dependency.cpathList:
+    addUniquePath(profile.cpathList, path)
+  for path in dependency.libraryPathList:
+    addUniquePath(profile.libraryPathList, path)
 
 proc populateFromSourceSearchPathsImpl(profile: var PathOnlyToolProfile;
                                        recipeDir: string;
@@ -4804,6 +4792,8 @@ proc populateFromSourceSearchPathsImpl(profile: var PathOnlyToolProfile;
   # sibling. An unresolved cycle-break tool is skipped, while a completed
   # source mirror remains part of the search-path closure.
   for useDef in m9r14fLoadInterfaceToolUses(recipeDir):
+    if useDef.depKind == "native":
+      continue
     for depName in m9r14fDepRecipeNames(useDef):
       let depDir = recipeRoot / depName
       if not fileExists(extendedPath(depDir / "repro.nim")):
@@ -4853,7 +4843,6 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
   var visited: HashSet[string] = initHashSet[string]()
   populateFromSourceSearchPathsImpl(profile, recipeDir, effectiveRoot,
     visited, 0)
-  mergeRecordedSourceProviderProfiles(profile, recipeDir)
 
 proc fromSourceSearchPathsCurrent*(profile: PathOnlyToolProfile): bool =
   ## Return whether a cached from-source profile still describes the
@@ -4862,6 +4851,29 @@ proc fromSourceSearchPathsCurrent*(profile: PathOnlyToolProfile): bool =
   ## ``lib`` changing to ``lib64``) without changing the consumer's project
   ## interface. Reusing the old identity in that case leaves pkg-config and
   ## the linker pointed at directories that no longer contain the dependency.
+  # Existence of the producer cannot validate its dependency identities or
+  # fallback selection. Re-resolve declared closures before reusing an identity.
+  if profile.lockIdentity.contains(":closure:"):
+    return false
+  let recipeDir =
+    if profile.installMethod == "from-source": profile.selectedStorePath
+    elif profile.installMethod in ["nix", "tarball", "scoop"] and
+        profile.executableName.len > 0:
+      m9r14fResolveRecipeDir(InterfaceToolUse(
+        packageSelector: profile.packageSelector,
+        executableName: profile.executableName), fromSourceRecipeRoot())
+    else: ""
+  let interfacePath = recipeDir /
+    ".repro/build/repro/project-interface.rbsz"
+  if recipeDir.len > 0 and fileExists(extendedPath(interfacePath)):
+    try:
+      let declared = readInterfaceArtifact(interfacePath).projectInterface
+      let uses = if profile.installMethod == "from-source": declared.toolUses
+                 else: declared.runtimeToolUses
+      if uses.len > 0:
+        return false
+    except CatchableError:
+      return false
   if profile.installMethod != "from-source":
     return true
   if profile.selectedStorePath.len == 0 or
@@ -5528,6 +5540,74 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     libraryPathList: profile.libraryPathList)
   result.actionFingerprint = actionFingerprintFor(result)
 
+proc resetSourceSearchPaths(profile: var PathOnlyToolProfile) =
+  if profile.installMethod != "from-source":
+    return
+  # The probe's directory walk is advisory. Consumption must use only the
+  # current, resolved closure, not partial mirrors or historical providers.
+  profile.pathSearchList = @[parentDir(profile.resolvedExecutablePath)]
+  profile.realizedStorePaths = @[profile.selectedStorePath]
+  profile.pkgConfigSearchList = @[]
+  profile.cmakePrefixList = @[]
+  profile.cpathList = @[]
+  profile.libraryPathList = @[]
+  populateFromSourceSearchPathsLocal(profile, profile.selectedStorePath)
+  refreshProfileIdentity(profile)
+
+proc resolveSourceDependencyClosure(profile: var PathOnlyToolProfile;
+                                    rootUse: InterfaceToolUse;
+                                    storeRoot: string) =
+  if profile.installMethod == "path" or profile.lockIdentity.endsWith(":dry-run"):
+    return
+  let sourceSelected = profile.installMethod == "from-source"
+  let rootRecipe = if sourceSelected: profile.selectedStorePath
+                   else: m9r14fResolveRecipeDir(rootUse, fromSourceRecipeRoot())
+  if rootRecipe.len == 0 or not fileExists(extendedPath(rootRecipe / "repro.nim")):
+    return
+  resetSourceSearchPaths(profile)
+  var pending = @[(recipeDir: rootRecipe, runtimeOnly: not sourceSelected)]
+  var visited = initHashSet[string]()
+  var resolvedUses: seq[InterfaceToolUse] = @[]
+  var payload: seq[byte] = @[]
+  var next = 0
+  while next < pending.len:
+    let entry = pending[next]
+    let recipeDir = absolutePath(entry.recipeDir)
+    inc next
+    let key = recipeDir & ":" & $entry.runtimeOnly
+    if key in visited:
+      continue
+    visited.incl(key)
+    let interfacePath = recipeDir / ".repro/build/repro/project-interface.rbsz"
+    if not fileExists(extendedPath(interfacePath)):
+      continue
+    let artifact = readInterfaceArtifact(interfacePath)
+    # Source artifacts retain legacy target/build dependencies as link closure.
+    # A selected bootstrap alternative activates only runtime dependencies.
+    let uses = if entry.runtimeOnly: artifact.projectInterface.runtimeToolUses
+               else: artifact.projectInterface.toolUses
+    for useDef in uses:
+      if useDef.depKind == "native":
+        continue
+      if useDef in resolvedUses:
+        continue
+      resolvedUses.add(useDef)
+      var dependency = toolProfileFor(useDef, tpmFromSource, "", storeRoot)
+      resetSourceSearchPaths(dependency)
+      profile.mergeSourceDependencyProfile(dependency)
+      payload.writeString(digestHex(dependency.profileFingerprint))
+      if dependency.installMethod == "from-source":
+        pending.add((dependency.selectedStorePath, false))
+      else:
+        let fallbackRecipe = m9r14fResolveRecipeDir(useDef, fromSourceRecipeRoot())
+        if fallbackRecipe.len > 0 and
+            fileExists(extendedPath(fallbackRecipe / "repro.nim")):
+          pending.add((fallbackRecipe, true))
+  if payload.len > 0:
+    profile.lockIdentity.add(":closure:" &
+      digestHex(blake3DomainDigest(payload, hdActionFingerprint)))
+    refreshProfileIdentity(profile)
+
 proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
                         mode: ToolProvisioningMode;
                         pathValue = getEnv("PATH");
@@ -5548,8 +5628,10 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
   result.projectName = artifact.projectInterface.projectName
   result.interfaceFingerprint = artifact.interfaceFingerprint
   for useDef in artifact.projectInterface.toolUses:
-    let profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
+    var profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
       producerExecutableSelectors, producerAuxSelectors)
+    if mode == tpmFromSource:
+      resolveSourceDependencyClosure(profile, useDef, storeRoot)
     result.profiles.add(profile)
     result.actionIdentities.add(actionIdentityFor(useDef, profile))
 

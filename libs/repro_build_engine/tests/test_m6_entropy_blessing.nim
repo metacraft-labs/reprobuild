@@ -159,6 +159,17 @@ proc published(scenario: Scenario; act: BuildAction): bool =
   ## consequence under test: the file the NEXT build's lookup reads.
   fileExists(dependencyEvidencePath(scenario.cacheRoot, act.id))
 
+proc checkCacheSkipTrace(run: BuildRunResult; event: string;
+                        reasons: openArray[string]) =
+  var skips: seq[SchedulerTraceEvent] = @[]
+  for item in run.trace:
+    if item.event.startsWith("cache-skip-"):
+      skips.add(item)
+  require skips.len == 1
+  check skips[0].event == event
+  check skips[0].detail == "action-cache publication skipped; reasons=" &
+    reasons.join(",")
+
 suite "M6 an unblessed tool's entropy costs it its cache entry":
 
   test "entropy from the program's own image blocks publication":
@@ -178,6 +189,7 @@ suite "M6 an unblessed tool's entropy costs it its cache entry":
     check fileExists(scenario.outputPath)
     # ...and it is not remembered.
     check not scenario.published(act)
+    checkCacheSkipTrace(run, "cache-skip-ineligible", ["unblessed-entropy"])
 
   test "entropy reported from OUTSIDE the main image blocks it too":
     ## The load-bearing case, and the one a plausible-looking implementation
@@ -214,6 +226,7 @@ suite "M6 an unblessed tool's entropy costs it its cache entry":
     let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
     check run.results[0].status == asSucceeded
     check not scenario.published(act)
+    checkCacheSkipTrace(run, "cache-skip-ineligible", ["unblessed-entropy"])
 
   test "the reason is stated, naming the source and the origin":
     ## A permanent cache miss that says nothing reads as a caching bug and
@@ -309,6 +322,7 @@ suite "M6 absence of evidence is not evidence of absence":
     let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
     check run.results[0].status == asSucceeded
     check not scenario.published(act)
+    checkCacheSkipTrace(run, "cache-skip-ineligible", ["entropy-unobservable"])
 
   test "the profile's supported= list alone is enough to fail closed":
     ## Isolates one of the two signals a blind capture carries. With both
@@ -455,6 +469,49 @@ suite "M6 the blast radius is one action":
     check run.results[0].status == asSucceeded
     for diagnostic in run.results[0].evidence.diagnostics:
       check "action-cache publish skipped" notin diagnostic
+
+suite "cache-ineligibility trace causes":
+
+  test "a missing backend profile reports unknown entropy observability":
+    let scenario = setupScenario("no-profile")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, @[fileRead(scenario.sourcePath)])
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
+    check run.results[0].status == asSucceeded
+    check not scenario.published(act)
+    checkCacheSkipTrace(run, "cache-skip-ineligible", ["entropy-observability-unknown"])
+
+  test "loss, entropy, and empty evidence keep distinct causes":
+    for loss in ["", "unknown", "known"]:
+      for entropy in [false, true]:
+        let scenario = setupScenario("trace-" & loss & "-" & $entropy)
+        defer: removeDir(scenario.root)
+        var records = observingProfileRecords()
+        if loss.len > 0:
+          records.add(fileRead(scenario.sourcePath))
+          records.add(MonitorRecord(kind: mrEventLoss,
+            observationKind: moEventLoss,
+            detail: (if loss == "unknown": "unmonitored subtree/peer"
+                     else: "process killed with an un-flushed read batch (kill-before-flush)")))
+        if entropy:
+          records.add(unattributedEntropyRead("getrandom"))
+        writeRmdf(scenario.rmdfPath, records)
+        let act = scenarioAction(scenario, ndpUnblessed)
+        let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
+        check run.results[0].status == asSucceeded
+        check scenario.published(act) == (loss == "known" and not entropy)
+        var reasons: seq[string] = @[]
+        if entropy: reasons.add("unblessed-entropy")
+        if loss.len == 0: reasons.add("empty-evidence")
+        if loss == "unknown": reasons.add("monitor-loss")
+        if reasons.len > 0:
+          checkCacheSkipTrace(run,
+            (if loss == "unknown": "cache-skip-monitor-loss"
+             else: "cache-skip-ineligible"), reasons)
+        else:
+          for item in run.trace:
+            check not item.event.startsWith("cache-skip-")
 
 suite "M6 evidence classification, in isolation":
 

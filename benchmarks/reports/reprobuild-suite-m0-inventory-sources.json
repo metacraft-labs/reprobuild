@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1489,
+    "nimTestBinaries": 1492,
     "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 600,
+    "pureUnitTests": 601,
     "staticallyDetectedRuntimeCompilerFlowTests": 84,
-    "testEntries": 1496
+    "testEntries": 1499
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1147,9 +1147,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 646,
+      "integration": 648,
       "platform/destructive": 107,
-      "pure unit": 600,
+      "pure unit": 601,
       "unclassified": 127
     },
     "graphOwnedTestArtifacts": [
@@ -1262,9 +1262,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1489,
+    "nimTestBinaryCount": 1492,
     "pythonTestFileCount": 7,
-    "testEntryCount": 1496
+    "testEntryCount": 1499
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5979,8 +5979,8 @@
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/test_m6_entropy_blessing.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 17,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21281,6 +21281,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cached_source_closure_preparation",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_build_engine",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cached_source_closure_preparation.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_cas_restore_outputs_cleans_temp_on_failure",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -29148,6 +29168,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cached_source_dependency_closure",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_cached_source_dependency_closure.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_capabilities",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -29217,7 +29256,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_constructor_fetch_tool_refs.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31131,6 +31170,27 @@
       "source": "tests/unit/t_shared_mime_info_dev_stub.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_source_fetch_tool_metadata",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [
+        "reproInterfaceMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_source_fetch_tool_metadata.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

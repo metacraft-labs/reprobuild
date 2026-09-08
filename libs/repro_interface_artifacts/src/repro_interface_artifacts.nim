@@ -268,6 +268,8 @@ type
     packageSelector*: string
     executableName*: string
     policyPath*: seq[string]
+    depKind*: string
+      ## Same role as PackageUseDef: target (also legacy empty), native, runtime.
     nixProvisioning*: seq[InterfaceNixProvisioning]
     tarballProvisioning*: seq[InterfaceTarballProvisioning]
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
@@ -449,8 +451,10 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 14'u16
-    ## v14 (current): retains package runtime dependencies in
+  EnvelopeVersion = 15'u16
+    ## v15 (current): retains dependency roles on InterfaceToolUse. Older
+    ##                payloads decode with the legacy empty/target role.
+    ## v14: retains package runtime dependencies in
     ##                ``ProjectInterface.runtimeToolUses``. The block follows
     ##                ``toolUses`` and precedes provisioning contributions.
     ## v13: adds fingerprint-bound provisioning contributions and
@@ -908,6 +912,8 @@ proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
   outp.writeString(useDef.packageSelector)
   outp.writeString(useDef.executableName)
   outp.writeStringSeq(useDef.policyPath)
+  if version >= 15'u16:
+    outp.writeString(useDef.depKind)
   let omitRealizations = forFingerprint and version >= 13'u16
   outp.writeU32Le(uint32(if omitRealizations: 0 else:
     useDef.nixProvisioning.len))
@@ -932,6 +938,8 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
   result.packageSelector = readString(bytes, pos)
   result.executableName = readString(bytes, pos)
   result.policyPath = readStringSeq(bytes, pos)
+  if version >= 15'u16:
+    result.depKind = readString(bytes, pos)
   if version >= 2'u16:
     let provisioningCount = int(readU32Le(bytes, pos))
     result.nixProvisioning = newSeq[InterfaceNixProvisioning](
@@ -1444,6 +1452,7 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
     packageSelector: useDef.packageSelector,
     executableName: useDef.executableName,
     policyPath: useDef.policyPath,
+    depKind: useDef.depKind,
     location: SourceLocation(file: useDef.sourceFile, line: useDef.sourceLine))
   for pkg in packages:
     if pkg.packageName == useDef.packageSelector:
@@ -1895,7 +1904,8 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
       seenResourceTypeIds.add(resource.typeId)
       result.publicResources.add(resource)
     for use in projection.toolUses:
-      let key = use.packageSelector & "\x1f" & use.executableName
+      let key = use.packageSelector & "\x1f" & use.executableName &
+        "\x1f" & use.depKind
       if seenToolUses.find(key) >= 0:
         continue
       seenToolUses.add(key)

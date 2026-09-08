@@ -408,13 +408,13 @@ suite "DSL-port M9.R.14f.1 — transitive libDirs union":
     check profile.pkgConfigSearchList.len >= 1
     check profile.cpathList.len >= 1
 
-  test "source provider inherits its recorded bootstrap profile":
+  test "source provider does not inherit historical bootstrap paths":
     let scratch = createTempDir("repro-m9r14f-1-bootstrap-", "")
     defer: removeDir(scratch)
 
     writeRecipeManifest(scratch, "gcc")
     discard writeInstallMirrorExecutable(scratch, "gcc", "gcc")
-    writeSyntheticInterface(scratch, "gcc", deps = @[])
+    writeSyntheticInterface(scratch, "gcc", deps = @["binutils"])
 
     let bootstrapRoot = scratch / "bootstrap-binutils"
     let bootstrapBin = bootstrapRoot / "bin"
@@ -435,9 +435,9 @@ suite "DSL-port M9.R.14f.1 — transitive libDirs union":
 
     var profile = PathOnlyToolProfile(installMethod: "from-source")
     populateFromSourceSearchPaths(profile, scratch / "gcc", scratch)
-    check absolutePath(bootstrapRoot) in profile.realizedStorePaths
-    check absolutePath(bootstrapBin) in profile.pathSearchList
-    check absolutePath(bootstrapLib) in profile.libraryPathList
+    check absolutePath(bootstrapRoot) notin profile.realizedStorePaths
+    check absolutePath(bootstrapBin) notin profile.pathSearchList
+    check absolutePath(bootstrapLib) notin profile.libraryPathList
 
   test "no_interface_artifact_falls_back_gracefully":
     # When the dep has NOT been built yet (no project-interface.rbsz),
