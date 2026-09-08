@@ -86,7 +86,8 @@ proc runRepro(reproBin, pathValue: string; cwd: string;
     args.add(a)
   let entries = @[
     ("PATH", pathValue),
-    ("REPRO_TOOL_PROVISIONING", "path")
+    ("REPRO_TOOL_PROVISIONING", "path"),
+    ("REPRO_DAEMON", "off")
   ]
   requireSuccess(shellCommand(args, entries), cwd)
 
@@ -102,6 +103,7 @@ suite "t_e2e_repro_run_lists_tasks_and_edges":
       let projectRoot = tempRoot / "project"
       createDir(projectRoot)
       writeTaskOnlyProject(projectRoot / "repro.nim")
+      let binDir = tempRoot / "bin"
       let pidPath = tempRoot / "daemon-pids"
       let wrapper = tempRoot / "runquotad-witness"
       writeExecutable(wrapper, "#!/bin/sh\n" &
@@ -126,8 +128,9 @@ suite "t_e2e_repro_run_lists_tasks_and_edges":
               break
             sleep(25)
           check posix.kill(pid, 0) != 0
-      proc invoke(bypass: string): CmdResult =
-        runShell(shellCommand(@[reproBin, "run", "task:greet"], @[
+      proc invoke(bypass: string; target = "task:greet"): CmdResult =
+        runShell(shellCommand(@[reproBin, "run", target], @[
+          ("PATH", binDir & $PathSep & getEnv("PATH")),
           ("RUNQUOTAD_BIN", wrapper),
           ("RUNQUOTA_SOCKET", tempRoot / "not-running.sock"),
           ("REPROBUILD_AUTO_RUNQUOTA", "1"),
@@ -149,6 +152,15 @@ suite "t_e2e_repro_run_lists_tasks_and_edges":
       check failed.code != 0
       check not failed.output.contains("task-only-hi")
       checkDaemonsStopped(2)
+      writeTool(binDir)
+      createDir(projectRoot / "src")
+      writeFile(projectRoot / "src" / "main.txt", "main v1\n")
+      writeProject(projectRoot / "repro.nim")
+      let namedRun = invoke("0", "app-run")
+      checkpoint namedRun.output
+      check namedRun.code == 0
+      check fileExists(projectRoot / "build" / "app")
+      checkDaemonsStopped(4)
 
   test "dev-env-only recipe lists and runs its task":
     let repoRoot = getCurrentDir()
@@ -213,6 +225,3 @@ suite "t_e2e_repro_run_lists_tasks_and_edges":
     check sourceModeOut.contains("greet")
     check sourceModeOut.contains("[run-edge]")
     check sourceModeOut.contains("app-run")
-
-    discard runRepro(reproBin, pathValue, projectRoot, ["run", "app-run"])
-    check fileExists(projectRoot / "build" / "app")

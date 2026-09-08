@@ -16038,8 +16038,8 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   else:
     let socket = runquotaEndpointPath(
       "reprobuild-runquota-" & $getCurrentProcessId())
-    if fileExists(socket):
-      removeFile(socket)
+    # fileExists excludes Unix sockets; removeFile also accepts a missing path.
+    removeFile(socket)
     var args = @[
       "--socket", socket,
       "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
