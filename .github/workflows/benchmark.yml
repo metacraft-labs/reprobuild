@@ -25,7 +25,7 @@ jobs:
         include:
           # GREEN PROOF ONLY: uncontended runner.
           - platform: linux
-            runner: '["eph-linux-x64"]'
+            runner: '["self-hosted", "Linux", "X64", "bare-metal", "nixos"]'
     runs-on: ${{ fromJSON(matrix.runner) }}
     steps:
       # Deliberately the first step. It decides whether the two
