@@ -1793,11 +1793,107 @@ proc concatenatedStrLit(node: NimNode): tuple[ok: bool; text: string] =
         return (true, lhs.text & rhs.text)
   (false, "")
 
-proc parsePlatformsSection(stmt: NimNode; pkg: var PackageDef) =
-  ## PMC-1 — parse a package-level ``platforms:`` declaration.
+proc isResolvedPlatformsForm(stmt: NimNode): bool =
+  ## Is this the CANONICAL ``platforms <expr>`` form — one command argument
+  ## that is an ordinary Nim expression?
   ##
-  ## Three shapes are accepted, all of which reach here as the ``platforms``
-  ## section head:
+  ##   platforms [windows]
+  ##   platforms [x86_64 * windows, aarch64 * windows]
+  ##   platforms desktopPlatforms
+  ##
+  ## Stage 1 of the ``package`` macro hands that expression to the compiler
+  ## inside ``withPlatformVocabulary``, so by the time the section handler runs
+  ## the VALUES are already known and there is nothing here to parse. The
+  ## legacy shapes (``platforms: [windows]`` with a colon block, or a trailing
+  ## ``msg =``) are not this, and keep their macro-time token walk below.
+  stmt.kind == nnkCommand and stmt.len == 2 and
+    stmt[1].kind notin {nnkExprEqExpr, nnkAsgn, nnkStmtList}
+
+proc applyResolvedPlatforms(stmt: NimNode; pkg: var PackageDef;
+                            resolved: seq[PlatformConstraintDef];
+                            docComment: string) =
+  ## Record the constraints stage 1 already evaluated.
+  ##
+  ## No token parsing happens here, and that is the point of the redesign: a
+  ## misspelled ``windwos`` never reaches this proc, because it failed earlier
+  ## as an undeclared identifier with the compiler's own caret. What IS still
+  ## checked are the things a VALUE can get wrong — an empty list, a repeated
+  ## coordinate, a cpu/os string a computed expression invented — because
+  ## ``platforms someSeq`` can produce all three and the const vocabulary
+  ## cannot rule them out.
+  ##
+  ## Diagnostics point at ``stmt``, which stage 1 deliberately left in the
+  ## body for exactly this reason. Per-entry carets are not available for a
+  ## computed expression (there are no per-entry nodes), so every message
+  ## names the offending coordinate in its text rather than relying on the
+  ## caret alone.
+  pkg.platformsDeclared = true
+  pkg.platformsMessage = docComment
+  let loc = lineFile(stmt)
+
+  proc describe(c: PlatformConstraintDef): string =
+    if c.cpu == "any" and c.os == "any": "any"
+    elif c.cpu == "any": c.os
+    elif c.os == "any": c.cpu
+    else: c.cpu & "-" & c.os
+
+  proc rejectMarkers(raw, axis, noun, expected: string) =
+    ## The vocabulary helpers are total by necessity -- see the comment above
+    ## ``narrowPlatformAxis``: an unhandled exception raised while evaluating
+    ## a ``static`` argument is DROPPED and the VM carries on (upstream
+    ## nim-lang/Nim#22623), so a helper that raised would turn a malformed
+    ## declaration into a silently wrong one rather than a compile error.
+    ## They encode the failure in the value instead, and this is where it
+    ## becomes a compile error, at the author's line.
+    if raw.startsWith(PlatformAxisConflict):
+      let parts = raw[PlatformAxisConflict.len .. ^1].split('|')
+      error("platforms: this entry narrows to both '" & parts[0] & "' and '" &
+        parts[1] & "' on the " & axis & " axis. One coordinate names one " &
+        noun & "; write two entries if you meant either of them.", stmt)
+    if raw.startsWith(PlatformAxisUnknown):
+      error("platforms: unknown platform token '" &
+        raw[PlatformAxisUnknown.len .. ^1] & "'. Expected " & expected &
+        ", or a <cpu>-<os> pair such as x86_64-windows. Microarchitecture " &
+        "levels (x86-64-v2, …) are a different axis and are not accepted " &
+        "here.", stmt)
+
+  for entry in resolved:
+    var constraint = entry
+    rejectMarkers(constraint.cpu, "CPU", "CPU family",
+      "one of " & KnownPlatformCpuTokens.join(" | "))
+    rejectMarkers(constraint.os, "OS", "operating system",
+      "one of " & KnownPlatformOsTokens.join(" | "))
+    constraint.cpu = canonicalPlatformCpuToken(
+      if constraint.cpu.len == 0: "any" else: constraint.cpu)
+    constraint.os = canonicalPlatformOsToken(
+      if constraint.os.len == 0: "any" else: constraint.os)
+    if constraint.cpu notin KnownPlatformCpuTokens:
+      error("platforms: '" & entry.cpu & "' is not a CPU family. Expected " &
+        "one of " & KnownPlatformCpuTokens.join(" | ") & ". (This value came " &
+        "from an expression rather than one of the platform consts, so the " &
+        "compiler could not reject it earlier.)", stmt)
+    if constraint.os notin KnownPlatformOsTokens:
+      error("platforms: '" & entry.os & "' is not an operating system. " &
+        "Expected one of " & KnownPlatformOsTokens.join(" | ") & ". (This " &
+        "value came from an expression rather than one of the platform " &
+        "consts, so the compiler could not reject it earlier.)", stmt)
+    constraint.sourceFile = loc.file
+    constraint.sourceLine = loc.line
+    for existing in pkg.declaredPlatforms:
+      if existing.cpu == constraint.cpu and existing.os == constraint.os:
+        error("platforms: '" & describe(constraint) & "' is named twice. A " &
+          "coordinate declared twice says nothing the first one did not, so " &
+          "it is a copy-paste slip rather than a wider declaration.", stmt)
+    pkg.declaredPlatforms.add(constraint)
+
+  if pkg.declaredPlatforms.len == 0:
+    error("platforms: must name at least one platform. An empty list would " &
+      "declare a package that can exist nowhere, which is never what an " &
+      "author means; delete the declaration to leave availability inferred " &
+      "from the provisioning arms.", stmt)
+
+proc parsePlatformsSection(stmt: NimNode; pkg: var PackageDef) =
+  ## PMC-1 — the LEGACY ``platforms:`` shapes, parsed from source text.
   ##
   ##   platforms: [windows]
   ##   platforms: [x86_64-windows, aarch64-windows]
@@ -1807,9 +1903,15 @@ proc parsePlatformsSection(stmt: NimNode; pkg: var PackageDef) =
   ##       "POSIX build."
   ##   platforms [windows], msg = "…"
   ##
-  ## ``msg`` mirrors Spack's ``requires(…, msg=…)``: it lets the author state
-  ## the reason, which is the one thing the resolver cannot infer and the
-  ## reason PMC-1's diagnostic exists at all.
+  ## Kept working because recipes in the wild use them, NOT because they are
+  ## the recommended spelling. Everything this proc does by reading
+  ## identifiers as text is what ``DSL-Macro-Authoring-Guide.md`` lists as the
+  ## anti-pattern: ``windows`` here is not a symbol, so a typo produces this
+  ## proc's message rather than the compiler's, name resolution answers to
+  ## this walker rather than to Nim's scope rules, and ``platforms: someSeq``
+  ## cannot work. The canonical ``platforms <expr>`` form (see
+  ## ``isResolvedPlatformsForm``) has none of those properties, and new
+  ## recipes should use it.
   var bracket: NimNode = nil
   var message = ""
   var sawMessage = false
@@ -1820,8 +1922,10 @@ proc parsePlatformsSection(stmt: NimNode; pkg: var PackageDef) =
     let folded = concatenatedStrLit(valueNode)
     if not folded.ok:
       error("platforms: msg must be a string literal (or a `&` chain of " &
-        "them): it is baked into the diagnostic at compile time and the " &
-        "macro cannot evaluate an expression here", valueNode)
+        "them) in this legacy form: the macro reads it at compile time and " &
+        "cannot evaluate an expression here. The canonical form has no " &
+        "`msg` at all — write the reason as a `##` doc comment above " &
+        "`platforms <expr>` and it becomes the message.", valueNode)
     message = folded.text
     sawMessage = true
 
@@ -1852,8 +1956,10 @@ proc parsePlatformsSection(stmt: NimNode; pkg: var PackageDef) =
     of nnkCommentStmt:
       discard
     else:
-      error("platforms: expects a [...] list of platform tokens, e.g. " &
-        "`platforms: [windows]`; got " & node.repr, node)
+      error("platforms: expects a [...] list of platform tokens; got " &
+        node.repr & ". The canonical form is `platforms [windows]` — one " &
+        "command argument, no colon — where the entries are ordinary " &
+        "expressions the compiler resolves.", node)
 
   for i in 1 ..< stmt.len:
     consume(stmt[i])
@@ -1977,12 +2083,34 @@ proc lintArmsAgainstDeclaredPlatforms(body: NimNode; pkg: PackageDef) =
       else:
         discard
 
-proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
+proc parsePackageDef(name: NimNode; body: NimNode;
+                     resolvedPlatforms: seq[PlatformConstraintDef] = @[]):
+    PackageDef =
+  ## ``resolvedPlatforms`` carries the values stage 1 of the ``package`` macro
+  ## already had the compiler evaluate. It is consulted only for the canonical
+  ## ``platforms <expr>`` form; the legacy shapes still parse their own tokens,
+  ## and a package with no ``platforms`` declaration ignores it entirely.
   let loc = lineFile(name)
   result.packageName = identText(name)
   result.sourceFile = loc.file
   result.sourceLine = loc.line
+  # The doc comment immediately preceding a statement documents THAT
+  # statement, the way it does everywhere else in Nim. Same accumulate-then-
+  # reset shape as ``parseVariantsSection``'s ``pendingDoc`` above, one level
+  # out: this walks the PACKAGE body where that walks a ``config:`` body. The
+  # two are not factored into a shared helper because the shape is three lines
+  # and the loops they live in are otherwise unrelated.
+  #
+  # ``platforms`` is the only section that reads it so far, so the tracker is
+  # reset by any non-comment statement and nothing else has to know about it.
+  var pendingDocComment = ""
   for stmt in body:
+    if stmt.kind == nnkCommentStmt:
+      if pendingDocComment.len > 0: pendingDocComment.add("\n")
+      pendingDocComment.add(stmt.strVal)
+      continue
+    let docForStmt = pendingDocComment
+    pendingDocComment = ""
     if calleeName(stmt).normalize == "executable":
       result.executables.add(parseExecutable(result.packageName, stmt))
     elif calleeName(stmt).normalize == "library":
@@ -2015,7 +2143,11 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       # provisioning arm has been collected.
       if result.platformsDeclared:
         error("platforms: may be declared only once per package", stmt)
-      parsePlatformsSection(stmt, result)
+      if isResolvedPlatformsForm(stmt):
+        applyResolvedPlatforms(stmt, result, resolvedPlatforms,
+                               docForStmt.strip())
+      else:
+        parsePlatformsSection(stmt, result)
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
         collectUses(stmt[i], @[], result.toolUses)

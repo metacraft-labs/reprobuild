@@ -1,5 +1,5 @@
 import std/[algorithm, json, locks, monotimes, options, os, osproc, net,
-    nativesockets, sets, streams, strtabs, strutils, tables, times]
+    nativesockets, sets, streams, strtabs, strutils, tables, tempfiles, times]
 
 # The OS is reached through a named symbol list on both platforms, never
 # wholesale. ``std/posix`` exports ``fork`` / ``execvp`` / ``posix_spawn``
@@ -4887,6 +4887,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
                      cacheRoot: string;
                      hostInProcess: bool): tuple[action: BuildAction;
                                                  diagnostic: string;
+                                                 capturePath: string;
                                                  hostInProcess: bool] =
   ## SEAM 1 of two (the other is ``preparedRunQuotaCommand``): everything that
   ## decides whether an action is monitored, and how, happens here.
@@ -4978,6 +4979,19 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # that starts no host — it fails the action instead of running it.
       result.hostInProcess = true
     else:
+      # The diagnostic path is shared by action ID, even across builds. Never
+      # consume it as this execution's evidence: another monitor can truncate
+      # or replace it after our child exits. Capture privately on the same
+      # filesystem, then fold before atomically publishing the diagnostic.
+      try:
+        createDir(depfile.parentDir)
+        let capture = createTempFile("." & depfile.extractFilename & ".capture-",
+          ".tmp", depfile.parentDir)
+        capture.cfile.close()
+        result.capturePath = capture.path
+      except CatchableError as err:
+        result.diagnostic = "cannot create monitor capture: " & err.msg
+        return
       # ``--interest`` is how the engine's event-interest REQUEST survives the
       # hop into a second process. It travels on the ARGV and not through the
       # environment because `REPRO_MONITOR_INTEREST` is io-mon's own channel to
@@ -4988,7 +5002,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # made this path's request silently different from the hosted path's —
       # see ``monitorInterest``.
       result.action.argv = @[monitorCli] & config.monitorCliArgs &
-        @["--depfile", depfile,
+        @["--depfile", result.capturePath,
           "--interest", interestToTokens(monitorInterest(action)),
           "--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
@@ -6273,6 +6287,12 @@ when defined(macosx):
   # spec's "reuse io-mon's existing population rather than re-implementing it".
   import stackable_hooks/propagation as sip_propagation
 
+  const nonSipShellCandidateNames* = ["sh", "bash", "dash", "ash", "zsh"]
+    ## Executable names accepted as the non-SIP wrapper shell, most-preferred
+    ## first. ``sh`` stays first so a host that does expose one keeps its
+    ## previous behaviour exactly; the rest exist because Nix and Homebrew put
+    ## ``bash`` on PATH and (almost) never a bare ``sh``.
+
   proc resolveNonSipShell*(): string =
     ## Resolve a non-SIP POSIX shell suitable for wrapping a monitored
     ## action's redirection (`sh -c "<argv> > out 2> err"`). Resolution order:
@@ -6282,9 +6302,21 @@ when defined(macosx):
     ##    SIP-rewrite target (``rewriteSipPath("/bin/sh", dir)``), so reusing it
     ##    keeps the engine's wrapper shell identical to the one the monitor's
     ##    own exec-redirect would pick.
-    ## 2. The first non-SIP ``sh`` on ``PATH`` (e.g. the Nix dev shell's bash).
-    ##    ``isSipProtected`` rejects ``/bin``, ``/sbin``, ``/usr/bin``,
-    ##    ``/usr/sbin`` candidates so a SIP shell is never selected here.
+    ## 2. The first non-SIP shell on ``PATH``, tried under each of
+    ##    ``nonSipShellCandidateNames`` in order. ``isSipProtected`` rejects
+    ##    ``/bin``, ``/sbin``, ``/usr/bin``, ``/usr/sbin`` candidates so a SIP
+    ##    shell is never selected here.
+    ##
+    ##    Probing more than ``sh`` is not a convenience. The doc above names
+    ##    "the dev shell's Nix/Homebrew bash" as the intended fallback, but a
+    ##    Nix profile links only ``bin/bash`` into a PATH directory — the
+    ##    ``bin/sh`` symlink stays behind in the package's own store output,
+    ##    which nothing puts on PATH. So on a stock Nix macOS host (CI runner or
+    ##    developer laptop) the only ``sh`` reachable by name is the SIP
+    ##    ``/bin/sh``, this proc returned ``""``, and every monitored action
+    ##    failed the fail-safe below. Each name here is invoked identically, as
+    ##    ``<shell> -c "umask 022 && <argv> > out 2> err"`` — plain POSIX that
+    ##    bash, dash, ash and zsh all honour.
     ##
     ## Returns ``""`` when only SIP-protected shells are available — the caller
     ## then enforces the Monitor-Hook-Shim.md:501 fail-safe for monitored
@@ -6295,16 +6327,51 @@ when defined(macosx):
       if fileExists(dropInSh) or symlinkExists(dropInSh):
         return dropInSh
     let pathEnv = getEnv("PATH")
-    for entry in pathEnv.split(PathSep):
+    for name in nonSipShellCandidateNames:
+      for entry in pathEnv.split(PathSep):
+        if entry.len == 0:
+          continue
+        let candidate = entry / name
+        if not fileExists(candidate):
+          continue
+        if sip_propagation.isSipProtected(candidate):
+          continue
+        return candidate
+    ""
+
+  proc nonSipShellSearchReport*(): string =
+    ## Human-readable account of what ``resolveNonSipShell`` just looked at.
+    ##
+    ## The fail-safe this feeds is unconditional and fatal, so its message has
+    ## to carry enough to diagnose the host it fired on. Without this, the error
+    ## says only "put a Nix/Homebrew sh on PATH" and the reader cannot tell
+    ## whether PATH was empty, whether CT_SANDBOX_TOOLS_DIR pointed somewhere
+    ## that lacks the drop-in, or whether shells were found and all rejected as
+    ## SIP-protected.
+    let sandboxDir = getEnv("CT_SANDBOX_TOOLS_DIR")
+    var parts: seq[string] = @[]
+    if sandboxDir.len == 0:
+      parts.add("CT_SANDBOX_TOOLS_DIR unset")
+    else:
+      let dropInSh = sip_propagation.rewriteSipPath("/bin/sh", sandboxDir)
+      parts.add("CT_SANDBOX_TOOLS_DIR=" & sandboxDir & " (no " & dropInSh & ")")
+    var pathDirs = 0
+    var rejected: seq[string] = @[]
+    for entry in getEnv("PATH").split(PathSep):
       if entry.len == 0:
         continue
-      let candidate = entry / "sh"
-      if not fileExists(candidate):
-        continue
-      if sip_propagation.isSipProtected(candidate):
-        continue
-      return candidate
-    ""
+      inc pathDirs
+      for name in nonSipShellCandidateNames:
+        let candidate = entry / name
+        if fileExists(candidate) and sip_propagation.isSipProtected(candidate):
+          rejected.add(candidate)
+    parts.add("searched " & $pathDirs & " PATH dir(s) for " &
+      nonSipShellCandidateNames.join("/"))
+    if rejected.len == 0:
+      parts.add("no shell of any candidate name found on PATH")
+    else:
+      parts.add("rejected as SIP-protected: " & rejected.join(", "))
+    parts.join("; ")
 
 proc bypassActionStdoutLogPath(cacheRoot, actionId: string): string =
   bypassActionLogDir(cacheRoot) / (actionId & ".stdout.log")
@@ -6402,7 +6469,8 @@ proc preparedRunQuotaCommand(action: BuildAction;
   when defined(macosx):
     if action.monitorDepfile.len > 0 and resolveNonSipShell().len == 0:
       raiseEngine("SIP-safe monitored launch requires a non-SIP shell; " &
-        "configure CT_SANDBOX_TOOLS_DIR or put a Nix/Homebrew sh on PATH")
+        "configure CT_SANDBOX_TOOLS_DIR or put a Nix/Homebrew sh on PATH " &
+        "[" & nonSipShellSearchReport() & "]")
   let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
@@ -8174,6 +8242,138 @@ proc builtinCopyDestinationMatches(source, destination: string): bool =
   else:
     true
 
+const busyReplacedSuffix = ".repro-replaced-"
+  ## Names a destination file that had to be renamed out of the way because a
+  ## live process still had it mapped. Deliberately appended AFTER the original
+  ## extension: a displaced ``libcrypto-3-x64.dll`` becomes
+  ## ``libcrypto-3-x64.dll.repro-replaced-1234-0``, which no longer matches the
+  ## ``*.dll`` sweep in ``stageHostDynlibsBesideBinary`` and so cannot be
+  ## re-staged into a scratch tree as if it were a real library.
+
+proc sweepBusyReplacedLeftovers(destination: string) =
+  ## Best-effort reaping of ``<destination>.repro-replaced-*`` files.
+  ##
+  ## The rename in ``copyFileReplacingBusyDestination`` always succeeds, but the
+  ## subsequent DELETE of the displaced file cannot: Windows refuses to unlink a
+  ## file that is still mapped as an image, and during the very build that
+  ## displaced it, it always is — the process holding it is that build's own
+  ## driver. So the delete is retried here, at the start of the next staging
+  ## attempt, by which time the holder has exited. This is the only place the
+  ## leftovers ever get collected, so it must also run on the no-op path where
+  ## the destination already matches and no copy happens at all.
+  let dir = destination.splitPath.head
+  let leaf = destination.extractFilename
+  if dir.len == 0 or leaf.len == 0 or not dirExists(extendedPath(dir)):
+    return
+  # Prefix match over walkDir, NOT a ``walkFiles`` glob. ``walkFiles`` carries a
+  # FindFirstFile workaround (std/private/osdirs.nim: "Windows bug/gotcha:
+  # 't*.nim' matches 'tfoo.nims'") that treats everything after the last dot in
+  # the PATTERN as an extension and then demands the match have an extension of
+  # the same length. ``libcrypto-3-x64.dll.repro-replaced-*`` therefore matches
+  # NOTHING — the sweep appears to run and silently reaps zero files forever.
+  # Verified the hard way: the first cut of this used the glob and left the real
+  # displaced DLLs sitting in build/bin across repeated green builds.
+  let prefix = leaf & busyReplacedSuffix
+  let dirExt = extendedPath(dir)
+  for kind, entry in walkDir(dirExt, relative = true):
+    if kind == pcFile and entry.startsWith(prefix):
+      discard tryRemoveFile(dirExt / entry)
+
+proc copyFileReplacingBusyDestination(source, destination: string) =
+  ## ``copyFileWithPermissions``, but able to replace a destination that a live
+  ## process still has open.
+  ##
+  ## Why this is needed at all: reprobuild stages its Windows runtime DLLs INTO
+  ## the same ``build/bin`` tree its own binaries run from (see the B5 block in
+  ## ``repro.nim``). Every one of those libraries is dlopen'd by leaf name, and
+  ## Win32's LoadLibrary searches the running .exe's own directory FIRST — that
+  ## co-location is the whole point of staging. The consequence is a genuine
+  ## self-conflict: ``build/bin/repro.exe`` (and the workers it spawns, and any
+  ## resident ``repro-daemon``) map ``build/bin/libcrypto-3-x64.dll``, and then
+  ## the build graph that same process is executing tries to overwrite that file.
+  ##
+  ## In the steady state ``builtinCopyDestinationMatches`` makes this a no-op, so
+  ## the conflict is invisible. It becomes a HARD WEDGE the moment the source
+  ## content changes — an OpenSSL bump, a re-provisioned toolchain. From then on
+  ## the copy is genuinely required, the destination is genuinely mapped, and the
+  ## staging action fails on EVERY build, forever: the driver cannot release a
+  ## library it needs in order to run. Stopping the daemon does not help, because
+  ## the driver itself is a holder. That is not a race to narrow; it is a
+  ## deadlock, and it must be broken rather than retried.
+  ##
+  ## The way out is a Windows asymmetry that is easy to miss: a mapped image
+  ## cannot be OPENED for writing or DELETED, but it CAN be RENAMED. Renaming it
+  ## aside leaves the holders running happily against the displaced file (Windows
+  ## tracks the mapping, not the name) and frees the name for the new content.
+  ## Note that plain write-to-temp-then-replace is NOT sufficient on its own:
+  ## replacing still has to unlink the mapped destination, which fails exactly as
+  ## the direct copy does. The rename is the load-bearing step.
+  ##
+  ## Sequenced as copy-to-temp, rename-away, rename-into-place so the destination
+  ## flips from old content to new in a single atomic step. It is never absent
+  ## and never partially written, which matters because concurrent workers are
+  ## loading that very path while this runs.
+  ##
+  ## The fallback is entered only after a plain copy fails with a sharing error.
+  ## That keeps the ordinary path — and all of POSIX — on exactly the code it
+  ## was on before, and it is safe to attempt second because a failed copy of a
+  ## mapped destination fails at the OPEN: it cannot have truncated anything.
+  when not defined(windows):
+    copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+  else:
+    const
+      errorAccessDenied = 5'i32
+      errorSharingViolation = 32'i32
+      errorUserMappedFile = 1224'i32
+
+    sweepBusyReplacedLeftovers(destination)
+    try:
+      copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+      return
+    except OSError as err:
+      if err.errorCode notin
+          [errorAccessDenied, errorSharingViolation, errorUserMappedFile] or
+          not fileExists(extendedPath(destination)):
+        # Not a busy destination — a missing source, a bad path, a full disk.
+        # Renaming would only obscure the real diagnostic.
+        raise
+
+    let incoming = destination & ".repro-incoming-" & $getCurrentProcessId()
+    discard tryRemoveFile(extendedPath(incoming))
+    copyFileWithPermissions(extendedPath(source), extendedPath(incoming))
+
+    # Pick a displaced name that is free. Leftovers from a still-running holder
+    # can legitimately be sitting there, so this cannot assume attempt 0 is
+    # available; the bound just refuses to spin forever on a pathological dir.
+    var displaced = ""
+    for attempt in 0 ..< 1024:
+      let candidate = destination & busyReplacedSuffix &
+        $getCurrentProcessId() & "-" & $attempt
+      if not fileExists(extendedPath(candidate)):
+        displaced = candidate
+        break
+    if displaced.len == 0:
+      discard tryRemoveFile(extendedPath(incoming))
+      raiseEngine("could not find a free name to displace a busy output: " &
+        destination)
+
+    try:
+      moveFile(extendedPath(destination), extendedPath(displaced))
+    except OSError:
+      discard tryRemoveFile(extendedPath(incoming))
+      raise
+    try:
+      moveFile(extendedPath(incoming), extendedPath(destination))
+    except OSError:
+      # The output must never be left missing: restore what we displaced before
+      # surfacing the failure.
+      moveFile(extendedPath(displaced), extendedPath(destination))
+      discard tryRemoveFile(extendedPath(incoming))
+      raise
+    # Expected to fail while a holder still has the displaced image mapped; the
+    # sweep above collects it on the next build.
+    discard tryRemoveFile(extendedPath(displaced))
+
 proc removeExistingPath(path: string) =
   let expanded = extendedPath(path)
   if symlinkExists(expanded) or fileExists(expanded):
@@ -8243,16 +8443,22 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       let destination = action.builtinPath(action.outputs[0])
       let destinationMatches =
         builtinCopyDestinationMatches(source, destination)
-      if not destinationMatches:
+      if destinationMatches:
+        # The no-op path is the ONLY moment a wedged staging action ever gets
+        # back to steady state, so it is also where the displaced files from an
+        # earlier busy replacement finally become deletable. See
+        # ``sweepBusyReplacedLeftovers``.
+        when defined(windows):
+          sweepBusyReplacedLeftovers(destination)
+      else:
         createDir(extendedPath(destination.splitPath.head))
         prepareBuiltinFileOutput(destination)
-      # Preserve the source file's mode bits — plain ``copyFile`` creates the
-      # destination with the process umask default (typically 0644), which
-      # silently drops the executable bit. CodeTracer's recipe copies the
-      # cargo-built ``replay-server`` / ``session-manager`` binaries through
-      # this action; without the exec bit they fail to launch (exit 126).
-      if not destinationMatches:
-        copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+        # Preserve the source file's mode bits — plain ``copyFile`` creates the
+        # destination with the process umask default (typically 0644), which
+        # silently drops the executable bit. CodeTracer's recipe copies the
+        # cargo-built ``replay-server`` / ``session-manager`` binaries through
+        # this action; without the exec bit they fail to launch (exit 126).
+        copyFileReplacingBusyDestination(source, destination)
     of bakEnsureDir:
       if action.outputs.len != 1:
         raiseEngine("ensureDir action requires exactly one output: " & action.id)
@@ -8375,8 +8581,10 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           prepareBuiltinFileOutput(destination)
           # Preserve source mode bits (notably the exec bit) — see the
           # bakCopyFile note above; preserveTree mirrors arbitrary trees that
-          # may contain executables.
-          copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+          # may contain executables. It mirrors DLLs too, and unlike bakCopyFile
+          # it has no identical-destination guard, so it re-copies every build —
+          # which makes the busy-destination hazard strictly worse here.
+          copyFileReplacingBusyDestination(source, destination)
         of ptekSymlink:
           if not symlinkExists(extendedPath(source)):
             raiseEngine("preserveTree source symlink disappeared before execution: " &
@@ -9471,6 +9679,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # Consulted before an action's cache entry is published and reported again at
   # the end of the build for the publications that had not finished by then.
   var monitorFlushFailures = initTable[string, string]()
+  var wrappedMonitorCaptures = initTable[string, string]()
   var launchedSucceeded = initHashSet[string]()
   var runQuotaDaemonReachable: Option[bool]
 
@@ -10430,6 +10639,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let monitorPlanStart = statStart()
         let plan = monitoredAction(action, config, cacheRoot,
           hostMonitorInProcess)
+        if plan.capturePath.len > 0:
+          wrappedMonitorCaptures[id] = plan.capturePath
         finishStat("repro monitor plan", monitorPlanStart)
         if plan.diagnostic.len > 0:
           statuses[id] = asFailed
@@ -11038,6 +11249,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           continue
         let evidenceStart = statStart()
+        var evidenceAction = action
+        let wrappedCapture = wrappedMonitorCaptures.getOrDefault(finished.id)
+        if wrappedCapture.len > 0:
+          evidenceAction.monitorDepfile = wrappedCapture
         var evidence =
           if runningItem.processKind == rpkMonitorHost:
             # HM-5 — fold from the records the host already has. The ``.iomon``
@@ -11046,10 +11261,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               hostedRecords = addr hostedMonitorRecords,
               config = addr config)
           else:
-            collectEvidence(action, strict = true,
+            collectEvidence(evidenceAction, strict = true,
               config = addr config)
         hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
+        if wrappedCapture.len > 0:
+          enqueueMonitorFlush(MonitorFlushJob(actionId: finished.id,
+            tempPath: wrappedCapture, destPath: action.monitorDepfile))
         # HM-5 — a publication that FAILED means this action's ``.iomon`` never
         # landed. Nothing is wrong with the action or its evidence, which came
         # from memory; what is missing is the artefact ``repro why`` and CI
@@ -11069,7 +11287,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # non-cacheable action, and every action's next edges up to this point
         # — still proceeds without waiting.
         let flushOutcomes =
-          if runningItem.processKind == rpkMonitorHost and action.cacheable:
+          if (runningItem.processKind == rpkMonitorHost or
+              wrappedCapture.len > 0) and action.cacheable:
             awaitMonitorFlush(finished.id)
           else:
             drainMonitorFlushOutcomes()
@@ -11129,6 +11348,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:
+        let wrappedCapture = wrappedMonitorCaptures.getOrDefault(finished.id)
+        if wrappedCapture.len > 0:
+          enqueueMonitorFlush(MonitorFlushJob(actionId: finished.id,
+            tempPath: wrappedCapture,
+            destPath: runningItem.action.monitorDepfile))
         runResult.trace(finished.id, "failed", "exit=" & $finished.exitCode)
         blockClosure(finished.id, finished.id)
         emitProgress(bpkActionCompleted, finished.id)
@@ -11215,6 +11439,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # because it also folds evidence back into slots. This line is what keeps
     # the guarantee whole for the tenant AFTER that one.
     awaitEnginePoolIdle()
+    # Launch, converter and cancellation failures may never enqueue a flush.
+    # Only this build's exclusive capture files belong to this cleanup.
+    for capture in wrappedMonitorCaptures.values:
+      try:
+        removeFile(capture)
+      except CatchableError as err:
+        runResult.trace("", "monitor-capture-cleanup-failed", err.msg)
   finishStat("repro scheduler total", totalStart)
   finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats

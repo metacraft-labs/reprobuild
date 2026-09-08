@@ -3732,7 +3732,60 @@ proc emitDeclaredPackageImports(sectionStmts: NimNode): NimNode =
             ident(importAliasFor(name)))))
 
 macro package*(name: untyped; body: untyped): untyped =
-  ## Top-level package declaration.
+  ## Top-level package declaration — STAGE 1.
+  ##
+  ## This stage interprets nothing. Its whole job is to find the canonical
+  ## ``platforms <expr>`` declaration, wrap that ONE sub-expression in a scope
+  ## where the platform vocabulary is bound, and hand both the resulting value
+  ## and the untouched body to ``packageImpl``. Everything else — every
+  ## section handler, every emission — happens in stage 2, unchanged.
+  ##
+  ## Why the split exists, in one line: it makes ``windows`` a symbol the
+  ## compiler resolves instead of an identifier a macro reads as text, which
+  ## is what gives a typo the compiler's own caret and spelling suggestion,
+  ## puts name resolution under Nim's scope rules rather than under this
+  ## macro's, and makes ``platforms desktopSet`` work with no second code
+  ## path. ``DSL-Macro-Authoring-Guide.md`` in reprobuild-specs has the long
+  ## version.
+  ##
+  ## The body is passed on VERBATIM, ``platforms`` statement included. Stage 2
+  ## therefore still holds the author's original nodes and can point
+  ## ``error(msg, node)`` at the right line — the diagnostics regression
+  ## usually assumed to be the price of staging is not one.
+  var declaredExpr: NimNode = bindSym"NoPlatformConstraints"
+  var seenPlatforms = false
+  for stmt in body:
+    # `platforms[windows]` — no space — is `nnkBracketExpr`, array indexing,
+    # not a call. Nothing downstream matches it, so without this it would
+    # reach the partition as ordinary user code and fail as "undeclared
+    # identifier: platforms" a long way from the actual mistake.
+    if stmt.kind == nnkBracketExpr and stmt.len >= 1 and
+       stmt[0].eqIdent("platforms"):
+      error("platforms: missing a space — `platforms[...]` is array " &
+        "indexing to Nim, not a declaration. Write `platforms [" &
+        (if stmt.len > 1: stmt[1].repr else: "windows") & "]`.", stmt)
+    if not isResolvedPlatformsForm(stmt) or not stmt[0].eqIdent("platforms"):
+      continue
+    if seenPlatforms:
+      error("platforms: may be declared only once per package", stmt)
+    seenPlatforms = true
+    declaredExpr = newCall(bindSym"withPlatformVocabulary",
+      newCall(bindSym"toConstraintDefs", stmt[1]))
+  # `ident`, not `bindSym`: stage 2 is declared BELOW this macro (it is the
+  # bulk of the file and reads better after the entry point), and `bindSym`
+  # resolves in the definition scope, where the name does not exist yet.
+  return newCall(ident("packageImpl"), name, declaredExpr, body)
+
+macro packageImpl*(name: untyped;
+                   resolvedPlatforms: static seq[PlatformConstraintDef];
+                   body: untyped): untyped =
+  ## Top-level package declaration — STAGE 2.
+  ##
+  ## ``resolvedPlatforms`` arrives as VALUES: stage 1 handed the author's
+  ## expression to the compiler, so ``windows`` has become
+  ## ``PlatformConstraint(cpu: "any", os: "windows")`` and a computed seq has
+  ## been evaluated. ``body`` arrives untyped and unmodified, so source
+  ## locations are still available for diagnostics.
   ##
   ## DSL-port M1 — the body is partitioned through
   ## ``partitionPackageBody`` (the production seam for v8's
@@ -3778,7 +3831,7 @@ macro package*(name: untyped; body: untyped): untyped =
   ##    ``let <name> = declareVariant[T](...)`` plus a trailing
   ##    ``finalizeVariants()`` call.
   let (sectionStmts, preservedStmts) = partitionPackageBody(body)
-  let pkg = parsePackageDef(name, body)
+  let pkg = parsePackageDef(name, body, resolvedPlatforms)
   let packageName = pkg.packageName
   # ── DSL-port M2: emit ``config:`` scalar registrations + ``versions:``
   # entries. The two emitters operate on the M1 ``sectionStmts``

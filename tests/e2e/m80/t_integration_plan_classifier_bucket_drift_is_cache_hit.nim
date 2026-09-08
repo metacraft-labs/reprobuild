@@ -47,7 +47,7 @@
 import std/[algorithm, json, os, osproc, streams, strtabs, strutils,
   tempfiles]
 
-import ct_test_unittest_parallel
+import std/unittest
 import repro_home_generations
 import repro_local_store
 import repro_test_support

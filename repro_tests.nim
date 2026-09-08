@@ -99,6 +99,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/ct_test_surface/tests/t_ct_test_surface_locator.nim",
+    binary: "build/test-bin/t_ct_test_surface_locator",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim",
     binary: "build/test-bin/t_backward_compat_std_unittest_test_runs_unchanged",
     defines: @[],
@@ -713,6 +722,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim",
     binary: "build/test-bin/test_umask_wrap_both_spawn_paths",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim",
+    binary: "build/test-bin/test_wrapped_monitor_evidence_ownership",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -3854,6 +3872,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_untyped_form_unchanged.nim",
     binary: "build/test-bin/t_dsl_outputs_untyped_form_unchanged",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim",
+    binary: "build/test-bin/t_dsl_platforms_resolved_form",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -8496,6 +8523,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_ct_test_surface_case_addressability.nim",
+    binary: "build/test-bin/t_ct_test_surface_case_addressability",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",
     binary: "build/test-bin/t_d1_buildnimunittest_resolves_in_path_mode",
     defines: @[],
@@ -9819,6 +9855,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_reuses_monitored_provider_metadata.nim",
+    binary: "build/test-bin/t_lock_refresh_reuses_monitored_provider_metadata",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_store_backend_roundtrip_each_backend.nim",
     binary: "build/test-bin/t_lock_store_backend_roundtrip_each_backend",
     defines: @[],
@@ -10280,6 +10325,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim",
     binary: "build/test-bin/t_platform_refusal_surfaces_through_realize_and_plan",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_platforms_form_diagnostics.nim",
+    binary: "build/test-bin/t_platforms_form_diagnostics",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -11349,6 +11403,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_switch_mainline_and_fetch.nim",
+    binary: "build/test-bin/t_switch_mainline_and_fetch",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_switch_new_branch_marks_feature_branch.nim",
     binary: "build/test-bin/t_switch_new_branch_marks_feature_branch",
     defines: @[],
@@ -12177,15 +12240,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/t_switch_mainline_and_fetch.nim",
-    binary: "build/test-bin/t_switch_mainline_and_fetch",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
     source: "tests/integration/t_workspace_sync_fetches_repos_in_parallel.nim",
     binary: "build/test-bin/t_workspace_sync_fetches_repos_in_parallel",
     defines: @[],
@@ -12206,6 +12260,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_sync_jobs_network_pool_bounds_concurrency.nim",
     binary: "build/test-bin/t_workspace_sync_jobs_network_pool_bounds_concurrency",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_sync_mainline_reconcile.nim",
+    binary: "build/test-bin/t_sync_mainline_reconcile",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -13432,6 +13495,8 @@ const pythonTestPaths*: seq[string] = @[
   "tests/test_dev_env_m9_policy.py",
   "tests/unit/test_cmake_generator_competitiveness_bench.py",
   "tests/unit/test_continuous_benchmarking_policy.py",
+  "tests/unit/test_ct_test_surface_addressability.py",
+  "tests/unit/test_dev_shell_hook_scope.py",
   "tests/unit/test_package_root_anchor.py",
   "tests/unit/test_reprobuild_suite_inventory.py"
 ]

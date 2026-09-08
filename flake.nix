@@ -98,7 +98,17 @@
       # Workspace locks pin sibling checkouts. This declaration and flake.lock
       # pin the standalone Nix input, which must also parse the CLI's --interest
       # flag when no sibling checkout overrides it.
-      url = "github:metacraft-labs/io-mon/0f9cf4eea7141c48c061f31863bc3f6018901f2a";
+      #
+      # Bumped to the revision that stops the Linux shim referencing
+      # nim-stackable-hooks' amd64-only raw-syscall substrate. This input is
+      # what `librepro_monitor_shim.so` is actually compiled from (the sandboxed
+      # package build and CI have no io-mon sibling), so the previous pin
+      # produced a shim with five undefined `stackable_linux_*` symbols on
+      # aarch64. LD_PRELOAD binds eagerly, so every `eph-linux-arm64` lane in
+      # the fleet died on the first monitored process with
+      # `undefined symbol: stackable_linux_chain_sigtrap` — surfacing as
+      # `repro build: error: interface extraction edge asFailed`.
+      url = "github:metacraft-labs/io-mon/65b190ba5704454dd33138a2dc82fac8fbc188d6";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -1696,6 +1706,10 @@
               pkgs.swtpm
             ];
             shellHook = ''
+              # Consumers may borrow this toolchain with `nix develop PATH`.
+              # Its repository checks belong only to a Reprobuild checkout.
+              if PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
+                  ${./scripts/is_reprobuild_checkout.sh}; then
               # Lend pre-commit back its own chained shim BEFORE its installer
               # runs, so the installer never meets a stale copy of its own
               # output beside the dispatcher. Without this, a shell entry that
@@ -1749,6 +1763,7 @@
               # never ran.
               PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
                 ${./scripts/pre_commit_hook_handoff.sh} after --hook pre-push || true
+              fi
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
               # ReproOS attestation: name the exact edk2 firmware pair the
