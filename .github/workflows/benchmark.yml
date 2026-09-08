@@ -92,9 +92,29 @@ jobs:
       # else for so long. It surfaces hundreds of lines below its cause as
       # `error: Failed to fetch git repository 'https://github.com/status-im/nim-bearssl'`,
       # while the real line is `fatal: could not read Username for
-      # 'https://github.com'` -- git reporting it had NO credential after a 401.
-      # A credential that IS offered and REJECTED reads `remote: Invalid username
-      # or token` instead. It is macOS-only by luck, not by design: the Linux leg
+      # 'https://github.com'`.
+      #
+      # That line does NOT by itself mean "no credential was sent" -- a tempting
+      # reading, and a false one. It means a 401 arrived and git had no
+      # credential HELPER to retry with. With `GIT_CONFIG_GLOBAL=/dev/null` and
+      # `GIT_CONFIG_NOSYSTEM=1` set, as they are below, a REJECTED preemptive
+      # `extraHeader` produces the identical line; only when a helper is
+      # reachable does git say `remote: Invalid username or token` instead.
+      # (Both measured, including through Nix's own fetcher.)
+      #
+      # What establishes that this fetch was anonymous is structural, not the
+      # message: the only git configuration these steps used to install was a
+      # URL-embedded `insteadOf` for `metacraft-labs/codetracer-native-recorder`,
+      # which cannot match a `status-im` URL, and the two GIT_CONFIG_* variables
+      # above removed everything else. Nothing was in a position to attach a
+      # credential.
+      #
+      # A consequence worth knowing when this next fails: after this change the
+      # same line means the OPPOSITE -- pair 1 below now matches, so `could not
+      # read Username` on a status-im URL indicates the token was REJECTED, not
+      # absent. Check the token, not the quota.
+      #
+      # It is macOS-only by luck, not by design: the Linux leg
       # runs on a persistent bare-metal host whose fetcher cache is already warm,
       # so it never performs the fetch, while `eph-macos-arm64` is cold every job.
       #
