@@ -78,6 +78,73 @@ jobs:
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
           substituters: ${{ vars.SUBSTITUTERS }}
           nix-github-token: ${{ secrets.GITHUB_TOKEN }}
+      # `bearssl-src` is a PUBLIC THIRD-PARTY `git+https://` flake input
+      # (`status-im/nim-bearssl`, plus its `status-im/BearSSL` submodule). Nix
+      # fetches it by exec'ing the `git` BINARY, and passes that subprocess no
+      # credential of its own -- not `access-tokens`, not `netrc-file`; neither
+      # appears anywhere in `libfetchers/{git,git-utils}.cc`. The two steps below
+      # additionally set `GIT_CONFIG_GLOBAL=/dev/null` and
+      # `GIT_CONFIG_NOSYSTEM=1`, so that fetch sees no ambient configuration
+      # either. It is therefore fully ANONYMOUS, and anonymous github.com traffic
+      # is rate-limited PER IP across this whole ephemeral fleet.
+      #
+      # That is the macOS-lane failure, and its shape is why it read as something
+      # else for so long. It surfaces hundreds of lines below its cause as
+      # `error: Failed to fetch git repository 'https://github.com/status-im/nim-bearssl'`,
+      # while the real line is `fatal: could not read Username for
+      # 'https://github.com'`.
+      #
+      # That line does NOT by itself mean "no credential was sent" -- a tempting
+      # reading, and a false one. It means a 401 arrived and git had no
+      # credential HELPER to retry with. With `GIT_CONFIG_GLOBAL=/dev/null` and
+      # `GIT_CONFIG_NOSYSTEM=1` set, as they are below, a REJECTED preemptive
+      # `extraHeader` produces the identical line; only when a helper is
+      # reachable does git say `remote: Invalid username or token` instead.
+      # (Both measured, including through Nix's own fetcher.)
+      #
+      # What establishes that this fetch was anonymous is structural, not the
+      # message: the only git configuration these steps used to install was a
+      # URL-embedded `insteadOf` for `metacraft-labs/codetracer-native-recorder`,
+      # which cannot match a `status-im` URL, and the two GIT_CONFIG_* variables
+      # above removed everything else. Nothing was in a position to attach a
+      # credential.
+      #
+      # A consequence worth knowing when this next fails: after this change the
+      # same line means the OPPOSITE -- pair 1 below now matches, so `could not
+      # read Username` on a status-im URL indicates the token was REJECTED, not
+      # absent. Check the token, not the quota.
+      #
+      # It is macOS-only by luck, not by design: the Linux leg
+      # runs on a persistent bare-metal host whose fetcher cache is already warm,
+      # so it never performs the fetch, while `eph-macos-arm64` is cold every job.
+      #
+      # A URL-embedded credential CANNOT fix this: git does not send a URL's
+      # userinfo preemptively, and a public repo never issues the 401 that would
+      # prompt it -- so the `insteadOf` pairs below authenticate the PRIVATE
+      # native-recorder and nothing public. An `extraHeader` is sent on every
+      # request including the first, so it does.
+      #
+      # And it works cross-org, which is the part that was assumed impossible:
+      # GitHub does not require a credential to be SCOPED to a repository to
+      # accept it on a PUBLIC one, only to be VALID. Measured with an
+      # installation token covering nothing in `status-im`
+      # (metacraft-github-actions run 34273033056, job 102219153977): the
+      # third-party fetch under this exact header returns rc=0 and the correct
+      # SHA, while a fake token in the same header is rejected outright -- so the
+      # header is being read, not ignored, and the fetch leaves the anonymous
+      # budget.
+      - name: Derive the preemptive credential for the third-party flake input
+        id: bearssl_auth
+        shell: bash
+        env:
+          TOK: ${{ steps.ci_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          blob="$(printf 'x-access-token:%s' "$TOK" | base64 | tr -d '\n')"
+          echo "::add-mask::$blob"
+          echo "header=AUTHORIZATION: basic ${blob}" >> "$GITHUB_OUTPUT"
+          echo "bearssl-auth: 'https://github.com/status-im/' will be fetched authenticated"
+
       - name: Build Reprobuild CMake fork
         env:
           # The native-recorder flake input deliberately uses git+https because
@@ -88,9 +155,16 @@ jobs:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
-          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_COUNT: '2'
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
+          # Pair 1 is the third-party one; see the long note above the
+          # `bearssl_auth` step. Scoped to the OWNER prefix, not the single
+          # repository, because git matches `http.<url>.*` by slash-delimited
+          # path prefix and `nim-bearssl`'s `status-im/BearSSL` submodule is a
+          # second fetch on the same anonymous budget.
+          GIT_CONFIG_KEY_1: http.https://github.com/status-im/.extraHeader
+          GIT_CONFIG_VALUE_1: ${{ steps.bearssl_auth.outputs.header }}
           NIX_CONFIG: >-
             access-tokens = github.com=${{ github.token }}
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token.outputs.token }}
@@ -109,9 +183,16 @@ jobs:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
-          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_COUNT: '2'
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
+          # Pair 1 is the third-party one; see the long note above the
+          # `bearssl_auth` step. Scoped to the OWNER prefix, not the single
+          # repository, because git matches `http.<url>.*` by slash-delimited
+          # path prefix and `nim-bearssl`'s `status-im/BearSSL` submodule is a
+          # second fetch on the same anonymous budget.
+          GIT_CONFIG_KEY_1: http.https://github.com/status-im/.extraHeader
+          GIT_CONFIG_VALUE_1: ${{ steps.bearssl_auth.outputs.header }}
           NIX_CONFIG: >-
             access-tokens = github.com=${{ github.token }}
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token.outputs.token }}
