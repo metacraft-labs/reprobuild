@@ -729,6 +729,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim",
+    binary: "build/test-bin/test_wrapped_monitor_evidence_ownership",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
     binary: "build/test-bin/t_cas_ingest_link",
     defines: @[],

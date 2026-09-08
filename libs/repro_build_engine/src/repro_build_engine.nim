@@ -1,5 +1,5 @@
 import std/[algorithm, json, locks, monotimes, options, os, osproc, net,
-    nativesockets, sets, streams, strtabs, strutils, tables, times]
+    nativesockets, sets, streams, strtabs, strutils, tables, tempfiles, times]
 
 # The OS is reached through a named symbol list on both platforms, never
 # wholesale. ``std/posix`` exports ``fork`` / ``execvp`` / ``posix_spawn``
@@ -4887,6 +4887,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
                      cacheRoot: string;
                      hostInProcess: bool): tuple[action: BuildAction;
                                                  diagnostic: string;
+                                                 capturePath: string;
                                                  hostInProcess: bool] =
   ## SEAM 1 of two (the other is ``preparedRunQuotaCommand``): everything that
   ## decides whether an action is monitored, and how, happens here.
@@ -4978,6 +4979,19 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # that starts no host — it fails the action instead of running it.
       result.hostInProcess = true
     else:
+      # The diagnostic path is shared by action ID, even across builds. Never
+      # consume it as this execution's evidence: another monitor can truncate
+      # or replace it after our child exits. Capture privately on the same
+      # filesystem, then fold before atomically publishing the diagnostic.
+      try:
+        createDir(depfile.parentDir)
+        let capture = createTempFile("." & depfile.extractFilename & ".capture-",
+          ".tmp", depfile.parentDir)
+        capture.cfile.close()
+        result.capturePath = capture.path
+      except CatchableError as err:
+        result.diagnostic = "cannot create monitor capture: " & err.msg
+        return
       # ``--interest`` is how the engine's event-interest REQUEST survives the
       # hop into a second process. It travels on the ARGV and not through the
       # environment because `REPRO_MONITOR_INTEREST` is io-mon's own channel to
@@ -4988,7 +5002,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # made this path's request silently different from the hosted path's —
       # see ``monitorInterest``.
       result.action.argv = @[monitorCli] & config.monitorCliArgs &
-        @["--depfile", depfile,
+        @["--depfile", result.capturePath,
           "--interest", interestToTokens(monitorInterest(action)),
           "--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
@@ -9611,6 +9625,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # Consulted before an action's cache entry is published and reported again at
   # the end of the build for the publications that had not finished by then.
   var monitorFlushFailures = initTable[string, string]()
+  var wrappedMonitorCaptures = initTable[string, string]()
   var launchedSucceeded = initHashSet[string]()
   var runQuotaDaemonReachable: Option[bool]
 
@@ -10570,6 +10585,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let monitorPlanStart = statStart()
         let plan = monitoredAction(action, config, cacheRoot,
           hostMonitorInProcess)
+        if plan.capturePath.len > 0:
+          wrappedMonitorCaptures[id] = plan.capturePath
         finishStat("repro monitor plan", monitorPlanStart)
         if plan.diagnostic.len > 0:
           statuses[id] = asFailed
@@ -11178,6 +11195,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           continue
         let evidenceStart = statStart()
+        var evidenceAction = action
+        let wrappedCapture = wrappedMonitorCaptures.getOrDefault(finished.id)
+        if wrappedCapture.len > 0:
+          evidenceAction.monitorDepfile = wrappedCapture
         var evidence =
           if runningItem.processKind == rpkMonitorHost:
             # HM-5 — fold from the records the host already has. The ``.iomon``
@@ -11186,10 +11207,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               hostedRecords = addr hostedMonitorRecords,
               config = addr config)
           else:
-            collectEvidence(action, strict = true,
+            collectEvidence(evidenceAction, strict = true,
               config = addr config)
         hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
+        if wrappedCapture.len > 0:
+          enqueueMonitorFlush(MonitorFlushJob(actionId: finished.id,
+            tempPath: wrappedCapture, destPath: action.monitorDepfile))
         # HM-5 — a publication that FAILED means this action's ``.iomon`` never
         # landed. Nothing is wrong with the action or its evidence, which came
         # from memory; what is missing is the artefact ``repro why`` and CI
@@ -11209,7 +11233,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # non-cacheable action, and every action's next edges up to this point
         # — still proceeds without waiting.
         let flushOutcomes =
-          if runningItem.processKind == rpkMonitorHost and action.cacheable:
+          if (runningItem.processKind == rpkMonitorHost or
+              wrappedCapture.len > 0) and action.cacheable:
             awaitMonitorFlush(finished.id)
           else:
             drainMonitorFlushOutcomes()
@@ -11269,6 +11294,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:
+        let wrappedCapture = wrappedMonitorCaptures.getOrDefault(finished.id)
+        if wrappedCapture.len > 0:
+          enqueueMonitorFlush(MonitorFlushJob(actionId: finished.id,
+            tempPath: wrappedCapture,
+            destPath: runningItem.action.monitorDepfile))
         runResult.trace(finished.id, "failed", "exit=" & $finished.exitCode)
         blockClosure(finished.id, finished.id)
         emitProgress(bpkActionCompleted, finished.id)
@@ -11355,6 +11385,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # because it also folds evidence back into slots. This line is what keeps
     # the guarantee whole for the tenant AFTER that one.
     awaitEnginePoolIdle()
+    # Launch, converter and cancellation failures may never enqueue a flush.
+    # Only this build's exclusive capture files belong to this cleanup.
+    for capture in wrappedMonitorCaptures.values:
+      try:
+        removeFile(capture)
+      except CatchableError as err:
+        runResult.trace("", "monitor-capture-cleanup-failed", err.msg)
   finishStat("repro scheduler total", totalStart)
   finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats
