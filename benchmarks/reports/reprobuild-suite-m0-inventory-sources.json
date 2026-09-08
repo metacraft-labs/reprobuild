@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1494,
+    "nimTestBinaries": 1496,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 601,
     "staticallyDetectedRuntimeCompilerFlowTests": 84,
-    "testEntries": 1501
+    "testEntries": 1503
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1147,10 +1147,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 650,
+      "integration": 651,
       "platform/destructive": 107,
       "pure unit": 601,
-      "unclassified": 127
+      "unclassified": 128
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1262,9 +1262,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1494,
+    "nimTestBinaryCount": 1496,
     "pythonTestFileCount": 7,
-    "testEntryCount": 1501
+    "testEntryCount": 1503
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -26842,6 +26842,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_runquota_long_temp_rendezvous",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_runquota_long_temp_rendezvous.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_s7_repro_build_restores_a_deleted_output",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -31116,6 +31134,23 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_run_consumes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_runquota_endpoint_paths",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_runquota_endpoint_paths.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,

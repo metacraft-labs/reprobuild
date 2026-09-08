@@ -11160,6 +11160,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_runquota_long_temp_rendezvous.nim",
+    binary: "build/test-bin/t_runquota_long_temp_rendezvous",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_s7_repro_build_restores_a_deleted_output.nim",
     binary: "build/test-bin/t_s7_repro_build_restores_a_deleted_output",
     defines: @[],
@@ -13322,6 +13331,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_run_consumes.nim",
     binary: "build/test-bin/t_run_consumes",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_runquota_endpoint_paths.nim",
+    binary: "build/test-bin/t_runquota_endpoint_paths",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
