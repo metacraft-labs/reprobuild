@@ -4129,6 +4129,12 @@ macro packageImpl*(name: untyped;
   # verify + extract) is a separate milestone (M9.K).
   let m9hFetchEmission = emitM9HFetch(packageName, classifiedSections)
   result.add(m9hFetchEmission)
+  if m9hFetchEmission.len > 0:
+    let fetchPackageName = newLit(packageName)
+    result.add(parseStmt(
+      "from repro_dsl_stdlib/source_fetch_tools import registerSourceFetchTools\n"))
+    result.add(quote do:
+      registerSourceFetchTools(`fetchPackageName`))
   # ── DSL-port M9.R.10b: default ``build:`` synthesis. When a recipe
   # declares ``fetch:`` AND no explicit ``build:`` block, dispatch to
   # the ``synthesizeMesonPackage`` / ``synthesizeCmakePackage`` /

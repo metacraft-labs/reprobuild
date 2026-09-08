@@ -103,9 +103,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
     of dfkTarball: "tarball"
     of dfkGitArchive: "git"
     of dfkDataFile: "data-file"
-  let hashTools = case spec.hashAlg
-    of dshaSha256: @["sha256sum"]
-    of dshaBlake3: @["b2sum", "blake3sum"]
+  let hashTools = @[sourceFetchHashTool(spec.hashAlg)]
   var fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
     copiesDataFile = spec.kind == dfkDataFile,
     archiveUrl = spec.url)
@@ -140,12 +138,8 @@ proc emitFetchAction*(projectRoot, packageName: string;
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
           "\" | sha256sum -c -; ")
       of dshaBlake3:
-        # b2sum -a blake3 is GNU coreutils' shape; some hosts ship
-        # ``blake3sum`` instead. Try the GNU spelling first.
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
-          "\" | b2sum -a blake3 -c - || ")
-        script.add("echo \"" & escapedHash & "  " & escapedTarball &
-          "\" | blake3sum -c -; ")
+          "\" | b3sum -c -; ")
       script.appendTarExtraction(tarball, staged, spec.extractStrip)
     of dfkGitArchive:
       # Shallow clone + archive. The git rev is verified by extracting
@@ -165,9 +159,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
           "\" | sha256sum -c -; ")
       of dshaBlake3:
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
-          "\" | b2sum -a blake3 -c - || ")
-        script.add("echo \"" & escapedHash & "  " & escapedTarball &
-          "\" | blake3sum -c -; ")
+          "\" | b3sum -c -; ")
       script.appendTarExtraction(tarball, staged, spec.extractStrip)
     of dfkDataFile:
       script.appendCurlDownload(tarball, spec.url)
@@ -177,9 +169,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
           "\" | sha256sum -c -; ")
       of dshaBlake3:
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
-          "\" | b2sum -a blake3 -c - || ")
-        script.add("echo \"" & escapedHash & "  " & escapedTarball &
-          "\" | blake3sum -c -; ")
+          "\" | b3sum -c -; ")
       script.add("cp \"" & escapedTarball & "\" \"" &
         escapedStaged & "/source\"; ")
     script.add("rm -rf \"" & escapedExtracted & "\"; ")

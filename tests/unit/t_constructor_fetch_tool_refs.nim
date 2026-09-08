@@ -1,4 +1,4 @@
-import std/[os, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 when defined(reproProviderMode):
   import repro_core
@@ -53,12 +53,12 @@ when defined(reproProviderMode):
       includeDefault = false)
     extractActions(fragment)
 
-  proc registerSha256Fetch(packageName: string) =
+  proc registerTestFetch(packageName: string; hashAlg = dshaSha256) =
     registerFetchSpec(
       packageName = packageName,
       url = "https://example.invalid/source.tar.gz",
       gitRevision = "",
-      hashAlg = dshaSha256,
+      hashAlg = hashAlg,
       hashHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       kind = dfkTarball,
       extractStrip = 1,
@@ -109,15 +109,15 @@ suite "constructor fetch tool identities":
       ]
       let expected = @["sh", "rm", "mkdir", "curl", "mv", "sha256sum",
         "tar", "gzip"]
-      check shellFetchToolIdentityRefs(@["b2sum", "blake3sum"],
+      check shellFetchToolIdentityRefs(@["b3sum"],
         copiesDataFile = true) ==
-          @["sh", "rm", "mkdir", "curl", "mv", "b2sum", "blake3sum",
+          @["sh", "rm", "mkdir", "curl", "mv", "b3sum",
             "cp"]
       check shellFetchToolIdentityRefs(@["sha256sum"],
         archiveUrl = "https://example.invalid/source.tar.xz?mirror=1") ==
           @["sh", "rm", "mkdir", "curl", "mv", "sha256sum", "tar", "xz"]
       for (packageName, kind, actionId) in cases:
-        registerSha256Fetch(packageName)
+        registerTestFetch(packageName)
         let action = findById(constructorActions(root, packageName, kind),
           actionId)
         check action.toolIdentityRefs == expected
@@ -141,10 +141,34 @@ suite "constructor fetch tool identities":
           removeDir(root)
       writeFile(root / "repro.nim", "package customFetchTest:\n  discard\n")
 
-      registerSha256Fetch(PackageName)
+      registerTestFetch(PackageName)
       let action = findById(customSynthActions(root, PackageName),
         "ccpp-fetch-" & PackageName)
       check action.toolIdentityRefs ==
         @["sh", "rm", "mkdir", "curl", "mv", "sha256sum", "tar", "gzip"]
+    else:
+      skip()
+
+  test "BLAKE3 fetch commands and identities select b3sum together":
+    when defined(reproProviderMode):
+      resetDslPortFetchState()
+      let root = createTempDir("repro-blake3-fetch-", "")
+      defer:
+        resetDslPortFetchState()
+        removeDir(root)
+      writeFile(root / "repro.nim", "package blake3FetchTest:\n  discard\n")
+      for kind in ConstructorKind:
+        let packageName = "blake3Fetch" & $kind
+        registerTestFetch(packageName, dshaBlake3)
+        var checked = false
+        for action in constructorActions(root, packageName, kind):
+          if "b3sum" notin action.toolIdentityRefs:
+            continue
+          checked = true
+          check "b2sum" notin action.toolIdentityRefs
+          check "blake3sum" notin action.toolIdentityRefs
+          check "| b3sum -c -;" in action.call.arguments[0].encodedValue
+          check "b2sum -a" notin action.call.arguments[0].encodedValue
+        check checked
     else:
       skip()

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1489,
+    "nimTestBinaries": 1490,
     "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 600,
+    "pureUnitTests": 601,
     "staticallyDetectedRuntimeCompilerFlowTests": 84,
-    "testEntries": 1496
+    "testEntries": 1497
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1149,7 +1149,7 @@
       "graph-fixture": 16,
       "integration": 646,
       "platform/destructive": 107,
-      "pure unit": 600,
+      "pure unit": 601,
       "unclassified": 127
     },
     "graphOwnedTestArtifacts": [
@@ -1262,9 +1262,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1489,
+    "nimTestBinaryCount": 1490,
     "pythonTestFileCount": 7,
-    "testEntryCount": 1496
+    "testEntryCount": 1497
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29217,7 +29217,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_constructor_fetch_tool_refs.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31131,6 +31131,27 @@
       "source": "tests/unit/t_shared_mime_info_dev_stub.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_source_fetch_tool_metadata",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [
+        "reproInterfaceMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_source_fetch_tool_metadata.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -5,6 +5,42 @@
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 
+package gzip:
+  provisioning:
+    nixPackage "nixpkgs#gzip", executablePath = "bin/gzip",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package xz:
+  provisioning:
+    nixPackage "nixpkgs#xz", executablePath = "bin/xz",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package bzip2:
+  provisioning:
+    nixPackage "nixpkgs#bzip2", executablePath = "bin/bzip2",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package b3sum:
+  provisioning:
+    nixPackage "nixpkgs#b3sum", executablePath = "bin/b3sum",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package sed:
+  provisioning:
+    nixPackage "nixpkgs#gnused", executablePath = "bin/sed",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package grep:
+  provisioning:
+    nixPackage "nixpkgs#gnugrep", executablePath = "bin/grep",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package ssh:
   provisioning:
     nixPackage "nixpkgs#openssh", executablePath = "bin/ssh",
