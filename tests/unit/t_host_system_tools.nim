@@ -2,6 +2,8 @@ import std/unittest
 
 import repro_project_dsl
 import repro_dsl_stdlib/packages/system_tools
+import repro_dsl_stdlib/packages/host_system_tools
+import repro_dsl_stdlib/nixpkgs_pin
 
 proc findPackage(name: string): PackageDef =
   for pkg in registeredPackages():
@@ -10,6 +12,15 @@ proc findPackage(name: string): PackageDef =
   raise newException(ValueError, "package not registered: " & name)
 
 suite "host system tool provisioning":
+  test "SSH commands select the pinned host OpenSSH executables":
+    for tool in ["ssh", "ssh-keygen"]:
+      let pkg = findPackage(tool)
+      check pkg.nixProvisioning.len == 1
+      check pkg.nixProvisioning[0].selector == "nixpkgs#openssh"
+      check pkg.nixProvisioning[0].executablePath == "bin/" & tool
+      check pkg.nixProvisioning[0].nixpkgsRev == CanonicalNixpkgsRev
+      check pkg.nixProvisioning[0].nixpkgsNarHash == CanonicalNixpkgsNarHash
+
   test "find uses the pinned Nix findutils provider":
     let pkg = findPackage("find")
     check pkg.nixProvisioning.len == 1
