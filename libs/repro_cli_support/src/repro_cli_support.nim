@@ -8851,10 +8851,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # Interface extraction does not evaluate the producer's build body.
         let producerOutDir = recipeDir / ".repro/build/repro"
         createDir(extendedPath(producerOutDir))
+        # Match preparation so the existing keyed session cache can reuse the
+        # producer's extraction after a build or binary-cache restoration.
         let producerArtifact = extractInterfaceEdge(recipeDir / "repro.nim",
           producerOutDir / "project-interface.rbsz",
           producerOutDir / "project-interface.nim",
-          reprobuildLibraryWorkDir(), producerOutDir / "iface-work",
+          reprobuildLibraryWorkDir(), producerOutDir / "provider-work",
           recipeDir, publicCliPath, producerOutDir / "build-engine-cache",
           buildStats, requireStub = false,
           bypassRunQuota = bypassRunQuota,
