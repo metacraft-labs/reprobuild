@@ -95,14 +95,10 @@
       # collecting categories an edge does not depend on. The enum, request
       # field, and environment codec are all introduced by this revision.
       #
-      # Advanced to io-mon `dev` HEAD (latest mainline) per an explicit cross-repo
-      # decision to base BOTH reprobuild and codetracer on the identical latest
-      # io-mon (see .github/sibling-repos' io-mon note). This keeps the Nix build
-      # input in lock-step with the CI sibling pin so a monitored build and a
-      # hermetic build compile against the same io_mon module set (`io_mon/depfile`
-      # among them). Only 5 commits ahead of the prior cb26b626 pin (Windows shim
-      # hooks/interpose + capabilities/render/types), depfile unchanged.
-      url = "github:metacraft-labs/io-mon/e2ee15afe8dd7f538ec2ce79af9a1aa512addce2";
+      # Workspace locks pin sibling checkouts. This declaration and flake.lock
+      # pin the standalone Nix input, which must also parse the CLI's --interest
+      # flag when no sibling checkout overrides it.
+      url = "github:metacraft-labs/io-mon/0f9cf4eea7141c48c061f31863bc3f6018901f2a";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -1700,6 +1696,10 @@
               pkgs.swtpm
             ];
             shellHook = ''
+              # Consumers may borrow this toolchain with `nix develop PATH`.
+              # Its repository checks belong only to a Reprobuild checkout.
+              if PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
+                  ${./scripts/is_reprobuild_checkout.sh}; then
               # Lend pre-commit back its own chained shim BEFORE its installer
               # runs, so the installer never meets a stale copy of its own
               # output beside the dispatcher. Without this, a shell entry that
@@ -1753,6 +1753,7 @@
               # never ran.
               PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
                 ${./scripts/pre_commit_hook_handoff.sh} after --hook pre-push || true
+              fi
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
               # ReproOS attestation: name the exact edk2 firmware pair the

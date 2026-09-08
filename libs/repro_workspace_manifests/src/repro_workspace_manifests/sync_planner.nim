@@ -346,3 +346,211 @@ proc planSync*(resolved: openArray[ResolvedRepo];
     let decision = classifyRepoState(repo, observations[i], rebaseOnForcePush)
     result.plan.decisions.add(decision)
     result.report.decisions.add(decision)
+
+# ---------------------------------------------------------------------------
+# `repro sync --mainline` — reconcile a branch with its repo's own mainline.
+#
+# A SEPARATE decision table from `planSync` above, deliberately. `planSync`
+# answers "is this checkout where the lock says it should be", comparing the
+# current branch against its own upstream and the locked revision. `--mainline`
+# answers a different question — "has trunk moved under my feature branch" —
+# against a different ref, and the two tables share no case. Folding them would
+# mean a `syncCase` whose meaning depended on a flag, which is exactly the kind
+# of overload that makes the report unreadable.
+#
+# Pure, like its sibling: the caller gathers the observation (fetch, rev-parse,
+# merge-base, and the `merge-tree` conflict prediction) and executes the plan.
+# Nothing here touches the filesystem, so the whole table is unit-testable.
+
+type
+  MainlineSyncFlavor* = enum
+    ## How a DIVERGED branch should be integrated. `msfFastForwardOnly` is the
+    ## bare `--mainline` default and integrates nothing: it fast-forwards what
+    ## can be fast-forwarded and reports the rest (CLI/sync.md §"Without
+    ## --rebase or --merge"). The two real flavors are chosen per invocation
+    ## because the answer depends on the diff, not on the repository.
+    msfFastForwardOnly
+    msfRebase
+    msfMerge
+
+  MainlineSyncCase* = enum
+    mscUpToDate          ## Branch already contains the mainline tip.
+    mscFastForwardable   ## Branch is an ancestor of mainline; FF is safe.
+    mscIntegrable        ## Diverged, a flavor was chosen, predicted clean.
+    mscDiverged          ## Diverged and no flavor chosen — report, don't guess.
+    mscConflict          ## Chosen flavor would conflict; repo left untouched.
+    mscDirty             ## Uncommitted changes; integration needs a clean tree.
+    mscDetachedHead      ## No branch to reconcile.
+    mscNoMainlineBranch  ## Fragment declares no `branch` to target.
+    mscNoMainlineRef     ## `<remote>/<mainline>` absent after fetching.
+    mscMissingCheckout   ## Nothing on disk.
+
+  MainlineSyncAction* = enum
+    msaNone
+    msaFastForward
+    msaRebase
+    msaMerge
+
+  MainlineSyncObservation* = object
+    ## One repo's git state, relative to ITS mainline. Every field is a fact
+    ## the caller measured; the planner adds no I/O of its own.
+    exists*: bool
+    isClean*: bool
+    currentBranch*: string     ## Empty when HEAD is detached.
+    headSha*: string
+    mainlineBranch*: string    ## The fragment's `branch`; empty if undeclared.
+    mainlineTip*: string       ## `<remote>/<mainlineBranch>`; empty if absent.
+    mainlineInHead*: bool      ## merge-base --is-ancestor <mainlineTip> HEAD
+    headInMainline*: bool      ## merge-base --is-ancestor HEAD <mainlineTip>
+    integrationConflicts*: bool
+      ## Result of the `merge-tree --write-tree` prediction. Only consulted
+      ## when a flavor is chosen AND the repo is diverged AND the tree is
+      ## clean; meaningless otherwise, and the planner never reads it outside
+      ## that case.
+
+  MainlineSyncDecision* = object
+    name*: string
+    path*: string
+    syncCase*: MainlineSyncCase
+    action*: MainlineSyncAction
+    branch*: string          ## The branch being reconciled.
+    mainlineBranch*: string  ## What it is being reconciled WITH.
+    message*: string
+    refusalReason*: string
+
+proc mainlineSyncCaseTag*(c: MainlineSyncCase): string =
+  ## Stable snake_case identifiers for the JSON report, matching the names
+  ## CLI/sync.md §"Refusal cases" uses verbatim.
+  case c
+  of mscUpToDate: "up_to_date"
+  of mscFastForwardable: "fast_forwarded"
+  of mscIntegrable: "integrated"
+  of mscDiverged: "diverged"
+  of mscConflict: "conflict"
+  of mscDirty: "dirty"
+  of mscDetachedHead: "detached_head"
+  of mscNoMainlineBranch: "no_mainline_branch"
+  of mscNoMainlineRef: "no_mainline_ref"
+  of mscMissingCheckout: "missing_checkout"
+
+proc mainlineSyncActionTag*(a: MainlineSyncAction): string =
+  case a
+  of msaNone: "none"
+  of msaFastForward: "fast_forward"
+  of msaRebase: "rebase"
+  of msaMerge: "merge"
+
+proc classifyMainlineSync*(resolved: ResolvedRepo;
+                           obs: MainlineSyncObservation;
+                           flavor: MainlineSyncFlavor): MainlineSyncDecision =
+  ## The whole `--mainline` decision table, in one place and in priority order.
+  result.name = resolved.name
+  result.path = resolved.path
+  result.branch = obs.currentBranch
+  result.mainlineBranch = obs.mainlineBranch
+  result.action = msaNone
+
+  if not obs.exists:
+    result.syncCase = mscMissingCheckout
+    result.refusalReason = "no checkout at '" & resolved.path &
+      "' — run `repro sync` or `repro workspace pull` first"
+    result.message = result.refusalReason
+    return
+
+  # The manifest is this mode's input, so an incomplete fragment is named
+  # rather than skipped — the same rule `switch --mainline` follows.
+  if obs.mainlineBranch.len == 0:
+    result.syncCase = mscNoMainlineBranch
+    result.refusalReason = "repo '" & resolved.path &
+      "' declares no `branch` in its manifest fragment" &
+      (if resolved.fragmentPath.len > 0: " (" & resolved.fragmentPath & ")"
+       else: "") & " — `--mainline` reconciles toward that field"
+    result.message = result.refusalReason
+    return
+
+  if obs.currentBranch.len == 0:
+    result.syncCase = mscDetachedHead
+    result.refusalReason = "repo '" & resolved.path &
+      "' is in detached HEAD; there is no branch to reconcile with '" &
+      obs.mainlineBranch & "'"
+    result.message = result.refusalReason
+    return
+
+  if obs.mainlineTip.len == 0:
+    result.syncCase = mscNoMainlineRef
+    result.refusalReason = "no remote-tracking branch for mainline '" &
+      obs.mainlineBranch & "' in repo '" & resolved.path &
+      "' after fetching — correct the fragment's `branch`, or restore that " &
+      "branch on the remote"
+    result.message = result.refusalReason
+    return
+
+  # Already carries trunk: identical, or the branch is strictly ahead. Both are
+  # "nothing to integrate" — being ahead of trunk is the normal state of a
+  # feature branch whose trunk has not moved, not something to act on.
+  if obs.mainlineInHead:
+    result.syncCase = mscUpToDate
+    result.message = "'" & obs.currentBranch & "' already contains '" &
+      obs.mainlineBranch & "'"
+    return
+
+  # No local commits of its own and trunk moved: a fast-forward, which needs no
+  # decision and cannot rewrite anything.
+  if obs.headInMainline:
+    result.syncCase = mscFastForwardable
+    result.action = msaFastForward
+    result.message = "fast-forward '" & obs.currentBranch & "' to '" &
+      obs.mainlineBranch & "'"
+    return
+
+  # Genuinely diverged from here on: both sides moved.
+  if flavor == msfFastForwardOnly:
+    result.syncCase = mscDiverged
+    result.refusalReason = "'" & obs.currentBranch & "' and '" &
+      obs.mainlineBranch & "' have both advanced in repo '" & resolved.path &
+      "' — integrating is a judgment call. Re-run with --rebase to replay " &
+      "your commits onto '" & obs.mainlineBranch & "', or --merge to record " &
+      "a merge (scope it with --only=" & resolved.name & " if the answer " &
+      "differs per repo)."
+    result.message = result.refusalReason
+    return
+
+  # A flavor was chosen. Both `rebase` and `merge` require a clean tree, and a
+  # conflict prediction made against a dirty one would not describe what the
+  # operator would actually get.
+  if not obs.isClean:
+    result.syncCase = mscDirty
+    result.refusalReason = "repo '" & resolved.path &
+      "' has uncommitted changes; commit or stash them before integrating '" &
+      obs.mainlineBranch & "' into '" & obs.currentBranch & "'"
+    result.message = result.refusalReason
+    return
+
+  if obs.integrationConflicts:
+    result.syncCase = mscConflict
+    result.refusalReason = "integrating '" & obs.mainlineBranch & "' into '" &
+      obs.currentBranch & "' in repo '" & resolved.path &
+      "' would conflict; the repo is UNTOUCHED. Resolve it there (git -C " &
+      resolved.path & " " &
+      (if flavor == msfRebase: "rebase" else: "merge") & " " &
+      obs.mainlineBranch & "), then re-run."
+    result.message = result.refusalReason
+    return
+
+  result.syncCase = mscIntegrable
+  result.action = if flavor == msfRebase: msaRebase else: msaMerge
+  result.message =
+    (if flavor == msfRebase: "rebase '" else: "merge '") &
+    obs.currentBranch & "' onto '" & obs.mainlineBranch & "'"
+
+proc planMainlineSync*(resolved: openArray[ResolvedRepo];
+                       observations: openArray[MainlineSyncObservation];
+                       flavor: MainlineSyncFlavor):
+                      seq[MainlineSyncDecision] =
+  ## One decision per resolved repo, in declaration order.
+  if resolved.len != observations.len:
+    raise newException(ValueError,
+      "planMainlineSync requires one observation per resolved repo (got " &
+        $resolved.len & " repos and " & $observations.len & " observations)")
+  for i, repo in resolved:
+    result.add(classifyMainlineSync(repo, observations[i], flavor))

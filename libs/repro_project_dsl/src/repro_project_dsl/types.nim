@@ -476,6 +476,20 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  PlatformConstraint* = object
+    ## The VALUE a `platforms` entry evaluates to.
+    ##
+    ## Distinct from `PlatformConstraintDef`, which is the stored model: this
+    ## is what the author's expression produces, and it exists so `windows` can
+    ## be a real `const` the compiler resolves rather than an identifier a
+    ## macro reads as text. See `DSL-Macro-Authoring-Guide.md` in
+    ## reprobuild-specs -- the three defects that motivated it (identifiers
+    ## that are not symbols; a source with two readings that Nim's scope rules
+    ## do not get to arbitrate; computed expressions impossible) all follow
+    ## from the text-reading shape.
+    cpu*: string
+    os*: string
+
   PackageDef* = object
     packageName*: string
     lockFile*: string

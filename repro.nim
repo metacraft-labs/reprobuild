@@ -343,6 +343,8 @@ package reprobuild:
     # ``NIX_LDFLAGS`` from the shell that launched repro.
     "openssl"
     "sh"
+    "bash"
+    "git"
 
     # The `reprobuild-nix-daemon` staging edge below is a `shell(...)`
     # whose command line invokes bare `mkdir`, `cp` and `chmod`. Those
@@ -1209,9 +1211,17 @@ package reprobuild:
 
     for source in pythonTestPaths:
       let pyActionId = pythonTestActionId(source)
+      let hookScopeTest = source == "tests/unit/test_dev_shell_hook_scope.py"
       let pyExecute = pythonUnittest.run(
         source = source,
-        actionId = pyActionId)
+        actionId = pyActionId,
+        extraInputs = if hookScopeTest:
+          @["scripts/is_reprobuild_checkout.sh", "flake.nix"] else: @[])
+      when not defined(windows):
+        if hookScopeTest:
+          appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
+      if hookScopeTest:
+        discard target("test-dev-shell-hook-scope", pyExecute)
       reprobuildTestExecuteActions.add(pyExecute)
 
     # Spec-Implementation M0: the ``test`` build graph collection

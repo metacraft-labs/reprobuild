@@ -1462,6 +1462,70 @@ proc describeMechanism*(report: MaterializeReport): string =
   elif report.hardlinked > 0: "mixed"
   else: "copy"
 
+proc jsonEscape(s: string): string =
+  for ch in s:
+    case ch
+    of '"': result.add "\\\""
+    of '\\': result.add "\\\\"
+    of '\n': result.add "\\n"
+    of '\r': result.add "\\r"
+    of '\t': result.add "\\t"
+    else:
+      if ch < ' ': result.add "\\u" & toHex(ord(ch), 4)
+      else: result.add ch
+
+proc renderMaterializeReportText*(report: MaterializeReport;
+                                  srcDir, dstDir: string): string =
+  ## Human-readable rendering of what a materialisation actually did.
+  ##
+  ## The per-cause fallback breakdown is NOT optional decoration. A
+  ## consumer that composes a tree out of store entries degrades to full
+  ## byte copies for four unrelated reasons — a per-file link cap, a
+  ## cross-device destination, a filesystem with no link arm, and a
+  ## caller that passed ``allowSharedInode = false`` — and all four
+  ## produce a CORRECT tree at N times the disk and the I/O. Nothing
+  ## fails and nothing logs, so the only way the cause is ever known is
+  ## if the mechanism that took the decision reports it at the time.
+  ## Reporting only the size defers the discovery to whoever notices the
+  ## tree is fat, which is late and names no cause.
+  var lines: seq[string]
+  lines.add "repro store materialize: " & srcDir & " -> " & dstDir
+  lines.add "mechanism: " & report.describeMechanism()
+  lines.add "files: " & $report.files
+  lines.add "hardlinked: " & $report.hardlinked
+  lines.add "copied: " & $report.copied
+  lines.add "per-file fallbacks: " & $report.perFileFallbacks
+  for reason in MaterializeFallbackReason:
+    if reason == mfrNone: continue
+    if report.reasons[reason] > 0:
+      lines.add "fallback " & $reason & ": " & $report.reasons[reason]
+  lines.add "capability probed: " & (if report.capabilityProbed: "yes" else: "no")
+  lines.add "hardlink available: " & (if report.hardlinkAvailable: "yes" else: "no")
+  if report.diagnostic.len > 0:
+    lines.add "diagnostic: " & report.diagnostic
+  lines.join("\n")
+
+proc renderMaterializeReportJson*(report: MaterializeReport;
+                                  srcDir, dstDir: string): string =
+  ## The same report, machine-readable, so a composer can decide rather
+  ## than a human can read. Same reasoning as ``renderMaterializeReportText``.
+  var reasons: seq[string]
+  for reason in MaterializeFallbackReason:
+    if reason == mfrNone: continue
+    reasons.add "\"" & $reason & "\": " & $report.reasons[reason]
+  result = "{\"schema\": \"reprobuild.store-materialize.v1\"" &
+    ", \"source\": \"" & jsonEscape(srcDir) & "\"" &
+    ", \"destination\": \"" & jsonEscape(dstDir) & "\"" &
+    ", \"mechanism\": \"" & report.describeMechanism() & "\"" &
+    ", \"files\": " & $report.files &
+    ", \"hardlinked\": " & $report.hardlinked &
+    ", \"copied\": " & $report.copied &
+    ", \"per_file_fallbacks\": " & $report.perFileFallbacks &
+    ", \"fallback_reasons\": {" & reasons.join(", ") & "}" &
+    ", \"capability_probed\": " & (if report.capabilityProbed: "true" else: "false") &
+    ", \"hardlink_available\": " & (if report.hardlinkAvailable: "true" else: "false") &
+    ", \"diagnostic\": \"" & jsonEscape(report.diagnostic) & "\"}"
+
 proc materializeViaHardlinkOrCopy*(srcDir, dstDir: string;
                                   mechanism: var string) =
   ## Backwards-compatible wrapper: ``materializeDirectory`` with the

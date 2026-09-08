@@ -1485,7 +1485,7 @@ proc parsePackagePlatformToken*(token: string):
   ##   * a ``<cpu>-<os>`` pair — ``x86_64-windows``, ``aarch64-linux``.
   ##
   ## The bare form is the common case and reads as the milestone writes
-  ## it (``platforms: [windows]``); the paired form is what a package
+  ## it (``platforms [windows]``); the paired form is what a package
   ## available on only one architecture of one OS needs. A bare token is
   ## resolved against the OS vocabulary first and the CPU vocabulary
   ## second, so ``windows`` means "any CPU, Windows" and ``aarch64``
