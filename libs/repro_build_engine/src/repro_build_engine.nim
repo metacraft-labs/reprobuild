@@ -4809,6 +4809,80 @@ proc dependencyEvidencePath*(cacheRoot, actionId: string): string =
   cacheRoot / "dependency-evidence" /
     (sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId) & ".rbar")
 
+proc monitorInterest(action: BuildAction): set[EventCategory] =
+  ## The event categories `action` asks io-mon for — ONE definition, read by
+  ## BOTH hosting forms, and today the answer is always `FullInterest`.
+  ##
+  ## THIS IS ONE PROC BECAUSE THE TWO PATHS DIVERGING WAS A LIVE DEFECT, not
+  ## because two copies of four lines offended anyone. The reduction used to be
+  ## spelled once in `monitorHostRequest`, where it took effect, and once in
+  ## `launchChildEnv` as a `REPRO_MONITOR_INTEREST` env seed that io-mon's
+  ## `childEnv` overwrote before any shim could read it — so the same action
+  ## asked for `{file, proc, lib}` when the engine hosted io-mon in-process and
+  ## got everything when it spawned `repro internal io monitor`.
+  ## (Engine-Threadpool FINDING 2, as corrected.) Both call sites now read this
+  ## proc, and the wrapped path forwards the answer to the CLI with
+  ## `--interest`, a channel io-mon does not own and therefore cannot overwrite.
+  ##
+  ## WHY THE ANSWER IS "EVERYTHING", when the reduction it replaces looked so
+  ## reasonable. The old comment said a build edge wants file/process/library
+  ## dependencies and not "the clock/env/sysctl/entropy or IPC a tool
+  ## incidentally touches". That is true of what those records DESCRIBE and
+  ## false of what this engine DOES with them. io-mon's categories are
+  ## deliberately coarse — five buckets, no per-kind filtering
+  ## (io-mon/docs/contributors/event-interest-filter.md §7) — and each of the
+  ## two categories the reduction dropped carries a record kind this engine
+  ## reads to make a cache-correctness decision:
+  ##
+  ##   * `ecNonDeterminism` carries `mrEnvRead`, which lands in
+  ##     `PathSetEvidence.monitorEnvReads` and reaches the STRONG FINGERPRINT
+  ##     through `cacheEnvInputs`. Without the category, an action that reads
+  ##     `PWD` / `SOURCE_DATE_EPOCH` and produces different bytes for different
+  ##     values keys identically for all of them — the false-hit class the
+  ##     observed-env cache key exists to close.
+  ##   * `ecNonDeterminism` also carries `mrNonDeterministic`, which lands in
+  ##     `entropyObservations`. Without the category `applyEntropyBlessingPolicy`
+  ##     sees zero observations while `entropyObservability` still says
+  ##     `entObserved` — the backend-profile record is META and `recordWanted`
+  ##     never gates it — so it PUBLISHES. "Observable, and nothing observed" is
+  ##     verbatim the false clean that policy's own doc comment says it exists
+  ##     to prevent, reached by asking the monitor not to look.
+  ##   * `ecIpc` carries `mrIpcConnect` and `ecNonDeterminism` also carries
+  ##     `mrExternalContent`, and BOTH are completeness-bearing. io-mon's
+  ##     `mergeFragments` turns each out-of-tree IPC peer
+  ##     (`unmonitoredSubtreeLossDetails`) and each unpaired external content
+  ##     channel (`externalContentLossCount`) into a synthetic `mrEventLoss`,
+  ##     which is what forces `mcIncomplete` on an edge whose tree consumed
+  ##     something the monitor could not see. The shim's interest gate drops
+  ##     those records at `emitRecord` — BEFORE `mergeFragments` runs — so
+  ##     suppressing either category does not merely hide records, it turns an
+  ##     `mcIncomplete` edge into an `mcComplete` one. That is the cardinal
+  ##     sin. io-mon's own §6 ("disabling a category is a consumer choice, not
+  ##     data loss") is stated for the whole feature and is simply not true of
+  ##     these two kinds; the loss markers they generate are never gated, but
+  ##     they are also never generated.
+  ##
+  ## So there is no reduction available at this granularity that is safe for a
+  ## reprobuild edge, and this proc says so in one place instead of three.
+  ## Narrowing it again needs io-mon to change first — `mrEnvRead` and
+  ## `mrNonDeterministic` split out of `ecNonDeterminism`, and `mrIpcConnect`
+  ## made ungateable like the other completeness-bearing kinds — and this
+  ## change deliberately does not make that call.
+  ##
+  ## THIS IS NOT A WIDENING RELATIVE TO WHAT SHIPS. `monitorHosting` defaults to
+  ## `mhmNever`, so every action ships through the wrapped path — and the
+  ## wrapped path has been running at full interest all along, precisely because
+  ## the request the engine wrote never arrived. What changes is the HOSTED
+  ## path, which stops losing the three record kinds above.
+  ##
+  ## `DependencyGatheringPolicy.captureNonDeterminism` / `captureIpc` are
+  ## therefore SUBSUMED: an edge that sets either still gets what it asked for,
+  ## and an edge that sets neither now gets it too. They are left in place
+  ## rather than deleted because they are declared DSL surface with recipes and
+  ## tests behind them, and retiring a public field is its own change with its
+  ## own blast radius.
+  FullInterest
+
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
                      cacheRoot: string;
                      hostInProcess: bool): tuple[action: BuildAction;
@@ -4904,8 +4978,19 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # that starts no host — it fails the action instead of running it.
       result.hostInProcess = true
     else:
+      # ``--interest`` is how the engine's event-interest REQUEST survives the
+      # hop into a second process. It travels on the ARGV and not through the
+      # environment because `REPRO_MONITOR_INTEREST` is io-mon's own channel to
+      # the shim: `childEnv` writes it last, after the caller's `request.env`
+      # and after the injected pairs, so that a caller cannot redirect or
+      # disarm monitoring. An engine seeding it into the action's environment
+      # was therefore writing into a variable io-mon overwrites, which is what
+      # made this path's request silently different from the hosted path's —
+      # see ``monitorInterest``.
       result.action.argv = @[monitorCli] & config.monitorCliArgs &
-        @["--depfile", depfile, "--"] & action.argv
+        @["--depfile", depfile,
+          "--interest", interestToTokens(monitorInterest(action)),
+          "--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
     # ``launchChildEnv`` (NOT here on ``result.action.env``). The seed
     # MUST NOT enter the action's fingerprint — the absolute path of
@@ -6079,15 +6164,28 @@ proc launchChildEnv(action: BuildAction;
     else: findShimLibrary()
   if shimLib.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)
-    # Same event-interest as the hosted path (`monitorHostRequest`): a build edge
-    # wants file/process/library deps, not the clock/env/sysctl/entropy or IPC a
-    # tool incidentally touches, so io-mon skips those hooks unless the edge opts
-    # in. On this direct-spawn path the shim reads it from the action's env rather
-    # than io-mon's `childEnv`.
-    var interest = {ecFileDeps, ecProcessTree, ecLibraryLoads}
-    if action.dependencyPolicy.captureNonDeterminism: interest.incl ecNonDeterminism
-    if action.dependencyPolicy.captureIpc: interest.incl ecIpc
-    result.add("REPRO_MONITOR_INTEREST=" & interestToTokens(interest))
+    # NO ``REPRO_MONITOR_INTEREST`` SEED HERE, DELIBERATELY. There used to be
+    # one, with a comment claiming it gave this path "the same event-interest as
+    # the hosted path". It did not, and it could not:
+    #
+    #   * ``REPRO_MONITOR_INTEREST`` is io-mon's channel to its own shim, not an
+    #     input a caller supplies. `childEnv` (io-mon `fs_snoop.nim`) composes
+    #     the monitored child's whole environment as host env, then
+    #     `request.env`, then the injected pairs, and writes the interest
+    #     variable LAST — the injection must win, or a caller could redirect
+    #     `REPRO_MONITOR_SHIM_LIB` and silently disarm monitoring. All three
+    #     platform arms call that one proc. So a value seeded here was
+    #     overwritten before any shim could read it, on both hosting forms.
+    #   * The one case where a shim reads an INHERITED value — a process that
+    #     picked the shim up from an enclosing monitor's `LD_PRELOAD` rather
+    #     than from an injection of ours — is a process whose records belong to
+    #     THAT monitor's request. Seeding this action's narrower set there would
+    #     have re-scoped a live outer capture, which is worse than doing
+    #     nothing.
+    #
+    # The request now travels on the ARGV (`--interest`, see
+    # ``monitorInterest`` and ``monitoredAction``), which is a channel io-mon
+    # does not own and therefore cannot overwrite.
   # macOS monitoring needs NO env seed: the io-mon shim always runs BOTH
   # monitoring mechanisms (interpose + body-patch) by default — the
   # user-facing ``IO_MON_MACOS_BACKEND`` selector was removed (see
@@ -7270,22 +7368,16 @@ proc monitorHostRequest(action: BuildAction;
   ## reads. Passing it explicitly is what keeps that decision at the one call
   ## site that makes it, instead of leaving a second proc quietly able to
   ## write the destination in place.
-  # A build edge depends on the files it reads, the binaries it launches and the
-  # libraries they load — not on the clock/env/sysctl/entropy or IPC peers a tool
-  # incidentally touches. Ask io-mon for those three categories only, so it skips
-  # installing/recording the non-determinism + IPC observations it would
-  # otherwise spend resources on (io-mon/docs/contributors/event-interest-filter.md).
-  # An edge that genuinely depends on such an input opts the category back in via
-  # its dependency policy.
-  var interest = {ecFileDeps, ecProcessTree, ecLibraryLoads}
-  if action.dependencyPolicy.captureNonDeterminism: interest.incl ecNonDeterminism
-  if action.dependencyPolicy.captureIpc: interest.incl ecIpc
+  # The event-interest request. ONE definition, shared with the wrapped path
+  # (which forwards the same answer to `repro internal io monitor` as
+  # `--interest`), so the two hosting forms cannot ask io-mon for different
+  # categories for the same action — see ``monitorInterest``.
   result = FsSnoopRequest(
     command: command.argv,
     depFilePath: depFilePath,
     cwd: command.cwd,
     streamMode: fsoNone,
-    interest: interest,
+    interest: monitorInterest(action),
     passthroughChildStdout: true,
     passthroughChildStderr: true)
   for entry in command.env:

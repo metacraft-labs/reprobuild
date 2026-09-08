@@ -1446,57 +1446,43 @@ proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
   of lpInlineRunQuota, lpInlineRunQuotaQueued:
     result.inlineRunQuota = true
 
-proc comparableInterestPolicy(): DependencyGatheringPolicy =
-  ## EVERY LAUNCH PATH ASKS IO-MON FOR THE SAME EVENT CATEGORIES, and this
-  ## is not a formality — it is the workaround for a live engine defect,
-  ## recorded here with the measurement that promoted it.
-  ##
-  ## `DependencyGatheringPolicy` defaults `captureNonDeterminism` to false on
-  ## the stated grounds that an edge depends on the files it reads and not on
-  ## the clock or the environment a tool happens to touch, so the engine asks
-  ## for `{ecFileDeps, ecProcessTree, ecLibraryLoads}` only. That reduction is
-  ## carried on `FsSnoopRequest.interest` and TAKES EFFECT on the HOSTED
-  ## path. On the WRAPPED path the engine can only seed
-  ## `REPRO_MONITOR_INTEREST` into the action's environment, and io-mon's
-  ## `composeInjectionEnv` OVERWRITES that variable with its own request's
-  ## interest — which for `repro internal io monitor` is `FullInterest`,
-  ## because `parseRun` takes no interest flag. So the engine's reduction is
-  ## live on one path and dead on the other. That is Engine-Threadpool
-  ## FINDING 2, and `test_monitor_finish_is_pooled` carries the same
-  ## workaround for the same reason.
-  ##
-  ## WHAT IS NEW HERE, AND IT CONTRADICTS THAT FINDING'S OWN CONCLUSION.
-  ## FINDING 2 recorded the divergence as visible in the published `.iomon`
-  ## RECORD STREAM and NOT in `PathSetEvidence`, because the two records it
-  ## measured — `mrSysctlRead` and `mrTimeRead` — "produce no path, so they
-  ## land in no field HM-6's field-by-field comparison has", leaving the
-  ## divergence "latent in the artefact rather than live in the dependency
-  ## set". `ba86940a` ended that: `mrEnvRead` is in the SAME `ecNonDeterminism`
-  ## category and now lands in `PathSetEvidence.monitorEnvReads`, which
-  ## `cacheEnvInputs` folds into the ACTION CACHE KEY.
-  ##
-  ## MEASURED, on this fixture, with this opt-in REMOVED and everything else
-  ## unchanged: L1 (hosted) renders `monitorEnvReads=[]` while L2, L3 and L3b
-  ## (wrapped) render `monitorEnvReads=[PWD]`, and the identity comparison
-  ## fails on that one line. The fixture reads `$PWD` — so the two hosting
-  ## mechanisms key the SAME action on DIFFERENT environment sets, and
-  ## hosting is the side that loses the entry. The same filter applies to
-  ## `mrNonDeterministic`, so a hosted action that read entropy would have
-  ## its records dropped by interest while the backend profile still reported
-  ## `entObserved` — "observable, and nothing observed" — which is the input
-  ## `applyEntropyBlessingPolicy` reads to decide an action is deterministic
-  ## enough to publish.
-  ##
-  ## This file cannot fix that; the fix is either an interest flag on the
-  ## monitor CLI (io-mon's side) or a decision that the hosted path must ask
-  ## for `ecNonDeterminism` unconditionally, and both are engine/spec changes
-  ## rather than test changes. What it does instead is make all four paths
-  ## ask for the same thing, so the identity comparison is about WHO HOSTS
-  ## and not about who asked for which categories — and record the
-  ## measurement above so the divergence is reported rather than absorbed.
-  result = automaticMonitorGatheringPolicy()
-  result.captureNonDeterminism = true
-  result.captureIpc = true
+## THE EVENT-INTEREST OPT-IN THAT USED TO LIVE HERE IS GONE, and its removal
+## is the acceptance test for the engine fix that replaced it.
+##
+## `comparableInterestPolicy()` set `captureNonDeterminism` / `captureIpc` on
+## the fixture so that all four launch paths asked io-mon for the SAME event
+## categories. It was not a formality: the engine reduced its request to
+## `{ecFileDeps, ecProcessTree, ecLibraryLoads}`, that reduction took effect on
+## the HOSTED path (carried on `FsSnoopRequest.interest`) and was DISCARDED on
+## the WRAPPED one (`repro internal io monitor` accepted no interest flag, so
+## its request carried `{}` -> everything, and io-mon's `childEnv` wrote that
+## over the `REPRO_MONITOR_INTEREST` the engine had seeded — the injection wins
+## over an inherited value by design). Measured on this fixture with the opt-in
+## removed: of the eleven rendered fields exactly two differed, and the hosted
+## arm lost both — `monitorEnvReads` `[]` vs `[PWD]`, and
+## `entropyObservations` `[]` vs `[getentropy@ecoUnattributed]`. The first
+## reaches `computeStrongFingerprint` through `cacheEnvInputs`, so ONE action
+## keyed TWO ways depending on who hosted it. (Engine-Threadpool FINDING 2, as
+## corrected.)
+##
+## The opt-in masked that, and masking is all it could do from a test file —
+## which is why it is gone now that the engine no longer diverges.
+## `monitorInterest` is one proc read by both hosting forms, and the wrapped
+## path forwards its answer to the CLI as `--interest` rather than through an
+## environment io-mon owns. So this file's fixture asks for exactly what a
+## plain `automaticMonitorGatheringPolicy()` edge asks for, and the identity
+## comparison below is once again about WHO HOSTS rather than about who was
+## allowed to be heard.
+##
+## IT IS REMOVED RATHER THAN KEPT AS A BELT-AND-BRACES PIN, deliberately.
+## Keeping it would not add a guard, it would remove one: with both arms forced
+## to request the same categories the comparison CANNOT fail for an interest
+## divergence, which is precisely how the original divergence survived this
+## file. The three anti-vacuity pins below (`PWD` in `monitorEnvReads`, a
+## non-empty `entropyObservations`, a decided `entropyObservability`) are what
+## keep the removal honest: they only hold while the engine really does request
+## `ecNonDeterminism`, so an engine that starts reducing it again reddens here
+## instead of quietly making four empty sets agree.
 
 proc monitoredFixtureAction(id, fixtureBin, marker, outPath, workRoot: string;
                             holdMs: int; cpuMilli: uint32): BuildAction =
@@ -1507,7 +1493,7 @@ proc monitoredFixtureAction(id, fixtureBin, marker, outPath, workRoot: string;
     commandStatsId = id,
     cpuMilli = cpuMilli,
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
-    dependencyPolicy = comparableInterestPolicy())
+    dependencyPolicy = automaticMonitorGatheringPolicy())
 
 proc mentionsPath(paths: seq[string]; wanted: string): bool =
   for p in paths:
@@ -2914,6 +2900,149 @@ suite "every_launch_path_is_monitored":
                 recordedEvidence[i].label, " ---\n",
                 recordedEvidence[i].shape
             check recordedEvidence[i].shape == recordedEvidence[0].shape
+
+    test "the event-interest request survives the hop to a spawned monitor":
+      ## THE PROPERTY THAT HAD NO TEST, WHICH IS WHY THE DIVERGENCE ABOVE
+      ## SURVIVED. Everything upstream of this case asserts what the engine
+      ## INTENDED; nothing asserted what the monitored child was actually
+      ## TOLD. Those were different values for two years of the wrapped
+      ## path's life: the engine seeded `REPRO_MONITOR_INTEREST` into the
+      ## action's environment, io-mon's `childEnv` overwrote it with the
+      ## CLI request's own interest (the injection wins over an inherited
+      ## value by design, so a caller cannot disarm monitoring), and
+      ## `parseRun` had no way to receive the request at all. The seed was
+      ## dead and nothing anywhere said so.
+      ##
+      ## So this case reads the value out of the CHILD, on both hosting
+      ## forms, and asserts three separate things:
+      ##
+      ##   1. the two hosting forms tell the child the SAME thing. This is
+      ##      the assertion the original defect fails: with the engine's old
+      ##      reduction and no way to forward it, the hosted arm's child saw
+      ##      `file,proc,lib` and the wrapped arm's saw everything.
+      ##   2. what they tell it is what the engine asks for. `monitorInterest`
+      ##      is private, so its answer is pinned here by value — and the
+      ##      value is not arbitrary: every one of these five categories
+      ##      carries a record kind this engine consumes for a cache-
+      ##      correctness decision (see that proc). An engine that starts
+      ##      reducing again reddens HERE, next to the reason.
+      ##   3. a REDUCED request really is honoured end to end. (1) and (2)
+      ##      cannot show that on their own — the engine's request happens to
+      ##      equal the CLI's absent-flag default, so deleting the forwarding
+      ##      would leave them both green. Part 3 drives the real `repro
+      ##      internal io monitor` image with `--interest file,proc,lib` and
+      ##      requires the child to see exactly that, which is red the moment
+      ##      the flag stops being parsed or stops reaching `childEnv`.
+      ##
+      ## NO MOCKS: two real builds through the real engine, and one real
+      ## `repro` subprocess. The oracle is a file the monitored child wrote.
+      const EngineRequest = "file,proc,lib,nondet,ipc"
+      var bypass = EnumeratedLaunchPaths[0]
+      for candidate in EnumeratedLaunchPaths:
+        if candidate.kind == lpBypassRunQuota:
+          bypass = candidate
+      check bypass.kind == lpBypassRunQuota   # L1 needs no runquotad
+
+      let interestRoot = tempRoot / "interest"
+      createDir(interestRoot)
+
+      # A TEMPLATE, NOT A PROC. A failed `check` inside a plain `proc`
+      # prints "Check failed" and the enclosing case still reports [OK],
+      # because unittest's failure flag is bound per test body.
+      template interestSeenByChild(tag: string;
+                                   hosting: MonitorHostingMode): string =
+        block:
+          let caseRoot = interestRoot / tag
+          let workRoot = caseRoot / "work"
+          createDir(workRoot)
+          var config = configFor(bypass, repoRoot, caseRoot / ".repro-cache")
+          config.monitorHosting = hosting
+          let run = runBuild(graph([action("interest-" & tag,
+            @["sh", "-c", "printf %s \"$REPRO_MONITOR_INTEREST\" > seen.txt"],
+            cwd = workRoot,
+            outputs = ["seen.txt"],
+            commandStatsId = "interest-" & tag,
+            governingLockIdentity = lockIdentityOutsideSolvedGraph())]),
+            config)
+          check run.results.len == 1
+          if run.results.len == 1 and run.results[0].status != asSucceeded:
+            echo "[", tag, "] the interest probe did not run: exit=",
+              run.results[0].exitCode, " stderr=", run.results[0].stderr
+          check run.results[0].status == asSucceeded
+          check fileExists(workRoot / "seen.txt")
+          readFile(workRoot / "seen.txt")
+
+      # `mhmNever` forces the historical wrapper (a second `repro` process
+      # hosts io-mon); `mhmWhereSupported` on the same launch path makes the
+      # engine host it in-process. Nothing else differs between the two runs.
+      let wrapped = interestSeenByChild("wrapped", mhmNever)
+      let hosted = interestSeenByChild("hosted", mhmWhereSupported)
+
+      # 1 — PRIMARY ASSERTION.
+      if wrapped != hosted:
+        echo "the two hosting forms told the monitored child DIFFERENT ",
+          "event-interest sets for the same action:\n  wrapped(spawned) = ",
+          wrapped, "\n  hosted(in-process) = ", hosted,
+          "\n  The engine's request is being discarded on one of them."
+      check wrapped == hosted
+
+      # 2 — and what they tell it is the engine's request.
+      if wrapped != EngineRequest:
+        echo "the spawned monitor's child was told `", wrapped,
+          "`, not the engine's request `", EngineRequest,
+          "`.\n  If the engine's request changed deliberately, read ",
+          "`monitorInterest` first: each category it asks for carries a ",
+          "record kind a cache-correctness decision reads."
+      check wrapped == EngineRequest
+      check hosted == EngineRequest
+
+      # 3 — a REDUCED request is honoured end to end, through the same
+      # `repro internal io monitor` image the engine spawns. This is the
+      # part that is red when the CLI flag stops working; parts 1 and 2 are
+      # not, because the engine's request equals the absent-flag default.
+      const Reduced = "file,proc,lib"
+      let cliRoot = interestRoot / "cli"
+      createDir(cliRoot)
+      let tools = monitorTools(repoRoot)
+      let seenPath = cliRoot / "seen.txt"
+      let cliArgs = tools.monitorCliArgs & @[
+        "--depfile", cliRoot / "cli.iomon",
+        "--interest", Reduced,
+        "--", "sh", "-c",
+        "printf %s \"$REPRO_MONITOR_INTEREST\" > " & quoteShell(seenPath)]
+      let cliProcess = startProcess(tools.monitorCliPath, args = cliArgs,
+        options = {poStdErrToStdOut})
+      let cliOutput = cliProcess.outputStream.readAll()
+      let cliCode = cliProcess.waitForExit()
+      cliProcess.close()
+      if cliCode != 0:
+        echo "`", tools.monitorCliPath, " ", cliArgs.join(" "),
+          "` exited ", cliCode, ":\n", cliOutput
+      check cliCode == 0
+      check fileExists(seenPath)
+      let cliSeen = if fileExists(seenPath): readFile(seenPath) else: ""
+      if cliSeen != Reduced:
+        echo "the monitor CLI was asked for `", Reduced,
+          "` and told its child `", cliSeen,
+          "`.\n  The `--interest` flag is not reaching io-mon's `childEnv`, ",
+          "which is exactly the discard this whole case exists for."
+      check cliSeen == Reduced
+
+      # AND THE ENGINE REALLY FORWARDS IT, at the one site that builds the
+      # wrapped argv. Part 3 proves the CLI honours the flag and part 1
+      # proves the paths agree; neither can see a forwarding that was
+      # deleted while the engine's request happened to match the default.
+      # RAW, not `codeOnly`: the needle CONTAINS a string literal, and
+      # `codeOnly` blanks those. The needle is specific enough that no
+      # comment in the engine spells it (prose uses ``--interest``).
+      let engineSrc = readFile(getCurrentDir() / EngineModuleRelPath)
+      if countOccurrences(engineSrc, "\"--interest\", interestToTokens(") != 1:
+        echo "the engine's monitor-argv construction does not forward the ",
+          "event-interest request exactly once. It is the only channel the ",
+          "spawned path has: `REPRO_MONITOR_INTEREST` is io-mon's own, and ",
+          "`childEnv` overwrites whatever the engine puts there."
+      check countOccurrences(engineSrc,
+        "\"--interest\", interestToTokens(") == 1
 
     test "teardown":
       daemon.stop()

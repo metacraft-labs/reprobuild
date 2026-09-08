@@ -125,18 +125,31 @@ type
     recognizedReports*: seq[RecognizedDependencyReportSpec]
     postBuildConverters*: seq[PostBuildDependencyConverterSpec]
     ignoredInputPrefixes*: seq[string]
-    # Event-interest opt-ins for automatic monitoring. A build edge's
-    # reproducibility hinges on the files/binaries/libraries it reads, NOT on the
-    # clock, environment, sysctls, entropy, or IPC peers a tool happens to touch,
-    # so the engine monitors an action with io-mon's ecFileDeps+ecProcessTree+
-    # ecLibraryLoads categories only (see `monitorHostRequest`). io-mon then skips
-    # installing/recording the non-determinism and IPC observations, which it
-    # would otherwise spend resources on. An edge that genuinely depends on such
-    # an input sets the matching flag to add the category back. Kept as bools (not
-    # a `set[EventCategory]`) so repro_core carries no io_mon dependency; the
-    # engine translates them. Default false = off.
-    captureNonDeterminism*: bool  ## add io-mon's ecNonDeterminism
-    captureIpc*: bool             ## add io-mon's ecIpc
+    # Event-interest opt-ins for automatic monitoring. THEY NO LONGER CHANGE
+    # ANYTHING, and the reasoning that made them look safe is recorded here
+    # because it is the reasoning that has to stay dead.
+    #
+    # These used to reduce io-mon's event interest to
+    # ecFileDeps+ecProcessTree+ecLibraryLoads on the grounds that a build edge's
+    # reproducibility hinges on the files/binaries/libraries it reads and not on
+    # the clock, environment, sysctls, entropy, or IPC peers a tool happens to
+    # touch. That is true of what those records DESCRIBE and false of what the
+    # engine DOES with them: the dropped categories carry `mrEnvRead` (which
+    # reaches the action cache key), `mrNonDeterministic` (which gates cache
+    # publication), and `mrIpcConnect` / `mrExternalContent` (from which io-mon
+    # derives the event-loss markers that force `mcIncomplete`). The engine
+    # therefore asks for EVERY category, unconditionally — see `monitorInterest`
+    # in `repro_build_engine.nim`, which is the one place that decides and
+    # carries the full argument.
+    #
+    # So an edge that sets either flag gets what it asked for and an edge that
+    # sets neither gets it too. They are kept — rather than deleted — because
+    # they are declared DSL surface with recipes and tests behind them, and
+    # retiring a public field is its own change; narrowing the request again
+    # needs finer categories from io-mon first. Kept as bools (not a
+    # `set[EventCategory]`) so repro_core carries no io_mon dependency.
+    captureNonDeterminism*: bool  ## INERT: ecNonDeterminism is always requested
+    captureIpc*: bool             ## INERT: ecIpc is always requested
     suppressMonitorShimSeed*: bool
       ## Withhold the launch-time ``REPRO_MONITOR_SHIM_LIB`` environment seed
       ## from this action (see ``launchChildEnv`` in the build engine).

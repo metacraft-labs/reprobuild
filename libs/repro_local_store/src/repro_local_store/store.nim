@@ -155,6 +155,32 @@ type
     gaQuarantine = "quarantine"
     gaReclaim = "reclaim"
     gaRestore = "restore"
+    gaRefuse = "refuse"
+      ## A TARGETED collection was asked for a prefix a root still holds.
+      ## Audited rather than merely returned, because "the GC declined to
+      ## delete something" is exactly the event an operator later wants
+      ## to find when a store did not shrink.
+
+  GcPrefixResult* = object
+    ## The outcome of collecting ONE named prefix.
+    ##
+    ## `gc` sweeps whatever is unreachable and says nothing about what it
+    ## left alone, which is the right shape for a sweep and the wrong
+    ## shape for "delete this entry". A caller naming an entry needs to be
+    ## told NO, and told by whom — and the distinction between "refused"
+    ## and "there was nothing there" must not collapse into a single
+    ## silent success.
+    refused*: bool
+    holdingRoots*: seq[string]
+      ## Non-empty exactly when `refused`. The roots keeping it alive.
+    found*: bool
+      ## False when the prefix is not indexed at all.
+    quarantinedPath*: string
+      ## Where the tree was moved. Empty when refused or not found.
+    reclaimed*: bool
+      ## True when the quarantined tree was also unlinked, i.e. the grace
+      ## had already elapsed for an earlier quarantine of the same path.
+    reason*: string
 
   GcAuditRow* = object
     auditId*: int64
@@ -1224,40 +1250,226 @@ type
     ## store index.
     perOutput*: seq[PerOutputRealize]
 
-proc materializeViaHardlinkOrCopy*(srcDir, dstDir: string;
-                                  mechanism: var string) =
-  ## Walks `srcDir` and reproduces its file tree under `dstDir`,
-  ## preferring hardlinks where the OS supports them and falling back to
-  ## a regular file copy. The chosen mechanism string is written back so
-  ## the caller can record it as a debugging hint.
-  mechanism = "copy"
+const PrefixMaterializeAllowSharedInodeDefault* = true
+  ## The materialisation side's shared-inode policy, and it is the
+  ## OPPOSITE of the ingest side's — which is why it needs its own named
+  ## constant rather than borrowing
+  ## ``CasIngestAllowSharedInodeDefault``.
+  ##
+  ## The two directions are not symmetric and the asymmetry is the whole
+  ## argument:
+  ##
+  ##   * **Ingest** (build tree → store) shares an inode between a file
+  ##     the build system is still going to write to and the stored blob.
+  ##     Every compiler's ``-o`` is ``O_WRONLY|O_CREAT|O_TRUNC``, so the
+  ##     next rebuild rewrites the store through the shared name. That is
+  ##     why ``CasIngestAllowSharedInodeDefault`` is ``false``.
+  ##   * **Materialisation** (→ prefix) writes into a staging directory
+  ##     the store allocated and then publishes it by an atomic rename,
+  ##     after which the prefix is treated as immutable. Nothing in the
+  ##     store ever reopens a published prefix for writing, so a shared
+  ##     inode on this side has no writer on either end of it.
+  ##
+  ## So the hazard that justifies ``false`` on the way IN does not exist
+  ## on the way OUT, and defaulting to ``false`` here would buy nothing
+  ## while turning every prefix realisation into a full byte copy.
+  ##
+  ## **Be precise about the SOURCE, because the argument depends on it.**
+  ## The two production callers of ``materializeDirectory``
+  ## (``realizeDirectoryAsPrefix`` and ``realizeMultiOutput``) are handed
+  ## a directory by an adapter — an unpacked tarball, a Nix store path, a
+  ## per-output staging tree — not a blob out of ``cas/``. The default is
+  ## sound because none of those is a build tree a compiler is still
+  ## going to ``-o`` into, and because it is what the pre-existing
+  ## implementation already did: it called ``createHardlink``
+  ## unconditionally, with no flag to read. What changed is that the
+  ## choice is now NAMED and can be declined, not that the arm was
+  ## switched on.
+  ##
+  ## **This is stated as a decision, not inherited as a default.** A
+  ## caller whose source is a tree someone else may still write to, or
+  ## which materialises into a directory it intends to WRITE TO in place,
+  ## must pass ``false`` and take the copy.
+  ##
+  ## **DO NOT read this as "materialisation is safe, so turn the arm on
+  ## everywhere."** ``repro_cas_store``'s
+  ## ``CasMaterializeAllowSharedInodeDefault`` is ``false`` and must stay
+  ## that way: ``casMaterialize`` restores a blob into a destination the
+  ## CALLER chose, which is typically a build tree an action is about to
+  ## open and truncate. The distinction is not ingest-versus-
+  ## materialisation, it is **who owns the destination and whether
+  ## anything will write to it** — and only this path can answer "the
+  ## store does, and nothing will".
+
+type
+  MaterializeFallbackReason* = enum
+    ## Why one file did not get the mechanism the pair supports. Derived
+    ## from the operation's own ``LinkOutcome``, never guessed.
+    mfrNone = "none"
+    mfrLinkLimit = "per-file-link-cap"
+      ## NTFS caps a file at 1023 links. A property of THIS blob, not of
+      ## the filesystem pair — see ``isPerFileFallback``.
+    mfrCrossDevice = "cross-device"
+    mfrUnsupported = "unsupported"
+    mfrArmDisabled = "shared-inode-arm-disabled"
+    mfrOther = "other"
+
+  MaterializeReport* = object
+    ## What a materialisation actually did, per file.
+    ##
+    ## It exists because the previous return value was a single string in
+    ## {"hardlink", "mixed", "copy"}, and "mixed" is precisely the answer
+    ## that matters and precisely the answer that says nothing: it cannot
+    ## distinguish one capped blob from a filesystem that refused every
+    ## link. A fallback that is only visible as a size is a fallback
+    ## discovered by an overlay being fat, which is late and gives no
+    ## cause.
+    files*: int
+    hardlinked*: int
+    copied*: int
+    perFileFallbacks*: int
+      ## Files that fell back for a reason that is a property of the FILE.
+      ## These must not be read as a defect in the pair.
+    reasons*: array[MaterializeFallbackReason, int]
+    capabilityProbed*: bool
+    hardlinkAvailable*: bool
+    diagnostic*: string
+      ## Human-readable; safe to log, never parsed.
+
+var materializeLinkAttemptHook*: proc (src, dst: string): LinkAttempt {.closure.}
+  ## TEST SEAM. ``nil`` in production, and nothing in the store ever sets
+  ## it.
+  ##
+  ## Consulted immediately before each real ``attemptHardlink``. A return
+  ## whose ``outcome`` is ``loOk`` means "no injection, do the real
+  ## thing"; any other outcome is used INSTEAD of attempting the link, and
+  ## the destination is left uncreated — which is what a genuinely failed
+  ## ``CreateHardLinkW`` / ``link()`` also leaves behind.
+  ##
+  ## It exists for one reason, and the reason is the same shape as the one
+  ## ``casIngestRaceWindowHook`` carries: **NTFS's 1023-link cap is not
+  ## reachable on any other filesystem.** ext4 allows 65 000 links, so a
+  ## test that drove a real inode to the cap on Linux would never reach
+  ## it, and a test that only ran on Windows would leave the fallback
+  ## unexercised everywhere else. The seam makes "this one file is at its
+  ## link cap" a deterministic input rather than a filesystem the test
+  ## cannot obtain.
+  ##
+  ## It does NOT stand in for the per-file loop: the accompanying test
+  ## also materialises one real entry into more than 1023 real
+  ## destinations on the real filesystem, so the loop's per-file
+  ## behaviour and the cache's survival are measured against the OS and
+  ## not against this hook.
+
+proc reasonFor(attempt: LinkAttempt): MaterializeFallbackReason =
+  if attempt.isPerFileFallback(): mfrLinkLimit
+  else:
+    case attempt.outcome
+    of loOk: mfrNone
+    of loCrossDevice: mfrCrossDevice
+    of loUnsupported: mfrUnsupported
+    else: mfrOther
+
+proc materializeDirectory*(srcDir, dstDir: string;
+                           report: var MaterializeReport;
+                           allowSharedInode =
+                             PrefixMaterializeAllowSharedInodeDefault) =
+  ## Reproduce ``srcDir``'s file tree under ``dstDir``, preferring a
+  ## hardlink and falling back to a copy PER FILE, and record what
+  ## happened.
+  ##
+  ## **Availability is probed, never predicted.** The mechanism comes
+  ## from ``preferredMechanisms`` over a real ``linkCapabilities`` probe
+  ## of the (source → destination) pair, so a cross-volume destination
+  ## degrades to copy because ``link()`` said ``EXDEV`` /
+  ## ``ERROR_NOT_SAME_DEVICE``, not because anyone read a mount table.
+  ## This replaces a bare ``try: createHardlink except OSError: copy``,
+  ## which could not tell a capped blob from an unsupported filesystem
+  ## from a permission error, and therefore could not report any of them.
+  ##
+  ## **A per-file limit drops THIS file to copy and nothing else.** The
+  ## cached pair capability is deliberately left alone
+  ## (``isPerFileFallback``): NTFS's 1023-link cap is a property of one
+  ## blob, so treating it as a verdict on the filesystem would turn every
+  ## subsequent file into a copy because one file was popular.
+  report = MaterializeReport()
   if not dirExists(extendedPath(srcDir)):
     raise newException(StoreError, "materialize source missing: " & srcDir)
   createDir(extendedPath(dstDir))
-  var anyHardlink = false
-  var anyCopy = false
+
+  let cap = linkCapabilities(srcDir, dstDir)
+  report.capabilityProbed = cap.probed
+  report.hardlinkAvailable = cap.hardlink
+  let mechanisms = cap.preferredMechanisms(allowSharedInode = allowSharedInode)
+  # ``lmReflink`` is not attempted here. A prefix directory is published
+  # by rename and then read-only, so the copy-on-write safety a reflink
+  # buys over a hardlink has nothing to protect against, and the hardlink
+  # is the cheaper of the two.
+  let mayHardlink = lmHardlink in mechanisms
+
+  if not mayHardlink:
+    report.diagnostic =
+      if cap.hardlink and not allowSharedInode:
+        "copy: the pair supports hardlinks but the shared-inode arm is " &
+        "disabled by this caller"
+      elif not cap.probed:
+        "copy: the filesystem pair could not be probed (" & cap.describe() & ")"
+      else:
+        "copy: the pair offers no hardlink arm [" & cap.describe() & "]"
+
   for entry in walkDirRec(extendedPath(srcDir), yieldFilter = {pcFile, pcLinkToFile},
       relative = true):
     let src = srcDir / entry
     let dst = dstDir / entry
     createDir(extendedPath(parentDir(dst)))
-    var hardlinked = false
-    when defined(windows) or defined(posix):
-      try:
-        createHardlink(src, dst)
-        hardlinked = true
-        anyHardlink = true
-      except OSError, IOError:
-        hardlinked = false
-    if not hardlinked:
+    report.files.inc
+
+    var linked = false
+    if mayHardlink:
+      var attempt = LinkAttempt(outcome: loOk)
+      if materializeLinkAttemptHook != nil:
+        attempt = materializeLinkAttemptHook(src, dst)
+      if attempt.outcome == loOk:
+        attempt = attemptHardlink(src, dst)
+      if attempt.outcome == loOk:
+        linked = true
+        report.hardlinked.inc
+      else:
+        let reason = reasonFor(attempt)
+        report.reasons[reason].inc
+        if attempt.isPerFileFallback():
+          report.perFileFallbacks.inc
+        elif report.diagnostic.len == 0:
+          # Only the FIRST pair-level reason is kept: a cross-volume
+          # destination produces one per file and a log line per file is
+          # how a real diagnostic gets scrolled away.
+          report.diagnostic = "hardlink: " & attempt.message &
+            " [" & cap.describe() & "]"
+    else:
+      report.reasons[
+        if cap.hardlink and not allowSharedInode: mfrArmDisabled
+        else: mfrUnsupported].inc
+
+    if not linked:
       copyFile(extendedPath(src), extendedPath(dst))
-      anyCopy = true
-  if anyHardlink and not anyCopy:
-    mechanism = "hardlink"
-  elif anyHardlink and anyCopy:
-    mechanism = "mixed"
-  else:
-    mechanism = "copy"
+      report.copied.inc
+
+proc describeMechanism*(report: MaterializeReport): string =
+  ## The three-valued summary the receipt records, preserved verbatim so
+  ## the on-disk ``materializationMechanism`` field keeps its existing
+  ## vocabulary. Callers that need to know WHY should read the report.
+  if report.hardlinked > 0 and report.copied == 0: "hardlink"
+  elif report.hardlinked > 0: "mixed"
+  else: "copy"
+
+proc materializeViaHardlinkOrCopy*(srcDir, dstDir: string;
+                                  mechanism: var string) =
+  ## Backwards-compatible wrapper: ``materializeDirectory`` with the
+  ## report reduced to the three-valued mechanism string its existing
+  ## callers already store in the receipt.
+  var report: MaterializeReport
+  materializeDirectory(srcDir, dstDir, report)
+  mechanism = report.describeMechanism()
 
 proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
                     hint: StoreReceiptHint;
@@ -1435,6 +1647,22 @@ proc deadSet*(s: Store): seq[PrefixRow] =
     row.createdAtUnix = stmt.columnInt(6)
     result.add(row)
 
+proc rootsHolding*(s: Store; prefixId: PrefixIdBytes): seq[string] =
+  ## The root ids that currently hold `prefixId`, in id order.
+  ##
+  ## The complement of `deadSet`, asked about ONE prefix. `deadSet`
+  ## answers "what is unreachable"; this answers "who is keeping this
+  ## reachable", which is the question a refusal has to be able to
+  ## answer. A refusal that cannot name the holder is a refusal an
+  ## operator cannot act on.
+  var stmt = s.db.prepare(
+    "SELECT root_id FROM root_holds_prefix WHERE prefix_id = ? " &
+    "ORDER BY root_id")
+  defer: stmt.finalize()
+  stmt.bindBlob(1, prefixId)
+  while stmt.step() == SqliteRow:
+    result.add(stmt.columnText(0))
+
 proc appendAudit(s: var Store; action: GcAction; prefixId: PrefixIdBytes;
                  reason: string) =
   var stmt = s.db.prepare(
@@ -1483,6 +1711,93 @@ proc quarantineUnique(s: var Store; absolutePath: string): string =
   result = s.gcPendingRoot / (leaf & "." & token)
   createDir(extendedPath(s.gcPendingRoot))
   moveDir(extendedPath(absolutePath), extendedPath(result))
+
+proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
+               graceSeconds = DefaultGcGraceSeconds): GcPrefixResult =
+  ## Collect ONE named prefix, and REFUSE if a root still holds it.
+  ##
+  ## This is the within-job half of the store's GC discipline: a job
+  ## registers a root, the root holds the entries the job materialised,
+  ## and the root is released at job end. Everything the job is still
+  ## using is reachable from a live root, so an entry that a root holds
+  ## must not be collectable — and, because the caller NAMED it, must not
+  ## be silently skipped either. `gc`'s sweep is free to say nothing
+  ## about what it left alone; a targeted request is not.
+  ##
+  ## The refusal names the holding roots. It also leaves the tree exactly
+  ## where it was: refusing after moving it would be a deletion with a
+  ## complaint attached.
+  ##
+  ## Reachability, not refcounting. The holder set is a table join, so a
+  ## root that dies without releasing cleanly is recovered by deleting
+  ## the root row — there is no counter to get out of step with reality.
+  ##
+  ## `graceSeconds` is the UNLINK grace (`DefaultGcGraceSeconds`), i.e.
+  ## how long a quarantined tree waits before its bytes go away. It is
+  ## NOT a retention policy: how long an entry is worth KEEPING is a
+  ## separate question, decided by the retention vocabulary, and this
+  ## store consumes that rather than growing a second one.
+  result.reason = ""
+  let holders = s.rootsHolding(prefixId)
+  if holders.len > 0:
+    result.refused = true
+    result.holdingRoots = holders
+    result.found = true
+    result.reason = "refused: prefix is held by root(s) " & holders.join(", ")
+    s.appendAudit(gaRefuse, prefixId, result.reason)
+    return result
+
+  let lookup = s.lookupPrefix(prefixId)
+  if not lookup.found:
+    result.found = false
+    result.reason = "no such prefix in the index"
+    return result
+  result.found = true
+
+  let absPath = s.absolutePrefixPath(lookup.row.realizedPath)
+  if dirExists(extendedPath(absPath)):
+    try:
+      result.quarantinedPath = s.quarantineUnique(absPath)
+    except OSError as err:
+      s.appendAudit(gaQuarantine, prefixId,
+        "quarantine deferred: " & err.msg)
+      result.reason = "quarantine deferred: " & err.msg
+      return result
+
+  s.db.exec("BEGIN IMMEDIATE")
+  var committed = false
+  try:
+    var del = s.db.prepare("DELETE FROM prefixes WHERE prefix_id = ?")
+    del.bindBlob(1, prefixId)
+    discard del.step()
+    del.finalize()
+    s.appendAudit(gaQuarantine, prefixId, "moved to " & result.quarantinedPath)
+    s.db.exec("COMMIT")
+    committed = true
+  finally:
+    if not committed:
+      try: s.db.exec("ROLLBACK") except CatchableError: discard
+
+  # Unlink now if the grace has already elapsed for this tree. The mtime
+  # is the quarantine instant, so a zero grace reclaims immediately and a
+  # live grace defers to the sweep in `gc`.
+  if result.quarantinedPath.len > 0:
+    var age: int64 = 0
+    try:
+      let info = getFileInfo(result.quarantinedPath, followSymlink = false)
+      age = getTime().toUnix - info.lastWriteTime.toUnix
+    except OSError:
+      age = 0
+    if age >= graceSeconds.int64:
+      try:
+        removeDir(extendedPath(result.quarantinedPath))
+        s.appendAuditNoPrefix(gaReclaim, "unlinked " & result.quarantinedPath &
+          " (age " & $age & "s >= grace " & $graceSeconds & "s)")
+        result.reclaimed = true
+      except OSError:
+        discard
+
+  result.reason = "collected"
 
 proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
   ## Runs the spec's eager GC: dead-set query, move to
