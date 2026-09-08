@@ -8415,6 +8415,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_cmake_fresh_configure.nim",
+    binary: "build/test-bin/t_cmake_fresh_configure",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim",
     binary: "build/test-bin/t_commit_records_the_sibling_revision_the_shell_actually_used",
     defines: @[],

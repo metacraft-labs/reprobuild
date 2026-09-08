@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1492,
+    "nimTestBinaries": 1493,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 601,
     "staticallyDetectedRuntimeCompilerFlowTests": 84,
-    "testEntries": 1499
+    "testEntries": 1500
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1147,7 +1147,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 648,
+      "integration": 649,
       "platform/destructive": 107,
       "pure unit": 601,
       "unclassified": 127
@@ -1262,9 +1262,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1492,
+    "nimTestBinaryCount": 1493,
     "pythonTestFileCount": 7,
-    "testEntryCount": 1499
+    "testEntryCount": 1500
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -21464,6 +21464,26 @@
       "source": "tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cmake_fresh_configure",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_cmake_fresh_configure.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

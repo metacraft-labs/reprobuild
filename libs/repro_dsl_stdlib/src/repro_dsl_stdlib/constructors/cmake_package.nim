@@ -152,7 +152,8 @@ proc cmake_package*(srcDir: string;
                     target = "";
                     extraEnv: seq[(string, string)] = @[];
                     allowSourceWrites = false;
-                    srcPatches: seq[string] = @[]): CmakePackageResult =
+                    srcPatches: seq[string] = @[];
+                    freshConfigure = false): CmakePackageResult =
   ## Configure → build → install pipeline for an upstream cmake
   ## project. v1 leaves component selection up to the recipe
   ## (``component`` field on the install call); the standard layout
@@ -173,6 +174,11 @@ proc cmake_package*(srcDir: string;
   ## ``allowSourceWrites`` is an explicit exception for upstream CMake
   ## projects that generate configuration inputs inside their extracted
   ## source tree. The default keeps the source root read-only.
+  ##
+  ## ``freshConfigure`` discards CMake's cached probes whenever the configure
+  ## action executes, including retries after a failed dependency probe. It
+  ## does not force an otherwise up-to-date action to run. Recipes enabling
+  ## it must require CMake >=3.24; older CMake remains supported by default.
   ##
   ## ## M9.R.14g.6 — inline-exec build + install
   ##
@@ -544,6 +550,7 @@ proc cmake_package*(srcDir: string;
     buildDir = buildDir,
     generator = generator,
     cacheVars = effectiveCacheVars,
+    fresh = freshConfigure,
     after = configureAfter,
     extraEnv = extraEnv)
   # M9.R.79.4 — declare the write scope + read-only source scope for

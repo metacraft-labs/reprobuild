@@ -92,6 +92,8 @@ package cmake:
         flag config is string,
           alias = "--config=",
           format = concat
+        flag fresh is bool,
+          alias = "--fresh"
 
         outputs buildDir
 
