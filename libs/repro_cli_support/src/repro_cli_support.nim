@@ -8849,7 +8849,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         expandedSourceRecipes.incl(expansionKey)
         # A restored prefix is not evidence of a complete dependency closure.
         # Interface extraction does not evaluate the producer's build body.
-        let producerOutDir = recipeDir / ".repro/build/repro"
+        let producerOutDir = outputDirForTarget(
+          parseBuildTarget(recipeDir / "repro.nim"), workRoot)
         createDir(extendedPath(producerOutDir))
         # Match preparation so the existing keyed session cache can reuse the
         # producer's extraction after a build or binary-cache restoration.
@@ -8865,6 +8866,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           suppressTrace = mcTrace notin measureSet,
           skipCacheHitEvidence = mcCacheEvidence notin measureSet,
           statsEnabled = statsEnabled, cancelCheck = cancelCheck)
+        # Existing closure readers use recipe-local metadata, even when the
+        # validated extraction and its evidence live under a custom work root.
+        let projectionPath = recipeDir / ".repro/build/repro/project-interface.rbsz"
+        if projectionPath != producerOutDir / "project-interface.rbsz":
+          let bytes = encodeProjectInterfaceArtifact(producerArtifact)
+          var projectionLock = acquireInterfaceArtifactLock(projectionPath)
+          try:
+            if not fileExists(extendedPath(projectionPath)) or
+                repro_profile_compile.readBytes(projectionPath) != bytes:
+              let stagedPath = projectionPath & ".projection-tmp"
+              writeInterfaceArtifact(stagedPath, producerArtifact)
+              moveFile(extendedPath(stagedPath), extendedPath(projectionPath))
+          finally:
+            releaseInterfaceArtifactLock(projectionLock)
         let dependencies =
           if runtimeOnly: producerArtifact.projectInterface.runtimeToolUses
           else: producerArtifact.projectInterface.toolUses

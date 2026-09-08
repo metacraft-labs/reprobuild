@@ -21296,7 +21296,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_cached_source_closure_preparation.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
