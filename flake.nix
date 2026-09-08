@@ -108,7 +108,7 @@
       # the fleet died on the first monitored process with
       # `undefined symbol: stackable_linux_chain_sigtrap` — surfacing as
       # `repro build: error: interface extraction edge asFailed`.
-      url = "github:metacraft-labs/io-mon/9adc77f43c6a2ae6ad81a168c88111afeba17f5d";
+      url = "github:metacraft-labs/io-mon/65b190ba5704454dd33138a2dc82fac8fbc188d6";
       flake = false;
     };
     nim-shm-gset-src = {
