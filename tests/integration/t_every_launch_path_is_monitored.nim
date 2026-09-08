@@ -1334,6 +1334,8 @@ type DaemonHandle = object
   process: Process
   socket: string
   started: bool
+  previousSocket, previousBypass: string
+  hadSocket, hadBypass: bool
 
 proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
                          cpuMilli: int): DaemonHandle =
@@ -1371,8 +1373,17 @@ proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
   var died = false
   for _ in 0 ..< 400:
     if statExists(socketPath):
+      result = DaemonHandle(process: daemon, socket: socketPath, started: true,
+        previousSocket: getEnv("RUNQUOTA_SOCKET"),
+        previousBypass: getEnv("REPROBUILD_NO_RUNQUOTA"),
+        hadSocket: existsEnv("RUNQUOTA_SOCKET"),
+        hadBypass: existsEnv("REPROBUILD_NO_RUNQUOTA"))
       putEnv("RUNQUOTA_SOCKET", socketPath)
-      return DaemonHandle(process: daemon, socket: socketPath, started: true)
+      # Graph actions inherit bypass to avoid reacquiring the outer leased
+      # pool. This fixture has its own authority, so exercise real leases here.
+      # The caller's policy is restored on stop; the engine policy is unchanged.
+      delEnv("REPROBUILD_NO_RUNQUOTA")
+      return
     # A REFUSAL EXITS; it does not hang. Noticing that here turns a
     # ten-second silent timeout into an immediate, quotable diagnosis.
     if not daemon.running:
@@ -1399,7 +1410,10 @@ proc stop(handle: var DaemonHandle) =
   discard handle.process.waitForExit()
   handle.process.close()
   removeFile(handle.socket)
-  delEnv("RUNQUOTA_SOCKET")
+  if handle.hadSocket: putEnv("RUNQUOTA_SOCKET", handle.previousSocket)
+  else: delEnv("RUNQUOTA_SOCKET")
+  if handle.hadBypass: putEnv("REPROBUILD_NO_RUNQUOTA", handle.previousBypass)
+  else: delEnv("REPROBUILD_NO_RUNQUOTA")
   handle.started = false
 
 proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
@@ -2538,6 +2552,29 @@ suite "every_launch_path_is_monitored":
           # is the property the case below claims.
           executedPaths.incl lp.kind
 
+    test "explicit bypass is honored even with a reachable private authority":
+      require runQuotaError.len == 0
+      let workRoot = tempRoot / "explicit-bypass"
+      let cacheRoot = workRoot / "cache"
+      createDir(workRoot)
+      let marker = workRoot / "marker.txt"
+      writeFile(marker, "explicit bypass marker\n")
+      let act = monitoredFixtureAction("explicit-bypass", fixtureBin,
+        marker, workRoot / "out.txt", workRoot, holdMs = 0, cpuMilli = 100'u32)
+      let config = configFor(LaunchPath(kind: lpInlineRunQuota), repoRoot,
+        cacheRoot)
+      var run: BuildRunResult
+      putEnv("REPROBUILD_NO_RUNQUOTA", "1")
+      try:
+        run = runBuild(graph([act]), config)
+      finally:
+        delEnv("REPROBUILD_NO_RUNQUOTA")
+      require run.results.len == 1
+      checkTookLaunchPath(LaunchPath(kind: lpBypassRunQuota), run,
+        run.results[0], cacheRoot)
+      checkMonitoredEvidence(run.results[0], expandFilename(marker),
+        "explicit bypass")
+
     test "every enumerated launch path actually executed":
       ## THE SKIP COUNT IS PART OF THE RESULT, so it is asserted rather
       ## than read off a summary line nobody checks.
@@ -3046,6 +3083,10 @@ suite "every_launch_path_is_monitored":
 
     test "teardown":
       daemon.stop()
+      check existsEnv("RUNQUOTA_SOCKET") == daemon.hadSocket
+      check getEnv("RUNQUOTA_SOCKET") == daemon.previousSocket
+      check existsEnv("REPROBUILD_NO_RUNQUOTA") == daemon.hadBypass
+      check getEnv("REPROBUILD_NO_RUNQUOTA") == daemon.previousBypass
       removeDir(tempRoot)
       # ``check true`` could not fail, so a teardown that silently left the
       # daemon running or the scratch tree on disk still reported [OK].
