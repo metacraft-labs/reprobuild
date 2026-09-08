@@ -6287,6 +6287,12 @@ when defined(macosx):
   # spec's "reuse io-mon's existing population rather than re-implementing it".
   import stackable_hooks/propagation as sip_propagation
 
+  const nonSipShellCandidateNames* = ["sh", "bash", "dash", "ash", "zsh"]
+    ## Executable names accepted as the non-SIP wrapper shell, most-preferred
+    ## first. ``sh`` stays first so a host that does expose one keeps its
+    ## previous behaviour exactly; the rest exist because Nix and Homebrew put
+    ## ``bash`` on PATH and (almost) never a bare ``sh``.
+
   proc resolveNonSipShell*(): string =
     ## Resolve a non-SIP POSIX shell suitable for wrapping a monitored
     ## action's redirection (`sh -c "<argv> > out 2> err"`). Resolution order:
@@ -6296,9 +6302,21 @@ when defined(macosx):
     ##    SIP-rewrite target (``rewriteSipPath("/bin/sh", dir)``), so reusing it
     ##    keeps the engine's wrapper shell identical to the one the monitor's
     ##    own exec-redirect would pick.
-    ## 2. The first non-SIP ``sh`` on ``PATH`` (e.g. the Nix dev shell's bash).
-    ##    ``isSipProtected`` rejects ``/bin``, ``/sbin``, ``/usr/bin``,
-    ##    ``/usr/sbin`` candidates so a SIP shell is never selected here.
+    ## 2. The first non-SIP shell on ``PATH``, tried under each of
+    ##    ``nonSipShellCandidateNames`` in order. ``isSipProtected`` rejects
+    ##    ``/bin``, ``/sbin``, ``/usr/bin``, ``/usr/sbin`` candidates so a SIP
+    ##    shell is never selected here.
+    ##
+    ##    Probing more than ``sh`` is not a convenience. The doc above names
+    ##    "the dev shell's Nix/Homebrew bash" as the intended fallback, but a
+    ##    Nix profile links only ``bin/bash`` into a PATH directory — the
+    ##    ``bin/sh`` symlink stays behind in the package's own store output,
+    ##    which nothing puts on PATH. So on a stock Nix macOS host (CI runner or
+    ##    developer laptop) the only ``sh`` reachable by name is the SIP
+    ##    ``/bin/sh``, this proc returned ``""``, and every monitored action
+    ##    failed the fail-safe below. Each name here is invoked identically, as
+    ##    ``<shell> -c "umask 022 && <argv> > out 2> err"`` — plain POSIX that
+    ##    bash, dash, ash and zsh all honour.
     ##
     ## Returns ``""`` when only SIP-protected shells are available — the caller
     ## then enforces the Monitor-Hook-Shim.md:501 fail-safe for monitored
@@ -6309,16 +6327,51 @@ when defined(macosx):
       if fileExists(dropInSh) or symlinkExists(dropInSh):
         return dropInSh
     let pathEnv = getEnv("PATH")
-    for entry in pathEnv.split(PathSep):
+    for name in nonSipShellCandidateNames:
+      for entry in pathEnv.split(PathSep):
+        if entry.len == 0:
+          continue
+        let candidate = entry / name
+        if not fileExists(candidate):
+          continue
+        if sip_propagation.isSipProtected(candidate):
+          continue
+        return candidate
+    ""
+
+  proc nonSipShellSearchReport*(): string =
+    ## Human-readable account of what ``resolveNonSipShell`` just looked at.
+    ##
+    ## The fail-safe this feeds is unconditional and fatal, so its message has
+    ## to carry enough to diagnose the host it fired on. Without this, the error
+    ## says only "put a Nix/Homebrew sh on PATH" and the reader cannot tell
+    ## whether PATH was empty, whether CT_SANDBOX_TOOLS_DIR pointed somewhere
+    ## that lacks the drop-in, or whether shells were found and all rejected as
+    ## SIP-protected.
+    let sandboxDir = getEnv("CT_SANDBOX_TOOLS_DIR")
+    var parts: seq[string] = @[]
+    if sandboxDir.len == 0:
+      parts.add("CT_SANDBOX_TOOLS_DIR unset")
+    else:
+      let dropInSh = sip_propagation.rewriteSipPath("/bin/sh", sandboxDir)
+      parts.add("CT_SANDBOX_TOOLS_DIR=" & sandboxDir & " (no " & dropInSh & ")")
+    var pathDirs = 0
+    var rejected: seq[string] = @[]
+    for entry in getEnv("PATH").split(PathSep):
       if entry.len == 0:
         continue
-      let candidate = entry / "sh"
-      if not fileExists(candidate):
-        continue
-      if sip_propagation.isSipProtected(candidate):
-        continue
-      return candidate
-    ""
+      inc pathDirs
+      for name in nonSipShellCandidateNames:
+        let candidate = entry / name
+        if fileExists(candidate) and sip_propagation.isSipProtected(candidate):
+          rejected.add(candidate)
+    parts.add("searched " & $pathDirs & " PATH dir(s) for " &
+      nonSipShellCandidateNames.join("/"))
+    if rejected.len == 0:
+      parts.add("no shell of any candidate name found on PATH")
+    else:
+      parts.add("rejected as SIP-protected: " & rejected.join(", "))
+    parts.join("; ")
 
 proc bypassActionStdoutLogPath(cacheRoot, actionId: string): string =
   bypassActionLogDir(cacheRoot) / (actionId & ".stdout.log")
@@ -6416,7 +6469,8 @@ proc preparedRunQuotaCommand(action: BuildAction;
   when defined(macosx):
     if action.monitorDepfile.len > 0 and resolveNonSipShell().len == 0:
       raiseEngine("SIP-safe monitored launch requires a non-SIP shell; " &
-        "configure CT_SANDBOX_TOOLS_DIR or put a Nix/Homebrew sh on PATH")
+        "configure CT_SANDBOX_TOOLS_DIR or put a Nix/Homebrew sh on PATH " &
+        "[" & nonSipShellSearchReport() & "]")
   let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)

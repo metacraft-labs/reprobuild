@@ -5555,7 +5555,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

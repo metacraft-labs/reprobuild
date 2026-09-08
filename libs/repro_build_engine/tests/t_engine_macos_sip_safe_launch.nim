@@ -74,6 +74,63 @@ when defined(macosx):
         for prefix in ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"]:
           check not sh.startsWith(prefix)
 
+    test "resolveNonSipShell accepts a non-SIP bash when PATH has no `sh`":
+      # THE REGRESSION THIS PINS. Until now this proc probed only `entry / "sh"`.
+      # A Nix profile links `bin/bash` into a PATH directory and leaves the
+      # package's `bin/sh` symlink behind in its own store output, which nothing
+      # puts on PATH — so on a stock Nix macOS host the only `sh` reachable by
+      # name is the SIP `/bin/sh`, resolution returned "", and the fail-safe
+      # below failed EVERY monitored action. That is what took out the
+      # `eph-macos-arm64` lane of the reprobuild consumer fleet with
+      # "SIP-safe monitored launch requires a non-SIP shell".
+      #
+      # The pre-existing "positive" arm below cannot catch this: it runs inside
+      # reprobuild's own nix devShell, which does carry `pkgs.bash`'s bin dir
+      # (complete with its `sh`) on PATH. The consumer lanes run under
+      # `repro exec`, whose PATH does not. So this arm builds the failing
+      # environment explicitly instead of inheriting a passing one.
+      let tempRoot = createTempDir("repro-b1-bash-only", "")
+      defer: removeDir(tempRoot)
+      let binDir = tempRoot / "bin"
+      createDir(binDir)
+      let onlyBash = binDir / "bash"      # note: deliberately NO `sh` here
+      writeFile(onlyBash, "#!/bin/sh\nexit 0\n")
+      setFilePermissions(onlyBash, {fpUserExec, fpUserRead, fpUserWrite,
+        fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
+
+      let prevPath = getEnv("PATH")
+      let prevSandbox = getEnv("CT_SANDBOX_TOOLS_DIR")
+      putEnv("PATH", binDir)
+      delEnv("CT_SANDBOX_TOOLS_DIR")
+      defer:
+        putEnv("PATH", prevPath)
+        if prevSandbox.len > 0: putEnv("CT_SANDBOX_TOOLS_DIR", prevSandbox)
+
+      check resolveNonSipShell() == onlyBash
+
+    test "nonSipShellSearchReport explains an unresolvable PATH":
+      # The fail-safe is fatal and unconditional, so its message must carry
+      # enough to diagnose the host it fired on rather than just restating the
+      # remedy. Assert the report names the empty-handed search instead of
+      # going quiet.
+      let tempRoot = createTempDir("repro-b1-report", "")
+      defer: removeDir(tempRoot)
+      let emptyBin = tempRoot / "empty-bin"
+      createDir(emptyBin)
+
+      let prevPath = getEnv("PATH")
+      let prevSandbox = getEnv("CT_SANDBOX_TOOLS_DIR")
+      putEnv("PATH", emptyBin)
+      delEnv("CT_SANDBOX_TOOLS_DIR")
+      defer:
+        putEnv("PATH", prevPath)
+        if prevSandbox.len > 0: putEnv("CT_SANDBOX_TOOLS_DIR", prevSandbox)
+
+      let report = nonSipShellSearchReport()
+      check report.contains("CT_SANDBOX_TOOLS_DIR unset")
+      check report.contains("searched 1 PATH dir(s)")
+      check report.contains("no shell of any candidate name found on PATH")
+
     test "resolveNonSipShell prefers the CT_SANDBOX_TOOLS_DIR drop-in":
       # When a drop-in bundle is present, the engine wrapper shell must be the
       # drop-in /bin/sh (the canonical rewriteSipPath target) so it matches the
