@@ -18616,7 +18616,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30919,7 +30919,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_run_consumes.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

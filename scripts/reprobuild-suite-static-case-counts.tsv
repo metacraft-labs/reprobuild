@@ -779,7 +779,7 @@ tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim	nim	5
 tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_build_named_target.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_run_lists_tasks_and_edges.nim	nim	2
-tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim	nim	1
+tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim	nim	2
 tests/e2e/local-build-engine/t_e2e_repro_run_qualified_and_ambiguous.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_run_unknown_and_nonrunnable.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim	nim	1
@@ -1475,7 +1475,7 @@ tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	19
 tests/unit/t_measurement_axes.nim	nim	14
 tests/unit/t_nix_propagated_store_paths.nim	nim	2
-tests/unit/t_run_consumes.nim	nim	3
+tests/unit/t_run_consumes.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
 tests/unit/t_runquota_grant_wait_wedged_connected.nim	nim	2
 tests/unit/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling.nim	nim	4

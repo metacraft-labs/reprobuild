@@ -67,6 +67,8 @@ proc mockApply(inst: ResourceInstance; action: ResourceActionKind;
     result = ResourceBinding(address: inst.address, typeId: inst.typeId,
       resourceId: id, present: false)
   else:
+    if a.value == "fail":
+      raise newException(IOError, "mock materialization failed: " & inst.address)
     applyLog.add(inst.address)            # <-- the materialize witness
     mockWorld[id] = a.value
     result = ResourceBinding(address: inst.address, typeId: inst.typeId,
@@ -211,3 +213,60 @@ suite "N2: leased-consumes bridge (hermetic)":
     # The synthetic run-edge consumer record (never-reap) is untouched — it
     # carries no dated deadline, so it is skipped, not destroyed.
     check hasStateRecord(store, "topology-lease-smoke::consumes::topology")
+
+  test "required groups reject missing, empty, and incomplete membership":
+    let store = scratchStore("missing")
+    defer: removeDir(store.root)
+    let (resources, _) = topologyGraph()
+    let consumes = @[RunEdgeLease(address: "topology", policyKind: relDelayed,
+      ttlSeconds: 1800)]
+    for groups in [
+        newSeq[StateGroupDef](),
+        @[StateGroupDef(name: "topology", members: @[])],
+        @[StateGroupDef(name: "topology", members: @["net", "missing"])]]:
+      let outcome = reconcileConsumedStateGroups(consumes, "required-run",
+        resources, groups, store, endpoint = NoDaemon)
+      check outcome.missingGroups == @["topology"]
+      check outcome.reconciled.len == 0
+      check outcome.renewedGroups.len == 0
+      check applyLog.len == 0
+    let direct = @[mockState("topology", "up")]
+    check buildStateGroupDesired(consumes[0], "required-run", direct, @[]).len == 2
+    check buildStateGroupDesired(consumes[0], "required-run", direct,
+      @[StateGroupDef(name: "topology", members: @[])]).len == 0
+
+  test "required out-of-tree state rejects a missing provider session":
+    let store = scratchStore("provider-missing")
+    defer: removeDir(store.root)
+    var member = mockState("external", "up")
+    member.typeId = "n2.unlinked-required-state"
+    check not isResourceProviderRegistered(member.typeId)
+    let groups = @[StateGroupDef(name: "external-group", members: @["external"])]
+    let consumes = @[RunEdgeLease(address: "external-group",
+      policyKind: relDelayed, ttlSeconds: 1800)]
+    expect ValueError:
+      discard reconcileConsumedStateGroups(consumes, "required-run",
+        @[member], groups, store, endpoint = NoDaemon)
+    check applyLog.len == 0
+    check not hasStateRecord(store, "external")
+
+  test "failed required reconciliation preserves leased state for normal cleanup":
+    let store = scratchStore("partial-failure")
+    defer: removeDir(store.root)
+    let resources = @[mockState("net", "up"), mockState("a", "fail")]
+    let groups = @[StateGroupDef(name: "topology", members: @["net", "a"])]
+    let consumes = @[RunEdgeLease(address: "topology", policyKind: relDelayed,
+      ttlSeconds: 1800)]
+    let t0 = fromUnix(1_700_000_000)
+    expect IOError:
+      discard reconcileConsumedStateGroups(consumes, "required-run",
+        resources, groups, store, endpoint = NoDaemon, now = t0)
+    check applyLog == @["net"]
+    check hasStateRecord(store, "net")
+    check not hasStateRecord(store, "a")
+    check destroyLog.len == 0
+    discard reapExpiredAtReconcileStart(store, now = t0 + initDuration(minutes = 1))
+    check destroyLog.len == 0
+    discard reapExpiredAtReconcileStart(store, now = t0 + initDuration(minutes = 31))
+    check destroyLog == @["net"]
+    check not hasStateRecord(store, "net")

@@ -11756,17 +11756,19 @@ proc buildStateGroupDesired*(lease: RunEdgeLease;
   ##     a separate consumer that ``consumes`` it), reusing the landed lease
   ##     renewal path verbatim.
   ##
-  ## Returns an empty seq when the group is unknown / has no members present in
-  ## the graph, so a consuming edge whose group is not declared runs with no
-  ## reconcile (the N1 no-lease path) rather than erroring.
+  ## Returns an empty seq when the group is unknown, empty, or incomplete.
+  ## Explicit consumption requires the whole group (Named-Runnable-Edges
+  ## section 3.3); the run boundary must reject an unavailable group.
   var members: seq[string] = @[]
+  var groupFound = false
   for g in groups:
     if g.name == lease.address:
+      groupFound = true
       members = g.members
       break
   # Fallback: a leased address that names a resource directly (not a group)
   # still reconciles as a one-member group.
-  if members.len == 0:
+  if not groupFound:
     for inst in resources:
       if inst.address == lease.address:
         members = @[lease.address]
@@ -11778,9 +11780,10 @@ proc buildStateGroupDesired*(lease: RunEdgeLease;
     byAddr[inst.address] = inst
   var present: seq[string] = @[]
   for m in members:
-    if byAddr.hasKey(m):
-      result.add(byAddr[m])
-      present.add(m)
+    if not byAddr.hasKey(m):
+      return @[]
+    result.add(byAddr[m])
+    present.add(m)
   if present.len == 0:
     return @[]
   # The synthetic consumer: one leased edge per member, all held by the run-
@@ -11859,9 +11862,8 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
   ## out-of-tree ``typeId`` — a hermetic test injects one over a mock provider
   ## binary; production wires it from the pooled provider artifacts (the same
   ## discovery the reaper transport uses). When a group has an out-of-tree
-  ## member but no ``sessionResolver`` is available, the member is recorded in
-  ## ``missingGroups`` rather than hard-erroring (the run proceeds without the
-  ## unreconcilable state — a clear diagnostic, not a crash).
+  ## member but no ``sessionResolver`` is available, reconciliation fails:
+  ## required state cannot be treated as an optional optimization.
   for lease in consumes:
     let desired = buildStateGroupDesired(lease, runEdgeName, resources, groups)
     if desired.len == 0:
@@ -11877,8 +11879,9 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
         # OUT-OF-TREE members: reconcile over the provider session WITH the
         # store, routing the always-linked synthetic consumer in-process.
         if sessionResolver == nil:
-          result.missingGroups.add(lease.address)
-          continue
+          raise newException(ValueError,
+            "required leased state group '" & lease.address &
+            "' has no provider session for its out-of-tree resources")
         reconcileResourcesViaSession(desired, sessionResolver,
           store = some(store), now = now,
           inProcess = proc (typeId: string): bool =
@@ -11930,9 +11933,9 @@ proc buildRunEdgeSessionResolver*(
   ## for an out-of-tree member, from the harvested per-typeId provider artifacts
   ## — mirroring ``buildLeaseReapTransport``'s ``rtSession`` resolver. Returns
   ## ``nil`` when no artifact is registered (all-in-tree ⇒ the in-process fast
-  ## path stays; the bridge records a still-out-of-tree member as missing rather
-  ## than crashing). ``pool`` is the caller-owned ``ProviderSessionPool`` (closed
-  ## after the run) so a session per artifact id is launched once and reused.
+  ## path stays; the bridge rejects a still-out-of-tree member). ``pool`` is the
+  ## caller-owned ``ProviderSessionPool`` (closed after reconciliation) so a
+  ## session per artifact id is launched once and reused.
   if providerArtifacts.len == 0:
     return nil
   var byType = initTable[string, ResourceProviderArtifactRef]()
@@ -12048,8 +12051,8 @@ proc runReproRunCommand(args: openArray[string];
           # resolver from the harvested provider-artifact refs (nil when every
           # member is in-tree ⇒ the in-process fast path). A pooled resolver so
           # a session per artifact id is launched once + reused; closed after
-          # the reconcile. No-daemon / no-session-safe: a nil resolver falls
-          # through to the missing-group warning below, never blocking the run.
+          # the reconcile, including failure. An absent daemon is harmless;
+          # an absent required provider must block execution.
           let sessionPool = newProviderSessionPool()
           defer: (try: sessionPool.closeAll() except CatchableError: discard)
           let sessionResolver = buildRunEdgeSessionResolver(
@@ -12059,17 +12062,18 @@ proc runReproRunCommand(args: openArray[string];
             resolution.resources, resolution.groups, store,
             sessionResolver = sessionResolver)
           for missing in bridge.missingGroups:
-            stderr.writeLine("repro run: warning: run-edge '" &
-              resolution.entry.name & "' consumes leased state '" & missing &
-              "' but no matching stateGroup / resource was found; running " &
-              "without it.")
+            stderr.writeLine("repro run: error: run-edge '" &
+              resolution.entry.name & "' requires leased state group '" & missing &
+              "' but the group is missing, empty, or incomplete.")
+          if bridge.missingGroups.len > 0:
+            return 1
         except CatchableError as bridgeErr:
-          # A reconcile failure must not silently swallow the run in a way that
-          # hides the cause; surface it but let the edge run (the leased state
-          # is an optimization, and N1's no-lease path still executes).
-          stderr.writeLine("repro run: warning: leased-state reconcile for '" &
+          # Named-Runnable-Edges section 3.2: execute only after required state
+          # materializes. Persisted leases remain available to the normal reaper.
+          stderr.writeLine("repro run: error: required leased-state reconcile for '" &
             resolution.entry.name & "' failed: " & bridgeErr.msg &
-            " — running without it.")
+            "; command not started.")
+          return 1
       # Run-edge (or a collection of run-edges) — delegate to the build
       # engine, which executes it. Collections mirror ``repro build test``.
       var buildArgs = @[parsed.rawTarget]

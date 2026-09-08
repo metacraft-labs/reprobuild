@@ -73,7 +73,7 @@ proc writeRunTool(binDir: string) =
       "cp \"$input\" \"$output\"\n" &
       "printf '%s %s\\n' \"$output\" \"$forwarded\" >> \"$marker\"\n")
 
-proc writeRunEdgeProject(path: string) =
+proc writeRunEdgeProject(path: string; requiredMode = "") =
   ## A typed-tool edge (`build-app`) plus a `run "app-run", build =
   ## "build-app"` run-target naming it. `import repro_resources` brings the
   ## N0 `run` surface into recipe scope.
@@ -93,9 +93,27 @@ proc writeRunEdgeProject(path: string) =
     "  call:\n" &
     "    flag output is string, alias = \"--output\", role = output\n" &
     "    outputs output\n")
+  var requiredState = ""
+  if requiredMode in ["missing-provider", "failed-provider"]:
+    # Registered in the recipe, deliberately not linked into the engine.
+    requiredState = """
+type RequiredAttrs = object
+  value: string
+registerExtension[RequiredAttrs]("n1.required")
+registerResourceProvider(ResourceProviderDef(typeId: "n1.required",
+  determinism: rdVolatile))
+stateGroup "required-state":
+  discard resource("n1.required", "required-member", RequiredAttrs(value: "up"))
+"""
+    if requiredMode == "failed-provider":
+      requiredState.add("""
+registerResourceProviderArtifact("n1.required", ResourceProviderArtifactRef(
+  binaryPath: "missing-required-provider", providerArtifactId: "n1-required",
+  workingDir: "."))
+""")
   writeFile(path,
     "import repro_project_dsl\n" &
-    "import repro_resources\n\n" &
+    "import repro_resources\n\n" & requiredState & "\n" &
     "package n1RunPkg:\n" &
     "  usesImportPath \"reprobuild/packages\"\n" &
     "  uses:\n" &
@@ -109,7 +127,9 @@ proc writeRunEdgeProject(path: string) =
     "      marker = marker)\n" &
     "    discard target(\"app-build\", app)\n" &
     "    discard collect(\"lint\", [app])\n" &
-    "    run(\"app-run\", build = \"build-app\")\n")
+    "    run(\"app-run\", build = \"build-app\")\n" &
+    "    run(\"required-run\", build = \"build-app\",\n" &
+    "      consumes = @[leased(\"required-state\", delayed(minutes = 30))])\n")
 
 proc nonEmptyLines(path: string): seq[string] =
   if not fileExists(path):
@@ -191,3 +211,45 @@ suite "t_e2e_repro_run_named_run_edge":
     let secondRun = runRun(reproBin, pathValue, projectRoot, runArgs)
     checkpoint secondRun
     check nonEmptyLines(projectRoot / ".repro" / "n1-runs.log").len == 1
+
+  test "required consumed state failures prevent the command from starting":
+    # Named-Runnable-Edges section 3.2: required state precedes execution.
+    # The SAME command without consumes remains runnable in every fixture.
+    let reproBin = reproBinary(getCurrentDir())
+    let tempRoot = createTempDir("repro-required-run", "")
+    defer: removeDir(tempRoot)
+    let binDir = tempRoot / "bin"
+    writeRunTool(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+    let home = tempRoot / "home"
+    createDir(home)
+    for mode in ["missing-group", "missing-provider", "failed-provider"]:
+      checkpoint mode
+      let projectRoot = tempRoot / mode
+      createDir(projectRoot / "src")
+      writeFile(projectRoot / "src/main.txt", "required state witness\n")
+      writeRunEdgeProject(projectRoot / "reprobuild.nim", mode)
+      let env = @[
+        ("PATH", pathValue), ("HOME", home), ("USERPROFILE", home),
+        ("REPRO_TOOL_PROVISIONING", "path"),
+        ("REPROBUILD_NO_RUNQUOTA", "1"), ("REPRO_DAEMON", "off")]
+      let failed = runShell(shellCommand(@[reproBin, "run", "required-run"], env),
+        projectRoot)
+      checkpoint failed.output
+      check failed.code != 0
+      check failed.output.contains("repro run: error:")
+      check failed.output.contains("required-run")
+      case mode
+      of "missing-group":
+        check failed.output.contains("required-state")
+        check failed.output.contains("missing, empty, or incomplete")
+      of "missing-provider":
+        check failed.output.contains("no provider session")
+      else:
+        check failed.output.contains("missing-required-provider")
+      check not fileExists(projectRoot / ".repro" / "n1-runs.log")
+      check not fileExists(projectRoot / "build" / "app")
+      let control = requireSuccess(shellCommand(@[reproBin, "run", "app-run"], env),
+        projectRoot)
+      checkpoint control
+      check nonEmptyLines(projectRoot / ".repro" / "n1-runs.log").len == 1
