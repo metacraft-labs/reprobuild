@@ -12,7 +12,7 @@
 
 import std/[os, strutils]
 
-import ct_test_unittest_parallel
+import std/unittest
 
 import repro_home_resources
 

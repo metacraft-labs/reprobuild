@@ -237,8 +237,10 @@ for libName in [
   # Build-side test typed-tool, moved in-tree (see the ctTestRoot note
   # above): ``ct_test_interface`` is the leaf contract, ``ct_test_nim_unittest``
   # the ``buildNimUnittest`` typed-tool that ``repro.nim`` imports, and
-  # ``ct_test_unittest_parallel`` is the test-binary protocol support that
-  # reprobuild's own ``tools/test-runner`` and parallel-runner tests link.
+  # ``ct_test_unittest_parallel`` is the test-binary protocol support the
+  # shim's own tests and the fixture modules they compile at run time link.
+  # Ordinary test sources speak the same protocol through ``std/unittest``,
+  # which the codetracer-nim fork carries it in, and do not need this path.
   "ct_test_interface",
   "ct_test_nim_unittest",
   "ct_test_unittest_parallel",

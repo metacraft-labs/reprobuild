@@ -69,6 +69,18 @@
 ## sibling happens to be, which is not necessarily the pinned revision. The
 ## checked-in artifact records which binary produced its numbers.
 ##
+## Known prerequisite, as of this commit: the checked-in ledger was produced by
+## a ``ct-test`` that reads a Nim import clause as a statement rather than as a
+## line (CodeTracer ``80c097309``), and that revision is not yet an ancestor of
+## CodeTracer's ``dev``, so it is not what ``flake.lock`` resolves to. Run
+## against the surface the dev shell builds for itself, this test reports 46
+## sources as "NOT addressable and NOT in the ledger" and fails the second and
+## third cases below. Set ``$CT_TEST`` to a conforming build to reproduce the
+## artifact's numbers; the failure clears on its own once the fix lands in
+## CodeTracer and the ``codetracer-src`` pin moves onto it. The gate is not
+## softened to accommodate the gap, because a gate that tolerated a
+## 46-source disagreement would not be measuring anything.
+##
 ## What the ground truth is, and what it cannot see
 ## ------------------------------------------------
 ## The ground truth is ``benchmarks/reports/reprobuild-suite-m0-inventory-
@@ -76,7 +88,7 @@
 ## comes from ``reprobuild_suite_inventory.py``'s own Nim token scanner — a
 ## different program, in a different language, in a different repository from
 ## CodeTracer's provider. The two sides of the comparison therefore share no
-## PRODUCER, which is what makes an agreement on 1,393 of 1,394 sources mean
+## PRODUCER, which is what makes an agreement on 1,479 of 1,480 sources mean
 ## something.
 ##
 ## They do share a DEFINITION, and the honest reading of these numbers depends
@@ -84,13 +96,16 @@
 ## source; neither executes anything, and the checked-in inventory artifact
 ## carries no ``--list-json``-derived field at all. A case declared through a
 ## repository-local template is invisible to both, and so cannot appear in
-## either the numerator or the denominator. There are nine such cases today,
-## declared through the ``testWithReturn`` template in the four
-## ``tests/integration/t_repro_test_runner_*`` sources that define it; the
-## surface reports zero cases for those files, the inventory records zero, the
-## two agree, and the cases are nonetheless not addressable through ``ct
-## test``. They are a real part of the gap between "94.19% of sources" and
-## "every logical Reprobuild case", and no assertion below can find them.
+## either the numerator or the denominator. There are 94 such cases today
+## across 17 sources: 13 through ``testWithReturn`` in the four
+## ``tests/integration/t_repro_test_runner_*`` sources, and 81 through
+## ``gatedTest``, which registers a case unconditionally and skips its body
+## with a reason where the host cannot run it. The surface reports zero cases
+## for all 17, the inventory records zero, the two agree, and none of the 94
+## is addressable through ``ct test``. They are a real part of the gap between
+## "99.87% of sources" and "every logical Reprobuild case", and no assertion
+## below can find them — which is why the number is stated rather than left to
+## be inferred from a percentage that does not contain it.
 ##
 ## Mocking: none. The surface is the real ``ct test`` binary, driven as a
 ## subprocess against this repository's real sources. There is no stand-in for

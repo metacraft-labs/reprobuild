@@ -10,23 +10,158 @@
   "counts": {
     "catalogs": 3,
     "itemsByKind": {
-      "case": 8238,
-      "suite": 1900
+      "case": 8510,
+      "suite": 2015
     },
     "itemsByProvider": {
       "assembly-fallback": 2,
-      "nim-unittest": 10039,
-      "python-unittest": 97
+      "nim-unittest": 10409,
+      "python-unittest": 114
     },
-    "itemsTotal": 10138,
+    "itemsTotal": 10525,
     "responseDiagnostics": {
       "info": 1,
-      "warning": 35
+      "warning": 36
     }
   },
   "discoveryScope": "auto (the surface's default: the workspace's own VCS inventory; vendored and ignored trees excluded)",
   "generatedBy": "scripts/ct_test_surface_addressability.py",
   "identityCollisions": [
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim::integration_scoop_manifest_bin_resolution::integration_scoop_manifest_bin_resolution",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim",
+          "startLine": 102
+        },
+        {
+          "file": "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim",
+          "startLine": 108
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim::integration_scoop_probe_gui_and_timeout::integration_scoop_probe_gui_and_timeout",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim",
+          "startLine": 117
+        },
+        {
+          "file": "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim",
+          "startLine": 123
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim::m76-gate:-integration_stow_byte_identical_target_is_cache_hit::byte-identical-regular-file-target-is-a-no-op-cache-hit;",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 62
+        },
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 177
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim::m76-gate:-integration_stow_byte_identical_target_is_cache_hit::genuinely-differing-regular-file-target-still-raises",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 70
+        },
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 267
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim::m76-gate:-integration_stow_byte_identical_target_is_cache_hit::stow-target-reached-through-a-parent-directory-junction-into",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 74
+        },
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 343
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim::m76-gate:-integration_stow_byte_identical_target_is_cache_hit::wrong-source-link-whose-resolved-content-is-byte-identical",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 66
+        },
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 223
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim::m83-phase-f3-gate:-profile-compile-failure-is-a-hard-error::repro-home-apply-hard-errors-on-a-broken-phase-a-profile",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 38
+        },
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 118
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim::m83-phase-f3-gate:-profile-compile-failure-is-a-hard-error::repro-home-apply-plan-hard-errors-on-a-broken-phase-a-profile",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 41
+        },
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 132
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim::m83-phase-f3-gate:-profile-compile-failure-is-a-hard-error::repro-home-plan-hard-errors-on-a-broken-phase-a-profile",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 44
+        },
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 141
+        }
+      ]
+    },
     {
       "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
       "id": "nim-unittest/nim/std/unittest/tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim::t_e2e_repro_watch_multiple_named_targets::t_e2e_repro_watch_multiple_named_targets",
@@ -41,550 +176,76 @@
           "startLine": 319
         }
       ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/integration/t_r2_iso_boot.nim::t_r2_iso_boot::r2-iso-boots-under-hyper-v-gen-2-uefi;-kernel-+-initramfs-reach-userspace",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/integration/t_r2_iso_boot.nim",
+          "startLine": 181
+        },
+        {
+          "file": "tests/integration/t_r2_iso_boot.nim",
+          "startLine": 213
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/integration/t_r9_systemd_boot.nim::t_r9_systemd_boot::r9-iso-boots;-systemd-257.9-reaches-login-prompt",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/integration/t_r9_systemd_boot.nim",
+          "startLine": 137
+        },
+        {
+          "file": "tests/integration/t_r9_systemd_boot.nim",
+          "startLine": 167
+        }
+      ]
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.05,
-    "caseItemsInCatalog": 8238,
-    "casesAddressableThroughTheSurface": 8028,
-    "collidingIdentities": 1,
-    "distinctCaseIdentities": 8237,
+    "caseCoveragePercent": 98.98,
+    "caseItemsInCatalog": 8510,
+    "casesAddressableThroughTheSurface": 8286,
+    "collidingIdentities": 12,
+    "distinctCaseIdentities": 8498,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1393,
-      "compared": 1394,
+      "agree": 1479,
+      "compared": 1480,
       "disagree": 1
     },
-    "sourceCoveragePercent": 94.19,
-    "sourcesAddressableThroughTheSurface": 1394,
-    "sourcesNotAddressable": 86,
-    "trackedNimSuiteSources": 1480,
-    "trackedStaticCaseCount": 8358
+    "sourceCoveragePercent": 99.87,
+    "sourcesAddressableThroughTheSurface": 1480,
+    "sourcesNotAddressable": 2,
+    "trackedNimSuiteSources": 1482,
+    "trackedStaticCaseCount": 8371
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
-    "provenance": "built from metacraft-labs/codetracer e1b5280a2755f4c5016679610d208e5b94d1d5ec \u2014 the codetracer-src revision pinned in reprobuild flake.lock \u2014 with the ctTestTools recipe: nim c --threads:on --mm:orc --out:build/bin/ct-test src/ct_test/ct_test.nim",
+    "provenance": "metacraft-labs/codetracer 80c097309 (fix/nim-unittest-multiline-imports), built in a sibling worktree",
     "resolvedBy": "environment",
-    "sha256": "bc12a52262e2b1a08495050a19531f1f89946a15afa1295953728db02ad16e85"
+    "sha256": "68f81fdcb9ccd25d74fe08bb26e0a86cf161f10b5ef163b6b37ae8903c279289"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [
     {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
+      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; not importing the shim does, which is what 38 sources did. The companion .md says why the one that is left keeps the import",
       "inventoryStaticCaseCount": 2,
       "reason": "shim-protocol-producer",
       "source": "libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 3,
-      "reason": "provider-multi-line-import",
-      "source": "libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 2,
-      "reason": "provider-multi-line-import",
-      "source": "libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 2,
-      "reason": "provider-multi-line-import",
-      "source": "libs/repro_binary_cache_server/tests/t_a2_p2_rest_surface.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 12,
-      "reason": "provider-multi-line-import",
-      "source": "libs/repro_build_engine/tests/t_action_cache_output_integrity.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 17,
-      "reason": "provider-multi-line-import",
-      "source": "libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 1,
-      "reason": "provider-multi-line-import",
-      "source": "libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 4,
-      "reason": "provider-multi-line-import",
-      "source": "libs/repro_local_store/tests/t_a4_p4_eviction.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 1,
-      "reason": "provider-multi-line-import",
-      "source": "libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 1,
-      "reason": "provider-multi-line-import",
-      "source": "libs/repro_peer_cache/tests/t_peer_cache_metrics_prometheus_format.nim"
     },
     {
       "detail": "declares no literal suite/test of its own; any cases it contributes are declared in the modules it imports, which are discovered separately under their own identities",
       "inventoryStaticCaseCount": 82,
       "reason": "declares-no-cases-of-its-own",
       "source": "tests/bundles/bundle_repro_solver_pure_unit.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 2,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dev-env/t_e2e_dev_env_performance_gates.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 2,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dev-env/t_e2e_develop_overrides_activity.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 3,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dev-env/t_e2e_hooks_shell_direnv.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 3,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dev-env/t_e2e_native_shell_hooks.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 5,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 2,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 4,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dev-env/t_e2e_repro_exec_shell.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 1,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 1,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dev-env/t_e2e_shell_hook_realistic_workload.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 2,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/dotfiles-replacement/t_e2e_dotfiles_replacement_on_real_host.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 1,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 3,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/home-resources/t_integration_prevent_destroy.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 3,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/home-resources/t_integration_resource_move.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_home_env_user_path_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_home_fs_managed_block_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_home_fs_user_file_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_home_linux_dconfkey_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_home_linux_kdeconfigkey_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_home_shell_integration_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_home_systemd_user_unit_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_linux_firewallrule_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_linux_nixdaemonsetting_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_linux_polkitrule_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_linux_sudoersrule_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_linux_sysctl_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_linux_tmpfilesrule_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_linux_udevrule_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_os_hostname_posix_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_os_timezone_posix_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_passwd_group_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_plan_apply_convergent.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 1,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_infra_systemd_system_timer_vm.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_repro_system_command_family.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_windows_optional_feature_and_capability.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_windows_registry_system_scope.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m69/t_e2e_windows_vs_installer.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 6,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/m71/t_e2e_remote_apply_home_profile_phase_e.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 1,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/m71/t_integration_remote_apply_cross_host_evaluation_phase_b.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 2,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/m72/t_e2e_apply_plan_dry_run.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 2,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/m72/t_integration_production_package_catalog.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 4,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/m72/t_integration_stow_non_destructive_over_existing.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 2,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 2,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 8,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m77/t_integration_scoop_installed_version_survives_bucket_drift.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m80/t_integration_plan_classifier_bucket_drift_is_cache_hit.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m81/t_integration_privileged_broker_single_prompt.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 6,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 6,
-      "reason": "provider-multi-line-import",
-      "source": "tests/e2e/m83/t_e2e_profile_modules.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/scoop/t_e2e_scoop_adapter_diagnostics.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/scoop/t_e2e_scoop_adapter_realize_and_launch.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 0,
-      "reason": "shim-protocol-producer",
-      "source": "tests/e2e/scoop/t_e2e_scoop_practical_hardening.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 5,
-      "reason": "shim-protocol-producer",
-      "source": "tests/integration/t_branch_unpublished_source_head.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 8,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_every_launch_path_is_monitored.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 2,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_ext_repro_action_rows.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 3,
-      "reason": "shim-protocol-producer",
-      "source": "tests/integration/t_ext_test_execution_rows.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 1,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_integration_daemon_nix_and_tarball_realize.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 5,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_integration_local_store_layout_and_atomic_writes.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 7,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_linked_worktree_pre_push_repository_env.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 3,
-      "reason": "shim-protocol-producer",
-      "source": "tests/integration/t_m20_second_runner_generic_layer.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 2,
-      "reason": "shim-protocol-producer",
-      "source": "tests/integration/t_m21_point_in_time_queries.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 10,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_nested_lock_push_capability_security.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 4,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_nix_daemon_ipc.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 2,
-      "reason": "shim-protocol-producer",
-      "source": "tests/integration/t_r2_iso_boot.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 2,
-      "reason": "shim-protocol-producer",
-      "source": "tests/integration/t_r9_systemd_boot.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 17,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim"
-    },
-    {
-      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; retiring the shim would",
-      "inventoryStaticCaseCount": 2,
-      "reason": "shim-protocol-producer",
-      "source": "tests/integration/t_repro_test_runner_parallel_n_workers.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 9,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_repro_test_runner_process_group_cleanup.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 5,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_stats_reads_shared_store.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 6,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_store_daemon_m66_dev.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 7,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_switch_new_branch_marks_feature_branch.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 6,
-      "reason": "provider-multi-line-import",
-      "source": "tests/integration/t_workspace_switch_switches_all_repos.nim"
-    },
-    {
-      "detail": "imports std/unittest inside a bracketed clause spanning more than one line; the provider's framework scan is line-oriented and never sees the continuation, so the file is never scanned for declarations. It is not silent, but the diagnostic it does emit says the opposite of the truth: `no Nim unittest imports detected in file`, one of 206 such rows in the workspace response, for a file that plainly does import it",
-      "inventoryStaticCaseCount": 7,
-      "reason": "provider-multi-line-import",
-      "source": "tests/unit/t_m9r83_install_mirror_publish.nim"
     }
   ]
 }

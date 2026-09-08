@@ -29,10 +29,10 @@ separate and the second is not close: see "What the surface cannot do" below.
 
 | | |
 |---|---|
-| Repository | `reprobuild`, `origin/dev` at `c1b231baa443d066f74197b4ccc49b99afd1cd31`, plus the working-tree change that added this report |
+| Repository | `reprobuild`, `origin/dev` at `70801c670afafe9a381dacafb0f2002196d10e37`, plus the working-tree change that added this report and moved this suite's test sources onto `std/unittest` |
 | Platform | Linux 6.12.85 x86_64, single host, no contention control |
-| Surface | `ct-test`, built from `metacraft-labs/codetracer` `e1b5280a2755f4c5016679610d208e5b94d1d5ec` — the `codetracer-src` revision pinned in `flake.lock` at the commit above |
-| Surface build | `nim c --threads:on --mm:orc --nimcache:build/nimcache/ct-test --out:build/bin/ct-test src/ct_test/ct_test.nim`, with `RUNQUOTA_SRC` set: the `ctTestTools` recipe in `flake.nix`, run against a checkout of the pin |
+| Surface | `ct-test`, built from `metacraft-labs/codetracer` `80c097309`, content hash `68f81fdcb9cc…`. That revision carries the import-clause fix described under "the multi-line-import rows" below; the `codetracer-src` revision pinned in `flake.lock` predates it and does not |
+| Surface build | `nim c --threads:on --mm:orc --nimcache:build/nimcache/ct-test --out:build/bin/ct-test src/ct_test/ct_test.nim`, with `RUNQUOTA_SRC` set: the `ctTestTools` recipe in `flake.nix`, run against a checkout of that revision |
 | Command | `ct-test test discover --workspace <repo> --json` |
 | Discovery scope | `auto` — the surface's default, which is the workspace's own VCS inventory. Vendored `references/` trees and ignored paths are excluded |
 | Ground truth | `benchmarks/reports/reprobuild-suite-m0-inventory-sources.json` (`staticCaseCount`), produced by a different scanner in a different language in a different repository |
@@ -42,49 +42,83 @@ what makes their agreement informative. They do share a *definition*: both count
 a case as a literal `test "…"` call in the source, and the checked-in inventory
 carries no `--list-json`-derived count at all. A case declared through a
 repository-local template appears in neither the numerator nor the denominator.
-Nine such cases exist today — the `testWithReturn` template in the four
-`tests/integration/t_repro_test_runner_*` sources that define it. The surface
-reports zero cases for those four files, the inventory records zero, the two
-agree, and the cases are still not addressable through `ct test`. They belong to
-the gap between the percentages below and "every logical Reprobuild case", and
-nothing in this measurement can find them.
+**94 such cases exist today, in 17 sources** — 13 through `testWithReturn` in
+four `tests/integration/t_repro_test_runner_*` sources, and 81 through
+`gatedTest`, a template that registers a case unconditionally and skips its
+body with a reason on a host that cannot run it. The surface reports zero cases
+for all 17, the inventory records zero, the two agree, and none of the 94 is
+addressable through `ct test`. They belong to the gap between the percentages
+below and "every logical Reprobuild case", and nothing in this measurement can
+find them.
 
-**The pinned binary was built by hand on purpose.** The dev shell also puts a
+This number is worth watching rather than filing away, because the migration
+recorded below changes how it reads. All 13 `gatedTest` sources are among the
+38 that stopped importing the shim. Before that change they were themselves in
+the not-addressable set, so a reader had no reason to credit them with
+anything; after it they are discovered, and are reported as zero-case files
+whose zero agrees with a zero-case ground truth. Their 81 cases were never in
+either the numerator or the denominator and still are not. So the source
+percentage rises by 13 sources that carry 81 cases the surface still cannot
+name, and it does so without any line in the tables below moving to say so.
+That is why the number is stated here: a coverage figure that reported only the
+rise would be worth less than a smaller one that reported both.
+
+**The measured binary was built by hand on purpose.** The dev shell also puts a
 `ct-test` on `PATH`, and it is *not* necessarily this one: `ctTestTools` builds
 from the `codetracer-src` flake input, and the workspace `.envrc`
 auto-override redirects that input to a `../codetracer` sibling checkout
-whenever one exists. On the host this was measured on, that sibling was at
-`8bc496724`, which is **not** a descendant of the pin and lacks work the pin
-carries. A measurement against it would have been a measurement of one
-developer's checkout.
+whenever one exists. Whichever binary is used, `$CT_TEST` is the supported way
+to name it, and the artifact records the content hash rather than a host-local
+path, so the numbers below can be tied to a build on any machine.
 
-Both builds were nonetheless run against this suite, and the comparison is
-worth recording: two `ct-test` binaries with different content hashes
-(`bc12a52262e2…` from the pin, `7b5d44071c04…` from the sibling) produce
-**byte-identical** `counts`, `reconciliation`, `unaddressableSources`,
-`caseCountDisagreements` and `identityCollisions`. Everything below is
-therefore a property of the suite and of the provider's scanning rules, not of
-one build — but only the pin is a reproducible identity, so the pin is what the
-artifact records.
+**The figures move with the surface, so the surface has to be stated.** A
+`ct-test` older than `80c097309` reads a Nim import clause one line at a time
+and does not see `unittest` on a continuation line. Against this same tree such
+a binary reports **46 fewer sources**: 1,434 of 1,482 (96.76%) and 8,085 cases,
+with 48 rows in `unaddressableSources` rather than 2 — measured, not projected,
+against the `ct-test` the dev shell puts on `PATH` here (content hash
+`7b5d44071c04…`). That difference is not a property of the suite, and a reader
+comparing two runs of this report needs the surface identity above to tell the
+two causes apart.
+
+**The figures in this report are ahead of the surface this repository pins, and
+the gate says so by failing.** `80c097309` is on a CodeTracer topic branch; it
+is not an ancestor of CodeTracer's `dev`, and the `codetracer-src` revision
+locked in `flake.lock` is an ancestor of it rather than the other way round.
+So no `ct-test` the dev shell builds for itself carries the fix yet, and
+`tests/integration/t_ct_test_surface_case_addressability.nim` — which compares
+this ledger against whatever surface it finds, in both directions — reports 46
+sources that are "NOT addressable and NOT in the ledger" and fails two of its
+six cases unless `$CT_TEST` names a conforming build. That is the intended
+behaviour of an exact gate, not a flaw in it: this ledger becomes the
+repository's own state only once the import-clause fix lands in CodeTracer and
+`flake.lock` moves onto it. Until then the numbers here are reproducible only by
+naming the binary.
 
 ## Result
 
 | Measure | Value |
 |---|---|
 | Catalogs returned | 3 (`nim-unittest`, `python-unittest`, `assembly-fallback`) |
-| Items returned | 10,138 — 8,238 cases, 1,900 suites |
+| Items returned | 10,525 — 8,510 cases, 2,015 suites |
 | Error diagnostics | 0 |
-| Tracked Nim suite sources | 1,480 |
-| …addressable through the surface | **1,394 (94.19%)** |
-| Tracked static case count | 8,358 |
-| …addressable through the surface | **8,028 (96.05%)** |
-| Per-source case-count agreement | 1,393 of 1,394 agree with the independent scanner |
-| Distinct case identities vs case items | 8,237 distinct for 8,238 items — **one** collision |
+| Tracked Nim suite sources | 1,482 |
+| …addressable through the surface | **1,480 (99.87%)** |
+| Tracked static case count | 8,371 |
+| …addressable through the surface | **8,286 (98.98%)** |
+| Per-source case-count agreement | 1,479 of 1,480 agree with the independent scanner |
+| Distinct case identities vs case items | 8,498 distinct for 8,510 items — **12** collisions |
 
 Per-source case counts are compared against a scanner that shares no code with
-the surface, and they agree on 1,393 of 1,394 sources. That is the load-bearing
+the surface, and they agree on 1,479 of 1,480 sources. That is the load-bearing
 part of "the counts are machine-readable": they are not merely *emitted*, they
 are *right*, checked against a producer that could have disagreed.
+
+**Every case in the gap is accounted for by name**, not by an average. The 85
+cases between 8,286 and 8,371 are 82 in the generated bundle (re-attributed, not
+lost — see below), 2 in the one source that still speaks the shim protocol, and
+1 dead case inside a `when false` that the ground truth counts and the surface
+correctly does not.
 
 **The one disagreement resolves in the surface's favour**, which is worth
 saying because `caseCountDisagreements` is neutral about who is wrong.
@@ -96,62 +130,92 @@ the surface. (Note the asymmetry with the identity collision below: the surface
 evaluates a literal `when false` but not a `when defined(…)`, so it drops the
 dead case here and keeps *both* arms there.)
 
-## The 86 sources the surface cannot see, by cause
+## The 2 sources the surface cannot see, by cause
 
 | Cause | Sources | Cases |
 |---|---|---|
-| Imports the vendored `ct_test_unittest_parallel` shim | 43 | 57 |
-| `import std/[… unittest …]` spanning more than one line | 42 | 190 |
+| Imports the vendored `ct_test_unittest_parallel` shim | 1 | 2 |
 | Declares no cases of its own (an auto-generated bundle module) | 1 | 82 |
 
 The full list, with a reason on every row, is `unaddressableSources` in the
 JSON.
 
-**The shim rows are not what they were first written up as.** They are the 43
-sources that speak this repository's *other*, divergent protocol
-implementation — the one whose removal is already the subject of a separate
-decision — and that part is right. What is *not* right is "the provider detects
-`unittest_parallel` and declares it not implemented". It does no such thing
-here. `frameworkForImport` matches the literal module names `unittest`,
-`unittest2` and `unittest_parallel`; these files import
-`ct_test_unittest_parallel`, which is none of them. No framework is detected,
-the "detected but not implemented in M2" warning is never emitted — the
-workspace response contains **zero** of them — and the files fall through the
-same generic path as any non-test source.
+### What closed, and how
 
-The practical consequence is the opposite of the original framing: implementing
-`unittest_parallel` support upstream would **not** recover these 43 rows,
-because nothing in this repository imports that module under that name.
-Retiring the shim would.
+Two causes that between them accounted for 85 of the earlier 86 rows are gone.
 
-**The 42 multi-line-import rows are a defect in the surface, and it is
-narrow.** The provider's framework scan is line-oriented: it looks for a line
-beginning `import ` and parses that line. A bracketed clause such as
+**The multi-line-import rows (42 sources, 190 cases) were a defect in the
+surface, and it was narrow.** The provider's framework scan was line-oriented:
+it looked for a line beginning `import ` and parsed that line. A bracketed
+clause such as
 
 ```nim
 import std/[algorithm, os, osproc, streams, strtabs, strutils,
             tempfiles, times, unittest]
 ```
 
-puts `unittest` on a continuation line the scan never reads, so the file is
-never recognised as a unittest source and is never scanned for declarations at
-all. The failure is total per file. It is **not silent** — an earlier draft of
-this report said it was — but the diagnostic it emits states the opposite of the
-truth: `info: no Nim unittest imports detected in file`, for a file that plainly
-does import it. That row is one of 206 identical ones in the workspace response —
-86 on the sources tabled here and 120 on ordinary non-test files where it is
-simply true — so nothing distinguishes a real drop from routine noise. A wrong diagnostic buried in 206
-correct ones is not much better than none, but the distinction matters to any
-claim about whether the surface reports its refusals. Two variants hit the same
-bug — the
-`unittest` entry on a later line, and an `import std/[unittest, …` whose
-closing bracket is on a later line.
+put `unittest` on a continuation line the scan never read, so the file was
+never recognised as a unittest source and never scanned for declarations at
+all — the failure was total per file. It was not silent, but the diagnostic it
+emitted said the opposite of the truth: `info: no Nim unittest imports detected
+in file`, for a file that plainly does import it, and indistinguishable from the
+same line emitted correctly on ordinary non-test files. Reading an import clause
+as a statement rather than as a line fixes it; the `ct-test` measured here does
+that, and all 42 sources and all 190 cases are in the numerator above.
 
-Joining bracketed import clauses before scanning recovers all 42 sources and
-190 cases; nothing else about the provider needs to change. That is measured,
-not projected: a mechanical bracket-join applied to every one of the 42, with
-`discover --file` re-run on each, recovers 42 of 42 — none stays at zero, and
-every file lands on exactly the case count the inventory records, 190 in total.
+**The shim rows (43 sources, 57 cases) were this repository's own to close, and
+38 of them are now closed.** The provider's `frameworkForImport` matches the
+literal module names `unittest`, `unittest2` and `unittest_parallel`; those
+files imported `ct_test_unittest_parallel`, which is none of them, so no
+framework was detected and they fell through the same generic path as any
+non-test source. Implementing `unittest_parallel` support upstream would not
+have recovered a single row, because nothing here imports that module under that
+name.
+
+What made the shim removable is that it is no longer load-bearing.
+`ct_test_unittest_parallel` exists to answer `--list` / `--list-json` / `--run`
+and to write `$NIMTEST_RESULT_FILE`; the codetracer-nim fork has since put that
+same protocol inside `std/unittest` itself, in a strictly larger form — it adds
+`--catalog`, `bodyHash`, `group`, `threadsRequired`, `xfail`, `tags`,
+`deterministic` and a column, and it keeps the protocol document off a stdout
+that a suite body might also write to. So for a test source, `import
+std/unittest` in place of `import ct_test_unittest_parallel` is a one-line
+change that gains the fields this repository's own runner already reads. 38
+sources took that change; per-source `--list-json` catalogs built before and
+after are identical in case name, suite and line for all 38, 115 cases in
+total.
+
+One behaviour is narrower rather than wider, and it is named here rather than
+rounded off: the shim's `--run` accepts a bare case name, a `suite::` prefix or
+an empty selector as well as the full `suite::test`, while `std/unittest`
+matches the full name and nothing else. Nothing in this repository relies on the
+latitude — `tools/test-runner` passes back the `name` it read from the catalog,
+which is always the full form — so no call site changes, but "strictly larger"
+is true of the catalog and the result document rather than of the selector.
+
+Four further rows were never shim rows at all. They import `std/unittest` in a
+bracketed clause and merely *contain* the string `ct_test_unittest_parallel`,
+inside triple-quoted fixture modules they compile at run time. The classifier
+that wrote their reason searched the raw bytes of the file and attributed them
+to the shim; it now reads a source with its comments and string literals
+removed, and tests the bracketed-clause condition first, so a file that is
+subject to both is reported under the one that actually binds.
+`tests/unit/test_ct_test_surface_addressability.py` holds that behaviour, and
+also re-derives every reason in this ledger from the source it names, so the
+prose here cannot quietly go stale.
+
+### What remains
+
+**One source still speaks the shim protocol, and should.**
+`libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim` is
+the shim's own smoke test: it calls `registeredTests()` and
+`currentProtocolMode()` to assert that the shim's `suite`/`test` overrides
+register the running binary's cases in-process, with the right file and line.
+Moving it to `std/unittest` would not migrate the test, it would delete its
+subject — the shim's registry is populated only by the shim's own `test`
+override. Its 2 cases are addressable through the shim's `--list-json`, and are
+run by this suite; they are not addressable through `ct test`, and will not be
+for as long as the shim is worth having a test for.
 
 **The one bundle row is a re-attribution, not a loss.** `tests/bundles/
 bundle_repro_solver_pure_unit.nim` is generated, imports 24 solver test
@@ -159,7 +223,13 @@ modules and declares nothing itself. All 24 of those modules *are* discovered,
 under their own identities, so its 82 cases are addressable — they are simply
 not addressable *under the bundle's* name. They are counted as lost above
 because the honest denominator is the tracked entry, and double-counting them
-would flatter the result.
+would flatter the result. Making the row disappear would need a decision on
+which side owns the duplication: the surface would have to follow a Nim
+`import` of a test module and re-attribute the imported module's cases to the
+importing file, which would put all 82 into the catalog twice under two
+different files and turn them into 82 identity collisions; or the inventory
+would have to stop attributing member cases to the aggregator, which is a change
+to this repository's scanner and not to `ct test`. Neither is attempted here.
 
 ## Identity stability
 
@@ -175,22 +245,29 @@ Two properties were checked, both by the test rather than by inspection:
   ids from the workspace-wide catalog are byte-identical to the ids from a
   per-file `--file` discovery, and each is exactly what the documented mapping
   predicts from that item's own file, suite and case name.
-* **Unique across the whole catalog, with one exception.** The identity is a
-  slug — lowercased, whitespace collapsed to hyphens, `--` collapsed — so
-  collisions are possible in principle. Across all 8,238 case items there is
-  exactly one: `tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim`
-  declares two suite/case pairs with identical titles at lines 211 and 319.
+* **Unique across the whole catalog, bar 12 rows, and all 12 are the same
+  thing.** The identity is a slug — lowercased, whitespace collapsed to
+  hyphens, `--` collapsed — so collisions are possible in principle. Across all
+  8,510 case items there are 12, listed with their sites in
+  `identityCollisions`. They fall across seven files, and every one of them is a
+  pair of declarations in *mutually exclusive* arms of a `when`: `when not
+  defined(windows): … else: …` in four files (m74, m75, m76, m83), `when
+  defined(vmHarnessAvailable)` in two (`t_r2_iso_boot`, `t_r9_systemd_boot`),
+  and `when defined(macosx) or defined(linux)` in the last
+  (`t_e2e_repro_watch_multiple_named_targets`). At most one of each pair exists
+  in any build — the compiled binary has one case with that name and nothing to
+  disambiguate.
 
-  The two are in *mutually exclusive* arms of a
-  `when defined(macosx) or defined(linux): … else: …`, so at most one of them
-  exists in any build — the compiled binary has one case with that name and
-  nothing to disambiguate. The collision is therefore an artifact of
-  configuration-blind static discovery, which the surface and this
-  repository's own inventory scanner share, and not a duplication a developer
-  can remove. It costs no coverage; what it shows is that a `ct test` identity
-  has no configuration dimension, so it cannot say *which* `when` arm it names.
-  It is recorded because "stable identities" would otherwise be a claim nobody
-  had counted.
+  The collisions are therefore an artifact of configuration-blind static
+  discovery, which the surface and this repository's own inventory scanner
+  share, and not duplications a developer can remove. They cost no coverage;
+  what they show is that a `ct test` identity has no configuration dimension, so
+  it cannot say *which* `when` arm it names.
+
+  Eleven of the twelve are newly *visible* rather than newly created: the files
+  that declare them were not discovered at all before, so their collisions could
+  not be counted. Making a source addressable is what exposes this property of
+  the identity, which is the honest order for a number to arrive in.
 
 ## What the surface cannot do
 
@@ -201,12 +278,12 @@ and it was run rather than inferred:
 
 ```
 $ ct-test test run --workspace <repo> --threads 4 --no-certificate
-{"total": 10138, "dispatched": 10138, "executed": 0, "skipped": 0,
- "skipped_by_partition": 0, "passed": 0, "failed": 0, "unrunnable": 10136,
- "wall_time_ms": 242, "threads": 4, "verdict": "nothing-executed"}
-errors: "provider 'nim-unittest' cannot run 10039 of the units dispatched to
+{"total": 10525, "dispatched": 10525, "executed": 0, "skipped": 0,
+ "skipped_by_partition": 0, "passed": 0, "failed": 0, "unrunnable": 10523,
+ "wall_time_ms": 111, "threads": 4, "verdict": "nothing-executed"}
+errors: "provider 'nim-unittest' cannot run 10409 of the units dispatched to
          it, so they were discovered but never executed"
-         "provider 'python-unittest' cannot run 97 …"
+         "provider 'python-unittest' cannot run 114 …"
 exit 2
 ```
 

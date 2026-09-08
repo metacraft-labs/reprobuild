@@ -52,7 +52,7 @@
 
 import std/[os, strutils, tempfiles]
 
-import ct_test_unittest_parallel
+import std/unittest
 
 import repro_core
 import repro_elevation

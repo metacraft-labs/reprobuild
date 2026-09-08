@@ -18,7 +18,7 @@
 
 import std/[os, strutils, osproc]
 
-import ct_test_unittest_parallel
+import std/unittest
 
 import repro_elevation
 

@@ -1,8 +1,9 @@
 ## repro_test_runner — Test-Edges-And-Parallel-Runner M3
 ##
 ## Minimal protocol-level parallel runner for reprobuild's Nim test
-## suite. Consumes the Tier-1 "Standard" binary protocol shipped in
-## ``ct_test_unittest_parallel`` (M2):
+## suite. Consumes the Tier-1 "Standard" binary protocol, which the
+## codetracer-nim ``std/unittest`` fork now carries itself and which the
+## vendored ``ct_test_unittest_parallel`` shim (M2) also answers:
 ##
 ## * ``--list-json``                — JSON catalog of test cases
 ## * ``--run "<suite>::<test>"``    — execute one named test
@@ -1180,13 +1181,19 @@ proc caseIsUnchanged(catalog: RunCatalog; stem: string;
   # An empty hash on EITHER side means a producer told us nothing, and
   # two silences are not an agreement. This is not hypothetical: this
   # repository contains a second, older protocol producer — the vendored
-  # ``libs/ct_test_unittest_parallel`` shim, imported by thirteen test
-  # files — whose ``--list-json`` rows carry ``name``/``suite``/``file``/
-  # ``line`` and no ``bodyHash`` at all. Without this guard, every case in
-  # every shim-built binary would compare "" against "", match, and be
-  # silently deselected forever. The guard is written as one condition on
-  # purpose: split across two statements, one half sat behind the other
-  # and could not be shown to do anything.
+  # ``libs/ct_test_unittest_parallel`` shim — whose ``--list-json`` rows
+  # carry ``name``/``suite``/``file``/``line`` and no ``bodyHash`` at all.
+  # Without this guard, every case in every shim-built binary would
+  # compare "" against "", match, and be silently deselected forever. The
+  # guard is written as one condition on purpose: split across two
+  # statements, one half sat behind the other and could not be shown to
+  # do anything.
+  #
+  # The shim's reach is now the shim's own tests and fixtures: the test
+  # sources that had inherited the import were moved to ``std/unittest``,
+  # which is what gives their binaries a ``bodyHash`` to compare in the
+  # first place. The guard stays because the shim still exists and a new
+  # producer could appear.
   if entry.bodyHash.len == 0 or recorded.len == 0:
     return false
   recorded == entry.bodyHash

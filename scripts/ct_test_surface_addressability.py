@@ -106,25 +106,91 @@ def discover_workspace(surface: str) -> dict:
     return json.loads(body)
 
 
+def nim_code_only(text: str) -> str:
+    """Blank out Nim comments and string literals, preserving offsets.
+
+    Every classifier below asks a question about what a file *imports*, and an
+    import is a statement. Asking it of the raw bytes answers a different
+    question — what the file *mentions* — and the two diverge exactly where
+    this repository writes Nim inside Nim: the runner tests embed whole fixture
+    modules as triple-quoted strings, and those fixtures have imports of their
+    own. Four sources were attributed to the shim on the strength of an
+    `import ct_test_unittest_parallel` that belonged to an embedded fixture
+    while the file itself imported `std/unittest` in a bracketed clause. The
+    reason was wrong and the remedy it implied was wrong with it.
+
+    Replacing literal and comment bodies with spaces rather than deleting them
+    keeps line structure intact, which the multi-line-clause test depends on.
+    """
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "#":
+            if text.startswith("#[", i):  # block comment, nestable in Nim
+                depth, j = 1, i + 2
+                while j < n and depth > 0:
+                    if text.startswith("#[", j):
+                        depth += 1
+                        j += 2
+                    elif text.startswith("]#", j):
+                        depth -= 1
+                        j += 2
+                    else:
+                        j += 1
+                out.append("".join(c if c == "\n" else " " for c in text[i:j]))
+                i = j
+                continue
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if text.startswith('"""', i):
+            j = text.find('"""', i + 3)
+            j = n if j < 0 else j + 3
+            out.append("".join(c if c == "\n" else " " for c in text[i:j]))
+            i = j
+            continue
+        if ch == "'" and not (i > 0 and (text[i - 1].isalnum() or text[i - 1] == "_")):
+            # Char literal: 'a', '\n', '\''. Skipped so that a quote inside one
+            # cannot open a phantom string and blank the code that follows.
+            m = re.match(r"'(\\.[0-9]*|[^'\\])'", text[i:])
+            if m:
+                out.append(" " * m.end())
+                i += m.end()
+                continue
+        if ch == '"':
+            raw = i > 0 and (text[i - 1].isalnum() or text[i - 1] == "_")
+            j = i + 1
+            while j < n and text[j] != "\n":
+                if text[j] == '"':
+                    if raw and text.startswith('""', j):
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                if not raw and text[j] == "\\":
+                    j += 2
+                    continue
+                j += 1
+            out.append(" " * (j - i))
+            i = j
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def classify_absent(source: Path) -> tuple[str, str]:
     """Why did the surface not see this source? Prose, not a gate."""
-    text = source.read_text(encoding="utf8", errors="replace")
-    if re.search(r"\bct_test_unittest_parallel\b", text):
-        return (
-            "shim-protocol-producer",
-            "imports the vendored ct_test_unittest_parallel shim instead of "
-            "std/unittest. Note what does NOT happen: the provider's "
-            "`frameworkForImport` matches the literal names `unittest`, "
-            "`unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` "
-            "is none of them — so no framework is detected, no `detected but not "
-            "implemented` warning is emitted (the workspace response carries "
-            "zero of those), and the file falls through the same generic path as "
-            "any non-test source, reported as `no Nim unittest imports detected "
-            "in file`. Implementing unittest_parallel support upstream would "
-            "therefore NOT recover these rows; retiring the shim would",
-        )
-    for match in re.finditer(r"\b(?:import|from)\s+std/\[", text):
-        rest = text[match.end() :]
+    code = nim_code_only(source.read_text(encoding="utf8", errors="replace"))
+    # Ordered most specific first. A file can both import std/unittest and
+    # import the shim; when it does, the bracketed-clause scan is the binding
+    # constraint — joining the clause recovers the file whether or not the
+    # shim is ever retired — so that verdict has to be reached first.
+    for match in re.finditer(r"\b(?:import|from)\s+std/\[", code):
+        rest = code[match.end() :]
         close = rest.find("]")
         if close < 0:
             continue
@@ -137,10 +203,25 @@ def classify_absent(source: Path) -> tuple[str, str]:
                 "and never sees the continuation, so the file is never scanned "
                 "for declarations. It is not silent, but the diagnostic it does "
                 "emit says the opposite of the truth: `no Nim unittest imports "
-                "detected in file`, one of 206 such rows in the workspace "
-                "response, for a file that plainly does import it",
+                "detected in file`, for a file that plainly does import it",
             )
-    if re.search(r"^\s*import\s.*\bunittest\b", text, re.M):
+    if re.search(r"\bct_test_unittest_parallel\b", code):
+        return (
+            "shim-protocol-producer",
+            "imports the vendored ct_test_unittest_parallel shim instead of "
+            "std/unittest. Note what does NOT happen: the provider's "
+            "`frameworkForImport` matches the literal names `unittest`, "
+            "`unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` "
+            "is none of them — so no framework is detected, no `detected but not "
+            "implemented` warning is emitted (the workspace response carries "
+            "zero of those), and the file falls through the same generic path as "
+            "any non-test source, reported as `no Nim unittest imports detected "
+            "in file`. Implementing unittest_parallel support upstream would "
+            "therefore NOT recover these rows; not importing the shim does, "
+            "which is what 38 sources did. The companion .md says why the one "
+            "that is left keeps the import",
+        )
+    if re.search(r"^\s*import\s.*\bunittest\b", code, re.M):
         return ("unclassified", "imports unittest and is still not discovered")
     return (
         "declares-no-cases-of-its-own",
