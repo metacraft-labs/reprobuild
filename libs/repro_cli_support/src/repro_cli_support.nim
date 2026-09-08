@@ -29515,6 +29515,23 @@ type
     excludeTags: seq[string]
       ## RA-18 ``--tags=-a`` / ``-a`` entries: repos carrying any of these tags
       ## are excluded (exclusion wins over inclusion).
+    onlyRepos: seq[string]
+      ## ``--only=a,b``: repo NAMES, matched exactly. Same vocabulary as
+      ## ``repro develop --all`` so the workspace has one selection language
+      ## rather than a second one grown here.
+    exceptRepos: seq[string]
+      ## ``--except=a,b``: repo names to drop. Exclusion wins over inclusion,
+      ## the same precedence ``--tags`` uses.
+    filterGlob: string
+      ## ``--filter=GLOB``: glob over the repo name.
+    mainline: bool
+      ## ``--mainline``: reconcile toward each repo's manifest-declared branch
+      ## instead of its own upstream (CLI/sync.md §"Reconciling with the
+      ## mainline").
+    mainlineFlavor: MainlineSyncFlavor
+      ## ``--rebase`` / ``--merge``. Defaults to ``msfFastForwardOnly``, which
+      ## integrates nothing: bare ``--mainline`` fast-forwards what it can and
+      ## reports what needs a decision.
     report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
 
 const
@@ -29595,6 +29612,32 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
             result.excludeTags.add(t)
         else:
           result.includeTags.add(term)
+    elif arg == "--only" or arg.startsWith("--only="):
+      for raw in valueFromFlag(args, i, "--only").split(','):
+        let n = raw.strip()
+        if n.len > 0 and n notin result.onlyRepos:
+          result.onlyRepos.add(n)
+    elif arg == "--except" or arg.startsWith("--except="):
+      for raw in valueFromFlag(args, i, "--except").split(','):
+        let n = raw.strip()
+        if n.len > 0 and n notin result.exceptRepos:
+          result.exceptRepos.add(n)
+    elif arg == "--filter" or arg.startsWith("--filter="):
+      let g = valueFromFlag(args, i, "--filter").strip()
+      # Same rule ``develop`` applies: taking the last of two different values
+      # would make the answer depend on argv order.
+      if result.filterGlob.len > 0 and result.filterGlob != g:
+        raise newException(ValueError,
+          "--filter was given twice with different values ('" &
+          result.filterGlob & "' and '" & g & "'). It takes a single value. " &
+          "Use --only=a,b to name several repos exactly.")
+      result.filterGlob = g
+    elif arg == "--mainline":
+      result.mainline = true
+    elif arg == "--rebase":
+      result.mainlineFlavor = msfRebase
+    elif arg == "--merge":
+      result.mainlineFlavor = msfMerge
     elif arg == "--no-interleaved":
       result.noInterleaved = true
     elif arg == "--fail-fast":
@@ -29628,6 +29671,17 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
         result.projectName = arg
       result.scopeProjects.add(arg)
     inc i
+  # ``--rebase`` / ``--merge`` describe how to integrate a DIVERGED branch with
+  # its mainline, which is a question only ``--mainline`` asks. Accepting them
+  # bare would silently do nothing, so they are refused with the flag that
+  # makes them meaningful.
+  if result.mainlineFlavor != msfFastForwardOnly and not result.mainline:
+    raise newException(ValueError,
+      "`repro sync " &
+      (if result.mainlineFlavor == msfRebase: "--rebase" else: "--merge") &
+      "` needs --mainline: the flavor says how to integrate a branch that " &
+      "has diverged from its mainline, and plain `sync` never integrates " &
+      "(it fast-forwards toward the branch's own upstream or reports).")
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -34296,6 +34350,317 @@ proc emitLockCoherenceAdvisory*[T](toolProvisioning: ToolProvisioningMode;
   except CatchableError:
     discard
 
+# ---- `repro sync --mainline` ----------------------------------------------
+#
+# Reconcile each repo's CURRENT branch with THAT repo's manifest-declared
+# mainline (CLI/sync.md §"Reconciling with the mainline"). A separate executor
+# from ``executeWorkspaceSync``: it reconciles toward a different ref, its
+# decision table shares no case with the lock-oriented one, and keeping them
+# apart means the ordinary sync path cannot regress when this one changes.
+#
+# Per-repo atomicity is the load-bearing property. A repo is either fully
+# reconciled or left EXACTLY as it was — never a conflicted index the operator
+# has to `--abort` out of. Two mechanisms, because one is not enough:
+#
+#   1. `git merge-tree --write-tree` PREDICTS the integration without touching
+#      the working tree, so a repo that would conflict is never started. For a
+#      merge this is exact. For a rebase it is an approximation — it predicts
+#      the combined result rather than replaying each commit — so a rebase can
+#      still fail after a clean prediction.
+#   2. Hence the guarantee does not rest on the prediction: a rebase or merge
+#      that fails anyway is IMMEDIATELY aborted, restoring the pre-run state.
+#
+# Atomicity is per repo and not per run, deliberately: one conflicting repo
+# must not block the other hundred (see the spec section named above).
+
+type
+  MainlineSyncEntry* = object
+    name*: string
+    path*: string
+    branch*: string
+    mainlineBranch*: string
+    outcome*: string
+    action*: string
+    headBefore*: string
+    headAfter*: string
+    message*: string
+    diagnostic*: string
+
+  MainlineSyncReport* = object
+    project*: string
+    workspaceRoot*: string
+    flavor*: string
+    repos*: seq[MainlineSyncEntry]
+    exitCode*: int
+
+proc toJsonNode*(report: MainlineSyncReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["mainline"] = %true
+  result["flavor"] = %report.flavor
+  var repos = newJArray()
+  for e in report.repos:
+    var obj = newJObject()
+    obj["name"] = %e.name
+    obj["path"] = %e.path
+    obj["branch"] = %e.branch
+    obj["mainlineBranch"] = %e.mainlineBranch
+    obj["outcome"] = %e.outcome
+    obj["action"] = %e.action
+    obj["headBefore"] = %e.headBefore
+    obj["headAfter"] = %e.headAfter
+    obj["message"] = %e.message
+    obj["diagnostic"] = %e.diagnostic
+    repos.add(obj)
+  result["repos"] = repos
+  result["exitCode"] = %report.exitCode
+
+proc renderMainlineSyncTextLines*(report: MainlineSyncReport): seq[string] =
+  var counts = initOrderedTable[string, int]()
+  for e in report.repos:
+    var line = "workspace sync: " & e.path & " " & e.outcome
+    if e.branch.len > 0 and e.mainlineBranch.len > 0:
+      line.add(" " & e.branch & " <- " & e.mainlineBranch)
+    if e.diagnostic.len > 0:
+      line.add(" (" & e.diagnostic & ")")
+    result.add(line)
+    counts[e.outcome] = counts.getOrDefault(e.outcome, 0) + 1
+  var parts: seq[string]
+  for tag, n in counts:
+    parts.add($n & " " & tag)
+  result.add("workspace sync --mainline: " & parts.join(", ") &
+    " (" & $report.repos.len & " repo(s))")
+
+proc mainlineFlavorTag(flavor: MainlineSyncFlavor): string =
+  case flavor
+  of msfFastForwardOnly: "fast-forward-only"
+  of msfRebase: "rebase"
+  of msfMerge: "merge"
+
+proc applyRepoSelectors(repos: seq[ResolvedRepo];
+                        only, exceptNames: seq[string];
+                        filterGlob: string): seq[ResolvedRepo] =
+  ## ``--only`` / ``--except`` / ``--filter``, with the same semantics
+  ## ``repro develop --all`` uses: names matched EXACTLY, a glob only through
+  ## ``--filter``, exclusion winning over inclusion. An unknown exact name is
+  ## an error rather than an empty result, because a typo that silently
+  ## selects nothing reads exactly like "there was nothing to do".
+  var known: seq[string]
+  for r in repos:
+    known.add(r.name)
+  for n in only:
+    if n notin known:
+      raise newException(ValueError,
+        "'--only=" & n & "' names no repo in this workspace (names are " &
+        "matched EXACTLY; use --filter for a glob, or `repro workspace " &
+        "repos list` to see the set)")
+  for n in exceptNames:
+    if n notin known:
+      raise newException(ValueError,
+        "'--except=" & n & "' names no repo in this workspace (names are " &
+        "matched EXACTLY; use --filter for a glob, or `repro workspace " &
+        "repos list` to see the set)")
+  for r in repos:
+    if only.len > 0 and r.name notin only:
+      continue
+    if filterGlob.len > 0 and not developNameGlobMatches(r.name, filterGlob):
+      continue
+    if r.name in exceptNames:
+      continue
+    result.add(r)
+
+proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
+  result.workspaceRoot = args.workspaceRoot
+  result.flavor = mainlineFlavorTag(args.mainlineFlavor)
+
+  var resolveArgs = args
+  if args.scopeProjects.len > 0:
+    resolveArgs.projectName = args.scopeProjects[0]
+  var resolved = resolveWorkspaceSyncProject(resolveArgs)
+  result.project = resolved.projectName
+
+  if args.scopeProjects.len > 0:
+    let scopePaths = scopeRepoPathSet(args.workspaceRoot, args.scopeProjects)
+    var kept: seq[ResolvedRepo]
+    for repo in resolved.repos:
+      if repo.path in scopePaths:
+        kept.add(repo)
+    resolved.repos = kept
+  if args.includeTags.len > 0 or args.excludeTags.len > 0:
+    var kept: seq[ResolvedRepo]
+    for repo in resolved.repos:
+      if repoSelectedByTags(repo, args.includeTags, args.excludeTags):
+        kept.add(repo)
+    resolved.repos = kept
+  resolved.repos = applyRepoSelectors(resolved.repos, args.onlyRepos,
+    args.exceptRepos, args.filterGlob)
+
+  let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  # Fetch phase, through the engine so it runs under the bounded `vcs/fetch`
+  # pool rather than opening one connection per repo.
+  var fetchFailure = initTable[string, string]()
+  var fetchActions: seq[BuildAction]
+  var fetchIdByPath = initTable[string, string]()
+  let receiptDir = args.workspaceRoot / ".repro" / "workspace" / "receipts"
+  createDir(receiptDir)
+  for idx, repo in resolved.repos:
+    if not dirExists(args.workspaceRoot / repo.path / ".git"):
+      continue
+    let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
+    let actionId = "workspace-mainline-sync-fetch-" & idSeg
+    var action = gitFetchAction(actionId, identity,
+      remoteName = gitRemoteNameFor(repo),
+      repoPath = repo.path,
+      receiptPath = ".repro" / "workspace" / "receipts" /
+        ("mainline-sync-fetch-" & idSeg & ".receipt"))
+    action.cwd = args.workspaceRoot
+    fetchActions.add(action)
+    fetchIdByPath[repo.path] = actionId
+  if fetchActions.len > 0:
+    let cacheRoot = args.workspaceRoot / ".repro" / "workspace" / "engine-cache"
+    var config = defaultBuildEngineConfig(cacheRoot)
+    config.suppressTrace = true
+    config.fallbackToRunQuotaBypass = true
+    let res = runBuild(graph(fetchActions), config)
+    var outcomeById = initTable[string, ActionResult]()
+    for outcome in res.results:
+      outcomeById[outcome.id] = outcome
+    for path, actionId in fetchIdByPath:
+      let outcome = outcomeById.getOrDefault(actionId)
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        var diag = "status=" & $outcome.status & " reason=" & outcome.reason
+        if outcome.stderr.len > 0:
+          diag.add(" stderr=" & outcome.stderr)
+        fetchFailure[path] = diag
+
+  # Observation phase: refs only, no mutation.
+  var observations: seq[MainlineSyncObservation]
+  for repo in resolved.repos:
+    let repoAbs = args.workspaceRoot / repo.path
+    var obs: MainlineSyncObservation
+    obs.mainlineBranch = repo.branch
+    if not dirExists(repoAbs / ".git"):
+      obs.exists = false
+      observations.add(obs)
+      continue
+    obs.exists = true
+    let branchRes = gitRunPlain(identity,
+      ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branchRes.code == 0:
+      obs.currentBranch = branchRes.output.strip()
+    obs.headSha = revParse(identity, repoAbs, "HEAD")
+    obs.isClean = gitRunPlain(identity,
+      ["-C", repoAbs, "status", "--porcelain"]).output.strip().len == 0
+    if obs.mainlineBranch.len > 0:
+      obs.mainlineTip = revParse(identity, repoAbs,
+        "refs/remotes/" & gitRemoteNameFor(repo) & "/" & obs.mainlineBranch)
+    if obs.mainlineTip.len > 0 and obs.headSha.len > 0:
+      obs.mainlineInHead = gitRunPlain(identity, ["-C", repoAbs, "merge-base",
+        "--is-ancestor", obs.mainlineTip, obs.headSha]).code == 0
+      obs.headInMainline = gitRunPlain(identity, ["-C", repoAbs, "merge-base",
+        "--is-ancestor", obs.headSha, obs.mainlineTip]).code == 0
+      # Predict the integration WITHOUT touching the tree. Only meaningful for
+      # the diverged-and-a-flavor-was-chosen case, so only asked there.
+      if args.mainlineFlavor != msfFastForwardOnly and
+          not obs.mainlineInHead and not obs.headInMainline and obs.isClean:
+        obs.integrationConflicts = gitRunPlain(identity,
+          ["-C", repoAbs, "merge-tree", "--write-tree",
+           obs.headSha, obs.mainlineTip]).code != 0
+    observations.add(obs)
+
+  let decisions = planMainlineSync(resolved.repos, observations,
+    args.mainlineFlavor)
+
+  var anyFailure = false
+  var anyRefusal = false
+  for i, decision in decisions:
+    let repo = resolved.repos[i]
+    let repoAbs = args.workspaceRoot / repo.path
+    var entry = MainlineSyncEntry(
+      name: decision.name, path: decision.path,
+      branch: decision.branch, mainlineBranch: decision.mainlineBranch,
+      outcome: mainlineSyncCaseTag(decision.syncCase),
+      action: mainlineSyncActionTag(decision.action),
+      headBefore: observations[i].headSha,
+      headAfter: observations[i].headSha,
+      message: decision.message,
+      diagnostic: decision.refusalReason)
+
+    # A fetch failure outranks the planner's verdict: it was reached with refs
+    # that may be stale, so reporting `up_to_date` would be a fiction.
+    if fetchFailure.hasKey(repo.path):
+      entry.outcome = "fetch_failed"
+      entry.action = "none"
+      entry.diagnostic = "fetch failed for '" & repo.path & "': " &
+        fetchFailure[repo.path] &
+        " — check connectivity/credentials, then re-run"
+      anyFailure = true
+      result.repos.add(entry)
+      continue
+
+    let remoteRef = gitRemoteNameFor(repo) & "/" & decision.mainlineBranch
+    case decision.action
+    of msaNone:
+      if decision.syncCase != mscUpToDate:
+        anyRefusal = true
+    of msaFastForward:
+      let ff = gitRunPlain(identity,
+        ["-C", repoAbs, "merge", "--ff-only", remoteRef])
+      if ff.code != 0:
+        entry.outcome = "fast_forward_failed"
+        entry.diagnostic = "fast-forward to " & remoteRef & " failed: " &
+          ff.output.strip()
+        anyFailure = true
+      else:
+        entry.headAfter = revParse(identity, repoAbs, "HEAD")
+    of msaRebase, msaMerge:
+      let isRebase = decision.action == msaRebase
+      let run =
+        if isRebase:
+          gitRunPlain(identity, ["-C", repoAbs, "rebase", remoteRef])
+        else:
+          gitRunPlain(identity, ["-C", repoAbs, "merge", "--no-edit", remoteRef])
+      if run.code != 0:
+        # The prediction was optimistic (it is an approximation for rebase).
+        # Abort so the repo is left EXACTLY as it was — the per-repo atomicity
+        # guarantee does not rest on the prediction being right.
+        discard gitRunPlain(identity,
+          ["-C", repoAbs, (if isRebase: "rebase" else: "merge"), "--abort"])
+        entry.outcome = mainlineSyncCaseTag(mscConflict)
+        entry.action = "none"
+        entry.diagnostic = (if isRebase: "rebase" else: "merge") &
+          " onto " & remoteRef & " failed and was aborted; repo is unchanged: " &
+          run.output.strip()
+        anyRefusal = true
+      else:
+        entry.headAfter = revParse(identity, repoAbs, "HEAD")
+    result.repos.add(entry)
+
+  result.exitCode =
+    if anyFailure: 1
+    elif anyRefusal: 2
+    else: 0
+
+proc writeMainlineSyncReport(report: MainlineSyncReport; destination: string) =
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
+  let report = executeMainlineSync(parsed)
+  writeMainlineSyncReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "sync"))
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderMainlineSyncTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
 proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ## ``repro workspace sync [<project>...] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]
@@ -34351,6 +34716,11 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ##         manual work to do. Distinct from exit-1 ("sync blew up")
   ##         so scripts can tell the two apart.
   let parsed = parseWorkspaceSyncArgs(args)
+  # ``--mainline`` reconciles toward each repo's manifest-declared branch
+  # instead of its own upstream. Different target, different decision table,
+  # so a separate executor — see the block comment above it.
+  if parsed.mainline:
+    return runMainlineSyncCommand(parsed)
   let outcome = executeWorkspaceSync(parsed)
   # RA-27: a dry run does not run any mutating step, so it does not write a
   # report artifact (there is nothing to persist about a run that did not
