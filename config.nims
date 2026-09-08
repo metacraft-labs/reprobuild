@@ -542,8 +542,10 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # SHM-QUEUE-MIGRATE / io-mon LOSSLESS M1: reprobuild's action-cache submission
 # ring (libs/repro_shm_index) AND the io-mon sibling's dependency queue BOTH sit
 # on nim-shm-queue's Layer-1 MPSC ring; the io-mon sibling ALSO sits on
-# nim-shm-gset (``shm_gset/transport``). Because config.nims compiles the io-mon
-# SIBLING in-tree (the io-mon block above prefers ``../io-mon`` over $IO_MON_SRC),
+# nim-shm-gset (``shm_gset/transport``). Because config.nims compiles whichever
+# io-mon the block above selected — $IO_MON_SRC when it is set (the usual case
+# in CI and the sandboxed package build, where the flake exports it), and the
+# ``../io-mon`` sibling only as the fallback when it is not —
 # these shm packages MUST resolve to their co-developed siblings too — otherwise
 # a newer io-mon is compiled against an older $SHM_QUEUE_SRC pin or a
 # missing nim-shm-gset, which is exactly the version skew that breaks the build.
