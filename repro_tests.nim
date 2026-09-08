@@ -12177,6 +12177,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_switch_mainline_and_fetch.nim",
+    binary: "build/test-bin/t_switch_mainline_and_fetch",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_sync_fetches_repos_in_parallel.nim",
     binary: "build/test-bin/t_workspace_sync_fetches_repos_in_parallel",
     defines: @[],

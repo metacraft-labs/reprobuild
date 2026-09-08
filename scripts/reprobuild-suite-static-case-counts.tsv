@@ -1267,6 +1267,7 @@ tests/integration/t_stats_reads_shared_store.nim	nim	5
 tests/integration/t_status_health_add_remove_use_unified_resolver.nim	nim	1
 tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim	nim	1
 tests/integration/t_store_daemon_m66_dev.nim	nim	6
+tests/integration/t_switch_mainline_and_fetch.nim	nim	6
 tests/integration/t_switch_new_branch_marks_feature_branch.nim	nim	7
 tests/integration/t_switch_stashes_and_restores_per_repo_wip.nim	nim	1
 tests/integration/t_sync_check_operate_from_committed_lock_without_manifests.nim	nim	1
