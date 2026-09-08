@@ -10,7 +10,7 @@ import ./packages/zstd as zstd_module
 import ./packages/git as git_module
 import ./packages/host_system_tools
 
-proc registerSourceFetchTools*(packageName: string) =
+proc registerSourceFetchTools*(packageName, sourceFile: string; sourceLine: int) =
   let spec = registeredFetchSpec(packageName)
   if spec.url.len == 0 or spec.hashHex.len == 0:
     return
@@ -19,7 +19,7 @@ proc registerSourceFetchTools*(packageName: string) =
   if spec.kind == dfkGitArchive:
     tools.add("git")
   for toolName in tools:
-    if registerPackageNativeTool(packageName, PackageUseDef(
+    if registerPackageNativeTool(packageName, sourceFile, sourceLine, PackageUseDef(
         rawConstraint: toolName, packageSelector: toolName,
         executableName: toolName, depKind: DepKindNative)):
       registerPackageDep(packageName, DepKindNative, toolName)

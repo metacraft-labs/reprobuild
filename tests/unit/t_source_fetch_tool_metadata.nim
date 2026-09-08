@@ -2,6 +2,7 @@ import std/[sequtils, unittest]
 import repro_project_dsl
 import repro_interface_artifacts
 import repro_dsl_stdlib/configurables/variants
+import ./fixtures/source_fetch_gzip/repro as gzip_recipe
 
 const FetchHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 const ArchiveSuffix = ".tar.xz?mirror=1"
@@ -102,3 +103,25 @@ suite "source fetch metadata":
     let iface = toProjectInterface(definition("gitFetchMetadata"),
       registeredPackages())
     check "git" in iface.toolUses.mapIt(it.executableName)
+
+  test "fetch tools belong to the recipe declaration, not its same-name stub":
+    let packages = registeredPackages()
+    let recipes = packages.filterIt(it.packageName == "gzip" and
+      it.sourceFile == GzipRecipeSource)
+    let stubs = packages.filterIt(it.packageName == "gzip" and
+      it.sourceFile != GzipRecipeSource)
+    require recipes.len == 1
+    require stubs.len == 1
+    check stubs[0].nativeBuildDeps.len == 0
+    let iface = artifactFromRegisteredDsl(GzipRecipeSource).projectInterface
+    check iface.packageName == "gzip"
+    for name in shellFetchToolIdentityRefs(@["sha256sum"],
+        archiveUrl = "https://example.invalid/gzip.tar.xz"):
+      let uses = iface.toolUses.filterIt(it.executableName == name)
+      check uses.len == 1
+      if uses.len == 1:
+        check uses[0].nixProvisioning.len > 0
+    let curlUses = recipes[0].nativeBuildDeps.filterIt(
+      it.executableName == "curl")
+    require curlUses.len == 1
+    check curlUses[0].rawConstraint == "curl >=8"

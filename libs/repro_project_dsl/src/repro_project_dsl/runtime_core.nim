@@ -417,24 +417,34 @@ proc registerPackageDef*(pkg: PackageDef) {.dynOrStatic.} =
 proc registeredPackages*(): seq[PackageDef] {.dynOrStatic.} =
   registry
 
-proc registerPackageNativeTool*(packageName: string; toolUse: PackageUseDef):
-    bool {.dynOrStatic.} =
+proc registerPackageNativeTool*(packageName, sourceFile: string; sourceLine: int;
+                                toolUse: PackageUseDef): bool {.dynOrStatic.} =
   ## Constructor metadata may add build-platform tools before any build body
   ## runs. Preserve explicit constraints and keep host/runtime roles separate.
+  var found = false
   for pkg in registry.mitems:
-    if pkg.packageName != packageName:
+    if pkg.packageName != packageName or pkg.sourceFile != sourceFile or
+        pkg.sourceLine != sourceLine:
       continue
+    found = true
+    var alreadyDeclared = false
     for useDef in pkg.nativeBuildDeps:
       if useDef.packageSelector == toolUse.packageSelector and
           useDef.gateVariant.len == 0:
-        return false
+        alreadyDeclared = true
+        break
+    if alreadyDeclared:
+      continue
     var locatedUse = toolUse
     locatedUse.sourceFile = pkg.sourceFile
     locatedUse.sourceLine = pkg.sourceLine
     pkg.nativeBuildDeps.add(locatedUse)
-    return true
-  raise newException(ValueError, "cannot register a native tool for unknown package " &
-    packageName)
+    # One declaration can be instantiated through multiple sibling shims.
+    result = true
+  if not found:
+    raise newException(ValueError,
+      "cannot register a native tool for unknown package declaration " &
+      packageName & " at " & sourceFile & ":" & $sourceLine)
 
 proc registeredRuntimeLibraries*(packageName: string):
     seq[RuntimeLibraryDef] {.dynOrStatic.} =

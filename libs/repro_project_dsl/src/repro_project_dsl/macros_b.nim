@@ -4131,10 +4131,13 @@ macro packageImpl*(name: untyped;
   result.add(m9hFetchEmission)
   if m9hFetchEmission.len > 0:
     let fetchPackageName = newLit(packageName)
+    let fetchSourceFile = newLit(pkg.sourceFile)
+    let fetchSourceLine = newLit(pkg.sourceLine)
     result.add(parseStmt(
       "from repro_dsl_stdlib/source_fetch_tools import registerSourceFetchTools\n"))
     result.add(quote do:
-      registerSourceFetchTools(`fetchPackageName`))
+      registerSourceFetchTools(`fetchPackageName`, `fetchSourceFile`,
+        `fetchSourceLine`))
   # ── DSL-port M9.R.10b: default ``build:`` synthesis. When a recipe
   # declares ``fetch:`` AND no explicit ``build:`` block, dispatch to
   # the ``synthesizeMesonPackage`` / ``synthesizeCmakePackage`` /

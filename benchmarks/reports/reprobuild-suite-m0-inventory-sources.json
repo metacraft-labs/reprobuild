@@ -31151,7 +31151,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_source_fetch_tool_metadata.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
