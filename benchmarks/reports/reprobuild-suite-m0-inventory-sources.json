@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1492,
+    "nimTestBinaries": 1495,
     "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 601,
-    "staticallyDetectedRuntimeCompilerFlowTests": 84,
-    "testEntries": 1499
+    "pureUnitTests": 602,
+    "staticallyDetectedRuntimeCompilerFlowTests": 86,
+    "testEntries": 1502
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1147,9 +1147,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 648,
+      "integration": 650,
       "platform/destructive": 107,
-      "pure unit": 601,
+      "pure unit": 602,
       "unclassified": 127
     },
     "graphOwnedTestArtifacts": [
@@ -1262,9 +1262,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1492,
+    "nimTestBinaryCount": 1495,
     "pythonTestFileCount": 7,
-    "testEntryCount": 1499
+    "testEntryCount": 1502
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1892,6 +1892,48 @@
         }
       ],
       "source": "tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "caseDir",
+            "env",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 89,
+          "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "\"gcc\", \"-c\", \"-O2\", \"-fcf-protection=full\", \"-ffunction-sections\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "caseDir",
+            "env",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 110,
+          "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "\"gcc\", \"-O2\", \"-g\","
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim"
     },
     {
       "class": "integration",
@@ -3259,6 +3301,48 @@
         }
       ],
       "source": "tests/integration/t_integration_cross_compilation_fixture_compiles.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "binPath",
+            "compileArgs",
+            "fixture",
+            "objPath",
+            "repoRoot"
+          ],
+          "line": 266,
+          "path": "tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "newJString(runSuccess(\"gcc --version\", repoRoot).splitLines()[0])"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "binPath",
+            "compileArgs",
+            "fixture",
+            "objPath",
+            "repoRoot"
+          ],
+          "line": 268,
+          "path": "tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim",
+          "patterns": [
+            "clang"
+          ],
+          "snippet": "newJString(runSuccess(\"clang --version\", repoRoot).splitLines()[0])"
+        }
+      ],
+      "source": "tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim"
     },
     {
       "class": "integration",
@@ -18129,6 +18213,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent",
+        "repro_hcr_linker"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_hcr_watch_inference",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -23345,6 +23447,23 @@
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_cf_protection_sled_layout",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -31262,6 +31381,23 @@
       "source": "tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 20,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_linker"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

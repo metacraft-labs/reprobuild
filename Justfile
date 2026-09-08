@@ -739,6 +739,33 @@ e2e_hcr_in_target_link_and_trampoline:
         tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim \
         2>&1 | tee test-logs/e2e_hcr_in_target_link_and_trampoline.log
 
+integration_hcr_linux_cf_protection_sled_layout:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_cf_protection_sled_layout \
+        --out:build/test-bin/integration_hcr_linux_cf_protection_sled_layout \
+        tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_cf_protection_sled_layout.log
+
+unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions \
+        --out:build/test-bin/unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions \
+        tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim \
+        2>&1 | tee test-logs/unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.log
+
+e2e_hcr_linux_x86_64_single_threaded_direct_patch:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_x86_64_single_threaded_direct_patch \
+        --out:build/test-bin/e2e_hcr_linux_x86_64_single_threaded_direct_patch \
+        tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_x86_64_single_threaded_direct_patch.log
+
 e2e_hcr_direct_patch_debug_unwind_replay:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

@@ -6705,6 +6705,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
+    binary: "build/test-bin/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
     binary: "build/test-bin/t_e2e_hcr_watch_inference",
     defines: @[],
@@ -9371,6 +9380,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_integration_hcr_linkgraph_relocation_classification.nim",
     binary: "build/test-bin/t_integration_hcr_linkgraph_relocation_classification",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim",
+    binary: "build/test-bin/t_integration_hcr_linux_cf_protection_sled_layout",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -13394,6 +13412,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim",
     binary: "build/test-bin/t_tool_profile_keys_on_resolution_not_search_path",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim",
+    binary: "build/test-bin/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
