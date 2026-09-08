@@ -9819,6 +9819,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_reuses_monitored_provider_metadata.nim",
+    binary: "build/test-bin/t_lock_refresh_reuses_monitored_provider_metadata",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_store_backend_roundtrip_each_backend.nim",
     binary: "build/test-bin/t_lock_store_backend_roundtrip_each_backend",
     defines: @[],
@@ -11349,6 +11358,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_switch_mainline_and_fetch.nim",
+    binary: "build/test-bin/t_switch_mainline_and_fetch",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_switch_new_branch_marks_feature_branch.nim",
     binary: "build/test-bin/t_switch_new_branch_marks_feature_branch",
     defines: @[],
@@ -12170,15 +12188,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_switch_switches_all_repos.nim",
     binary: "build/test-bin/t_workspace_switch_switches_all_repos",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
-    source: "tests/integration/t_switch_mainline_and_fetch.nim",
-    binary: "build/test-bin/t_switch_mainline_and_fetch",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

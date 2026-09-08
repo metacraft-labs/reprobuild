@@ -55679,8 +55679,8 @@ proc tryLoadDurableSolverProviderArtifacts(
   ## A normal build already materializes monitored interface/provider edges in
   ## the recipe's output directory. Lock refresh asks the same build-engine
   ## edges to validate their recorded read sets in dry-run mode before reading
-  ## those artifacts. A miss falls back to the disposable direct-extraction
-  ## path below, so lock refresh still writes no project artifacts of its own.
+  ## those artifacts. A miss falls back to monitored edges in the user cache,
+  ## so lock refresh still writes no project artifacts of its own.
   try:
     let outDir = outputDirForTarget(parseBuildTarget(modulePath), "")
     let interfacePath = outDir / "project-interface.rbsz"
@@ -55779,8 +55779,9 @@ proc solverInputsFromCompiledProvider(projectDir: string;
   ## Best-effort by design — ANY of {no recipe, no ``build:`` block, no
   ## solver-bound ``uses:``, interface-extraction / provider-compile / run
   ## failure, an empty solve} returns ``none`` so the caller falls back to the
-  ## ``repro.solver`` sidecar. All scratch lives under the system temp dir, so
-  ## refresh still writes NO build artifacts into the project tree.
+  ## ``repro.solver`` sidecar. Compile artifacts live in the user cache; only
+  ## the fresh manifest request and solver emission use disposable scratch.
+  ## Refresh still writes NO build artifacts into the project tree.
   result = none(CompiledProviderSolverInputs)
   let match =
     try: resolveProjectFile(projectDir)
@@ -55811,14 +55812,24 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       try: removeDir(extendedPath(scratchRoot))
       except CatchableError: discard
     let compileWorkDir = reprobuildLibraryWorkDir()
-    let scratchDir = scratchRoot / "work"
-    let interfacePath = scratchRoot / "project-interface.rbsz"
-    let stubPath = scratchRoot / "project-interface.nim"
-    # Fresh monitored artifacts from a normal build are reused below. On a
-    # miss, deliberately do NOT create extraction edges for these temp paths:
-    # they disappear at the end of this call, so such edges could never hit.
-    # The fallback remains a best-effort lock probe whose results are thrown
-    # away and which writes nothing into the project tree.
+    let metadataRoot = absolutePath(currentActionCacheRoot() /
+      "lock-provider-metadata")
+    let moduleKey = toHex(weakFingerprintFromText(
+      modulePath & "\x00" & compileWorkDir).bytes)
+    let artifactDir = metadataRoot / "providers" / moduleKey
+    # Share compiler scratch across recipes, not their output artifacts.
+    # The existing compiler locks serialize writers to each Nim cache.
+    let scratchDir = metadataRoot / "work"
+    let interfacePath = artifactDir / "project-interface.rbsz"
+    let stubPath = artifactDir / "project-interface.nim"
+    let cacheRoot = artifactDir / "build-engine-cache"
+    let publicCliPath = stablePublicCliPath()
+    # Hold the existing artifact lock through execution: another refresh must
+    # not replace a provider binary while this process is about to run it.
+    var metadataLock = acquireInterfaceArtifactLock(artifactDir / "metadata")
+    defer: releaseInterfaceArtifactLock(metadataLock)
+    var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+    defer: releaseAutoRunQuotaProcess(autoRunQuota)
     # A refresh always re-solves. Clear inherited build pins before interface
     # extraction as well as provider execution: module initialization can run
     # during either process, and an old pin must not prevent us from observing
@@ -55839,13 +55850,15 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       # the monitored artifacts validate, and changing it first defeats reuse.
       ensureBootstrapToolchainEnv(tpmPathOnly,
         resolveStoreRoot() / "tool-store")
+    var compileStats: BuildStats
     let artifact =
       if durable.isSome:
         durable.get().interfaceArtifact
       else:
-        extractInterfaceFromModule(modulePath, interfacePath,
-          stubPath, compileWorkDir, scratchDir, requireStub = false,
-          consumerRoot = projectRootForModule(modulePath))
+        extractInterfaceEdge(modulePath, interfacePath, stubPath,
+          compileWorkDir, scratchDir, projectRootForModule(modulePath),
+          publicCliPath, cacheRoot, compileStats, requireStub = false,
+          bypassRunQuota = runQuotaBypassedByEnv())
     # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.
@@ -55865,9 +55878,38 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       if durable.isSome:
         durable.get().providerArtifact
       else:
-        let providerBinaryPath = scratchRoot / "provider" / "project-provider"
-        compileProviderBinary(modulePath, providerBinaryPath,
-          artifact.interfaceFingerprint, "", compileWorkDir, scratchDir)
+        let providerBinaryPath = artifactDir / "provider" / "project-provider"
+        let providerArtifactPath = artifactDir / "provider-compile.rbsz"
+        let plan = providerCompilePlan(modulePath, providerBinaryPath,
+          artifact.interfaceFingerprint, compileWorkDir, scratchDir)
+        invalidateStaleProviderCompileArtifact(plan, providerArtifactPath)
+        let compileAction = providerCompileBuildAction(plan,
+          modulePath, interfacePath, providerArtifactPath,
+          internalReproHelperCliPath(publicCliPath), compileWorkDir, scratchDir)
+        let compiled = runBuild(graph([compileAction]), BuildEngineConfig(
+          cacheRoot: cacheRoot,
+          actionCacheRoot: currentActionCacheRoot(),
+          runQuotaCliPath: publicCliPath,
+          monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
+          monitorCliArgs: internalIoMonitorArgs,
+          maxParallelism: 1'u32,
+          stdoutLimit: 1024 * 1024,
+          stderrLimit: 1024 * 1024,
+          rebuildMissingOutputsOnCacheHit: true,
+          deferLocalOutputBlobs: true,
+          bypassRunQuota: runQuotaBypassedByEnv(),
+          inlineRunQuota: true,
+          suppressTrace: true,
+          skipCacheHitEvidence: true))
+        if compiled.hasFailedActions():
+          raise newException(OSError, providerCompileFailure(compiled))
+        if not providerCompileArtifactFresh(providerArtifactPath,
+            plan.outputBinaryPath, plan.interfaceFingerprint,
+            plan.providerFingerprint, plan.workDir):
+          raise newException(IOError,
+            "lock metadata provider artifact is stale after edge execution: " &
+              providerArtifactPath)
+        readProviderCompileArtifact(providerArtifactPath)
     let emitPath = scratchRoot / "solver-inputs.explain"
     let protocolRoot = scratchRoot / "protocol"
     let cwd = if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
