@@ -109,7 +109,8 @@ const TmpDir = "build/test-tmp/t_zero_evidence_edge_is_not_cacheable"
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
 const RootImage = "/bin/sh"
-  ## `runEdge`'s `argv[0]`, and therefore the path the LAUNCHER contributes
+  ## The DEFAULT `argv[0]` for the edges below, and therefore the path the
+  ## LAUNCHER contributes
   ## through `foldLauncherRootImage` — the action's own root image, which no
   ## monitor record can supply. It is in `monitorReads` of every edge here and
   ## is named rather than counted, so that a change to what the engine folds
@@ -117,6 +118,40 @@ const RootImage = "/bin/sh"
   ## of being absorbed by moving a number. What must NOT change silently is
   ## that this contribution cannot answer "did the monitor observe anything?";
   ## the first test below is what holds that.
+  ##
+  ## It is `/bin/sh` rather than a `/nix/store` path for a second reason the
+  ## final suite in this file depends on: `/bin/sh` lies under no
+  ## content-addressed root, so `cacheInputPaths` elides nothing for these
+  ## edges and the set the guard reads IS the set the record is keyed on. The
+  ## suite at the bottom is the case where those two sets come apart.
+
+proc contentAddressedShell(): string =
+  ## A `/nix/store/<hash>-bash-…/bin/sh` this host can actually execute, or
+  ## `""`.
+  ##
+  ## A REAL STORE PATH, not a fixture directory, and that is forced rather than
+  ## chosen: `nixStoreRoot` — the single function both the elision
+  ## (`toolInputRoots`) and the key mix (`keyedOnContentAddressedToolRoot`)
+  ## read — recognizes the literal prefix `/nix/store/` and nothing else. A
+  ## synthesized "store-like" directory under the fixture root would be elided
+  ## by neither, and the suite would grade nothing while reading green. So the
+  ## honest shape is to use the host's store when it has one and skip when it
+  ## does not.
+  ##
+  ## The executability probe is not paranoia. A plain name scan of this host's
+  ## store returned, as its FIRST candidate, a bash derivation built for
+  ## another machine format: "cannot execute binary file: Exec format error",
+  ## which fails the edge for a reason that has nothing to do with caching.
+  for entry in walkDir("/nix/store"):
+    if entry.kind != pcDir:
+      continue
+    let name = entry.path.extractFilename
+    if not name.contains("-bash-5") or name.contains("interactive"):
+      continue
+    let sh = entry.path / "bin" / "sh"
+    if fileExists(sh) and execShellCmd(sh & " -c true >/dev/null 2>&1") == 0:
+      return sh
+  ""
 
 proc weak(name: string): ContentDigest =
   weakFingerprintFromText("zero-evidence-edge." & name)
@@ -211,14 +246,19 @@ proc readRecord(path: string): MonitorRecord =
     threadId: 4242,
     path: path)
 
-proc runEdge(f: Fixture; id: string; cacheable = true): BuildAction =
+proc runEdge(f: Fixture; id: string; cacheable = true;
+             rootImage = RootImage): BuildAction =
   ## `monitoredAction` preserves a monitor depfile the caller already set
   ## ("direct engine callers may provide a monitor depfile path for
   ## actions that produce iomon evidence themselves"), so the fixture iomon
   ## is what `collectEvidence` folds instead of the engine wrapping the
   ## command in the monitor and overwriting it.
+  ##
+  ## `rootImage` is a parameter and not the constant because the KEYED-set
+  ## suite at the bottom needs an `argv[0]` under a content-addressed root —
+  ## the one condition under which `cacheInputPaths` subtracts anything at all.
   result = action(id,
-    ["/bin/sh", "-c", "echo ran >> " & f.runLogPath],
+    [rootImage, "-c", "echo ran >> " & f.runLogPath],
     cwd = f.workRoot,
     inputs = [],
     outputs = [],
@@ -278,7 +318,8 @@ proc iomonReportEdge(f: Fixture; id: string): BuildAction =
           completeness: decComplete)]),
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
-proc reportValidatedByMonitorEdge(f: Fixture; id: string): BuildAction =
+proc reportValidatedByMonitorEdge(f: Fixture; id: string;
+                                  rootImage = RootImage): BuildAction =
   ## `dgRecognizedFormatValidatedByMonitor` — the SECOND member of
   ## `MonitorPolicyKinds`, and until this case existed the guard was graded on
   ## the first member only.
@@ -300,7 +341,7 @@ proc reportValidatedByMonitorEdge(f: Fixture; id: string): BuildAction =
   ## writes it, because `required: true` means a missing report is a different
   ## failure than the one under test.
   result = action(id,
-    ["/bin/sh", "-c", "echo ran >> " & f.runLogPath &
+    [rootImage, "-c", "echo ran >> " & f.runLogPath &
       "; printf 'out:\\n' > " & f.makeDepfilePath],
     cwd = f.workRoot,
     inputs = [],
@@ -321,7 +362,8 @@ proc reportValidatedByMonitorEdge(f: Fixture; id: string): BuildAction =
   result.monitorDepfile = f.rmdfPath
 
 proc converterValidatedByMonitorEdge(f: Fixture; id: string;
-                                     converterReports = ""): BuildAction =
+                                     converterReports = "";
+                                     rootImage = RootImage): BuildAction =
   ## `dgPostBuildConverterValidatedByMonitor` — the THIRD and last member of
   ## `MonitorPolicyKinds`, graded for the same reason as the one above.
   ##
@@ -336,7 +378,7 @@ proc converterValidatedByMonitorEdge(f: Fixture; id: string;
   ## exists to prevent. Recording it here means a future change to that
   ## decision fails a test that names it.
   result = action(id,
-    ["/bin/sh", "-c", "echo ran >> " & f.runLogPath],
+    [rootImage, "-c", "echo ran >> " & f.runLogPath],
     cwd = f.workRoot,
     inputs = [],
     outputs = [],
@@ -760,3 +802,284 @@ suite "the zero-evidence diagnostic names the platform's floor regime":
     # platform the original soundness hole with no signal.
     check msg.contains("not a weaker guard here")
     check not msg.contains("suspect the monitor backend")
+
+suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the monitor filled":
+  ## THE SECOND HALF OF THE SAME DEFECT, and the reason it needs its own
+  ## suite rather than an extra assertion above.
+  ##
+  ## Every case before this one has an `argv[0]` of `/bin/sh`, which lies
+  ## under no content-addressed root. For such an edge `toolInputRoots` is
+  ## empty, `cacheInputPaths` subtracts nothing, and the set
+  ## `applyMonitorEvidenceStatus` reads IS the set the record is keyed on. So
+  ## those cases cannot see a divergence between the two sets — not because
+  ## they were written carelessly, but because their fixture has no store
+  ## root in it. That is the same shape of blind spot
+  ## `t_executed_binary_is_a_recorded_input` had, and it is why the fixture
+  ## here reaches for the host's real `/nix/store`.
+  ##
+  ## MEASURED before the fix (2026-09-09), `dgAutomaticMonitor`, `argv[0]` a
+  ## `/nix/store/…-bash-5.2p26/bin/sh`, one observed read under that same
+  ## store root, declaring nothing:
+  ##
+  ## | | value |
+  ## |---|---|
+  ## | `monitorReads` (what the guard saw) | 2 entries -> passed, no diagnostic |
+  ## | `cacheInputPaths` (what the record was keyed on) | `[]` |
+  ## | published | **yes**, `record.inputs.len == 0` |
+  ## | warm | `cdHit`, `launched = false` |
+  ##
+  ## A cacheable edge published a record with an entirely empty input set —
+  ## exactly the state the suites above exist to refuse — and did it silently,
+  ## because the guard graded a different set than the one that got keyed.
+  ## Dependency-Observation-Attribution.md rule 7.
+  ##
+  ## RULE 8: a case per member of `MonitorPolicyKinds`, both directions.
+  ## `gradeKeyedInputSet` is scoped to `monitorEvidenceRequired`, which is
+  ## that same three-member set plus an iomon, and the member list is what a
+  ## later contributor edits. Each kind gets the empty-key arm AND the
+  ## narrowness arm, because "does not publish" is also satisfied by an engine
+  ## that refuses every store-tool edge outright, which would be a far worse
+  ## regression than the one being fixed.
+
+  proc storeRootRead(sh: string): string =
+    ## A real file under the tool's OWN store root — the class-1 observation
+    ## `cacheInputPaths` elides. `bin/sh` is a symlink to `bin/bash` in every
+    ## nixpkgs bash derivation, so this path exists whenever `sh` does.
+    sh.parentDir / "bash"
+
+  test "automatic-monitor: an observed set that the tool-root elision empties does not publish":
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture("keyed-auto-zero")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
+      let act = f.runEdge("keyed-auto-zero/run", rootImage = sh)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: status=" & $r0.status &
+        " reads=" & $r0.evidence.monitorReads &
+        " keyed=" & $act.cacheInputPaths(r0.evidence) &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      # The action still SUCCEEDS — same arm of Monitor-Hook-Shim.md:501 the
+      # suites above take.
+      check r0.status == asSucceeded
+      check f.runCount() == 1
+
+      # THE DENOMINATOR, and the whole point of the case: the guard's set is
+      # NOT empty. Both entries are named, so a change that empties this set
+      # for some other reason fails here rather than silently converting this
+      # into a duplicate of the zero-observation case.
+      check r0.evidence.monitorReads == @[storeRootRead(sh), sh]
+      # ... and the set the record would be keyed on IS empty.
+      check act.cacheInputPaths(r0.evidence).len == 0
+
+      let diagnosed = r0.evidence.diagnostics.join(" ")
+      check diagnosed.contains("came out EMPTY")
+      check diagnosed.contains(act.id)
+      # It reports the count rule 3 asks for, rather than only the verdict.
+      check diagnosed.contains("observed 2 path(s)")
+      check not f.hasRecord(act)
+
+      let warm = runBuild(g, config)
+      let r1 = warm.byId(act.id)
+      checkpoint("warm: decision=" & $r1.cacheDecision &
+        " launched=" & $r1.launched)
+      check r1.cacheDecision notin ReuseDecisions
+      check r1.launched
+      check f.runCount() == 2
+
+  test "automatic-monitor: a store-tool edge with one KEYED input still publishes":
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture("keyed-auto-one")
+      defer: removeDir(f.root)
+      # Same store `argv[0]`; the observation is a WORKSPACE file, so it
+      # survives the elision and the key is not empty.
+      f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
+      let act = f.runEdge("keyed-auto-one/run", rootImage = sh)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: reads=" & $r0.evidence.monitorReads &
+        " keyed=" & $act.cacheInputPaths(r0.evidence))
+      check r0.status == asSucceeded
+      check r0.evidence.monitorReads == @[f.observedPath, sh]
+      # The root image is elided as class 1 and the workspace read is not:
+      # this is the elision doing its job, named exactly.
+      check act.cacheInputPaths(r0.evidence) == @[f.observedPath]
+      check r0.evidence.diagnostics.len == 0
+      check f.hasRecord(act)
+      check f.runCount() == 1
+
+      let warm = runBuild(g, config)
+      check warm.byId(act.id).cacheDecision in ReuseDecisions
+      check f.runCount() == 1
+
+      # ... and it still invalidates on the observation it kept.
+      writeFile(f.observedPath, "generation-2-longer\n")
+      let after = runBuild(g, config)
+      check after.byId(act.id).cacheDecision notin ReuseDecisions
+      check f.runCount() == 2
+
+  test "recognized-format-validated-by-monitor: the elision emptying the key does not publish":
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture("keyed-report-zero")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
+      let act = f.reportValidatedByMonitorEdge("keyed-report-zero/run",
+        rootImage = sh)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: reads=" & $r0.evidence.monitorReads &
+        " depfileInputs=" & $r0.evidence.depfileInputs &
+        " keyed=" & $act.cacheInputPaths(r0.evidence) &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      check r0.evidence.monitorReads == @[storeRootRead(sh), sh]
+      check r0.evidence.depfileInputs.len == 0
+      check act.cacheInputPaths(r0.evidence).len == 0
+      check r0.evidence.diagnostics.join(" ").contains("came out EMPTY")
+      check not f.hasRecord(act)
+
+      let warm = runBuild(g, config)
+      check warm.byId(act.id).cacheDecision notin ReuseDecisions
+      check f.runCount() == 2
+
+  test "recognized-format-validated-by-monitor: one KEYED input still publishes":
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture("keyed-report-one")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
+      let act = f.reportValidatedByMonitorEdge("keyed-report-one/run",
+        rootImage = sh)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: keyed=" & $act.cacheInputPaths(r0.evidence))
+      check r0.status == asSucceeded
+      check act.cacheInputPaths(r0.evidence) == @[f.observedPath]
+      check r0.evidence.diagnostics.len == 0
+      check f.hasRecord(act)
+
+      let warm = runBuild(g, config)
+      check warm.byId(act.id).cacheDecision in ReuseDecisions
+      check f.runCount() == 1
+
+  test "converter-validated-by-monitor: the elision emptying the key does not publish":
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture("keyed-converter-zero")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
+      let act = f.converterValidatedByMonitorEdge("keyed-converter-zero/run",
+        rootImage = sh)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: reads=" & $r0.evidence.monitorReads &
+        " keyed=" & $act.cacheInputPaths(r0.evidence) &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      check r0.evidence.monitorReads == @[storeRootRead(sh), sh]
+      check act.cacheInputPaths(r0.evidence).len == 0
+      check r0.evidence.diagnostics.join(" ").contains("came out EMPTY")
+      check not f.hasRecord(act)
+
+      let warm = runBuild(g, config)
+      check warm.byId(act.id).cacheDecision notin ReuseDecisions
+      check f.runCount() == 2
+
+  test "converter-validated-by-monitor: one KEYED converted input still publishes":
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture("keyed-converter-one")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord()])
+      let act = f.converterValidatedByMonitorEdge("keyed-converter-one/run",
+        converterReports = "input\\t" & f.observedPath & "\\n",
+        rootImage = sh)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: reads=" & $r0.evidence.monitorReads &
+        " keyed=" & $act.cacheInputPaths(r0.evidence))
+      check r0.status == asSucceeded
+      check act.cacheInputPaths(r0.evidence) == @[f.observedPath]
+      check r0.evidence.diagnostics.len == 0
+      check f.hasRecord(act)
+
+      let warm = runBuild(g, config)
+      check warm.byId(act.id).cacheDecision in ReuseDecisions
+      check f.runCount() == 1
+
+  test "a non-cacheable store-tool edge is unaffected":
+    # `gradeKeyedInputSet` must not turn `cacheable = false` — the sanctioned
+    # home for an edge with nothing of its own in the key — into a new
+    # diagnostic. It never published, so there is nothing to skip.
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture("keyed-noncacheable")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
+      let act = f.runEdge("keyed-noncacheable/run", cacheable = false,
+        rootImage = sh)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: status=" & $r0.status &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      check act.cacheInputPaths(r0.evidence).len == 0
+      check r0.evidence.diagnostics.len == 0
+      check f.runCount() == 1
+
+  test "the empty-keyed-set diagnostic is distinguishable from the zero-observation one":
+    # Two different failures with two different remedies, so they must not
+    # read as one message. The zero-observation guard says the MONITOR saw
+    # nothing; this one says the monitor saw things and the ENGINE's own
+    # subtraction removed all of them.
+    let keyed = emptyKeyedInputSetDiagnostic("pkg.some_edge", 7, 7)
+    checkpoint(keyed)
+    check keyed.contains("pkg.some_edge")
+    check keyed.contains("observed 7 path(s)")
+    check keyed.contains("came out EMPTY")
+    check keyed.contains("cacheable = false")
+    check keyed.contains("rules 3 and 7")
+    # It must NOT claim the monitor recorded nothing — that is the other
+    # guard's finding and it points an operator at the monitor backend.
+    check not keyed.contains("no observation of any kind")
+    check not keyed.contains("suspect the monitor backend")
+    check emptyKeyedInputSetDiagnostic("pkg.some_edge", 7, 7) !=
+      zeroEvidenceDiagnostic("pkg.some_edge", MonitorHasLibraryLoadFloor)

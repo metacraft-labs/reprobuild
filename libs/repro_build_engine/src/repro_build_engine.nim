@@ -1597,6 +1597,36 @@ proc textBytes(text: string): seq[byte] =
 proc weakFingerprintFromText*(text: string): ContentDigest =
   blake3DomainDigest(text.textBytes(), hdActionFingerprint)
 
+proc nixStoreRoot*(path: string): string =
+  ## The `/nix/store/<hash>-<name>` root a path lies under, or `""`.
+  ##
+  ## THE ONE CONTENT-ADDRESSED ROOT THE ENGINE RECOGNISES TODAY, and the
+  ## reason it is defined here rather than beside its first consumer: two
+  ## opposite operations key off exactly this function and they are only sound
+  ## as a PAIR.
+  ##
+  ## * `toolInputRoots` SUBTRACTS observed reads under such a root from the
+  ##   action-cache input set (Dependency-Observation-Attribution.md §Class 1
+  ##   — "the path names its own content, the store is immutable, and the
+  ##   thing that put it in the key already covers every byte under it").
+  ## * `keyedOnContentAddressedToolRoot` below is what makes the second half
+  ##   of that sentence TRUE for the action's own image, instead of a claim
+  ##   about some caller's fingerprint that the engine never checks.
+  ##
+  ## Both must read the same root for the same path or the subtraction drops
+  ## something the key does not carry. Sharing the function is the structural
+  ## form of "same root".
+  let normalized = path.replace('\\', '/')
+  const prefix = "/nix/store/"
+  if not normalized.startsWith(prefix):
+    return ""
+  let rest = normalized.substr(prefix.len)
+  let slash = rest.find('/')
+  if slash < 0:
+    normalized
+  else:
+    prefix & rest[0 ..< slash]
+
 proc keyedOnGoverningLock*(fingerprint: ContentDigest;
                            governingLockIdentity: LockIdentity): ContentDigest =
   ## Named-Lock-Files §7 — mix the governing lock identity into an action's
@@ -1795,6 +1825,149 @@ proc keyedOnActionEnvironment*(fingerprint: ContentDigest;
   framed.add($text.len & "\x1f" & text & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc monitorPayloadArgIndex(argv: openArray[string]): int
+
+proc executedImageArgvIndex*(argv: openArray[string]): int =
+  ## Index in `argv` of the image the ACTION ITSELF executes, or `-1` when
+  ## that cannot be told without guessing.
+  ##
+  ## ONE ANSWER FOR THREE QUESTIONS, and they used to have two. An action's
+  ## argv is not always the recipe's argv: on the wrapped monitor path
+  ## `monitoredAction` rewrites it to
+  ## `<repro> internal io monitor --depfile <f> -- <argv>`, so `argv[0]`
+  ## becomes the ENGINE'S OWN BINARY and the action's real tool moves to the
+  ## payload. On the in-process-hosted path it is left alone. Which one a
+  ## given action carries is decided by the launch site, not by the action.
+  ##
+  ## `executedToolImagePath` already knew this. `toolInputRoots` did not, and
+  ## MEASURED (2026-09-09) on a real monitored build the disagreement is
+  ## visible in both directions:
+  ##
+  ## * it subtracted nothing for the action's real store-resolved tool,
+  ##   because it was reading the wrapper's `argv[0]`; and
+  ## * where the engine's own binary is itself a store path — an installed
+  ##   reprobuild — it subtracted THAT root instead, which is an elision of
+  ##   reads under a root that is in no key at all, since the wrapper argv is
+  ##   composed long after the weak fingerprint was computed.
+  ##
+  ## Both disappear once the subtraction, the key mix and the launcher's
+  ## root-image fold ask this one function which argument is the tool.
+  ##
+  ## Returns `-1` for a monitor-shaped argv whose payload cannot be located,
+  ## rather than falling back to index 0. Index 0 there is the launcher, not
+  ## the action, and naming the wrong image is worse than naming none: it
+  ## would key an edge on the engine binary and elide the reads of whatever
+  ## else lives beside it.
+  if argv.len == 0:
+    return -1
+  let payloadIndex = monitorPayloadArgIndex(argv)
+  if payloadIndex >= 0:
+    return payloadIndex
+  if argv.len >= 4 and argv[1] == "internal" and argv[2] == "io" and
+      argv[3] == "monitor":
+    return -1
+  0
+
+proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
+                                     argv: openArray[string]): ContentDigest =
+  ## Mix the CONTENT-ADDRESSED ROOT of the image this action executes into its
+  ## weak fingerprint — the derived half of the class-1 elision `cacheInputPaths`
+  ## performs, and the reason that elision is sound.
+  ##
+  ## ## The claim this exists to make true
+  ##
+  ## `toolInputRoots` drops every observed read under `nixStoreRoot(argv[0])`
+  ## from the action-cache input set. Dependency-Observation-Attribution.md
+  ## §Class 1 permits that ONLY on a two-part argument: the root is
+  ## content-addressed (the path names its content) AND "its identity is in
+  ## the key". The first half is a property of the store. **The second half was
+  ## an assumption about whatever fingerprint the caller happened to compute,
+  ## and nothing checked it.**
+  ##
+  ## MEASURED (2026-09-09), engine-default fingerprint
+  ## (`weakFingerprintFromText(id)`), monitored cacheable edge, `argv[0]` a
+  ## `/nix/store/…-bash-5.2p26/bin/sh`, one observed workspace read:
+  ##
+  ## | step | decision |
+  ## |---|---|
+  ## | run 1, tool A | published, `record.inputs = [observed.txt]` |
+  ## | warm, tool A | `cdHit` (control) |
+  ## | `argv[0]` -> `/nix/store/…-bash-5.3p9/bin/sh` | **`cdHit`, `launched=false`** |
+  ##
+  ## A DIFFERENT BINARY, and the record published against the first one was
+  ## served without running anything. `weak(A) == weak(B)` was `true`: the
+  ## engine's default fingerprint is the action id, the lock identity and the
+  ## environment declaration, and argv appears in none of them. The strong
+  ## fingerprint is `weak + inputs + envInputs` (`computeStrongFingerprint`),
+  ## and the tool was subtracted out of `inputs`. So for a store-resolved tool
+  ## the executed binary's identity was in NO key at all, and `947c50fc`'s
+  ## stated goal — "make the binary an action executes one of its cache
+  ## inputs" — was unmet for exactly the tools every NixOS build uses.
+  ##
+  ## The same measurement with argv mixed into the caller's fingerprint gives
+  ## `cdMiss, launched=true`. So the elision is sound precisely when the key
+  ## covers `argv[0]`, and the fix is to make that true by construction rather
+  ## than to hope each caller arranged it.
+  ##
+  ## ## Why the ROOT and not the file, and why the path and not its content
+  ##
+  ## The root, because the root is the granularity the subtraction works at:
+  ## `cacheInputPaths` drops everything under `nixStoreRoot(argv[0])`, so the
+  ## key has to carry that whole root or the two sets do not line up
+  ## (Dependency-Observation-Attribution.md rule 7).
+  ##
+  ## The path rather than a digest of the bytes, because for a
+  ## content-addressed root the path IS the digest — that is the entire
+  ## premise of class 1, and re-hashing the closure would cost a store walk to
+  ## re-derive what the name already states. Where the premise does not hold
+  ## the mix does not happen: `nixStoreRoot` returns `""` for every path
+  ## outside the store, `toolInputRoots` subtracts nothing there, and the
+  ## image stays a content-fingerprinted recorded input via
+  ## `foldLauncherRootImage` — which is the case
+  ## `t_executed_binary_is_a_recorded_input` has always pinned.
+  ##
+  ## ## Applied in the CONSTRUCTOR, for `keyedOnGoverningLock`'s reason
+  ##
+  ## "By a structural check, not by care." Every `weakFingerprint =` argument
+  ## in the tree is a caller who computed a fingerprint over what its edge
+  ## does; some of them (`weakFingerprintForProfileBuildAction`, the typed-tool
+  ## DSL site's `profile.profileFingerprint`) already cover the tool and some
+  ## (`weakFingerprintFromText(id)`, the inline-exec site's id + payload) do
+  ## not. A subtraction whose soundness depends on which caller you came
+  ## through is a subtraction that is unsound somewhere, and the engine cannot
+  ## tell the two apart by inspecting an opaque digest.
+  ##
+  ## ## The empty case is the IDENTITY, and that is required
+  ##
+  ## An edge whose `argv[0]` is not under a content-addressed root must
+  ## fingerprint to exactly what it fingerprinted before this existed —
+  ## otherwise a correctness fix ships as a total cache wipe for every user
+  ## who does not build on NixOS. NLF-STAT-4's baseline corpus uses
+  ## `/usr/bin/cc`, so those recorded bytes do not move; the test pins it.
+  ##
+  ## ## Where the OTHER `toolInputRoots` roots come from, and why they need no
+  ## equivalent
+  ##
+  ## `toolInputRoots` also collects store roots out of `PATH` and `NODE_PATH`
+  ## — but it reads them from `action.env`, the edge's own DECLARED
+  ## environment, and `keyedOnActionEnvironment` already mixes every declared
+  ## name AND value into this same fingerprint. A passthrough `PATH`
+  ## contributes no value to the key, and `envValue` cannot see it either, so
+  ## it yields no root to subtract. Those two halves line up by construction
+  ## already. `argv[0]` was the one that did not.
+  let imageIndex = executedImageArgvIndex(argv)
+  let root = if imageIndex >= 0: nixStoreRoot(argv[imageIndex]) else: ""
+  if root.len == 0:
+    return fingerprint
+  # Length-framed two-field mix, same shape and rationale as
+  # `keyedOnGoverningLock` and `keyedOnActionEnvironment`: no two distinct
+  # (fingerprint, root) pairs may collide by concatenation ambiguity.
+  var framed = "action-tool-root\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  framed.add($root.len & "\x1f" & root & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc weakFingerprintFor*(id: string;
                          governingLockIdentity: LockIdentity): ContentDigest =
   ## The fingerprint `action()` / `builtinAction()` would compute for an edge
@@ -1874,8 +2047,18 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # no environment is unaffected — `keyedOnActionEnvironment` is the
     # identity on the empty declaration — so this does not move any
     # fingerprint that existed before it.
+    #
+    # The tool-root mix sits between them, and it is the same kind of
+    # thing: an engine-derived component no call site knows to supply.
+    # It is the IDENTITY unless `argv[0]` lies under a content-addressed
+    # root, which is exactly the condition under which `cacheInputPaths`
+    # subtracts that root's contents out of the key — see
+    # `keyedOnContentAddressedToolRoot` for the measurement that showed
+    # the two halves had never been connected.
     weakFingerprint: keyedOnGoverningLock(
-      keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
+      keyedOnContentAddressedToolRoot(
+        keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
+        argv),
       governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     depfile: depfile,
@@ -2897,6 +3080,49 @@ proc zeroEvidenceDiagnostic*(actionId: string;
       "want, the fix is a library-load floor in the platform's shim, not " &
       "a weaker guard here.")
 
+proc emptyKeyedInputSetDiagnostic*(actionId: string;
+                                   observedCount, elidedCount: int): string =
+  ## The diagnostic for an action that observed something and keyed on
+  ## nothing — the S2 state.
+  ##
+  ## `zeroEvidenceDiagnostic` above grades what the MONITOR saw.  This one
+  ## grades what the RECORD is keyed on, and the two are different sets: the
+  ## engine's own tool-root and ignored-prefix subtractions are applied to the
+  ## observed channels on the way to `cacheInputPaths`, AFTER the monitor
+  ## question has been asked and answered.
+  ##
+  ## MEASURED (2026-09-09) — monitored cacheable edge, `argv[0]` a
+  ## `/nix/store/…-bash-5.2p26/bin/sh`, whose single observed read is a file
+  ## under that same store root, declaring nothing:
+  ##
+  ## | | value |
+  ## |---|---|
+  ## | `monitorReads` (the guard's set) | 2 entries -> passes, no diagnostic |
+  ## | `cacheInputPaths` (the key's set) | `[]` |
+  ## | published | **yes**, `record.inputs.len == 0` |
+  ## | warm | `cdHit`, `launched = false` |
+  ##
+  ## A cacheable edge published a record with an entirely empty input set —
+  ## precisely the state `zeroEvidenceDiagnostic`'s guard exists to refuse —
+  ## and reached it with no diagnostic at all, because the guard graded a
+  ## different set than the one that got keyed. That is
+  ## Dependency-Observation-Attribution.md rule 7: "the set a guard checks and
+  ## the set the key is built from are the same set — or the difference
+  ## between them is itself counted and reported". This message is the report,
+  ## and `elidedCount` is the count rule 3 asks for.
+  "action '" & actionId & "': the monitor observed " & $observedCount &
+    " path(s), but " & $elidedCount & " of them were elided by the " &
+    "action's own tool roots / ignored prefixes and the action-cache " &
+    "input set came out EMPTY. Such a record is keyed on the weak " &
+    "fingerprint alone and is indistinguishable from one published by an " &
+    "action that observed nothing, which is the state " &
+    "Reprobuild-Development.milestones.org M17 and " &
+    "Compiles-Are-Normal-Edges.md:269-273 refuse. Action-cache publish " &
+    "skipped; the edge re-runs. If the elided paths really are keyed by " &
+    "construction, the edge still has nothing of its own in the key and " &
+    "wants `cacheable = false`; if they are not, the elision is the bug. " &
+    "Spec: Dependency-Observation-Attribution.md rules 3 and 7."
+
 proc monitorEvidenceRequired(action: BuildAction): bool =
   ## Monitor evidence is required for monitored policies once an iomon
   ## (monitor depfile) has actually been wired up for the action. The only
@@ -3878,10 +4104,17 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     if action.cacheable:
       col.publishable = false
 
-proc monitorPayloadArgIndex(argv: openArray[string]): int
 proc preparedRunQuotaCommand(action: BuildAction;
                              config: BuildEngineConfig;
                              shellUmaskWrap = true): ReproCommandSpec
+# Forward-declared so `collectEvidence` can grade THE SET THAT GETS KEYED
+# rather than the set the monitor filled in — see `gradeKeyedInputSet`. The
+# definitions stay beside the other key-construction helpers further down;
+# only the visibility ordering moves.
+proc cacheInputPaths*(action: BuildAction;
+                      evidence: PathSetEvidence): seq[string]
+proc evidenceInputPaths(action: BuildAction;
+                        evidence: PathSetEvidence): seq[string]
 
 proc isExecutableFile(path: string): bool =
   ## `execvp`'s candidate test, as close as a consumer can get to it: the
@@ -3942,18 +4175,15 @@ proc executedToolImagePath(action: BuildAction;
   ## shape, a bare name that no PATH entry supplies, or no config to ask.
   ## Returning nothing leaves the pre-existing gap exactly as it was; it never
   ## invents a path.
-  if action.argv.len == 0:
-    return ""
-  let payloadIndex = monitorPayloadArgIndex(action.argv)
-  if payloadIndex < 0 and action.argv.len >= 4 and
-      action.argv[1] == "internal" and action.argv[2] == "io" and
-      action.argv[3] == "monitor":
-    # Monitor-wrapped but not in the shape `monitorPayloadArgIndex` accepts.
-    # The root image would be the `repro` binary, which is the launcher, not
-    # the action. Say nothing rather than record the wrong thing.
-    return ""
-  let base = if payloadIndex >= 0: payloadIndex else: 0
-  if base >= action.argv.len:
+  # `executedImageArgvIndex` is the shared answer to "which argument is the
+  # action's own image", and it returns -1 for a monitor-wrapped argv whose
+  # payload cannot be located — there the root image would be the `repro`
+  # binary, which is the launcher and not the action, so say nothing rather
+  # than record the wrong thing. `toolInputRoots` and
+  # `keyedOnContentAddressedToolRoot` read the same function, which is what
+  # keeps the elision, the key and this fold talking about one image.
+  let base = executedImageArgvIndex(action.argv)
+  if base < 0 or base >= action.argv.len:
     return ""
   let name = action.argv[base]
   if name.len == 0:
@@ -4027,6 +4257,51 @@ proc foldLauncherRootImage(action: BuildAction; config: ptr BuildEngineConfig;
   let rootImage = executedToolImagePath(action, config)
   if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
     evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
+
+proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
+  ## The zero-evidence guard, applied to the set the RECORD IS KEYED ON.
+  ##
+  ## `applyMonitorEvidenceStatus` asks "did the monitor observe anything?" of
+  ## `evidence.monitorReads` and friends. That is the right question about the
+  ## MONITOR, and it stays where it is. It is not the question about the KEY,
+  ## because two engine-side subtractions run between those channels and
+  ## `cacheInputPaths`: `toolInputRoots` (the action's own store roots) and
+  ## `ignoredInputRoots` (author-declared prefixes, expanded against the
+  ## engine's environment when `action.env` is silent). An action can therefore
+  ## satisfy the first question and still publish a record keyed on nothing —
+  ## measured, and quantified in `emptyKeyedInputSetDiagnostic`.
+  ##
+  ## IT MUST RUN AFTER `foldLauncherRootImage`, AND THAT IS THE SAME
+  ## CORRECTNESS ORDERING `832f5fa2` INTRODUCED, POINTED THE OTHER WAY.
+  ## There, a predicate over observed evidence had to run BEFORE the engine
+  ## contributed to that evidence (rule 6). Here, a predicate over the KEY has
+  ## to run AFTER every contributor to the key, or it grades a draft. The two
+  ## are not in tension: they are the same instruction — *ask each question of
+  ## the final state of the set that question is about* — and the sets are
+  ## different, which is exactly why the guard needs two call sites and not
+  ## one.
+  ##
+  ## SCOPED TO `monitorEvidenceRequired`, deliberately: that is the precondition
+  ## of the guard this mirrors, so the two cover the same class of edge and a
+  ## change to the scope moves both. An edge outside it is either declaring its
+  ## own input set (where an empty key is the author's statement, not the
+  ## engine's failure) or is not monitored at all.
+  ##
+  ## The `observed` denominator is what makes this a REPORT rather than a
+  ## duplicate: when the observed channels were empty too, the monitor guard
+  ## has already fired with its own, more specific message, and firing again
+  ## would tell an operator the same thing twice in different words.
+  if not action.cacheable or not action.monitorEvidenceRequired():
+    return
+  let observed = action.evidenceInputPaths(col.evidence).len
+  if observed == 0:
+    return
+  let keyed = action.cacheInputPaths(col.evidence)
+  if keyed.len > 0:
+    return
+  col.evidence.diagnostics.add(
+    emptyKeyedInputSetDiagnostic(action.id, observed, observed))
+  col.disableCacheHits = true
 
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
@@ -4285,6 +4560,11 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # belongs in the cache key; it is not evidence that the monitor observed
   # anything. See `foldLauncherRootImage`.
   foldLauncherRootImage(action, config, result.evidence, seen)
+  # ... and LAST of all, after every contributor to the key including the fold
+  # immediately above, grade the set the key is actually built from. Rule 7.
+  # See `gradeKeyedInputSet` for why this ordering is the mirror image of the
+  # one on the line before it rather than a contradiction of it.
+  gradeKeyedInputSet(action, result)
   if strict and not result.publishable:
     discard
 
@@ -4357,18 +4637,6 @@ proc evidenceInputPaths(action: BuildAction;
       continue
     result.addUnique(seen, probe)
 
-proc nixStoreRoot(path: string): string =
-  let normalized = path.replace('\\', '/')
-  const prefix = "/nix/store/"
-  if not normalized.startsWith(prefix):
-    return ""
-  let rest = normalized.substr(prefix.len)
-  let slash = rest.find('/')
-  if slash < 0:
-    normalized
-  else:
-    prefix & rest[0 ..< slash]
-
 proc addNixStoreRoot(roots: var seq[string]; path: string) =
   let root = nixStoreRoot(path)
   if root.len > 0:
@@ -4381,8 +4649,37 @@ proc envValue(action: BuildAction; name: string): string =
       return item.substr(prefix.len)
 
 proc toolInputRoots(action: BuildAction): seq[string] =
-  if action.argv.len > 0:
-    result.addNixStoreRoot(action.argv[0])
+  ## The content-addressed roots whose contents `cacheInputPaths` may elide
+  ## from the action-cache key, and — read together with the note below —
+  ## the reason it may.
+  ##
+  ## EVERY ROOT THIS RETURNS IS IN THE WEAK FINGERPRINT BY CONSTRUCTION.
+  ## Dependency-Observation-Attribution.md §Class 1 allows the elision only
+  ## when the root is content-addressed AND its identity is in the key, and
+  ## for a long time this function supplied the first half and merely assumed
+  ## the second. The two halves are now connected, per source:
+  ##
+  ## * `argv[0]` — `keyedOnContentAddressedToolRoot`, applied in `action()`
+  ##   over exactly this `nixStoreRoot` call, so the root subtracted here is
+  ##   the root mixed there. Before that existed, a monitored edge under the
+  ##   engine-default fingerprint took a `cdHit` after its `/nix/store` shell
+  ##   was swapped for a different store path — measured; see that proc.
+  ## * `PATH` / `NODE_PATH` — `keyedOnActionEnvironment`, also applied in
+  ##   `action()`, which mixes every DECLARED name and value. `envValue` reads
+  ##   `action.env`, the same declaration, so a value that yields a root here
+  ##   is a value that is in the key there. A passthrough variable is in
+  ##   neither: the key carries only its name, and `envValue` returns "".
+  ##
+  ## An elision that stops being covered by one of those is a soundness
+  ## regression, not a tuning change. `gradeKeyedInputSet` is the backstop
+  ## that reports the case where the subtraction empties the key entirely.
+  ##
+  ## `executedImageArgvIndex` rather than a bare `argv[0]`, because by the time
+  ## this runs the argv may be the monitor wrapper's — see that proc for what
+  ## reading index 0 through the wrapper subtracted, and failed to subtract.
+  let imageIndex = executedImageArgvIndex(action.argv)
+  if imageIndex >= 0:
+    result.addNixStoreRoot(action.argv[imageIndex])
   for value in action.envValue("PATH").split(PathSep):
     result.addNixStoreRoot(value)
   for value in action.envValue("NODE_PATH").split(PathSep):

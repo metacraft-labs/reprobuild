@@ -1,6 +1,12 @@
 ## The binary an action EXECUTES is an input of that action, and must be in
 ## its cache key.
 ##
+## "IN ITS CACHE KEY" IS THE PROPERTY; "A RECORDED INPUT" IS ONLY ONE OF THE
+## TWO WAYS TO GET THERE, and the file's original title named the way rather
+## than the property. That mattered: it is exactly the confusion that let the
+## suite pass for six days while the property it names was FALSE for every
+## tool on a NixOS host. See the last suite in this file.
+##
 ## MOCK POLICY — NO MOCKS ARE USED IN THIS FILE, AND NONE MAY BE ADDED.
 ## Every assertion drives the real `runBuild` scheduler, the real per-edge
 ## `ActionCache` + CAS in `repro_local_store`, the real graph-built io-monitor
@@ -63,6 +69,29 @@
 ## `acfpTimestamp` action-cache policy, which keys on timestamp; a byte-only
 ## swap would be confounded in the other direction. Both new bytes and a new
 ## mtime is the case a user actually hits.
+##
+## WHAT THE FIXTURE ABOVE STRUCTURALLY CANNOT REACH
+## ---------------------------------------------------------------------
+## `makeFixture` compiles the helper into a MUTABLE directory under the
+## fixture root, and says so ("a MUTABLE directory, not a content-addressed
+## store: on NixOS every tool a normal action runs is an immutable store path,
+## which is exactly what masks this hole in day-to-day use"). That comment
+## names the masking and then the suite never tests the masked case, so the
+## four shapes above grade the recorded-input route and only that route.
+##
+## For a tool UNDER a content-addressed root the recorded-input route does not
+## apply and must not: `cacheInputPaths` elides every observed read under the
+## action's own `/nix/store` root as class 1
+## (Dependency-Observation-Attribution.md §Class 1). The elision is sound only
+## if the root's identity is in the key by some other route — and MEASURED on
+## 2026-09-09, under the engine-default weak fingerprint, it was in NO route:
+##
+##   argv[0] = /nix/store/…-bash-5.2p26/bin/sh   -> publish
+##   argv[0] = /nix/store/…-bash-5.3p9/bin/sh    -> cdHit, launched=false
+##
+## A different binary, and the record published against the first one was
+## served without running anything. The final suite below is that case, and
+## `keyedOnContentAddressedToolRoot` is what makes it pass.
 
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
@@ -429,3 +458,190 @@ suite "the binary an action executes is a recorded input":
       # ... and it declines rather than guessing.
       check not phantomRecorded
       check not fileExists(phantom)
+
+# ---------------------------------------------------------------------------
+# The tool UNDER a content-addressed root.
+# ---------------------------------------------------------------------------
+
+proc contentAddressedShells(shim: string): seq[string] =
+  ## Distinct `/nix/store/<hash>-bash-…` roots, each supplying a `bin/sh` this
+  ## host can execute UNDER THE MONITOR. Up to two; fewer means the suite below
+  ## skips.
+  ##
+  ## THE HOST'S REAL STORE, not a fixture directory, and that is forced rather
+  ## than chosen. `nixStoreRoot` — the single function both the elision
+  ## (`toolInputRoots`) and the key mix (`keyedOnContentAddressedToolRoot`)
+  ## consult — recognizes the literal prefix `/nix/store/` and nothing else, so
+  ## a synthesized "store-like" directory under the fixture root would be
+  ## elided by neither and this suite would assert nothing while reading green.
+  ## That is precisely the failure mode the file's original fixture had.
+  ##
+  ## BOTH PROBES BELOW EARNED THEIR PLACE ON THIS HOST, and each rejects a
+  ## candidate that would fail the edge for a reason with nothing to do with
+  ## caching:
+  ##
+  ## * plain execution — the first candidate a bare name scan returned was a
+  ##   bash derivation built for another machine format: "cannot execute
+  ##   binary file: Exec format error".
+  ## * execution WITH THE SHIM INJECTED — `bash-5.2p26` here is a
+  ##   `bootstrap-stage0` derivation whose loader and libc come from
+  ##   `bootstrap-stage0-glibc-bootstrapFiles`. It runs perfectly on its own
+  ##   and dies as `libm.so.6: cannot open shared object file` the moment the
+  ##   monitor shim is preloaded into it, because the shim is linked against
+  ##   the dev shell's glibc and that closure is not reachable from the
+  ##   bootstrap loader. A tool the monitor cannot inject into is a real and
+  ##   separate condition (io-mon reports it as event loss); it is not the
+  ##   condition this suite is about, so it is filtered out here rather than
+  ##   diagnosed as a cache defect at the assertion.
+  var roots: seq[string] = @[]
+  for entry in walkDir("/nix/store"):
+    if entry.kind != pcDir:
+      continue
+    let name = entry.path.extractFilename
+    if not name.contains("-bash-5") or name.contains("interactive"):
+      continue
+    let sh = entry.path / "bin" / "sh"
+    if not fileExists(sh):
+      continue
+    if execShellCmd(sh & " -c true >/dev/null 2>&1") != 0:
+      continue
+    if execShellCmd(InjectionVariableForHost & "=" & shim & " " & sh &
+        " -c true >/dev/null 2>&1") != 0:
+      continue
+    roots.add(sh)
+    if roots.len >= 2:
+      break
+  roots
+
+proc storeToolEdge(f: Fixture; sh: string): BuildAction =
+  ## ONE edge id, ONE command, ONE declared environment — the only thing that
+  ## varies between the two calls this suite makes is `argv[0]`. Everything
+  ## the engine's default weak fingerprint covers (the id, the governing lock,
+  ## the environment declaration) is therefore held constant, which is what
+  ## makes the decision after the swap attributable to the tool and to nothing
+  ## else.
+  ##
+  ## The command runs the MUTABLE helper, so the edge has a genuine class-2
+  ## input of its own. Without one the record's input set would be empty and
+  ## `gradeKeyedInputSet` would refuse the publish — a correct refusal, but it
+  ## would decide this case before the property under test got a chance to.
+  f.monitoredEdge("execdep/store-tool",
+    [sh, "-c", f.helperPath & " " & f.logPath("store-tool")])
+
+suite "a tool under a content-addressed root is in the cache key without being a recorded input":
+
+  test "swapping the store-resolved argv[0] re-runs the edge, and each tool keeps its own record":
+    let repoRoot = findRepoRoot()
+    let shells =
+      if ccPath().len == 0: newSeq[string]()
+      else: contentAddressedShells(monitorTools(repoRoot).shim)
+    if ccPath().len == 0 or shells.len < 2:
+      skip()
+    else:
+      let shA = shells[0]
+      let shB = shells[1]
+      let rootA = shA.parentDir.parentDir
+      # THE DENOMINATOR. Two different store paths must be two different
+      # programs, or "the edge re-ran" would be a statement about nothing.
+      check readFile(shA) != readFile(shB)
+
+      let f = makeFixture()
+      defer: removeDir(f.root)
+
+      let edgeA = f.storeToolEdge(shA)
+      let edgeB = f.storeToolEdge(shB)
+      # The mechanism, named: the two edges differ ONLY in `argv[0]`, and the
+      # engine's constructor is what turns that into two keys. An assertion on
+      # the decision alone would also pass if some unrelated component of the
+      # fingerprint happened to move.
+      checkpoint("weakA=" & toHex(edgeA.weakFingerprint.bytes) &
+        " weakB=" & toHex(edgeB.weakFingerprint.bytes))
+      check edgeA.weakFingerprint != edgeB.weakFingerprint
+
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+
+      let first = runBuild(graph([edgeA]), config)
+      let r0 = first.byId(edgeA.id)
+      checkpoint("A first: status=" & $r0.status & " stderr=" & r0.stderr)
+      check r0.status == asSucceeded
+      check r0.launched
+      check f.runCount("store-tool") == 1
+
+      let inputs = f.recordedInputs(edgeA)
+      let toolRecorded = inputs.anyIt(it.path == shA)
+      let underOwnRoot = inputs.filterIt(
+        it.path == rootA or it.path.startsWith(rootA & "/"))
+      let helperRecorded = inputs.anyIt(it.path == f.helperPath)
+      checkpoint("A recorded inputs: " & $inputs.len &
+        "; tool recorded: " & $toolRecorded &
+        "; under own store root: " & $underOwnRoot.len &
+        "; helper recorded: " & $helperRecorded)
+      # The edge published something real ...
+      check inputs.len > 0
+      check helperRecorded
+      # ... and the tool is NOT part of it. This is the class-1 elision doing
+      # its job, and it is why the swap below cannot be caught by input
+      # revalidation: there is no recorded input naming the tool to revalidate.
+      check not toolRecorded
+      check underOwnRoot.len == 0
+
+      let warm = runBuild(graph([edgeA]), config)
+      checkpoint("A warm: decision=" & $warm.byId(edgeA.id).cacheDecision)
+      check warm.byId(edgeA.id).cacheDecision in ReuseDecisions
+      check not warm.byId(edgeA.id).launched
+      check f.runCount("store-tool") == 1
+
+      # THE SWAP. A different store path is what a content change to a
+      # nix-built tool looks like; the store cannot mutate one in place.
+      let swapped = runBuild(graph([edgeB]), config)
+      let r1 = swapped.byId(edgeB.id)
+      checkpoint("after the tool swap: decision=" & $r1.cacheDecision &
+        " launched=" & $r1.launched & " reason=" & r1.reason)
+      check r1.cacheDecision notin ReuseDecisions
+      check r1.launched
+      check f.runCount("store-tool") == 2
+
+      # ... and the new state is itself reusable, so the fix is a re-key
+      # rather than a permanent miss.
+      let settled = runBuild(graph([edgeB]), config)
+      checkpoint("B settled: decision=" & $settled.byId(edgeB.id).cacheDecision)
+      check settled.byId(edgeB.id).cacheDecision in ReuseDecisions
+      check not settled.byId(edgeB.id).launched
+      check f.runCount("store-tool") == 2
+
+      # THE KEY DISTINGUISHES, IT DOES NOT MERELY MOVE. Going back to tool A
+      # serves A's own record without executing anything. An implementation
+      # that invalidated on every build — the cheap way to make the swap
+      # assertion above pass — fails here.
+      let backToA = runBuild(graph([edgeA]), config)
+      checkpoint("back to A: decision=" & $backToA.byId(edgeA.id).cacheDecision)
+      check backToA.byId(edgeA.id).cacheDecision in ReuseDecisions
+      check not backToA.byId(edgeA.id).launched
+      check f.runCount("store-tool") == 2
+
+  test "an argv[0] outside any content-addressed root does not move the key":
+    ## THE IDENTITY CASE, and it is a requirement rather than a nicety: a
+    ## correctness fix that shifted every fingerprint would ship as a total
+    ## cache wipe for every user who does not build on NixOS. NLF-STAT-4's
+    ## recorded baseline corpus uses `/usr/bin/cc`, so this is also what keeps
+    ## those bytes where they are.
+    let digest = weakFingerprintFromText("execdep/identity-case")
+    check keyedOnContentAddressedToolRoot(digest, ["/usr/bin/cc", "-c"]) ==
+      digest
+    check keyedOnContentAddressedToolRoot(digest, ["/bin/sh", "-c"]) == digest
+    check keyedOnContentAddressedToolRoot(digest, []) == digest
+    # ... while a store path does move it, and two different store roots move
+    # it to two different places.
+    let a = keyedOnContentAddressedToolRoot(digest,
+      ["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bash-5.2p26/bin/sh"])
+    let b = keyedOnContentAddressedToolRoot(digest,
+      ["/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-bash-5.3p9/bin/sh"])
+    check a != digest
+    check b != digest
+    check a != b
+    # The mix is over the ROOT, not the full path, because the ROOT is the
+    # granularity `cacheInputPaths` subtracts at. Two binaries in the same
+    # store root are covered by one key component; splitting them would key on
+    # something the elision does not bound.
+    check keyedOnContentAddressedToolRoot(digest,
+      ["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bash-5.2p26/bin/bash"]) == a
