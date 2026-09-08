@@ -778,7 +778,7 @@ tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	nim	18
 tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim	nim	5
 tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_build_named_target.nim	nim	1
-tests/e2e/local-build-engine/t_e2e_repro_run_lists_tasks_and_edges.nim	nim	2
+tests/e2e/local-build-engine/t_e2e_repro_run_lists_tasks_and_edges.nim	nim	3
 tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim	nim	2
 tests/e2e/local-build-engine/t_e2e_repro_run_qualified_and_ambiguous.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_run_unknown_and_nonrunnable.nim	nim	1
@@ -1387,7 +1387,7 @@ tests/unit/t_hcr_agent_process_target.nim	nim	2
 tests/unit/t_hcr_agent_protocol.nim	nim	8
 tests/unit/t_hcr_agent_runtime.nim	nim	4
 tests/unit/t_hcr_watch_inference.nim	nim	1
-tests/unit/t_host_system_tools.nim	nim	3
+tests/unit/t_host_system_tools.nim	nim	4
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_library_stage_alias.nim	nim	3
 tests/unit/t_m21_history_fed_scheduling.nim	nim	22

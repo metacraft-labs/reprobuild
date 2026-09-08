@@ -14,6 +14,9 @@
 
 import std/[os, strutils, tempfiles, unittest]
 
+when not defined(windows):
+  import std/posix
+
 import repro_test_support
 
 proc reproBinary(repoRoot: string): string =
@@ -89,6 +92,64 @@ proc runRepro(reproBin, pathValue: string; cwd: string;
 
 suite "t_e2e_repro_run_lists_tasks_and_edges":
 
+  when not defined(windows):
+    test "task_runquota_autospawn":
+      let daemonBin = requireRunQuotaDaemonBin(getCurrentDir())
+      let reproBin = reproBinary(getCurrentDir())
+      let tempRoot = createTempDir("repro-task-runquota", "")
+      setFilePermissions(tempRoot, {fpUserRead, fpUserWrite, fpUserExec})
+      defer: removeDir(tempRoot)
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot)
+      writeTaskOnlyProject(projectRoot / "repro.nim")
+      let pidPath = tempRoot / "daemon-pids"
+      let wrapper = tempRoot / "runquotad-witness"
+      writeExecutable(wrapper, "#!/bin/sh\n" &
+        "printf '%s\\n' \"$$\" >> " & quoteShell(pidPath) & "\n" &
+        "exec " & quoteShell(daemonBin) & " \"$@\"\n")
+      proc daemonPids(): seq[Pid] =
+        if fileExists(pidPath):
+          for line in readFile(pidPath).splitLines():
+            if line.len > 0:
+              result.add(Pid(parseInt(line)))
+      defer:
+        # Only clean up daemons launched by this test's wrapper.
+        for pid in daemonPids():
+          if posix.kill(pid, 0) == 0:
+            discard posix.kill(pid, SIGTERM)
+      proc checkDaemonsStopped(expected: int) =
+        let pids = daemonPids()
+        check pids.len == expected
+        for pid in pids:
+          for attempt in 0 ..< 40:
+            if posix.kill(pid, 0) != 0:
+              break
+            sleep(25)
+          check posix.kill(pid, 0) != 0
+      proc invoke(bypass: string): CmdResult =
+        runShell(shellCommand(@[reproBin, "run", "task:greet"], @[
+          ("RUNQUOTAD_BIN", wrapper),
+          ("RUNQUOTA_SOCKET", tempRoot / "not-running.sock"),
+          ("REPROBUILD_AUTO_RUNQUOTA", "1"),
+          ("REPROBUILD_NO_RUNQUOTA", bypass),
+          ("REPRO_TOOL_PROVISIONING", "path"),
+          ("REPRO_DAEMON", "off")]), projectRoot)
+      let cold = invoke("0")
+      checkpoint cold.output
+      check cold.code == 0
+      check cold.output.contains("task-only-hi")
+      checkDaemonsStopped(1)
+      let bypassed = invoke("1")
+      checkpoint bypassed.output
+      check bypassed.code == 0
+      check bypassed.output.contains("task-only-hi")
+      checkDaemonsStopped(1)
+      writeFile(projectRoot / "repro.nim", "not valid Nim syntax !!!\n")
+      let failed = invoke("0")
+      check failed.code != 0
+      check not failed.output.contains("task-only-hi")
+      checkDaemonsStopped(2)
+
   test "dev-env-only recipe lists and runs its task":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-n1-task-only", "")
@@ -152,3 +213,6 @@ suite "t_e2e_repro_run_lists_tasks_and_edges":
     check sourceModeOut.contains("greet")
     check sourceModeOut.contains("[run-edge]")
     check sourceModeOut.contains("app-run")
+
+    discard runRepro(reproBin, pathValue, projectRoot, ["run", "app-run"])
+    check fileExists(projectRoot / "build" / "app")

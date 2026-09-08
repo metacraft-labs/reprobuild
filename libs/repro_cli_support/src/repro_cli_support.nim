@@ -10976,9 +10976,17 @@ proc publicDevEnvMonitor(publicCliPath: string):
   ## monitor binary.
   (selfSpawnIoMonitorPath(publicCliPath), internalIoMonitorArgs)
 
+proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
+                               extraPools: openArray[BuildPool] = []):
+    owned(Process)
+proc releaseAutoRunQuotaProcess*(process: var owned(Process))
+proc runQuotaBypassedByEnv(): bool
+
 proc computePublicDevEnv(selection: DevEnvCliSelection;
                          publicCliPath: string;
                          renderShell = false): DevEnvEdgeResult =
+  var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
   let monitor = publicDevEnvMonitor(publicCliPath)
   computeDevEnvEdge(DevEnvEdgeConfig(
     modulePath: selection.modulePath,
@@ -10992,6 +11000,7 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     activity: selection.activity,
     lockSliceId: selection.lockSliceId,
     developOverridesPath: selection.developOverridesPath,
+    toolProvisioning: resolveToolProvisioningWithEnv(tpmUnspecified),
     renderShell: renderShell,
     statsEnabled: selection.statsPath.len > 0))
 
@@ -11564,10 +11573,6 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  selectedActionOverride = ""):
                                    BuildGraphInspection
 
-proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
-                               extraPools: openArray[BuildPool] = []):
-    owned(Process)
-
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
@@ -11957,6 +11962,8 @@ proc buildRunEdgeSessionResolver*(
 proc runReproRunCommand(args: openArray[string];
                         publicCliPath: string): int =
   let parsed = parseReproRunArgs(args)
+  var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
   if parsed.selection.statsPath.len > 0:
     let edge = computePublicDevEnv(parsed.selection, publicCliPath)
@@ -12085,6 +12092,8 @@ proc runReproRunCommand(args: openArray[string];
         buildArgs.add("--")
         for a in actionArgs:
           buildArgs.add(a)
+      # The build path owns recipe pool discovery and its own auto-daemon.
+      releaseAutoRunQuotaProcess(autoRunQuota)
       return runBuildCommand(buildArgs, publicCliPath)
     else:
       # Named-Runnable-Edges N1 (spec §3.1 / §7 — conservative default): a
@@ -12117,6 +12126,8 @@ proc runReproRunCommand(args: openArray[string];
 proc runReproTasksCommand(args: openArray[string];
                           publicCliPath: string): int =
   let parsed = parseReproTasksArgs(args)
+  var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
   if parsed.selection.statsPath.len > 0:
     let edge = computePublicDevEnv(parsed.selection, publicCliPath)
