@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1492,
+    "nimTestBinaries": 1494,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 601,
     "staticallyDetectedRuntimeCompilerFlowTests": 84,
-    "testEntries": 1499
+    "testEntries": 1501
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1147,7 +1147,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 648,
+      "integration": 650,
       "platform/destructive": 107,
       "pure unit": 601,
       "unclassified": 127
@@ -1262,9 +1262,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1492,
+    "nimTestBinaryCount": 1494,
     "pythonTestFileCount": 7,
-    "testEntryCount": 1499
+    "testEntryCount": 1501
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -21468,6 +21468,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cmake_fresh_configure",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_cmake_fresh_configure.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_commit_records_the_sibling_revision_the_shell_actually_used",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -24329,6 +24349,24 @@
       "source": "tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lock_validate_root_provenance_survives_commit",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock",
+        "repro_multihash"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_lock_validate_root_provenance_survives_commit.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

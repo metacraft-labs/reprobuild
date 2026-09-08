@@ -1,4 +1,4 @@
-import std/[net, os, osproc, strtabs, strutils, tempfiles, unittest]
+import std/[net, os, osproc, sequtils, strtabs, strutils, tempfiles, unittest]
 
 import repro_binary_cache_client
 import repro_build_engine
@@ -16,6 +16,12 @@ proc prefix(root, name: string): string =
 
 proc manifest(root, name, deps, script: string; cacheIdentity = ""): string =
   result = "import std/options\nimport repro_project_dsl\n\n" &
+    "when defined(reproInterfaceMode) and reproConsumerRoot == " &
+      (root / "catalog" / name).escape() & ":\n" &
+    "  block:\n" &
+    "    let witness = open(" & (root / (name & ".extractions")).escape() & ", fmAppend)\n" &
+    "    witness.writeLine(\"extract\")\n" &
+    "    witness.close()\n\n" &
     "package " & name & "Source:\n" &
     "  usesImportPath \"stubs\"\n" & deps &
     "  build:\n" &
@@ -83,7 +89,7 @@ proc runCli(binary, root: string; args: seq[string];
   process.close()
   (readFile(outputPath), code)
 
-proc checkPrepared(root: string) =
+proc checkPrepared(root, phase: string) =
   check readFile(root / "consumer/build/result").strip() == "closure-ready"
   check (prefix(root, "closure_c") / "usr/lib") in
     readFile(root / "consumer/build/libs")
@@ -103,6 +109,13 @@ proc checkPrepared(root: string) =
   require identity.profiles.len == 1
   check prefix(root, "closure_c") / "usr/bin" in identity.profiles[0].pathSearchList
   check prefix(root, "closure_native") / "usr/bin" notin identity.profiles[0].pathSearchList
+  # Sibling shims also initialize imported recipes. The witness is guarded by
+  # reproConsumerRoot so only the producer's own extraction runner is counted.
+  for name in ["closure_a", "closure_b", "closure_c", "closure_runtime"]:
+    let count = readFile(root / (name & ".extractions")).splitLines().count("extract")
+    echo phase & " interface extractions: " & name & "=" & $count
+    checkpoint("interface extractions for " & name)
+    check count == 1
 
 suite "cached source closure preparation through the CLI":
   test "ready and cache-restored prefixes acquire metadata and transitive producers":
@@ -130,7 +143,7 @@ suite "cached source closure preparation through the CLI":
       let ready = runCli(binary, root, buildArgs)
       checkpoint(ready.output)
       require ready.exitCode == 0
-      checkPrepared(root)
+      checkPrepared(root, "ready")
 
       let listener = newSocket()
       listener.bindAddr(Port(0), "127.0.0.1")
@@ -177,6 +190,9 @@ suite "cached source closure preparation through the CLI":
       require published.exitCode == 0
       for name in ["closure_a", "closure_b", "closure_c", "closure_runtime"]:
         removeDir(root / "catalog" / name / ".repro")
+        removeFile(root / (name & ".extractions"))
+      # Exercise a cold preparation after signed prefix restoration as well.
+      removeDir(root / "action-cache")
       removeDir(root / "consumer/.repro")
       removeDir(root / "consumer/build")
       createDir(root / "consumer/build")
@@ -185,4 +201,4 @@ suite "cached source closure preparation through the CLI":
       require restored.exitCode == 0
       check restored.output.contains("from-source cache substitute: restored")
       check readFile(aBinary) == "#!/bin/sh\nexit 0\n"
-      checkPrepared(root)
+      checkPrepared(root, "restored")

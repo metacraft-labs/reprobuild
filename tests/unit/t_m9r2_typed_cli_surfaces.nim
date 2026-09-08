@@ -210,6 +210,13 @@ suite "DSL-port M9.R.2 — cmake typed CLI surface":
       "-DCMAKE_BUILD_TYPE=Release",
       "-DCMAKE_INSTALL_PREFIX=/usr"]
 
+    let freshAction = cmake.configure(srcDir = "./src", buildDir = "./fresh-b",
+      fresh = true)
+    check argvForCall(freshAction.call,
+      PathOnlyToolProfile(resolvedExecutablePath: "/tools/cmake")) == @[
+        "/tools/cmake", "-S", "./src", "-B", "./fresh-b", "--fresh"]
+    check freshAction.argByName("fresh").encodedValue == "true"
+
   test "cmake.build + cmake.install carry --build / --install":
     let buildAction = cmake.build(buildDir = "./b", target = "all",
       jobs = 4)
