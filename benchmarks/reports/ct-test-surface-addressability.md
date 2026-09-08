@@ -31,7 +31,7 @@ separate and the second is not close: see "What the surface cannot do" below.
 |---|---|
 | Repository | `reprobuild`, `origin/dev` at `70801c670afafe9a381dacafb0f2002196d10e37`, plus the working-tree change that added this report and moved this suite's test sources onto `std/unittest` |
 | Platform | Linux 6.12.85 x86_64, single host, no contention control |
-| Surface | `ct-test`, built from `metacraft-labs/codetracer` `80c097309`, content hash `68f81fdcb9cc…`. That revision carries the import-clause fix described under "the multi-line-import rows" below; the `codetracer-src` revision pinned in `flake.lock` predates it and does not |
+| Surface | `ct-test`, built from `metacraft-labs/codetracer` `80c097309`, content hash `68f81fdcb9cc…`. That revision carries the import-clause fix described under "the multi-line-import rows" below. It has since landed on CodeTracer's `dev` as `632fdceed` — same tree — and `flake.lock` now pins `codetracer-src` at that commit, so the dev shell reproduces these numbers without `$CT_TEST` |
 | Surface build | `nim c --threads:on --mm:orc --nimcache:build/nimcache/ct-test --out:build/bin/ct-test src/ct_test/ct_test.nim`, with `RUNQUOTA_SRC` set: the `ctTestTools` recipe in `flake.nix`, run against a checkout of that revision |
 | Command | `ct-test test discover --workspace <repo> --json` |
 | Discovery scope | `auto` — the surface's default, which is the workspace's own VCS inventory. Vendored `references/` trees and ignored paths are excluded |
@@ -72,7 +72,7 @@ to name it, and the artifact records the content hash rather than a host-local
 path, so the numbers below can be tied to a build on any machine.
 
 **The figures move with the surface, so the surface has to be stated.** A
-`ct-test` older than `80c097309` reads a Nim import clause one line at a time
+`ct-test` older than `632fdceed` reads a Nim import clause one line at a time
 and does not see `unittest` on a continuation line. Against this same tree such
 a binary reports **46 fewer sources**: 1,434 of 1,482 (96.76%) and 8,085 cases,
 with 48 rows in `unaddressableSources` rather than 2 — measured, not projected,
@@ -81,19 +81,20 @@ against the `ct-test` the dev shell puts on `PATH` here (content hash
 comparing two runs of this report needs the surface identity above to tell the
 two causes apart.
 
-**The figures in this report are ahead of the surface this repository pins, and
-the gate says so by failing.** `80c097309` is on a CodeTracer topic branch; it
-is not an ancestor of CodeTracer's `dev`, and the `codetracer-src` revision
-locked in `flake.lock` is an ancestor of it rather than the other way round.
-So no `ct-test` the dev shell builds for itself carries the fix yet, and
+**The figures in this report are now the surface this repository pins.** The
+import-clause fix landed in CodeTracer as `632fdceed`, it is an ancestor of
+CodeTracer's `dev`, and `flake.lock` pins `codetracer-src` at it. So a `ct-test`
+the dev shell builds for itself carries the fix, and
 `tests/integration/t_ct_test_surface_case_addressability.nim` — which compares
-this ledger against whatever surface it finds, in both directions — reports 46
-sources that are "NOT addressable and NOT in the ledger" and fails two of its
-six cases unless `$CT_TEST` names a conforming build. That is the intended
-behaviour of an exact gate, not a flaw in it: this ledger becomes the
-repository's own state only once the import-clause fix lands in CodeTracer and
-`flake.lock` moves onto it. Until then the numbers here are reproducible only by
-naming the binary.
+this ledger against whatever surface it finds, in both directions — passes all
+six of its cases with no `$CT_TEST` override. This ledger is the repository's
+own state rather than a projection of one.
+
+One caveat survives, and it is a property of the workspace rather than of the
+pin: the `.envrc` auto-override redirects `codetracer-src` to a `../codetracer`
+sibling whenever one exists, so on a workspace host a sibling checked out behind
+the pin — not the pin — is what the dev shell builds. If the two cases above
+fail there, check the sibling's revision first.
 
 ## Result
 

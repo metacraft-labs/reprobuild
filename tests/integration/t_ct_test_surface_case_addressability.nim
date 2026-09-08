@@ -69,17 +69,23 @@
 ## sibling happens to be, which is not necessarily the pinned revision. The
 ## checked-in artifact records which binary produced its numbers.
 ##
-## Known prerequisite, as of this commit: the checked-in ledger was produced by
+## Surface prerequisite, and how it is now met: the checked-in ledger requires
 ## a ``ct-test`` that reads a Nim import clause as a statement rather than as a
-## line (CodeTracer ``80c097309``), and that revision is not yet an ancestor of
-## CodeTracer's ``dev``, so it is not what ``flake.lock`` resolves to. Run
-## against the surface the dev shell builds for itself, this test reports 46
-## sources as "NOT addressable and NOT in the ledger" and fails the second and
-## third cases below. Set ``$CT_TEST`` to a conforming build to reproduce the
-## artifact's numbers; the failure clears on its own once the fix lands in
-## CodeTracer and the ``codetracer-src`` pin moves onto it. The gate is not
-## softened to accommodate the gap, because a gate that tolerated a
-## 46-source disagreement would not be measuring anything.
+## line. That fix is CodeTracer ``632fdceed``, it is an ancestor of CodeTracer's
+## ``dev``, and ``flake.lock`` pins ``codetracer-src`` at it — so the surface
+## the dev shell builds for itself carries it and this test needs no ``$CT_TEST``
+## override to pass.
+##
+## A ``ct-test`` older than that reads one physical line and calls it the import
+## statement, so it does not see ``unittest`` on a continuation line; against
+## this tree such a binary reports 46 sources as "NOT addressable and NOT in the
+## ledger" and fails the second and third cases below. That is the intended
+## behaviour of an exact gate: it is not softened to accommodate the gap,
+## because a gate that tolerated a 46-source disagreement would not be measuring
+## anything. If those two cases fail on a workspace host, suspect the
+## ``../codetracer`` sibling before suspecting this repository — the auto-override
+## named above means a sibling checked out behind the pin, not the pin, is what
+## the dev shell built.
 ##
 ## What the ground truth is, and what it cannot see
 ## ------------------------------------------------

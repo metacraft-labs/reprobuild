@@ -229,7 +229,7 @@
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
-    "provenance": "metacraft-labs/codetracer 80c097309 (fix/nim-unittest-multiline-imports), built in a sibling worktree",
+    "provenance": "metacraft-labs/codetracer 80c097309, built in a sibling worktree; that tree landed on dev as 632fdceed, which flake.lock now pins",
     "resolvedBy": "environment",
     "sha256": "68f81fdcb9ccd25d74fe08bb26e0a86cf161f10b5ef163b6b37ae8903c279289"
   },
