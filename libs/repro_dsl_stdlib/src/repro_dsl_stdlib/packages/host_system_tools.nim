@@ -5,6 +5,18 @@
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 
+package ssh:
+  provisioning:
+    nixPackage "nixpkgs#openssh", executablePath = "bin/ssh",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `ssh-keygen`:
+  provisioning:
+    nixPackage "nixpkgs#openssh", executablePath = "bin/ssh-keygen",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package `qemu-img`:
   provisioning:
     nixPackage "nixpkgs#qemu", executablePath = "bin/qemu-img",

@@ -10976,9 +10976,17 @@ proc publicDevEnvMonitor(publicCliPath: string):
   ## monitor binary.
   (selfSpawnIoMonitorPath(publicCliPath), internalIoMonitorArgs)
 
+proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
+                               extraPools: openArray[BuildPool] = []):
+    owned(Process)
+proc releaseAutoRunQuotaProcess*(process: var owned(Process))
+proc runQuotaBypassedByEnv(): bool
+
 proc computePublicDevEnv(selection: DevEnvCliSelection;
                          publicCliPath: string;
                          renderShell = false): DevEnvEdgeResult =
+  var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
   let monitor = publicDevEnvMonitor(publicCliPath)
   computeDevEnvEdge(DevEnvEdgeConfig(
     modulePath: selection.modulePath,
@@ -10992,6 +11000,7 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     activity: selection.activity,
     lockSliceId: selection.lockSliceId,
     developOverridesPath: selection.developOverridesPath,
+    toolProvisioning: resolveToolProvisioningWithEnv(tpmUnspecified),
     renderShell: renderShell,
     statsEnabled: selection.statsPath.len > 0))
 
@@ -11564,10 +11573,6 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  selectedActionOverride = ""):
                                    BuildGraphInspection
 
-proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
-                               extraPools: openArray[BuildPool] = []):
-    owned(Process)
-
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
@@ -11756,17 +11761,19 @@ proc buildStateGroupDesired*(lease: RunEdgeLease;
   ##     a separate consumer that ``consumes`` it), reusing the landed lease
   ##     renewal path verbatim.
   ##
-  ## Returns an empty seq when the group is unknown / has no members present in
-  ## the graph, so a consuming edge whose group is not declared runs with no
-  ## reconcile (the N1 no-lease path) rather than erroring.
+  ## Returns an empty seq when the group is unknown, empty, or incomplete.
+  ## Explicit consumption requires the whole group (Named-Runnable-Edges
+  ## section 3.3); the run boundary must reject an unavailable group.
   var members: seq[string] = @[]
+  var groupFound = false
   for g in groups:
     if g.name == lease.address:
+      groupFound = true
       members = g.members
       break
   # Fallback: a leased address that names a resource directly (not a group)
   # still reconciles as a one-member group.
-  if members.len == 0:
+  if not groupFound:
     for inst in resources:
       if inst.address == lease.address:
         members = @[lease.address]
@@ -11778,9 +11785,10 @@ proc buildStateGroupDesired*(lease: RunEdgeLease;
     byAddr[inst.address] = inst
   var present: seq[string] = @[]
   for m in members:
-    if byAddr.hasKey(m):
-      result.add(byAddr[m])
-      present.add(m)
+    if not byAddr.hasKey(m):
+      return @[]
+    result.add(byAddr[m])
+    present.add(m)
   if present.len == 0:
     return @[]
   # The synthetic consumer: one leased edge per member, all held by the run-
@@ -11859,9 +11867,8 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
   ## out-of-tree ``typeId`` — a hermetic test injects one over a mock provider
   ## binary; production wires it from the pooled provider artifacts (the same
   ## discovery the reaper transport uses). When a group has an out-of-tree
-  ## member but no ``sessionResolver`` is available, the member is recorded in
-  ## ``missingGroups`` rather than hard-erroring (the run proceeds without the
-  ## unreconcilable state — a clear diagnostic, not a crash).
+  ## member but no ``sessionResolver`` is available, reconciliation fails:
+  ## required state cannot be treated as an optional optimization.
   for lease in consumes:
     let desired = buildStateGroupDesired(lease, runEdgeName, resources, groups)
     if desired.len == 0:
@@ -11877,8 +11884,9 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
         # OUT-OF-TREE members: reconcile over the provider session WITH the
         # store, routing the always-linked synthetic consumer in-process.
         if sessionResolver == nil:
-          result.missingGroups.add(lease.address)
-          continue
+          raise newException(ValueError,
+            "required leased state group '" & lease.address &
+            "' has no provider session for its out-of-tree resources")
         reconcileResourcesViaSession(desired, sessionResolver,
           store = some(store), now = now,
           inProcess = proc (typeId: string): bool =
@@ -11930,9 +11938,9 @@ proc buildRunEdgeSessionResolver*(
   ## for an out-of-tree member, from the harvested per-typeId provider artifacts
   ## — mirroring ``buildLeaseReapTransport``'s ``rtSession`` resolver. Returns
   ## ``nil`` when no artifact is registered (all-in-tree ⇒ the in-process fast
-  ## path stays; the bridge records a still-out-of-tree member as missing rather
-  ## than crashing). ``pool`` is the caller-owned ``ProviderSessionPool`` (closed
-  ## after the run) so a session per artifact id is launched once and reused.
+  ## path stays; the bridge rejects a still-out-of-tree member). ``pool`` is the
+  ## caller-owned ``ProviderSessionPool`` (closed after reconciliation) so a
+  ## session per artifact id is launched once and reused.
   if providerArtifacts.len == 0:
     return nil
   var byType = initTable[string, ResourceProviderArtifactRef]()
@@ -11954,6 +11962,8 @@ proc buildRunEdgeSessionResolver*(
 proc runReproRunCommand(args: openArray[string];
                         publicCliPath: string): int =
   let parsed = parseReproRunArgs(args)
+  var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
   if parsed.selection.statsPath.len > 0:
     let edge = computePublicDevEnv(parsed.selection, publicCliPath)
@@ -12048,8 +12058,8 @@ proc runReproRunCommand(args: openArray[string];
           # resolver from the harvested provider-artifact refs (nil when every
           # member is in-tree ⇒ the in-process fast path). A pooled resolver so
           # a session per artifact id is launched once + reused; closed after
-          # the reconcile. No-daemon / no-session-safe: a nil resolver falls
-          # through to the missing-group warning below, never blocking the run.
+          # the reconcile, including failure. An absent daemon is harmless;
+          # an absent required provider must block execution.
           let sessionPool = newProviderSessionPool()
           defer: (try: sessionPool.closeAll() except CatchableError: discard)
           let sessionResolver = buildRunEdgeSessionResolver(
@@ -12059,17 +12069,18 @@ proc runReproRunCommand(args: openArray[string];
             resolution.resources, resolution.groups, store,
             sessionResolver = sessionResolver)
           for missing in bridge.missingGroups:
-            stderr.writeLine("repro run: warning: run-edge '" &
-              resolution.entry.name & "' consumes leased state '" & missing &
-              "' but no matching stateGroup / resource was found; running " &
-              "without it.")
+            stderr.writeLine("repro run: error: run-edge '" &
+              resolution.entry.name & "' requires leased state group '" & missing &
+              "' but the group is missing, empty, or incomplete.")
+          if bridge.missingGroups.len > 0:
+            return 1
         except CatchableError as bridgeErr:
-          # A reconcile failure must not silently swallow the run in a way that
-          # hides the cause; surface it but let the edge run (the leased state
-          # is an optimization, and N1's no-lease path still executes).
-          stderr.writeLine("repro run: warning: leased-state reconcile for '" &
+          # Named-Runnable-Edges section 3.2: execute only after required state
+          # materializes. Persisted leases remain available to the normal reaper.
+          stderr.writeLine("repro run: error: required leased-state reconcile for '" &
             resolution.entry.name & "' failed: " & bridgeErr.msg &
-            " — running without it.")
+            "; command not started.")
+          return 1
       # Run-edge (or a collection of run-edges) — delegate to the build
       # engine, which executes it. Collections mirror ``repro build test``.
       var buildArgs = @[parsed.rawTarget]
@@ -12081,6 +12092,8 @@ proc runReproRunCommand(args: openArray[string];
         buildArgs.add("--")
         for a in actionArgs:
           buildArgs.add(a)
+      # The build path owns recipe pool discovery and its own auto-daemon.
+      releaseAutoRunQuotaProcess(autoRunQuota)
       return runBuildCommand(buildArgs, publicCliPath)
     else:
       # Named-Runnable-Edges N1 (spec §3.1 / §7 — conservative default): a
@@ -12113,6 +12126,8 @@ proc runReproRunCommand(args: openArray[string];
 proc runReproTasksCommand(args: openArray[string];
                           publicCliPath: string): int =
   let parsed = parseReproTasksArgs(args)
+  var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
   if parsed.selection.statsPath.len > 0:
     let edge = computePublicDevEnv(parsed.selection, publicCliPath)
@@ -16023,8 +16038,8 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   else:
     let socket = runquotaEndpointPath(
       "reprobuild-runquota-" & $getCurrentProcessId())
-    if fileExists(socket):
-      removeFile(socket)
+    # fileExists excludes Unix sockets; removeFile also accepts a missing path.
+    removeFile(socket)
     var args = @[
       "--socket", socket,
       "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
@@ -26203,13 +26218,34 @@ proc runStoreCommand*(args: seq[string]): int =
   ##              SQLite index.
   ##   roots    — list the currently-registered roots.
   ##   list     — list every realized prefix recorded in the index.
+  ##   materialize <src-dir> <dst-dir>
+  ##            — reproduce a directory tree at another path using the
+  ##              store's OWN materialiser (hardlink per file, copy per
+  ##              file on failure), and report what it actually did.
+  ##
+  ## ``materialize`` exists so a consumer that composes a tree out of
+  ## store entries has ONE code path to compose it WITH. The alternative
+  ## is a bespoke copy loop, and a bespoke copy loop is the shape in
+  ## which a link tier degrades silently: the output is correct, the cost
+  ## is N times the disk and the I/O, nothing fails and nothing logs.
+  ## Because the composition goes through ``materializeDirectory``, the
+  ## per-file fallbacks and their CAUSES (per-file link cap /
+  ## cross-device / unsupported / shared-inode arm disabled) are counted
+  ## at the point the decision is taken and reported here, rather than
+  ## being inferred later from a tree that turned out to be fat.
+  ##
+  ## It is deliberately a plain directory→directory operation and does
+  ## not open the SQLite index: the source is a store entry only by
+  ## convention, and refusing to run against an unindexed directory would
+  ## make the verb useless for exactly the composition it exists for.
   ##
   ## Each subcommand accepts an optional `--store-root=PATH` to
   ## override the per-user default; the `$REPRO_STORE_ROOT` env var
   ## is honoured otherwise.
   if args.len == 0:
-    echo "usage: repro store {gc | recover | roots | list} " &
-      "[--store-root=PATH] [--grace-seconds=N]"
+    echo "usage: repro store {gc | recover | roots | list | " &
+      "materialize <src-dir> <dst-dir>} " &
+      "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode]"
     return 2
   if args[0] == "serve":
     # Executable-Consolidation M3: `repro store serve` is the store daemon
@@ -26222,23 +26258,55 @@ proc runStoreCommand*(args: seq[string]): int =
     return runStoreDaemonCommand(daemonArgs)
   var storeRootOverride = ""
   var graceSeconds = DefaultGcGraceSeconds
-  var sub = ""
+  var emitJson = false
+  # Materialisation defaults to the shared-inode arm being ALLOWED. The
+  # opposite default is the single most likely way for a composed tree to
+  # be a full byte copy on a filesystem where links work perfectly well,
+  # and it produces no error to notice. Declining it is therefore an
+  # explicit flag rather than something a caller inherits by silence.
+  var allowSharedInode = true
+  var positionals: seq[string] = @[]
   for raw in args:
     if raw.startsWith("--store-root="):
       storeRootOverride = raw[len("--store-root=") .. ^1]
     elif raw.startsWith("--grace-seconds="):
       graceSeconds = parseInt(raw[len("--grace-seconds=") .. ^1])
+    elif raw == "--json":
+      emitJson = true
+    elif raw == "--no-shared-inode":
+      allowSharedInode = false
     elif raw.startsWith("--"):
       stderr.writeLine("repro store: unknown flag: " & raw)
       return 2
-    elif sub.len == 0:
-      sub = raw
     else:
-      stderr.writeLine("repro store: unexpected argument: " & raw)
-      return 2
-  if sub.len == 0:
+      positionals.add raw
+  if positionals.len == 0:
     stderr.writeLine("repro store: missing subcommand")
     return 2
+  let sub = positionals[0]
+  if sub != "materialize" and positionals.len > 1:
+    stderr.writeLine("repro store: unexpected argument: " & positionals[1])
+    return 2
+
+  if sub == "materialize":
+    if positionals.len != 3:
+      stderr.writeLine("usage: repro store materialize <src-dir> <dst-dir> " &
+        "[--json] [--no-shared-inode]")
+      return 2
+    let srcDir = positionals[1]
+    let dstDir = positionals[2]
+    try:
+      var report: MaterializeReport
+      materializeDirectory(srcDir, dstDir, report,
+                           allowSharedInode = allowSharedInode)
+      if emitJson:
+        echo renderMaterializeReportJson(report, srcDir, dstDir)
+      else:
+        echo renderMaterializeReportText(report, srcDir, dstDir)
+      return 0
+    except CatchableError as err:
+      stderr.writeLine("repro store materialize: error: " & err.msg)
+      return 1
 
   let root = resolveStoreRoot(storeRootOverride)
   try:
@@ -49880,6 +49948,13 @@ type
     croSwitched           ## Local branch existed; ``git switch`` ran.
     croFetchedAndSwitched ## Remote-only branch; fetched + tracked.
     croAlreadyOnBranch    ## Already on the requested branch (no-op).
+    croFastForwarded      ## Landed on the branch AND fast-forwarded it to
+                          ## its upstream (the ``--fetch`` default).
+    croDivergedRefused    ## Target branch and its upstream both moved.
+                          ## `switch` never repoints a branch, so this is a
+                          ## refusal, not a reset.
+    croNoMainlineRefused  ## ``--mainline`` but the fragment declares no
+                          ## ``branch`` to target.
     croDirtyRefused       ## Repo dirty; nothing scheduled.
     croBranchMissingRefused
                           ## Branch absent locally AND on every remote.
@@ -49899,6 +49974,11 @@ type
     headSha*: string
     previousBranch*: string
     newBranch*: string
+    targetBranch*: string
+      ## The branch THIS repo was aimed at. Identical to the report's
+      ## ``branch`` for an ordinary switch; under ``--mainline`` it is the
+      ## repo's own declared branch, so the report records what each repo was
+      ## actually sent to rather than one name that fits none of them.
     outcome*: string
     remoteHadBranch*: bool
     localHadBranch*: bool
@@ -49924,6 +50004,9 @@ proc switchOutcomeTag(outcome: SwitchRepoOutcome): string =
   of croSwitched: "switched"
   of croFetchedAndSwitched: "fetched_and_switched"
   of croAlreadyOnBranch: "already_on_branch"
+  of croFastForwarded: "fast_forwarded"
+  of croDivergedRefused: "diverged_refused"
+  of croNoMainlineRefused: "no_mainline_branch_refused"
   of croDirtyRefused: "dirty_refused"
   of croBranchMissingRefused: "branch_missing_refused"
   of croProbeFailed: "probe_failed"
@@ -49945,6 +50028,7 @@ proc toJsonNode*(report: SwitchReport): JsonNode =
     obj["headSha"] = %entry.headSha
     obj["previousBranch"] = %entry.previousBranch
     obj["newBranch"] = %entry.newBranch
+    obj["targetBranch"] = %entry.targetBranch
     obj["outcome"] = %entry.outcome
     obj["remoteHadBranch"] = %entry.remoteHadBranch
     obj["localHadBranch"] = %entry.localHadBranch
@@ -49958,7 +50042,7 @@ proc toJsonNode*(report: SwitchReport): JsonNode =
 
 proc renderSwitchTextLines*(report: SwitchReport): seq[string] =
   for entry in report.repos:
-    var line = "workspace checkout: " & entry.path & " " & entry.outcome
+    var line = "workspace switch: " & entry.path & " " & entry.outcome
     if entry.previousBranch.len > 0 and entry.newBranch.len > 0 and
         entry.previousBranch != entry.newBranch:
       line.add(" " & entry.previousBranch & " -> " & entry.newBranch)
@@ -49974,9 +50058,30 @@ proc renderSwitchTextLines*(report: SwitchReport): seq[string] =
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
   if report.exitCode == 0:
-    result.add("workspace checkout: '" & report.branch &
-      "' active across " & $report.repos.len &
-      " repos; metadata=" & report.recordedBranch)
+    # Under ``--mainline`` there is no single branch to name in the summary —
+    # the repos landed on `dev`, `latest`, `live` and friends — so report the
+    # count instead of a name that would be wrong for most of them.
+    if report.branch.len > 0:
+      result.add("workspace switch: '" & report.branch &
+        "' active across " & $report.repos.len &
+        " repos; metadata=" & report.recordedBranch)
+    else:
+      var targets: seq[string]
+      for entry in report.repos:
+        if entry.targetBranch.len > 0 and entry.targetBranch notin targets:
+          targets.add(entry.targetBranch)
+      sort(targets)
+      var line = "workspace switch: mainline active across " &
+        $report.repos.len & " repos (" & targets.join(", ") & ")"
+      if targets.len > 1:
+        # No single branch describes the workspace now, so the metadata was
+        # deliberately left alone. Say that, rather than printing a
+        # `metadata=` value that contradicts every repo on disk.
+        line.add("; [workspace].branch left at '" & report.recordedBranch &
+          "' — no single branch describes this workspace")
+      else:
+        line.add("; metadata=" & report.recordedBranch)
+      result.add(line)
 
 type
   SwitchArgs = object
@@ -49984,6 +50089,8 @@ type
     projectName: string
     branchName: string
     newBranch: bool      ## WV-5 ``-b``: create the branch before switching.
+    mainline: bool       ## ``--mainline``: target is each repo's declared branch.
+    fetch: bool          ## ``--fetch`` (default) / ``--no-fetch``.
     json: bool
     assumeYes: bool      ## RA-9 ``--yes``: skip the per-repo confirmation.
     toolProvisioning: ToolProvisioningMode
@@ -49991,11 +50098,17 @@ type
 
 proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
   ## ``repro switch <branch> [-b|--new-branch] [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``. The
-  ## positional ``<branch>`` is REQUIRED — unlike ``repro branch`` the
-  ## argument-less form is not a defined surface.
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``, or
+  ## ``repro switch --mainline [...]``. The positional ``<branch>`` is
+  ## REQUIRED unless ``--mainline`` supplies the target per repo — unlike
+  ## ``repro branch`` the argument-less form is not a defined surface.
+  ##
+  ## ``--fetch`` is the DEFAULT (CLI/switch.md §"Fetching"): "switch me to
+  ## `dev`" means the `dev` that exists now, not whatever the last fetch left
+  ## behind. ``--no-fetch`` restores purely local classification.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
+  result.fetch = true
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -50007,6 +50120,12 @@ proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
         valueFromFlag(args, i, "--tool-provisioning"))
     elif arg == "-b" or arg == "--new-branch":
       result.newBranch = true
+    elif arg == "--mainline":
+      result.mainline = true
+    elif arg == "--fetch":
+      result.fetch = true
+    elif arg == "--no-fetch":
+      result.fetch = false
     elif arg == "--json":
       result.json = true
     elif arg == "--yes" or arg == "--force":
@@ -50022,9 +50141,24 @@ proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
       raise newException(ValueError,
         "unexpected positional argument to `repro switch`: " & arg)
     inc i
-  if result.branchName.len == 0:
+  # ``--mainline`` names the target per repo, so a positional branch or ``-b``
+  # alongside it is a contradiction rather than a precedence question. Refusing
+  # is the only honest answer: silently letting one win would switch the
+  # workspace somewhere the operator did not ask for.
+  if result.mainline and result.branchName.len > 0:
     raise newException(ValueError,
-      "`repro switch` requires a branch name positional argument")
+      "`repro switch --mainline` takes no branch positional (got '" &
+      result.branchName & "'); --mainline resolves each repo's target from " &
+      "its manifest fragment. Drop one of the two.")
+  if result.mainline and result.newBranch:
+    raise newException(ValueError,
+      "`repro switch --mainline` cannot be combined with -b/--new-branch: " &
+      "there is no single branch name to create when every repo has its own " &
+      "declared mainline")
+  if not result.mainline and result.branchName.len == 0:
+    raise newException(ValueError,
+      "`repro switch` requires a branch name positional argument " &
+      "(or --mainline to take each repo's declared branch)")
   result.workspaceRoot = resolveInvokedWorkspaceRoot(result.workspaceRoot)
 
 proc resolveSwitchProject(parsed: SwitchArgs):
@@ -50075,8 +50209,43 @@ proc resolveSwitchProject(parsed: SwitchArgs):
       "' found under '" & manifestsRoot &
       "' (looked for '" & projectFile & "' and '" & variantFile & "')")
 
+type
+  SwitchUpstreamRel = enum
+    surNoUpstream   ## No remote-tracking ref: a purely local branch.
+    surUpToDate     ## Branch and its upstream are the same commit.
+    surBehind       ## Upstream strictly contains the branch → fast-forwardable.
+    surAhead        ## Branch strictly contains its upstream → local commits.
+    surDiverged     ## Both moved. `switch` refuses; it never repoints.
+
+proc classifySwitchUpstream(identity: GitToolIdentity;
+                            repoPath, branch, remoteName: string):
+    tuple[rel: SwitchUpstreamRel; localSha, remoteSha: string] =
+  ## Where does ``refs/heads/<branch>`` sit relative to
+  ## ``refs/remotes/<remoteName>/<branch>``? Answered from refs only — the
+  ## caller has already fetched — so this is cheap and does no network I/O.
+  ##
+  ## An absent remote-tracking ref is ``surNoUpstream`` rather than an error:
+  ## a local-only branch is a legitimate switch target, it simply has nothing
+  ## to fast-forward toward.
+  let localSha = revParse(identity, repoPath, "refs/heads/" & branch)
+  let remoteSha =
+    revParse(identity, repoPath, "refs/remotes/" & remoteName & "/" & branch)
+  if localSha.len == 0 or remoteSha.len == 0:
+    return (surNoUpstream, localSha, remoteSha)
+  if localSha == remoteSha:
+    return (surUpToDate, localSha, remoteSha)
+  if gitRunPlain(identity, ["-C", repoPath, "merge-base", "--is-ancestor",
+      localSha, remoteSha]).code == 0:
+    return (surBehind, localSha, remoteSha)
+  if gitRunPlain(identity, ["-C", repoPath, "merge-base", "--is-ancestor",
+      remoteSha, localSha]).code == 0:
+    return (surAhead, localSha, remoteSha)
+  (surDiverged, localSha, remoteSha)
+
 proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   result.workspaceRoot = parsed.workspaceRoot
+  # Under ``--mainline`` there is no single requested branch; the report's
+  # ``branch`` stays empty and each entry's ``targetBranch`` carries the truth.
   result.branch = parsed.branchName
 
   let (resolved, _) = resolveSwitchProject(parsed)
@@ -50090,27 +50259,103 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   type
     RepoStateKind = enum
       rsReadyLocal, rsReadyFetchAndTrack, rsAlreadyOnBranch,
-      rsBranchMissing, rsDirty, rsProbeFailed
+      rsBranchMissing, rsDirty, rsProbeFailed, rsDiverged, rsNoMainlineBranch
     RepoState = object
       kind: RepoStateKind
       repo: ResolvedRepo
       repoPath: string
+      target: string        ## The branch THIS repo is aimed at.
       headSha: string
       previousBranch: string
       localHadBranch: bool
       remoteHadBranch: bool
       needsStash: bool      ## RA-29: dirty on leave → stash before switch.
+      needsFastForward: bool
+        ## Target branch is strictly behind its upstream and the move is a
+        ## fast-forward. Scheduled as a ``merge --ff-only`` after the switch
+        ## (or on its own when the repo is already on the branch).
       reason: string
+
+  # ``--fetch`` pre-pass (the default). Classification below asks whether the
+  # target branch is behind, ahead of, or diverged from its upstream, and those
+  # questions are only meaningful against remote-tracking refs that reflect the
+  # remote NOW. Fetching first is what makes "switch me to dev" mean the dev
+  # that exists rather than the one the last fetch happened to leave behind.
+  # The fetches are scheduled as engine actions, so they run under the same
+  # bounded ``vcs/fetch`` pool ``sync`` uses instead of opening one connection
+  # per repo.
+  var fetchFailure = initTable[string, string]()
+  if parsed.fetch:
+    var fetchActions: seq[BuildAction]
+    var fetchIdByPath = initTable[string, string]()
+    let fetchReceiptDir =
+      parsed.workspaceRoot / ".repro" / "workspace" / "receipts"
+    createDir(fetchReceiptDir)
+    for idx, repo in resolved.repos:
+      let repoAbs = parsed.workspaceRoot / repo.path
+      if not dirExists(repoAbs / ".git"):
+        continue
+      let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
+      let actionId = "workspace-switch-prefetch-" & idSeg
+      var action = gitFetchAction(actionId, identity,
+        remoteName = gitRemoteNameFor(repo),
+        repoPath = repo.path,
+        receiptPath = ".repro" / "workspace" / "receipts" /
+          ("switch-prefetch-" & idSeg & ".receipt"))
+      action.cwd = parsed.workspaceRoot
+      fetchActions.add(action)
+      fetchIdByPath[repo.path] = actionId
+    if fetchActions.len > 0:
+      let cacheRoot =
+        parsed.workspaceRoot / ".repro" / "workspace" / "engine-cache"
+      var config = defaultBuildEngineConfig(cacheRoot)
+      config.suppressTrace = true
+      config.fallbackToRunQuotaBypass = true
+      let res = runBuild(graph(fetchActions), config)
+      var outcomeById = initTable[string, ActionResult]()
+      for outcome in res.results:
+        outcomeById[outcome.id] = outcome
+      for path, actionId in fetchIdByPath:
+        let outcome = outcomeById.getOrDefault(actionId)
+        if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+          var diag = "status=" & $outcome.status & " reason=" & outcome.reason
+          if outcome.stderr.len > 0:
+            diag.add(" stderr=" & outcome.stderr)
+          fetchFailure[path] = diag
 
   var states: seq[RepoState]
   for repo in resolved.repos:
     var state: RepoState
     state.repo = repo
     state.repoPath = parsed.workspaceRoot / repo.path
+    # ``--mainline``: the target is this repo's declared tracking branch. A
+    # fragment that declares only a ``revision`` pin has no branch to aim at;
+    # that is an operator-fixable manifest gap, so it is named rather than
+    # skipped (CLI/switch.md §"--mainline").
+    state.target =
+      if parsed.mainline: repo.branch
+      else: parsed.branchName
+    if parsed.mainline and state.target.len == 0:
+      state.kind = rsNoMainlineBranch
+      state.reason = "repo '" & repo.path &
+        "' declares no `branch` in its manifest fragment" &
+        (if repo.fragmentPath.len > 0: " (" & repo.fragmentPath & ")" else: "") &
+        " — `--mainline` targets that field. Add a `branch` to the fragment, " &
+        "or name a branch explicitly instead of using --mainline."
+      states.add(state)
+      continue
     if not dirExists(state.repoPath / ".git"):
       state.kind = rsProbeFailed
       state.reason = "no on-disk checkout at '" & state.repoPath &
         "'; run `repro workspace init` or `repro workspace sync` first"
+      states.add(state)
+      continue
+    if fetchFailure.hasKey(repo.path):
+      state.kind = rsProbeFailed
+      state.reason = "fetch failed for '" & repo.path & "': " &
+        fetchFailure[repo.path] &
+        " — check connectivity/credentials, or pass --no-fetch to classify " &
+        "against local refs only"
       states.add(state)
       continue
     let headRes = queryGitState(headShaQuery(state.repoPath), identity)
@@ -50141,8 +50386,37 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
       # (i.e. not the already-on-branch no-op below), so we just record
       # the intent here and let the branch-availability probes proceed.
       state.needsStash = true
-    # No-op short circuit: already on the requested branch.
-    if state.previousBranch == parsed.branchName:
+    let remoteNameForRepo = gitRemoteNameFor(repo)
+    # Upstream relationship of the TARGET branch, consulted for both the
+    # already-on-branch and the switch-to-a-local-branch cases. Only under
+    # ``--fetch``: ``--no-fetch`` is defined as purely local classification,
+    # and fast-forwarding toward a stale remote-tracking ref would be a
+    # half-measure that neither mode asked for.
+    var rel = surNoUpstream
+    var relRemoteSha = ""
+    if parsed.fetch:
+      let cls = classifySwitchUpstream(identity, state.repoPath,
+        state.target, remoteNameForRepo)
+      rel = cls.rel
+      relRemoteSha = cls.remoteSha
+    if rel == surDiverged:
+      # Both the branch and its upstream moved. Repointing would drop the
+      # local commits, and `switch` does not repoint — that is the whole
+      # distinction from the ungated pre-gate behaviour of `pull`.
+      state.kind = rsDiverged
+      state.reason = "branch '" & state.target & "' in repo '" & repo.path &
+        "' has diverged from '" & remoteNameForRepo & "/" & state.target &
+        "' (both carry commits the other does not) — `switch` will not " &
+        "repoint a branch. Reconcile it (`git -C " & repo.path &
+        " rebase " & remoteNameForRepo & "/" & state.target &
+        "`), or pass --no-fetch to switch without consulting the remote."
+      states.add(state)
+      continue
+    state.needsFastForward = rel == surBehind
+    # No-op short circuit: already on the target branch. Still fast-forwarded
+    # when it is behind — "put me on trunk" is not satisfied by a trunk from
+    # last week just because HEAD already carries the right branch name.
+    if state.previousBranch == state.target:
       state.kind = rsAlreadyOnBranch
       state.localHadBranch = true
       states.add(state)
@@ -50150,7 +50424,7 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     # Probe local branch.
     let localProbe = gitRunPlain(identity,
       ["-C", state.repoPath, "rev-parse", "--verify", "--quiet",
-       "refs/heads/" & parsed.branchName])
+       "refs/heads/" & state.target])
     if localProbe.code == 0 and localProbe.output.strip().len > 0:
       state.localHadBranch = true
       state.kind = rsReadyLocal
@@ -50168,31 +50442,42 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     # on the remote-tracking ref (which may be stale) so we get a
     # truthful answer even before any fetch. The standard remote name
     # after ``git clone`` is ``origin``.
-    let remoteName =
-      gitRemoteNameFor(repo)
+    let remoteName = remoteNameForRepo
     let lsRemote = gitRunPlain(identity,
       ["-C", state.repoPath, "ls-remote", "--heads", remoteName,
-       parsed.branchName])
+       state.target])
     if lsRemote.code != 0:
       # Network / config failure: treat as probe-failed so the
       # operator sees the real diagnostic rather than a misleading
       # "branch missing" verdict.
       state.kind = rsProbeFailed
       state.reason = "git ls-remote --heads " & remoteName & " " &
-        parsed.branchName & " exited " & $lsRemote.code & ": " &
+        state.target & " exited " & $lsRemote.code & ": " &
         lsRemote.output.strip()
       states.add(state)
       continue
     if lsRemote.output.strip().len == 0:
       state.kind = rsBranchMissing
       # Principle 2: name the offending repo + missing branch AND a concrete
-      # remedy — create the branch across the workspace first, then checkout.
-      state.reason = "branch '" & parsed.branchName &
-        "' is absent locally and not present on remote '" &
-        remoteName & "' in repo '" & repo.path &
-        "' — run 'repro branch " & parsed.branchName &
-        "' to create it across the workspace (or 'repro start " &
-        parsed.branchName & "')"
+      # remedy. Under ``--mainline`` the branch comes from the manifest, so
+      # the fix is the fragment, not a branch-creation command — suggesting
+      # `switch -b` there would tell the operator to invent a branch the
+      # manifest already claims exists.
+      state.reason =
+        if parsed.mainline:
+          "manifest-declared branch '" & state.target &
+          "' is absent locally and not present on remote '" & remoteName &
+          "' in repo '" & repo.path & "'" &
+          (if repo.fragmentPath.len > 0:
+             " — correct the `branch` field in " & repo.fragmentPath
+           else: " — correct the repo's `branch` field") &
+          ", or restore that branch on the remote"
+        else:
+          "branch '" & state.target &
+          "' is absent locally and not present on remote '" &
+          remoteName & "' in repo '" & repo.path &
+          "' — run 'repro switch -b " & state.target &
+          "' to create it across the workspace"
       states.add(state)
       continue
     state.remoteHadBranch = true
@@ -50206,14 +50491,19 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   var dirtyCount = 0
   var missingCount = 0
   var probeFailures = 0
+  var divergedCount = 0
+  var noMainlineCount = 0
   for state in states:
     case state.kind
     of rsDirty: inc dirtyCount
     of rsBranchMissing: inc missingCount
     of rsProbeFailed: inc probeFailures
+    of rsDiverged: inc divergedCount
+    of rsNoMainlineBranch: inc noMainlineCount
     else: discard
 
-  if probeFailures > 0 or dirtyCount > 0 or missingCount > 0:
+  if probeFailures > 0 or dirtyCount > 0 or missingCount > 0 or
+      divergedCount > 0 or noMainlineCount > 0:
     # Refuse-and-report path: mutate nothing, surface the per-repo
     # classification. ``rsReadyLocal`` / ``rsReadyFetchAndTrack`` repos
     # report ``ready_*`` (the work was scheduled-then-cancelled by the
@@ -50224,12 +50514,13 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
         path: state.repo.path,
         headSha: state.headSha,
         previousBranch: state.previousBranch,
+        targetBranch: state.target,
         remoteHadBranch: state.remoteHadBranch,
         localHadBranch: state.localHadBranch)
       case state.kind
       of rsAlreadyOnBranch:
         entry.outcome = switchOutcomeTag(croAlreadyOnBranch)
-        entry.newBranch = parsed.branchName
+        entry.newBranch = state.target
       of rsDirty:
         entry.outcome = switchOutcomeTag(croDirtyRefused)
         entry.dirtyReason = state.reason
@@ -50240,6 +50531,14 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
         entry.newBranch = state.previousBranch
       of rsProbeFailed:
         entry.outcome = switchOutcomeTag(croProbeFailed)
+        entry.diagnostic = state.reason
+        entry.newBranch = state.previousBranch
+      of rsDiverged:
+        entry.outcome = switchOutcomeTag(croDivergedRefused)
+        entry.diagnostic = state.reason
+        entry.newBranch = state.previousBranch
+      of rsNoMainlineBranch:
+        entry.outcome = switchOutcomeTag(croNoMainlineRefused)
         entry.diagnostic = state.reason
         entry.newBranch = state.previousBranch
       of rsReadyLocal:
@@ -50265,24 +50564,31 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   # Only the repos that would actually switch (``rsReadyLocal`` /
   # ``rsReadyFetchAndTrack``) are previewed — an all-``already_on_branch``
   # checkout is a no-op and skips the gate entirely.
+  # ``--mainline`` sends different repos to different branches, so the preview
+  # names each repo's own target. That is precisely where an operator sees
+  # `infra -> live` next to `codetracer-specs -> latest`.
+  let targetLabel =
+    if parsed.mainline: "their declared mainline"
+    else: "'" & parsed.branchName & "'"
   var switchPreview: seq[string]
   for state in states:
-    if state.kind in {rsReadyLocal, rsReadyFetchAndTrack}:
+    if state.kind in {rsReadyLocal, rsReadyFetchAndTrack} or
+        (state.kind == rsAlreadyOnBranch and state.needsFastForward):
       let from0 =
         if state.previousBranch.len > 0: state.previousBranch
         else: "(detached)"
       switchPreview.add("  " & state.repo.path & ": " & from0 &
-        " -> " & parsed.branchName &
+        " -> " & state.target &
         (if state.kind == rsReadyFetchAndTrack: " (fetch+track)" else: "") &
+        (if state.needsFastForward: " (ff)" else: "") &
         (if state.needsStash: " (stash WIP)" else: ""))
   if switchPreview.len > 0:
     stderr.writeLine("repro switch will switch " & $switchPreview.len &
-      " repo(s) to '" & parsed.branchName & "':")
+      " repo(s) to " & targetLabel & ":")
     for line in switchPreview:
       stderr.writeLine(line)
     let decision = confirmDestructive(
-      prompt = "Switch the repo(s) above to '" & parsed.branchName &
-        "'? [y/N] ",
+      prompt = "Switch the repo(s) above to " & targetLabel & "? [y/N] ",
       autoYes = parsed.assumeYes,
       isTty = isatty(stdin),
       flagName = "--yes",
@@ -50300,12 +50606,13 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
           headSha: state.headSha,
           previousBranch: state.previousBranch,
           newBranch: state.previousBranch,
+          targetBranch: state.target,
           remoteHadBranch: state.remoteHadBranch,
           localHadBranch: state.localHadBranch)
         case state.kind
         of rsAlreadyOnBranch:
           entry.outcome = switchOutcomeTag(croAlreadyOnBranch)
-          entry.newBranch = parsed.branchName
+          entry.newBranch = state.target
         of rsReadyLocal, rsReadyFetchAndTrack:
           entry.outcome = switchOutcomeTag(croConfirmRefused)
           # RA-28 Principle 2: the per-repo diagnostic must NAME the offender
@@ -50324,11 +50631,14 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
             if decision == ddRefusedNonTty:
               "non-interactive context without --yes"
             else: "operator declined"
+          let retryArg =
+            if parsed.mainline: "--mainline"
+            else: parsed.branchName
           entry.diagnostic =
             "refused: switching repo '" & state.repo.path & "' from '" &
-            from0 & "' to '" & parsed.branchName & "'" & stashNote &
+            from0 & "' to '" & state.target & "'" & stashNote &
             " requires confirmation (" & cause &
-            ") — re-run 'repro switch " & parsed.branchName &
+            ") — re-run 'repro switch " & retryArg &
             " --yes' to confirm"
         else:
           entry.outcome = "internal_unexpected_state"
@@ -50366,14 +50676,41 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
 
   var actions: seq[BuildAction]
   var switchActionByIdx = initTable[int, string]()
+  var ffActionByIdx = initTable[int, string]()
   let receiptDir = parsed.workspaceRoot / ".repro" / "workspace" / "receipts"
   createDir(receiptDir)
+
+  proc scheduleFastForward(idx: int; state: RepoState;
+                           afterAction: string) =
+    ## Schedule ``merge --ff-only <remote>/<target>`` for a repo whose target
+    ## branch is strictly behind its upstream. ``gitMergeFfAction`` refuses a
+    ## non-fast-forward itself, so this is belt-and-braces on top of the
+    ## classification: nothing here can turn into a repoint.
+    let idSeg = safeRepoIdSegment(state.repo.name) & "-" & $idx
+    let ffActionId = "workspace-switch-ff-" & idSeg
+    var ffAction = gitMergeFfAction(ffActionId, identity,
+      remoteName = gitRemoteNameFor(state.repo),
+      branchName = state.target,
+      repoPath = state.repo.path,
+      receiptPath = ".repro" / "workspace" / "receipts" /
+        ("switch-ff-" & idSeg & ".receipt"),
+      deps = if afterAction.len > 0: @[afterAction] else: @[])
+    ffAction.cwd = parsed.workspaceRoot
+    actions.add(ffAction)
+    ffActionByIdx[idx] = ffActionId
+
   for idx, state in states:
     if stashFailure.hasKey(idx):
       # Stash failed for this repo — skip scheduling its switch; the
       # outcome loop below reports ``croStashFailed`` and fails the run.
       continue
     case state.kind
+    of rsAlreadyOnBranch:
+      # Normally a no-op. But when the branch we are standing on is behind its
+      # upstream and ``--fetch`` is in force, the request is not yet satisfied:
+      # fast-forward in place without any switch action.
+      if state.needsFastForward:
+        scheduleFastForward(idx, state, "")
     of rsReadyLocal:
       let receiptRel = ".repro" / "workspace" / "receipts" /
         ("checkout-switch-" & safeRepoIdSegment(state.repo.name) &
@@ -50381,12 +50718,16 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
       let actionId = "workspace-checkout-switch-" &
         safeRepoIdSegment(state.repo.name) & "-" & $idx
       var action = gitSwitchAction(actionId, identity,
-        branchName = parsed.branchName,
+        branchName = state.target,
         repoPath = state.repo.path,
         receiptPath = receiptRel)
       action.cwd = parsed.workspaceRoot
       actions.add(action)
       switchActionByIdx[idx] = actionId
+      # Fast-forward AFTER landing on the branch: the merge runs in the
+      # working tree, so it has to be the tree that is on the target.
+      if state.needsFastForward:
+        scheduleFastForward(idx, state, actionId)
     of rsReadyFetchAndTrack:
       let fetchReceiptRel = ".repro" / "workspace" / "receipts" /
         ("checkout-fetch-" & safeRepoIdSegment(state.repo.name) &
@@ -50409,7 +50750,7 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
       # engine orders them. ``git switch`` DWIMs the tracking branch
       # off the ``origin/<name>`` ref the fetch just populated.
       var switchAction = gitSwitchAction(switchActionId, identity,
-        branchName = parsed.branchName,
+        branchName = state.target,
         repoPath = state.repo.path,
         receiptPath = switchReceiptRel,
         deps = @[fetchActionId])
@@ -50431,21 +50772,41 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     for outcome in res.results:
       outcomeById[outcome.id] = outcome
     for idx, state in states:
-      if not switchActionByIdx.hasKey(idx):
+      if not switchActionByIdx.hasKey(idx) and not ffActionByIdx.hasKey(idx):
         continue
-      let switchId = switchActionByIdx[idx]
-      let outcome = outcomeById.getOrDefault(switchId)
-      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
-        var diag = "status=" & $outcome.status &
-          " reason=" & outcome.reason
-        if outcome.stderr.len > 0:
-          diag.add(" stderr=" & outcome.stderr)
-        perRepoOutcome[idx] = (outcome: croActionFailed, diagnostic: diag)
-      else:
-        let tag =
-          if state.kind == rsReadyFetchAndTrack: croFetchedAndSwitched
-          else: croSwitched
-        perRepoOutcome[idx] = (outcome: tag, diagnostic: "")
+      # The switch (when there was one) has to succeed before the
+      # fast-forward's verdict means anything.
+      var failed = false
+      if switchActionByIdx.hasKey(idx):
+        let outcome = outcomeById.getOrDefault(switchActionByIdx[idx])
+        if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+          var diag = "status=" & $outcome.status &
+            " reason=" & outcome.reason
+          if outcome.stderr.len > 0:
+            diag.add(" stderr=" & outcome.stderr)
+          perRepoOutcome[idx] = (outcome: croActionFailed, diagnostic: diag)
+          failed = true
+      if failed:
+        continue
+      if ffActionByIdx.hasKey(idx):
+        let ffOutcome = outcomeById.getOrDefault(ffActionByIdx[idx])
+        if ffOutcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+          var diag = "fast-forward to " & gitRemoteNameFor(state.repo) & "/" &
+            state.target & " failed: status=" & $ffOutcome.status &
+            " reason=" & ffOutcome.reason
+          if ffOutcome.stderr.len > 0:
+            diag.add(" stderr=" & ffOutcome.stderr)
+          perRepoOutcome[idx] = (outcome: croActionFailed, diagnostic: diag)
+          continue
+        # Landed on the branch AND brought it up to date. Reported as
+        # ``fast_forwarded`` rather than ``switched`` so the operator can see
+        # which repos actually moved forward.
+        perRepoOutcome[idx] = (outcome: croFastForwarded, diagnostic: "")
+        continue
+      let tag =
+        if state.kind == rsReadyFetchAndTrack: croFetchedAndSwitched
+        else: croSwitched
+      perRepoOutcome[idx] = (outcome: tag, diagnostic: "")
 
   # RA-29 restore-on-return: a repo that successfully switched TO the
   # requested branch may have a prior ``repro-checkout:<branch>`` stash
@@ -50459,9 +50820,9 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     if not perRepoOutcome.hasKey(idx):
       continue   # stash-on-leave failed → no switch happened, no restore.
     let r = perRepoOutcome[idx]
-    if r.outcome in {croSwitched, croFetchedAndSwitched}:
+    if r.outcome in {croSwitched, croFetchedAndSwitched, croFastForwarded}:
       let rest = restoreRepoWipOnReturn(identity, state.repoPath,
-        parsed.branchName)
+        state.target)
       if rest.restored:
         restoredOnReturn[idx] = true
       elif rest.diagnostic.len > 0:
@@ -50477,14 +50838,24 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
       path: state.repo.path,
       headSha: state.headSha,
       previousBranch: state.previousBranch,
+      targetBranch: state.target,
       remoteHadBranch: state.remoteHadBranch,
       localHadBranch: state.localHadBranch,
       stashedOnLeave: stashedOnLeave.getOrDefault(idx, false),
       restoredOnReturn: restoredOnReturn.getOrDefault(idx, false))
     case state.kind
     of rsAlreadyOnBranch:
-      entry.outcome = switchOutcomeTag(croAlreadyOnBranch)
-      entry.newBranch = parsed.branchName
+      # An in-place fast-forward still ran through the engine, so report its
+      # verdict rather than a blanket no-op.
+      let r = perRepoOutcome.getOrDefault(idx,
+        (outcome: croAlreadyOnBranch, diagnostic: ""))
+      entry.outcome = switchOutcomeTag(r.outcome)
+      entry.diagnostic = r.diagnostic
+      entry.newBranch =
+        if r.outcome == croActionFailed: state.previousBranch
+        else: state.target
+      if r.outcome == croActionFailed:
+        inc actionFailures
     of rsReadyLocal, rsReadyFetchAndTrack:
       if stashFailure.hasKey(idx):
         # RA-29: the leave-stash failed; this repo did not switch. WIP is
@@ -50504,7 +50875,7 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
         entry.diagnostic = r.diagnostic
         entry.newBranch =
           if r.outcome == croActionFailed: state.previousBranch
-          else: parsed.branchName
+          else: state.target
         if r.outcome == croActionFailed:
           inc actionFailures
     else:
@@ -50526,19 +50897,44 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   # leaves the "started" feature, so the mark is CLEARED unless the
   # checkout target matches the branch that was already marked started
   # (the no-op-style re-checkout case, where we keep the mark).
+  # Which branch is the WORKSPACE on now? For an ordinary switch that is the
+  # requested branch. Under ``--mainline`` it is only well defined when every
+  # repo happens to track the same branch; in a mixed workspace (`dev` +
+  # `latest` + `live`) there is no single answer, and inventing one would put
+  # a branch in the metadata that no repo is standing on — the exact
+  # incoherence `pull` leaves behind.
+  var effectiveBranch = parsed.branchName
+  if parsed.mainline:
+    var distinct0: seq[string]
+    for state in states:
+      if state.target.len > 0 and state.target notin distinct0:
+        distinct0.add(state.target)
+    effectiveBranch =
+      if distinct0.len == 1: distinct0[0]
+      else: ""
+
+  if effectiveBranch.len == 0:
+    # Heterogeneous mainline: leave ``[workspace].branch`` untouched rather
+    # than record a lie, and say so instead of failing silently.
+    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+    if recorded.isSome:
+      result.recordedBranch = recorded.get()
+    result.exitCode = 0
+    return
+
   var preserveStartedMark = false
   try:
     if readWorkspaceFeatureStarted(parsed.workspaceRoot):
       let recordedBranch = readWorkspaceBranch(parsed.workspaceRoot)
-      if recordedBranch.isSome and recordedBranch.get() == parsed.branchName:
+      if recordedBranch.isSome and recordedBranch.get() == effectiveBranch:
         preserveStartedMark = true
   except WorkspaceManifestParseError:
     preserveStartedMark = false
   try:
     writeWorkspaceBranchWithStarted(parsed.workspaceRoot,
-      project = resolved.projectName, branch = parsed.branchName,
+      project = resolved.projectName, branch = effectiveBranch,
       featureStarted = preserveStartedMark)
-    result.recordedBranch = parsed.branchName
+    result.recordedBranch = effectiveBranch
   except WorkspaceManifestParseError as err:
     result.exitCode = 1
     result.recordedBranch = ""
@@ -50567,11 +50963,16 @@ proc runSwitchCommand*(args: openArray[string]): int =
   ## what happened, in addition to the stdout-formatted text lines.
   ## Without ``--write-report`` nothing is written to disk.
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo "repro switch <branch> [-b|--new-branch] [--yes] " &
-      "[--workspace-root=PATH] [--json] [--write-report[=PATH]]"
+    echo "repro switch <branch>|--mainline [-b|--new-branch] [--no-fetch] " &
+      "[--yes] [--workspace-root=PATH] [--json] [--write-report[=PATH]]"
     echo "  <branch>          switch every participating repo onto <branch>,"
     echo "                    stashing and restoring per-repo work in progress"
+    echo "  --mainline        switch each repo onto ITS declared branch"
+    echo "                    (dev / latest / live / …) from the manifest"
     echo "  -b, --new-branch  create <branch> across every repo first"
+    echo "  --fetch           fetch before switching, and fast-forward the"
+    echo "                    branch landed on (DEFAULT)"
+    echo "  --no-fetch        classify against local refs only (offline)"
     echo "  --yes, --force    skip the per-repo confirmation preview"
     echo ""
     echo "  To fork a NEW workspace directory instead, use `repro branch`."

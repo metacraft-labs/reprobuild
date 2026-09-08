@@ -48,38 +48,39 @@
 ## ``fieldPairs``, so a field added to ``MonitorRecord`` later is compared
 ## without anyone remembering to add it.
 ##
-## AND ONE THING THE COMPARISON HAD TO BE TOLD, because the first run of it
-## found a PRE-EXISTING divergence between the two hosting forms that has
-## nothing to do with TP-2. The engine reduces io-mon's event interest to
-## ``{ecFileDeps, ecProcessTree, ecLibraryLoads}`` for a build edge, on the
-## grounds that an edge depends on the files it reads and not on the clock or
-## the sysctls a tool happens to touch. On the HOSTED path that reduction is
-## carried on ``FsSnoopRequest.interest`` and takes effect. On the WRAPPED
-## path the engine can only seed ``REPRO_MONITOR_INTEREST`` into the action's
-## environment — and io-mon's ``composeInjectionEnv`` OVERWRITES that variable
-## with the request's own interest, which for ``repro internal io monitor``
-## is ``FullInterest`` because the CLI takes no interest flag. So the wrapped
-## arm records ``mrSysctlRead`` / ``mrTimeRead`` that the hosted arm does not:
-## measured here as 142 records against 140 for the identical fixture, with
-## ``sysconf:1`` and a time read the only difference.
+## AND THE WORKAROUND THAT USED TO BE HERE IS GONE, because the divergence it
+## compensated for has been fixed at the source.
 ##
-## That is a real finding about the engine's env seed (whose comment says
-## "same event-interest as the hosted path") and it is reported as one rather
-## than worked around silently. What this file does about it is make the two
-## arms ASK FOR THE SAME THING: the fixture opts into ``captureNonDeterminism``
-## and ``captureIpc``, so the hosted request is ``FullInterest`` too and the
-## comparison is about where ``finishMonitor`` ran rather than about which
-## categories were requested. HM-6's field-by-field comparison could not see
-## this difference at all, because ``PathSetEvidence`` has no field a sysctl
-## read lands in.
+## The first run of this comparison found a PRE-EXISTING divergence between the
+## two hosting forms that had nothing to do with TP-2. The engine reduced
+## io-mon's event interest to ``{ecFileDeps, ecProcessTree, ecLibraryLoads}``
+## for a build edge; on the HOSTED path that reduction was carried on
+## ``FsSnoopRequest.interest`` and took effect, while on the WRAPPED path the
+## engine could only seed ``REPRO_MONITOR_INTEREST`` into the action's
+## environment — which io-mon's ``childEnv`` OVERWRITES with the request's own
+## interest, since the injection must win over an inherited value. ``parseRun``
+## took no interest flag, so the spawned monitor's request was "everything".
+## The wrapped arm therefore recorded ``mrSysctlRead`` / ``mrTimeRead`` the
+## hosted arm did not: measured here as 142 records against 140 for the
+## identical fixture.
+##
+## This file used to make the two arms ASK FOR THE SAME THING by opting the
+## fixture into ``captureNonDeterminism`` / ``captureIpc``. That is no longer
+## needed and is no longer wanted: ``repro internal io monitor`` now takes an
+## ``--interest`` flag, the engine computes its request in ONE place
+## (``monitorInterest``) that both hosting forms read, and that request is
+## every category — because each one carries a record kind a cache-correctness
+## decision consumes. Keeping the opt-in would now REMOVE a guard rather than
+## add one: with both arms forced to request identical categories the
+## comparison below cannot fail for an interest divergence, which is exactly
+## how the original one survived this file.
 
 import std/[algorithm, os, sets, strutils, tables, unittest]
 
 import repro_build_engine
 import repro_build_engine/worker_pool
 from repro_test_support import prepareMonitorTools, testCaseScratchSlug
-from repro_core/dependency_gathering import DependencyGatheringPolicy,
-  automaticMonitorGatheringPolicy
+from repro_core/dependency_gathering import automaticMonitorGatheringPolicy
 
 when defined(linux) or defined(macosx):
   import io_mon
@@ -134,19 +135,6 @@ else:
 
   proc depfilePathFor(cacheRoot, actionId: string): string =
     cacheRoot / "monitor-depfiles" / (actionId & ".iomon")
-
-  proc comparableInterestPolicy(): DependencyGatheringPolicy =
-    ## BOTH ARMS ASK IO-MON FOR THE SAME CATEGORIES. See the header: the
-    ## engine's interest reduction reaches io-mon on the hosted path (through
-    ## ``FsSnoopRequest.interest``) and is overwritten on the wrapped one
-    ## (io-mon's own injection variable wins over the engine's env seed), so
-    ## without this the two arms differ by two records for a reason that
-    ## predates TP-2 and has nothing to do with it. Opting in makes both
-    ## requests ``FullInterest``, which is the one value the two paths agree
-    ## on today.
-    result = automaticMonitorGatheringPolicy()
-    result.captureNonDeterminism = true
-    result.captureIpc = true
 
   # ------------------------------------------------------------------
   # THE NORMALISER, AND THE FLAKE THAT REWROTE IT.
@@ -461,7 +449,7 @@ else:
           inputs = ["marker.txt"],
           outputs = ["out.txt"],
           cacheable = false,
-          dependencyPolicy = comparableInterestPolicy(),
+          dependencyPolicy = automaticMonitorGatheringPolicy(),
           governingLockIdentity = lockIdentityOutsideSolvedGraph())]),
           engineConfig(armCacheRoot, 1'u32, hosted))
         check run.results.len == 1
@@ -853,7 +841,7 @@ else:
           inputs = ["marker.txt"],
           outputs = [name & "-out.txt"],
           cacheable = false,
-          dependencyPolicy = comparableInterestPolicy(),
+          dependencyPolicy = automaticMonitorGatheringPolicy(),
           governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       # Sealed AFTER the directory exists and BEFORE the build runs, so the
@@ -914,7 +902,7 @@ else:
         inputs = ["marker.txt"],
         outputs = ["after-out.txt"],
         cacheable = false,
-        dependencyPolicy = comparableInterestPolicy(),
+        dependencyPolicy = automaticMonitorGatheringPolicy(),
         governingLockIdentity = lockIdentityOutsideSolvedGraph())]),
         engineConfig(root / "cache-after", 1'u32, true))
       check after.results.len == 1
