@@ -7,9 +7,14 @@
 ## the fingerprinting in `repro_local_store`, the subprocess and the
 ## files are all the production ones. What is supplied here is the iomon
 ## the action is fingerprinted against: it is written with io-mon's OWN
-## canonical encoder (`io_mon/writer.encodeCanonical`) and read back by
+## canonical encoder (`io_mon/writer.encodeCanonical`), prefixed with this
+## host's real backend profile from io-mon's OWN
+## `profileRecords(defaultHooksMonitorProfile())`, and read back by
 ## the production reader, so the FILE is real — it is its CONTENT that
-## is chosen rather than observed.
+## is chosen rather than observed. See `writeRmdf` for why the profile
+## records are not optional: without them the edge fails closed on the
+## entropy-observability policy instead, and this suite grades a decision
+## it did not make.
 ##
 ## That is unavoidable, and the reason is itself a finding. Measured on
 ## this host with the real monitor:
@@ -80,6 +85,15 @@
 ## anything; (2) is what makes it mean something, and is the regression
 ## guard for the whole class of edges that "make a zero-output edge
 ## cacheable" exists to serve.
+##
+## (2) EARNED ITS KEEP, and the way it did is worth recording. When a
+## LATER, unrelated policy — M6's entropy-observability gate — began
+## refusing the publish for every capture whose backend profile was
+## missing, this fixture had no profile record, so (1) went on passing
+## while the guard it names had stopped deciding anything. (2) is what
+## went red: an edge with one recorded read stopped being reused. Any
+## global fail-closed rule that swallows this suite's subject shows up
+## there first, which is why the narrowness arm is not optional.
 
 import std/[os, strutils, unittest]
 
@@ -87,10 +101,20 @@ import repro_build_engine
 import repro_core
 import repro_hash
 import repro_local_store
-import io_mon/[types, writer]
+import io_mon/[types, writer, capabilities]
 
 const TmpDir = "build/test-tmp/t_zero_evidence_edge_is_not_cacheable"
 const ReuseDecisions = {cdHit, cdHybridCutoff}
+
+const RootImage = "/bin/sh"
+  ## `runEdge`'s `argv[0]`, and therefore the path the LAUNCHER contributes
+  ## through `foldLauncherRootImage` — the action's own root image, which no
+  ## monitor record can supply. It is in `monitorReads` of every edge here and
+  ## is named rather than counted, so that a change to what the engine folds
+  ## from its own bookkeeping fails on the IDENTITY of the extra entry instead
+  ## of being absorbed by moving a number. What must NOT change silently is
+  ## that this contribution cannot answer "did the monitor observe anything?";
+  ## the first test below is what holds that.
 
 proc weak(name: string): ContentDigest =
   weakFingerprintFromText("zero-evidence-edge." & name)
@@ -137,7 +161,31 @@ proc writeRmdf(f: Fixture; records: seq[MonitorRecord]) =
   ## io-mon's own canonical encoder, so the production reader validates
   ## magic, version, framing, sequence numbers and trailer checksum
   ## exactly as it does for a monitor-written file.
-  writeFile(f.rmdfPath, cast[string](encodeCanonical(records)))
+  ##
+  ## The capture is PREFIXED with this host's real backend profile, taken from
+  ## io-mon's own `profileRecords(defaultHooksMonitorProfile())` — the same
+  ## call the monitor makes — because every capture the monitor writes carries
+  ## one and the engine reads it.
+  ##
+  ## Without it the edge never reaches the guard under test. A capture with no
+  ## `mrBackendProfile` record leaves `entropyObservability` at `entUnknown`,
+  ## and `applyEntropyBlessingPolicy` (Windows-Build-Correctness M6) refuses
+  ## the publish on THAT ground — "absence of evidence is not evidence of
+  ## absence" — before the zero-evidence question is ever asked. The suite then
+  ## reads green on a fixture that is failing closed for an unrelated reason:
+  ## the "does not publish" assertions hold no matter what this guard does, and
+  ## the "one observation publishes" assertion cannot hold at all. Supplying
+  ## the profile is what makes the entropy policy say nothing here, so the only
+  ## thing left deciding the publish is the property this file is about.
+  ##
+  ## These records are META and add no observation: `mrBackendProfile` and
+  ## `mrCapabilityGap` carry capability ids in `path`, not paths, and
+  ## `foldOneMonitorRecord` routes them to `entropyObservability` only. The
+  ## zero case below stays genuinely zero — its checked denominators say so.
+  var all = profileRecords(defaultHooksMonitorProfile())
+  for record in records:
+    all.add(record)
+  writeFile(f.rmdfPath, cast[string](encodeCanonical(all)))
 
 proc processRecord(): MonitorRecord =
   ## A record that carries no file observation. The real monitor emits
@@ -210,9 +258,18 @@ suite "an edge that observed nothing is not cacheable":
     check r0.launched
     check f.runCount() == 1
 
-    # Denominator: the evidence really is empty, or the assertions below
-    # would be about something else entirely.
-    check r0.evidence.monitorReads.len == 0
+    # Denominator: the OBSERVED evidence really is empty, or the
+    # assertions below would be about something else entirely.
+    #
+    # `monitorReads` is not empty and must not be: it carries the one path
+    # the LAUNCHER contributes, the action's own root image. That entry is a
+    # reconstruction from `argv[0]`, not something the monitor saw, and it is
+    # present for every action whose image resolves — so it is named here,
+    # exactly, rather than budgeted for by a bumped count. If the engine ever
+    # answers "the monitor observed something" with an entry of its own again,
+    # this equality fails on the identity of the entry, and the publish
+    # assertions below fail with it.
+    check r0.evidence.monitorReads == @[RootImage]
     check r0.evidence.monitorWrites.len == 0
     check r0.evidence.monitorProbes.len == 0
 
@@ -252,7 +309,16 @@ suite "an edge that observed nothing is not cacheable":
     checkpoint("first: status=" & $r0.status &
       " reads=" & $r0.evidence.monitorReads.len)
     check r0.status == asSucceeded
-    check r0.evidence.monitorReads.len == 1
+    # The one observed read PLUS the launcher's root image, named in both
+    # positions: what makes this edge publish has to be the OBSERVATION, and
+    # an assertion that only counted would keep passing if the observation
+    # were dropped and a second engine-side entry took its place.
+    #
+    # The image is LAST, and that is the visible half of the fix: it is
+    # contributed after the evidence question is asked, so moving it back in
+    # front of `applyMonitorEvidenceStatus` reorders this seq and fails here
+    # as well as in the zero case above.
+    check r0.evidence.monitorReads == @[f.observedPath, RootImage]
     check f.runCount() == 1
     check f.hasRecord(act)
 

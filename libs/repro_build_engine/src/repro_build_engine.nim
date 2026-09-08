@@ -3815,6 +3815,15 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     # from ANY source, including a recognized report's
     # `depfileInputs`. An action with one recorded probe has said
     # something about the world and keeps its record.
+    #
+    # EVERY CHANNEL READ HERE MUST CARRY ONLY OBSERVATIONS. Anything the
+    # ENGINE contributes to these sets from its own bookkeeping answers
+    # this question on the monitor's behalf and silently retires the
+    # guard: `foldLauncherRootImage` seeded `monitorReads` with the
+    # action's own resolved `argv[0]` and made the whole branch
+    # unreachable for every action whose image resolves. It now runs
+    # after this point. A future contributor of the same shape must do
+    # the same.
     if action.cacheable and
         col.evidence.monitorReads.len == 0 and
         col.evidence.monitorWrites.len == 0 and
@@ -3976,6 +3985,49 @@ proc executedToolImagePath(action: BuildAction;
       return os.normalizedPath(candidate)
   ""
 
+proc foldLauncherRootImage(action: BuildAction; config: ptr BuildEngineConfig;
+                           evidence: var PathSetEvidence;
+                           seen: var EvidenceSeenSets) =
+  ## The action's OWN root image, which no monitor record can supply — see
+  ## `executedToolImagePath`. Folded as a content read, beside `mrLibraryLoad`
+  ## and the `mrProcessExec` arm that covers this action's NESTED execs.
+  ##
+  ## SCOPED TO THE AUTOMATIC-MONITOR CLASS on purpose. That is the class where
+  ## the ENGINE promises to discover the input set, so a missing input is the
+  ## engine's defect. On an edge whose inputs are declared by its author, the
+  ## author owns that set and the engine adding an undeclared path to the key
+  ## behind their back is a different decision, with a different blast radius,
+  ## and it is not the one this makes.
+  ##
+  ## IT MUST RUN AFTER `applyMonitorEvidenceStatus`, AND THAT IS A CORRECTNESS
+  ## ORDERING, NOT A STYLE ONE. This path is a RECONSTRUCTION the launcher
+  ## performs from `argv[0]`; it is not something the monitor saw, and it is
+  ## available for essentially every action whether the monitor observed
+  ## anything or not. The `mesComplete` arm of `applyMonitorEvidenceStatus`
+  ## asks "did this capture record an observation of ANY kind?" and refuses to
+  ## publish when the answer is no (M17 / Compiles-Are-Normal-Edges.md:269-273).
+  ## Seeding `monitorReads` before that question is asked answers it with the
+  ## engine's own bookkeeping: measured on this host, a capture holding one
+  ## `mrProcessStart` and nothing else PUBLISHED and then took a `cdHit`, with
+  ## no diagnostic, because `monitorReads` was `@["/bin/sh"]`. The guard was
+  ## dead for every action whose `argv[0]` resolves — which is the same set of
+  ## actions the fold is scoped to. Contributing the image afterwards keeps it
+  ## in the cache key (`t_executed_binary_is_a_recorded_input.nim` still pins
+  ## all four exec shapes) while leaving the "what did the monitor see?"
+  ## predicate answerable only by the monitor.
+  ##
+  ## Ordering rather than a subtract-the-known-path filter, deliberately: if a
+  ## record HAD observed this same path (a nested exec of the action's own
+  ## image on a platform with no library-load floor), `addUnique` collapses the
+  ## two into one entry and no later filter can tell an observation from a
+  ## reconstruction. Asking the question before the reconstruction exists does
+  ## not have that blind spot.
+  if action.dependencyPolicy.kind notin MonitorPolicyKinds:
+    return
+  let rootImage = executedToolImagePath(action, config)
+  if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
+    evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
                      config: ptr BuildEngineConfig = nil):
@@ -4016,20 +4068,11 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # legacy linear ``find`` made the per-action wrap-up the dominant
   # term on the 14-app / ~1044-action collections from B1/B3/B5.
   var seen: EvidenceSeenSets
-  # The action's OWN root image, which no monitor record can supply — see
-  # `executedToolImagePath`. Folded as a content read, beside `mrLibraryLoad`
-  # and the `mrProcessExec` arm that covers this action's NESTED execs.
-  #
-  # SCOPED TO THE AUTOMATIC-MONITOR CLASS on purpose. That is the class where
-  # the ENGINE promises to discover the input set, so a missing input is the
-  # engine's defect. On an edge whose inputs are declared by its author, the
-  # author owns that set and the engine adding an undeclared path to the key
-  # behind their back is a different decision, with a different blast radius,
-  # and it is not the one this change makes.
-  if action.dependencyPolicy.kind in MonitorPolicyKinds:
-    let rootImage = executedToolImagePath(action, config)
-    if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
-      result.evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
+  # The action's own root image is contributed by `foldLauncherRootImage` at
+  # the END of this proc, NOT here. It is a launcher-side reconstruction rather
+  # than an observation, and the zero-evidence guard in
+  # `applyMonitorEvidenceStatus` must not be able to mistake it for one — see
+  # that proc's own note before moving this back.
   let reports = action.reportSpecsForPolicy()
   if action.dependencyPolicy.kind in RecognizedPolicyKinds and reports.len == 0:
     result.evidence.diagnostics.add(
@@ -4237,6 +4280,11 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "rewrites are errors'.")
     if offenders.len > 0:
       result.publishable = false
+  # LAST, and after every `applyMonitorEvidenceStatus` call above (the wrapped/
+  # hosted arm and the iomon-recognized-report arm both reach one). The image
+  # belongs in the cache key; it is not evidence that the monitor observed
+  # anything. See `foldLauncherRootImage`.
+  foldLauncherRootImage(action, config, result.evidence, seen)
   if strict and not result.publishable:
     discard
 
