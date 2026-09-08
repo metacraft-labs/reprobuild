@@ -2677,6 +2677,79 @@ proc entryDeterminismFor*(config: BuildEngineConfig;
   declaredDeterminism(action.determinismClass, action.effectiveRetention,
     nowUnix = config.nowUnix, buildEpoch = config.buildEpoch)
 
+proc refusesRecordWithNoInputs*(action: BuildAction): bool =
+  ## Is this an edge for which a cache record with NO inputs and NO observed
+  ## environment inputs is never legitimate?
+  ##
+  ## THE SCOPE, factored out because it is read from three places that would
+  ## otherwise each carry their own copy: the per-edge lookup
+  ## (`unservableCacheRecordReason`), the whole-graph metadata scan (through
+  ## `HotMetadataProbe.refuseRecordWithNoInputs`), and the whole-graph
+  ## record scan. A predicate whose scope is written down three times is a
+  ## predicate that will eventually mean three things.
+  ##
+  ## Each clause excludes a case where an empty record is CORRECT:
+  ##
+  ## * `cacheable` — a non-cacheable edge never publishes and always re-runs.
+  ## * `bakProcess` — a built-in (write-text, copy-file, stamp) legitimately
+  ##   has no file inputs; it is keyed on text its caller mixed into the weak
+  ##   fingerprint, and refusing it would make every such edge a permanent
+  ##   miss.
+  ## * `MonitorPolicyKinds` — this is the class where the ENGINE promised to
+  ##   discover the input set, so an empty one is the engine's failure. Where
+  ##   the author declares the set (a recognized report), an empty set is the
+  ##   author's statement and not ours to overrule.
+  action.cacheable and action.kind == bakProcess and
+    action.dependencyPolicy.kind in MonitorPolicyKinds
+
+proc unservableCacheRecordReason*(action: BuildAction;
+                                  record: ActionResultRecord): string =
+  ## Why this RECORD must not be served to this ACTION, or `""`.
+  ##
+  ## THE LOOKUP-SIDE TWIN OF `gradeKeyedInputSet`, and the reason there is one
+  ## at all. The publish-side guard is where the information lives — at publish
+  ## time the engine knows what the monitor observed — so it is the primary
+  ## defence and this is not a substitute for it. What this adds is POSITION:
+  ## it sits on the path every record must cross to be used, whichever
+  ## direction it arrived from. A record installed from a LAN peer, restored
+  ## from a binary cache, or written by some future launch path that publishes
+  ## without going through `collectEvidence` never passes the publish-side
+  ## guard at all. It passes here.
+  ##
+  ## THE PREDICATE IS RECORD-INTRINSIC AND HAS NO FALSE POSITIVES, and both
+  ## halves of that matter. A record with no input fingerprints and no observed
+  ## environment inputs is keyed on the weak fingerprint alone: the lookup
+  ## re-derives its strong fingerprint from its own (empty) input list, finds
+  ## nothing to compare against the filesystem, and returns a hit — forever,
+  ## for every future build, whatever changes. For a monitored, cacheable
+  ## PROCESS edge that state is never legitimate; `gradeKeyedInputSet` refuses
+  ## to publish it. The scope is what keeps it honest: a built-in action
+  ## (write-text, copy-file, stamp) legitimately has no file inputs and is
+  ## keyed on text its caller mixed into the weak fingerprint, and an edge
+  ## whose author declares its own input set owns that set.
+  ##
+  ## WHAT IT DELIBERATELY DOES NOT TRY TO DO. It does not attempt to recognise
+  ## the records published during the 2026-09-02..2026-09-08 window. Those
+  ## carry ONE input — the root image the engine reconstructed from `argv[0]`
+  ## — and are byte-indistinguishable from a record of an edge that genuinely
+  ## read that path. The fact that would separate them was destroyed when the
+  ## two were merged into one list (Dependency-Observation-Attribution.md rule
+  ## 6). Draining those needs a discriminator the record does carry, which is
+  ## its version; see `ActionRecordVersion` in `repro_local_store`. Guessing
+  ## here instead would refuse sound entries and still miss unsound ones.
+  if not action.refusesRecordWithNoInputs():
+    return ""
+  if record.inputs.len > 0 or record.envInputs.len > 0:
+    return ""
+  "action '" & action.id & "': refusing a cached record with no recorded " &
+    "inputs and no recorded environment inputs. Such a record is keyed on " &
+    "the weak fingerprint alone, so it has nothing to revalidate and would " &
+    "be served on every future build regardless of what changed. A monitored " &
+    "cacheable action never publishes one; this record predates the guard " &
+    "that refuses to, or arrived from a producer that lacks it. Re-running. " &
+    "Spec: Failure-Semantics.md:11-12, " &
+    "Reprobuild-Development.milestones.org M17."
+
 proc cachedResultReusableInPlace(action: BuildAction;
                                  declaredOutputsPresent: bool): bool =
   ## "If the action cache says nothing this action reads has changed, can the
@@ -10147,7 +10220,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         hotProbes.add(HotMetadataProbe(
           weakFingerprint: action.weakFingerprint,
           policy: action.actionCachePolicy,
-          outputRoot: action.cwd))
+          outputRoot: action.cwd,
+          # This arm never runs the scheduler, so the per-edge refusal at the
+          # `lookupActionResult` seam is not on this path at all. The probe
+          # carries the scope so the scan can apply it where it already has
+          # the record in hand. See `refusesRecordWithNoInputs`.
+          refuseRecordWithNoInputs: action.refusesRecordWithNoInputs()))
         hotEnvResolvers.add(action.actionEnvResolver())
       let lookupStart = statStart()
       let navigatorStart = statStart()
@@ -10204,6 +10282,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # as "repro output revalidate"; a timer here would have measured this
       # call site only.
       if outputStateMismatch(hotRecord.get(), action.cwd).len > 0:
+        return none(BuildRunResult)
+      # The other whole-graph arm, and the same reason as the probe field
+      # above: reaching `hmssHit` here also means the scheduler never runs, so
+      # the per-edge refusal never gets a turn. Falling back to the full
+      # scheduler is enough — it re-consults this edge, refuses the record
+      # there, and states the reason once.
+      if action.unservableCacheRecordReason(hotRecord.get()).len > 0:
         return none(BuildRunResult)
       hotRecords.add(hotRecord.get())
       hotRecordEnvResolvers.add(action.actionEnvResolver())
@@ -10984,6 +11069,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               else:
                 runResult.trace(id, "peer-cache-install-failed",
                   install.reason)
+          # ONE seam for BOTH lookups above — the local one and the
+          # peer-installed retry — and deliberately placed after the retry so
+          # a record that arrived from a peer is graded exactly like one that
+          # was already on disk. See `unservableCacheRecordReason` for what it
+          # refuses and, just as importantly, what it does not try to.
+          if lookup.status in {aclHit, aclHybridCutoff}:
+            let refusal = action.unservableCacheRecordReason(lookup.record)
+            if refusal.len > 0:
+              runResult.trace(id, "cache-record-refused", refusal)
+              lookup = ActionCacheLookup(status: aclMissNoRecord,
+                message: refusal)
           case lookup.status
           of aclHit:
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:

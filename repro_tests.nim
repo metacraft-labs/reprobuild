@@ -369,6 +369,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim",
+    binary: "build/test-bin/t_dark_window_cache_records_are_drained",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim",
     binary: "build/test-bin/t_declared_env_is_in_the_cache_key",
     defines: @[],

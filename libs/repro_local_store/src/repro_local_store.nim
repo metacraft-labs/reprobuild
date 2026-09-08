@@ -325,6 +325,26 @@ type
       ## The action's cwd, used to resolve the record's relative output
       ## paths so the whole-build fast path can revalidate output state
       ## (Incremental-Invalidation.md §"Minimum check set" Step 3.3).
+    refuseRecordWithNoInputs*: bool
+      ## Treat a matched record that has NO input fingerprints and NO
+      ## environment inputs as if there were no record at all.
+      ##
+      ## Such a record is keyed on the weak fingerprint alone: the loop below
+      ## finds nothing to compare against the filesystem, so it reports a hit
+      ## unconditionally, forever, whatever changed. WHICH edges may never be
+      ## in that state is an engine policy question and stays there — see
+      ## `repro_build_engine.unservableCacheRecordReason`, which sets this and
+      ## owns the scope. Defaulted false, so every other caller of this scan
+      ## behaves exactly as before (a built-in write-text edge legitimately
+      ## has no file inputs and is keyed on text its caller mixed into the
+      ## weak fingerprint).
+      ##
+      ## It has to be HERE, and not only at `lookupActionResult`, because this
+      ## scan is the whole-graph shortcut: when it answers `hmssHit` the
+      ## scheduler never runs and no per-edge lookup happens at all.
+      ## `skipCacheHitEvidence` — the arm that reaches this function — is the
+      ## default on the main CLI path, so a check placed only at the per-edge
+      ## lookup is a check the production path does not execute.
 
   HotMetadataScanStatus* = enum
     hmssUnavailable
@@ -343,45 +363,117 @@ type
 
 const
   ActionRecordMagic = "RBAR"
-  # DELIBERATELY NOT BUMPED. The output witnesses this file adds (change
-  # time, symlink target, directory metadata digest) live in a SIDECAR file
-  # next to the `.rec`, not inside the RBAR frame -- see `OutputWitness` and
-  # `writeWitnessSidecar`. Growing the frame would have required a version
-  # bump, and a bump is not backward-tolerable here: verified against a
-  # binary built from the base commit, a v4 frame makes
-  # `loadPerEdgeRecords` return ZERO records (the per-frame
-  # `except EnvelopeError: break` swallows it), so every edge this binary
-  # wrote becomes a permanent cache miss for any older `repro` sharing the
-  # per-user cache root; and `decodeActionResultRecord`, the public codec
-  # the peer cache and the dependency-evidence reader use, raises outright.
-  # An 8-byte field does not justify that.
+  # THE VERSIONS BELOW ARE FORMAT HISTORY. Only the last one is WRITTEN, and
+  # only the last one is READ -- see `ActionRecordVersionEvidenceEpoch`, which
+  # explains why this decoder refuses every earlier frame rather than
+  # tolerating it. The earlier constants stay because the decoder's shape is
+  # still expressed in terms of them ("does this frame have an env section?",
+  # "are its paths interned?") and deleting them would turn readable version
+  # gates into bare integers.
+  #
+  # DELIBERATELY NOT BUMPED FOR FORMAT GROWTH. The output witnesses this file
+  # adds (change time, symlink target, directory metadata digest) live in a
+  # SIDECAR file next to the `.rec`, not inside the RBAR frame -- see
+  # `OutputWitness` and `writeWitnessSidecar`. Growing the frame would have
+  # required a version bump, and a bump is never cheap: a frame at an unknown
+  # version makes `loadPerEdgeRecords` return ZERO records (the per-frame
+  # `except EnvelopeError: break` swallows it), and `decodeActionResultRecord`,
+  # the public codec the peer cache and the dependency-evidence reader use,
+  # raises outright. An 8-byte field does not justify that. That judgement is
+  # unchanged by the epoch bump below: bump this only to draw another TRUST
+  # line, never to grow the format, and write down which line and why.
   ActionRecordVersion = 3'u16
   ActionRecordVersionEnv = 4'u16
     ## Written ONLY for a record that actually carries observed environment
-    ## inputs. A record with none stays version 3, byte-for-byte what this
-    ## code wrote before, so no existing cache entry is invalidated and no
-    ## older reader (a peer cache, a previously built binary) is locked out of
-    ## the records it could already read. The version bump is scoped to the
-    ## records that genuinely need the new section.
+    ## inputs; a record with none stayed at version 3. Retained as the gate
+    ## that asks whether a frame has an env section at all.
   ActionRecordVersionInterned = 5'u16
     ## Action-Cache-Per-Edge-Store.md §5.5 C4: the record carries a path table
     ## LOCAL TO ITSELF, and every path field is an index into it plus the
-    ## file's own name. Written for every new record, and read alongside 2, 3
-    ## and 4 -- an existing cache keeps working, and this binary keeps reading
-    ## every record it could read before.
+    ## file's own name. Retained as the gate that asks whether a frame's paths
+    ## are interned.
     ##
-    ## Unlike the env bump above, this one is NOT scoped to the records that
-    ## benefit, because §5.5 "Compatibility" makes the bump a deliberate,
-    ## once-only compatibility boundary rather than something to spend twice:
-    ## a binary that predates it sees these records as absent and re-executes,
-    ## which is a miss and never a wrong answer.
-    ##
-    ## This changes the STORAGE encoding only. The strong fingerprint is
+    ## This changed the STORAGE encoding only. The strong fingerprint is
     ## computed by `strongIdentityPayload`, which is untouched, so no key in
     ## any existing cache moves and no warm build anywhere misses because of
-    ## this. Interning inside `strongIdentityPayload` would have shifted every
+    ## it. Interning inside `strongIdentityPayload` would have shifted every
     ## strong fingerprint on every disk in the world; that is why the two
     ## payloads are separate functions and must stay separate.
+  ActionRecordVersionEvidenceEpoch = 6'u16
+    ## THE ONLY VERSION THIS BINARY WRITES, AND THE ONLY ONE IT READS. This is
+    ## a TRUST boundary, not a format one: byte-for-byte, a v6 frame is a v5
+    ## frame. Nothing about the encoding changed; what changed is whether the
+    ## producer's evidence could be believed.
+    ##
+    ## WHAT IS UNTRUSTED. Starting 2026-09-02 03:44 the engine seeded an
+    ## observed-evidence channel from its own bookkeeping BEFORE asking whether
+    ## the monitor had observed anything: `foldLauncherRootImage` put the
+    ## action's own `argv[0]`, a path the launcher RECONSTRUCTS, into
+    ## `monitorReads`. That made the guard which refuses to publish a record
+    ## from an action that observed nothing unreachable for every action whose
+    ## image resolves -- which is the same set of actions the guard protects.
+    ## Measured: a capture holding one process-start record and nothing else
+    ## published, and the engine then took a cache hit on that record and did
+    ## not run the action.
+    ##
+    ## The commit that reorders the fold after the guard is the one introducing
+    ## this constant, so EVERY record version that existed before it -- 2, 3, 4
+    ## and 5 alike -- was written by a binary whose guard was dead. Version 5 is
+    ## not a safe floor merely because it is the newest: it landed 2026-09-09,
+    ## a week INTO the window, for an unrelated path-interning change. The first
+    ## trustworthy version is this one.
+    ##
+    ## WHY AN EPOCH AND NOT A PREDICATE THAT RECOGNISES THE BAD RECORDS.
+    ## Because there is no such predicate. What identifies one of these records
+    ## -- "the monitor observed nothing" -- was never written into it: the
+    ## reconstruction and the observation were merged into one input list at
+    ## publish time, and Dependency-Observation-Attribution.md rule 6 is
+    ## precisely that once they are merged nothing downstream can separate
+    ## them. A record whose input list is `["/bin/sh"]` because the engine
+    ## reconstructed it is byte-identical to one whose input list is
+    ## `["/bin/sh"]` because a process really read it. The publish-side fix
+    ## cannot reach them either: lookup is by weak fingerprint, happens before
+    ## the action runs, and re-derives the strong fingerprint from the record's
+    ## OWN input list, so a bad record keeps validating against itself forever.
+    ## The only sound discriminator left is WHEN the record was written, and a
+    ## version is the cheapest and most total form of "written before this
+    ## point".
+    ##
+    ## WHY A CONSTANT OF OUR OWN RATHER THAN REUSING 5. Because the boundary
+    ## has to stay attached to its REASON. Pinning it to `…Interned` would
+    ## pin a trust decision to the accidental date of a format change, and a
+    ## later renumbering of that format constant would move the trust line
+    ## silently.
+    ##
+    ## WHAT IT COSTS, PLAINLY. Every action-cache record, peer-cache bundle and
+    ## shm slot that exists today is ignored -- not some of them, all of them.
+    ## That is one full rebuild, once, for everyone. Build OUTPUTS are
+    ## unaffected: this invalidates cached ANSWERS, never artifacts. An older
+    ## `repro` sharing a per-user cache root also ignores what this one writes,
+    ## so the installed binary must move with this change (DA-1h) or the two
+    ## will thrash on one cache root. That is a large cost and it is the
+    ## correct trade: a one-time rebuild is recoverable, and silently serving
+    ## an entry keyed on inputs nothing observed is not (Failure-Semantics.md:
+    ## 11-12 -- "reject cache reuse, rerun, or require review rather than
+    ## silently accepting stale state").
+    ##
+    ## THIS OVERRIDES A DELIBERATE UPSTREAM COMPATIBILITY DECISION. The
+    ## interning bump chose to keep reading 2, 3 and 4 so that "an existing
+    ## cache keeps working, and this binary keeps reading every record it could
+    ## read before". That choice was right for a format change and is wrong for
+    ## this one: back-compatibility is exactly the property that keeps the
+    ## untrustworthy records reachable.
+    ##
+    ## Every reader degrades to a MISS rather than an error, verified by
+    ## reading each call site rather than assumed: `decodeRecord` is the ONLY
+    ## parser of RBAR bytes in the tree, and its four callers are
+    ## `decodePerEdgeFileWithSeq` (stops at the first undecodable frame and
+    ## returns a shorter list; `loadPerEdgeRecords` treats an empty list as an
+    ## undecodable container), `perEdgeRecordFileIsIntact` (returns false),
+    ## `decodeActionResultRecord` via the peer-cache bundle decoder (wrapped in
+    ## `except CatchableError` -> peer miss), and the standalone `.rbar`
+    ## diagnostic reader. The shm tier stores digests, not bytes, and reopens
+    ## the containers through the same path.
   MaxRecordPathTableEntries = 4_000_000'u32
   # Per-edge record file: a small self-describing container holding the
   # edge's bounded record set. Each contained record is the existing
@@ -2202,7 +2294,10 @@ proc encodeRecord(record: ActionResultRecord): seq[byte] =
   result.add(byte(ord(ActionRecordMagic[1])))
   result.add(byte(ord(ActionRecordMagic[2])))
   result.add(byte(ord(ActionRecordMagic[3])))
-  result.writeU16Le(ActionRecordVersionInterned)
+  # v6 is the v5 LAYOUT with a version word that says the producer's evidence
+  # can be believed -- see `ActionRecordVersionEvidenceEpoch`. Nothing below
+  # this line changed when the epoch was drawn.
+  result.writeU16Le(ActionRecordVersionEvidenceEpoch)
   result.writeDigest(record.weakFingerprint)
   result.add(byte(ord(record.policy)))
   let paths = buildRecordPathTable(record)
@@ -2217,10 +2312,10 @@ proc encodeRecord(record: ActionResultRecord): seq[byte] =
     result.add(if input.hasLocalHash: 1'u8 else: 0'u8)
     if input.hasLocalHash:
       result.writeLocalHash(input.localHash)
-  # v5 always carries the env count, zero included. v4 appended the section
-  # only when non-empty because doing otherwise would have rewritten every
-  # record's bytes for nothing; v5 is already rewriting them, so the format
-  # takes the simpler shape rather than carrying the conditional forward.
+  # v5 and later always carry the env count, zero included. v4 appended the
+  # section only when non-empty because doing otherwise would have rewritten
+  # every record's bytes for nothing; v5 was already rewriting them, so the
+  # format took the simpler shape rather than carrying the conditional forward.
   result.writeU32Le(uint32(record.envInputs.len))
   for env in record.envInputs:
     result.writeString(env.name)
@@ -2252,8 +2347,12 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       raiseEnvelopeError(eeUnknownMagic, "unknown action record magic")
   var pos = 4
   let version = readU16Le(payload, pos)
-  if version notin {2'u16, ActionRecordVersion, ActionRecordVersionEnv,
-      ActionRecordVersionInterned}:
+  # Versions 2, 3, 4 and 5 are deliberately NOT accepted. They are the frames
+  # written while the no-evidence publish guard was dead, and refusing them is
+  # the whole mechanism -- see `ActionRecordVersionEvidenceEpoch`. This is a
+  # trust decision, so it is a SET and not a `>=`: a version is readable only
+  # once someone has said why it is trustworthy.
+  if version notin {ActionRecordVersionEvidenceEpoch}:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported action record version")
   let interned = version >= ActionRecordVersionInterned
   result.weakFingerprint = readDigest(payload, pos)
@@ -3487,6 +3586,16 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     for record in records:
       if record.weakFingerprint == probe.weakFingerprint and
           record.policy == probe.policy:
+        # A record with nothing in it to check is not a hit. Reported as
+        # `hmssMissingRecord` rather than a new status because that is what it
+        # means to the caller — there is no usable record here — and it is
+        # already the status that sends the graph to the full scheduler, where
+        # the per-edge refusal states the reason. See
+        # `HotMetadataProbe.refuseRecordWithNoInputs`.
+        if probe.refuseRecordWithNoInputs and record.inputs.len == 0 and
+            record.envInputs.len == 0:
+          return HotMetadataScan(status: hmssMissingRecord,
+            recordCount: totalRecords, checkedInputCount: checkedInputs)
         # M10 — the OBSERVED ENVIRONMENT has to be checked on this path too.
         # It is the whole-graph "everything is already up to date" shortcut,
         # so a record whose environment moved and is not caught HERE is served

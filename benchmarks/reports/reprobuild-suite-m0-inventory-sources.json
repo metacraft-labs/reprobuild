@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1480,
+    "nimTestBinaries": 1481,
     "pureUnitConsolidationGroups": 51,
-    "pureUnitTests": 597,
+    "pureUnitTests": 598,
     "staticallyDetectedRuntimeCompilerFlowTests": 83,
-    "testEntries": 1485
+    "testEntries": 1486
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1135,7 +1135,7 @@
       "graph-fixture": 16,
       "integration": 639,
       "platform/destructive": 107,
-      "pure unit": 597,
+      "pure unit": 598,
       "unclassified": 126
     },
     "graphOwnedTestArtifacts": [
@@ -1248,9 +1248,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1480,
+    "nimTestBinaryCount": 1481,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1485
+    "testEntryCount": 1486
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5411,6 +5411,28 @@
       "source": "libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dark_window_cache_records_are_drained",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_depfile",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

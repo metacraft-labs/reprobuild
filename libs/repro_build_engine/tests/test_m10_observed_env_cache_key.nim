@@ -250,36 +250,45 @@ suite "M10 the observed-environment record round-trips":
     check decoded.strongFingerprint == record.strongFingerprint
 
   test "a record with NO env inputs did not have its CACHE KEY moved":
-    ## REWRITTEN for the §5.5 C4 record-format bump
-    ## (Action-Cache-Per-Edge-Store.md). It used to read
-    ## `check version == 3'u16`, on the reasoning that "an older reader must
-    ## still accept the record, which it only does if the version field did
-    ## not move" — the guarantee M10 needed, because M10 was adding a field
-    ## and had no business costing the world a rebuild for it.
+    ## REWRITTEN TWICE, and the two rewrites pull in opposite directions, so
+    ## both reasons are recorded here.
     ##
-    ## C4 spends that version field deliberately, once, and §5.5
-    ## "Compatibility" states the consequence it accepts: an older reader
-    ## treats the new records as absent and re-executes. So the old
-    ## assertion is now asserting the opposite of the intended behaviour and
-    ## could only be satisfied by reverting C4.
+    ## Originally this read `check version == 3'u16`, on the reasoning that
+    ## "an older reader must still accept the record, which it only does if
+    ## the version field did not move" — the guarantee M10 needed, because M10
+    ## was adding a field and had no business costing the world a rebuild for
+    ## it.
     ##
-    ## What it was PROTECTING, though, is untouched and is what this case
-    ## checks instead: that M10's env section still costs nothing to a
-    ## record that has none. That was always two claims wearing one
-    ## assertion —
+    ## The §5.5 C4 record-format bump (Action-Cache-Per-Edge-Store.md) spent
+    ## that version field deliberately, so the assertion was dropped: it had
+    ## become a claim that could only be satisfied by reverting C4.
+    ##
+    ## The version field is now pinned AGAIN, but it is no longer a
+    ## compatibility claim — it is a TRUST one. `ActionRecordVersionEvidence`
+    ## `Epoch` (6) is the first version written by a binary whose no-evidence
+    ## publish guard actually fires; every earlier version, 5 included, was
+    ## written while that guard was dead. So the number this case pins is the
+    ## epoch, and pinning it is the point: an accidental change to it is
+    ## either a silent cache wipe or a silent un-drain, and both should fail
+    ## here rather than in the field.
+    ##
+    ## What the case was always FOR is untouched: that M10's env section still
+    ## costs nothing to a record that has none. That was two claims wearing
+    ## one assertion —
     ##
     ##   1. the STRONG FINGERPRINT of an env-free record is unchanged, which
     ##      is the half that would invalidate every cache on every machine;
     ##      and
     ##   2. the encoded bytes carry no env section.
     ##
-    ## Claim 1 is the one worth having, and it is now checked directly rather
-    ## than through a proxy — the version field never actually established
-    ## it, since the key is computed by `computeStrongFingerprint` and not by
-    ## the record encoder at all.
-    ## The record carries real INPUT PATHS, deliberately. An input-free
-    ## record would pin a key that no path ever reached, and the change most
-    ## likely to move this key by accident is one to how paths are written.
+    ## Claim 1 is the one worth having, and it is checked directly rather than
+    ## through a proxy — the version field never actually established it,
+    ## since the key is computed by `computeStrongFingerprint` and not by the
+    ## record encoder at all.
+    ##
+    ## The record carries real INPUT PATHS, deliberately. An input-free record
+    ## would pin a key that no path ever reached, and the change most likely
+    ## to move this key by accident is one to how paths are written.
     var record = ActionResultRecord(
       weakFingerprint: weakFingerprintFromText("legacy-fixture-edge"),
       policy: ffpTimestamp,
@@ -302,9 +311,47 @@ suite "M10 the observed-environment record round-trips":
     # And it is this exact value, pinned to what the binary that predates
     # BOTH M10 and C4 computed for it. A change to the key payload fails
     # here rather than silently costing every machine one full rebuild.
+    #
+    # THIS VALUE MUST NOT MOVE WITH THE EPOCH. The epoch changes which
+    # records are READ; it does not change how a key is COMPUTED. If this
+    # digest ever moves in the same commit as a version bump, the bump
+    # reached into `strongIdentityPayload` and is doing more than it says.
     check digestHex(record.strongFingerprint) ==
       "28c642b92be7b7deafe4cc2394d8a4f0c99d9e0e1c3a8e6de09ee44d7ddb3a51"
     # 2. Nothing decodes back as an env input.
     let encoded = encodeActionResultRecord(record)
     check encoded.len > 6
+    # Literals rather than the constants, deliberately: asserting
+    # `version == ActionRecordVersionEvidenceEpoch` would hold at every
+    # version and pin nothing. A number a contributor has to change on
+    # purpose is the whole mechanism.
+    let version = uint16(encoded[4]) or (uint16(encoded[5]) shl 8)
+    check version == 6'u16
     check decodeActionResultRecord(encoded).envInputs.len == 0
+
+    # ... and the env-carrying record is at the SAME version, not the next
+    # one. This used to assert a PAIRING (env-free at N, env-carrying at N+1)
+    # because v4 appended the env section only when it was non-empty. Since
+    # v5 the count is always written, zero included, so the optional-section
+    # pairing no longer exists and asserting it would re-introduce a
+    # conditional the format deliberately dropped.
+    var withEnv = record
+    withEnv.envInputs = @[EnvFingerprint(name: "X", present: true, value: "1")]
+    withEnv.strongFingerprint = computeStrongFingerprint(
+      withEnv.weakFingerprint, withEnv.inputs, withEnv.envInputs)
+    let encodedEnv = encodeActionResultRecord(withEnv)
+    let envVersion = uint16(encodedEnv[4]) or (uint16(encodedEnv[5]) shl 8)
+    check envVersion == 6'u16
+    check decodeActionResultRecord(encodedEnv).envInputs.len == 1
+
+    # 3. THE REFUSAL, which is what makes the epoch a drain rather than a
+    #    relabelling. A frame that is byte-identical to one this encoder
+    #    produces, differing ONLY in its version word, is refused for every
+    #    pre-epoch version — including 5, which is the one a binary built
+    #    from mainline today still writes.
+    for stale in [2'u16, 3'u16, 4'u16, 5'u16]:
+      var patched = encoded
+      patched[4] = byte(stale and 0xff'u16)
+      patched[5] = byte((stale shr 8) and 0xff'u16)
+      expect EnvelopeError:
+        discard decodeActionResultRecord(patched)
