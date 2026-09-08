@@ -87,6 +87,29 @@ proc actionFailureDiagnostic(run: BuildRunResult): string =
 
 # ---------------------------------------------------------------------------
 # BuildAction construction (mirror of providerCompileBuildAction).
+#
+# The mirror is of the action's SHAPE, and it deliberately stops short of the
+# provider-compile edge's determinism claim. Do not finish the symmetry:
+#
+#   * The provider edge may state that the compiler's randomness cannot reach
+#     its output because that helper only ever compiles. THIS helper does not
+#     stop at compiling -- `compileProfileBinary` runs the binary it just
+#     built and re-encodes that run's stdout into the published envelope, so
+#     the produced program's behaviour IS the output. The provider's
+#     justification is exactly the property this edge lacks, and repeating it
+#     here would assert something untrue.
+#   * The provider edge's environment passthrough names the compiler and C
+#     toolchain it is handed (`REPRO_NIM_COMPILER`, `REPRO_BOOTSTRAP_CC`, the
+#     provider nimcache session). This edge reads none of them: it finds Nim
+#     with `findExe` and takes its scratch location from argv, so declaring
+#     that list would name variables the edge never consumes.
+#
+# Nor is anything waiting to be fixed by them. The provider edge had to answer
+# from the action cache because that was its only warm path;
+# `compileProfileToRbpi` short-circuits on the source-set digest before the
+# build engine is reached at all, which is what
+# `t_e2e_repro_profile_compile_via_action` pins as "second call hits the
+# structural cache without spawning nim".
 # ---------------------------------------------------------------------------
 
 proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
