@@ -6484,14 +6484,15 @@
         "io_mon",
         "repro_build_engine",
         "repro_core",
+        "repro_depfile",
         "repro_hash",
         "repro_local_store"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

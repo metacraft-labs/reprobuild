@@ -99,6 +99,8 @@ import std/[os, strutils, unittest]
 
 import repro_build_engine
 import repro_core
+import repro_core/paths as corepaths
+import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/[types, writer, capabilities]
@@ -132,6 +134,8 @@ type Fixture = object
   rmdfPath: string
   runLogPath: string
   observedPath: string
+  makeDepfilePath: string
+  pathSetPath: string
 
 proc runCount(f: Fixture): int =
   if not fileExists(f.runLogPath):
@@ -154,7 +158,9 @@ proc makeFixture(name: string): Fixture =
     cacheRoot: root / "cache",
     rmdfPath: workRoot / "observed.iomon",
     runLogPath: workRoot / "runs.log",
-    observedPath: workRoot / "observed.txt")
+    observedPath: workRoot / "observed.txt",
+    makeDepfilePath: workRoot / "deps.d",
+    pathSetPath: workRoot / "converted.pathset")
   writeFile(result.observedPath, "generation-1\n")
 
 proc writeRmdf(f: Fixture; records: seq[MonitorRecord]) =
@@ -220,6 +226,138 @@ proc runEdge(f: Fixture; id: string; cacheable = true): BuildAction =
     weakFingerprint = weak(id),
     actionCachePolicy = ffpHybrid,
     dependencyPolicy = automaticMonitorGatheringPolicy(),
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+  result.monitorDepfile = f.rmdfPath
+
+proc iomonReportEdge(f: Fixture; id: string): BuildAction =
+  ## THE OTHER PRODUCER OF MONITOR EVIDENCE, and the reason it is here.
+  ##
+  ## `collectEvidence` reaches `applyMonitorEvidenceStatus` from TWO places,
+  ## not one: the wrapped/hosted monitor arm that `runEdge` above exercises,
+  ## and this one — an edge whose own command PRODUCES an `.iomon` capture
+  ## which the engine consumes as the edge's evidence
+  ## (`IomonFormatName` / `iomonReportPolicy`), instead of monitoring the
+  ## orchestrator process. Both arms fold through `foldMonitorDepFileEvidence`
+  ## and both ask the zero-evidence question, so the guard has to hold on
+  ## both.
+  ##
+  ## MEASURED, and this is why the case exists rather than being assumed
+  ## covered: deleting `applyMonitorEvidenceStatus` from the recognized-report
+  ## arm outright left this whole file GREEN. Nothing in the tree drives an
+  ## `IomonFormatName` report end to end — `iomonReportPolicy` has call sites
+  ## in the DSL and none in any test that builds — so that arm's Level 0-3
+  ## handling, the zero-evidence guard included, was graded by nothing at all.
+  ## The claim that the launcher's root-image fold runs after "every"
+  ## `applyMonitorEvidenceStatus` call was therefore only half checkable.
+  ##
+  ## The policy is spelled out here rather than imported because the
+  ## constructor that builds it (`iomonReportGatheringPolicy`) is private to
+  ## `repro_cli_support`; the shape is its shape, and `IomonFormatName` is the
+  ## same constant the engine routes on.
+  ##
+  ## Note also what this edge does NOT get: its policy is not in
+  ## `MonitorPolicyKinds`, so `foldLauncherRootImage` contributes nothing to
+  ## it. Its `monitorReads` is exactly what the capture said, which is what
+  ## makes the assertions below able to name the whole set.
+  result = action(id,
+    ["/bin/sh", "-c", "echo ran >> " & f.runLogPath],
+    cwd = f.workRoot,
+    inputs = [],
+    outputs = [],
+    cacheable = true,
+    weakFingerprint = weak(id),
+    actionCachePolicy = ffpHybrid,
+    dependencyPolicy = DependencyGatheringPolicy(
+      kind: dgRecognizedFormat,
+      completeness: decComplete,
+      recognizedReports: @[
+        RecognizedDependencyReportSpec(
+          formatName: DependencyFormatName(IomonFormatName),
+          outputs: @[ExpectedDependencyFile(
+            logicalName: "iomon", path: f.rmdfPath, required: true)],
+          completeness: decComplete)]),
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+proc reportValidatedByMonitorEdge(f: Fixture; id: string): BuildAction =
+  ## `dgRecognizedFormatValidatedByMonitor` — the SECOND member of
+  ## `MonitorPolicyKinds`, and until this case existed the guard was graded on
+  ## the first member only.
+  ##
+  ## WHY THAT GAP WAS LOAD-BEARING RATHER THAN COSMETIC. `runEdge` above is
+  ## `dgAutomaticMonitor`; the recognized-report suite is `dgRecognizedFormat`,
+  ## which is NOT in `MonitorPolicyKinds` at all, so `foldLauncherRootImage`
+  ## contributes nothing to it. Between them they left both "validated by
+  ## monitor" kinds — the two policies that carry a monitor capture AND an
+  ## author-declared report — with the launcher fold ACTIVE and the guard
+  ## UNGRADED. Measured: re-seeding `monitorReads` with the root image before
+  ## `applyMonitorEvidenceStatus` for exactly these two kinds reopens the
+  ## defect this file is about for two thirds of the monitored policy set, and
+  ## every case in this file stayed green.
+  ##
+  ## The declared report is a make depfile naming a target and NO
+  ## prerequisites, so `depfileInputs` stays empty and the only thing that can
+  ## answer "did the monitor observe anything?" is the capture. The action
+  ## writes it, because `required: true` means a missing report is a different
+  ## failure than the one under test.
+  result = action(id,
+    ["/bin/sh", "-c", "echo ran >> " & f.runLogPath &
+      "; printf 'out:\\n' > " & f.makeDepfilePath],
+    cwd = f.workRoot,
+    inputs = [],
+    outputs = [],
+    cacheable = true,
+    weakFingerprint = weak(id),
+    actionCachePolicy = ffpHybrid,
+    dependencyPolicy = DependencyGatheringPolicy(
+      kind: dgRecognizedFormatValidatedByMonitor,
+      completeness: decComplete,
+      recognizedReports: @[
+        RecognizedDependencyReportSpec(
+          formatName: DependencyFormatName(MakeDepfileFormatName),
+          outputs: @[ExpectedDependencyFile(
+            logicalName: "deps", path: f.makeDepfilePath, required: true)],
+          completeness: decComplete)]),
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+  result.monitorDepfile = f.rmdfPath
+
+proc converterValidatedByMonitorEdge(f: Fixture; id: string;
+                                     converterReports = ""): BuildAction =
+  ## `dgPostBuildConverterValidatedByMonitor` — the THIRD and last member of
+  ## `MonitorPolicyKinds`, graded for the same reason as the one above.
+  ##
+  ## `converterReports` is the body the converter appends to its
+  ## `repro-pathset-v1` output. Empty is the zero case; an `input\t<path>`
+  ## line is the narrowness case — and note WHICH channel that line lands in:
+  ## `addPathSet(recognized = false)` folds a converter's declared inputs into
+  ## `monitorReads`, the same seq the monitor's own observations use. So this
+  ## arm also pins that a converter-reported path is accepted as evidence,
+  ## which is a deliberate, spec'd decision ("an action with one recorded
+  ## probe has said something about the world") and not the accident this file
+  ## exists to prevent. Recording it here means a future change to that
+  ## decision fails a test that names it.
+  result = action(id,
+    ["/bin/sh", "-c", "echo ran >> " & f.runLogPath],
+    cwd = f.workRoot,
+    inputs = [],
+    outputs = [],
+    cacheable = true,
+    weakFingerprint = weak(id),
+    actionCachePolicy = ffpHybrid,
+    dependencyPolicy = DependencyGatheringPolicy(
+      kind: dgPostBuildConverterValidatedByMonitor,
+      completeness: decComplete,
+      postBuildConverters: @[
+        PostBuildDependencyConverterSpec(
+          converterProcess: directProcess(
+            corepaths.normalizedPath("/bin/sh"),
+            ["-c", "printf 'repro-pathset-v1\\n" & converterReports & "' > " &
+              f.pathSetPath],
+            corepaths.normalizedPath(f.workRoot)),
+          outputs: @[ExpectedDependencyFile(
+            logicalName: "path-set", path: f.pathSetPath, required: true)],
+          outputKind: dcoReproPathSet,
+          outputFormatName: DependencyFormatName(ReproPathSetFormatName),
+          completeness: decComplete)]),
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
   result.monitorDepfile = f.rmdfPath
 
@@ -362,6 +500,205 @@ suite "an edge that observed nothing is not cacheable":
 
     check runBuild(g, config).byId(act.id).status == asSucceeded
     check f.runCount() == 2
+
+suite "the same guard holds on the recognized-report evidence arm":
+  ## `collectEvidence` has a second `applyMonitorEvidenceStatus` call site and
+  ## it decides the same thing for a different class of edge. Graded here so
+  ## that "the guard is armed" is a statement about the engine rather than
+  ## about one launch path.
+
+  test "zero observations in a produced .iomon: the edge does not publish":
+    let f = makeFixture("report-zero")
+    defer: removeDir(f.root)
+    f.writeRmdf(@[processRecord()])
+    let act = f.iomonReportEdge("report-zero-evidence/run")
+    let g = graph([act])
+    let config = testConfig(f.cacheRoot)
+
+    let first = runBuild(g, config)
+    let r0 = first.byId(act.id)
+    checkpoint("first: status=" & $r0.status &
+      " reads=" & $r0.evidence.monitorReads.len &
+      " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+    check r0.status == asSucceeded
+    check f.runCount() == 1
+    # Genuinely empty, and on this arm there is no launcher contribution to
+    # subtract: the whole observed set is what the capture carried.
+    check r0.evidence.monitorReads.len == 0
+    check r0.evidence.monitorWrites.len == 0
+    check r0.evidence.monitorProbes.len == 0
+    check r0.evidence.depfileInputs.len == 0
+
+    let diagnosed = r0.evidence.diagnostics.join(" ")
+    check diagnosed.contains("no observation of any kind")
+    check diagnosed.contains(act.id)
+    check not f.hasRecord(act)
+
+    let warm = runBuild(g, config)
+    let r1 = warm.byId(act.id)
+    checkpoint("warm: decision=" & $r1.cacheDecision &
+      " launched=" & $r1.launched)
+    check r1.cacheDecision notin ReuseDecisions
+    check r1.launched
+    check f.runCount() == 2
+
+  test "one observation in a produced .iomon: the edge publishes and is reused":
+    # The narrowness arm again, on this arm. Without it, "does not publish"
+    # would also be satisfied by an engine that refused every edge of this
+    # class for some unrelated reason.
+    let f = makeFixture("report-one")
+    defer: removeDir(f.root)
+    f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
+    let act = f.iomonReportEdge("report-one-observation/run")
+    let g = graph([act])
+    let config = testConfig(f.cacheRoot)
+
+    let first = runBuild(g, config)
+    let r0 = first.byId(act.id)
+    checkpoint("first: status=" & $r0.status &
+      " reads=" & $r0.evidence.monitorReads)
+    check r0.status == asSucceeded
+    check r0.evidence.monitorReads == @[f.observedPath]
+    check f.runCount() == 1
+    check f.hasRecord(act)
+
+    let warm = runBuild(g, config)
+    let r1 = warm.byId(act.id)
+    checkpoint("warm: decision=" & $r1.cacheDecision &
+      " launched=" & $r1.launched)
+    check r1.cacheDecision in ReuseDecisions
+    check f.runCount() == 1
+
+suite "the guard holds for every monitored policy kind, not just the first":
+  ## `foldLauncherRootImage` is scoped to `MonitorPolicyKinds`, which has
+  ## THREE members. The suites above grade `dgAutomaticMonitor` (where the
+  ## fold is active) and `dgRecognizedFormat` (where it is not). These two
+  ## cases are the remaining members — the ones that carry BOTH a monitor
+  ## capture and an author-declared report — so "the launcher's contribution
+  ## cannot answer the monitor's question" is a statement about the scope of
+  ## the fold rather than about one policy that happens to be tested.
+  ##
+  ## MEASURED, which is why they exist: re-seeding `monitorReads` before
+  ## `applyMonitorEvidenceStatus` for exactly `{dgRecognizedFormat` &
+  ## `ValidatedByMonitor, dgPostBuildConverterValidatedByMonitor}` — the
+  ## original defect, narrowed to the two kinds nothing covered — left every
+  ## other case in this file green.
+
+  test "recognized-format-validated-by-monitor: zero observations do not publish":
+    let f = makeFixture("validated-report-zero")
+    defer: removeDir(f.root)
+    f.writeRmdf(@[processRecord()])
+    let act = f.reportValidatedByMonitorEdge("validated-report-zero/run")
+    let g = graph([act])
+    let config = testConfig(f.cacheRoot)
+
+    let first = runBuild(g, config)
+    let r0 = first.byId(act.id)
+    checkpoint("first: status=" & $r0.status &
+      " reads=" & $r0.evidence.monitorReads &
+      " depfileInputs=" & $r0.evidence.depfileInputs &
+      " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+    check r0.status == asSucceeded
+    check f.runCount() == 1
+    # The declared report contributed no prerequisite, so the launcher's
+    # root image is again the whole of `monitorReads` and nothing else has
+    # said anything about the world.
+    check r0.evidence.monitorReads == @[RootImage]
+    check r0.evidence.depfileInputs.len == 0
+    check r0.evidence.monitorWrites.len == 0
+    check r0.evidence.monitorProbes.len == 0
+
+    let diagnosed = r0.evidence.diagnostics.join(" ")
+    check diagnosed.contains("no observation of any kind")
+    check diagnosed.contains(act.id)
+    check not f.hasRecord(act)
+
+    let warm = runBuild(g, config)
+    let r1 = warm.byId(act.id)
+    checkpoint("warm: decision=" & $r1.cacheDecision)
+    check r1.cacheDecision notin ReuseDecisions
+    check r1.launched
+    check f.runCount() == 2
+
+  test "recognized-format-validated-by-monitor: one observation publishes":
+    let f = makeFixture("validated-report-one")
+    defer: removeDir(f.root)
+    f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
+    let act = f.reportValidatedByMonitorEdge("validated-report-one/run")
+    let g = graph([act])
+    let config = testConfig(f.cacheRoot)
+
+    let first = runBuild(g, config)
+    let r0 = first.byId(act.id)
+    checkpoint("first: reads=" & $r0.evidence.monitorReads)
+    check r0.status == asSucceeded
+    # Observation first, launcher reconstruction last — the same ordering the
+    # `dgAutomaticMonitor` case pins, asserted again on the policy kind where
+    # BOTH `applyMonitorEvidenceStatus` producers can run.
+    check r0.evidence.monitorReads == @[f.observedPath, RootImage]
+    check f.hasRecord(act)
+    check f.runCount() == 1
+
+    let warm = runBuild(g, config)
+    check warm.byId(act.id).cacheDecision in ReuseDecisions
+    check f.runCount() == 1
+
+  test "converter-validated-by-monitor: zero observations do not publish":
+    let f = makeFixture("validated-converter-zero")
+    defer: removeDir(f.root)
+    f.writeRmdf(@[processRecord()])
+    let act = f.converterValidatedByMonitorEdge("validated-converter-zero/run")
+    let g = graph([act])
+    let config = testConfig(f.cacheRoot)
+
+    let first = runBuild(g, config)
+    let r0 = first.byId(act.id)
+    checkpoint("first: status=" & $r0.status &
+      " reads=" & $r0.evidence.monitorReads &
+      " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+    check r0.status == asSucceeded
+    check f.runCount() == 1
+    check r0.evidence.monitorReads == @[RootImage]
+    check r0.evidence.depfileInputs.len == 0
+    check r0.evidence.monitorWrites.len == 0
+    check r0.evidence.monitorProbes.len == 0
+
+    let diagnosed = r0.evidence.diagnostics.join(" ")
+    check diagnosed.contains("no observation of any kind")
+    check diagnosed.contains(act.id)
+    check not f.hasRecord(act)
+
+    let warm = runBuild(g, config)
+    let r1 = warm.byId(act.id)
+    check r1.cacheDecision notin ReuseDecisions
+    check r1.launched
+    check f.runCount() == 2
+
+  test "converter-validated-by-monitor: one converted input publishes":
+    let f = makeFixture("validated-converter-one")
+    defer: removeDir(f.root)
+    f.writeRmdf(@[processRecord()])
+    let act = f.converterValidatedByMonitorEdge("validated-converter-one/run",
+      converterReports = "input\\t" & f.observedPath & "\\n")
+    let g = graph([act])
+    let config = testConfig(f.cacheRoot)
+
+    let first = runBuild(g, config)
+    let r0 = first.byId(act.id)
+    checkpoint("first: status=" & $r0.status &
+      " reads=" & $r0.evidence.monitorReads &
+      " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+    check r0.status == asSucceeded
+    # The converter's declared input lands in `monitorReads` BEFORE the
+    # launcher's reconstruction, and it is what makes this edge publish while
+    # the case above does not.
+    check r0.evidence.monitorReads == @[f.observedPath, RootImage]
+    check f.hasRecord(act)
+    check f.runCount() == 1
+
+    let warm = runBuild(g, config)
+    check warm.byId(act.id).cacheDecision in ReuseDecisions
+    check f.runCount() == 1
 
 suite "the zero-evidence diagnostic names the platform's floor regime":
   ## Both regimes are graded here, on whatever host runs the suite. The
