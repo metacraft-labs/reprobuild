@@ -1711,7 +1711,21 @@ test "incomplete name" and:
                 "t_branch_forks_new_workspace_on_feature_branch",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 14,
+                # 14 -> 16. The source declares sixteen cases and has for some
+                # time; the pin was simply not moved with it. Recomputed from
+                # the tree, and the independent static scan behind
+                # `scripts/reprobuild-suite-static-case-counts.tsv` agrees
+                # (16), which is the second opinion this pin exists to have.
+                # The two added cases are unconditional — no platform gate —
+                # so they move Linux and Darwin alike and the exact delta
+                # asserted further down is untouched.
+                #
+                # This sat behind the catalog-delta assertion, which runs
+                # first in the same test and was itself failing, so the suite
+                # never reached this line to report it. Exactly the shape the
+                # comment at the M19b entry below warns about: a stale pin
+                # hiding until something ahead of it stops failing.
+                "sourceCaseCount": 16,
                 "class": "integration",
             },
             "recipes/packages/source/grub/test_grub_source.nim": {
@@ -6693,6 +6707,21 @@ compileProfileBinary()
             # sources the twelve upstream PRs merged here added, and it is the
             # only one of the 42 that joined this census at all.
             "libs/repro_build_engine/tests/test_engine_worker_pool.nim",
+            # Same disposition as the eight above, reached through the
+            # INVERTED spelling of their gate. This file writes
+            # `when not (defined(linux) or defined(macosx)):` — a skip-only
+            # suite for hosts that are neither — and puts every real
+            # declaration under an `else:` at the gate's own indentation.
+            #
+            # So the "no `else:` at the gate's indentation" evidence the eight
+            # above are held to is literally false here, and reading that rule
+            # as a syntactic test would file this source under `exclusive`.
+            # The rule is a proxy for the property, and the property is what
+            # decides: Linux and Darwin both fail `not (linux or macosx)` and
+            # both take the `else:`, so both select the identical catalog and
+            # the source contributes nothing to the delta. Cardinality-neutral,
+            # which is why the (24, 22) assertion below does not move.
+            "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim",
         }
         gated_sources = self.platform_gated_test_sources(data)
         self.assertEqual(gated_sources, set(exclusive) | catalog_identical)
@@ -6701,7 +6730,7 @@ compileProfileBinary()
         # tables without saying so. The equality alone is satisfied by any
         # partition of the census.
         self.assertEqual(len(exclusive), 16)
-        self.assertEqual(len(catalog_identical), 10)
+        self.assertEqual(len(catalog_identical), 11)
 
         by_source = {item["source"]: item for item in data["tests"]}
         for source, expected_by_host in exclusive.items():
