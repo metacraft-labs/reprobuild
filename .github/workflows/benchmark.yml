@@ -31,6 +31,72 @@ jobs:
             runner: '["eph-macos-arm64"]'  # CIP-5: nix macOS benchmark leg → eph-macos-arm64
     runs-on: ${{ fromJSON(matrix.runner) }}
     steps:
+      # Deliberately the first step. It decides whether the two
+      # github-action-benchmark steps at the end of this job can run at
+      # all, and a broken remote query should cost seconds rather than the
+      # half hour of nix builds and benchmarking that follows.
+      #
+      # Both of those steps read the benchmark history from a `gh-pages`
+      # data branch. Upstream reaches it with a bare `git switch
+      # gh-pages` and has no fallback that creates the branch (see
+      # `writeBenchmarkToGitHubPages` in benchmark-action's src/write.ts),
+      # so on a repository that has never published history the action
+      # aborts with:
+      #   fatal: invalid reference: gh-pages
+      # Note that `skip-fetch-gh-pages: true` does not avoid this; it
+      # skips the fetch, not the switch.
+      #
+      # Resolving the branch here, up front, is what lets those steps say
+      # plainly whether they ran and why. Previously the PR comparison
+      # simply hit the error above and hid it behind
+      # `continue-on-error: true`, so every pull request produced an
+      # `##[error]` line inside a green check and no comparison comment.
+      - name: Detect published benchmark history
+        id: bench_history
+        env:
+          # Neutralise the persistent runner's git configuration and
+          # credential helper, as the build steps below do, and rewrite
+          # the remote to an authenticated URL so this keeps working if
+          # the repository ever stops being public.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ github.token }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+        run: |
+          set -uo pipefail
+          branch=gh-pages
+          remote="https://github.com/${{ github.repository }}.git"
+
+          status=0
+          git ls-remote --exit-code --heads "${remote}" "refs/heads/${branch}" \
+            >/dev/null 2>&1 || status=$?
+
+          case "${status}" in
+            0)
+              echo "present=true" >> "${GITHUB_OUTPUT}"
+              echo "Benchmark history branch '${branch}' is present."
+              ;;
+            2)
+              # `--exit-code` reports 2 for "the query succeeded and
+              # matched no refs". That is the ordinary state of a
+              # repository that has not commissioned benchmark history,
+              # and it is not an error.
+              echo "present=false" >> "${GITHUB_OUTPUT}"
+              echo "Benchmark history branch '${branch}' does not exist in ${{ github.repository }}."
+              ;;
+            *)
+              # Anything else means the question was never answered:
+              # transport, authentication, DNS. Guessing "no history"
+              # here would silently disable benchmark comparison and
+              # publishing for as long as the fault lasted, which is the
+              # class of bug this step exists to remove. Fail instead.
+              echo "::error::Could not determine whether branch '${branch}' exists in ${{ github.repository }}: git ls-remote exited ${status} (expected 0 for present, 2 for absent). This is a failed query, not an absent branch, so the benchmark steps below cannot be resolved either way."
+              exit "${status}"
+              ;;
+          esac
+
       - name: Checkout Reprobuild
         uses: actions/checkout@v4
         with:
@@ -125,9 +191,17 @@ jobs:
           path: reprobuild/bench-results/
           retention-days: 30
 
+      # Gating: no `continue-on-error`. If the comparison runs at all it
+      # has to succeed, because a comparison that fails halfway tells us
+      # nothing and must not be mistaken for "no regression". The single
+      # condition that legitimately stops it — a repository with no
+      # published history to compare against — is decided by the first
+      # step of this job and announced by the next step, rather than
+      # being swallowed here.
       - name: Compare pull request benchmarks
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
+        if: >-
+          github.event_name == 'pull_request'
+          && steps.bench_history.outputs.present == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           tool: customSmallerIsBetter
@@ -139,8 +213,54 @@ jobs:
           comment-always: true
           alert-threshold: '120%'
 
-      - name: Publish main benchmark history
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Report skipped benchmark comparison
+        if: >-
+          github.event_name == 'pull_request'
+          && steps.bench_history.outputs.present != 'true'
+        run: |
+          set -euo pipefail
+          cat >> "${GITHUB_STEP_SUMMARY}" <<'SUMMARY'
+          ### Benchmark comparison skipped
+
+          Comparison against historical results is **optional** and was skipped
+          because this repository has no `gh-pages` branch, which is where
+          benchmark history is stored. There is nothing to compare this run
+          against.
+
+          This is not a failure. The benchmarks themselves ran, and their raw
+          results are attached to this run as a `benchmark-results-*` artifact.
+
+          To switch comparison on, commission the history branch once:
+
+          ```sh
+          git switch --orphan gh-pages
+          git commit --allow-empty -m "Initialise benchmark history"
+          git push origin gh-pages
+          ```
+
+          The publish step of this workflow then records a data point per push
+          to `dev`, and this comparison becomes active and gating on every pull
+          request.
+          SUMMARY
+          echo "::notice::Benchmark comparison skipped: no gh-pages branch, so there is no published history to compare against. This is optional and not an error; see the job summary for how to enable it."
+
+      # Retargeted from `refs/heads/main`, which this repository does not
+      # have and which this workflow never triggers on (see `on.push`
+      # above), so the step could not run under any circumstances and the
+      # history it was supposed to write was never written. `dev` is the
+      # mainline.
+      #
+      # Also gated on the history branch existing, because upstream
+      # cannot create it (see the first step of this job): without the
+      # guard the first push to `dev` would fail here rather than
+      # publish. Commissioning the branch is a deliberate, one-time
+      # decision, so the next step asks for it out loud instead of this
+      # workflow creating a branch as a side effect.
+      - name: Publish benchmark history
+        if: >-
+          github.event_name == 'push'
+          && github.ref == 'refs/heads/dev'
+          && steps.bench_history.outputs.present == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           tool: customSmallerIsBetter
@@ -150,3 +270,34 @@ jobs:
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: perf/bench/${{ matrix.platform }}
           alert-threshold: '120%'
+
+      - name: Report unpublished benchmark history
+        if: >-
+          github.event_name == 'push'
+          && github.ref == 'refs/heads/dev'
+          && steps.bench_history.outputs.present != 'true'
+        run: |
+          set -euo pipefail
+          cat >> "${GITHUB_STEP_SUMMARY}" <<'SUMMARY'
+          ### Benchmark history not published
+
+          Publishing is **inactive** because this repository has no `gh-pages`
+          branch. It is not disabled in this workflow and it did not fail: the
+          branch simply does not exist yet, and
+          `benchmark-action/github-action-benchmark` cannot create it.
+
+          Results for this run are attached as a `benchmark-results-*`
+          artifact, with the retention shown on the upload step.
+
+          To start recording history, create the branch once:
+
+          ```sh
+          git switch --orphan gh-pages
+          git commit --allow-empty -m "Initialise benchmark history"
+          git push origin gh-pages
+          ```
+
+          From the next push to `dev` this step publishes under `perf/bench/`
+          and gates: if publishing fails after that, this job fails.
+          SUMMARY
+          echo "::notice::Benchmark history not published: no gh-pages branch exists to publish to. See the job summary for the one-time command that activates it."
