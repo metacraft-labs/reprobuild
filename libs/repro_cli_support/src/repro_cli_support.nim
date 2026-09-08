@@ -1824,6 +1824,49 @@ proc capabilitiesJson*(): JsonNode =
     "disassembly-only-debugging"])
   hcrProfiles.add(codetracerProfile)
 
+  # HLX-M0: the Linux ELF/x86_64 direct-patch profile, registered on the agent
+  # wire alongside the macOS one. It is deliberately NOT a continuation of the
+  # M25-M28 Mach-O gates — those do not transfer — so its feature list names
+  # only what HLX-M0 actually proved, and `missingComponents` names the axes
+  # later HLX milestones add.
+  var linuxProfile = newJObject()
+  linuxProfile["id"] = %"linux-x86_64-elf-direct-hcr-v1"
+  linuxProfile["status"] = %"prototype"
+  linuxProfile["languages"] = jsonStringSeq(["C", "CXX"])
+  linuxProfile["requires"] = jsonStringSeq([
+    "hcr-agent-protocol",
+    "coordinator-agent-negotiation",
+    "direct-patch-injection",
+    "patchable-function-entry",
+    "function-alignment-16",
+    "membarrier-private-expedited-sync-core",
+    "mprotect-text-rw-rx-roundtrip"])
+  linuxProfile["features"] = jsonStringSeq([
+    "hcr-agent-content-length-framing",
+    "coordinator-agent-session-validation",
+    "elf-patchable-function-entries-sled-lookup",
+    "computed-8-byte-aligned-publication-window",
+    "single-aligned-store-e9-rel32-publication",
+    "endbr64-preserved-at-entry",
+    "raw-syscall-mprotect",
+    "host-capability-probe-at-agent-start",
+    "named-sled-refusal-diagnostics",
+    "single-threaded-only"])
+  linuxProfile["missingComponents"] = jsonStringSeq([
+    "elf-symbol-resolution",       # HLX-M1
+    "far-target-islands",          # HLX-M2
+    "transactional-rollback",      # HLX-M3
+    "thread-quiescence",           # HLX-M4
+    "unwind-and-debugger-registration", # HLX-M5
+    "mcr-coexistence"])            # HLX-M7
+  linuxProfile["rejects"] = jsonStringSeq([
+    "multithreaded-targets",
+    "straddling-or-non-atomic-text-writes",
+    "instruction-stealing",
+    "clang-cf-protection-sleds",
+    "shared-library-positive-path"])
+  hcrProfiles.add(linuxProfile)
+
   var hcr = newJObject()
   hcr["decisionAuthority"] = %"reprobuild"
   hcr["buildSystemRole"] = %(
