@@ -242,6 +242,12 @@ for libName in [
   "ct_test_interface",
   "ct_test_nim_unittest",
   "ct_test_unittest_parallel",
+  # ``ct_test_surface``: the reader for CodeTracer's PUBLISHED ``ct test``
+  # catalog/provider surface (``ct-test test discover``). It is deliberately
+  # not part of the three above: those are how a test BINARY speaks the
+  # protocol, while this is how this repository asks the canonical CodeTracer
+  # driver what cases the source tree contains. Only tests import it.
+  "ct_test_surface",
   # RunQuota-Observation-Store M19: the ``HistoryReporter`` write path.
   # It is NOT part of the three above and must not be: those are linked
   # into test binaries and into ``repro.nim``'s DSL, while this one

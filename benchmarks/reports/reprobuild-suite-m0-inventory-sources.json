@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1478,
+    "nimTestBinaries": 1480,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 596,
     "staticallyDetectedRuntimeCompilerFlowTests": 83,
-    "testEntries": 1483
+    "testEntries": 1485
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1118,7 +1118,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 639,
+      "integration": 641,
       "platform/destructive": 107,
       "pure unit": 596,
       "unclassified": 125
@@ -1233,9 +1233,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1478,
+    "nimTestBinaryCount": 1480,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1483
+    "testEntryCount": 1485
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4853,6 +4853,23 @@
       "source": "libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_ct_test_surface_locator",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "ct_test_surface"
+      ],
+      "owner": "libs/ct_test_surface",
+      "requiresReproBinary": true,
+      "source": "libs/ct_test_surface/tests/t_ct_test_surface_locator.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21538,6 +21555,23 @@
       "source": "tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_ct_test_surface_case_addressability",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "ct_test_surface"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_ct_test_surface_case_addressability.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

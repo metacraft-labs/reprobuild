@@ -3,6 +3,7 @@ apps/repro-harvest-apt/src/repro_harvest_apt/signature.nim
 apps/repro-harvest-dnf/src/repro_harvest_dnf/signature.nim
 apps/repro-harvest-pacman/src/repro_harvest_pacman/signature.nim
 apps/repro-peer-cache-sim/repro_peer_cache_sim.nim
+libs/ct_test_surface/src/ct_test_surface.nim
 libs/repro_binary_cache_client/src/repro_binary_cache_client/engine_publisher.nim
 libs/repro_build_engine/src/repro_build_engine.nim
 libs/repro_cli_support/src/repro_cli_support.nim

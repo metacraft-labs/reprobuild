@@ -17,6 +17,7 @@
 # the suite; that is the event this baseline exists to make visible.
 libs/ct_test_interface/tests/t_smoke_ct_test_interface.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim	nim	1
+libs/ct_test_surface/tests/t_ct_test_surface_locator.nim	nim	9
 libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim	nim	1
 libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim	nim	1
 libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	nim	3
@@ -947,6 +948,7 @@ tests/integration/t_config_layer_determines_tier_not_per_repo_field.nim	nim	1
 tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	nim	2
 tests/integration/t_cross_targeting_axes_do_not_silently_disagree.nim	nim	5
 tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim	nim	1
+tests/integration/t_ct_test_surface_case_addressability.nim	nim	6
 tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim	nim	2
 tests/integration/t_d1_pythonunittest_resolves_in_path_mode.nim	nim	2
 tests/integration/t_d2_cross_project_selector_recognised.nim	nim	2
