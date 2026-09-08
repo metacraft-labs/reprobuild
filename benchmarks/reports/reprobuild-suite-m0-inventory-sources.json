@@ -5979,8 +5979,8 @@
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/test_m6_entropy_blessing.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 17,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

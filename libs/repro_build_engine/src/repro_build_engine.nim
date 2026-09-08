@@ -897,23 +897,25 @@ type
     mesUnknownScopeLoss    ## Level 2
     mesMonitorUnavailable  ## Level 3
 
+  CacheIneligibilityReason = enum
+    cirUnblessedEntropy = "unblessed-entropy"
+    cirEntropyUnobservable = "entropy-unobservable"
+    cirEntropyObservabilityUnknown = "entropy-observability-unknown"
+    cirEmptyEvidence = "empty-evidence"
+    cirMonitorLoss = "monitor-loss"
+    cirMonitorFlushFailed = "monitor-flush-failed"
+
   EvidenceCollection = object
     evidence: PathSetEvidence
     publishable: bool
     disableCacheHits: bool
-      ## M9.R.72.3 — when ``true``, the action MAY still succeed (exit=0
-      ## flows through completeSuccess with asSucceeded) but MUST NOT
-      ## publish an action-cache record. Set when the monitor evidence
-      ## is incomplete due to Level 1/2 loss and ``publishable`` was
-      ## downgraded from a hard-fail to a cache-skip per the spec's
-      ## Failure-Semantics.md ladder. When ``false`` and
-      ## ``publishable == false``, the action is a Level 3 fail.
-      ##
-      ## M9.R.73.2: reserved for Level 2 (unknown-scope) semantics.
-      ## Level 1 no longer sets this bit — it populates
-      ## ``invalidatedPaths`` instead so the scheduler can narrow the
-      ## invalidation to only cache lookups whose input set intersects
-      ## the affected path set.
+      ## Withhold this action's cache publication without failing the action.
+      ## Entropy policy, empty evidence, unknown-scope monitor loss, and
+      ## capture-flush failure can all set this flag. Only ``monitorStatus``
+      ## governs session-wide loss invalidation; known-scope loss uses
+      ## ``invalidatedPaths`` instead.
+    cacheIneligibilityReasons: set[CacheIneligibilityReason]
+      ## Diagnostic only; never used to decide cache acceptance/publication.
     invalidatedPaths: HashSet[string]
       ## M9.R.73.2 — per-Failure-Semantics.md-plus-Monitor-Loss-Path-Invalidation.md
       ## the certainly-invalidated + ambiguous path set for a Level 1
@@ -1937,6 +1939,22 @@ proc trace(result: var BuildRunResult; actionId, event, detail: string) =
     actionId: actionId,
     event: event,
     detail: detail)
+
+proc traceCacheIneligibility(result: var BuildRunResult; actionId: string;
+                            collection: EvidenceCollection) =
+  var reasons: seq[string] = @[]
+  for reason in collection.cacheIneligibilityReasons:
+    reasons.add($reason)
+  if reasons.len == 0:
+    reasons.add("unspecified")
+  # Keep the existing event for actual loss, not every cache refusal.
+  let event =
+    if cirMonitorLoss in collection.cacheIneligibilityReasons:
+      "cache-skip-monitor-loss"
+    else:
+      "cache-skip-ineligible"
+  result.trace(actionId, event,
+    "action-cache publication skipped; reasons=" & reasons.join(","))
 
 proc raiseEngine(message: string) {.noreturn.} =
   raise newException(BuildEngineError, message)
@@ -3687,6 +3705,7 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       "program itself drew none. Spec: " &
       "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
     collection.disableCacheHits = true
+    collection.cacheIneligibilityReasons.incl(cirUnblessedEntropy)
     return
   if collection.evidence.entropyObservability != entObserved:
     collection.evidence.diagnostics.add(
@@ -3701,6 +3720,11 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       "randomness was consumed. Spec: " &
       "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
     collection.disableCacheHits = true
+    collection.cacheIneligibilityReasons.incl(
+      if collection.evidence.entropyObservability == entNotObserved:
+        cirEntropyUnobservable
+      else:
+        cirEntropyObservabilityUnknown)
 
 proc applyMonitorEvidenceStatus(action: BuildAction;
                                 status: MonitorEvidenceStatus;
@@ -3789,6 +3813,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
       col.evidence.diagnostics.add(
         zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
       col.disableCacheHits = true
+      col.cacheIneligibilityReasons.incl(cirEmptyEvidence)
   of mesKnownScopeLoss:
     # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
     # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
@@ -3824,6 +3849,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
       "Failure-Semantics.md §Monitoring Failures")
     if action.cacheable:
       col.disableCacheHits = true
+      col.cacheIneligibilityReasons.incl(cirMonitorLoss)
   of mesMonitorUnavailable:
     # Unreachable from foldMonitorDepFileEvidence today (Level 3 is
     # asserted here only when the iomon path was empty), but future
@@ -10528,12 +10554,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # session-disable flag) into the session-scoped accumulator
             # so downstream cache LOOKUPS can skip narrowly.
             registerEvidenceInvalidation(evidence)
-            # M9.R.72.3 — spec Level 1/2 monitor-loss handling. When
-            # ``disableCacheHits`` is set, the exit=0 action still succeeds
-            # (downstream can proceed) but the action-cache publish is
-            # skipped so a future rebuild will re-execute rather than
-            # trust an incomplete evidence set. See collectEvidence's
-            # M9.R.72.3 block for the spec citation.
+            # Cache ineligibility withholds publication, not successful outputs.
             if action.cacheable and not evidence.disableCacheHits:
               let recordStart = statStart()
               let storeOutputBlobs =
@@ -10565,9 +10586,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               publishPeerCacheBundle(action.weakFingerprint, record)
               publishBinaryCacheBundle(action, record)
             elif action.cacheable and evidence.disableCacheHits:
-              runResult.trace(id, "cache-skip-monitor-loss",
-                "session cache publish skipped per Failure-Semantics.md " &
-                "§Monitoring Failures Level 1/2")
+              runResult.traceCacheIneligibility(id, evidence)
             completeSuccess(id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "elevated")
           else:
@@ -10704,11 +10723,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # session-disable flag) into the session-scoped accumulator
             # so downstream cache LOOKUPS can skip narrowly.
             registerEvidenceInvalidation(evidence)
-            # M9.R.72.3 — spec Level 1/2 monitor-loss handling. When
-            # ``disableCacheHits`` is set, the exit=0 action still succeeds
-            # (downstream can proceed) but the action-cache publish is
-            # skipped so a future rebuild will re-execute. See
-            # collectEvidence's M9.R.72.3 block.
+            # Cache ineligibility withholds publication, not successful outputs.
             if plan.action.cacheable and not evidence.disableCacheHits:
               let recordStart = statStart()
               # Peer-Cache M1: when a publisher closure is set, force
@@ -10746,9 +10761,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               publishPeerCacheBundle(plan.action.weakFingerprint, record)
               publishBinaryCacheBundle(plan.action, record)
             elif plan.action.cacheable and evidence.disableCacheHits:
-              runResult.trace(finished.id, "cache-skip-monitor-loss",
-                "session cache publish skipped per Failure-Semantics.md " &
-                "§Monitoring Failures Level 1/2")
+              runResult.traceCacheIneligibility(finished.id, evidence)
             completeSuccess(finished.id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "builtin")
           else:
@@ -11297,6 +11310,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           monitorFlushFailures[outcome.actionId] = outcome.error
         if monitorFlushFailures.hasKey(finished.id):
           evidence.disableCacheHits = true
+          evidence.cacheIneligibilityReasons.incl(cirMonitorFlushFailed)
           evidence.evidence.diagnostics.add(
             "monitor depfile flush failed; action-cache publish skipped so " &
             "the next build re-executes: " & monitorFlushFailures[finished.id])
@@ -11316,10 +11330,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # session-disable flag) into the session-scoped accumulator
         # so downstream cache LOOKUPS can skip narrowly.
         registerEvidenceInvalidation(evidence)
-        # M9.R.72.3 — spec Level 1/2 monitor-loss handling. When
-        # ``disableCacheHits`` is set, the exit=0 action still succeeds
-        # but the action-cache publish is skipped so a future rebuild
-        # will re-execute. See collectEvidence's M9.R.72.3 block.
+        # Cache ineligibility withholds publication, not successful outputs.
         if action.cacheable and not evidence.disableCacheHits:
           let recordStart = statStart()
           # M9.L.4-refactor Step A: force output-blob retention when
@@ -11342,9 +11353,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           publishPeerCacheBundle(action.weakFingerprint, record)
           publishBinaryCacheBundle(action, record)
         elif action.cacheable and evidence.disableCacheHits:
-          runResult.trace(finished.id, "cache-skip-monitor-loss",
-            "session cache publish skipped per Failure-Semantics.md " &
-            "§Monitoring Failures Level 1/2")
+          runResult.traceCacheIneligibility(finished.id, evidence)
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:
