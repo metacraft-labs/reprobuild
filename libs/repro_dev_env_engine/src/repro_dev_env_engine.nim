@@ -125,6 +125,31 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     # the edge must not publish. This was hard-coded ``true`` here.
     cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
+    # THE SAME EDGE, SO THE SAME DECLARATION. This runs byte-for-byte the
+    # argv the CLI's own provider-compile edge runs — the ``repro`` helper
+    # invoking ``nim c`` on the recipe's provider — so it must carry the same
+    # environment contract and the same determinism claim. It did not, and
+    # both omissions were silent:
+    #
+    #   * WITHOUT ``envPassthrough`` the two edges disagree about their own
+    #     identity. The passthrough NAMES are mixed into the action key, so
+    #     the same compile keyed differently depending on which entry point
+    #     reached it, and the compiler / C toolchain / scratch-location
+    #     variables were resolved by plain inheritance rather than declared.
+    #   * WITHOUT the blessing the edge never publishes. A monitored ``nim c``
+    #     reads entropy (measured on this edge's own capture: 167
+    #     ``mrNonDeterministic`` records, ``arc4random`` + ``getrandom``, a
+    #     complete capture with no event loss), and an unblessed action that
+    #     reads entropy has its action-cache hits disabled. So the provider
+    #     recompiled on EVERY activation, which surfaced as a dev-env that
+    #     reported a rebuild each time it was entered.
+    #
+    # The justification is the one already stated for the identical command:
+    # this helper only compiles: it never runs what it produced, so the
+    # compiler's randomness has no path to an output.
+    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    nonDeterminism = ndpEntropyBlessed,
+    nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(
       providerCompileIgnoredInputPrefixes(scratchDir)))
 
