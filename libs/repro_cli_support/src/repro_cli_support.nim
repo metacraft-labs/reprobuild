@@ -33076,7 +33076,8 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
       else: root / d.path
     case d.coordinates.kind
     of ckVcs:
-      if dirExists(extendedPath(repoAbs / ".git")):
+      if dirExists(extendedPath(repoAbs / ".git")) or
+          fileExists(extendedPath(repoAbs / ".git")):
         if d.integrity.startsWith("blake3:"):
           # MO-13 (correcting MO-9) — NON-CONSERVATIVE where SAFE. A lock
           # refreshed BEFORE the repo's first commit records a ``blake3:``
@@ -33129,7 +33130,7 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
               " is not present/reachable in '" & d.path & "'"))
           continue
         let observed =
-          gitObjectMultihash(gitObjectFormatOf(repoAbs), d.coordinates.revision)
+          gitObjectMultihash(gitObjectFormatOf(repoAbs), rp.output.strip())
         if observed != d.integrity:
           result.add(LockedIntegrityFailure(name: d.name, path: d.path,
             expected: d.integrity, observed: observed,
@@ -56906,6 +56907,42 @@ proc runReproLockValidate(rest: openArray[string]): int =
           else: absolutePath(projectDir) / d.path
         if not dirExists(extendedPath(depAbs)):
           continue  # not checked out here — cannot recompute (not a tamper).
+        if (d.path == "." or d.path.len == 0) and
+            d.integrity.startsWith("git-sha"):
+          # An in-tree lock cannot contain its own commit ID. Preserve its
+          # recorded root coordinates, but permit only the lock's own content
+          # to differ from that revision; ordinary source drift is still stale.
+          let gitBin = findExe("git")
+          if gitBin.len == 0 or not (
+              dirExists(extendedPath(depAbs / ".git")) or
+              fileExists(extendedPath(depAbs / ".git"))):
+            problems.add("dep '" & d.name &
+              "' root integrity cannot be verified without its Git checkout")
+            continue
+          let failures = verifyLockedIntegrityAtCoordinates(projectDir,
+            LockedDependencies(deps: @[d]))
+          for failure in failures:
+            problems.add("dep '" & d.name & "' integrity mismatch: " &
+              failure.diagnostic)
+          if failures.len > 0:
+            continue
+          var diffArgs = @[gitBin, "-C", depAbs, "diff", "--quiet",
+            "--no-ext-diff", "--no-textconv", "--ignore-submodules=none",
+            d.coordinates.revision, "--", "."]
+          let lockRel = relativePath(absolutePath(lockP), depAbs).replace('\\', '/')
+          if lockRel.len > 0 and lockRel != ".." and
+              not lockRel.startsWith("../") and not isAbsolute(lockRel):
+            diffArgs.add(":(top,exclude,literal)" & lockRel)
+          let comparison = execCmdEx(quoteShellCommand(diffArgs),
+            options = {poUsePath}, env = scrubbedGitRepositoryEnv())
+          if comparison.exitCode == 1:
+            problems.add("dep '" & d.name &
+              "' root source content differs from locked revision '" &
+              d.coordinates.revision & "' outside the generated lock")
+          elif comparison.exitCode != 0:
+            problems.add("dep '" & d.name &
+              "' root source content could not be verified: " & comparison.output.strip())
+          continue
         let observed = committedLockRepoFacts(depAbs).headSha
         let recomputed = computeDepIntegrity(depAbs, observed)
         if recomputed != d.integrity:

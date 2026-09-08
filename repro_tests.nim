@@ -9900,6 +9900,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_validate_root_provenance_survives_commit.nim",
+    binary: "build/test-bin/t_lock_validate_root_provenance_survives_commit",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim",
     binary: "build/test-bin/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db",
     defines: @[],
