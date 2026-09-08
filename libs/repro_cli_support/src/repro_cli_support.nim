@@ -133,6 +133,7 @@ import repro_cli_support/infra
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
 import repro_cli_support/disk as cli_disk
+import repro_cli_support/attest as cli_attest
 import repro_cli_support/mode1_loader
 from repro_cli_support/partition as repro_partition import
   ShardBuildAction, ShardTestEdge, ShardPlanRequest, ShardPlan,
@@ -207,6 +208,12 @@ export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
        cli_disk.DiskCliOptions, cli_disk.DiskSubcommand,
        cli_disk.DiskPlanOutcome, cli_disk.DiskPlanFailureKind
+export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
+       cli_attest.renderAttestUsage, cli_attest.AttestCliOptions,
+       cli_attest.AttestSubcommand, cli_attest.ConventionalUkiName,
+       cli_attest.ConventionalVerityImageName,
+       cli_attest.ConventionalVerityRootHashName,
+       cli_attest.ConventionalManifestName
 
 # ---------------------------------------------------------------------------
 # Peer-Cache M1 build wiring (Linux-Distro-Recipe-Validation M5,
@@ -339,6 +346,8 @@ proc renderUsage*(programName: string): string =
       " deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> [--secrets-key <FILE> [--secrets-dir <DIR>]] ...\n       " &
           programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
+          programName &
+      " attest expect --image PATH [--out PATH | --check PATH]\n       " &
           programName &
       " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n       " &
           programName &
@@ -59090,6 +59099,8 @@ const reproTopLevelCommands = [
   "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
   "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
+  # `repro attest <sub>`: expected launch measurements for attested images.
+  "attest",
   # Nix-Flake-Coexistence NF-1 — ``repro flake <sub>``: the override
   # arguments an `.envrc` needs, computed from the workspace's develop set.
   "flake",
@@ -64452,6 +64463,16 @@ proc runThinAppDispatch(programName: string): int =
       else:
         @[]
     return runDiskCommand(diskArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "attest":
+    # `repro attest` — expected launch measurements for attested images.
+    # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI
+    # reference's `repro attest` page is the surface contract.
+    let attestArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runAttestCommand(attestArgs)
   stderr.writeLine(renderUsage(programName))
   2
 

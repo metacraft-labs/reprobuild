@@ -281,6 +281,10 @@ for libName in [
   "xxh3",
   "gxhash",
   "repro_hash",
+  # Expected launch measurements and the measurement-manifest schema.
+  # Shared by the image build that emits the document and the verifier
+  # that consumes it, so it belongs to neither.
+  "repro_attest",
   "cbor",
   "repro_domain_types",
   "repro_depfile",

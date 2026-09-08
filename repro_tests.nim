@@ -8010,6 +8010,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_attested_image_manifest.nim",
+    binary: "build/test-bin/t_attested_image_manifest",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_b0_develop_mode_uses_local_source.nim",
     binary: "build/test-bin/t_b0_develop_mode_uses_local_source",
     defines: @[],
