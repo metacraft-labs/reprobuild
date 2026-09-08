@@ -98,7 +98,17 @@
       # Workspace locks pin sibling checkouts. This declaration and flake.lock
       # pin the standalone Nix input, which must also parse the CLI's --interest
       # flag when no sibling checkout overrides it.
-      url = "github:metacraft-labs/io-mon/0f9cf4eea7141c48c061f31863bc3f6018901f2a";
+      #
+      # Bumped to the revision that stops the Linux shim referencing
+      # nim-stackable-hooks' amd64-only raw-syscall substrate. This input is
+      # what `librepro_monitor_shim.so` is actually compiled from (the sandboxed
+      # package build and CI have no io-mon sibling), so the previous pin
+      # produced a shim with five undefined `stackable_linux_*` symbols on
+      # aarch64. LD_PRELOAD binds eagerly, so every `eph-linux-arm64` lane in
+      # the fleet died on the first monitored process with
+      # `undefined symbol: stackable_linux_chain_sigtrap` — surfacing as
+      # `repro build: error: interface extraction edge asFailed`.
+      url = "github:metacraft-labs/io-mon/811fb263c60a156953bebc71a308df2af55ddf92";
       flake = false;
     };
     nim-shm-gset-src = {
