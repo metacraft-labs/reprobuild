@@ -931,6 +931,7 @@ tests/integration/t_cache_daemon_grows_via_cas_resize_and_survives_crash.nim	nim
 tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim	nim	1
 tests/integration/t_cache_push_cannot_publish_a_branch.nim	nim	1
 tests/integration/t_cache_refuses_to_serve_an_unsatisfiable_floor.nim	nim	1
+tests/integration/t_cached_source_closure_preparation.nim	nim	1
 tests/integration/t_cas_restore_outputs_cleans_temp_on_failure.nim	nim	3
 tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim	nim	1
 tests/integration/t_certificate_policy_required_advisory_off_modes.nim	nim	1
@@ -1378,6 +1379,7 @@ tests/integration/t_workspace_vcs_hybrid_workspace_clone.nim	nim	1
 tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim	nim	3
 tests/test_dev_env_m9_policy.py	python	4
 tests/unit/t_action_compatibility_key.nim	nim	4
+tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_configure_build_tree_cleanup.nim	nim	5

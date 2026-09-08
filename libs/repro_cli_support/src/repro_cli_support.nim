@@ -8839,13 +8839,47 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # floor; the upper layers (autoconf / automake / expat / libffi /
     # etc.) still build from source.
     seedBootstrapCycleBreakTools()
-    for useDef in buildArtifact.projectInterface.toolUses:
+    var pendingSourceUses = buildArtifact.projectInterface.toolUses
+    var expandedSourceRecipes = initHashSet[string]()
+    var nextSourceUse = 0
+    template enqueueSourceDependencies(directory: string; runtimeOnly: bool) =
+      let recipeDir = absolutePath(directory)
+      let expansionKey = recipeDir & ":" & $runtimeOnly
+      if expansionKey notin expandedSourceRecipes:
+        expandedSourceRecipes.incl(expansionKey)
+        # A restored prefix is not evidence of a complete dependency closure.
+        # Interface extraction does not evaluate the producer's build body.
+        let producerOutDir = recipeDir / ".repro/build/repro"
+        createDir(extendedPath(producerOutDir))
+        let producerArtifact = extractInterfaceEdge(recipeDir / "repro.nim",
+          producerOutDir / "project-interface.rbsz",
+          producerOutDir / "project-interface.nim",
+          reprobuildLibraryWorkDir(), producerOutDir / "iface-work",
+          recipeDir, publicCliPath, producerOutDir / "build-engine-cache",
+          buildStats, requireStub = false,
+          bypassRunQuota = bypassRunQuota,
+          fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
+          forceRebuild = forceRebuild,
+          suppressTrace = mcTrace notin measureSet,
+          skipCacheHitEvidence = mcCacheEvidence notin measureSet,
+          statsEnabled = statsEnabled, cancelCheck = cancelCheck)
+        let dependencies =
+          if runtimeOnly: producerArtifact.projectInterface.runtimeToolUses
+          else: producerArtifact.projectInterface.toolUses
+        for dependency in dependencies:
+          if dependency.depKind != "native":
+            pendingSourceUses.add(dependency)
+
+    while nextSourceUse < pendingSourceUses.len:
+      let useDef = pendingSourceUses[nextSourceUse]
+      inc nextSourceUse
       # A completed source mirror remains authoritative even for a
       # bootstrap tool. The cycle-break set only suppresses recursive
       # construction when that mirror is absent; this lets later
       # consumers use bootstrap tools that an earlier build completed.
       let outcome = tryResolveFromSourceTool(useDef)
       if outcome.kind == rrResolved:
+        enqueueSourceDependencies(outcome.profile.selectedStorePath, false)
         continue
       if outcome.kind != rrNeedsBuild:
         continue
@@ -8884,11 +8918,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           logSummary("from-source cache substitute: restored \"" &
             outcome.toolName & "\" at " & siblingRecipeDir)
           fromSourceResolvedRecipes.incl(siblingRecipeDir)
+          pendingSourceUses.add(useDef)
           continue
       # The bootstrap floor suppresses recursive construction only after a
       # configured source-artifact cache had a chance to restore the mirror.
       if useDef.executableName.len > 0 and
           useDef.executableName in fromSourceCycleBrokenTools:
+        enqueueSourceDependencies(siblingRecipeDir, true)
         continue
       if siblingRecipeDir in fromSourceBuildStack:
         # DSL-port M9.R.10a — cycle break via stdlib fall-through.
@@ -8914,6 +8950,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # try to recurse again on the next probe pass — the closing-edge
         # tool resolves via stdlib from here on.
         fromSourceResolvedRecipes.incl(siblingRecipeDir)
+        enqueueSourceDependencies(siblingRecipeDir, true)
         continue
       if fromSourceBuildStack.len >= FromSourceMaxRecursionDepth:
         raise newException(ValueError,
@@ -8966,6 +9003,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             fromSourceBuildStack[^1] == siblingRecipeDir:
           discard fromSourceBuildStack.pop()
       fromSourceResolvedRecipes.incl(siblingRecipeDir)
+      if not dryRun:
+        pendingSourceUses.add(useDef)
 
   # Cross-Repo-Source-Consumption SC-2 (§4.2) — producer graph load + splice
   # (executable channel). A pre-pass that mirrors the from-source auto-recurse

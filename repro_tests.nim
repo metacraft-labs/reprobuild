@@ -8325,6 +8325,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_cached_source_closure_preparation.nim",
+    binary: "build/test-bin/t_cached_source_closure_preparation",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_cas_restore_outputs_cleans_temp_on_failure.nim",
     binary: "build/test-bin/t_cas_restore_outputs_cleans_temp_on_failure",
     defines: @[],
@@ -12332,6 +12341,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_action_compatibility_key.nim",
     binary: "build/test-bin/t_action_compatibility_key",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_cached_source_dependency_closure.nim",
+    binary: "build/test-bin/t_cached_source_dependency_closure",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
