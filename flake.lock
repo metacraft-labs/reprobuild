@@ -255,7 +255,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "e1b5280a2755f4c5016679610d208e5b94d1d5ec",
+        "rev": "632fdceed037c52b0fd26b2195934bc32e82a0ed",
         "type": "github"
       },
       "original": {
@@ -1194,9 +1194,11 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
+        "lastModified": 1788876344,
+        "narHash": "sha256-BtMWgvvEg+jONDnQIY8osCHshjwAbonB5ArZpqzmYDA=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "e2ee15afe8dd7f538ec2ce79af9a1aa512addce2",
+        "rev": "65b190ba5704454dd33138a2dc82fac8fbc188d6",
         "type": "github"
       },
       "original": {
