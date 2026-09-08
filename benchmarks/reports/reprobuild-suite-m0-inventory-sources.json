@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 599,
     "staticallyDetectedRuntimeCompilerFlowTests": 83,
-    "testEntries": 1488
+    "testEntries": 1489
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1149,7 +1149,7 @@
       "integration": 641,
       "platform/destructive": 107,
       "pure unit": 599,
-      "unclassified": 125
+      "unclassified": 126
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1262,8 +1262,8 @@
       }
     ],
     "nimTestBinaryCount": 1483,
-    "pythonTestFileCount": 5,
-    "testEntryCount": 1488
+    "pythonTestFileCount": 6,
+    "testEntryCount": 1489
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31214,6 +31214,21 @@
       "source": "tests/unit/test_continuous_benchmarking_policy.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_dev_shell_hook_scope.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

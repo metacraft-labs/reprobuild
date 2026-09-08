@@ -1696,6 +1696,10 @@
               pkgs.swtpm
             ];
             shellHook = ''
+              # Consumers may borrow this toolchain with `nix develop PATH`.
+              # Its repository checks belong only to a Reprobuild checkout.
+              if PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
+                  ${./scripts/is_reprobuild_checkout.sh}; then
               # Lend pre-commit back its own chained shim BEFORE its installer
               # runs, so the installer never meets a stale copy of its own
               # output beside the dispatcher. Without this, a shell entry that
@@ -1749,6 +1753,7 @@
               # never ran.
               PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
                 ${./scripts/pre_commit_hook_handoff.sh} after --hook pre-push || true
+              fi
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
               # ReproOS attestation: name the exact edk2 firmware pair the
