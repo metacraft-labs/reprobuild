@@ -1,0 +1,251 @@
+{
+  "caseCountDisagreements": [
+    {
+      "ctTestCaseCount": 4,
+      "inventoryStaticCaseCount": 5,
+      "source": "tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim"
+    }
+  ],
+  "command": "ct-test test discover --workspace <repo> --json",
+  "counts": {
+    "catalogs": 3,
+    "itemsByKind": {
+      "case": 8510,
+      "suite": 2015
+    },
+    "itemsByProvider": {
+      "assembly-fallback": 2,
+      "nim-unittest": 10409,
+      "python-unittest": 114
+    },
+    "itemsTotal": 10525,
+    "responseDiagnostics": {
+      "info": 1,
+      "warning": 36
+    }
+  },
+  "discoveryScope": "auto (the surface's default: the workspace's own VCS inventory; vendored and ignored trees excluded)",
+  "generatedBy": "scripts/ct_test_surface_addressability.py",
+  "identityCollisions": [
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim::integration_scoop_manifest_bin_resolution::integration_scoop_manifest_bin_resolution",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim",
+          "startLine": 102
+        },
+        {
+          "file": "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim",
+          "startLine": 108
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim::integration_scoop_probe_gui_and_timeout::integration_scoop_probe_gui_and_timeout",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim",
+          "startLine": 117
+        },
+        {
+          "file": "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim",
+          "startLine": 123
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim::m76-gate:-integration_stow_byte_identical_target_is_cache_hit::byte-identical-regular-file-target-is-a-no-op-cache-hit;",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 62
+        },
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 177
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim::m76-gate:-integration_stow_byte_identical_target_is_cache_hit::genuinely-differing-regular-file-target-still-raises",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 70
+        },
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 267
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim::m76-gate:-integration_stow_byte_identical_target_is_cache_hit::stow-target-reached-through-a-parent-directory-junction-into",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 74
+        },
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 343
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim::m76-gate:-integration_stow_byte_identical_target_is_cache_hit::wrong-source-link-whose-resolved-content-is-byte-identical",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 66
+        },
+        {
+          "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
+          "startLine": 223
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim::m83-phase-f3-gate:-profile-compile-failure-is-a-hard-error::repro-home-apply-hard-errors-on-a-broken-phase-a-profile",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 38
+        },
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 118
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim::m83-phase-f3-gate:-profile-compile-failure-is-a-hard-error::repro-home-apply-plan-hard-errors-on-a-broken-phase-a-profile",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 41
+        },
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 132
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim::m83-phase-f3-gate:-profile-compile-failure-is-a-hard-error::repro-home-plan-hard-errors-on-a-broken-phase-a-profile",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 44
+        },
+        {
+          "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+          "startLine": 141
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim::t_e2e_repro_watch_multiple_named_targets::t_e2e_repro_watch_multiple_named_targets",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim",
+          "startLine": 211
+        },
+        {
+          "file": "tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim",
+          "startLine": 319
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/integration/t_r2_iso_boot.nim::t_r2_iso_boot::r2-iso-boots-under-hyper-v-gen-2-uefi;-kernel-+-initramfs-reach-userspace",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/integration/t_r2_iso_boot.nim",
+          "startLine": 181
+        },
+        {
+          "file": "tests/integration/t_r2_iso_boot.nim",
+          "startLine": 213
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/integration/t_r9_systemd_boot.nim::t_r9_systemd_boot::r9-iso-boots;-systemd-257.9-reaches-login-prompt",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/integration/t_r9_systemd_boot.nim",
+          "startLine": 137
+        },
+        {
+          "file": "tests/integration/t_r9_systemd_boot.nim",
+          "startLine": 167
+        }
+      ]
+    }
+  ],
+  "reconciliation": {
+    "caseCoveragePercent": 98.98,
+    "caseItemsInCatalog": 8510,
+    "casesAddressableThroughTheSurface": 8286,
+    "collidingIdentities": 12,
+    "distinctCaseIdentities": 8498,
+    "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
+    "perSourceCaseCountAgreement": {
+      "agree": 1479,
+      "compared": 1480,
+      "disagree": 1
+    },
+    "sourceCoveragePercent": 99.87,
+    "sourcesAddressableThroughTheSurface": 1480,
+    "sourcesNotAddressable": 2,
+    "trackedNimSuiteSources": 1482,
+    "trackedStaticCaseCount": 8371
+  },
+  "schemaVersion": 1,
+  "surface": {
+    "binary": "ct-test",
+    "provenance": "metacraft-labs/codetracer 80c097309, built in a sibling worktree; that tree landed on dev as 632fdceed, which flake.lock now pins",
+    "resolvedBy": "environment",
+    "sha256": "68f81fdcb9ccd25d74fe08bb26e0a86cf161f10b5ef163b6b37ae8903c279289"
+  },
+  "title": "Reprobuild case addressability through the canonical `ct test` surface",
+  "unaddressableSources": [
+    {
+      "detail": "imports the vendored ct_test_unittest_parallel shim instead of std/unittest. Note what does NOT happen: the provider's `frameworkForImport` matches the literal names `unittest`, `unittest2` and `unittest_parallel`, and `ct_test_unittest_parallel` is none of them \u2014 so no framework is detected, no `detected but not implemented` warning is emitted (the workspace response carries zero of those), and the file falls through the same generic path as any non-test source, reported as `no Nim unittest imports detected in file`. Implementing unittest_parallel support upstream would therefore NOT recover these rows; not importing the shim does, which is what 38 sources did. The companion .md says why the one that is left keeps the import",
+      "inventoryStaticCaseCount": 2,
+      "reason": "shim-protocol-producer",
+      "source": "libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim"
+    },
+    {
+      "detail": "declares no literal suite/test of its own; any cases it contributes are declared in the modules it imports, which are discovered separately under their own identities",
+      "inventoryStaticCaseCount": 82,
+      "reason": "declares-no-cases-of-its-own",
+      "source": "tests/bundles/bundle_repro_solver_pure_unit.nim"
+    }
+  ]
+}

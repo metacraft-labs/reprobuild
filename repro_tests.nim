@@ -99,6 +99,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/ct_test_surface/tests/t_ct_test_surface_locator.nim",
+    binary: "build/test-bin/t_ct_test_surface_locator",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim",
     binary: "build/test-bin/t_backward_compat_std_unittest_test_runs_unchanged",
     defines: @[],
@@ -8514,6 +8523,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_ct_test_surface_case_addressability.nim",
+    binary: "build/test-bin/t_ct_test_surface_case_addressability",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",
     binary: "build/test-bin/t_d1_buildnimunittest_resolves_in_path_mode",
     defines: @[],
@@ -13477,6 +13495,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/test_dev_env_m9_policy.py",
   "tests/unit/test_cmake_generator_competitiveness_bench.py",
   "tests/unit/test_continuous_benchmarking_policy.py",
+  "tests/unit/test_ct_test_surface_addressability.py",
   "tests/unit/test_dev_shell_hook_scope.py",
   "tests/unit/test_package_root_anchor.py",
   "tests/unit/test_reprobuild_suite_inventory.py"

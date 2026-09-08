@@ -24,7 +24,7 @@
 
 import std/[os, osproc, strutils]
 
-import ct_test_unittest_parallel
+import std/unittest
 when defined(posix):
   import std/posix
 

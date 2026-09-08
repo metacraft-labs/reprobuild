@@ -11,7 +11,7 @@
 
 import std/[os, osproc, strutils, tables, times]
 
-import ct_test_unittest_parallel
+import std/unittest
 
 const HostRunsGate = defined(windows)
   ## The Hyper-V backend needs a Windows host. This used to be enforced

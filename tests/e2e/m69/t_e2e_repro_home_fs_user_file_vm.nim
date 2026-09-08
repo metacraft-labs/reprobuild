@@ -10,7 +10,7 @@
 
 import std/os
 
-import ct_test_unittest_parallel
+import std/unittest
 
 import repro_home_resources
 

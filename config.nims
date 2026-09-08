@@ -237,11 +237,19 @@ for libName in [
   # Build-side test typed-tool, moved in-tree (see the ctTestRoot note
   # above): ``ct_test_interface`` is the leaf contract, ``ct_test_nim_unittest``
   # the ``buildNimUnittest`` typed-tool that ``repro.nim`` imports, and
-  # ``ct_test_unittest_parallel`` is the test-binary protocol support that
-  # reprobuild's own ``tools/test-runner`` and parallel-runner tests link.
+  # ``ct_test_unittest_parallel`` is the test-binary protocol support the
+  # shim's own tests and the fixture modules they compile at run time link.
+  # Ordinary test sources speak the same protocol through ``std/unittest``,
+  # which the codetracer-nim fork carries it in, and do not need this path.
   "ct_test_interface",
   "ct_test_nim_unittest",
   "ct_test_unittest_parallel",
+  # ``ct_test_surface``: the reader for CodeTracer's PUBLISHED ``ct test``
+  # catalog/provider surface (``ct-test test discover``). It is deliberately
+  # not part of the three above: those are how a test BINARY speaks the
+  # protocol, while this is how this repository asks the canonical CodeTracer
+  # driver what cases the source tree contains. Only tests import it.
+  "ct_test_surface",
   # RunQuota-Observation-Store M19: the ``HistoryReporter`` write path.
   # It is NOT part of the three above and must not be: those are linked
   # into test binaries and into ``repro.nim``'s DSL, while this one

@@ -290,12 +290,20 @@ fi
 # cases), so it is an INPUT to those tests and not an output of compiling them.
 #
 # It used to be built only in the `else` of the ct-test-runner branch further
-# down, i.e. only on hosts where `ct-test-runner` is absent from PATH. On a host
-# that HAS ct-test-runner — which is the direnv dev shell's own configuration,
-# since `ctTestTools` is in the shell's packages — nothing rebuilt it, and those
-# tests silently exercised whatever binary happened to be on disk. Conditions
-# that a runner change is supposed to make pass were therefore unreachable
-# without a hand build, which is the opposite of a gate.
+# down, i.e. only on hosts where `ct-test-runner` is absent from PATH. On any
+# host that HAS one, nothing rebuilt it and those tests silently exercised
+# whatever binary happened to be on disk. Conditions that a runner change is
+# supposed to make pass were therefore unreachable without a hand build, which
+# is the opposite of a gate.
+#
+# (An earlier version of this comment said the dev shell is such a host,
+# "since `ctTestTools` is in the shell's packages". That is wrong and worth
+# correcting rather than deleting, because it is the kind of claim that makes
+# a reader believe the branch below is live. `ctTestTools` installs a binary
+# named `ct-test`, not `ct-test-runner`; `command -v ct-test-runner` returns
+# nonzero in the dev shell. The unconditional build is still right, for the
+# reason in the paragraph above — a dozen tests spawn this binary — but not
+# for the reason that was given.)
 #
 # Staleness is judged against everything the runner LINKS, not just its own
 # entry point: `repro_test_runner.nim` imports `ct_test_history` and
@@ -474,6 +482,42 @@ fi
 printf 'Executing tests with %s worker(s); nested builds get REPROBUILD_MAX_PARALLELISM=%s\n' \
   "${REPROBUILD_TEST_THREADS}" "${REPROBUILD_MAX_PARALLELISM}" >&2
 
+# Runner selection. Read this together with the note below before assuming a
+# `ct-test` on PATH belongs in it.
+#
+# THIS LOOKUP RESOLVES AN EXECUTOR, NOT A CATALOG. Both branches below hand
+# their program a directory of ALREADY COMPILED test binaries and ask it to run
+# them. Note that they do NOT agree on the argv, and it is worth knowing which
+# one you are reading: the `ct-test-runner` branch passes a `run` verb, while
+# the `repro_test_runner` fallback — the branch that is actually taken in this
+# workspace, because `command -v ct-test-runner` is nonzero in the dev shell —
+# passes no verb at all. `repro_test_runner run …` is in fact an error
+# ("unexpected positional: run"). So "the runner protocol" is really two
+# closely related ones, and a claim about the verb is only ever about one of
+# them.
+#
+# CodeTracer's canonical `ct test` surface — which the dev shell does provide,
+# as `ct-test` — is a different contract from both, and the difference that
+# actually decides the question is not the spelling:
+#
+#   1. input:  `--workspace <source tree>`, not `--bin-dir <compiled dir>`.
+#      This one is structural: there is no argv translation, because the two
+#      programs are given different KINDS of thing.
+#   2. ability: its Nim provider declares `canRunProject/File/Single = false`,
+#      so `ct test run` over this repository dispatches every unit and
+#      executes none of them, exiting 2 ("no test ran at all"). Measured, not
+#      inferred: total 10138, dispatched 10138, executed 0, unrunnable 10136.
+#   3. verb:   `ct-test test run …` — a subcommand, unlike either branch here.
+#      Listed last because it is the weakest of the three: a verb is the kind
+#      of difference a wrapper could paper over, and (2) is why one should not.
+#
+# So the name is not what stands between this repository and the canonical
+# surface; the contract is. The surface IS consumed elsewhere — for discovery
+# and per-case addressability, see `libs/ct_test_surface` and
+# `tests/integration/t_ct_test_surface_case_addressability.nim`, which locate
+# it with their own lookup ($CT_TEST, then `ct-test`, then `ct`) precisely
+# because it must not be confused with this one. When `ct test run` gains a
+# Nim provider that can execute, this block is where that lands.
 ct_test_runner="${CT_TEST_RUNNER:-}"
 if [[ -z "${ct_test_runner}" ]]; then
   ct_test_runner="$(command -v "ct-test-runner${exe_ext}" 2>/dev/null || true)"

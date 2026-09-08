@@ -95,7 +95,7 @@
 
 import std/[os, osproc, strutils, tempfiles, times]
 
-import ct_test_unittest_parallel
+import std/unittest
 
 import repro_elevation
 import repro_infra

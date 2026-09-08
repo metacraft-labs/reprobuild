@@ -57,7 +57,7 @@
 
 import std/[json, os, osproc, strutils, tempfiles]
 
-import ct_test_unittest_parallel
+import std/unittest
 import repro_test_support
 import repro_workspace_manifests
 
