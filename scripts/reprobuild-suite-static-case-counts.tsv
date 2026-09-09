@@ -117,7 +117,7 @@ libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim	nim	3
 libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim	nim	1
 libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim	nim	1
 libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim	nim	6
-libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	5
+libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
 libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	nim	4
 libs/repro_cli_support/tests/t_w2_dev_env_producer_pin_binding.nim	nim	9

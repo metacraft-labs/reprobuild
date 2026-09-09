@@ -8904,8 +8904,31 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           cmakeRegenerationAction.weakFingerprint,
           cmakeRegenerationAction.actionCachePolicy)
         if hot.isSome:
+          # A THIRD SERVING PATH, and it needs the same refusal the other two
+          # carry. Like `tryFastNoopCacheHits`, this synthesises
+          # `asCacheHit` / `launched: false` WITHOUT entering the scheduler,
+          # so the per-edge refusal at the `lookupActionResult` seam never
+          # gets a turn. And `hotMetadataRecordInputsUnchanged` answers
+          # `true` VACUOUSLY for a record with no inputs — there is nothing
+          # to compare — so a record keyed on the weak fingerprint alone
+          # would be served here on every future build regardless of what
+          # changed.
+          #
+          # Today that is unreachable rather than safe: the regeneration
+          # edge's policy is `dgRecognizedFormat`, which is outside
+          # `MonitorPolicyKinds`, so `refusesRecordWithNoInputs` is false for
+          # it and this call is the identity. Asking the question anyway is
+          # what makes that a GUARD instead of an accident of one field's
+          # current value — a later change to the edge's policy would
+          # otherwise reopen the hole silently, at a call site with no
+          # mention of it. Same shape, and same fail-closed answer, as
+          # `tryFastNoopCacheHits`' `unservableCacheRecordReason` bail-out:
+          # fall through to the real build path, which re-consults the edge.
+          let servable =
+            cmakeRegenerationAction.unservableCacheRecordReason(
+              hot.get()).len == 0
           let selectedInputsUnchanged =
-            hotMetadataRecordInputsUnchanged(@[hot.get()])
+            servable and hotMetadataRecordInputsUnchanged(@[hot.get()])
           if selectedInputsUnchanged:
             cmakeFastHit = true
             cmakeRegenerationResult.results.add(ActionResult(

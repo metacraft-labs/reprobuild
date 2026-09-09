@@ -224,3 +224,77 @@ suite "S7 every build-path engine config can reach the restore configuration":
     check "engineConfig.requireCompleteOutputEvidence" notin source
     check "engineConfig.rebuildMissingOutputsOnCacheHit" notin source
     check "engineConfig.deferLocalOutputBlobs" notin source
+
+proc codeOnly(line: string): string =
+  ## `line` with any trailing comment removed.
+  ##
+  ## A `#` is treated as the start of a comment only when the text before it
+  ## contains an even number of `"` characters, so a `#` inside a string
+  ## literal is left alone. That is not a Nim lexer and does not need to be:
+  ## the population it is applied to is one file's call sites, and the failure
+  ## direction of a misjudged `#` is a SHORTER haystack, i.e. a stricter audit.
+  var quotes = 0
+  for i, ch in line:
+    if ch == '"':
+      inc quotes
+    elif ch == '#' and quotes mod 2 == 0:
+      return line[0 ..< i]
+  line
+
+suite "no CLI path serves a cache record without the servability refusal":
+  ## A THIRD SERVING PATH, found by reading rather than by running, and
+  ## audited here for the same reason S7's own sweeps are: a behavioural test
+  ## cannot see it.
+  ##
+  ## `repro build`'s CMake-regeneration fast hit looks up a hot metadata
+  ## record, asks `hotMetadataRecordInputsUnchanged`, and on `true`
+  ## synthesises `status: asCacheHit`, `launched: false` WITHOUT entering the
+  ## scheduler — the same shape as the engine's `tryFastNoopCacheHits`, and
+  ## therefore the same hazard: the per-edge refusal at the
+  ## `lookupActionResult` seam is not on that path at all.
+  ##
+  ## THE PREDICATE IS VACUOUSLY TRUE ON AN EMPTY INPUT LIST. A record with no
+  ## input fingerprints has nothing to compare against the filesystem, so
+  ## "inputs unchanged" is `true` forever, for every future build, whatever
+  ## changed. That is precisely the record class
+  ## `unservableCacheRecordReason` exists to refuse
+  ## (`t_dark_window_cache_records_are_drained`), and the engine's two
+  ## whole-graph arms both consult it before serving.
+  ##
+  ## WHY THIS IS STRUCTURAL AND NOT BEHAVIOURAL. The CMake edge's dependency
+  ## policy is `dgRecognizedFormat`, outside `MonitorPolicyKinds`, so
+  ## `refusesRecordWithNoInputs` is false for it and the refusal is the
+  ## identity today. Nothing observable changes; there is no build that goes
+  ## from wrong to right. What changes is that the path is now guarded rather
+  ## than merely out of range of the hazard, so a later change to that edge's
+  ## policy cannot reopen the hole at a call site that never mentioned it.
+
+  test "every decision-taking inputs-unchanged call is conjoined with the refusal":
+    ## THE SCAN IS OVER CODE, NOT OVER COMMENTS, and that is load-bearing
+    ## rather than tidy. Measured while writing this: deleting the guard while
+    ## leaving the explanatory comment in place kept the case GREEN, because
+    ## the comment names the very symbol the scan looks for. A structural audit
+    ## that a comment can satisfy audits the prose.
+    let lines = cliSupportSource().splitLines()
+    var decisionSites = 0
+    for i, line in lines:
+      if not codeOnly(line).contains("hotMetadataRecordInputsUnchanged("):
+        continue
+      if codeOnly(line).contains("discard "):
+        # The prewarm sweep takes no decision from the answer — it warms the
+        # metadata cache and throws the verdict away.
+        continue
+      inc decisionSites
+      let lo = max(0, i - 25)
+      let hi = min(lines.high, i + 5)
+      var window = ""
+      for j in lo .. hi:
+        window.add(codeOnly(lines[j]) & "\n")
+      checkpoint("decision-taking call at line " & $(i + 1) &
+        "; scanned code:\n" & window)
+      check window.contains("unservableCacheRecordReason")
+    # The sweep must have found something, or it asserted nothing. A SECOND
+    # site added tomorrow trips this count rather than slipping through
+    # unaudited — the same "assert over the population" shape as the sweeps
+    # above.
+    check decisionSites == 1
