@@ -98,6 +98,17 @@ type
     ##                          tracking ref (``git log @{u}..HEAD`` is
     ##                          non-empty, or the published-evidence
     ##                          query says ``isPublished=false``).
+    ## - ``attachableBranches`` — branch names for which ``git switch <name>``
+    ##                          would succeed AND land the checkout exactly on
+    ##                          ``lockedRevisionTip``. The dispatcher resolves
+    ##                          this (it is the only party that may touch git);
+    ##                          see ``observeRepoForSync`` for the exact tests,
+    ##                          which cover local tips, shadowed names, orphan
+    ##                          remote-tracking refs, and ambiguous DWIM.
+    ##                          Local names come first. Empty when nothing
+    ##                          names the locked revision, which is a
+    ##                          legitimate steady state, not an error — the
+    ##                          planner then leaves the checkout detached.
     ##
     ## The observation deliberately carries NO workspace-wide metadata. It
     ## used to also carry the M16 ``feature_started`` mark and the recorded
@@ -116,6 +127,7 @@ type
     hasUnpublishedCommits*: bool
     hasForcePushedCommits*: bool
     forcePushedBaseSha*: string
+    attachableBranches*: seq[string]
 
   RepoSyncDecision* = object
     ## One repo's classification + chosen mutating action. The
@@ -183,6 +195,70 @@ proc sameSha(a, b: string): bool =
   if a == b:
     return true
   a.startsWith(b) or b.startsWith(a)
+
+proc looksLikeSha(value: string): bool =
+  ## Branch-vs-SHA test for the manifest's ``revision`` field. Same
+  ## heuristic the CLI uses: 7-64 lowercase hex characters is a commit
+  ## (or an operator's abbreviation of one), anything else is a branch
+  ## name. Duplicated rather than imported because this module is
+  ## pure-policy and must not depend on the CLI layer.
+  if value.len < 7 or value.len > 64:
+    return false
+  for ch in value:
+    if ch notin {'0'..'9', 'a'..'f'}:
+      return false
+  true
+
+const wellKnownIntegrationBranches = ["main", "master", "develop", "trunk",
+                                      "default"]
+
+proc chooseAttachBranch*(resolved: ResolvedRepo;
+                         observation: RepoSyncObservation): string =
+  ## Pick the branch a detached-at-the-lock checkout should be re-attached
+  ## to, or "" when it must stay detached.
+  ##
+  ## Workspace-And-Develop-Mode.md §"Branch Preservation Policy" gives the
+  ## heuristic order, and every candidate in it is qualified by the SAME
+  ## condition — "if its tip matches the locked revision". That condition is
+  ## the whole point: a branch name is a convenience, the locked revision is
+  ## the correctness boundary, so attaching to a branch that names a
+  ## DIFFERENT commit does not preserve the checkout, it moves it. The
+  ## candidate list this chooses from (``attachableBranches``) is pre-filtered
+  ## on exactly that condition, so every branch here is safe by construction
+  ## and this proc only expresses the PREFERENCE among them.
+  ##
+  ## Order:
+  ##   1. the branch the fragment says this repo TRACKS (``resolved.branch``),
+  ##      then a legacy ``revision`` that holds a branch name rather than a
+  ##      commit — the most meaningful name for this revision in this
+  ##      workspace, and the closest thing to the spec's candidate 3
+  ##   2. well-known integration branches (spec candidate 4)
+  ##   3. any other attachable branch, lowest name first so the choice is
+  ##      deterministic across runs and machines (spec candidate 5)
+  ##
+  ## Spec candidate 2 ("the currently checked out branch") cannot apply: this
+  ## runs only for a DETACHED head, which by definition has none. Spec
+  ## candidate 1 (the active workspace branch) is deliberately not consulted —
+  ## ``RepoSyncObservation`` carries no workspace-wide metadata by design (see
+  ## its doc comment), and reinstating it here would undo that. It is a
+  ## preference among already-safe candidates, so omitting it cannot pick an
+  ## unsafe branch; it can only pick a differently-named safe one.
+  if observation.attachableBranches.len == 0:
+    return ""
+  for preferred in [resolved.branch,
+                    if looksLikeSha(resolved.revision): "" else: resolved.revision]:
+    if preferred.len == 0: continue
+    for candidate in observation.attachableBranches:
+      if candidate == preferred:
+        return candidate
+  for wellKnown in wellKnownIntegrationBranches:
+    for candidate in observation.attachableBranches:
+      if candidate == wellKnown:
+        return candidate
+  result = observation.attachableBranches[0]
+  for candidate in observation.attachableBranches:
+    if candidate < result:
+      result = candidate
 
 proc classifyRepoState*(resolved: ResolvedRepo;
                         observation: RepoSyncObservation;
@@ -304,12 +380,34 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   if lockedTip.len > 0 and sameSha(observation.headSha, lockedTip):
     if observation.currentBranch.len == 0:
       # Detached HEAD that happens to point at the locked revision.
-      # Re-attach the checkout to the manifest's pinned branch (when
-      # the manifest names one) so the steady state is on-branch.
+      # Re-attach it to a branch that NAMES that revision, so the steady
+      # state is on-branch without the checkout moving.
+      #
+      # This used to attach to the manifest's ``revision`` when that was a
+      # branch name and to the literal string "main" otherwise, without ever
+      # checking where either one pointed. For a SHA-pinned repo — every
+      # vendored reference tree in a real workspace — "main" has almost
+      # always moved past the pin, so the re-attach silently dragged the
+      # checkout OFF the revision the manifest pinned it to, which is the
+      # one thing sync must never do. Being detached at the pin is the
+      # CORRECT state for such a repo; the spec's "only leave it detached as
+      # a last resort" ranks the alternatives, it does not license moving
+      # the checkout to avoid the last resort.
       result.syncCase = scDetachedAtLockedRevision
+      let attachTo = chooseAttachBranch(resolved, observation)
+      if attachTo.len == 0:
+        # Spec §"Detached checkout at the locked revision": leaving it
+        # detached is the documented last resort. Report it and move on —
+        # NOT a refusal (no ``refusalReason``), because nothing is wrong:
+        # the checkout is clean and sits exactly where the manifest says.
+        result.action = saNone
+        result.message = "leaving '" & resolved.path & "' detached at " &
+          lockedTip & " — no branch tip names the locked revision"
+        return
       result.action = saAttachBranch
-      result.message = "attaching '" & resolved.path & "' branch=" &
-        resolved.revision & " at " & lockedTip
+      result.branch = attachTo
+      result.message = "attaching '" & resolved.path & "' to branch " &
+        attachTo & " at " & lockedTip
       return
     result.syncCase = scCleanAtLockedRevision
     result.action = saNone

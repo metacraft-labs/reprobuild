@@ -1,0 +1,12 @@
+\
+import std/[os, osproc, unittest]
+from repro_test_support import graphArtifactPath, requireBinary
+
+proc buildHelper(): string =
+  requireBinary(graphArtifactPath("build/test-bin/helper"),
+    "reprobuild.test_helpers.helper")
+
+suite "synthetic":
+  test "runs the helper":
+    let binary = buildHelper()
+    check execCmdEx(binary).exitCode == 0

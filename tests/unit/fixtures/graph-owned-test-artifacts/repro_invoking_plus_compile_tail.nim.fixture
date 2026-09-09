@@ -1,0 +1,3 @@
+
+let helperCmd = "nim c --hints:off --out:build/h helper.nim"
+discard execCmdEx(helperCmd)

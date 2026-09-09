@@ -273,6 +273,21 @@ proc foreachDispatchCode(pkg: PackageDef; dispatchName: string;
   code.add("    raise newException(ValueError, \"unknown foreach provider entry point: \" & request.entryPointId)\n")
   parseStmt(code)
 
+proc usesInstallMirrorConstructor(body: NimNode): bool =
+  # Declaration-time metadata for explicit direct/qualified calls only. Do not
+  # evaluate build code or attempt to expand arbitrary helper procedures.
+  if body.kind in {nnkCall, nnkCommand} and body.len > 0:
+    var callee = body[0]
+    if callee.kind == nnkDotExpr:
+      callee = callee[^1]
+    if callee.kind in {nnkIdent, nnkSym} and
+        (callee.eqIdent("cmake_package") or callee.eqIdent("meson_package") or
+         callee.eqIdent("autotools_package")):
+      return true
+  for child in body:
+    if usesInstallMirrorConstructor(child):
+      return true
+
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let buildBody = collectBuildStatements(body, pkg.packageName)
   let devEnvBody = collectDevEnvStatements(body)
@@ -2809,7 +2824,8 @@ proc hasClassifiedOwnership(classified: seq[ClassifiedSection];
   false
 
 proc emitM9R10bDefaultBuildSynthesis*(packageName: string;
-                                      classified: seq[ClassifiedSection]):
+                                      classified: seq[ClassifiedSection];
+                                      sourceFile: string; sourceLine: int):
                                         NimNode =
   ## Emit a default-build synthesis dispatch block when the package
   ## macro detects ``fetch:`` AND no explicit ``build:`` AND a
@@ -2926,7 +2942,11 @@ proc emitM9R10bDefaultBuildSynthesis*(packageName: string;
   # actions still emit.
   let synthBlock = quote do:
     when compiles(defaultBuildConventionFor(`pkgLit`)):
+      from repro_dsl_stdlib/install_mirror_tools import registerInstallMirrorTools
       block:
+        if shouldSynthesizeDefaultBuild(`pkgLit`, hasExplicitBuild = false,
+                                       hasFetchBlock = true):
+          registerInstallMirrorTools(`pkgLit`, `sourceFile`, `sourceLine`)
         registerBuildAction(`pkgLit`, `artifactLit`, `bodyReprLit`)
         beginBuildContext(`pkgLit`, `artifactLit`)
         try:
@@ -4138,6 +4158,15 @@ macro packageImpl*(name: untyped;
     result.add(quote do:
       registerSourceFetchTools(`fetchPackageName`, `fetchSourceFile`,
         `fetchSourceLine`))
+  if usesInstallMirrorConstructor(collectBuildStatements(bodyForBuild, packageName)):
+    let mirrorPackageName = newLit(packageName)
+    let mirrorSourceFile = newLit(pkg.sourceFile)
+    let mirrorSourceLine = newLit(pkg.sourceLine)
+    result.add(parseStmt(
+      "from repro_dsl_stdlib/install_mirror_tools import registerInstallMirrorTools\n"))
+    result.add(quote do:
+      registerInstallMirrorTools(`mirrorPackageName`, `mirrorSourceFile`,
+        `mirrorSourceLine`))
   # ── DSL-port M9.R.10b: default ``build:`` synthesis. When a recipe
   # declares ``fetch:`` AND no explicit ``build:`` block, dispatch to
   # the ``synthesizeMesonPackage`` / ``synthesizeCmakePackage`` /
@@ -4148,7 +4177,8 @@ macro packageImpl*(name: untyped;
   # ``emitM9R10bDefaultBuildSynthesis`` doc comment for the full
   # dispatch matrix + gating rationale.
   let m9r10bSynthesisEmission =
-    emitM9R10bDefaultBuildSynthesis(packageName, classifiedSections)
+    emitM9R10bDefaultBuildSynthesis(packageName, classifiedSections,
+      pkg.sourceFile, pkg.sourceLine)
   result.add(m9r10bSynthesisEmission)
   # ── DSL-port M9.R.6.1: the M9.I block emitter is GONE. Recipes
   # spell per-tool options via an explicit ``build:`` body calling

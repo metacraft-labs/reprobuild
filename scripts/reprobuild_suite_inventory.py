@@ -72,16 +72,156 @@ SLOW_REVIEW_CATEGORIES = {
     "justified integration scope",
 }
 
+# The Nim compiler COMMANDS that actually run the compiler. ``check`` belongs
+# here with ``c``/``cpp``/``js``: it runs the entire front end — parse, import
+# resolution, macro expansion, semantic analysis — and stops before code
+# generation. That changes what comes OUT of the run, not whether a compiler
+# was spawned, and a test that shells out to it pays the same undeclared-input,
+# uncached-rebuild, racing-compiler costs the ratchet exists to refuse.
+# (Omitting ``check`` was a live hole. Together with the leading-whitespace
+# anchor below and the executor-window bug in ``compiler_invocations``, TEN
+# declared test sources spawned a real compiler and appeared in neither the
+# detected set nor the reviewed baseline.)
+# ``cc`` is deliberately NOT here: it is not a Nim command, and the C compiler
+# spelled ``cc`` already has its own pattern below.
+NIM_COMPILE_VERBS = r"(?:c|cpp|js|compile|check)"
+
+# THE DISCRIMINATOR IS NIM'S SWITCH VOCABULARY. DO NOT "SIMPLIFY" IT BACK TO
+# PUNCTUATION.
+#
+# The problem this solves: the product has a `check` verb too. `repro check
+# --mode=pre-push --write-report` is the pre-push hook, and matching it would be
+# the exact failure this whole check exists to avoid — flagging a test for
+# driving reprobuild. It was a live false positive
+# (`t_pre_push_lock_records_unmaterialized_declared_repo`) the first time the
+# verb pattern was widened.
+#
+# The FIRST attempt at a discriminator keyed on the SEPARATOR, on the premise
+# that nim spells long options `--name:value` while this repository's CLIs use
+# `--name=value`. THAT PREMISE IS FALSE, and the compiler source says so:
+# `codetracer-nim/compiler/commands.nim:140` reads
+#
+#     elif switch[i] in {':', '='}: arg = substr(switch, i + 1)
+#
+# with the same `{':', '='}` set again at :202. `nim c --out=x src.nim` is a
+# perfectly ordinary Nim command line, so a separator-based rule left a body
+# spelled `nimExe & " c --out=x src.nim"` undetected — the same walkable bypass,
+# one punctuation mark over, reintroduced by the fix for it.
+#
+# Adding `=` to the separator rule is NOT the fix: that re-admits
+# `--mode=pre-push` and trades one defect for the other forever. Punctuation
+# cannot separate these two languages because they share it. The NAMES can:
+# `--out`, `--nimcache`, `--compileOnly` are nim's vocabulary under EITHER
+# separator, and `--mode` / `--write-report` are in it under neither.
+#
+# The vocabulary below is extracted from the `case switch.normalize` block of
+# `processSwitch` in `codetracer-nim/compiler/commands.nim` (lines 648-1215),
+# not assembled from memory. Names are stored already-normalized, and
+# `_nim_normalize` reproduces `strutils.normalize` exactly — lowercase, drop
+# underscores (`codetracer-nim/lib/pure/strutils.nim:313`) — so `--compileOnly`,
+# `--compile_only` and `--COMPILEONLY` are all recognised, because nim
+# recognises all three.
+NIM_SWITCH_NAMES = frozenset("""
+    advanced app asm assertions backend benchmarkvm boundchecks cc
+    checks cincludes clearnimblepath clib clibdir colors compile
+    compileonly compress context cppcompiletonamespace cppdefine cpu cs
+    cursorinference deadcodeelim debugger debuginfo declaredlocs
+    deepcopy def define defusages doccmd docinternal docroot
+    docseesrcurl dynliboverride dynliboverrideall embedsrc errormax eval
+    exceptions excessivestacktrace excludepath expandarc expandmacro
+    experimental fieldchecks filenames floatchecks forcebuild fullhelp
+    gc gencdeps gendeps genmapping genscript header help hint
+    hintaserror hints hotcodereloading ic implicitstatic import include
+    incremental index infchecks jsbigint64 legacy lib linedir linetrace
+    link listcmd listfullpaths mangle maxcalldepthvm maxloopiterationsvm
+    memtracker mm multimethods nanchecks newruntime nilchecks nilseqs
+    nimbasepattern nimblepath nimcache nimmainprefix no-auto-filter
+    noautofilter nocppexceptions noimportdoc nolinking nomain
+    nonimblepath objchecks opt os out outdir overflowchecks panics
+    parallelbuild passc passl path patterns processing profiler
+    profilevm project putenv rangechecks raw refchecks run seqsv2
+    showallmismatches shownonexports sinkinference skipcfg skipparentcfg
+    skipprojcfg skipusercfg sourcemap spellsuggest stacktrace
+    stacktracemsgs staticboundchecks stdinfile stdout stylecheck
+    stylechecks suggest symbol symbolfiles taintmode threadanalysis
+    threads tlsemulation trace trace-filter tracefilter track trackdirty
+    trmacros undef unitsep usages usenimcache verbosity version warning
+    warningaserror warnings
+""".split())
+
+# Nim's single-letter switch aliases, from the same case block (`of "out", "o"`
+# and friends). Kept separate because a BARE `-r` is far too weak a signal on
+# its own: these are only accepted when they carry a value (`-d:release`,
+# `-o=bin`), which is how a real compile spells them.
+NIM_SHORT_SWITCH_LETTERS = frozenset("abcdfghloprtuvwx")
+
+
+def _nim_normalize(name: str) -> str:
+    """`strutils.normalize`: lowercase, drop underscores. Nothing else."""
+    return name.replace("_", "").lower()
+
+
+class NimCompileVerbMatcher:
+    """A nim compile verb followed by a switch from NIM'S OWN VOCABULARY.
+
+    Duck-types the ``.search`` of a compiled pattern, because that is the only
+    thing ``COMPILER_PATTERNS`` consumers call on it (one call site:
+    ``compiler_invocations``). A class rather than one enormous regex
+    alternation over 158 names: the membership test is a set lookup, it mirrors
+    ``strutils.normalize`` exactly instead of approximating it in regex, and the
+    next reader can see what the rule IS.
+
+    The SHAPE is still a regex — quote, optional whitespace, compile verb,
+    whitespace, a switch token — and it deliberately says nothing about the
+    separator. ``--out:x``, ``--out=x`` and a bare ``--compileOnly`` are all the
+    same shape here; which of them is a nim switch is decided by the name.
+    """
+
+    _SHAPE = re.compile(
+        r"[\"']\s*" + NIM_COMPILE_VERBS + r"\s+(-{1,2})([A-Za-z][\w-]*)([:=]?)"
+    )
+
+    def search(self, text: str):
+        for match in self._SHAPE.finditer(text):
+            dashes, name, separator = match.groups()
+            normalized = _nim_normalize(name)
+            if len(dashes) == 2:
+                if normalized in NIM_SWITCH_NAMES:
+                    return match
+            elif (
+                separator
+                and len(normalized) == 1
+                and normalized in NIM_SHORT_SWITCH_LETTERS
+            ):
+                return match
+        return None
+
 COMPILER_PATTERNS = [
     ("nim-c", re.compile(r"(?<![\w-])nim\s+c(?:\s|[\"',\]]|$)")),
     ("nim-compile", re.compile(r"(?<![\w-])nim\s+compile(?:\s|[\"',\]]|$)")),
-    ("nim-argv", re.compile(r"[\"']nim[\"'].{0,80}[\"'](?:c|compile)[\"']")),
-    ("nim-variable-argv", re.compile(r"\bnim(?:Exe|Bin|Compiler)\b.{0,80}[\"'](?:c|compile)[\"']")),
+    ("nim-check", re.compile(r"(?<![\w-])nim\s+check(?:\s|[\"',\]]|$)")),
+    ("nim-argv", re.compile(r"[\"']nim[\"'].{0,80}[\"']" + NIM_COMPILE_VERBS + r"[\"']")),
+    ("nim-variable-argv", re.compile(
+        r"\bnim(?:Exe|Bin|Compiler)\b.{0,80}[\"']" + NIM_COMPILE_VERBS + r"[\"']")),
     # Nim commands are often assembled in stages, for example
     # `compileVerb = "c --compileOnly ..."`, then `cmd = nimExe & compileVerb`,
     # then `execCmdEx(cmd)`. The data-flow pass in `compiler_invocations`
     # verifies that this fragment eventually reaches an executor.
-    ("nim-compile-verb", re.compile(r"[\"']c\s+(?:--compileOnly|--run|--out:|--nimcache:)")),
+    #
+    # THE LEADING WHITESPACE IS NOT OPTIONAL TO ALLOW FOR. The compiler path is
+    # normally resolved at run time (`findExe("nim")`, `quoteShell(nimExe)`) and
+    # concatenated in FRONT of this fragment, which means the fragment almost
+    # always begins with a separating space: `nimExe & " c --compileOnly ..."`.
+    # An anchor that demanded the verb immediately after the quote therefore
+    # missed the repository's most common spelling, not an exotic one.
+    #
+    # The switch is matched by NAME against nim's own vocabulary (see
+    # `NimCompileVerbMatcher`) rather than as the four hard-coded flags it used
+    # to be: `" c --threads:on ... --compileOnly ..."` is a real invocation in
+    # this tree whose FIRST switch is not among those four. Requiring a nim
+    # switch — not merely "a switch" — is what keeps the pattern off
+    # `reproBin & " check --mode=pre-push"`.
+    ("nim-compile-verb", NimCompileVerbMatcher()),
     ("nimble-build", re.compile(r"(?<![\w-])nimble\s+build(?:\s|[\"',\]]|$)")),
     ("gcc", re.compile(r"(?<![\w-])gcc(?:\s|[\"',\]]|$)")),
     ("g++", re.compile(r"(?<![\w-])g\+\+(?:\s|[\"',\]]|$)")),
@@ -144,10 +284,13 @@ EXECUTOR_PATTERN = re.compile(
     r"runCommand|runNim|runSuccess|requireSuccess|requireNimSuccess)\b"
 )
 
-ARGV_COMPILER_TOKEN = re.compile(
-    r"[\"'](?:nim|nimble|gcc|g\+\+|clang|clang\+\+|cc|c\+\+|rustc|javac|"
-    r"swiftc|zig|cargo|go|dotnet|cmake|make|ninja)[\"']\s*,"
-)
+# ``ARGV_COMPILER_TOKEN`` used to live here. It gated the
+# "inside an open executor call" branch of ``compiler_invocations`` on the line
+# ALSO looking like an argv list (``"nim", "c",``), which made that branch
+# unreachable for the concatenation spelling this repository actually uses and
+# hid three real compiler spawns. The gate is now the open call alone, which
+# strictly subsumes the old condition, so the constant had no remaining reader
+# and is deleted rather than left as decoration.
 
 PLATFORM_PATH_TOKENS = [
     "macos",
@@ -3254,7 +3397,19 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
         ):
             continue
         assigned_var = assignment_name
-        nearby_before = "\n".join(lines[max(0, idx - 4) : idx])
+        # STRICTLY BEFORE the pattern line. This window answers "was an
+        # executor call still open when this line began?", so the line's own
+        # closing parens must not count. Including it made
+        #
+        #     let (output, code) = execCmdEx(
+        #       "nim check --hints:off " & quoteShell(path))
+        #
+        # balance to zero and read as "not inside a call" — the compile was
+        # matched and then dropped — while the same code with one more
+        # argument on a third line was detected. Whether a call's closing
+        # paren happens to land on the compiler line is not a fact about
+        # whether a compiler ran.
+        nearby_before = "\n".join(lines[max(0, idx - 4) : idx - 1])
         executor_matches = list(EXECUTOR_PATTERN.finditer(nearby_before))
         inside_multiline_executor = False
         if executor_matches:
@@ -3262,9 +3417,29 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
             inside_multiline_executor = (
                 executor_context.count("(") > executor_context.count(")")
             )
+        # A COMPILER FRAGMENT ON A CONTINUATION LINE OF AN OPEN EXECUTOR CALL
+        # IS EXECUTED. This used to require an argv-shaped token as well, which
+        # made the whole branch reachable only by `execCmdEx(\n  "nim", "c",`
+        # and not by the concatenation spelling this repository actually uses:
+        #
+        #     let (output, code) = execCmdEx(
+        #       nimExe & " check --hints:off ..." &
+        #       ...)
+        #
+        # Neither half of the old test could see that. The pattern line has no
+        # executor token of its own, so the first arm fails; and the assignment
+        # tracker never binds it to a variable, because `let (output, code) =`
+        # destructures a tuple and the tracker only matches a single identifier
+        # after `let`/`var`. The fragment was therefore matched and then
+        # discarded. Three declared test sources hid a real `nim check` /
+        # `nim c` spawn in exactly this shape.
+        #
+        # Being inside an unbalanced executor call is itself the evidence: the
+        # line is an argument to something that runs a command, and the line
+        # already matched a compiler pattern.
         direct_exec = bool(
             EXECUTOR_PATTERN.search(stripped)
-            or (ARGV_COMPILER_TOKEN.search(stripped) and inside_multiline_executor)
+            or inside_multiline_executor
         )
         matches.append(
             {

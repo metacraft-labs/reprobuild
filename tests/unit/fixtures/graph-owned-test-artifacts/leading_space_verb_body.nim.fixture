@@ -1,0 +1,32 @@
+\
+import std/[os, osproc, unittest]
+
+# A test body that spawns a REAL compiler with the verb carried in a fragment
+# that begins with a SPACE — `nimExe & " c --compileOnly ..."` — because the
+# compiler path is resolved at run time and concatenated in front of it.
+#
+# This is the single most common spelling of a runtime compile in this
+# repository, not a contrived one. Modelled on the live shapes in
+# `tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim:208`,
+# `tests/integration/t_installed_engine_read_only_source_tree.nim:198` and
+# `libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim:268`.
+
+proc buildHelper(): string =
+  let dir = "build" / "test-tmp" / "synthetic-leading-space"
+  createDir(dir)
+  let outputPath = dir / "helper"
+  let nimExe = findExe("nim")
+  doAssert nimExe.len > 0, "nim compiler not on PATH"
+  let cmd = quoteShell(nimExe) &
+    " c --compileOnly --hints:off --warnings:off" &
+    " --nimcache:" & quoteShell(dir / "nc") &
+    " -o:" & quoteShell(outputPath) &
+    " " & quoteShell(dir / "helper.nim")
+  let (output, exitCode) = execCmdEx(cmd)
+  if exitCode != 0:
+    raise newException(IOError, output)
+  outputPath
+
+suite "synthetic":
+  test "runs the helper":
+    check buildHelper().len > 0

@@ -1,0 +1,26 @@
+\
+import std/[os, osproc, unittest]
+
+# A test body that spawns a REAL compiler through `nim check`. Nim's `check`
+# command runs the full front end — it parses, resolves imports, expands
+# macros and type-checks — so this shells out to the compiler exactly as
+# `nim c` does. It stops before code generation, which changes what comes out,
+# not whether a compiler ran.
+#
+# Modelled on the live shape in
+# `libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim:196` and
+# `tests/integration/t_spec_example_fixtures_compile.nim:30`.
+
+proc typechecks(body: string): bool =
+  let dir = "build" / "test-tmp" / "synthetic-check"
+  createDir(dir)
+  let path = dir / "probe.nim"
+  writeFile(path, body)
+  let (output, code) = execCmdEx(
+    "nim check --hints:off --warnings:off " & quoteShell(path))
+  discard output
+  code == 0
+
+suite "synthetic":
+  test "the probe type-checks":
+    check typechecks("let x: int = 1\n")

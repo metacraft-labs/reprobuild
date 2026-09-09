@@ -612,10 +612,12 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       raiseDevEnvEdge("provider compile edge did not write artifact: " &
         result.providerArtifactPath)
     provider = readProviderCompileArtifact(result.providerArtifactPath)
-    if not providerCompileArtifactFresh(result.providerArtifactPath,
-        providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
-        providerPlan.providerFingerprint, providerPlan.workDir):
-      raiseDevEnvEdge("provider compile artifact is stale after edge execution")
+    let providerConsistency = providerCompileConsistencyAfterExecution(
+      providerPlan, result.providerArtifactPath)
+    if not providerConsistency.fresh:
+      raiseDevEnvEdge("provider compile artifact is stale after edge " &
+        "execution: " & result.providerArtifactPath & "\n" &
+        providerConsistency.detail)
 
   result.providerBinaryPath = provider.outputBinaryPath
   result.providerArtifactId = hexDigest(provider.providerFingerprint)

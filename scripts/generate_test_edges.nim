@@ -237,6 +237,7 @@ proc isProviderModePath(path: string): bool =
     "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
     "tests/unit/t_configure_build_tree_cleanup.nim",
     "tests/unit/t_constructor_fetch_tool_refs.nim",
+    "tests/unit/t_install_mirror_optional_version.nim",
     "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
     "tests/unit/t_library_stage_alias.nim",
   ]:
@@ -630,7 +631,8 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     var definesList: seq[string] = @[]
     if edge.needsProviderMode: definesList.add("reproProviderMode")
     if edge.needsSsl: definesList.add("ssl")
-    if edge.source == "tests/unit/t_source_fetch_tool_metadata.nim":
+    if edge.source in ["tests/unit/t_source_fetch_tool_metadata.nim",
+                       "tests/unit/t_install_mirror_tool_metadata.nim"]:
       definesList.add("reproInterfaceMode")
     if edge.source == BootIdUnavailableTest:
       definesList.add("reproShmIndexTestBootIdUnavailable")

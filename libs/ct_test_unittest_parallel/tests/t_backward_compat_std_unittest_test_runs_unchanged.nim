@@ -20,27 +20,25 @@
 
 import std/[os, osproc, strutils]
 import std/unittest
+from repro_test_support import ctShimFixturePath, requireBinary
 
-const fixtureSource = currentSourcePath().parentDir() /
-  "fixtures" / "fixture_baseline_std_unittest.nim"
-
-proc nimcacheDir(): string =
-  "build" / "nimcache" / "ct_test_unittest_parallel" /
-    "fixture_baseline_std_unittest"
-
+# Graph-Owned-Test-Artifacts M3: the baseline fixture is built by edge
+# ``reprobuild.test_fixtures.ct_shim_fixture_baseline`` and declared as a typed
+# input on this test's execute edge (``testFixtureArtifacts`` in ``repro.nim``).
+#
+# ASSERTION 1 IN THE DOCSTRING ABOVE — "the binary compiles cleanly" — IS NOT
+# DROPPED BY THIS CHANGE, it is RELOCATED. A ``nim c`` in a test body reports a
+# broken fixture as a failing test; a build edge reports it as a failing build,
+# before the suite runs at all. Both are red, the second is earlier and names
+# the artifact. Assertions 2 and 3 are about the binary's stdout shape and its
+# exit-code convention and are untouched.
+#
+# The old output path was ``build/test-bin/…``, which the suite runner
+# enumerates; the graph edge writes under ``build/test-fixtures/`` instead so a
+# fixture is never mistaken for a test of this repository.
 proc buildFixture(): string =
-  let outputPath = "build" / "test-bin" /
-    "ct_test_unittest_parallel_fixture_baseline"
-  createDir(outputPath.parentDir())
-  createDir(nimcacheDir())
-  let cmd = "nim c --hints:off --warnings:off --nimcache:" &
-    nimcacheDir().quoteShell() & " --out:" & outputPath.quoteShell() &
-    " " & fixtureSource.quoteShell()
-  let (output, exitCode) = execCmdEx(cmd)
-  if exitCode != 0:
-    echo output
-    raise newException(IOError, "failed to build fixture: " & cmd)
-  outputPath
+  requireBinary(ctShimFixturePath("fixture_baseline_std_unittest"),
+    "reprobuild.test_fixtures.ct_shim_fixture_baseline")
 
 suite "t_backward_compat_std_unittest_test_runs_unchanged":
   test "fixture_runs_with_std_unittest_output_shape":

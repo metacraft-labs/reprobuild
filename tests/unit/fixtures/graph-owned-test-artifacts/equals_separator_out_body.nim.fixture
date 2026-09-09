@@ -1,0 +1,34 @@
+\
+import std/[os, osproc, unittest]
+
+# A test body that spawns a REAL compiler with `--out=` rather than `--out:`.
+#
+# Nim accepts BOTH separators. `codetracer-nim/compiler/commands.nim:140`:
+#
+#     elif switch[i] in {':', '='}: arg = substr(switch, i + 1)
+#
+# so this is an ordinary Nim command line, not a contrivance. A detector that
+# discriminated nim switches from other CLIs by looking for a colon missed it
+# entirely, which is why the rule keys on nim's switch VOCABULARY instead.
+#
+# Deliberately spelled through `nimExe &` concatenation so that ONLY the
+# `nim-compile-verb` pattern can fire: there is no literal `nim c`/`nim check`
+# on any line, and no quoted bare verb for the argv patterns to catch.
+
+proc buildHelper(): string =
+  let dir = "build" / "test-tmp" / "synthetic-equals-out"
+  createDir(dir)
+  let outputPath = dir / "helper"
+  let nimExe = findExe("nim")
+  doAssert nimExe.len > 0, "compiler not on PATH"
+  let cmd = quoteShell(nimExe) &
+    " c --out=" & quoteShell(outputPath) &
+    " " & quoteShell(dir / "helper.nim")
+  let (output, exitCode) = execCmdEx(cmd)
+  if exitCode != 0:
+    raise newException(IOError, output)
+  outputPath
+
+suite "synthetic":
+  test "runs the helper":
+    check buildHelper().len > 0

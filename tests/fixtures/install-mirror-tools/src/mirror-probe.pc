@@ -1,0 +1,4 @@
+prefix=/usr
+Name: mirror-probe
+Description: Install mirror fixture
+Version: 1.0

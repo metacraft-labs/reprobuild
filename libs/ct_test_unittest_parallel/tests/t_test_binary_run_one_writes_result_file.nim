@@ -10,40 +10,30 @@
 
 import std/[json, os, osproc, strutils]
 import std/unittest
-from repro_test_support import testCaseScratchSlug
+from repro_test_support import ctShimFixturePath, requireBinary,
+  testCaseScratchSlug
 
-const fixtureSource = currentSourcePath().parentDir() /
-  "fixtures" / "fixture_protocol_three_tests.nim"
+# Graph-Owned-Test-Artifacts M3: the fixture is BUILT BY THE GRAPH — the same
+# single artifact ``t_every_test_binary_speaks_list_json_protocol`` reads, from
+# edge ``reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests``, and
+# declared as a typed input on both tests' execute edges. See the longer note
+# in that file for why the per-case output paths this proc used to need are
+# gone with the per-case compile that created the race.
+proc buildFixture(): string =
+  requireBinary(ctShimFixturePath("fixture_protocol_three_tests"),
+    "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests")
 
-# All four cases here — and both cases of
-# ``t_every_test_binary_speaks_list_json_protocol`` — build this same
-# fixture. Under per-case execution those are concurrent processes, so
-# a single shared output path and nimcache means one ``nim c`` relinks
-# the binary another case is in the middle of running. Give each case
-# its own. Building under ``build/test-tmp`` rather than
-# ``build/test-bin`` also keeps a deliberately-failing fixture out of
-# the directory the runner scans.
+# Per-case scratch for the result files this suite WRITES. Shared fixture,
+# private outputs. The four cases used to name fixed ``/tmp/...`` paths, which
+# is an absolute host path in a test body and does not honour ``$TMPDIR``;
+# ``testCaseScratchSlug()`` gives each case its own directory under the repo's
+# own build tree instead.
 let fixtureScratch = "build" / "test-tmp" / "ct-test-unittest-parallel" /
   testCaseScratchSlug()
 
-proc nimcacheDir(): string =
-  result = getEnv("CT_TEST_PARALLEL_NIMCACHE")
-  if result.len == 0:
-    result = fixtureScratch / "nimcache"
-
-proc buildFixture(): string =
-  let outputPath = fixtureScratch /
-    "ct_test_unittest_parallel_fixture_three_tests"
-  createDir(outputPath.parentDir())
-  createDir(nimcacheDir())
-  let cmd = "nim c --hints:off --warnings:off --nimcache:" &
-    nimcacheDir().quoteShell() & " --out:" & outputPath.quoteShell() &
-    " " & fixtureSource.quoteShell()
-  let (output, exitCode) = execCmdEx(cmd)
-  if exitCode != 0:
-    echo output
-    raise newException(IOError, "failed to build fixture: " & cmd)
-  outputPath
+proc resultFilePath(stem: string): string =
+  createDir(fixtureScratch)
+  fixtureScratch / (stem & ".json")
 
 proc runOne(binary, name, resultFile: string): tuple[exitCode: int,
                                                      doc: JsonNode] =
@@ -69,7 +59,7 @@ suite "t_test_binary_run_one_writes_result_file":
   test "pass_status_zero_exit":
     let binary = buildFixture()
     let (exitCode, doc) = runOne(binary, "arithmetic::addition",
-      "/tmp/ct_test_unittest_parallel.pass.json")
+      resultFilePath("pass"))
     check exitCode == 0
     check doc != nil
     if doc != nil:
@@ -79,7 +69,7 @@ suite "t_test_binary_run_one_writes_result_file":
   test "fail_status_one_exit_with_checkpoints":
     let binary = buildFixture()
     let (exitCode, doc) = runOne(binary, "arithmetic::subtraction_fails",
-      "/tmp/ct_test_unittest_parallel.fail.json")
+      resultFilePath("fail"))
     check exitCode == 1
     check doc != nil
     if doc != nil:
@@ -90,7 +80,7 @@ suite "t_test_binary_run_one_writes_result_file":
   test "skip_status_two_exit":
     let binary = buildFixture()
     let (exitCode, doc) = runOne(binary, "markers::skipped",
-      "/tmp/ct_test_unittest_parallel.skip.json")
+      resultFilePath("skip"))
     check exitCode == 2
     check doc != nil
     if doc != nil:
@@ -100,7 +90,7 @@ suite "t_test_binary_run_one_writes_result_file":
   test "missing_test_writes_result_and_exits_nonzero":
     let binary = buildFixture()
     let (exitCode, doc) = runOne(binary, "nonexistent::test",
-      "/tmp/ct_test_unittest_parallel.missing.json")
+      resultFilePath("missing"))
     check exitCode != 0
     check doc != nil
     if doc != nil:

@@ -8,40 +8,39 @@
 
 import std/[json, os, osproc, streams, strtabs, strutils]
 import std/unittest
-from repro_test_support import testCaseScratchSlug
+from repro_test_support import ctShimFixturePath, requireBinary,
+  testCaseScratchSlug
 
-const fixtureSource = currentSourcePath().parentDir() /
-  "fixtures" / "fixture_protocol_three_tests.nim"
+# Graph-Owned-Test-Artifacts M3: the fixture is BUILT BY THE GRAPH.
+#
+# This proc used to run ``nim c``. Both cases here, and every case of
+# ``t_test_binary_run_one_writes_result_file``, built the same fixture — and
+# because per-case execution runs those as concurrent processes, each case had
+# to be given its own output path and its own nimcache so that one case's
+# ``nim c`` would not relink a binary another case was in the middle of
+# executing. That was a workaround for a race that only existed because the
+# artifact was built six times.
+#
+# It is now built ONCE by edge ``reprobuild.test_fixtures.ct_shim_fixture_
+# protocol_three_tests`` and declared as a typed input on both tests' execute
+# edges (``testFixtureArtifacts`` in ``repro.nim``). All six cases read one
+# read-only file, so there is no race left to work around, and a change to the
+# fixture source invalidates the tests instead of being silently recompiled
+# underneath them.
+#
+# COMPILATION IS NOT THE SUBJECT HERE, which is why this migration is safe:
+# what is asserted is the ``--list-json`` protocol document the BINARY emits.
+# Contrast ``t_smoke_ct_test_unittest_parallel``, which IMPORTS the shim so
+# that its own binary is the artifact under test — nothing to lift, and the M2
+# migration correctly left it alone.
+proc buildFixture(): string =
+  requireBinary(ctShimFixturePath("fixture_protocol_three_tests"),
+    "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests")
 
-# Both cases in this suite — and every case of
-# ``t_test_binary_run_one_writes_result_file`` — build this same
-# fixture. Under per-case execution those are concurrent processes, so
-# a single shared output path and nimcache means one ``nim c`` relinks
-# the binary another case is in the middle of running. Give each case
-# its own. Building under ``build/test-tmp`` rather than
-# ``build/test-bin`` also keeps a deliberately-failing fixture out of
-# the directory the runner scans.
+# Scratch space for the per-case result file the protocol writes. The FIXTURE
+# is shared; anything the case WRITES still has to be per-case.
 let fixtureScratch = "build" / "test-tmp" / "ct-test-unittest-parallel" /
   testCaseScratchSlug()
-
-proc nimcacheDir(): string =
-  result = getEnv("CT_TEST_PARALLEL_NIMCACHE")
-  if result.len == 0:
-    result = fixtureScratch / "nimcache"
-
-proc buildFixture(): string =
-  let outputPath = fixtureScratch /
-    "ct_test_unittest_parallel_fixture_three_tests"
-  createDir(outputPath.parentDir())
-  createDir(nimcacheDir())
-  let cmd = "nim c --hints:off --warnings:off --nimcache:" &
-    nimcacheDir().quoteShell() & " --out:" & outputPath.quoteShell() &
-    " " & fixtureSource.quoteShell()
-  let (output, exitCode) = execCmdEx(cmd)
-  if exitCode != 0:
-    echo output
-    raise newException(IOError, "failed to build fixture: " & cmd)
-  outputPath
 
 proc runProtocolCommand(binary, argument: string): tuple[output: string;
     stderrOutput: string; exitCode: int] =

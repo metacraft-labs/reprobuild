@@ -560,18 +560,23 @@ proc emitInstallMirrorPublishAction(projectRoot, dslPackageName, outPath,
   script.add("touch \"" & escapedMirrorStamp & "\"; ")
   script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
     publishVersion, mirrorRoot))
+  var mirrorOutputs = @[mirrorStamp]
+  var mirrorWriteRoots = @[mirrorRoot]
+  if publishVersion.len > 0:
+    mirrorOutputs.add(sidecar)
+    mirrorWriteRoots.add(sidecar)
   buildAction(
     id = "from-source-custom-mirror-" & sanitizeNamePart(dslPackageName),
     call = inlineExecCall(@["sh", "-c", script], projectRoot),
     deps = @[lastShellId],
     inputs = @[lastShellStamp],
-    outputs = @[mirrorStamp, sidecar],
+    outputs = mirrorOutputs,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-custom.mirror",
     toolIdentityRefs = @InstallMirrorCoreToolNames &
       @[InstallMirrorPublishToolName],
-    declaredOutputs = @[mirrorRoot, sidecar])
+    declaredOutputs = mirrorWriteRoots)
 
 # ---------------------------------------------------------------------------
 # Convention entry
