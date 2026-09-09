@@ -190,12 +190,39 @@ suite "a real execute edge gives a test binary a usable PATH":
 
     # And it must actually depend on `PATH`, or it would pass under an
     # empty one.
-    check source.contains("getEnv(\"PATH\")")
-    check source.contains("findExe(")
+    #
+    # TWO HAYSTACKS, AND THE DIFFERENCE IS LOAD-BEARING RATHER THAN TIDY.
+    # Both needles name something the fixture must DO, so neither may be
+    # satisfiable by the fixture merely TALKING about it — and the fixture
+    # talks about both at length, because its own header quotes the corpus
+    # idiom it exists to defend:
+    #
+    #     ##     let gitBin = findExe("git")
+    #     ##     if gitBin.len == 0: skip()
+    #
+    # so `findExe(` was already satisfied by prose before the file's first
+    # line of code. Blanking comments is NOT ENOUGH for that one: the fixture
+    # also carries `checkpoint("findExe(\"git\") -> " & gitBin)`, a string
+    # literal that spells the needle exactly. It needs literals blanked too.
+    #
+    # `getEnv("PATH")` cannot use that mode, because the needle IS a string
+    # literal and blanking literals would delete the subject. Comments
+    # blanked, literals kept, is the strictest mode available to it.
+    let code = nimSourceCodeOnly(source)
+    let withoutComments = nimSourceCommentsBlanked(source)
+    check withoutComments.contains("getEnv(\"PATH\")")
+    check code.contains("findExe(")
 
     # The generator must have picked it up, or `.#test#<stem>` resolves
     # to nothing and the engine arm below cannot run.
-    let reproTests = readFile(repoRoot / "repro_tests.nim")
+    #
+    # Comments blanked for the same reason as above. LATENT rather than live,
+    # and said so rather than overstated: `repro_tests.nim` is generated, but
+    # its 30-line hand-written prologue names other identifiers already, and a
+    # prologue that came to name a source would let a REMOVED registration
+    # keep this green. Literals kept — a registration IS a literal.
+    let reproTests = nimSourceCommentsBlanked(
+      readFile(repoRoot / "repro_tests.nim"))
     check reproTests.contains("tests/unit/" & TargetTest & ".nim")
 
   test "engine: the execute edge runs it, and it reports OK not SKIPPED":

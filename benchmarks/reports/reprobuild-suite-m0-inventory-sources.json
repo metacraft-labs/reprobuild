@@ -2,7 +2,7 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
     "nimTestBinaries": 1481,
-    "pureUnitConsolidationGroups": 51,
+    "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 598,
     "staticallyDetectedRuntimeCompilerFlowTests": 83,
     "testEntries": 1486
@@ -114,17 +114,6 @@
         "libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim",
         "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim",
         "libs/repro_cli_support/tests/test_m2_env_ps1_migration_clean.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [],
-      "owner": "libs/repro_cli_support",
-      "sources": [
-        "libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim",
-        "libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim"
       ],
       "targetOs": "soAny"
     },
@@ -2916,7 +2905,6 @@
             "act",
             "allowed",
             "bypass",
-            "c",
             "cacheRoot",
             "cachedMonitorToolsReady",
             "callSites",
@@ -2932,12 +2920,12 @@
             "cliSeen",
             "cliSupport",
             "close",
+            "code",
             "config",
             "cur",
             "daemon",
             "daemonBin",
             "declared",
-            "depth",
             "devEnvEngine",
             "devSession",
             "died",
@@ -2966,7 +2954,6 @@
             "interestRoot",
             "isIdent",
             "item",
-            "j",
             "keyword",
             "lines",
             "lowered",
@@ -2974,7 +2961,6 @@
             "marker",
             "mentioned",
             "moduleKeys",
-            "n",
             "observability",
             "orphaned",
             "output",
@@ -2986,7 +2972,6 @@
             "probes",
             "profileEdge",
             "quoted",
-            "raw",
             "readAny",
             "reads",
             "refSites",
@@ -3025,7 +3010,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1317,
+          "line": 1258,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -6678,7 +6663,9 @@
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim",

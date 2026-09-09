@@ -69,7 +69,8 @@ when defined(posix):
   from std/posix import Mode, umask, dup, dup2, close
 
 import repro_build_engine
-from repro_test_support import prepareMonitorTools, testCaseScratchSlug
+from repro_test_support import prepareMonitorTools, testCaseScratchSlug,
+  nimSourceCommentsBlanked
 
 suite "M9.R.36.3 umask-022 sh-wrap":
   test "POSIX wrap shape: 3-element /bin/sh -c argv":
@@ -562,29 +563,73 @@ when defined(linux) or defined(macosx):
       # stops existing: delete the flag and the entry keeps permitting
       # whatever else lands in that file. So the permission has to be USED,
       # and the surface it was opened for has to be THERE.
-      let cliText = readFile(cliSource)
+      #
+      # OVER CODE, NOT OVER PROSE. `nimSourceCommentsBlanked` blanks every
+      # comment and KEEPS string literals, which is the mode this block needs
+      # in both directions: the flag exists in the CLI only as a literal, so
+      # blanking literals would delete the subject, while leaving comments in
+      # makes the whole block satisfiable by a sentence about the flag.
+      #
+      # THAT WAS NOT HYPOTHETICAL. This file previously said so and stopped
+      # there: "a CLI that had lost the flag but kept a comment naming it
+      # would satisfy it". The CLI carries two such comments TODAY, at
+      # `repro_cli_support.nim:8356` and `:18769`, and either satisfies a
+      # raw-text `contains` on its own — so the weakness was live, not
+      # prospective. The identical defect was measured, and fixed the same
+      # way, in `t_s7_build_paths_reach_the_restore_config`.
+      let cliCode = nimSourceCommentsBlanked(readFile(cliSource))
       if permittedMentions == 0:
         echo "the P1(b) allowlist permits ", Field,
           " in the CLI, but the CLI does not name it: the entry is now a ",
           "standing exemption for a plumbing that no longer exists. Remove ",
           "the entry, or restore the surface."
       check permittedMentions > 0
-      if not cliText.contains("--monitor-hosting"):
+      if not cliCode.contains("--monitor-hosting"):
         echo "the CLI does not carry the `--monitor-hosting` flag, so the ",
           "P1(b) operator surface this case's allowlist was relaxed for is ",
           "gone; the HM-6 verdict is once again unreproducible without a ",
           "harness."
-      check cliText.contains("--monitor-hosting")
-      # AND THAT ONE IS A SOURCE MATCH, WITH THE WEAKNESS A SOURCE MATCH
-      # HAS: a CLI that had lost the flag but kept a comment naming it would
-      # satisfy it. It cannot be pinned at runtime from here — this file is
-      # a `repro_build_engine` test and does not link the CLI, and importing
-      # `repro_cli_support` to reach one flag would invert the dependency
-      # direction. What actually exercises the flag end to end is the
-      # shipped binary: `repro build --help` lists it, a bad value exits 1
-      # naming the flag, and `--no-runquota --monitor-hosting=where-supported`
-      # produces a `.host.stdout` where the default produces none. Declared
-      # rather than papered over.
+      check cliCode.contains("--monitor-hosting")
+      # ... AND IT IS WIRED, NOT MERELY SPELLED. Blanking comments alone is
+      # not sufficient here, because the flag also appears in the `build`
+      # usage string and in the daemon's argument forwarder: a CLI that had
+      # lost the PARSE ARM but kept its help text would still satisfy the
+      # match above. So the chain is pinned link by link, and the three links
+      # are three different kinds of thing, which is what stops one edit
+      # satisfying all of them by accident:
+      #
+      #   1. the token is RECOGNISED as a flag by an argument parser,
+      #   2. its value is DECODED by the parser that owns the enum, and
+      #   3. the decoded value REACHES the engine config field.
+      #
+      # Link 3 is also what `permittedMentions > 0` above was reaching for,
+      # said as code rather than as a line count that a comment can move.
+      #
+      # LINK 1 IS THE WEAKEST OF THE THREE AND IS DELIBERATELY NOT SHARPENED.
+      # Two parsers in this file recognise the token — `repro build`'s own,
+      # and the daemon client's forwarder — so link 1 survives the deletion of
+      # either. That is measured, not assumed: removing the `repro build` arm
+      # left link 1 green and link 2 red, which is exactly what "three links,
+      # three different kinds of thing" buys. Counting the arms instead would
+      # pin a number that moves whenever a third surface learns the flag,
+      # which is a change this audit has no opinion about.
+      for link in ["arg == \"--monitor-hosting\"",
+                   "parseMonitorHostingMode(",
+                   "monitorHosting: monitorHosting"]:
+        if not cliCode.contains(link):
+          echo "the CLI names `--monitor-hosting` but does not wire it: ",
+            "the missing link is `", link, "`. The P1(b) operator surface ",
+            "this case's allowlist was relaxed for is a spelling with no ",
+            "effect, which is worse than its absence."
+        check cliCode.contains(link)
+      # WHAT IS STILL NOT PINNED HERE, declared rather than papered over: that
+      # the wired flag CHANGES BEHAVIOUR. That cannot be reached from this
+      # file — it is a `repro_build_engine` test and does not link the CLI,
+      # and importing `repro_cli_support` to reach one flag would invert the
+      # dependency direction. What exercises it end to end is the shipped
+      # binary: `repro build --help` lists it, a bad value exits 1 naming the
+      # flag, and `--no-runquota --monitor-hosting=where-supported` produces a
+      # `.host.stdout` where the default produces none.
       #
       # The environment half is pinned at RUNTIME rather than by a source
       # match, because a source match for an env-var name would pass on a
