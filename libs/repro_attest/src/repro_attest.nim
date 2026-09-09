@@ -12,8 +12,16 @@
 ##     lets a verifier re-derive it without the image.
 ##   * ``repro_attest/manifest`` — the ``reproos.attested-image.v1``
 ##     document: typed record, canonical renderer, strict parser.
+##   * ``repro_attest/binding`` — the 64-byte report data an instance
+##     binds into hardware evidence, constructed once for every backend.
+##   * ``repro_attest/report`` — the ``reproos.attestation-report.v1``
+##     envelope an instance answers a challenge with: typed record,
+##     canonical renderer, strict parser, and the trust rules encoded in
+##     the names a reader has to use.
 
 import ./repro_attest/measurement
 import ./repro_attest/manifest
+import ./repro_attest/binding
+import ./repro_attest/report
 
-export measurement, manifest
+export measurement, manifest, binding, report
