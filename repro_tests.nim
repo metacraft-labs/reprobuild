@@ -360,6 +360,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim",
+    binary: "build/test-bin/t_warm_noop_consultation_hashes_no_bytes",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim",
     binary: "build/test-bin/t_annotation_perturbs_no_fingerprint",
     defines: @[],

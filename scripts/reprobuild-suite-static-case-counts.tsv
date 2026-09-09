@@ -61,6 +61,7 @@ libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim	nim	3
 libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
+libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	nim	4
 libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim	nim	6
 libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	6
 libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
