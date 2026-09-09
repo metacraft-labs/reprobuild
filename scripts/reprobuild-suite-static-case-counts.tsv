@@ -1056,7 +1056,11 @@ tests/integration/t_integration_cross_target_splice.nim	nim	3
 tests/integration/t_integration_daemon_nix_and_tarball_realize.nim	nim	1
 tests/integration/t_integration_feature_set_solver_backed.nim	nim	5
 tests/integration/t_integration_hcr_linkgraph_relocation_classification.nim	nim	2
+tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim	nim	2
 tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim	nim	2
+tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim	nim	2
+tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim	nim	2
+tests/integration/t_integration_hcr_linux_static_local_symbol_ambiguity_refused.nim	nim	2
 tests/integration/t_integration_hcr_reference_corpus_and_object_inputs.nim	nim	1
 tests/integration/t_integration_launch_plan_binding_strategies.nim	nim	21
 tests/integration/t_integration_local_store_gc.nim	nim	3

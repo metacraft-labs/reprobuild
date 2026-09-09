@@ -774,6 +774,42 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_x86_64_single_threaded_direct_patch.log
 
+integration_hcr_linux_elf_symbol_resolution:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_elf_symbol_resolution \
+        --out:build/test-bin/integration_hcr_linux_elf_symbol_resolution \
+        tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_elf_symbol_resolution.log
+
+integration_hcr_linux_build_id_mismatch_refused:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_build_id_mismatch_refused \
+        --out:build/test-bin/integration_hcr_linux_build_id_mismatch_refused \
+        tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_build_id_mismatch_refused.log
+
+integration_hcr_linux_elf_object_parsing_and_patch_plan:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_elf_object_parsing_and_patch_plan \
+        --out:build/test-bin/integration_hcr_linux_elf_object_parsing_and_patch_plan \
+        tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_elf_object_parsing_and_patch_plan.log
+
+integration_hcr_linux_static_local_symbol_ambiguity_refused:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_static_local_symbol_ambiguity_refused \
+        --out:build/test-bin/integration_hcr_linux_static_local_symbol_ambiguity_refused \
+        tests/integration/t_integration_hcr_linux_static_local_symbol_ambiguity_refused.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_static_local_symbol_ambiguity_refused.log
+
 e2e_hcr_direct_patch_debug_unwind_replay:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
