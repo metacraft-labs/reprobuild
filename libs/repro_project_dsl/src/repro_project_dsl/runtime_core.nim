@@ -2556,6 +2556,43 @@ proc patchableFunctionEntryFlag*(tool: ReproHcr; entryBytes = 16;
   discard tool
   "-fpatchable-function-entry=" & $entryBytes & "," & $entryOffset
 
+proc functionAlignmentFlag*(tool: ReproHcr;
+                            alignment = 16): string {.dynOrStatic.} =
+  ## HLX-M0. Alignment is a PRECONDITION of atomic publication, not an
+  ## assumption, and it does not hold by default: measured, GCC 15.2 with
+  ## ``-O2 -fpatchable-function-entry=8,4`` and no ``-falign-functions`` puts
+  ## the second function of a TU at section offset ``0x14``, which is not even
+  ## 4-byte aligned. See ``HCR/Linux-ELF-Provider.md`` §4.2. The provider still
+  ## COMPUTES the window and refuses a site that has none, so this flag makes
+  ## the check pass by construction rather than substituting for it.
+  discard tool
+  "-falign-functions=" & $alignment
+
+proc patchableCompileFlags*(tool: ReproHcr; entryBytes = 0;
+                            entryOffset = 0;
+                            alignment = 16): seq[string] {.dynOrStatic.} =
+  ## The patchable-TU compile profile for the host architecture.
+  ##
+  ## ``HCR/Linux-ELF-Provider.md`` §4.3 settles the operand, which three
+  ## documents previously disagreed about: ``-fpatchable-function-entry=N[,M]``
+  ## counts NOP *instructions*, and ``M`` moves the entry label, so the M25
+  ## fixture's ``=8,4`` leaves only four usable bytes after the entry — not
+  ## enough for a five-byte ``E9 rel32``, let alone the eight-byte aligned
+  ## window this provider requires. The profile is therefore ``=16,0`` on
+  ## x86_64 (16 single-byte NOPs) and ``=4,0`` on aarch64 (4 x 4 = 16 bytes),
+  ## plus ``-falign-functions=16``.
+  ##
+  ## ``entryBytes = 0`` means "use the architecture default"; pass a value to
+  ## override.
+  let nopCount =
+    if entryBytes > 0: entryBytes
+    elif hostCPU == "arm64": 4
+    else: 16
+  result = @[
+    patchableFunctionEntryFlag(tool, nopCount, entryOffset),
+    functionAlignmentFlag(tool, alignment)
+  ]
+
 proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
                deps: openArray[string] = [];
                after: openArray[BuildActionDef] = [];

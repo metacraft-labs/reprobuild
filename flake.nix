@@ -1597,6 +1597,40 @@
               pkgs.libarchive
               pkgs.nlohmann_json
               pkgs.pcre2
+              # pcre (v1), and it is NOT a duplicate of pcre2 above. The two
+              # are different libraries with different sonames, and this shell
+              # needs both for different consumers.
+              #
+              # The LINK requirement comes from vm-harness, whose serial-console
+              # matcher (src/vm_harness/serial.nim) is built on Nim's `std/re`
+              # — a PCRE **1** binding — and pins the dependency into the ELF
+              # with `{.passL: "-Wl,--no-as-needed -lpcre -Wl,--as-needed".}`.
+              # reprobuild's R2/R9 boot gates
+              # (tests/integration/t_r2_iso_boot.nim and t_r9_systemd_boot.nim)
+              # `import vm_harness` whenever the optional sibling checkout is
+              # present (config.nims' `vmHarnessAvailable`), so their `nim c`
+              # link line carries `-lpcre`. vm-harness supplies the matching
+              # `-L` from ITS OWN config.nims via `pcre-config --libs`, and that
+              # file governs builds rooted in vm-harness only — a build rooted
+              # here reads reprobuild's config.nims instead and never sees it.
+              # The `-L` therefore has to come from this shell's NIX_LDFLAGS,
+              # exactly as the OpenSSL `-L` does for the `-d:ssl` test edges
+              # (see scripts/generate_test_edges.nim's `needsSslDefine`).
+              # Without this line `repro build .#test-builds` ends with
+              # `ld: cannot find -lpcre` on precisely those two binaries and
+              # `just test` cannot reach its execution phase at all.
+              #
+              # Note that `pkgs.pcre` already appears in LD_LIBRARY_PATH above,
+              # and that entry does NOT stand in for this one: LD_LIBRARY_PATH
+              # is consulted by the loader at run time and never by `ld` at
+              # link time. Both are needed, for the two different phases.
+              #
+              # This mirrors vm-harness's own flake, which lists `pkgs.pcre` in
+              # `buildInputs` (and `pkgs.pcre.dev`, for `pcre-config`, on the
+              # lint hook's PATH) for the same library. Listing it here also
+              # puts `pcre-config` on PATH, which is what vm-harness's
+              # config.nims hard-fails without.
+              pkgs.pcre
               pkgs.ninja
               pkgs.clang
               pkgs.curl

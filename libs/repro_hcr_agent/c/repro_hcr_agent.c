@@ -15,7 +15,23 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+/*
+ * Platform selection.
+ *
+ * Historically this file carried five `#if defined(__APPLE__) &&
+ * defined(__aarch64__)` guards with an inert `#else`. HLX-M0 opens each of them
+ * into a three-way selection: the Apple arm64 arm (unchanged), a Linux x86_64
+ * arm, and the pre-existing fallback. `REPRO_HCR_TARGET_APPLE_ARM64` is defined
+ * exactly when the old condition held, so the Apple behaviour is preserved by
+ * construction.
+ */
 #if defined(__APPLE__) && defined(__aarch64__)
+#define REPRO_HCR_TARGET_APPLE_ARM64 1
+#elif defined(__linux__) && defined(__x86_64__)
+#define REPRO_HCR_TARGET_LINUX_X86_64 1
+#endif
+
+#if defined(REPRO_HCR_TARGET_APPLE_ARM64)
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach-o/arm64/reloc.h>
@@ -23,6 +39,14 @@
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <mach-o/reloc.h>
+#elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
+#include "repro_hcr_linux_x86_64.h"
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
 #endif
 
 #define REPRO_HCR_AGENT_SOCKET_ENV "REPRO_HCR_AGENT_SOCKET"
@@ -41,7 +65,7 @@ static int repro_hcr_poll_done = 0;
 
 static void repro_hcr_notify_did_patch(void *entry, void *dispatch_entry,
                                        size_t patch_len) {
-#if defined(__APPLE__) && defined(__aarch64__)
+#if defined(REPRO_HCR_TARGET_APPLE_ARM64)
   typedef void (*repro_hcr_did_patch_hook)(void *, void *, size_t);
   static int resolved = 0;
   static repro_hcr_did_patch_hook hook = NULL;
@@ -69,6 +93,14 @@ static void repro_hcr_notify_did_patch(void *entry, void *dispatch_entry,
   if (hook != NULL) {
     hook(entry, dispatch_entry, patch_len);
   }
+#elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  /* HLX-M7 widens this into the MCR `ct_repro_hcr_agent_did_patch` bridge
+   * (patchId, patchedSymbols, code hashes). HLX-M0 deliberately does not
+   * resolve the hook through `dlsym`, so the agent imposes no libdl link
+   * requirement on the targets it is compiled into. */
+  (void)entry;
+  (void)dispatch_entry;
+  (void)patch_len;
 #else
   (void)entry;
   (void)dispatch_entry;
@@ -402,7 +434,7 @@ static void *repro_hcr_find_symbol(repro_hcr_agent_thread_args *args,
       return args->symbols[i].address;
     }
   }
-#if defined(__APPLE__) && defined(__aarch64__)
+#if defined(REPRO_HCR_TARGET_APPLE_ARM64)
   if (target_symbol != NULL && target_symbol[0] != '\0') {
     void *resolved = dlsym(RTLD_DEFAULT, target_symbol);
     if (resolved != NULL) {
@@ -415,11 +447,20 @@ static void *repro_hcr_find_symbol(repro_hcr_agent_thread_args *args,
       return resolved;
     }
   }
+#elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  /* Deliberately no `dlsym` fallback on Linux. Design §7.1: `dlsym` cannot see
+   * `static` or hidden functions, which are most of the interesting ones, and a
+   * partial resolver that silently succeeds for exported symbols only would
+   * hide that. HLX-M1 lands the real pipeline (`dl_iterate_phdr` load bias plus
+   * on-disk `.symtab`/`.strtab`, build-id verified). Until then the Linux arm
+   * resolves only symbols the target registered explicitly. */
+  (void)target_symbol;
+  (void)changed_function;
 #endif
   return NULL;
 }
 
-#if defined(__APPLE__) && defined(__aarch64__)
+#if defined(REPRO_HCR_TARGET_APPLE_ARM64)
 enum {
   REPRO_HCR_JIT_NOACTION = 0,
   REPRO_HCR_JIT_REGISTER_FN = 1,
@@ -853,6 +894,54 @@ static int repro_hcr_register_dynamic_eh_frame(
   out->called = 0;
   return -3;
 }
+#elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
+/*
+ * Unwinding and debugger integration on Linux/ELF is HLX-M5, not HLX-M0.
+ *
+ * The Mach-O path above cannot be translated: it rebases `section_64.addr` and
+ * applies `ARM64_RELOC_UNSIGNED`, whereas ELF needs an `ET_REL` symfile with
+ * `.text` `sh_addr` set to the live patch address and `R_X86_64_64` applied to
+ * `.debug_*`, plus a relocated compiler-generated `.eh_frame` registered
+ * through `__register_frame` (whose libgcc-vs-LLVM-libunwind ABI split is
+ * `HLX-OQ-4`). Returning -1 here means a Linux patch request that carries a
+ * debug-object or unwind-metadata payload fails loudly rather than silently
+ * registering nothing.
+ */
+typedef struct repro_hcr_jit_registration_evidence {
+  uint32_t success;
+} repro_hcr_jit_registration_evidence;
+
+typedef struct repro_hcr_unwind_registration_evidence {
+  uint32_t called;
+} repro_hcr_unwind_registration_evidence;
+
+static int repro_hcr_register_jit_debug_object(
+    const uint8_t *bytes,
+    uint64_t size,
+    uint64_t code_address,
+    const char *symbol_name,
+    repro_hcr_jit_registration_evidence *out) {
+  (void)bytes;
+  (void)size;
+  (void)code_address;
+  (void)symbol_name;
+  (void)out;
+  return -1;
+}
+
+static int repro_hcr_register_dynamic_eh_frame(
+    const uint8_t *bytes,
+    uint64_t size,
+    uint64_t code_address,
+    uint64_t code_size,
+    repro_hcr_unwind_registration_evidence *out) {
+  (void)bytes;
+  (void)size;
+  (void)code_address;
+  (void)code_size;
+  (void)out;
+  return -1;
+}
 #else
 typedef struct repro_hcr_jit_registration_evidence {
   uint32_t success;
@@ -891,7 +980,7 @@ static int repro_hcr_register_dynamic_eh_frame(
 }
 #endif
 
-#if defined(__APPLE__) && defined(__aarch64__)
+#if defined(REPRO_HCR_TARGET_APPLE_ARM64)
 static uint64_t repro_hcr_page_start(uint64_t address, size_t page_size) {
   return address & ~((uint64_t)page_size - 1u);
 }
@@ -999,6 +1088,78 @@ static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_byte
   return patch_page;
 }
 
+#elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
+
+/* ---------------------------------------------------------------------------
+ * Linux x86_64 ELF direct entry patching (HLX-M0).
+ *
+ * The Mach `vm_protect` max-protection ceiling fallback of the Apple arm above
+ * is deliberately NOT translated here (design §5.1): raising a Mach region's
+ * maximum protection has no Linux analogue — ELF `PT_LOAD` has `p_flags` and no
+ * separate maximum — and the `__HCR` segment scheme that supports it has no ELF
+ * counterpart either.
+ *
+ * Single-threaded scope: HLX-M0 proves a Linux patch path exists. It does not
+ * exercise the cross-core and in-window-PC hazards of design §4.4 and §6.1, and
+ * nothing here may be reported as safe for a multithreaded target until
+ * HLX-M4.
+ * ------------------------------------------------------------------------- */
+
+static size_t repro_hcr_lx_page_size(void) {
+  long value = sysconf(_SC_PAGESIZE);
+  return value > 0 ? (size_t)value : 4096u;
+}
+
+static void *repro_hcr_lx_map_anonymous(void *hint, size_t length,
+                                        int protection, int extra_flags) {
+  int prot = 0;
+  void *mapped;
+  if ((protection & REPRO_HCR_LX_PROT_READ) != 0) {
+    prot |= PROT_READ;
+  }
+  if ((protection & REPRO_HCR_LX_PROT_WRITE) != 0) {
+    prot |= PROT_WRITE;
+  }
+  if ((protection & REPRO_HCR_LX_PROT_EXEC) != 0) {
+    prot |= PROT_EXEC;
+  }
+  mapped = mmap(hint, length, prot,
+                MAP_PRIVATE | MAP_ANONYMOUS | extra_flags, -1, 0);
+  return mapped == MAP_FAILED ? NULL : mapped;
+}
+
+static int repro_hcr_lx_unmap(void *address, size_t length) {
+  return munmap(address, length);
+}
+
+/*
+ * Thin wrapper: resolve the sled from the runtime-mapped
+ * `__patchable_function_entries` section (design §4.2 — never derived from the
+ * symbol address) and hand off to the shared implementation in
+ * `repro_hcr_linux_x86_64.h`.
+ */
+static void *repro_hcr_apply_direct_patch(void *entry,
+                                          const uint8_t *patch_bytes,
+                                          size_t patch_len) {
+  uint64_t entry_address;
+  uint64_t sled_address;
+  void *patch_page;
+
+  if (entry == NULL) {
+    memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
+    repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+    return NULL;
+  }
+  entry_address = (uint64_t)(uintptr_t)entry;
+  sled_address = repro_hcr_lx_sled_address_for_entry(entry_address);
+  patch_page = repro_hcr_lx_apply_direct_patch_at(entry_address, sled_address,
+                                                  patch_bytes, patch_len);
+  if (patch_page != NULL) {
+    repro_hcr_notify_did_patch(entry, patch_page, patch_len);
+  }
+  return patch_page;
+}
+
 #else
 static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_bytes,
                                           size_t patch_len) {
@@ -1006,6 +1167,46 @@ static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_byte
   (void)patch_bytes;
   (void)patch_len;
   return NULL;
+}
+#endif
+
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+/*
+ * Capability negotiation is where an unsupported host is refused (design §5.2)
+ * and where SYNC_CORE availability is recorded (design §4.4, an explicit HLX-M0
+ * deliverable even though a single-threaded gate cannot exercise the hazard).
+ * On a host where `PROT_EXEC` cannot be regained the agent does not advertise
+ * `direct-patch-injection` at all, and any patch request it then receives is
+ * refused before a single byte of target text is touched.
+ */
+static const char *repro_hcr_capabilities_json_array(void) {
+  static char buffer[512];
+  const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
+  snprintf(buffer, sizeof(buffer),
+           "\"hcr-agent-protocol\"%s,\"debug-object-payloads\","
+           "\"unwind-metadata-payloads\",\"source-generation-metadata\","
+           "\"linux-x86_64-elf-direct-hcr\",\"%s\",\"%s\"",
+           caps->text_protection_roundtrip ? ",\"direct-patch-injection\"" : "",
+           caps->membarrier_sync_core ? "membarrier-sync-core"
+                                      : "membarrier-sync-core-unavailable",
+           caps->text_protection_roundtrip
+               ? "text-protection-roundtrip"
+               : "unsupported-host-text-protection-roundtrip");
+  return buffer;
+}
+
+static const char *repro_hcr_direct_patch_failure_detail(void) {
+  return repro_hcr_lx_refusal_name(repro_hcr_lx_last_report.refusal);
+}
+#else
+static const char *repro_hcr_capabilities_json_array(void) {
+  return "\"hcr-agent-protocol\",\"direct-patch-injection\","
+         "\"debug-object-payloads\",\"unwind-metadata-payloads\","
+         "\"source-generation-metadata\"";
+}
+
+static const char *repro_hcr_direct_patch_failure_detail(void) {
+  return "";
 }
 #endif
 
@@ -1018,12 +1219,21 @@ static char *repro_hcr_hello_json(const char *support_profile) {
            "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
            "\"protocolVersion\":1,\"messageId\":\"agent-hello-1\","
            "\"kind\":\"hello\",\"hello\":{\"supportProfile\":\"%s\","
-           "\"agentPid\":%ld,\"capabilities\":[\"hcr-agent-protocol\","
-           "\"direct-patch-injection\",\"debug-object-payloads\","
-           "\"unwind-metadata-payloads\",\"source-generation-metadata\"]}}",
+           "\"agentPid\":%ld,\"capabilities\":[%s]}}",
            REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE,
-           support_profile, (long)getpid());
+           support_profile, (long)getpid(),
+           repro_hcr_capabilities_json_array());
   return json;
+}
+
+const char *repro_hcr_agent_default_support_profile(void) {
+#if defined(REPRO_HCR_TARGET_APPLE_ARM64)
+  return REPRO_HCR_AGENT_SUPPORT_PROFILE_MACOS_ARM64;
+#elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return REPRO_HCR_AGENT_SUPPORT_PROFILE_LINUX_X86_64;
+#else
+  return "";
+#endif
 }
 
 static char *repro_hcr_lifecycle_json(const char *patch_id, const char *event,
@@ -1135,6 +1345,23 @@ static void *repro_hcr_agent_thread(void *raw_args) {
   char *unwind_digest =
       repro_hcr_json_payload_field(patch, "\"unwindMetadataPayload\"", "\"digest\"");
 
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  /* An empty `bytesHex` means the coordinator sent no debug/unwind payload at
+   * all, which is not a registration failure. The Apple arm's behaviour is
+   * deliberately left untouched: HLX-M0 must not change any macOS outcome, and
+   * every macOS gate sends real payloads. HLX-M5 lands ELF `.eh_frame` and GDB
+   * JIT registration, at which point a non-empty payload starts succeeding here
+   * instead of failing. */
+  if (debug_hex != NULL && debug_hex[0] == '\0') {
+    free(debug_hex);
+    debug_hex = NULL;
+  }
+  if (unwind_hex != NULL && unwind_hex[0] == '\0') {
+    free(unwind_hex);
+    unwind_hex = NULL;
+  }
+#endif
+
   int ok = 0;
   size_t patch_len = 0;
   size_t debug_len = 0;
@@ -1144,7 +1371,9 @@ static void *repro_hcr_agent_thread(void *raw_args) {
   uint8_t *unwind_bytes = NULL;
   void *dispatch_entry = NULL;
   void *entry = repro_hcr_find_symbol(args, target_symbol, changed_function);
+  char failure_detail[192];
   const char *failure_message = "C agent failed to apply direct patch";
+  failure_detail[0] = '\0';
   if (patch_id == NULL) {
     failure_message = "patch request is missing patchId";
   } else if (changed_function == NULL) {
@@ -1165,7 +1394,14 @@ static void *repro_hcr_agent_thread(void *raw_args) {
       dispatch_entry = patch_entry;
       ok = dispatch_entry != NULL;
       if (!ok) {
-        failure_message = "direct patch branch installation failed";
+        const char *detail = repro_hcr_direct_patch_failure_detail();
+        if (detail != NULL && detail[0] != '\0') {
+          snprintf(failure_detail, sizeof(failure_detail),
+                   "direct patch refused: %s", detail);
+          failure_message = failure_detail;
+        } else {
+          failure_message = "direct patch branch installation failed";
+        }
       }
       if (ok && debug_hex != NULL) {
         debug_bytes = repro_hcr_bytes_from_hex(debug_hex, &debug_len);
@@ -1229,10 +1465,39 @@ static void *repro_hcr_agent_thread(void *raw_args) {
   return NULL;
 }
 
+/* Design §4.4 and §5.2 both require work "at agent start": SYNC_CORE
+ * registration, and the RW->RX round-trip probe on a provider-owned scratch
+ * mapping. Both happen here, before any patch request can arrive. */
+static void repro_hcr_agent_probe_host_once(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  (void)repro_hcr_lx_capability_report();
+#endif
+}
+
+int repro_hcr_agent_host_supports_direct_patch(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_capability_report()->text_protection_roundtrip;
+#elif defined(REPRO_HCR_TARGET_APPLE_ARM64)
+  return 1;
+#else
+  return 0;
+#endif
+}
+
+int repro_hcr_agent_host_membarrier_sync_core(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_capability_report()->membarrier_sync_core;
+#else
+  return 0;
+#endif
+}
+
 int repro_hcr_agent_start_from_env(const char *support_profile,
                                    const repro_hcr_agent_symbol *symbols,
                                    size_t symbol_count) {
-  const char *socket_path = getenv(REPRO_HCR_AGENT_SOCKET_ENV);
+  const char *socket_path;
+  repro_hcr_agent_probe_host_once();
+  socket_path = getenv(REPRO_HCR_AGENT_SOCKET_ENV);
   if (socket_path == NULL || socket_path[0] == '\0') {
     return 0;
   }
@@ -1258,7 +1523,9 @@ int repro_hcr_agent_start_from_env(const char *support_profile,
 int repro_hcr_agent_start_polling_from_env(const char *support_profile,
                                            const repro_hcr_agent_symbol *symbols,
                                            size_t symbol_count) {
-  const char *socket_path = getenv(REPRO_HCR_AGENT_SOCKET_ENV);
+  const char *socket_path;
+  repro_hcr_agent_probe_host_once();
+  socket_path = getenv(REPRO_HCR_AGENT_SOCKET_ENV);
   if (socket_path == NULL || socket_path[0] == '\0') {
     return 0;
   }

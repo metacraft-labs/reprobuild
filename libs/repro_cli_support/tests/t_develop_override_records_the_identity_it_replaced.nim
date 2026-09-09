@@ -62,15 +62,19 @@
 ## parser, so a writer that emitted a different spelling than the parser reads
 ## would fail here even though both sides were internally consistent.
 ##
-## **What is NOT covered, stated rather than implied:** the `repro` binary
-## itself is not built or executed (`scripts/build_apps.sh` does not link in
-## this environment), so "end to end" here means "through the verb dispatcher".
+## **What is NOT covered, stated rather than implied:** the verb is called in
+## THIS process rather than by executing `build/bin/repro`, so "end to end"
+## here means "through the verb dispatcher". The built `repro` is still
+## required — see `nameTheRealCliForTheEngine` — because the engine spawns it
+## for the monitored helper edges the verb reaches; it is a collaborator here,
+## not the entry point.
 
 import std/[exitprocs, json, os, posix, strutils, tables, unittest]
 
 import repro_cli_support
 import repro_dsl_stdlib/configurables/variants
 import repro_lock
+import repro_test_support
 
 const
   DevelopedPackage = "libfoo"
@@ -247,16 +251,55 @@ proc solvedVersionOf(package: string): seq[string] =
 
 
 # ---------------------------------------------------------------------------
-# The scenarios, built ONCE.
+# The scenarios, built ONCE — but on FIRST USE, never at module scope.
 #
 # Each `developInto` runs the real verb, and the real verb now compiles the
 # sibling's provider to obtain its declarations — minutes, not milliseconds.
 # `setup:` runs per test, so building these per case would pay that price four
-# times over for four assertions about the same document. They are built here
-# instead, at module scope, and every suite below reads the documents they
-# produced. A scenario that cannot be built raises before any test runs, which
-# is the loud failure it should be: none of the assertions mean anything
-# against a document the verb refused to write.
+# times over for four assertions about the same document. They are therefore
+# built once and memoised, and every suite below reads the documents they
+# produced.
+#
+# BUILDING THEM AT MODULE SCOPE — which is how this file used to do it — IS
+# THE ONE PLACEMENT THAT CANNOT WORK HERE, and the failure mode is a fork
+# bomb rather than a slow test. A protocol-aware test binary is executed a
+# second time as `--list-json` so the runner can enumerate its cases, and
+# enumeration runs every module-level statement and every `suite` body,
+# because registration is how the catalog is built; only `test` bodies are
+# skipped. So a module-level `let` here ran the real `repro develop` verb
+# inside the discovery probe.
+#
+# That verb compiles the sibling's recipe, and the interface-extraction
+# compile is parameterised on `getAppFilename()` — see
+# `repro_interface_artifacts.nim`'s `--define:reproBin=`, which
+# `repro_project_dsl/macros_b.nim` then invokes as
+# `<reproBin> internal resolve-package …`, and the monitored extraction run
+# spawned as `<reproBin> internal io monitor … -- <reproBin>
+# __repro-extract-interface …`. In the `repro` CLI `getAppFilename()` is the
+# CLI and those verbs dispatch. In a TEST binary it is the test binary, which
+# has no such dispatcher: the re-executed process falls through to module
+# init, rebuilds these scenarios, and spawns the next generation. Unbounded,
+# and measured at 154 live generations inside 20 s.
+#
+# Memoising behind a proc keeps the build-once property the cost argument
+# above asks for while leaving enumeration free of engine work. The same
+# reasoning, for the same reason, is written out at length in
+# `tests/integration/t_runner_cpu_progress_liveness.nim`.
+#
+# `nameTheRealCliForTheEngine` below closes the OTHER half — it points the
+# engine at the built `repro`, so the image it spawns dispatches the verb
+# instead of being this binary. Both are wanted and neither replaces the
+# other: naming the CLI removes the recursion at its source, and memoising
+# keeps enumeration from doing minutes of engine work even when the spawn
+# would have been harmless. A `--list-json` probe that compiles two provider
+# binaries blows the probe budget and gets this file quarantined out of the
+# catalog whether or not it also forks.
+#
+# A scenario that cannot be built now raises inside the first case that asks
+# for it rather than before any test runs. That is still the loud failure it
+# should be — none of the assertions mean anything against a document the
+# verb refused to write — and it is attributed to a named case instead of to
+# module init.
 # ---------------------------------------------------------------------------
 
 type
@@ -265,47 +308,97 @@ type
     checkout: string      ## the develop checkout the override points at
     metadataPath: string  ## the document the verb reported writing
 
+var builtScenarios: Table[string, Scenario]
+  ## Label -> the scenario built for it, populated lazily by `scenario`. Also
+  ## the exit proc's work list, so a scenario no case asked for leaves no
+  ## scratch tree to remove.
+
+proc nameTheRealCliForTheEngine() =
+  ## Tell the engine which `repro` image to spawn for its monitored helper
+  ## edges, through the hook that exists for exactly this — an embedded host.
+  ##
+  ## `repro develop` reaches interface extraction and the provider probe, and
+  ## both are ordinary build-graph edges the engine runs by spawning a `repro`
+  ## that dispatches `__repro-extract-interface` / `__repro-compile-provider`
+  ## (`Compiles-Are-Normal-Edges.md`). The engine picks that image in
+  ## `internalReproHelperCliPath`: the running executable when it is named
+  ## `repro`, otherwise the caller-supplied public CLI path, which for this
+  ## probe is `stablePublicCliPath()` — i.e. `REPRO_PUBLIC_CLI_PATH` when set.
+  ##
+  ## WITHOUT this the variable is unset, `stablePublicCliPath()` answers
+  ## `getAppFilename()`, and the engine spawns THIS TEST BINARY with
+  ## `__repro-extract-interface` on its argv. A test binary has no such
+  ## dispatcher, so the child falls through to `main()` and runs the suite
+  ## again — the self-recursion that made this file a fork bomb while the
+  ## scenarios were built at module scope, and, once that was fixed, the
+  ## reason the `variants` cases saw an empty probe result and failed. The
+  ## probe swallows the failure (`except CatchableError: result = @[]`), so
+  ## the symptom was a missing field rather than an error.
+  ##
+  ## NOT a test double. It names the REAL CLI, and it is the same image
+  ## production spawns; all it supplies is the answer `getAppFilename()`
+  ## already gives inside the real `repro` process and cannot give here.
+  ## `repro` is a build-graph artifact (`reprobuild.apps.repro` ->
+  ## `build/bin/repro`, built before tests run), so it is asserted present
+  ## rather than compiled, per `Test-Fixtures-In-Build-Graph.md`.
+  if getEnv("REPRO_PUBLIC_CLI_PATH").len > 0:
+    return
+  putEnv("REPRO_PUBLIC_CLI_PATH",
+    requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
+      "reprobuild.apps.repro"))
+
 proc scenario(label: string; lockedPackages: openArray[LockedPackage];
               recipe: string; versionFile = ""): Scenario =
-  result.root = scratchRoot(label)
-  writeConsumer(result.root / "app", lockedPackages)
-  result.checkout = writeSibling(result.root, recipe, versionFile)
-  result.metadataPath = developInto(result.root / "app", result.checkout)
+  ## Build `label`'s scenario, or return the one already built for it. Every
+  ## accessor below funnels through here, so each label's real verb run
+  ## happens exactly once per process no matter how many cases read it.
+  if not builtScenarios.hasKey(label):
+    nameTheRealCliForTheEngine()
+    var built: Scenario
+    built.root = scratchRoot(label)
+    writeConsumer(built.root / "app", lockedPackages)
+    built.checkout = writeSibling(built.root, recipe, versionFile)
+    built.metadataPath = developInto(built.root / "app", built.checkout)
+    builtScenarios[label] = built
+  builtScenarios[label]
 
-let
-  lockedSibling = scenario("locked", @[
+proc lockedSibling(): Scenario =
+  ## The ordinary case: the consumer's lock names the dependency, so the
+  ## engine knows the identity the override replaces. NO `VERSION` file, so
+  ## a version reaching the solve can only have come off the entry.
+  scenario("locked", @[
       LockedPackage(name: DevelopedPackage, version: LockedVersion,
                     source: DevelopedPackage),
       LockedPackage(name: "zlib", version: "1.2.13", source: "zlib")],
     SiblingRecipeWithoutVariants)
-    ## The ordinary case: the consumer's lock names the dependency, so the
-    ## engine knows the identity the override replaces. NO `VERSION` file, so
-    ## a version reaching the solve can only have come off the entry.
 
-  unlockedSibling = scenario("unlocked", NoPackages,
-    SiblingRecipeWithoutVariants)
-    ## No committed lock and no `VERSION` file: the engine knows nothing and
-    ## the consumer's chain runs to its end, which is a refusal.
+proc unlockedSibling(): Scenario =
+  ## No committed lock and no `VERSION` file: the engine knows nothing and
+  ## the consumer's chain runs to its end, which is a refusal.
+  scenario("unlocked", NoPackages, SiblingRecipeWithoutVariants)
 
-  strangerLockSibling = scenario("stranger", @[
+proc strangerLockSibling(): Scenario =
+  ## A lock that names somebody else. The engine still knows nothing about
+  ## THIS dependency, and the checkout's `VERSION` file is what answers.
+  scenario("stranger", @[
       LockedPackage(name: "zlib", version: "1.2.13", source: "zlib")],
     SiblingRecipeWithoutVariants, versionFile = CheckoutFileVersion)
-    ## A lock that names somebody else. The engine still knows nothing about
-    ## THIS dependency, and the checkout's `VERSION` file is what answers.
 
-  variantSibling = scenario("variants", @[
+proc variantSibling(): Scenario =
+  ## A sibling whose recipe really declares variants.
+  scenario("variants", @[
       LockedPackage(name: DevelopedPackage, version: LockedVersion,
                     source: DevelopedPackage)],
     SiblingRecipe)
-    ## A sibling whose recipe really declares variants.
 
-  unaskableSibling = scenario("unaskable", NoPackages,
-    SiblingRecipeVariantsButNoBuild)
-    ## A sibling that declares a variant and cannot be asked about it.
+proc unaskableSibling(): Scenario =
+  ## A sibling that declares a variant and cannot be asked about it.
+  scenario("unaskable", NoPackages, SiblingRecipeVariantsButNoBuild)
 
 addExitProc(proc () =
-  for s in [lockedSibling, unlockedSibling, strangerLockSibling,
-            variantSibling, unaskableSibling]:
+  # Reads the memo rather than the accessors: calling those at exit would
+  # BUILD a scenario in order to delete it.
+  for s in builtScenarios.values:
     try: removeDir(s.root)
     except CatchableError: discard)
 
@@ -313,9 +406,9 @@ suite "the engine records the version the override replaced":
   ## `develop_sources.nim` source 1, and the first of its two KNOWN GAPs.
 
   test "the written document carries the version the lock solved":
-    let entry = overrideEntry(lockedSibling.metadataPath)
+    let entry = overrideEntry(lockedSibling().metadataPath)
     check entry["node"].getStr() == DevelopedPackage
-    check entry["path"].getStr() == lockedSibling.checkout
+    check entry["path"].getStr() == lockedSibling().checkout
     check entry.hasKey("version")
     check entry["version"].getStr() == LockedVersion
 
@@ -325,12 +418,12 @@ suite "the engine records the version the override replaced":
     # reach the solve is off the entry the writer produced — a writer and a
     # parser that each agreed with a fixture but not with each other would
     # fail here.
-    check not fileExists(lockedSibling.checkout / "VERSION")
-    withConsumerReading(lockedSibling.metadataPath):
+    check not fileExists(lockedSibling().checkout / "VERSION")
+    withConsumerReading(lockedSibling().metadataPath):
       check solvedVersionOf(DevelopedPackage) == @[LockedVersion]
 
   test "and it is not a version the solver may choose":
-    withConsumerReading(lockedSibling.metadataPath):
+    withConsumerReading(lockedSibling().metadataPath):
       discard solvedVersionOf(DevelopedPackage)
       # NLF-M2's own distinction: a recorded version is asserted, not searched.
       # Recording the right number and still handing it over as a one-element
@@ -342,7 +435,7 @@ suite "the engine records the version the override replaced":
     # other one's version against this entry would be a fabrication that
     # happens to be a real number, which is harder to notice than a synthetic
     # one.
-    check overrideEntry(lockedSibling.metadataPath)["version"].getStr() !=
+    check overrideEntry(lockedSibling().metadataPath)["version"].getStr() !=
       "1.2.13"
 
 suite "a version the engine does not know is not invented":
@@ -355,20 +448,21 @@ suite "a version the engine does not know is not invented":
     # Absent, not empty, not zero. `develop_sources` treats a present-but-empty
     # `version` as absent too, but writing one would say "we looked and the
     # answer is nothing", which is not what happened.
-    check not overrideEntry(unlockedSibling.metadataPath).hasKey("version")
+    check not overrideEntry(unlockedSibling().metadataPath).hasKey("version")
 
   test "a lock that does not name the dependency records nothing":
-    check not overrideEntry(strangerLockSibling.metadataPath).hasKey("version")
+    check not overrideEntry(
+      strangerLockSibling().metadataPath).hasKey("version")
 
   test "and the consumer's fallback chain still runs":
-    withConsumerReading(strangerLockSibling.metadataPath):
+    withConsumerReading(strangerLockSibling().metadataPath):
       # Source 2 of `develop_sources`'s documented order. It can only be
       # reached because source 1 is absent, so this is also the negative
       # control for the case above.
       check solvedVersionOf(DevelopedPackage) == @[CheckoutFileVersion]
 
   test "and with neither source the refusal is still raised":
-    withConsumerReading(unlockedSibling.metadataPath):
+    withConsumerReading(unlockedSibling().metadataPath):
       expect EDevelopVersionUnknown:
         discard solvedVersionOf(DevelopedPackage)
 
@@ -380,12 +474,12 @@ suite "the engine records the sibling's variant declarations":
   test "the premise: the sibling really declares two variants":
     # If the fixture stopped declaring them, every case below would be
     # asserting that a path nobody takes works.
-    let recipe = readFile(variantSibling.checkout / "repro.nim")
+    let recipe = readFile(variantSibling().checkout / "repro.nim")
     check "enableTls: variant bool = true" in recipe
     check "profile: variant string = \"release\"" in recipe
 
   test "the written document carries them, unqualified":
-    let entry = overrideEntry(variantSibling.metadataPath)
+    let entry = overrideEntry(variantSibling().metadataPath)
     check entry.hasKey("variants")
     var byName = initTable[string, JsonNode]()
     for item in entry["variants"]:
@@ -402,7 +496,7 @@ suite "the engine records the sibling's variant declarations":
     check "release" in byName["profile"]["values"].to(seq[string])
 
   test "and they reach the solve through the real path":
-    withConsumerReading(variantSibling.metadataPath):
+    withConsumerReading(variantSibling().metadataPath):
       discard solvedVersionOf(DevelopedPackage)
       let fixture = currentSolverInputsFixture()
       # Writer -> file -> parser -> solver input, with nothing hand-written in
@@ -413,7 +507,7 @@ suite "the engine records the sibling's variant declarations":
       check ("variant " & ProfileVariant) in fixture
 
   test "and the solver assigns them":
-    withConsumerReading(variantSibling.metadataPath):
+    withConsumerReading(variantSibling().metadataPath):
       discard solvedVersionOf(DevelopedPackage)
       finalizeVariants()
       check hasSolverSolution()
@@ -433,7 +527,7 @@ suite "the engine records the sibling's variant declarations":
     # inputs at all, which is the same `none` a failed provider compile
     # returns. Writing `"variants": []` for one of them would be a claim the
     # engine is not in a position to make.
-    let entry = overrideEntry(unlockedSibling.metadataPath)
+    let entry = overrideEntry(unlockedSibling().metadataPath)
     check not entry.hasKey("variants")
     check not entry.hasKey("version")
     check entry.len == 2
@@ -449,8 +543,8 @@ suite "the engine records the sibling's variant declarations":
     # The premise first, so this cannot silently become a test of something
     # else: the recipe really does declare a variant.
     check "enableTls: variant bool = true" in
-      readFile(unaskableSibling.checkout / "repro.nim")
-    check not overrideEntry(unaskableSibling.metadataPath).hasKey("variants")
+      readFile(unaskableSibling().checkout / "repro.nim")
+    check not overrideEntry(unaskableSibling().metadataPath).hasKey("variants")
 
 suite "an override document written before this change still loads":
   ## Every override on disk today carries `node` and `path` and nothing else.
@@ -459,12 +553,12 @@ suite "an override document written before this change still loads":
   ## what a newer document already carried.
 
   test "a node-and-path-only document still reaches the solve":
-    let metadataPath = strangerLockSibling.root / "legacy-overrides.json"
+    let metadataPath = strangerLockSibling().root / "legacy-overrides.json"
     writeFile(metadataPath, $(%*{
       "schemaId": "reprobuild.develop-overrides.v1",
-      "projectRoot": strangerLockSibling.root / "app",
+      "projectRoot": strangerLockSibling().root / "app",
       "overrides": [{"node": DevelopedPackage,
-                     "path": strangerLockSibling.checkout}]}))
+                     "path": strangerLockSibling().checkout}]}))
     withConsumerReading(metadataPath):
       check solvedVersionOf(DevelopedPackage) == @[CheckoutFileVersion]
       check "variant " notin currentSolverInputsFixture()
@@ -474,15 +568,17 @@ suite "an override document written before this change still loads":
     # thing back. A reader that forgot the two new fields would silently strip
     # them from every entry it did not touch — a regression with no diagnostic,
     # visible only as the version fallback mysteriously firing again.
-    let before = overrideEntry(variantSibling.metadataPath)
+    let before = overrideEntry(variantSibling().metadataPath)
     check before.hasKey("version")
     check before.hasKey("variants")
     # Second registration of the SAME dependency at the same path: the entry is
     # rewritten, so this is also the case that proves the refresh is
     # idempotent rather than merely non-destructive.
-    check developInto(variantSibling.root / "app",
-                      variantSibling.checkout) == variantSibling.metadataPath
-    let after = overrideEntry(variantSibling.metadataPath)
+    let scenarioUnderTest = variantSibling()
+    check developInto(scenarioUnderTest.root / "app",
+                      scenarioUnderTest.checkout) ==
+      scenarioUnderTest.metadataPath
+    let after = overrideEntry(variantSibling().metadataPath)
     check after["version"] == before["version"]
     check after["variants"] == before["variants"]
 
@@ -495,13 +591,14 @@ suite "an override document written before this change still loads":
     #
     # Runs last because it adds an entry the single-entry helper above would
     # refuse.
-    let before = entryFor(variantSibling.metadataPath, DevelopedPackage)
+    let before = entryFor(variantSibling().metadataPath, DevelopedPackage)
     check before.hasKey("version")
     check before.hasKey("variants")
-    check developInto(variantSibling.root / "app", variantSibling.checkout,
-                      dependency = "libbar") == variantSibling.metadataPath
-    let after = entryFor(variantSibling.metadataPath, DevelopedPackage)
+    check developInto(variantSibling().root / "app", variantSibling().checkout,
+                      dependency = "libbar") == variantSibling().metadataPath
+    let after = entryFor(variantSibling().metadataPath, DevelopedPackage)
     check after["version"] == before["version"]
     check after["variants"] == before["variants"]
     # And the premise: the second registration really did rewrite the file.
-    check parseJson(readFile(variantSibling.metadataPath))["overrides"].len == 2
+    check parseJson(
+      readFile(variantSibling().metadataPath))["overrides"].len == 2

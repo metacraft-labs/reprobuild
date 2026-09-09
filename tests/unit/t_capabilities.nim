@@ -46,3 +46,17 @@ suite "repro capabilities":
     check codetracerProfile["features"].getElems().anyIt(
       it.getStr() == "repro-hcr-coordinate-command")
     check codetracerProfile["missingComponents"].getElems().len == 0
+
+    # HLX-M0: the Linux ELF/x86_64 direct-patch profile is registered alongside
+    # the macOS one, and is honest about what it does NOT yet cover.
+    let linuxProfile = profileById(caps, "linux-x86_64-elf-direct-hcr-v1")
+    check linuxProfile["status"].getStr() == "prototype"
+    check linuxProfile["requires"].getElems().anyIt(
+      it.getStr() == "membarrier-private-expedited-sync-core")
+    check linuxProfile["features"].getElems().anyIt(
+      it.getStr() == "single-aligned-store-e9-rel32-publication")
+    check linuxProfile["features"].getElems().anyIt(
+      it.getStr() == "single-threaded-only")
+    check linuxProfile["rejects"].getElems().anyIt(
+      it.getStr() == "multithreaded-targets")
+    check linuxProfile["missingComponents"].getElems().len > 0
