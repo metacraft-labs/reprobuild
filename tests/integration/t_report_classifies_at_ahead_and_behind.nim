@@ -131,7 +131,7 @@ suite "NF-3: the report classifies at, ahead and behind":
       for name in ["alpha", "beta", "gamma"]:
         check not statusRow(doc, name & "-src").isNil
         check args.stdout.contains("--override-input " & name & "-src " &
-          "path:" & siblingDir(fx, name))
+          "git+file://" & siblingDir(fx, name))
       var overrideCount = 0
       for word in args.stdout.split(" "):
         if word == "--override-input": inc overrideCount

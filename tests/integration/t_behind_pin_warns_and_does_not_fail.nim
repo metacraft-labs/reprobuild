@@ -95,4 +95,4 @@ suite "NF-3: behind-pin warns and does not fail":
       check args.code == 0
       check args.output.contains("--override-input")
       check args.output.contains("alpha-src")
-      check args.output.contains("path:" & siblingDir(fx, "alpha"))
+      check args.output.contains("git+file://" & siblingDir(fx, "alpha"))

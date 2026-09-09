@@ -99,7 +99,7 @@ suite "NF-3: a linked-worktree sibling is reported and gated":
       checkpoint("override-args stdout: " & args.stdout)
       check args.code == 0
       check args.stdout.contains("--override-input gamma-src")
-      check args.stdout.contains("path:" & siblingDir(fx, "gamma"))
+      check args.stdout.contains("git+file://" & siblingDir(fx, "gamma"))
 
       # ---- (4) and the gate refuses on it ---------------------------------
       publishRepo(fx, fx.app)

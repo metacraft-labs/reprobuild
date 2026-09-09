@@ -300,8 +300,8 @@ suite "NF-1: an unreadable workspace refuses; it never answers empty":
         checkpoint("control stdout: " & readable.outText &
           "\nstderr: " & readable.errText)
       check readable.code == 0
-      check "--override-input core-src path:" in readable.outText
-      check "--override-input team-lib-src path:" in readable.outText
+      check "--override-input core-src git+file://" in readable.outText
+      check "--override-input team-lib-src git+file://" in readable.outText
 
       # ---- (3) a legitimately EMPTY selection is not a failure. -----------
       # `--filter` is the one selector that may match nothing (CLI/develop.md

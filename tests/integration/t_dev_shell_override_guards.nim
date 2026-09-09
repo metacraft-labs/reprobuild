@@ -1296,3 +1296,67 @@ suite "dev-shell override guards":
       check not res.output.contains("declares no such input")
       check not res.output.contains(
         "no flake input with an upstream url could be parsed")
+
+  test "t_dev_shell_fingerprint_sees_a_git_tree_override_not_only_path":
+    ## The fingerprint is what invalidates a cached dev shell when an
+    ## overridden working tree moves, and it is built by parsing the emitted
+    ## `--override-input` arguments back into `input<TAB>dir` pairs. That
+    ## parser therefore has to recognise EVERY spelling those arguments can
+    ## carry.
+    ##
+    ## `repro flake override-args` names a git checkout `git+file://<dir>`
+    ## (`?submodules=1` when the repo has submodules), because `path:` copies
+    ## gitignored build output into the store. A parser matching only `path:*`
+    ## does not fail on that input — it matches nothing, yields an EMPTY
+    ## fingerprint, and an empty fingerprint reports "no overrides configured"
+    ## and never invalidates again. That is the fifteen-day-stale
+    ## `RUNQUOTA_SRC` failure this file exists to prevent, arrived at from a
+    ## new direction, and it is silent in the direction that matters.
+    ##
+    ## Mutation: drop the `git+file://` arm of
+    ## `dev_shell_override_path_pairs_from_args` ⇒ RED here, and ONLY here.
+    if findExe("bash").len == 0 or findExe("git").len == 0:
+      echo "SKIPPED (loudly): " &
+        "t_dev_shell_fingerprint_sees_a_git_tree_override_not_only_path " &
+        "needs `bash` and `git` on PATH; bash=" &
+        (if findExe("bash").len == 0: "MISSING" else: "present") &
+        " git=" & (if findExe("git").len == 0: "MISSING" else: "present")
+      skip()
+    else:
+      let scratch = createTempDir("repro-devshell-gitref-", "")
+      defer: removeDirEventually(scratch)
+      let gitBin = findExe("git")
+      let sibling = scratch / "runquota"
+      seedGitTree(gitBin, sibling, "one\n")
+
+      proc renderFor(argRef: string): string =
+        let args = "'--override-input' 'runquota-src' '" & argRef & "' "
+        runBash(
+          "set -uo pipefail\n" &
+          "source " & quoteShell(libPath()) & "\n" &
+          "printf '%s' " & quoteShell(args) &
+          " | dev_shell_override_path_pairs_from_args" &
+          " | dev_shell_render_fingerprint\n", scratch).output
+
+      let viaPath = renderFor("path:" & sibling)
+      let viaGit = renderFor("git+file://" & sibling)
+      let viaGitSub = renderFor("git+file://" & sibling & "?submodules=1")
+
+      # The pair is FOUND under every spelling — asserted positively, because
+      # the failure being guarded against produces an empty result rather than
+      # a wrong one, and two empty files compare equal.
+      for rendered in [viaPath, viaGit, viaGitSub]:
+        check rendered.contains("runquota-src")
+        check rendered.contains(sibling)
+
+      # And all three describe the SAME tree: the query string is about how nix
+      # is asked to read the directory, not about which directory it is, so it
+      # must not leak into the recorded path.
+      check viaGit == viaPath
+      check viaGitSub == viaPath
+
+      # The fingerprint still MOVES when the tree does, under the git spelling
+      # — the property the parser exists to serve, not merely a parse.
+      writeFile(sibling / "src.txt", "two\n")
+      gitCommitAll(gitBin, sibling, "advance")
+      check renderFor("git+file://" & sibling) != viaGit

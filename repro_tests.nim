@@ -7920,6 +7920,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_a_sibling_override_excludes_gitignored_build_output.nim",
+    binary: "build/test-bin/t_a_sibling_override_excludes_gitignored_build_output",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_a_worktree_sibling_is_not_invisible_to_the_refresh.nim",
     binary: "build/test-bin/t_a_worktree_sibling_is_not_invisible_to_the_refresh",
     defines: @[],

@@ -108,4 +108,4 @@ suite "NF-3: a root-repo flake is reported, not refused":
       checkpoint("root-repo override-args stderr:\n" & readFile(argsErr))
       check args.code == 0
       check args.output.contains("--override-input beta-src")
-      check args.output.contains("path:" & siblingDir(fx, "beta"))
+      check args.output.contains("git+file://" & siblingDir(fx, "beta"))

@@ -140,8 +140,22 @@ proc resolvedInputs(nixBin, flakeDir, overrideArgs, scratch: string):
   for name, node in doc["locks"]["nodes"].pairs:
     if name == rootName: continue
     if not node.hasKey("locked"): continue
-    if node["locked"].hasKey("path"):
-      pairs.add(name & "=" & node["locked"]["path"].getStr())
+    # Two spellings reach nix for the same working tree — `path:<dir>` sets
+    # `locked.path`, `git+file://<dir>[?query]` sets `locked.type = "git"` and
+    # `locked.url = file://<dir>`. Both are reduced to the directory, because
+    # the subject here is WHICH tree an input resolved to. Reading only
+    # `locked.path` would silently shrink the set instead of failing, making
+    # "not substituted" and "substituted as a git tree" indistinguishable.
+    let locked = node["locked"]
+    if locked.hasKey("path"):
+      pairs.add(name & "=" & locked["path"].getStr())
+    elif locked.hasKey("url") and locked{"type"}.getStr() == "git":
+      var url = locked["url"].getStr()
+      if url.startsWith("file://"):
+        url = url[len("file://") .. ^1]
+        let q = url.find('?')
+        if q >= 0: url = url[0 ..< q]
+        pairs.add(name & "=" & url)
   pairs.sort()
   (ok: true, pairs: pairs, diagnostic: "")
 
@@ -229,7 +243,7 @@ suite "NF-1: selection decides substitution, presence on disk does not":
         checkpoint("stdout: " & selective.outText &
           "\nstderr: " & selective.errText)
       check selective.code == 0
-      check ("--override-input kept-src path:" & (ws / "kept")) in
+      check ("--override-input kept-src git+file://" & (ws / "kept")) in
         selective.outText
       check "pinned-src" notin selective.outText
       check (ws / "pinned") notin selective.outText
