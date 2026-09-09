@@ -1023,7 +1023,7 @@ tests/integration/t_every_commit_form_stages_through_the_installed_hook.nim	nim	
 tests/integration/t_every_launch_path_is_monitored.nim	nim	10
 tests/integration/t_evidence_publish_verb_and_lock_flag_on_test_sharding.nim	nim	1
 tests/integration/t_execute_edge_gives_tests_a_usable_path.nim	nim	3
-tests/integration/t_executed_binary_is_a_recorded_input.nim	nim	13
+tests/integration/t_executed_binary_is_a_recorded_input.nim	nim	16
 tests/integration/t_exit_codes_are_documented_and_stable.nim	nim	5
 tests/integration/t_ext_repro_action_rows.nim	nim	2
 tests/integration/t_ext_test_execution_rows.nim	nim	3

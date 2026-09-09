@@ -1652,16 +1652,33 @@ proc reproStoreRootPath(): string =
   ## What the env var still could do is nominate a MUTABLE tree as
   ## content-addressed within one consistent setting, and that is what
   ## `isRealizationDirName` bounds: the only thing elided under this root is a
-  ## directory whose own name states a 16-hex realization digest. A root of
-  ## `/` therefore does not exempt `/usr`; it exempts nothing that is not
-  ## already named like a realization.
+  ## directory whose own name states a 16-hex realization digest.
+  ##
+  ## A ROOT OF `/` NAMES NOTHING AT ALL, which is stronger than the bound
+  ## above and worth stating because a reader will look here for it. The
+  ## trailing-slash strip maps `"/"` to `""`, and `""` is what
+  ## `reproStoreRealizationRoot`'s `root.len == 0` arm refuses — so a store
+  ## root of `/` does not exempt `/usr/…/prefixes/…/<version>-<digest>`
+  ## either, even though that path IS named like a realization. There used to
+  ## be an `if result == "/": result = ""` after the strip presented as the
+  ## thing that made this true. It was unreachable: the strip removes EVERY
+  ## trailing `/`, so `result` is already `""` by the time it is tested and no
+  ## input can make that comparison fire. Deleted rather than kept with a
+  ## corrected comment, because a branch no test can redden is one a later
+  ## reader takes for load-bearing all over again.
+  ##
+  ## The `try` is not decoration: `resolveStoreRoot` RAISES a `StoreError`
+  ## when it must fall back to the per-user default and neither
+  ## `$XDG_CACHE_HOME` nor `$HOME` is set (`$LOCALAPPDATA`/`$USERPROFILE` on
+  ## Windows). This function is on the path of every `argv[0]` and every
+  ## `PATH` entry of every action, so letting that escape would turn an
+  ## unset variable into a build failure. "Cannot resolve a store root" and
+  ## "this path is under no store root" are the same answer here.
   try:
     result = resolveStoreRoot().replace('\\', '/').strip(
       leading = false, trailing = true, chars = {'/'})
   except CatchableError:
     return ""
-  if result == "/":
-    result = ""
 
 proc reproStoreRealizationRoot(normalized: string): string =
   ## The `<store>/…/prefixes/<package>/<version>-<hash>` realization directory
@@ -1680,6 +1697,15 @@ proc reproStoreRealizationRoot(normalized: string): string =
   # `NODE_PATH` entry of every action, and resolving the store root allocates;
   # a path with no `prefixes` segment cannot match the layout below, so the
   # overwhelming majority of calls stop here without touching configuration.
+  #
+  # IT IS A PERFORMANCE GUARD AND NOTHING ELSE — no part of the soundness
+  # argument rests on it, and deleting it cannot change an ANSWER. The loop
+  # below only ever succeeds with `parts[i] == "prefixes"` and two segments
+  # after it, and every such path contains the literal `/prefixes/` (the
+  # split is taken after `root & "/"`, so even `i == 0` has a slash in front
+  # of it). It is therefore the one conjunct in this chain that no mutation
+  # can redden, and it is said here so the next reader does not spend the
+  # effort discovering that twice. DA-11 grades every other arm below.
   if not normalized.contains("/prefixes/"):
     return ""
   let root = reproStoreRootPath()
@@ -2084,10 +2110,21 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   ## contributes no value to the key, and `envValue` cannot see it either, so
   ## it yields no root to subtract. Those two halves line up by construction
   ## already. `argv[0]` was the one that did not.
+  ## ## `-1` is an ANSWER here, not an error
+  ##
+  ## `executedImageArgvIndex` returns `-1` for an argv whose executed image
+  ## cannot be told without guessing, and this is one of the three callers it
+  ## says that to. Indexing `argv` with it would raise inside the action
+  ## CONSTRUCTOR — every edge in the graph goes through here — so the guard is
+  ## the difference between "no image to mix" and a crash while building the
+  ## graph. There is no `image.len > 0` test between it and the `root.len`
+  ## test below: `contentAddressedRoot("")` is `""`, so that test decided
+  ## nothing the next one does not, and a conjunct no mutation can redden is
+  ## one a later reader mistakes for load-bearing.
   let imageIndex = executedImageArgvIndex(argv)
   let image =
     if imageIndex >= 0: argv[imageIndex].replace('\\', '/') else: ""
-  let root = if image.len > 0: contentAddressedRoot(image) else: ""
+  let root = contentAddressedRoot(image)
   if root.len == 0:
     return fingerprint
   # Length-framed mix, same shape and rationale as `keyedOnGoverningLock` and
@@ -4843,9 +4880,22 @@ proc evidenceInputPaths(action: BuildAction;
     result.addUnique(seen, probe)
 
 proc addContentAddressedRoot(roots: var seq[string]; path: string) =
-  let root = contentAddressedRoot(path)
-  if root.len > 0:
-    roots.addUnique(root)
+  ## AN EMPTY ROOT MUST NEVER ENTER THIS SEQUENCE, and `addUnique` is what
+  ## stops it: its first statement is `if value.len == 0: return`.
+  ##
+  ## The consequence is worth stating because it is severe and silent. These
+  ## roots reach `isUnderAnyRoot`, which answers `startsWith(root & "/")` — so
+  ## a single `""` in here matches EVERY absolute path, `cacheInputPaths`
+  ## subtracts the entire observed set, and the record is keyed on nothing.
+  ## `contentAddressedRoot` returns `""` for the overwhelming majority of the
+  ## paths handed to it (every `PATH` entry of every non-store action), so
+  ## this is the common case, not an edge one.
+  ##
+  ## There used to be an `if root.len > 0:` here as well. It could not change
+  ## an answer — `addUnique` had already made `""` mean "add nothing" — and a
+  ## conjunct no mutation can redden is one a later reader takes for
+  ## load-bearing. The guarantee is named here instead of duplicated.
+  roots.addUnique(contentAddressedRoot(path))
 
 proc envValue(action: BuildAction; name: string): string =
   let prefix = name & "="

@@ -579,6 +579,16 @@ suite "a tool under a content-addressed root is in the cache key without being a
       # programs, or "the edge re-ran" would be a statement about nothing.
       check readFile(shA) != readFile(shB)
 
+      # The root the elision subtracts at, asked for from both ends of it.
+      # `<hash>-<name>` is the granularity: a path inside it answers the root,
+      # and the ROOT DIRECTORY ITSELF answers itself. The second is a separate
+      # arm — there is no further `/` to cut at, so the whole normalised path
+      # is the answer — and it is not academic: `isUnderAnyRoot` compares a
+      # candidate against the root by equality as well as by prefix, and a
+      # store root is a perfectly ordinary thing for an action to `stat`.
+      check contentAddressedRoot(shA) == rootA
+      check contentAddressedRoot(rootA) == rootA
+
       let f = makeFixture()
       defer: removeDir(f.root)
 
@@ -864,10 +874,13 @@ suite "a tool under a content-addressed root is in the cache key without being a
     ## same failure §"S2 and S3, settled" measured for the Nix store — reached
     ## here through configuration rather than through a missing key component.
     ##
-    ## Every alias and the realization differ in ONE path segment's SHAPE and
-    ## in nothing else: same store root, same `prefixes` segment, same depth.
-    ## So no assertion below can be satisfied by the env var failing to take,
-    ## and nothing but the predicate can decide it.
+    ## Every alias differs from the realization in exactly ONE thing, and the
+    ## denominator beside them is what makes that a statement rather than a
+    ## hope: the real realization is built by the store's own
+    ## `prefixRelativePath` under the same root, so an assertion below cannot
+    ## be satisfied by `$REPRO_STORE_ROOT` failing to take. Three aliases
+    ## differ only in the SHAPE of one segment's name; two differ only in
+    ## WHERE a segment of exactly the right name sits.
     let repoRoot = findRepoRoot()
     let shells =
       if ccPath().len == 0: newSeq[string]()
@@ -891,30 +904,61 @@ suite "a tool under a content-addressed root is in the cache key without being a
       let realTool = realDir / "bin" / "sh"
       copyFileWithPermissions(shells[0], realTool)
 
-      # ONE ALIAS PER ARM of `isRealizationDirName`, all three siblings of the
-      # realization above. `tag` only names the edge and its log; the entire
-      # property under test lives in `dirName`.
+      # ONE ALIAS PER ARM that can reject a directory under this store root.
+      # `tag` only names the edge and its log; the entire property under test
+      # lives in `relDir`, which is a path RELATIVE TO THE STORE ROOT because
+      # two of the arms are about DEPTH and cannot be expressed by a name.
       #
-      #   dirName                            arm 1   arm 2
-      #   c0c1c2c3c4c5c6c7c8c9dadbdcdddedf   reject  ACCEPT
-      #   bash-mutable-checkout              ACCEPT  reject
-      #   latest                             reject  (never reached)
+      #   relDir                                      rejected by
+      #   prefixes/bash/<32 hex>                      the separator arm
+      #   prefixes/bash/bash-mutable-checkout         the hex-digit arm
+      #   prefixes/bash/latest/tmp/<realization>      the `prefixes` DEPTH arm
+      #   scratch/prefixes/x/latest/build/<realiz.>   the `prefixes` DEPTH arm
+      #   prefixes/bash/latest                        the length arm
+      #
+      # THE TWO DEPTH WITNESSES CARRY A REAL REALIZATION NAME — literally the
+      # `realizationDirName` composed for the realization above, the same
+      # string — so `isRealizationDirName` ACCEPTS their last segment and
+      # nothing about the NAME rejects them. What rejects them is that the
+      # name does not sit exactly two segments below a `prefixes` segment.
+      #
+      # MEASURED (2026-09-09) before they existed: deleting `parts[i] !=
+      # "prefixes"` from `reproStoreRealizationRoot`, keeping the bounds check
+      # beside it, left this file at 13/13 and exit 0 — because every fixture
+      # here was already at the right depth, so the only arm that had ever
+      # been asked about the segment was the `contains("/prefixes/")`
+      # rejection above it, which is a performance guard that decides nothing.
+      # The requirement is not "a `prefixes` segment appears somewhere in the
+      # path"; it is "the realization sits exactly two segments below one".
+      #
+      # The second depth witness nests `prefixes` one level down on purpose.
+      # The store really does nest one inside itself — tools live under
+      # `<store>/tool-store/prefixes/<package>/<version>-<hash>` — so the
+      # segment has to be SEARCHED for, and "require it at depth 1" is not an
+      # available fix. What is required is that the match be positional
+      # relative to that segment wherever it is found.
       #
       # ORDER MATTERS, and only for what a failure is legible AS. A `check`
       # failure is recorded and the loop carries on, but an EXCEPTION aborts
-      # the whole case — and `latest` raises one when arm 1 is deleted, because
-      # `name.len - 16` goes to -10 and arm 2 indexes out of bounds. Put it
-      # last and that mutation reads as three wrong answers about the bare
-      # digest followed by an IndexDefect; put it first and the IndexDefect is
-      # all you get, which says far less about what arm 1 is FOR.
+      # the whole case — and `latest` raises one when the length arm is
+      # deleted, because `name.len - 16` goes to -10 and the digit arm indexes
+      # out of bounds. Put it last and that mutation reads as wrong ANSWERS
+      # about the aliases before it and only then an IndexDefect; put it first
+      # and the IndexDefect is all you get, which says far less about what the
+      # arm is FOR. MEASURED both ways.
+      let realization = realizationDirName("5.2", digest)
       let aliases = @[
-        (dirName: "c0c1c2c3c4c5c6c7c8c9dadbdcdddedf", tag: "bare-digest"),
-        (dirName: "bash-mutable-checkout", tag: "checkout"),
-        (dirName: "latest", tag: "latest")]
+        (relDir: "prefixes/bash/c0c1c2c3c4c5c6c7c8c9dadbdcdddedf",
+         tag: "bare-digest"),
+        (relDir: "prefixes/bash/bash-mutable-checkout", tag: "checkout"),
+        (relDir: "prefixes/bash/latest/tmp/" & realization, tag: "too-deep"),
+        (relDir: "scratch/prefixes/x/latest/build/" & realization,
+         tag: "nested-too-deep"),
+        (relDir: "prefixes/bash/latest", tag: "latest")]
       var aliasDirs: seq[string]
       var aliasTools: seq[string]
       for a in aliases:
-        let dir = storeRoot / "prefixes" / "bash" / a.dirName
+        let dir = storeRoot / a.relDir
         createDir(dir / "bin")
         copyFileWithPermissions(shells[0], dir / "bin" / "sh")
         aliasDirs.add(dir)
@@ -945,11 +989,12 @@ suite "a tool under a content-addressed root is in the cache key without being a
         let aliasTool = aliasTools[i]
         let name = "store-alias-" & a.tag
 
-        # THE PREDICATE. Each alias differs from the realization in ONE path
-        # segment's SHAPE and in nothing else — same store root, same
-        # `prefixes` segment, same depth — so nothing but the predicate can
-        # decide it, at the tool or at the directory itself.
-        checkpoint(a.dirName & ": root(tool)=" &
+        # THE PREDICATE. Every alias sits under the same store root as the
+        # recognised realization and carries a `prefixes` segment, so the only
+        # thing that can decide it is the predicate — asked at the tool and at
+        # the directory itself, because the directory is what the elision
+        # subtracts at.
+        checkpoint(a.relDir & ": root(tool)=" &
           contentAddressedRoot(aliasTool) & " root(dir)=" &
           contentAddressedRoot(aliasDir))
         check contentAddressedRoot(aliasTool).len == 0
@@ -970,7 +1015,7 @@ suite "a tool under a content-addressed root is in the cache key without being a
 
         let first = runBuild(graph([edge]), config)
         let r0 = first.byId(edge.id)
-        checkpoint(a.dirName & " first: status=" & $r0.status &
+        checkpoint(a.relDir & " first: status=" & $r0.status &
           " stderr=" & r0.stderr)
         check r0.status == asSucceeded
         check r0.launched
@@ -978,7 +1023,7 @@ suite "a tool under a content-addressed root is in the cache key without being a
 
         let inputs = f.recordedInputs(edge)
         let aliasRecorded = inputs.anyIt(it.path == aliasTool)
-        checkpoint(a.dirName & " recorded inputs: " & $inputs.len &
+        checkpoint(a.relDir & " recorded inputs: " & $inputs.len &
           "; alias tool among them: " & $aliasRecorded)
         check inputs.len > 0
         # A mutable tree has only the ordinary recorded-input route, and it
@@ -986,7 +1031,7 @@ suite "a tool under a content-addressed root is in the cache key without being a
         check aliasRecorded
 
         let warm = runBuild(graph([edge]), config)
-        checkpoint(a.dirName & " warm: decision=" &
+        checkpoint(a.relDir & " warm: decision=" &
           $warm.byId(edge.id).cacheDecision)
         check warm.byId(edge.id).cacheDecision in ReuseDecisions
         check not warm.byId(edge.id).launched
@@ -1005,7 +1050,7 @@ suite "a tool under a content-addressed root is in the cache key without being a
         copyFileWithPermissions(shells[1], aliasTool)
         let after = runBuild(graph([edge]), config)
         let r1 = after.byId(edge.id)
-        checkpoint(a.dirName & " after the repoint: decision=" &
+        checkpoint(a.relDir & " after the repoint: decision=" &
           $r1.cacheDecision & " launched=" & $r1.launched &
           " reason=" & r1.reason)
         check r1.cacheDecision notin ReuseDecisions
@@ -1015,11 +1060,234 @@ suite "a tool under a content-addressed root is in the cache key without being a
         # ... and the new state is reusable, so this is revalidation working
         # rather than the edge having become a permanent miss.
         let settled = runBuild(graph([edge]), config)
-        checkpoint(a.dirName & " settled: decision=" &
+        checkpoint(a.relDir & " settled: decision=" &
           $settled.byId(edge.id).cacheDecision)
         check settled.byId(edge.id).cacheDecision in ReuseDecisions
         check not settled.byId(edge.id).launched
         check f.runCount(name) == 2
+
+  test "only the store root the resolver names exempts anything":
+    ## THE THREE ARMS BETWEEN `$REPRO_STORE_ROOT` AND A RECOGNISED ROOT, none
+    ## of which any fixture above can reach, because every one of them builds
+    ## its paths under a store root that resolves and then asks about paths
+    ## inside it. Each arm below is measured by a witness that ONLY it
+    ## rejects.
+    ##
+    ## THE LAYOUT IS BUILT WITH THE STORE'S OWN `prefixRelativePath` on BOTH
+    ## sides of every comparison, and only the ROOT moves. A layout no
+    ## resolver recognises can demonstrate a hole and cannot demonstrate its
+    ## fix, so the recognised half is always present as the denominator.
+    ##
+    ## No `cc` and no shells, deliberately: every arm here is decided by a
+    ## predicate over a string, and a case that skips on hosts without a
+    ## compiler would prove nothing on exactly those hosts.
+    let root = createTempDir("repro-store-root-arms-", "",
+      dir = nonVolatileTempBase())
+    defer: removeDir(root)
+
+    var digest: PrefixIdBytes
+    for i in 0 ..< 32:
+      digest[i] = byte(0xD0 or (i and 0x0F))
+    let storeRoot = root / "store"
+    let inside = storeRoot / prefixRelativePath("bash", "5.2", digest)
+    # THE SAME LAYOUT, ONE DIRECTORY OVER: byte-for-byte the same realization
+    # name, the same `prefixes` segment, the same depth below its own parent.
+    # The ONLY difference is which root it hangs off, so nothing but the
+    # containment arm can tell these two apart.
+    let elsewhere = root / "elsewhere" /
+      prefixRelativePath("bash", "5.2", digest)
+    createDir(inside / "bin")
+    createDir(elsewhere / "bin")
+    let insideTool = inside / "bin" / "sh"
+    let elsewhereTool = elsewhere / "bin" / "sh"
+
+    let previousStoreRoot = getEnv(StoreRootEnvVar)
+    defer:
+      if previousStoreRoot.len > 0: putEnv(StoreRootEnvVar, previousStoreRoot)
+      else: delEnv(StoreRootEnvVar)
+
+    let seed = weakFingerprintFromText("execdep/store-root-arms")
+    putEnv(StoreRootEnvVar, storeRoot)
+
+    # THE DENOMINATOR. With the variable pointed here this layout IS
+    # recognised, so every `""` below is a statement about a path rather than
+    # about the variable having failed to take.
+    check contentAddressedRoot(insideTool) == inside
+    check keyedOnContentAddressedToolRoot(seed, [insideTool]) != seed
+
+    # OUTSIDE THE ROOT, and the failure is worse than "recognised something it
+    # should not have". The segment split is taken at the store root's LENGTH,
+    # so without the containment arm a path that merely happens to be as long
+    # is cut in the wrong place and the answer is a directory that does not
+    # exist and never did — `<root>/store` and `<root>/elsewhere` differ in
+    # length, and the answer for the second is assembled out of the first's
+    # prefix. Asserting the answer is a PREFIX of what was asked about is what
+    # a fabricated root cannot satisfy, and it is the assertion that survives
+    # any future change to the layout's spelling.
+    let outsideRoot = contentAddressedRoot(elsewhereTool)
+    checkpoint("outside the store root: [" & outsideRoot & "]")
+    check outsideRoot.len == 0
+    check elsewhereTool.startsWith(outsideRoot)
+    check keyedOnContentAddressedToolRoot(seed, [elsewhereTool]) == seed
+
+    # SHALLOWER THAN A REALIZATION. `<store>/prefixes` and
+    # `<store>/prefixes/<package>` are directories the store really has, and
+    # neither is content-addressed — packages come and go under the first,
+    # versions under the second. Two segments after `prefixes` is what the
+    # naming contract puts the digest in, so anything shorter has no digest to
+    # read and the bounds arm is what stops the segment being read off the end
+    # of the split.
+    check contentAddressedRoot(storeRoot / "prefixes").len == 0
+    check contentAddressedRoot(storeRoot / "prefixes" / "bash").len == 0
+
+    # A ROOT OF `/` EXEMPTS NOTHING AT ALL, including paths that ARE named
+    # like realizations — which is stronger than `reproStoreRootPath`'s own
+    # comment claims for it, and is the behaviour worth pinning because it is
+    # the safe direction. `resolveStoreRoot` may legitimately answer `/`; the
+    # trailing-slash strip turns that into the empty string, and the arm that
+    # refuses an empty root is the only thing between that and
+    # `startsWith(root & "/")` matching every absolute path on the machine.
+    putEnv(StoreRootEnvVar, "/")
+    checkpoint("root=/: inside=[" & contentAddressedRoot(insideTool) &
+      "] elsewhere=[" & contentAddressedRoot(elsewhereTool) & "]")
+    check contentAddressedRoot(insideTool).len == 0
+    check contentAddressedRoot(elsewhereTool).len == 0
+    check keyedOnContentAddressedToolRoot(seed, [insideTool]) == seed
+
+    # A ROOT THAT CANNOT BE RESOLVED AT ALL is the same answer, not a raised
+    # exception. `resolveStoreRoot` RAISES a `StoreError` when it falls back to
+    # the per-user default and neither `$XDG_CACHE_HOME` nor `$HOME` is set,
+    # and this predicate runs inside `action()` for every edge in the graph
+    # and once per `PATH` entry of every one of them. Letting that escape
+    # would turn an unset variable into a build failure instead of into "this
+    # path is under no store root", which is the same answer for the same
+    # reason as every other line in this case.
+    let previousXdg = getEnv("XDG_CACHE_HOME")
+    let previousHome = getEnv("HOME")
+    var unresolved = ""
+    try:
+      delEnv(StoreRootEnvVar)
+      delEnv("XDG_CACHE_HOME")
+      delEnv("HOME")
+      unresolved = contentAddressedRoot(insideTool)
+    except CatchableError as e:
+      unresolved = "<raised " & $e.name & ">"
+    finally:
+      if previousHome.len > 0: putEnv("HOME", previousHome)
+      if previousXdg.len > 0: putEnv("XDG_CACHE_HOME", previousXdg)
+    checkpoint("unresolvable store root: [" & unresolved & "]")
+    check unresolved.len == 0
+
+  test "a store root reached through PATH or NODE_PATH is elided too":
+    ## `argv[0]` IS NOT THE ONLY WAY A ROOT GETS SUBTRACTED. `toolInputRoots`
+    ## also reads `PATH` and `NODE_PATH` out of the action's DECLARED
+    ## environment, and the soundness argument for those two is different from
+    ## the one for `argv[0]`: no `keyedOnContentAddressedToolRoot` covers them,
+    ## `keyedOnActionEnvironment` does — it mixes every declared name AND
+    ## value, so a value that yields a root here is a value that is in the key
+    ## there. That claim was written down and graded by nothing; every fixture
+    ## in this file until now put its store root in `argv[0]`.
+    ##
+    ## `argv[0]` here is the host's ordinary `/bin/sh`, under no
+    ## content-addressed root at all, so the `argv[0]` arm contributes nothing
+    ## and the two roots below can only be subtracted through the environment.
+    ##
+    ## RULE 7 IS ASSERTED IN BOTH DIRECTIONS, which is what keeps this case
+    ## from passing vacuously. "Not in the recorded inputs" is also satisfied
+    ## by the monitor never having seen the read at all — so the monitor's own
+    ## set is asserted to CONTAIN each path before the record's set is asserted
+    ## not to.
+    let repoRoot = findRepoRoot()
+    if ccPath().len == 0:
+      skip()
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.root)
+
+      let storeRoot = f.root / "store"
+      var digestP: PrefixIdBytes
+      var digestN: PrefixIdBytes
+      for i in 0 ..< 32:
+        digestP[i] = byte(0xE0 or (i and 0x0F))
+        digestN[i] = byte(0xF0 or (i and 0x0F))
+      let dirP = storeRoot / prefixRelativePath("toolpath", "1.0", digestP)
+      let dirN = storeRoot / prefixRelativePath("nodepath", "1.0", digestN)
+      createDir(dirP / "bin")
+      createDir(dirN / "lib")
+      let readP = dirP / "bin" / "data"
+      let readN = dirN / "lib" / "data"
+      writeFile(readP, "path-root\n")
+      writeFile(readN, "node-root\n")
+
+      let previousStoreRoot = getEnv(StoreRootEnvVar)
+      putEnv(StoreRootEnvVar, storeRoot)
+      defer:
+        if previousStoreRoot.len > 0: putEnv(StoreRootEnvVar, previousStoreRoot)
+        else: delEnv(StoreRootEnvVar)
+
+      # THE DENOMINATOR for the elision: these two really are recognised
+      # roots, and they are two DIFFERENT ones, so neither assertion below can
+      # be satisfied by the other's subtraction.
+      check contentAddressedRoot(readP) == dirP
+      check contentAddressedRoot(readN) == dirN
+      check dirP != dirN
+
+      let log = f.logPath("env-roots")
+      # THE FIRST DECLARED ENTRY IS NEITHER OF THE TWO NAMES, and that is
+      # load-bearing rather than decoration. `envValue` walks `action.env`
+      # looking for `<name>=`; with an unrelated variable in front, a lookup
+      # that returned the first entry regardless of its name would answer
+      # `EXECDEP_ROOTS=`'s value for both `PATH` and `NODE_PATH` and subtract
+      # nothing. Put `PATH` first and that mistake is invisible for `PATH`.
+      let act = action("execdep/env-roots",
+        ["/bin/sh", "-c",
+         "cat " & readP & " " & readN & " > /dev/null; " &
+         f.helperPath & " " & log],
+        cwd = f.workRoot,
+        inputs = [],
+        outputs = [],
+        env = ["EXECDEP_ROOTS=env-roots",
+               "PATH=" & dirP / "bin" & PathSep & f.childPath(),
+               "NODE_PATH=" & dirN / "lib"],
+        cacheable = true,
+        weakFingerprint = weak("execdep/env-roots"),
+        actionCachePolicy = ffpHybrid,
+        dependencyPolicy = automaticMonitorGatheringPolicy(),
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+      let first = runBuild(graph([act]), config)
+      let r0 = first.byId(act.id)
+      checkpoint("env-roots first: status=" & $r0.status &
+        " stderr=" & r0.stderr & " reads=" & $r0.evidence.monitorReads.len)
+      check r0.status == asSucceeded
+      check r0.launched
+      check f.runCount("env-roots") == 1
+
+      # THE MONITOR SAW BOTH READS. Without this the two `not anyIt` below
+      # would be satisfied by an action that never opened the files.
+      let sawP = r0.evidence.monitorReads.anyIt(it == readP)
+      let sawN = r0.evidence.monitorReads.anyIt(it == readN)
+      checkpoint("monitor saw: PATH root read=" & $sawP &
+        " NODE_PATH root read=" & $sawN)
+      check sawP
+      check sawN
+
+      # ... AND THE RECORD CARRIES NEITHER, because both live under a
+      # content-addressed root the declared environment names.
+      let inputs = f.recordedInputs(act)
+      checkpoint("env-roots recorded inputs: " & $inputs.len &
+        "; under the PATH root: " &
+        $inputs.countIt(it.path.startsWith(dirP & "/")) &
+        "; under the NODE_PATH root: " &
+        $inputs.countIt(it.path.startsWith(dirN & "/")))
+      # The edge published something real — the helper is a mutable class-2
+      # input of its own — so "nothing under either root" is a statement about
+      # the elision rather than about an empty record.
+      check inputs.len > 0
+      check inputs.anyIt(it.path == f.helperPath)
+      check not inputs.anyIt(it.path.startsWith(dirP & "/"))
+      check not inputs.anyIt(it.path.startsWith(dirN & "/"))
 
   test "swapping the PROGRAM inside one derivation also re-runs the edge":
     ## THE GRANULARITY CASE, and it was a live hit rather than a hypothetical.
@@ -1232,6 +1500,61 @@ suite "which argument is the image the action executes":
     check r.wrapped == WrapperPrefix.len
     check r.wrappedTool == "/usr/bin/cc"
 
+  test "an argv that only RESEMBLES the wrapper is an ordinary command":
+    ## THE FOUR TOKENS THAT SAY "THIS IS THE ENGINE'S OWN WRAPPER", one
+    ## witness per token plus one for the length, because the tokens are a
+    ## conjunction and a conjunction is graded one conjunct at a time.
+    ##
+    ## The cost of getting any of them wrong runs in both directions and both
+    ## are bad. Too permissive, and an ordinary command whose arguments happen
+    ## to read `… io monitor … -- …` has its `argv[0]` mistaken for a
+    ## launcher: the edge is then keyed on an argument the recipe chose rather
+    ## than on the program it runs, and the reads under the real tool's root
+    ## are elided against a root nothing keyed. Too strict, and a real wrapper
+    ## is not recognised, `argv[0]` is the `repro` binary, and the elision
+    ## drops everything beside it in the store.
+    ##
+    ## The same four tokens are checked TWICE — once in
+    ## `monitorPayloadArgIndex`, which locates the payload, and once in
+    ## `executedImageArgvIndex`, which decides that a monitor-shaped argv with
+    ## no locatable payload names NOTHING rather than index 0. Both copies are
+    ## live and each fails differently, so each witness below is exercised
+    ## against a long argv (which reaches the first) and the verdicts are
+    ## stated as the ANSWER, which is where the two agree.
+    ##
+    ## ORDER MATTERS here for the reason it matters in the store-alias case
+    ## above: a `check` failure continues the loop, an EXCEPTION ends the case.
+    ## The last two rows are the ones that raise when a bounds arm is deleted
+    ## (`argv[1]` on a one-element argv), so they come last and everything
+    ## before them is graded as wrong ANSWERS first.
+    let nearMisses = @[
+      ("argv[1] is not `internal`",
+       @["/usr/bin/env", "repro", "io", "monitor", "--depfile", "d", "--",
+         "/bin/sh"], 0),
+      ("argv[2] is not `io`",
+       @["/usr/bin/repro", "internal", "cache", "monitor", "--depfile", "d",
+         "--", "/bin/sh"], 0),
+      ("argv[3] is not `monitor`",
+       @["/usr/bin/repro", "internal", "io", "record", "--depfile", "d", "--",
+         "/bin/sh"], 0),
+      # SHORTER THAN THE CANONICAL WRAPPER. `repro internal io monitor
+      # --depfile <f> -- <cmd>` is eight arguments at its shortest, so a
+      # four-token prefix with a `--` after it is not a wrapper this engine
+      # composed. It is monitor-SHAPED, though, so the answer is "no image"
+      # rather than "argv[0]" — naming `/usr/bin/repro` here would key the
+      # edge on the engine binary.
+      ("monitor-shaped but shorter than the canonical wrapper",
+       @["/usr/bin/repro", "internal", "io", "monitor", "--", "/bin/sh"], -1),
+      # TOO SHORT TO CARRY THE FOUR TOKENS AT ALL. Reading `argv[1]` of this
+      # raises, which is why the length is tested before the tokens rather
+      # than beside them.
+      ("a one-argument command", @["/bin/true"], 0)]
+    for (name, argv, expected) in nearMisses:
+      let got = executedImageArgvIndex(argv)
+      checkpoint(name & ": [" & argv.join(" ") & "] -> " & $got &
+        " (expected " & $expected & ")")
+      check got == expected
+
   test "the key and the elision move together on a wrapped argv":
     ## THE CONSEQUENCE, not just the index. `keyedOnContentAddressedToolRoot`
     ## and `toolInputRoots` both read this one function, so naming the wrong
@@ -1257,3 +1580,30 @@ suite "which argument is the image the action executes":
     check executedImageArgvIndex(@[]) == -1
     # A trailing `--` with nothing after it is the same "cannot be located".
     check executedImageArgvIndex(WrapperPrefix) == -1
+
+    # ... AND THE TWO CONSUMERS MUST SURVIVE THAT ANSWER, not just receive it.
+    # `-1` is a legal answer here, so both the key mix and the elision have to
+    # treat it as "no image" rather than index `argv` with it. The key mix runs
+    # inside `action()`, so getting this wrong raises while the graph is being
+    # BUILT — before any edge has run, with no action to attribute it to.
+    let unlocatable = @["/usr/bin/repro", "internal", "io", "monitor",
+                        "--depfile", "/tmp/d.iomon", "--interest", "all"]
+    let seed = weakFingerprintFromText("execdep/unlocatable-image")
+    check keyedOnContentAddressedToolRoot(seed, unlocatable) == seed
+    # The elision's side of the same answer: an action whose image cannot be
+    # named subtracts NOTHING, so an observed read survives into the key. The
+    # read is under a real `/nix/store` root on purpose — it is exactly what
+    # WOULD be subtracted if this returned index 0 and found the `repro`
+    # binary there.
+    let noImage = action("execdep/unlocatable-image", unlocatable,
+      cwd = getCurrentDir(),
+      inputs = [],
+      outputs = [],
+      cacheable = false,
+      weakFingerprint = seed,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    const observed = "/nix/store/ffffffffffffffffffffffffffffffff-d-1.0/x"
+    let keyed = noImage.cacheInputPaths(
+      PathSetEvidence(monitorReads: @[observed]))
+    checkpoint("unlocatable image, keyed inputs: " & $keyed)
+    check keyed == @[observed]
