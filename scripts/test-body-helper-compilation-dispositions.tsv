@@ -27,12 +27,23 @@
 # `--name:value` for nim, `--name=value` for everything else.  Nim accepts both
 # (codetracer-nim/compiler/commands.nim:140, `elif switch[i] in {':', '='}`), so
 # `" c --out=x"` walked straight through the fix for `" c --out:x"`.  Widening
-# that rule to accept `=` would have been worse than the bug it fixed: 20
-# declared test sources here spell `repro check --mode=...` (31 occurrences across
-# 22 files -- the other two are the CLI's own usage text in
-# libs/repro_cli_support and an imported, non-declared fixture module, neither of
-# which this check scans -- every one the PRODUCT, none a compile) and all 20
-# would have been condemned.  The rule now
+# that rule to accept `=` would have been worse than the bug it fixed: 40
+# declared test sources here spell `--mode=` (62 occurrences across 42 .nim
+# files -- the other two are the CLI's own usage text in
+# libs/repro_cli_support and an imported, non-declared fixture module
+# tests/integration/nf3_override_state_fixture.nim, neither of which this check
+# scans -- every one the PRODUCT, none a compile) and all 40 would have been
+# condemned.  DERIVATION, so this survives re-scanning rather than being taken
+# on an earlier header's word -- at 8a8cf16b4:
+#     git grep -n -- '--mode=' -- '*.nim' | grep -vE ':[0-9]+:[[:space:]]*#'
+# yields 62 lines over 42 files; "declared" means the file appears in
+# benchmarks/reports/reprobuild-suite-m0-inventory-sources.json's `tests` array.
+# Every one of the 62 lines in the 40 declared sources also carries the `check`
+# verb -- the only three `--mode=` lines in the tree that do not are in
+# libs/repro_cli_support, which this check does not scan.
+# (An earlier revision of this header said 20 sources / 31 occurrences / 22
+# files.  Those were attributed rather than measured; the command above is the
+# measurement, and it makes the point more strongly, not less.)  The rule now
 # keys on nim's switch VOCABULARY, extracted from `processSwitch`'s own case
 # block, which holds under either separator and admits neither `--mode` nor
 # `--write-report`.
@@ -76,12 +87,22 @@
 # THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
 # graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
 # which compiles a checked-in fixture exactly like its four siblings but is
-# labelled `integration` because it also needs the repro binary.  Counted at
-# 64e719c9f against the class field of the source inventory: of the 41 rows now
-# carrying `graph-owned` or `migrate-pending`, exactly ONE is classified
-# graph-fixture; 34 are `integration` and 6 are `platform/destructive`, and 22
-# of those sit under tests/integration/.  Every entry below was read
-# individually.
+# labelled `integration` because it also needs the repro binary.  Re-counted at
+# 8a8cf16b4 against the class field of the source inventory, joining every row
+# below to `staticallyDetectedRuntimeCompilerFlows[].class` by source path: of
+# the 41 rows now carrying `graph-owned` or `migrate-pending`, exactly ONE is
+# classified graph-fixture; 27 are `integration`, 6 are `platform/destructive`,
+# and 7 are ABSENT from the detected set entirely -- those are the seven
+# `graph-owned` rows, whose flows this change removed, so the inventory has no
+# class to offer for them.  22 of the 41 sit under tests/integration/ (20 of
+# them classed `integration`, 2 `platform/destructive`).  Restricted to the 34
+# `migrate-pending` rows alone the split is exactly 27 / 6 / 1.
+#
+# (An earlier revision of this header said "34 are `integration` and 6 are
+# `platform/destructive`".  That rolled the seven `graph-owned` rows into
+# `integration` and then reported the migrate-pending TOTAL, 34, as if it were
+# an integration count.  The structural point above is unaffected and is what
+# the sentence is for.)  Every entry below was read individually.
 #
 # VERDICTS
 #   graph-owned          Migrated: a repro.nim edge builds the artifact and the
@@ -140,8 +161,8 @@
 # the work, except t_spec_example_fixtures_compile and
 # t_b0_runquota_repro_nim_compiles, whose rows name their own blockers.
 #
-# NINE of the KEEP rows also compile C, and those are a separate matter -- they
-# WOULD stay KEEP even if a C edge existed: 2 compiler-is-subject (the
+# TEN of the KEEP rows also compile C, and those are a separate matter -- they
+# WOULD stay KEEP even if a C edge existed: 3 compiler-is-subject (the
 # compile's outcome is the assertion, and one of those compiles must FAIL),
 # 3 dynamic-source, 4 mutated-artifact (the binary is rewritten in place).
 # Two of the three dynamic-source rows substitute into the C text (a host gcc
@@ -152,10 +173,22 @@
 # other flow is a `nim check` over a reprobuild.nim written at run time whose
 # FAILURE is asserted, which no graph edge can express.  Nothing actionable is
 # parked -- its C half is blocked on the missing C edge either way.
-# Derived by re-scanning every row for a C-compiler pattern at 64e719c9f, not
-# estimated: the count is over rows whose DETECTED flows carry a C pattern.
-# (The previous header said seventeen, which counted the eight rows moved above
-# as if they were staying; the revision after it said ten, one too many.)
+# DERIVATION, stated so the count survives re-scanning.  Re-derived at
+# 8a8cf16b4 by joining each KEEP row to its record in
+# benchmarks/reports/reprobuild-suite-m0-inventory-sources.json and asking
+# whether any `matches[].patterns` entry is one of the four C-compiler pattern
+# ids in COMPILER_PATTERNS: `cc`, `gcc`, `clang`, `dynamic-c-compiler`.  Ten
+# rows qualify.  THE BOUNDARY ROW IS NAMED because the basis decides it:
+# tests/integration/t_e2e_cross_compilation_aarch64.nim (compiler-is-subject)
+# is in only through `dynamic-c-compiler`, which matches
+# `startProcess(ccPath` / `startProcess(crossGcc` -- a C compiler resolved at
+# run time rather than spelled.  Drop that pattern and the count is nine, with
+# 2 compiler-is-subject; it is kept here because a compiler reached through a
+# variable is still a compiler.  The same join over the `migrate-pending` rows
+# returns exactly the eleven listed above, which is an independent check on
+# that list.  (Earlier revisions of this header said seventeen -- counting the
+# eight rows moved above as if they were staying -- then ten, then nine.  Nine
+# was the narrow basis reported as if it were the stated one.)
 
 libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim	graph-owned	Built by edge reprobuild.test_fixtures.ct_shim_fixture_baseline. Its docstring lists 'the binary compiles cleanly' as assertion 1; the graph edge does not drop that assertion, it relocates it -- a fixture that stops compiling fails the edge and the suite cannot run. The remaining assertions are about the binary's stdout shape and exit code.
 libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim	graph-owned	Built by edge reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite, shared with t_ct_test_runner_partition_file_mode. The subject is the pass/fail/skip parity of two RUNNERS over one binary; compiling that binary is materialization. Classified 'integration' by the inventory only because it needs the repro binary -- proof that the class label does not partition migrate from keep.
