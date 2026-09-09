@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1503,
+    "nimTestBinaries": 1504,
     "pureUnitConsolidationGroups": 53,
-    "pureUnitTests": 606,
+    "pureUnitTests": 607,
     "staticallyDetectedRuntimeCompilerFlowTests": 87,
-    "testEntries": 1511
+    "testEntries": 1512
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1165,7 +1165,7 @@
       "graph-fixture": 12,
       "integration": 658,
       "platform/destructive": 107,
-      "pure unit": 606,
+      "pure unit": 607,
       "unclassified": 128
     },
     "graphOwnedTestArtifacts": [
@@ -1302,9 +1302,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1503,
+    "nimTestBinaryCount": 1504,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1511
+    "testEntryCount": 1512
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29883,6 +29883,28 @@
       "source": "tests/unit/t_infra_apply_lock_hung_owner.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_install_mirror_optional_version",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_standard_provider"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_install_mirror_optional_version.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

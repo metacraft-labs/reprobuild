@@ -1747,12 +1747,15 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     let dep = m9r14fStripDepConstraint(raw)
     if dep.len > 0 and dep notin mirrorToolRefs:
       mirrorToolRefs.add(dep)
+  var mirrorOutputs = @[stampPath]
+  if publishVersion.len > 0:
+    mirrorOutputs.add(realizationInfoPath(recipesRoot, recipeName))
   discard buildAction(
     id = stageId,
     call = inlineExecCall(argv),
     deps = @[installEdge.id],
     inputs = installEdge.outputs,
-    outputs = @[stampPath, realizationInfoPath(recipesRoot, recipeName)],
+    outputs = mirrorOutputs,
     pool = "compile",
     dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.install_mirror",

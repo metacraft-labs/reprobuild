@@ -4277,12 +4277,15 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       if versions.len > 0: versions[^1].version else: ""
     let cacheIdentity = sourceCacheEntryIdentity(
       projectRoot, packageName, packageVersion, "custom")
+    var mirrorOutputs = @[mirrorStamp]
+    if publishVersion.len > 0:
+      mirrorOutputs.add(realizationInfoPath(recipesRoot, recipeName))
     discard buildAction(
       id = mirrorActionId,
       call = inlineExecCall(@["sh", "-c", script], projectRoot),
       deps = @[prevId],
       inputs = @[prevStamp],
-      outputs = @[mirrorStamp, realizationInfoPath(recipesRoot, recipeName)],
+      outputs = mirrorOutputs,
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.mirror",
