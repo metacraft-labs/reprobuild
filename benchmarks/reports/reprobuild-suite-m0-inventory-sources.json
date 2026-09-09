@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1526,
+    "nimTestBinaries": 1527,
     "pureUnitConsolidationGroups": 56,
     "pureUnitTests": 618,
     "staticallyDetectedRuntimeCompilerFlowTests": 93,
-    "testEntries": 1534
+    "testEntries": 1535
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1216,7 +1216,7 @@
       "integration": 668,
       "platform/destructive": 108,
       "pure unit": 618,
-      "unclassified": 128
+      "unclassified": 129
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1352,9 +1352,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1526,
+    "nimTestBinaryCount": 1527,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1534
+    "testEntryCount": 1535
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30438,6 +30438,25 @@
       "source": "tests/unit/t_action_compatibility_key.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_bootstrap_nim_monitoring",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_bootstrap_nim_monitoring.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

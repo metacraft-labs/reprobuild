@@ -12573,6 +12573,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_bootstrap_nim_monitoring.nim",
+    binary: "build/test-bin/t_bootstrap_nim_monitoring",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_cached_source_dependency_closure.nim",
     binary: "build/test-bin/t_cached_source_dependency_closure",
     defines: @[],

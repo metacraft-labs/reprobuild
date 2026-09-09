@@ -2590,7 +2590,7 @@ const
   BootstrapGccWindowsTarballSha256 =
     "62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232"
 
-proc bootstrapNimToolUse(): InterfaceToolUse =
+proc bootstrapNimToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: "nim >=2.2 <3.0",
     packageSelector: "nim@2.2.10",
@@ -2608,6 +2608,22 @@ proc bootstrapNimToolUse(): InterfaceToolUse =
         lockIdentity: "tarball:nim@2.2.10:sha256:" & BootstrapNimTarballSha256,
         cpu: "x86_64",
         os: "windows")]
+  elif defined(linux):
+    # The vendor Linux archive contains a static ELF. A preload monitor cannot
+    # observe its reads, so every interface extraction would be uncacheable.
+    let nixpkgsRef = "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
+    result.packageSelector = "nim"
+    result.nixProvisioning = @[
+      InterfaceNixProvisioning(
+        packageName: "nim",
+        selector: "nixpkgs#nim",
+        executablePath: "bin/nim",
+        nixpkgsRef: nixpkgsRef,
+        nixpkgsRev: CanonicalNixpkgsRev,
+        nixpkgsNarHash: CanonicalNixpkgsNarHash,
+        packageId: "nixpkgs#nim",
+        lockIdentity: nixpkgsRef & "?narHash=" &
+          CanonicalNixpkgsNarHash & "#nim")]
   else:
     result.tarballProvisioning = @[
       InterfaceTarballProvisioning(
@@ -2746,9 +2762,10 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   ## the compile with `nimbase.h: Invalid argument`).
   ##
   ## Only fires for tool-provisioning modes where the project's
-  ## toolUses are resolved via the engine's tool-store (`tarball`
-  ## today; `nix`/`scoop` resolve their toolchain through other
-  ## adapters and the host PATH posture is already correct).
+  ## toolUses are resolved via the engine's tool-store (`tarball` and
+  ## `from-source`; `nix`/`scoop` arrange their toolchain separately).
+  ## Linux uses the pinned Nix channel for both bootstrap compilers so Nim
+  ## can be monitored; the vendor Linux Nim archive is statically linked.
   ##
   ## MR9 — `$CC` honors pre-set values for backward compat with callers
   ## that pre-pin the compiler (CI, integration tests). But the
@@ -2773,11 +2790,13 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   if getEnv("REPRO_NIM_COMPILER").len == 0:
     try:
       let useDef = bootstrapNimToolUse()
-      if useDef.tarballProvisioning.len > 0:
+      when defined(linux):
+        let profile = resolveNixTool(useDef, effectiveStoreRoot)
+      else:
         let profile = resolveTarballTool(useDef, effectiveStoreRoot)
-        if profile.resolvedExecutablePath.len > 0:
-          bumpWindowsNimStack(profile.resolvedExecutablePath)
-          putEnv("REPRO_NIM_COMPILER", profile.resolvedExecutablePath)
+      if profile.resolvedExecutablePath.len > 0:
+        bumpWindowsNimStack(profile.resolvedExecutablePath)
+        putEnv("REPRO_NIM_COMPILER", profile.resolvedExecutablePath)
     except CatchableError:
       # Silent: if bootstrap resolution fails (offline, no curl, etc.)
       # the existing PATH-based fallback in `nimCompilerPath()` still

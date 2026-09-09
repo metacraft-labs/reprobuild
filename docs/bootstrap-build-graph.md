@@ -38,6 +38,19 @@ the build report and `why`/introspection commands. Cache misses must report a
 specific reason such as `input-changed`, `missing-output`, `tool-identity-drift`,
 `provider-evaluation-input-changed`, or `directory-membership-changed`.
 
+## Bootstrap Compilers
+
+On Linux, `tarball` and `from-source` provisioning obtain the bootstrap Nim and
+C compiler from the pinned Nix channel. The upstream Linux Nim archive contains
+a statically linked executable, which the preload monitor cannot instrument.
+Using it for interface extraction produces incomplete dependency evidence and
+prevents that edge from being cached, even when the compile succeeds.
+
+An explicit `REPRO_NIM_COMPILER` remains supported for a pinned development or
+CI toolchain. It does not waive monitoring: a compiler that cannot be monitored
+still cannot produce a normally cacheable interface extraction. Windows keeps
+its pinned native Nim archive and stack-reserve adjustment.
+
 ## Streaming
 
 Once bootstrap phases are represented as actions, progress can start at process
@@ -56,11 +69,9 @@ pre-scheduler work visible and cacheable.
 
 The codebase already has pieces of this model:
 
-- Interface extraction has a binary metadata cache beside
-  `project-interface.rbsz`. On a cache hit, the CLI loads the previously
-  recorded project/Reprobuild input file lists from that artifact and restats
-  those paths before reusing the interface, avoiding runner compilation and
-  content hashing. It is not yet a normal monitored action.
+- Interface extraction is a monitored build action. The engine validates its
+  observed input closure before reusing `project-interface.rbsz` and its stub.
+  The child does not override that decision with a narrower import-walk cache.
 - Tool identity resolution has a cache keyed by interface/tool metadata. Nix
   provisioning also has a lower-level materialization receipt cache under the
   unified tool store: the first stage computes the effective Nix package plan,
