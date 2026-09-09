@@ -29821,7 +29821,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r14e_3_action_env_threading.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 29,
+      "staticCaseCount": 31,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

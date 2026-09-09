@@ -6472,15 +6472,21 @@ proc monitorPayloadArgIndex(argv: openArray[string]): int =
   ## (io-mon/src/io_mon/fs_snoop.nim) walks its arguments in order and
   ## ``break``s on the first ``--``, taking everything after it as the
   ## command. So this now names the argument io-mon will actually execute,
-  ## rather than a second answer free to disagree with it. The optional
-  ## leading ``run`` verb is skipped for the same reason —
-  ## ``parseFsSnoopCommand`` strips it before the option parser sees it.
+  ## rather than a second answer free to disagree with it.
+  ##
+  ## THE OPTIONAL LEADING ``run`` VERB NEEDS NO SPECIAL CASE, and there used
+  ## to be one here presented as required for agreement with
+  ## ``parseFsSnoopCommand``. It was dead: the loop below steps over every
+  ## token that is not ``--``, and ``run`` never is, so skipping it cannot
+  ## change the answer. MEASURED (2026-09-09) — deleting the skip left both
+  ## files that grade this function green, which is the definition of a branch
+  ## nothing can observe. It is removed rather than kept with a corrected
+  ## comment, because a branch no test can redden is one a later reader will
+  ## take for a load-bearing one all over again.
   if argv.len < 8 or argv[1] != "internal" or argv[2] != "io" or
       argv[3] != "monitor":
     return -1
   var i = 4
-  if argv[i] == "run":
-    inc i
   while i < argv.len:
     if argv[i] == "--":
       return (if i + 1 < argv.len: i + 1 else: -1)
