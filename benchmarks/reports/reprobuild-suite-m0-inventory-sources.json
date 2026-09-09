@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 18,
+    "graphOwnedHelperArtifacts": 22,
     "nimTestBinaries": 1492,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 601,
-    "staticallyDetectedRuntimeCompilerFlowTests": 84,
-    "testEntries": 1499
+    "staticallyDetectedRuntimeCompilerFlowTests": 87,
+    "testEntries": 1500
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1146,8 +1146,8 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 16,
-      "integration": 648,
+      "graph-fixture": 12,
+      "integration": 653,
       "platform/destructive": 107,
       "pure unit": 601,
       "unclassified": 127
@@ -1158,6 +1158,24 @@
         "kind": "test-fixture",
         "output": "build/test-bin/buildtype_output_probe",
         "source": "tests/fixtures/spec-examples/buildtype-output/probe_release.nim"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.ct_shim_fixture_baseline",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "libs/ct_test_unittest_parallel/tests/fixtures/"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "libs/ct_test_unittest_parallel/tests/fixtures/"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "libs/ct_test_unittest_parallel/tests/fixtures/"
       },
       {
         "actionId": "reprobuild.test_fixtures.inject64_helper",
@@ -1260,116 +1278,61 @@
         "kind": "test-helper",
         "output": "build/test-bin/repro_binary_cache_m6",
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
+      },
+      {
+        "actionId": "reprobuild.test_helpers.repro_catalog_harvester",
+        "kind": "test-helper",
+        "output": "build/test-bin/repro_catalog_harvester",
+        "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
     "nimTestBinaryCount": 1492,
-    "pythonTestFileCount": 7,
-    "testEntryCount": 1499
+    "pythonTestFileCount": 8,
+    "testEntryCount": 1500
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
       "class": "graph-fixture",
       "matches": [
         {
-          "assignedCommandVariable": "cmd",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
           "executedVariables": [
-            "binary",
-            "cmd"
+            "nim",
+            "root",
+            "source"
           ],
-          "line": 36,
-          "path": "libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim",
+          "line": 270,
+          "path": "libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim",
           "patterns": [
-            "nim-c"
+            "nim-compile-verb"
           ],
-          "snippet": "let cmd = \"nim c --hints:off --warnings:off --nimcache:\" &"
+          "snippet": "\" c --threads:on --hints:off --warnings:off --colors:off\" &"
         }
       ],
-      "source": "libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim"
-    },
-    {
-      "class": "integration",
-      "matches": [
-        {
-          "assignedCommandVariable": "cmd",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "cmd"
-          ],
-          "line": 39,
-          "path": "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim",
-          "patterns": [
-            "nim-c"
-          ],
-          "snippet": "let cmd = \"nim c --threads:on --hints:off --warnings:off \" &"
-        }
-      ],
-      "source": "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim"
+      "source": "libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim"
     },
     {
       "class": "graph-fixture",
       "matches": [
         {
-          "assignedCommandVariable": "cmd",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
           "executedVariables": [
-            "cmd"
+            "path",
+            "root"
           ],
-          "line": 40,
-          "path": "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim",
+          "line": 197,
+          "path": "libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim",
           "patterns": [
-            "nim-c"
+            "nim-check"
           ],
-          "snippet": "let cmd = \"nim c --threads:on --hints:off --warnings:off \" &"
+          "snippet": "\"nim check --hints:off --warnings:off \" & quoteShell(path),"
         }
       ],
-      "source": "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim"
-    },
-    {
-      "class": "graph-fixture",
-      "matches": [
-        {
-          "assignedCommandVariable": "cmd",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "binary",
-            "childEnv",
-            "cmd"
-          ],
-          "line": 37,
-          "path": "libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim",
-          "patterns": [
-            "nim-c"
-          ],
-          "snippet": "let cmd = \"nim c --hints:off --warnings:off --nimcache:\" &"
-        }
-      ],
-      "source": "libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim"
-    },
-    {
-      "class": "graph-fixture",
-      "matches": [
-        {
-          "assignedCommandVariable": "cmd",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "binary",
-            "cmd"
-          ],
-          "line": 39,
-          "path": "libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim",
-          "patterns": [
-            "nim-c"
-          ],
-          "snippet": "let cmd = \"nim c --hints:off --warnings:off --nimcache:\" &"
-        }
-      ],
-      "source": "libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim"
+      "source": "libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim"
     },
     {
       "class": "graph-fixture",
@@ -1451,27 +1414,6 @@
         }
       ],
       "source": "libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim"
-    },
-    {
-      "class": "graph-fixture",
-      "matches": [
-        {
-          "assignedCommandVariable": "compileCmd",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "compileCmd",
-            "shellArgs"
-          ],
-          "line": 94,
-          "path": "libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim",
-          "patterns": [
-            "nim-c"
-          ],
-          "snippet": "let compileCmd = \"nim c --hints:off --path:\" & libPath &"
-        }
-      ],
-      "source": "libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim"
     },
     {
       "class": "graph-fixture",
@@ -2222,6 +2164,39 @@
             "cc"
           ],
           "snippet": "discard requireSuccess(shellCommand([\"cc\", sourcePath, \"-o\", toolPath]))"
+        },
+        {
+          "assignedCommandVariable": "checkArgs",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "args",
+            "checkArgs",
+            "daemon",
+            "daemonBin",
+            "entries",
+            "invalidRoot",
+            "loweredGraphCachePath",
+            "missingRoot",
+            "pathValue",
+            "projectEnv",
+            "projectRoot",
+            "repoRoot",
+            "report",
+            "reproBin",
+            "socketPath",
+            "sourcePath",
+            "target",
+            "tempRoot",
+            "toolPath",
+            "traceEnv"
+          ],
+          "line": 1282,
+          "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "\"nim\", \"check\", \"--verbosity:0\", \"--hints:off\", \"--skipUserCfg:on\","
         }
       ],
       "source": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim"
@@ -2751,6 +2726,27 @@
       "class": "integration",
       "matches": [
         {
+          "assignedCommandVariable": "parts",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd",
+            "env"
+          ],
+          "line": 85,
+          "path": "tests/integration/t_b0_runquota_repro_nim_compiles.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "var parts = @[\"nim\", \"check\", \"--hints:off\", \"--warnings:off\"]"
+        }
+      ],
+      "source": "tests/integration/t_b0_runquota_repro_nim_compiles.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
           "assignedCommandVariable": "",
           "callableReachable": true,
           "commandVariableExecuted": false,
@@ -3243,6 +3239,26 @@
       "class": "integration",
       "matches": [
         {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
+          "line": 198,
+          "path": "tests/integration/t_installed_engine_read_only_source_tree.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "var cmd = quoteShell(nimExe) & \" c --compileOnly --hints:off --warnings:off\""
+        }
+      ],
+      "source": "tests/integration/t_installed_engine_read_only_source_tree.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
           "assignedCommandVariable": "nimcmd",
           "commandVariableExecuted": true,
           "directExecutionLine": false,
@@ -3526,6 +3542,29 @@
       "class": "integration",
       "matches": [
         {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd",
+            "composed",
+            "dir",
+            "hermeticPath"
+          ],
+          "line": 220,
+          "path": "tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "let cmd = quoteShell(nimExe) & \" c --hints:off --warnings:off\" &"
+        }
+      ],
+      "source": "tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
           "assignedCommandVariable": "res",
           "commandVariableExecuted": false,
           "directExecutionLine": true,
@@ -3607,6 +3646,29 @@
           "runtimeCompilerApi": "extractInterfaceFromModule",
           "runtimeCompilerApiModule": "repro_interface_artifacts",
           "snippet": "extractInterfaceFromModule(providerModule, artifactPath, stubPath,"
+        },
+        {
+          "assignedCommandVariable": "thinCheckCommand",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "binDir",
+            "consumerDepFlags",
+            "dslPath",
+            "intConsumer",
+            "providerDir",
+            "sourceConsumer",
+            "tempRoot",
+            "thinCheckCommand",
+            "thinConsumer",
+            "thinDir"
+          ],
+          "line": 220,
+          "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let thinCheckCommand = @[\"nim\", \"check\"] & consumerDepFlags &"
         },
         {
           "assignedCommandVariable": "thinRunOut",
@@ -3717,6 +3779,29 @@
           "runtimeCompilerApi": "extractInterfaceFromModule",
           "runtimeCompilerApiModule": "repro_interface_artifacts",
           "snippet": "extractInterfaceFromModule(providerModule, outDir / \"asset_pack_public_edit.rbsz\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "binDir",
+            "consumerDepFlags",
+            "dslPath",
+            "intConsumer",
+            "providerDir",
+            "sourceConsumer",
+            "tempRoot",
+            "thinCheckCommand",
+            "thinConsumer",
+            "thinDir"
+          ],
+          "line": 374,
+          "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "discard requireNimSuccess(@[\"nim\", \"check\"] & consumerDepFlags &"
         }
       ],
       "source": "tests/integration/t_project_interface_artifact_import_modes.nim"
@@ -3830,6 +3915,27 @@
         }
       ],
       "source": "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "compileProbe",
+            "tempRoot"
+          ],
+          "line": 74,
+          "path": "tests/integration/t_provisioning_contributions.nim",
+          "patterns": [
+            "nim-c"
+          ],
+          "snippet": "\"nim c --hints:off --warnings:off --path:\" &"
+        }
+      ],
+      "source": "tests/integration/t_provisioning_contributions.nim"
     },
     {
       "class": "integration",
@@ -4189,6 +4295,28 @@
       "matches": [
         {
           "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "consumerPath",
+            "genRoot",
+            "nimExe"
+          ],
+          "line": 192,
+          "path": "tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "nimExe & \" check --hints:off --warnings:off\" &"
+        }
+      ],
+      "source": "tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
           "callableReachable": true,
           "commandVariableExecuted": false,
           "directExecutionLine": false,
@@ -4221,6 +4349,26 @@
         }
       ],
       "source": "tests/integration/t_rp5b_resource_driver_via_protocol.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "coldCmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "coldCmd"
+          ],
+          "line": 208,
+          "path": "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "nimExe & \" c --compileOnly --hints:off --warnings:off -o:\" &"
+        }
+      ],
+      "source": "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim"
     },
     {
       "class": "integration",
@@ -4391,6 +4539,26 @@
         }
       ],
       "source": "tests/integration/t_runner_progress_visibility.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
+          "line": 30,
+          "path": "tests/integration/t_spec_example_fixtures_compile.nim",
+          "patterns": [
+            "nim-check"
+          ],
+          "snippet": "let cmd = \"nim check --hints:off --warnings:off \" & path.quoteShell"
+        }
+      ],
+      "source": "tests/integration/t_spec_example_fixtures_compile.nim"
     },
     {
       "class": "integration",
@@ -4584,6 +4752,20 @@
           "executedVariables": [
             "cmd"
           ],
+          "line": 175,
+          "path": "tests/integration/t_ti2_separate_module_producer.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "\"check --hints:off --warnings:off\""
+        },
+        {
+          "assignedCommandVariable": "compileVerb",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
           "line": 177,
           "path": "tests/integration/t_ti2_separate_module_producer.nim",
           "patterns": [
@@ -4604,6 +4786,20 @@
           "executedVariables": [
             "cmd"
           ],
+          "line": 160,
+          "path": "tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "\"check --hints:off --warnings:off\""
+        },
+        {
+          "assignedCommandVariable": "compileVerb",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
           "line": 162,
           "path": "tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim",
           "patterns": [
@@ -4617,6 +4813,20 @@
     {
       "class": "integration",
       "matches": [
+        {
+          "assignedCommandVariable": "compileVerb",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
+          "line": 171,
+          "path": "tests/integration/t_ti3_fingerprint_split.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "\"check --hints:off --warnings:off\""
+        },
         {
           "assignedCommandVariable": "compileVerb",
           "commandVariableExecuted": true,
@@ -4865,24 +5075,40 @@
       "source": "tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim"
     },
     {
-      "class": "graph-fixture",
+      "class": "platform/destructive",
       "matches": [
         {
           "assignedCommandVariable": "cmd",
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
-            "cmd"
+            "cmd",
+            "scratchRoot"
           ],
-          "line": 53,
-          "path": "tools/catalog-harvester/tests/test_harvester_app_name_validation.nim",
+          "line": 106,
+          "path": "tests/unit/t_windows_system_hash_mode.nim",
           "patterns": [
-            "nim-c"
+            "nim-argv"
           ],
-          "snippet": "let cmd = \"nim c --hints:off --verbosity:0 --out:\" & quoteShell(HarvesterExe) &"
+          "snippet": "\"nim\", \"check\","
+        },
+        {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd",
+            "scratchRoot"
+          ],
+          "line": 142,
+          "path": "tests/unit/t_windows_system_hash_mode.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "\"nim\", \"check\","
         }
       ],
-      "source": "tools/catalog-harvester/tests/test_harvester_app_name_validation.nim"
+      "source": "tests/unit/t_windows_system_hash_mode.nim"
     }
   ],
   "tests": [
@@ -4939,17 +5165,19 @@
     },
     {
       "binary": "build/test-bin/t_backward_compat_std_unittest_test_runs_unchanged",
-      "class": "graph-fixture",
-      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "libs/ct_test_unittest_parallel",
       "requiresReproBinary": false,
       "source": "libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -4958,34 +5186,38 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "libs/ct_test_unittest_parallel",
       "requiresReproBinary": true,
       "source": "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
       "binary": "build/test-bin/t_ct_test_runner_partition_file_mode",
-      "class": "graph-fixture",
-      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "libs/ct_test_unittest_parallel",
       "requiresReproBinary": false,
       "source": "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
       "binary": "build/test-bin/t_every_test_binary_speaks_list_json_protocol",
-      "class": "graph-fixture",
-      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -4996,7 +5228,7 @@
       "source": "libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -5018,8 +5250,8 @@
     },
     {
       "binary": "build/test-bin/t_test_binary_run_one_writes_result_file",
-      "class": "graph-fixture",
-      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -5030,7 +5262,7 @@
       "source": "libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -6094,8 +6326,8 @@
     },
     {
       "binary": "build/test-bin/test_monitor_finish_handoff_is_exclusive",
-      "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -6107,7 +6339,7 @@
       "source": "libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -7908,8 +8140,8 @@
     },
     {
       "binary": "build/test-bin/t_nim_entropy_blessing",
-      "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -7921,7 +8153,7 @@
       "source": "libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim",
       "sourceSuiteCount": 4,
       "staticCaseCount": 11,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -10095,19 +10327,20 @@
     },
     {
       "binary": "build/test-bin/t_peer_cache_admin_cli_status",
-      "class": "graph-fixture",
-      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_peer_cache",
       "requiresReproBinary": false,
       "source": "libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -20736,7 +20969,7 @@
       "source": "tests/integration/t_b0_runquota_repro_nim_compiles.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -23024,7 +23257,7 @@
       "source": "tests/integration/t_installed_engine_read_only_source_tree.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -24487,7 +24720,7 @@
       "source": "tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -25999,7 +26232,7 @@
       "source": "tests/integration/t_provisioning_contributions.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -26617,7 +26850,7 @@
       "source": "tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -26680,7 +26913,7 @@
       "source": "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -27197,7 +27430,7 @@
       "source": "tests/integration/t_spec_example_fixtures_compile.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -31312,7 +31545,7 @@
       "source": "tests/unit/t_windows_system_hash_mode.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -31394,6 +31627,21 @@
     },
     {
       "binary": "",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_graph_owned_test_artifacts.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 23,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
       "class": "unclassified",
       "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
@@ -31441,17 +31689,19 @@
     },
     {
       "binary": "build/test-bin/test_harvester_app_name_validation",
-      "class": "graph-fixture",
-      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tools/catalog-harvester",
       "requiresReproBinary": false,
       "source": "tools/catalog-harvester/tests/test_harvester_app_name_validation.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {

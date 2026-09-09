@@ -1504,6 +1504,7 @@ tests/unit/test_cmake_generator_competitiveness_bench.py	python	9
 tests/unit/test_continuous_benchmarking_policy.py	python	7
 tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_dev_shell_hook_scope.py	python	6
+tests/unit/test_graph_owned_test_artifacts.py	python	23
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_reprobuild_suite_inventory.py	python	64
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26

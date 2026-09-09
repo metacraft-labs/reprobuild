@@ -1,0 +1,2 @@
+let hiddenCmd = "nim c --hints:off --out:h helper.nim"
+discard execCmdEx(hiddenCmd)

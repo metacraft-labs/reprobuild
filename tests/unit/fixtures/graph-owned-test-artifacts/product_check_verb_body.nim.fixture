@@ -1,0 +1,29 @@
+\
+import std/[os, osproc, unittest]
+
+# A test that drives the PRODUCT, not a compiler: `repro check --mode=pre-push
+# --write-report`. This is the pre-push hook, and this shape is live in
+# `tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim`.
+#
+# It MUST NOT be detected. `repro` may well spawn a compiler underneath, and
+# that is the behaviour under test rather than a helper compile in this body —
+# the whole check is built so the integration surface is structurally invisible
+# to it.
+#
+# This fixture exists because widening the compile-verb pattern flagged exactly
+# this shape once: the product's `check` verb collided with nim's, and a
+# separator-based rule could not tell `--mode=pre-push` from `--out=x`. The
+# vocabulary rule can, and this is the arm that keeps it honest — without it,
+# "detect more" could always be bought by detecting the product.
+
+proc runPrePush(reproBin, workspaceRoot: string): int =
+  let cmd = quoteShell(reproBin) &
+    " check --mode=pre-push --write-report" &
+    " --workspace=" & quoteShell(workspaceRoot)
+  let (output, code) = execCmdEx(cmd, workingDir = workspaceRoot)
+  discard output
+  code
+
+suite "synthetic":
+  test "the pre-push check passes":
+    check runPrePush("build/bin/repro", ".") == 0

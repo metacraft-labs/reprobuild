@@ -1,0 +1,19 @@
+\
+import std/[os, osproc, strutils, unittest]
+
+const reproBin = "build" / "bin" / "repro"
+
+proc runRepro(args: string): tuple[output: string; exitCode: int] =
+  execCmdEx(reproBin.quoteShell() & " " & args)
+
+suite "synthetic integration":
+  test "second build of the same target is a cache hit":
+    let cold = runRepro("build .#hello")
+    check cold.exitCode == 0
+    let warm = runRepro("build .#hello")
+    check warm.exitCode == 0
+    check warm.output.contains("cache hit")
+
+  test "lock file is written":
+    check runRepro("lock").exitCode == 0
+    check fileExists("repro.lock")

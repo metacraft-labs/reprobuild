@@ -1,0 +1,12 @@
+import std/[os, osproc, unittest]
+
+const FixtureSource = """
+import std/os
+let cmd = "nim c --out:x helper.nim"
+discard execCmdEx(cmd)
+"""
+
+suite "synthetic":
+  test "writes a fixture":
+    writeFile("fixture.nim", FixtureSource)
+    check fileExists("fixture.nim")

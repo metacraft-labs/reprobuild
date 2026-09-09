@@ -130,6 +130,12 @@ jobs:
       # this step rather than a lint log. `just lint` runs it too.
       - name: No test case asserts only `check true`
         run: dev-exec python3 scripts/check_vacuous_test_cases.py
+      # Graph-Owned-Test-Artifacts M3, same class of gate: a source scan that
+      # refuses a new test compiling a helper program at execution time. Named
+      # as its own step so the failure annotation says what is wrong instead of
+      # pointing at a lint log.
+      - name: No test body compiles a helper program
+        run: dev-exec python3 scripts/check_test_body_helper_compilation.py
       - name: just lint
         run: dev-exec just lint
       - name: Upload logs

@@ -1037,6 +1037,52 @@ proc requireBinary*(path, edgeName: string): string {.discardable.} =
       "or declare that edge as a dependency of this test's execute edge.")
   path
 
+proc graphArtifactPath*(repoRelative: string;
+                        repoRoot = ReprobuildRepoRoot): string =
+  ## Graph-Owned-Test-Artifacts M3: resolve a repo-relative artifact path that
+  ## a ``repro.nim`` build edge declares as its output.
+  ##
+  ## THE POINT OF THIS PROC IS THE ARGUMENT IT REFUSES TO TAKE.
+  ##
+  ## M3 asked how a helper artifact's location reaches a test binary without
+  ## reintroducing host-local assumptions, and this campaign has repeatedly
+  ## found host paths leaking into cache keys. Two answers were available and
+  ## only one of them is safe:
+  ##
+  ## * Pass the absolute path in through the environment. This is what the
+  ##   pre-M3 tests effectively did by computing their own output location.
+  ##   It moves the dependency OUT of the graph's sight — the engine cannot
+  ##   fingerprint what it is not told about — and it puts a host path on the
+  ##   edge, which is the exact defect the tracked-artifact redaction rules
+  ##   elsewhere in this repository exist to catch.
+  ##
+  ## * Spell ONE repo-relative string, in exactly two places: the ``nim.c(...)``
+  ##   edge that declares the output, and here. That string is what the engine
+  ##   fingerprints and what ``testFixtureArtifacts`` in ``repro.nim`` puts on
+  ##   the test's execute edge as a typed input. This proc turns it into an
+  ##   absolute path only inside the running process, by joining it to
+  ##   ``ReprobuildRepoRoot`` — which is derived from ``currentSourcePath()``,
+  ##   i.e. the checkout that contains THIS FILE, never ``$PWD`` and never an
+  ##   environment variable a runner may or may not have set.
+  ##
+  ## So no absolute path is ever written down, and a test cannot accidentally
+  ## resolve an artifact from a different checkout than the one that built it.
+  ## Pair it with ``requireBinary`` so a missing artifact names its producing
+  ## edge instead of failing as a bare "file not found".
+  repoRoot / repoRelative
+
+const CtShimFixtureDir* = "build/test-fixtures/ct-test-unittest-parallel"
+  ## Graph-Owned-Test-Artifacts M3: where the ``ct_test_unittest_parallel``
+  ## protocol fixtures are built. Deliberately NOT ``build/test-bin``: one of
+  ## the fixtures contains an intentionally failing case, and the suite runner
+  ## enumerates ``build/test-bin`` — a fixture parked there is picked up and
+  ## reported as a failing test of this repository.
+
+proc ctShimFixturePath*(name: string; repoRoot = ReprobuildRepoRoot): string =
+  ## Path of one graph-built ``ct_test_unittest_parallel`` fixture binary.
+  ## ``name`` is the fixture's stem, e.g. ``"fixture_protocol_three_tests"``.
+  graphArtifactPath(CtShimFixtureDir / name.addFileExt(ExeExt), repoRoot)
+
 proc monitorShimPath*(repoRoot: string): string =
   ## Test-Fixtures-In-Build-Graph M2: the stable on-disk location of the
   ## graph-built monitor-shim library. This is the exact path
