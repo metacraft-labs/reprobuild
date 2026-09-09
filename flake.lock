@@ -5111,9 +5111,11 @@
         ]
       },
       "locked": {
+        "lastModified": 1788976244,
+        "narHash": "sha256-7wTdJkutu2VDQFuKIzZgAzJ7X8J3pHXbr3dEcqcVH2Q=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "1e141c603b853455d71a906d1fca3e1fcfe1e4c8",
+        "rev": "7a79877992908f64d3c8318bb7b20078ff5d1bf4",
         "type": "github"
       },
       "original": {
