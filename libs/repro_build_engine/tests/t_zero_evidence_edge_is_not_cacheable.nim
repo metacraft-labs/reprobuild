@@ -130,13 +130,13 @@ proc contentAddressedShell(): string =
   ## `""`.
   ##
   ## A REAL STORE PATH, not a fixture directory, and that is forced rather than
-  ## chosen: `nixStoreRoot` — the single function both the elision
+  ## chosen: `contentAddressedRoot` — the single function both the elision
   ## (`toolInputRoots`) and the key mix (`keyedOnContentAddressedToolRoot`)
-  ## read — recognizes the literal prefix `/nix/store/` and nothing else. A
-  ## synthesized "store-like" directory under the fixture root would be elided
-  ## by neither, and the suite would grade nothing while reading green. So the
-  ## honest shape is to use the host's store when it has one and skip when it
-  ## does not.
+  ## read — recognizes the literal prefix `/nix/store/` and reprobuild's own
+  ## configured CAS store, and nothing else. A synthesized "store-like"
+  ## directory under the fixture root would be elided by neither, and the suite
+  ## would grade nothing while reading green. So the honest shape is to use the
+  ## host's store when it has one and skip when it does not.
   ##
   ## The executability probe is not paranoia. A plain name scan of this host's
   ## store returned, as its FIRST candidate, a bash derivation built for
@@ -269,7 +269,8 @@ proc runEdge(f: Fixture; id: string; cacheable = true;
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
   result.monitorDepfile = f.rmdfPath
 
-proc iomonReportEdge(f: Fixture; id: string): BuildAction =
+proc iomonReportEdge(f: Fixture; id: string;
+                     rootImage = RootImage): BuildAction =
   ## THE OTHER PRODUCER OF MONITOR EVIDENCE, and the reason it is here.
   ##
   ## `collectEvidence` reaches `applyMonitorEvidenceStatus` from TWO places,
@@ -300,7 +301,7 @@ proc iomonReportEdge(f: Fixture; id: string): BuildAction =
   ## it. Its `monitorReads` is exactly what the capture said, which is what
   ## makes the assertions below able to name the whole set.
   result = action(id,
-    ["/bin/sh", "-c", "echo ran >> " & f.runLogPath],
+    [rootImage, "-c", "echo ran >> " & f.runLogPath],
     cwd = f.workRoot,
     inputs = [],
     outputs = [],
@@ -1038,6 +1039,72 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
 
       let warm = runBuild(g, config)
       check warm.byId(act.id).cacheDecision in ReuseDecisions
+      check f.runCount() == 1
+
+  test "the guard's SCOPE is graded: an edge outside it still publishes an elided-empty key":
+    ## THE SCOPE ITSELF, and until this case existed it was asserted by
+    ## nothing. MEASURED: deleting `monitorEvidenceRequired()` from
+    ## `gradeKeyedInputSet`'s condition — widening the guard to every cacheable
+    ## edge — left this file, and the whole 20-case suite it belongs to, GREEN.
+    ## Every other case here is INSIDE the scope, so they all measure what the
+    ## guard does and none of them measures where it stops. A scope no test
+    ## grades is a scope the next contributor can delete for free, which is
+    ## exactly what rule 8 is about.
+    ##
+    ## The edge below is the nearest thing outside the boundary that can still
+    ## reach the divergent state: `dgRecognizedFormat` is NOT in
+    ## `MonitorPolicyKinds`, so `monitorEvidenceRequired` is false and the
+    ## guard must not fire — yet the edge folds a real `.iomon` capture into
+    ## `monitorReads` and its `argv[0]` is a store path, so the elision empties
+    ## the keyed set exactly as it does for the in-scope cases above.
+    ##
+    ## THE SCOPE IS CORRECT AND NOT MERELY HISTORICAL. This edge's input set is
+    ## the author's declaration — a report it named and produced — not a set
+    ## the engine promised to discover. `refusesRecordWithNoInputs` draws the
+    ## line in the same place at lookup, for the same reason, and the two must
+    ## keep agreeing: an engine that refused here would make every edge whose
+    ## report legitimately names nothing a permanent miss.
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip()
+    else:
+      let f = makeFixture("keyed-out-of-scope")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
+      let act = f.iomonReportEdge("keyed-out-of-scope/run", rootImage = sh)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: status=" & $r0.status &
+        " reads=" & $r0.evidence.monitorReads &
+        " keyed=" & $act.cacheInputPaths(r0.evidence) &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      check f.runCount() == 1
+
+      # THE STATE THE GUARD WOULD FIRE ON, reached in full: the monitor's set
+      # is non-empty and the keyed set is empty. Naming both is what stops a
+      # later change that merely stops reaching this state from turning the
+      # case into a tautology.
+      #
+      # `foldLauncherRootImage` contributes nothing here (the policy is
+      # outside `MonitorPolicyKinds`), so `monitorReads` is exactly what the
+      # capture said — one entry, not the two the in-scope cases see.
+      check r0.evidence.monitorReads == @[storeRootRead(sh)]
+      check act.cacheInputPaths(r0.evidence).len == 0
+
+      # ... and the guard stays silent, publishes, and serves.
+      check r0.evidence.diagnostics.len == 0
+      check f.hasRecord(act)
+
+      let warm = runBuild(g, config)
+      let r1 = warm.byId(act.id)
+      checkpoint("warm: decision=" & $r1.cacheDecision &
+        " launched=" & $r1.launched)
+      check r1.cacheDecision in ReuseDecisions
+      check not r1.launched
       check f.runCount() == 1
 
   test "a non-cacheable store-tool edge is unaffected":

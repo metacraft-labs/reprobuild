@@ -469,12 +469,16 @@ proc contentAddressedShells(shim: string): seq[string] =
   ## skips.
   ##
   ## THE HOST'S REAL STORE, not a fixture directory, and that is forced rather
-  ## than chosen. `nixStoreRoot` — the single function both the elision
+  ## than chosen. `contentAddressedRoot` — the single function both the elision
   ## (`toolInputRoots`) and the key mix (`keyedOnContentAddressedToolRoot`)
-  ## consult — recognizes the literal prefix `/nix/store/` and nothing else, so
-  ## a synthesized "store-like" directory under the fixture root would be
-  ## elided by neither and this suite would assert nothing while reading green.
-  ## That is precisely the failure mode the file's original fixture had.
+  ## consult — recognizes the literal prefix `/nix/store/` and reprobuild's own
+  ## CAS store, and nothing else, so a synthesized "store-like" directory under
+  ## the fixture root would be elided by neither and this suite would assert
+  ## nothing while reading green. That is precisely the failure mode the file's
+  ## original fixture had. The repro-store arm below builds its fixture out of
+  ## the store's own naming contract and points `$REPRO_STORE_ROOT` at it, for
+  ## the same reason: a directory the resolver does not recognise would be
+  ## graded by neither side.
   ##
   ## BOTH PROBES BELOW EARNED THEIR PLACE ON THIS HOST, and each rejects a
   ## candidate that would fail the edge for a reason with nothing to do with
@@ -512,6 +516,36 @@ proc contentAddressedShells(shim: string): seq[string] =
     if roots.len >= 2:
       break
   roots
+
+proc coreutilsPrograms(shim: string): seq[string] =
+  ## `[<coreutils>/bin/cat, <coreutils>/bin/head]` from ONE `/nix/store`
+  ## derivation, or an empty seq.
+  ##
+  ## The granularity case needs the opposite fixture from
+  ## `contentAddressedShells`: two programs sharing one root, rather than one
+  ## program under two roots. Both probes are the same ones that suite needs
+  ## and for the same reasons — a derivation built for another machine format,
+  ## and a bootstrap derivation the shim cannot be preloaded into, are both
+  ## real conditions with nothing to do with caching.
+  for entry in walkDir("/nix/store"):
+    if entry.kind != pcDir:
+      continue
+    if not entry.path.extractFilename.contains("-coreutils"):
+      continue
+    let cat = entry.path / "bin" / "cat"
+    let head = entry.path / "bin" / "head"
+    if not fileExists(cat) or not fileExists(head):
+      continue
+    var usable = true
+    for prog in [cat, head]:
+      if execShellCmd(prog & " /dev/null >/dev/null 2>&1") != 0 or
+          execShellCmd(InjectionVariableForHost & "=" & shim & " " & prog &
+            " /dev/null >/dev/null 2>&1") != 0:
+        usable = false
+        break
+    if usable:
+      return @[cat, head]
+  @[]
 
 proc storeToolEdge(f: Fixture; sh: string): BuildAction =
   ## ONE edge id, ONE command, ONE declared environment — the only thing that
@@ -619,6 +653,208 @@ suite "a tool under a content-addressed root is in the cache key without being a
       check not backToA.byId(edgeA.id).launched
       check f.runCount("store-tool") == 2
 
+  test "a tool under REPROBUILD'S OWN store is in the key just like a Nix one":
+    ## THE OTHER CONTENT-ADDRESSED ROOT, and it was the more dangerous of the
+    ## two because the symmetry that made it look safe is not sufficient.
+    ##
+    ## While `contentAddressedRoot` recognised the literal `/nix/store/` and
+    ## nothing else, a repro-store tool was elided by neither side and mixed by
+    ## neither side. Rule 7 held — same set both sides — so the ELISION hole
+    ## stayed shut, and the tool survived as an ordinary recorded input. That
+    ## is not enough, and MEASURED (2026-09-09) with two byte-different bashes
+    ## under this exact fixture layout it fails outright:
+    ##
+    ##     PROBE weak(A)==weak(B): true
+    ##     PROBE after the CAS tool swap: decision=cdHit launched=false runs=1
+    ##
+    ## Revalidation only re-checks the paths a record already NAMES. `<A>/sh`
+    ## still existed and still hashed the same; nothing noticed `argv[0]` had
+    ## moved to `<B>/sh`. **A content-addressed store expresses a tool change
+    ## as a new PATH, so recording the old path cannot catch it — only keying
+    ## on it can.**
+    ##
+    ## THE FIXTURE IS BUILT FROM THE STORE'S OWN NAMING CONTRACT
+    ## (`prefixRelativePath` / `realizationDirName`) and the resolver is
+    ## pointed at it through `$REPRO_STORE_ROOT`, the same precedence every
+    ## other store consumer uses. Inventing a plausible-looking prefix instead
+    ## would be recognised by nothing and this case would read green while
+    ## asserting nothing — the failure mode the suite header names.
+    let repoRoot = findRepoRoot()
+    let shells =
+      if ccPath().len == 0: newSeq[string]()
+      else: contentAddressedShells(monitorTools(repoRoot).shim)
+    if ccPath().len == 0 or shells.len < 2:
+      skip()
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.root)
+
+      let storeRoot = f.root / "store"
+      var digestA: PrefixIdBytes
+      var digestB: PrefixIdBytes
+      for i in 0 ..< 32:
+        digestA[i] = byte(0xA0 or (i and 0x0F))
+        digestB[i] = byte(0xB0 or (i and 0x0F))
+      let dirA = storeRoot / prefixRelativePath("bash", "5.2", digestA)
+      let dirB = storeRoot / prefixRelativePath("bash", "5.3", digestB)
+      createDir(dirA / "bin")
+      createDir(dirB / "bin")
+      let toolA = dirA / "bin" / "sh"
+      let toolB = dirB / "bin" / "sh"
+      copyFileWithPermissions(shells[0], toolA)
+      copyFileWithPermissions(shells[1], toolB)
+      # THE DENOMINATOR. Two store paths must be two different programs, or
+      # "the edge re-ran" would be a statement about nothing.
+      check readFile(toolA) != readFile(toolB)
+
+      let previousStoreRoot = getEnv(StoreRootEnvVar)
+      putEnv(StoreRootEnvVar, storeRoot)
+      defer:
+        if previousStoreRoot.len > 0: putEnv(StoreRootEnvVar, previousStoreRoot)
+        else: delEnv(StoreRootEnvVar)
+
+      # The resolver recognises the realization directory, and stops there:
+      # `<store>/prefixes` is not content-addressed and must never be elided.
+      check contentAddressedRoot(toolA) == dirA
+      check contentAddressedRoot(toolB) == dirB
+      check contentAddressedRoot(storeRoot / "prefixes" / "bash").len == 0
+
+      let src = f.workRoot / "repro-store-src.txt"
+      writeFile(src, "generation-1\n")
+      let log = f.logPath("repro-store")
+
+      proc storeEdge(tool: string): BuildAction =
+        ## ONE id, ONE command; only `argv[0]` differs. Reading a workspace
+        ## file gives the edge a genuine class-2 input, so the empty-key guard
+        ## does not decide the case first.
+        f.monitoredEdge("execdep/repro-store",
+          [tool, "-c", "cat " & src & " >> " & log])
+
+      let edgeA = storeEdge(toolA)
+      let edgeB = storeEdge(toolB)
+      checkpoint("weakA=" & toHex(edgeA.weakFingerprint.bytes) &
+        " weakB=" & toHex(edgeB.weakFingerprint.bytes))
+      check edgeA.weakFingerprint != edgeB.weakFingerprint
+
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+
+      let first = runBuild(graph([edgeA]), config)
+      let r0 = first.byId(edgeA.id)
+      checkpoint("A first: status=" & $r0.status & " stderr=" & r0.stderr)
+      check r0.status == asSucceeded
+      check r0.launched
+      check f.runCount("repro-store") == 1
+
+      # The elision applies to this root exactly as it does to a Nix one, so
+      # the tool is NOT a recorded input and revalidation cannot see the swap.
+      # That is what makes the key the only thing standing between the two.
+      let inputs = f.recordedInputs(edgeA)
+      checkpoint("A recorded inputs: " & $inputs.len)
+      check inputs.len > 0
+      check not inputs.anyIt(it.path == toolA)
+      check not inputs.anyIt(it.path.startsWith(dirA & "/"))
+
+      let warm = runBuild(graph([edgeA]), config)
+      checkpoint("A warm: decision=" & $warm.byId(edgeA.id).cacheDecision)
+      check warm.byId(edgeA.id).cacheDecision in ReuseDecisions
+      check f.runCount("repro-store") == 1
+
+      let swapped = runBuild(graph([edgeB]), config)
+      let r1 = swapped.byId(edgeB.id)
+      checkpoint("after the CAS tool swap: decision=" & $r1.cacheDecision &
+        " launched=" & $r1.launched & " reason=" & r1.reason)
+      check r1.cacheDecision notin ReuseDecisions
+      check r1.launched
+      check f.runCount("repro-store") == 2
+
+      # ... and it is a re-key, not a blanket invalidation.
+      let backToA = runBuild(graph([edgeA]), config)
+      checkpoint("back to A: decision=" &
+        $backToA.byId(edgeA.id).cacheDecision)
+      check backToA.byId(edgeA.id).cacheDecision in ReuseDecisions
+      check f.runCount("repro-store") == 2
+
+  test "swapping the PROGRAM inside one derivation also re-runs the edge":
+    ## THE GRANULARITY CASE, and it was a live hit rather than a hypothetical.
+    ## `cacheInputPaths` subtracts at the ROOT, so the root must be in the key
+    ## (rule 7) — but the first version of the mix stopped THERE, on the
+    ## reasoning that keying on more "would key on something the elision does
+    ## not bound". That has the argument inverted: keying on more than you
+    ## elide is the safe direction. MEASURED (2026-09-09) before the repair,
+    ## one coreutils derivation, `argv[0]` swapped `bin/cat` -> `bin/head`:
+    ## **`cdHit`, `launched = false`**. One derivation, two programs, one cache
+    ## entry.
+    ##
+    ## A derivation holding two programs with DIFFERENT observable behaviour is
+    ## what makes the case legible: `cat` and `head` on a 12-line file produce
+    ## different stdout, so "the same entry was served" is visible in the
+    ## result and not only in the decision.
+    let repoRoot = findRepoRoot()
+    let progs =
+      if ccPath().len == 0: newSeq[string]()
+      else: coreutilsPrograms(monitorTools(repoRoot).shim)
+    if progs.len < 2:
+      skip()
+    else:
+      let catPath = progs[0]
+      let headPath = progs[1]
+      # THE DENOMINATOR for this case: one root, two programs.
+      check contentAddressedRoot(catPath) == contentAddressedRoot(headPath)
+      check contentAddressedRoot(catPath).len > 0
+
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let src = f.workRoot / "lines.txt"
+      var body = ""
+      for i in 1 .. 12:
+        body.add("line-" & $i & "\n")
+      writeFile(src, body)
+
+      proc programEdge(prog: string): BuildAction =
+        ## ONE id, ONE argument; only the PROGRAM changes, and both live under
+        ## the same store root. Reading a workspace file gives the edge a
+        ## genuine class-2 input, so `gradeKeyedInputSet` does not decide the
+        ## case before the property under test gets a turn.
+        f.monitoredEdge("execdep/program", [prog, src])
+
+      let edgeCat = programEdge(catPath)
+      let edgeHead = programEdge(headPath)
+      checkpoint("weak(cat)=" & toHex(edgeCat.weakFingerprint.bytes) &
+        " weak(head)=" & toHex(edgeHead.weakFingerprint.bytes))
+      check edgeCat.weakFingerprint != edgeHead.weakFingerprint
+
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+
+      let first = runBuild(graph([edgeCat]), config)
+      let r0 = first.byId(edgeCat.id)
+      checkpoint("cat first: status=" & $r0.status & " stderr=" & r0.stderr)
+      check r0.status == asSucceeded
+      check r0.launched
+      check r0.stdout.contains("line-12")
+
+      let warm = runBuild(graph([edgeCat]), config)
+      checkpoint("cat warm: decision=" & $warm.byId(edgeCat.id).cacheDecision)
+      check warm.byId(edgeCat.id).cacheDecision in ReuseDecisions
+      check not warm.byId(edgeCat.id).launched
+
+      let swapped = runBuild(graph([edgeHead]), config)
+      let r1 = swapped.byId(edgeHead.id)
+      checkpoint("after the program swap: decision=" & $r1.cacheDecision &
+        " launched=" & $r1.launched & " stdout=" & r1.stdout)
+      check r1.cacheDecision notin ReuseDecisions
+      check r1.launched
+      # `head` defaults to ten lines, so serving `cat`'s entry would have
+      # returned the whole file.
+      check not r1.stdout.contains("line-12")
+
+      # ... and going back to `cat` serves `cat`'s own record, so this is a
+      # re-key and not a blanket invalidation.
+      let backToCat = runBuild(graph([edgeCat]), config)
+      checkpoint("back to cat: decision=" &
+        $backToCat.byId(edgeCat.id).cacheDecision)
+      check backToCat.byId(edgeCat.id).cacheDecision in ReuseDecisions
+      check not backToCat.byId(edgeCat.id).launched
+
   test "an argv[0] outside any content-addressed root does not move the key":
     ## THE IDENTITY CASE, and it is a requirement rather than a nicety: a
     ## correctness fix that shifted every fingerprint would ship as a total
@@ -639,9 +875,138 @@ suite "a tool under a content-addressed root is in the cache key without being a
     check a != digest
     check b != digest
     check a != b
-    # The mix is over the ROOT, not the full path, because the ROOT is the
-    # granularity `cacheInputPaths` subtracts at. Two binaries in the same
-    # store root are covered by one key component; splitting them would key on
-    # something the elision does not bound.
+    # THE ROOT IS IN THE KEY BECAUSE RULE 7 REQUIRES IT, AND THE PATH IS IN
+    # THE KEY BECAUSE NOTHING FORBIDS IT. `cacheInputPaths` subtracts at the
+    # ROOT, so the root must be in the key or the elision drops what the key
+    # does not carry. That bounds the key from BELOW. It says nothing about
+    # the other direction: keying on MORE than the elision drops is always
+    # safe, because every subtracted path is still covered by the root
+    # component, and it is the ONLY way to tell two programs of one
+    # derivation apart. The first version of this assertion pinned the root
+    # ALONE and gave the reason as "splitting them would key on something the
+    # elision does not bound" — which has the argument inverted, and cost a
+    # real hit: MEASURED (2026-09-09), one coreutils derivation with `argv[0]`
+    # swapped `bin/cat` -> `bin/head`, `cdHit`, `launched = false`.
+    #
+    # Two binaries under one store root are therefore TWO key components ...
+    let sameRootOtherProgram = keyedOnContentAddressedToolRoot(digest,
+      ["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bash-5.2p26/bin/bash"])
+    check sameRootOtherProgram != a
+    check sameRootOtherProgram != digest
+    # ... while the ROOT still participates, so the same program name under
+    # two different derivations is still two keys. Without this the mix would
+    # have degenerated into "the path", and the root's own contribution — the
+    # half rule 7 actually demands — would be untested.
     check keyedOnContentAddressedToolRoot(digest,
-      ["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bash-5.2p26/bin/bash"]) == a
+      ["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x-1.0/bin/sh"]) !=
+      keyedOnContentAddressedToolRoot(digest,
+        ["/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-x-1.0/bin/sh"])
+
+suite "which argument is the image the action executes":
+  ## `executedImageArgvIndex` is the single answer three consumers ask for —
+  ## the elision (`toolInputRoots`), the key mix
+  ## (`keyedOnContentAddressedToolRoot`) and the launcher's root-image fold
+  ## (`executedToolImagePath`). Until this suite existed NOTHING in the tree
+  ## referenced it outside the engine, so its behaviour was graded only
+  ## indirectly, through edges whose payloads happened to contain no `--`.
+  ##
+  ## THE DEFECT IT WAS HIDING. `monitorPayloadArgIndex` located the payload by
+  ## scanning the WHOLE argv for the LAST `--`. `monitoredAction` prepends
+  ## `<repro> internal io monitor … --`, so for any payload carrying a `--` of
+  ## its own the answer was the argument after the ACTION's separator instead
+  ## of the wrapper's. MEASURED (2026-09-09) on the production key builder,
+  ## payload `/usr/bin/env runner -- /nix/store/…-data-1.0/input.txt`:
+  ##
+  ##     UNWRAPPED  index=0   -> /usr/bin/env
+  ##     WRAPPED    index=12  -> /nix/store/…-data-1.0/input.txt
+  ##
+  ## The elision then dropped every read under a root the weak fingerprint
+  ## carries nothing about — the wrapper argv is composed long after that
+  ## fingerprint is computed — which is
+  ## Dependency-Observation-Attribution.md rule 9 in a new shape, introduced
+  ## by the commit that closed the old one.
+  ##
+  ## THE PROPERTY, stated once and applied to every shape: wrapping an argv
+  ## for the monitor must not change WHICH argument is the tool. A payload's
+  ## own `--` is the action's business and belongs to nobody upstream.
+
+  const WrapperPrefix = @["/usr/bin/repro", "internal", "io", "monitor",
+                          "--depfile", "/tmp/d.iomon",
+                          "--interest", "file,proc,lib", "--"]
+
+  proc bothIndexes(payload: seq[string]):
+      tuple[unwrapped, wrapped: int, unwrappedTool, wrappedTool: string] =
+    let wrapped = WrapperPrefix & payload
+    result.unwrapped = executedImageArgvIndex(payload)
+    result.wrapped = executedImageArgvIndex(wrapped)
+    result.unwrappedTool =
+      if result.unwrapped >= 0: payload[result.unwrapped] else: "<none>"
+    result.wrappedTool =
+      if result.wrapped >= 0: wrapped[result.wrapped] else: "<none>"
+
+  test "a payload carrying its own `--` still names the payload's argv[0]":
+    ## The three real shapes a build graph produces, plus the one the
+    ## measurement above used. Each names a DIFFERENT tool so a scan that
+    ## collapsed to a constant would be visible.
+    let shapes = @[
+      ("cargo",
+       @["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-cargo-1.0/bin/cargo",
+         "test", "--", "--nocapture", "--test-threads=1"]),
+      ("sh -c",
+       @["/bin/sh", "-c", "run_it \"$@\"", "--",
+         "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-data-1.0/in.txt"]),
+      ("git",
+       @["/usr/bin/git", "log", "--oneline", "--",
+         "/nix/store/cccccccccccccccccccccccccccccccc-src-1.0/f.c"]),
+      ("env",
+       @["/usr/bin/env", "runner", "--",
+         "/nix/store/dddddddddddddddddddddddddddddddd-data-1.0/in.txt"])
+    ]
+    for (name, payload) in shapes:
+      let r = bothIndexes(payload)
+      checkpoint(name & ": unwrapped index=" & $r.unwrapped & " -> " &
+        r.unwrappedTool & "; wrapped index=" & $r.wrapped & " -> " &
+        r.wrappedTool)
+      # The tool is `argv[0]` of the payload in every one of these ...
+      check r.unwrapped == 0
+      # ... and the wrapper must not move the answer to a different string.
+      check r.wrappedTool == r.unwrappedTool
+      # The wrapped index is the payload's position, which is what makes the
+      # equality above a statement about the SCAN and not about two copies of
+      # one string that happen to match.
+      check r.wrapped == WrapperPrefix.len
+
+  test "a payload with no `--` of its own is unaffected":
+    ## The regression guard for the shapes that always worked. A fix that
+    ## simply stopped scanning would pass the case above and fail here.
+    let r = bothIndexes(@["/usr/bin/cc", "-c", "a.c", "-o", "a.o"])
+    checkpoint("unwrapped=" & $r.unwrapped & " wrapped=" & $r.wrapped)
+    check r.unwrapped == 0
+    check r.wrapped == WrapperPrefix.len
+    check r.wrappedTool == "/usr/bin/cc"
+
+  test "the key and the elision move together on a wrapped argv":
+    ## THE CONSEQUENCE, not just the index. `keyedOnContentAddressedToolRoot`
+    ## and `toolInputRoots` both read this one function, so naming the wrong
+    ## argument keys on one root while eliding another. Asking the key builder
+    ## directly is the cheapest statement of "they agree".
+    let digest = weakFingerprintFromText("execdep/argv-index")
+    let payload = @["/bin/sh", "-c", "run",
+                    "--", "/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-d-1.0/x"]
+    # `/bin/sh` is under no content-addressed root, so the mix is the
+    # IDENTITY — and it must stay the identity through the wrapper. Before the
+    # repair the wrapped form keyed on the store path after the action's own
+    # `--` instead.
+    check keyedOnContentAddressedToolRoot(digest, payload) == digest
+    check keyedOnContentAddressedToolRoot(digest, WrapperPrefix & payload) ==
+      digest
+
+  test "a monitor-shaped argv whose payload cannot be located names nothing":
+    ## `-1`, not `0`. Index 0 on a wrapper argv is the ENGINE'S OWN binary,
+    ## and naming it would key the edge on reprobuild and elide the reads of
+    ## everything beside it in the store.
+    check executedImageArgvIndex(@["/usr/bin/repro", "internal", "io",
+      "monitor", "--depfile", "/tmp/d.iomon", "--interest", "all"]) == -1
+    check executedImageArgvIndex(@[]) == -1
+    # A trailing `--` with nothing after it is the same "cannot be located".
+    check executedImageArgvIndex(WrapperPrefix) == -1

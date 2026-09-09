@@ -1597,10 +1597,110 @@ proc textBytes(text: string): seq[byte] =
 proc weakFingerprintFromText*(text: string): ContentDigest =
   blake3DomainDigest(text.textBytes(), hdActionFingerprint)
 
-proc nixStoreRoot*(path: string): string =
-  ## The `/nix/store/<hash>-<name>` root a path lies under, or `""`.
+proc nixStoreRoot(normalized: string): string =
+  ## The `/nix/store/<hash>-<name>` root a forward-slashed path lies under.
   ##
-  ## THE ONE CONTENT-ADDRESSED ROOT THE ENGINE RECOGNISES TODAY, and the
+  ## Matches the literal prefix and nothing else: `//nix/store`, `/nix/./store`
+  ## and symlink aliases are not recognised. That is the conservative
+  ## direction — an unrecognised root is elided by nobody and keyed as an
+  ## ordinary recorded input — and it is the same literal
+  ## `isImmutablePackageStoreRoot` matches.
+  const prefix = "/nix/store/"
+  if not normalized.startsWith(prefix):
+    return ""
+  let rest = normalized.substr(prefix.len)
+  let slash = rest.find('/')
+  if slash < 0:
+    normalized
+  else:
+    prefix & rest[0 ..< slash]
+
+proc isRealizationDirName(name: string): bool =
+  ## Does this directory name carry a realization digest?
+  ##
+  ## `repro_local_store/prefix_paths.realizationDirName` composes
+  ## `<version>-<first 16 hex of the BLAKE3 realization hash>`. Recognising
+  ## the SHAPE rather than trusting the location is what bounds the damage a
+  ## bogus `REPRO_STORE_ROOT` can do — see `reproStoreRootPath`.
+  if name.len < 17 or name[name.len - 17] != '-':
+    return false
+  for i in name.len - 16 ..< name.len:
+    if name[i] notin {'0' .. '9', 'a' .. 'f'}:
+      return false
+  true
+
+proc reproStoreRootPath(): string =
+  ## Reprobuild's OWN content-addressed store root, forward-slashed and with
+  ## any trailing slash stripped, or `""` when it cannot be resolved.
+  ##
+  ## DERIVED FROM CONFIGURATION, through the same `resolveStoreRoot`
+  ## precedence (`$REPRO_STORE_ROOT` > per-OS default) every other store
+  ## consumer uses, rather than from a literal — a per-user cache root has no
+  ## literal to hard-code.
+  ##
+  ## `isImmutablePackageStoreRoot` refuses to read the environment at all,
+  ## and its reason does not carry over here — the difference is worth stating
+  ## because the two look alike. There, the variable moved only the ELISION:
+  ## a transient value made a directory exempt, the record was written with
+  ## `mtimeNs = 0`, and clearing the variable did not recover because a 0 is
+  ## never re-listed. The value poisoned a record permanently. Here the same
+  ## value moves the elision AND the key, because `contentAddressedRoot` is
+  ## the single function both sides read: change it and every affected edge
+  ## fingerprints differently, so the old records are not found rather than
+  ## wrongly served. The failure direction is a rebuild.
+  ##
+  ## What the env var still could do is nominate a MUTABLE tree as
+  ## content-addressed within one consistent setting, and that is what
+  ## `isRealizationDirName` bounds: the only thing elided under this root is a
+  ## directory whose own name states a 16-hex realization digest. A root of
+  ## `/` therefore does not exempt `/usr`; it exempts nothing that is not
+  ## already named like a realization.
+  try:
+    result = resolveStoreRoot().replace('\\', '/').strip(
+      leading = false, trailing = true, chars = {'/'})
+  except CatchableError:
+    return ""
+  if result == "/":
+    result = ""
+
+proc reproStoreRealizationRoot(normalized: string): string =
+  ## The `<store>/…/prefixes/<package>/<version>-<hash>` realization directory
+  ## a forward-slashed path lies under, or `""`.
+  ##
+  ## The realization directory is the granularity at which the repro store is
+  ## content-addressed: `prefixRelativePath` puts the digest in that segment's
+  ## name and nowhere above it. `<store>/prefixes` is NOT a content-addressed
+  ## root — packages come and go under it — so taking the immediate child of
+  ## the store root the way the Nix arm does would elide a mutable tree.
+  ##
+  ## The `prefixes` segment is searched for rather than required at depth 1
+  ## because the store nests one inside itself: tools live under
+  ## `<store>/tool-store/prefixes/<package>/<version>-<hash>`.
+  # Cheap rejection first. This runs once per `argv[0]` AND once per `PATH` /
+  # `NODE_PATH` entry of every action, and resolving the store root allocates;
+  # a path with no `prefixes` segment cannot match the layout below, so the
+  # overwhelming majority of calls stop here without touching configuration.
+  if not normalized.contains("/prefixes/"):
+    return ""
+  let root = reproStoreRootPath()
+  if root.len == 0 or not normalized.startsWith(root & "/"):
+    return ""
+  let parts = normalized.substr(root.len + 1).split('/')
+  for i in 0 ..< parts.len:
+    if parts[i] != "prefixes" or i + 2 >= parts.len:
+      continue
+    if not isRealizationDirName(parts[i + 2]):
+      continue
+    result = root
+    for j in 0 .. i + 2:
+      result.add('/')
+      result.add(parts[j])
+    return result
+
+proc contentAddressedRoot*(path: string): string =
+  ## The content-addressed root a path lies under, or `""`.
+  ##
+  ## THE ONE PLACE THE ENGINE DECIDES WHAT "CONTENT-ADDRESSED" MEANS, and the
   ## reason it is defined here rather than beside its first consumer: two
   ## opposite operations key off exactly this function and they are only sound
   ## as a PAIR.
@@ -1615,17 +1715,34 @@ proc nixStoreRoot*(path: string): string =
   ##
   ## Both must read the same root for the same path or the subtraction drops
   ## something the key does not carry. Sharing the function is the structural
-  ## form of "same root".
+  ## form of "same root", and it is why a newly recognised root is added HERE
+  ## rather than at either call site.
+  ##
+  ## ## Why the repro store had to join the Nix store, and why symmetry was
+  ## ## not enough on its own
+  ##
+  ## While this recognised the literal `/nix/store/` and nothing else, a tool
+  ## under reprobuild's own CAS store was elided by neither side and mixed by
+  ## neither side. The two stayed symmetric, so rule 7 held and the ELISION
+  ## hole stayed shut — but the tool then lived on as an ordinary recorded
+  ## input, and MEASURED (2026-09-09) that is not enough:
+  ##
+  ## | | value |
+  ## |---|---|
+  ## | `weak(A) == weak(B)` for two byte-different repro-store bashes | `true` |
+  ## | warm run after swapping `argv[0]` from A to B | **`cdHit`, `launched = false`** |
+  ##
+  ## Revalidation only re-checks the paths a record already NAMES. `<A>/bin/sh`
+  ## still existed and still hashed the same, and nothing looked at the fact
+  ## that `argv[0]` had moved to `<B>/bin/sh`. **A content-addressed store
+  ## expresses a tool change as a NEW PATH, so recording the old path cannot
+  ## catch it — only keying on it can.** Recognising the root is what puts it
+  ## in the key (`keyedOnContentAddressedToolRoot`), and because both sides
+  ## read this one function, the elision moved with it.
   let normalized = path.replace('\\', '/')
-  const prefix = "/nix/store/"
-  if not normalized.startsWith(prefix):
-    return ""
-  let rest = normalized.substr(prefix.len)
-  let slash = rest.find('/')
-  if slash < 0:
-    normalized
-  else:
-    prefix & rest[0 ..< slash]
+  result = nixStoreRoot(normalized)
+  if result.len == 0:
+    result = reproStoreRealizationRoot(normalized)
 
 proc keyedOnGoverningLock*(fingerprint: ContentDigest;
                            governingLockIdentity: LockIdentity): ContentDigest =
@@ -1876,7 +1993,8 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   ##
   ## ## The claim this exists to make true
   ##
-  ## `toolInputRoots` drops every observed read under `nixStoreRoot(argv[0])`
+  ## `toolInputRoots` drops every observed read under
+  ## `contentAddressedRoot(argv[0])`
   ## from the action-cache input set. Dependency-Observation-Attribution.md
   ## §Class 1 permits that ONLY on a two-part argument: the root is
   ## content-addressed (the path names its content) AND "its identity is in
@@ -1909,20 +2027,31 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   ## covers `argv[0]`, and the fix is to make that true by construction rather
   ## than to hope each caller arranged it.
   ##
-  ## ## Why the ROOT and not the file, and why the path and not its content
+  ## ## The ROOT **and** the path within it, and why the path is not a digest
   ##
   ## The root, because the root is the granularity the subtraction works at:
-  ## `cacheInputPaths` drops everything under `nixStoreRoot(argv[0])`, so the
-  ## key has to carry that whole root or the two sets do not line up
+  ## `cacheInputPaths` drops everything under `contentAddressedRoot(argv[0])`,
+  ## so the key has to carry that whole root or the two sets do not line up
   ## (Dependency-Observation-Attribution.md rule 7).
+  ##
+  ## The path as WELL, because rule 7 bounds the key from BELOW and nothing
+  ## bounds it from above. Keying on MORE than the elision drops is the safe
+  ## direction — every path the subtraction removed is still covered by the
+  ## root component — whereas keying on LESS is the unsound one. The first
+  ## version of this mixed the root ALONE and reasoned that splitting the two
+  ## programs of one derivation "would key on something the elision does not
+  ## bound", which has the argument backwards. MEASURED (2026-09-09), one
+  ## coreutils derivation, `argv[0]` swapped `…/bin/cat` -> `…/bin/head`:
+  ## **`cdHit`, `launched = false`**. One derivation, two programs, one cache
+  ## entry, and the second program served the first one's result.
   ##
   ## The path rather than a digest of the bytes, because for a
   ## content-addressed root the path IS the digest — that is the entire
   ## premise of class 1, and re-hashing the closure would cost a store walk to
   ## re-derive what the name already states. Where the premise does not hold
-  ## the mix does not happen: `nixStoreRoot` returns `""` for every path
-  ## outside the store, `toolInputRoots` subtracts nothing there, and the
-  ## image stays a content-fingerprinted recorded input via
+  ## the mix does not happen: `contentAddressedRoot` returns `""` for every
+  ## path outside a recognised store, `toolInputRoots` subtracts nothing
+  ## there, and the image stays a content-fingerprinted recorded input via
   ## `foldLauncherRootImage` — which is the case
   ## `t_executed_binary_is_a_recorded_input` has always pinned.
   ##
@@ -1956,16 +2085,19 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   ## it yields no root to subtract. Those two halves line up by construction
   ## already. `argv[0]` was the one that did not.
   let imageIndex = executedImageArgvIndex(argv)
-  let root = if imageIndex >= 0: nixStoreRoot(argv[imageIndex]) else: ""
+  let image =
+    if imageIndex >= 0: argv[imageIndex].replace('\\', '/') else: ""
+  let root = if image.len > 0: contentAddressedRoot(image) else: ""
   if root.len == 0:
     return fingerprint
-  # Length-framed two-field mix, same shape and rationale as
-  # `keyedOnGoverningLock` and `keyedOnActionEnvironment`: no two distinct
-  # (fingerprint, root) pairs may collide by concatenation ambiguity.
+  # Length-framed mix, same shape and rationale as `keyedOnGoverningLock` and
+  # `keyedOnActionEnvironment`: no two distinct (fingerprint, root, image)
+  # triples may collide by concatenation ambiguity.
   var framed = "action-tool-root\x1e"
   let base = toHex(fingerprint.bytes)
   framed.add($base.len & "\x1f" & base & "\x1e")
   framed.add($root.len & "\x1f" & root & "\x1e")
+  framed.add($image.len & "\x1f" & image & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
 proc weakFingerprintFor*(id: string;
@@ -4710,8 +4842,8 @@ proc evidenceInputPaths(action: BuildAction;
       continue
     result.addUnique(seen, probe)
 
-proc addNixStoreRoot(roots: var seq[string]; path: string) =
-  let root = nixStoreRoot(path)
+proc addContentAddressedRoot(roots: var seq[string]; path: string) =
+  let root = contentAddressedRoot(path)
   if root.len > 0:
     roots.addUnique(root)
 
@@ -4733,10 +4865,12 @@ proc toolInputRoots(action: BuildAction): seq[string] =
   ## the second. The two halves are now connected, per source:
   ##
   ## * `argv[0]` — `keyedOnContentAddressedToolRoot`, applied in `action()`
-  ##   over exactly this `nixStoreRoot` call, so the root subtracted here is
-  ##   the root mixed there. Before that existed, a monitored edge under the
-  ##   engine-default fingerprint took a `cdHit` after its `/nix/store` shell
-  ##   was swapped for a different store path — measured; see that proc.
+  ##   over exactly this `contentAddressedRoot` call, so the root subtracted
+  ##   here is the root mixed there. Before that existed, a monitored edge
+  ##   under the engine-default fingerprint took a `cdHit` after its
+  ##   `/nix/store` shell was swapped for a different store path — measured;
+  ##   see that proc. The key additionally carries the image's own path
+  ##   within the root, which is strictly more than this drops.
   ## * `PATH` / `NODE_PATH` — `keyedOnActionEnvironment`, also applied in
   ##   `action()`, which mixes every DECLARED name and value. `envValue` reads
   ##   `action.env`, the same declaration, so a value that yields a root here
@@ -4752,11 +4886,11 @@ proc toolInputRoots(action: BuildAction): seq[string] =
   ## reading index 0 through the wrapper subtracted, and failed to subtract.
   let imageIndex = executedImageArgvIndex(action.argv)
   if imageIndex >= 0:
-    result.addNixStoreRoot(action.argv[imageIndex])
+    result.addContentAddressedRoot(action.argv[imageIndex])
   for value in action.envValue("PATH").split(PathSep):
-    result.addNixStoreRoot(value)
+    result.addContentAddressedRoot(value)
   for value in action.envValue("NODE_PATH").split(PathSep):
-    result.addNixStoreRoot(value)
+    result.addContentAddressedRoot(value)
 
 proc expandPolicyPath(action: BuildAction; path: string): string =
   result = path
@@ -6318,12 +6452,39 @@ proc applyExplicitRuntimeLibraryEnvOverrides*(env: StringTableRef;
 proc monitorPayloadArgIndex(argv: openArray[string]): int =
   ## Return the first argument of an io-monitor payload, or -1 when argv is
   ## not the canonical ``repro internal io monitor ... -- <command>`` shape.
+  ##
+  ## THE SCAN IS BOUNDED TO THE WRAPPER'S OWN ARGUMENTS, and it has to be.
+  ## It used to scan the WHOLE argv backwards for the LAST ``--``, which is
+  ## the wrapper's separator only when the payload contains no ``--`` of its
+  ## own. ``cargo test -- <args>``, ``sh -c <script> -- <arg>`` and
+  ## ``git … -- <path>`` all do, and MEASURED (2026-09-09) on the production
+  ## key builder a payload of
+  ## ``/usr/bin/env runner -- /nix/store/…-data-1.0/input.txt`` answered index
+  ## 12 — the store path after the ACTION's ``--`` — where the unwrapped argv
+  ## answers index 0. ``toolInputRoots`` then elided everything under a root
+  ## the weak fingerprint carries nothing about, because the wrapper argv is
+  ## composed long after that fingerprint was computed
+  ## (Dependency-Observation-Attribution.md rule 9, in a new shape).
+  ##
+  ## Scanning FORWARD from the first wrapper argument and stopping at the
+  ## FIRST ``--`` is not merely the opposite convention: it is the grammar the
+  ## RECEIVING parser applies. io-mon's ``parseRun``
+  ## (io-mon/src/io_mon/fs_snoop.nim) walks its arguments in order and
+  ## ``break``s on the first ``--``, taking everything after it as the
+  ## command. So this now names the argument io-mon will actually execute,
+  ## rather than a second answer free to disagree with it. The optional
+  ## leading ``run`` verb is skipped for the same reason —
+  ## ``parseFsSnoopCommand`` strips it before the option parser sees it.
   if argv.len < 8 or argv[1] != "internal" or argv[2] != "io" or
       argv[3] != "monitor":
     return -1
-  for i in countdown(argv.len - 1, 4):
-    if argv[i] == "--" and i + 1 < argv.len:
-      return i + 1
+  var i = 4
+  if argv[i] == "run":
+    inc i
+  while i < argv.len:
+    if argv[i] == "--":
+      return (if i + 1 < argv.len: i + 1 else: -1)
+    inc i
   -1
 
 when defined(macosx):
