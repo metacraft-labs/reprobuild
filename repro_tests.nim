@@ -2232,6 +2232,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim",
+    binary: "build/test-bin/t_newest_alias_and_interned_records",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim",
     binary: "build/test-bin/t_overlay_materialize_report_names_the_cause",
     defines: @[],

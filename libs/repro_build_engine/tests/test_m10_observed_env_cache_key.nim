@@ -249,19 +249,62 @@ suite "M10 the observed-environment record round-trips":
     check not decoded.envInputs[1].present
     check decoded.strongFingerprint == record.strongFingerprint
 
-  test "a record with NO env inputs keeps the older on-disk version":
-    ## Byte-level, because "we did not invalidate anybody's cache" is a claim
-    ## about the bytes. An older reader must still accept the record, which it
-    ## only does if the version field did not move.
+  test "a record with NO env inputs did not have its CACHE KEY moved":
+    ## REWRITTEN for the §5.5 C4 record-format bump
+    ## (Action-Cache-Per-Edge-Store.md). It used to read
+    ## `check version == 3'u16`, on the reasoning that "an older reader must
+    ## still accept the record, which it only does if the version field did
+    ## not move" — the guarantee M10 needed, because M10 was adding a field
+    ## and had no business costing the world a rebuild for it.
+    ##
+    ## C4 spends that version field deliberately, once, and §5.5
+    ## "Compatibility" states the consequence it accepts: an older reader
+    ## treats the new records as absent and re-executes. So the old
+    ## assertion is now asserting the opposite of the intended behaviour and
+    ## could only be satisfied by reverting C4.
+    ##
+    ## What it was PROTECTING, though, is untouched and is what this case
+    ## checks instead: that M10's env section still costs nothing to a
+    ## record that has none. That was always two claims wearing one
+    ## assertion —
+    ##
+    ##   1. the STRONG FINGERPRINT of an env-free record is unchanged, which
+    ##      is the half that would invalidate every cache on every machine;
+    ##      and
+    ##   2. the encoded bytes carry no env section.
+    ##
+    ## Claim 1 is the one worth having, and it is now checked directly rather
+    ## than through a proxy — the version field never actually established
+    ## it, since the key is computed by `computeStrongFingerprint` and not by
+    ## the record encoder at all.
+    ## The record carries real INPUT PATHS, deliberately. An input-free
+    ## record would pin a key that no path ever reached, and the change most
+    ## likely to move this key by accident is one to how paths are written.
     var record = ActionResultRecord(
-      weakFingerprint: weakFingerprintFromText("edge"),
-      policy: ffpChecksum,
+      weakFingerprint: weakFingerprintFromText("legacy-fixture-edge"),
+      policy: ffpTimestamp,
       outputPayloadKind: opkMetadataOnly)
+    record.inputs = @[
+      FileFingerprint(path: "/work/checkout/src/alpha.c",
+        policy: ffpTimestamp,
+        metadata: FileMetadata(kind: ffkRegular, sizeBytes: 11, mtimeNs: 22)),
+      FileFingerprint(path: "/work/checkout/src/beta.c",
+        policy: ffpTimestamp,
+        metadata: FileMetadata(kind: ffkRegular, sizeBytes: 33, mtimeNs: 44)),
+      FileFingerprint(path: "relative.h", policy: ffpTimestamp,
+        metadata: FileMetadata(kind: ffkRegular, sizeBytes: 55, mtimeNs: 66))]
     record.strongFingerprint = computeStrongFingerprint(record.weakFingerprint,
       record.inputs)
+    # 1. The env-free key is byte-identical to the key computed with an
+    #    explicitly empty env list, i.e. the section contributes nothing.
+    check computeStrongFingerprint(record.weakFingerprint, record.inputs) ==
+      computeStrongFingerprint(record.weakFingerprint, record.inputs, [])
+    # And it is this exact value, pinned to what the binary that predates
+    # BOTH M10 and C4 computed for it. A change to the key payload fails
+    # here rather than silently costing every machine one full rebuild.
+    check digestHex(record.strongFingerprint) ==
+      "28c642b92be7b7deafe4cc2394d8a4f0c99d9e0e1c3a8e6de09ee44d7ddb3a51"
+    # 2. Nothing decodes back as an env input.
     let encoded = encodeActionResultRecord(record)
-    # magic[4] then a little-endian u16 version.
     check encoded.len > 6
-    let version = uint16(encoded[4]) or (uint16(encoded[5]) shl 8)
-    check version == 3'u16
     check decodeActionResultRecord(encoded).envInputs.len == 0

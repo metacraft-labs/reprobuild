@@ -9132,6 +9132,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     stats.addCountedMetric("repro cas content digest", ccd.calls, 0.0)
     stats.addCountedMetric("repro cas content digest bytes",
       int(ccd.bytes), 0.0)
+    # Action-Cache-Per-Edge-Store.md §5.5. C1's whole claim is that a
+    # consultation decodes the ONE candidate it evaluates rather than every
+    # candidate the edge has, and C4's is that each decoded record is smaller.
+    # Both are counts of work performed, so both are visible under ambient
+    # load, which a wall-clock row on a shared machine is not.
+    let ard = actionRecordDecodeStats()
+    stats.addCountedMetric("repro action record decode", ard.records, 0.0)
+    stats.addCountedMetric("repro action record decode bytes",
+      int(ard.bytes), 0.0)
+    stats.addCountedMetric("repro per-edge container read",
+      ard.containerReads, 0.0)
+    stats.addCountedMetric("repro per-edge sidecar read",
+      ard.sidecarReads, 0.0)
 
   proc finishMetadataCacheStats(cache: FileMetadataCache) =
     if not config.statsEnabled:
