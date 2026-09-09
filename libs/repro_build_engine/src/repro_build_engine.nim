@@ -9118,6 +9118,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     stats.addCounterMetric("repro output record dir walks", osc.recordDirWalks)
     stats.addCounterMetric("repro output record dir entries",
       int(osc.recordDirEntries))
+    # The byte-scaled half of the cost model, beside the count-scaled half
+    # above. Caching-Architecture.md §"Known Limit: The Default Policy Can
+    # Serve A Stale Result" is a claim about which of the two a consultation
+    # pays; without these rows the claim is
+    # unobservable, and a warm no-op that quietly started hashing artifacts
+    # would look identical to one that did not. Zero rows are not rendered,
+    # so on the default local build they cost a reader nothing.
+    #
+    # `addCountedMetric`, not `addCounterMetric`: the latter appends one
+    # sample per unit, and the byte figure is measured in millions.
+    let ccd = casContentDigestStats()
+    stats.addCountedMetric("repro cas content digest", ccd.calls, 0.0)
+    stats.addCountedMetric("repro cas content digest bytes",
+      int(ccd.bytes), 0.0)
 
   proc finishMetadataCacheStats(cache: FileMetadataCache) =
     if not config.statsEnabled:

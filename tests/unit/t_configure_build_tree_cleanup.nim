@@ -47,7 +47,8 @@ when defined(reproProviderMode):
 
   proc cmakeActions(projectRoot, generator: string;
                     cacheVars: seq[string];
-                    srcPatches: seq[string] = @[]): seq[BuildActionDef] =
+                    srcPatches: seq[string] = @[];
+                    freshConfigure = false): seq[BuildActionDef] =
     let packageName = "cmakeCleanupTest"
     let pkg = PackageDef(
       packageName: packageName,
@@ -64,7 +65,8 @@ when defined(reproProviderMode):
           buildDir = "build-cmake",
           generator = generator,
           cacheVars = cacheVars,
-          srcPatches = srcPatches),
+          srcPatches = srcPatches,
+          freshConfigure = freshConfigure),
       includeDefault = false)
     extractActions(fragment)
 
@@ -175,6 +177,22 @@ suite "configure build-tree cleanup caching":
       check install.dependencyPolicy.ignoredInputPrefixes ==
         @[root / "build-cmake", root / "build-cmake" / "out"]
       check build.inputs == cleanup.outputs
+
+      let freshActions = cmakeActions(root, "Ninja", @["FEATURE=ON"],
+        freshConfigure = true)
+      let freshCleanup = findById(freshActions, cleanup.id)
+      check freshCleanup.cacheable
+      check freshCleanup.inlineArgv() == cleanup.inlineArgv()
+      for action in freshActions:
+        if action.call.packageName == "cmake" and
+            action.call.subcommand == "configure":
+          check action.cacheable
+          check action.id != configure.id
+          var foundFresh = false
+          for arg in action.call.arguments:
+            if arg.name == "fresh":
+              foundFresh = arg.alias == "--fresh" and arg.encodedValue == "true"
+          check foundFresh
     else:
       skip()
 

@@ -1,4 +1,4 @@
-import std/[net, os, osproc, strtabs, strutils, tempfiles, unittest]
+import std/[net, os, osproc, sequtils, strtabs, strutils, tempfiles, unittest]
 
 import repro_binary_cache_client
 import repro_build_engine
@@ -16,6 +16,12 @@ proc prefix(root, name: string): string =
 
 proc manifest(root, name, deps, script: string; cacheIdentity = ""): string =
   result = "import std/options\nimport repro_project_dsl\n\n" &
+    "when defined(reproInterfaceMode) and reproConsumerRoot == " &
+      (root / "catalog" / name).escape() & ":\n" &
+    "  block:\n" &
+    "    let witness = open(" & (root / (name & ".extractions")).escape() & ", fmAppend)\n" &
+    "    witness.writeLine(\"extract\")\n" &
+    "    witness.close()\n\n" &
     "package " & name & "Source:\n" &
     "  usesImportPath \"stubs\"\n" & deps &
     "  build:\n" &
@@ -70,6 +76,7 @@ proc runCli(binary, root: string; args: seq[string];
       ("REPROBUILD_NO_RUNQUOTA", "1"),
       ("REPRO_CACHES_CONFIG", root / "no-global-caches.conf"),
       ("REPRO_BINARY_CACHE_URL", ""),
+      ("REPROBUILD_WORK_ROOT", ""),
       ("REPRO_LOCAL_STORE", root / "local-store")]:
     env[key] = value
   for pair in extraEnv: env[pair[0]] = pair[1]
@@ -83,29 +90,55 @@ proc runCli(binary, root: string; args: seq[string];
   process.close()
   (readFile(outputPath), code)
 
-proc checkPrepared(root: string) =
+proc preparationDir(root, name, workRoot: string): string =
+  if workRoot.len > 0:
+    for directory in walkDirs(workRoot / "worktrees" / (name & "-*")):
+      return directory / "build/repro"
+  # Ready prefixes can receive their first metadata from closure extraction.
+  let recipe = if name == "consumer": root / name else: root / "catalog" / name
+  recipe / ".repro/build/repro"
+
+proc seedStaleProjection(root: string) =
+  # An older dependency-free interface must not hide the current B/C/runtime closure.
+  writeInterfaceArtifact(root / "catalog/closure_a/.repro/build/repro/project-interface.rbsz",
+    artifactFor(ProjectInterface(projectName: "closure_aSource", packageName: "closure_aSource")))
+
+proc checkPrepared(root, phase, workRoot: string) =
   check readFile(root / "consumer/build/result").strip() == "closure-ready"
   check (prefix(root, "closure_c") / "usr/lib") in
     readFile(root / "consumer/build/libs")
-  let artifact = readInterfaceArtifact(root /
-    "catalog/closure_a/.repro/build/repro/project-interface.rbsz")
+  let artifact = readInterfaceArtifact(
+    preparationDir(root, "closure_a", workRoot) / "project-interface.rbsz")
   var sawNative, sawRuntime = false
   for useDef in artifact.projectInterface.toolUses:
     if useDef.packageSelector == "closure_native": sawNative = useDef.depKind == "native"
     if useDef.packageSelector == "closure_runtime": sawRuntime = useDef.depKind == "runtime"
   check sawNative
   check sawRuntime
+  if workRoot.len > 0:
+    let projectionMatches =
+      readFile(root / "catalog/closure_a/.repro/build/repro/project-interface.rbsz") ==
+      readFile(preparationDir(root, "closure_a", workRoot) / "project-interface.rbsz")
+    check projectionMatches
+    echo phase & " current projection matches: " & $projectionMatches
   for name in ["closure_b", "closure_c", "closure_runtime"]:
     check fileExists(prefix(root, name) / "usr/bin" / name)
-    check fileExists(root / "catalog" / name / ".repro/build/repro/project-interface.rbsz")
-  let identity = readPathOnlyBuildIdentity(root /
-    "consumer/.repro/build/repro/from-source-tool-identities.rbtp")
+    check fileExists(preparationDir(root, name, workRoot) / "project-interface.rbsz")
+  let identity = readPathOnlyBuildIdentity(
+    preparationDir(root, "consumer", workRoot) / "from-source-tool-identities.rbtp")
   require identity.profiles.len == 1
   check prefix(root, "closure_c") / "usr/bin" in identity.profiles[0].pathSearchList
   check prefix(root, "closure_native") / "usr/bin" notin identity.profiles[0].pathSearchList
+  # Sibling shims also initialize imported recipes. The witness is guarded by
+  # reproConsumerRoot so only the producer's own extraction runner is counted.
+  for name in ["closure_a", "closure_b", "closure_c", "closure_runtime"]:
+    let count = readFile(root / (name & ".extractions")).splitLines().count("extract")
+    echo phase & " interface extractions: " & name & "=" & $count
+    checkpoint("interface extractions for " & name)
+    check count == 1
 
-suite "cached source closure preparation through the CLI":
-  test "ready and cache-restored prefixes acquire metadata and transitive producers":
+template verifyClosure(label: string; overrideWorkRoot: bool) =
+  block:
     when defined(windows):
       skip()
     else:
@@ -115,6 +148,8 @@ suite "cached source closure preparation through the CLI":
       require fileExists(serverBinary)
       let root = createTempDir("closure-cli-", "")
       defer: removeDir(root)
+      let workRoot = if overrideWorkRoot: root / "work" else: ""
+      let workEnv = @[("REPROBUILD_WORK_ROOT", workRoot)]
       let local = detectLocalPlatform(root / "platform-store")
       let identityLiteral = "newCacheEntryIdentity(packageName = \"closure_a\", " &
         "packageVersion = \"1\", platform = PlatformTriple(cpu: " & local.cpu.escape() &
@@ -127,10 +162,12 @@ suite "cached source closure preparation through the CLI":
       let buildArgs = @["build", "--daemon=off", "--tool-provisioning=from-source",
         "--progress=quiet", "--log=actions", "--measure=none",
         "--action-cache-root=" & root / "action-cache"]
-      let ready = runCli(binary, root, buildArgs)
+      if overrideWorkRoot:
+        seedStaleProjection(root)
+      let ready = runCli(binary, root, buildArgs, workEnv)
       checkpoint(ready.output)
       require ready.exitCode == 0
-      checkPrepared(root)
+      checkPrepared(root, label & " ready", workRoot)
 
       let listener = newSocket()
       listener.bindAddr(Port(0), "127.0.0.1")
@@ -177,12 +214,26 @@ suite "cached source closure preparation through the CLI":
       require published.exitCode == 0
       for name in ["closure_a", "closure_b", "closure_c", "closure_runtime"]:
         removeDir(root / "catalog" / name / ".repro")
-      removeDir(root / "consumer/.repro")
+        removeFile(root / (name & ".extractions"))
+      # Exercise a cold preparation after signed prefix restoration as well.
+      removeDir(root / "action-cache")
+      if workRoot.len > 0:
+        removeDir(workRoot)
+      else:
+        removeDir(root / "consumer/.repro")
       removeDir(root / "consumer/build")
       createDir(root / "consumer/build")
-      let restored = runCli(binary, root, buildArgs, cacheEnv)
+      if overrideWorkRoot:
+        seedStaleProjection(root)
+      let restored = runCli(binary, root, buildArgs, cacheEnv & workEnv)
       checkpoint(restored.output)
       require restored.exitCode == 0
       check restored.output.contains("from-source cache substitute: restored")
       check readFile(aBinary) == "#!/bin/sh\nexit 0\n"
-      checkPrepared(root)
+      checkPrepared(root, label & " restored", workRoot)
+
+suite "cached source closure preparation through the CLI":
+  test "default work root":
+    verifyClosure("default work root", false)
+  test "environment work root":
+    verifyClosure("environment work root", true)

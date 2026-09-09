@@ -20,6 +20,17 @@
 ## ``providerBuildSkippedFresh`` / ``providerBuildLaunched`` flags are the
 ## engine's own decision rather than the deleted gate's.
 ##
+## The same case also grades the two halves of the edge's DECLARATION that
+## the publish depends on, because a missing one of either is silent and
+## shows up only as "the dev env rebuilds the provider every time":
+##
+##   * its environment — the engine's environment-inheritance census over the
+##     graph that ran must count this edge as declaring passthrough names, so
+##     it keys the same way as the CLI entry point running the same argv;
+##   * its determinism claim — the edge must never be refused its
+##     action-cache publish, which an unblessed monitored compile that reads
+##     entropy always is.
+##
 ## No mocks: this runs the engine-built ``build/bin/repro`` binary, the real Nim
 ## compiler, the real io-mon shim and the real filesystem. The only fixture is
 ## the recipe itself.
@@ -133,6 +144,49 @@ suite "e2e_dev_env_provider_compile_edge":
       echo "TIMING coldDevEnvEdgeSeconds=", epochTime() - coldStart
       check first.stats.providerBuildLaunched
       check first.providerCompileAction.cacheDecision == cdMiss
+
+      # THE EDGE MUST DECLARE ITS ENVIRONMENT, and the engine's own census
+      # over the graph that just ran is what says whether it did.
+      #
+      # This entry point and the CLI's own provider-compile edge run
+      # byte-for-byte the same argv. The passthrough NAMES are mixed into the
+      # action key, so an edge that declares none keys differently from the
+      # other for the identical compile — the same work, split across two
+      # records, neither able to answer the other. Counted rather than read
+      # off the action object on purpose: this is the population the engine
+      # scheduled, so a declaration that is dropped somewhere between the
+      # constructor and the graph still shows up here.
+      let census = first.providerCompileResult.environmentInheritance
+      checkpoint("provider compile env census: total=" & $census.totalActions &
+        " passthrough=" & $census.passthroughActions &
+        " undeclared=" & $census.undeclaredActions)
+      check census.totalActions == 1
+      check census.passthroughActions == 1
+      check census.undeclaredActions == 0
+      # The one number that must be zero for any edge — an action running with
+      # no PATH at all finds no compiler and fails in a way that reads like a
+      # toolchain problem.
+      check census.emptyPathActions == 0
+
+      # AND IT MUST BE BLESSED, or it never publishes at all.
+      #
+      # A monitored `nim c` reads entropy — measured on this very edge's
+      # capture: 167 `mrNonDeterministic` records (`arc4random`, `getrandom`)
+      # in a complete capture with no event loss. An action that reads entropy
+      # and is NOT blessed loses its action-cache reuse and says so in its own
+      # diagnostics, so the `cdHit` asserted below is unreachable while the
+      # blessing is missing.
+      #
+      # Written as the absence of the refusal rather than as the presence of
+      # the blessed-entropy note, because whether the compiler draws any
+      # randomness at all is a property of the host toolchain. The property
+      # under test — this edge is never denied its publish — is the same on a
+      # host that draws none.
+      let coldDiagnostics =
+        first.providerCompileAction.evidence.diagnostics.join(" | ")
+      checkpoint("provider compile diagnostics: " & coldDiagnostics)
+      check not coldDiagnostics.contains("action-cache publish skipped")
+      check not coldDiagnostics.contains("is not blessed")
 
       # PRIMARY: nothing changed, so the edge that just published must now be
       # answered from the action cache instead of recompiling. This is the

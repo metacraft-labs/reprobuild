@@ -1,4 +1,6 @@
 import std/[strutils]
+when defined(posix):
+  import std/[posix, sha1]
 type
   NormalizedPathKind* = enum
     npRelative
@@ -78,7 +80,15 @@ proc runquotaEndpointPath*(name: string): string =
   when defined(windows):
     "\\\\.\\pipe\\runquotad-" & name.replace('\\', '_').replace('/', '_')
   else:
-    getTempDir() / name / "runquota.sock"
+    result = getTempDir() / name / "runquota.sock"
+    when defined(posix):
+      # sun_path includes its terminating NUL. Keep the daemon's private
+      # parent-directory checks while bounding deep temp roots and names.
+      # Hash the full requested path so distinct callers/roots stay distinct.
+      if result.len >= sizeof(Sockaddr_un().sun_path):
+        let identity = $secureHash(os.normalizedPath(absolutePath(result)))
+        result = "/tmp" / ("repro-rq-" & $getuid() & "-" & identity) /
+          "runquota.sock"
 
 proc extendedPath*(path: string): string =
   ## On Windows, rewrites a path into the `\\?\` extended-length form so

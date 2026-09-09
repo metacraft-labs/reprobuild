@@ -133,6 +133,7 @@ import repro_cli_support/infra
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
 import repro_cli_support/disk as cli_disk
+import repro_cli_support/attest as cli_attest
 import repro_cli_support/mode1_loader
 from repro_cli_support/partition as repro_partition import
   ShardBuildAction, ShardTestEdge, ShardPlanRequest, ShardPlan,
@@ -207,6 +208,12 @@ export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
        cli_disk.DiskCliOptions, cli_disk.DiskSubcommand,
        cli_disk.DiskPlanOutcome, cli_disk.DiskPlanFailureKind
+export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
+       cli_attest.renderAttestUsage, cli_attest.AttestCliOptions,
+       cli_attest.AttestSubcommand, cli_attest.ConventionalUkiName,
+       cli_attest.ConventionalVerityImageName,
+       cli_attest.ConventionalVerityRootHashName,
+       cli_attest.ConventionalManifestName
 
 # ---------------------------------------------------------------------------
 # Peer-Cache M1 build wiring (Linux-Distro-Recipe-Validation M5,
@@ -339,6 +346,8 @@ proc renderUsage*(programName: string): string =
       " deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> [--secrets-key <FILE> [--secrets-dir <DIR>]] ...\n       " &
           programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
+          programName &
+      " attest expect --image PATH [--out PATH | --check PATH]\n       " &
           programName &
       " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n       " &
           programName &
@@ -8849,12 +8858,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         expandedSourceRecipes.incl(expansionKey)
         # A restored prefix is not evidence of a complete dependency closure.
         # Interface extraction does not evaluate the producer's build body.
-        let producerOutDir = recipeDir / ".repro/build/repro"
+        let producerOutDir = outputDirForTarget(
+          parseBuildTarget(recipeDir / "repro.nim"), workRoot)
         createDir(extendedPath(producerOutDir))
+        # Match preparation so the existing keyed session cache can reuse the
+        # producer's extraction after a build or binary-cache restoration.
         let producerArtifact = extractInterfaceEdge(recipeDir / "repro.nim",
           producerOutDir / "project-interface.rbsz",
           producerOutDir / "project-interface.nim",
-          reprobuildLibraryWorkDir(), producerOutDir / "iface-work",
+          reprobuildLibraryWorkDir(), producerOutDir / "provider-work",
           recipeDir, publicCliPath, producerOutDir / "build-engine-cache",
           buildStats, requireStub = false,
           bypassRunQuota = bypassRunQuota,
@@ -8863,6 +8875,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           suppressTrace = mcTrace notin measureSet,
           skipCacheHitEvidence = mcCacheEvidence notin measureSet,
           statsEnabled = statsEnabled, cancelCheck = cancelCheck)
+        # Existing closure readers use recipe-local metadata, even when the
+        # validated extraction and its evidence live under a custom work root.
+        let projectionPath = recipeDir / ".repro/build/repro/project-interface.rbsz"
+        if projectionPath != producerOutDir / "project-interface.rbsz":
+          let bytes = encodeProjectInterfaceArtifact(producerArtifact)
+          var projectionLock = acquireInterfaceArtifactLock(projectionPath)
+          try:
+            if not fileExists(extendedPath(projectionPath)) or
+                repro_profile_compile.readBytes(projectionPath) != bytes:
+              let stagedPath = projectionPath & ".projection-tmp"
+              writeInterfaceArtifact(stagedPath, producerArtifact)
+              moveFile(extendedPath(stagedPath), extendedPath(projectionPath))
+          finally:
+            releaseInterfaceArtifactLock(projectionLock)
         let dependencies =
           if runtimeOnly: producerArtifact.projectInterface.runtimeToolUses
           else: producerArtifact.projectInterface.toolUses
@@ -33074,7 +33100,8 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
       else: root / d.path
     case d.coordinates.kind
     of ckVcs:
-      if dirExists(extendedPath(repoAbs / ".git")):
+      if dirExists(extendedPath(repoAbs / ".git")) or
+          fileExists(extendedPath(repoAbs / ".git")):
         if d.integrity.startsWith("blake3:"):
           # MO-13 (correcting MO-9) — NON-CONSERVATIVE where SAFE. A lock
           # refreshed BEFORE the repo's first commit records a ``blake3:``
@@ -33127,7 +33154,7 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
               " is not present/reachable in '" & d.path & "'"))
           continue
         let observed =
-          gitObjectMultihash(gitObjectFormatOf(repoAbs), d.coordinates.revision)
+          gitObjectMultihash(gitObjectFormatOf(repoAbs), rp.output.strip())
         if observed != d.integrity:
           result.add(LockedIntegrityFailure(name: d.name, path: d.path,
             expected: d.integrity, observed: observed,
@@ -56904,6 +56931,42 @@ proc runReproLockValidate(rest: openArray[string]): int =
           else: absolutePath(projectDir) / d.path
         if not dirExists(extendedPath(depAbs)):
           continue  # not checked out here — cannot recompute (not a tamper).
+        if (d.path == "." or d.path.len == 0) and
+            d.integrity.startsWith("git-sha"):
+          # An in-tree lock cannot contain its own commit ID. Preserve its
+          # recorded root coordinates, but permit only the lock's own content
+          # to differ from that revision; ordinary source drift is still stale.
+          let gitBin = findExe("git")
+          if gitBin.len == 0 or not (
+              dirExists(extendedPath(depAbs / ".git")) or
+              fileExists(extendedPath(depAbs / ".git"))):
+            problems.add("dep '" & d.name &
+              "' root integrity cannot be verified without its Git checkout")
+            continue
+          let failures = verifyLockedIntegrityAtCoordinates(projectDir,
+            LockedDependencies(deps: @[d]))
+          for failure in failures:
+            problems.add("dep '" & d.name & "' integrity mismatch: " &
+              failure.diagnostic)
+          if failures.len > 0:
+            continue
+          var diffArgs = @[gitBin, "-C", depAbs, "diff", "--quiet",
+            "--no-ext-diff", "--no-textconv", "--ignore-submodules=none",
+            d.coordinates.revision, "--", "."]
+          let lockRel = relativePath(absolutePath(lockP), depAbs).replace('\\', '/')
+          if lockRel.len > 0 and lockRel != ".." and
+              not lockRel.startsWith("../") and not isAbsolute(lockRel):
+            diffArgs.add(":(top,exclude,literal)" & lockRel)
+          let comparison = execCmdEx(quoteShellCommand(diffArgs),
+            options = {poUsePath}, env = scrubbedGitRepositoryEnv())
+          if comparison.exitCode == 1:
+            problems.add("dep '" & d.name &
+              "' root source content differs from locked revision '" &
+              d.coordinates.revision & "' outside the generated lock")
+          elif comparison.exitCode != 0:
+            problems.add("dep '" & d.name &
+              "' root source content could not be verified: " & comparison.output.strip())
+          continue
         let observed = committedLockRepoFacts(depAbs).headSha
         let recomputed = computeDepIntegrity(depAbs, observed)
         if recomputed != d.integrity:
@@ -59036,6 +59099,8 @@ const reproTopLevelCommands = [
   "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
   "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
+  # `repro attest <sub>`: expected launch measurements for attested images.
+  "attest",
   # Nix-Flake-Coexistence NF-1 — ``repro flake <sub>``: the override
   # arguments an `.envrc` needs, computed from the workspace's develop set.
   "flake",
@@ -64398,6 +64463,16 @@ proc runThinAppDispatch(programName: string): int =
       else:
         @[]
     return runDiskCommand(diskArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "attest":
+    # `repro attest` — expected launch measurements for attested images.
+    # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI
+    # reference's `repro attest` page is the surface contract.
+    let attestArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runAttestCommand(attestArgs)
   stderr.writeLine(renderUsage(programName))
   2
 
