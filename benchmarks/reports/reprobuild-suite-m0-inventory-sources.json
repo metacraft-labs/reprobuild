@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1511,
-    "pureUnitConsolidationGroups": 54,
-    "pureUnitTests": 610,
+    "nimTestBinaries": 1512,
+    "pureUnitConsolidationGroups": 55,
+    "pureUnitTests": 611,
     "staticallyDetectedRuntimeCompilerFlowTests": 89,
-    "testEntries": 1519
+    "testEntries": 1520
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -338,6 +338,21 @@
       "sources": [
         "libs/repro_local_store/tests/t_a4_p4_eviction.nim",
         "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "sources": [
+        "libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim",
+        "libs/repro_local_store/tests/t_retention_gc.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1183,7 +1198,7 @@
       "graph-fixture": 12,
       "integration": 663,
       "platform/destructive": 107,
-      "pure unit": 610,
+      "pure unit": 611,
       "unclassified": 127
     },
     "graphOwnedTestArtifacts": [
@@ -1320,9 +1335,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1511,
+    "nimTestBinaryCount": 1512,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1519
+    "testEntryCount": 1520
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9623,6 +9638,25 @@
       "source": "libs/repro_local_store/tests/t_m8_multi_output_realize.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_newest_alias_and_interned_records",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

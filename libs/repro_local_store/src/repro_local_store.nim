@@ -359,6 +359,26 @@ const
     ## older reader (a peer cache, a previously built binary) is locked out of
     ## the records it could already read. The version bump is scoped to the
     ## records that genuinely need the new section.
+  ActionRecordVersionInterned = 5'u16
+    ## Action-Cache-Per-Edge-Store.md §5.5 C4: the record carries a path table
+    ## LOCAL TO ITSELF, and every path field is an index into it plus the
+    ## file's own name. Written for every new record, and read alongside 2, 3
+    ## and 4 -- an existing cache keeps working, and this binary keeps reading
+    ## every record it could read before.
+    ##
+    ## Unlike the env bump above, this one is NOT scoped to the records that
+    ## benefit, because §5.5 "Compatibility" makes the bump a deliberate,
+    ## once-only compatibility boundary rather than something to spend twice:
+    ## a binary that predates it sees these records as absent and re-executes,
+    ## which is a miss and never a wrong answer.
+    ##
+    ## This changes the STORAGE encoding only. The strong fingerprint is
+    ## computed by `strongIdentityPayload`, which is untouched, so no key in
+    ## any existing cache moves and no warm build anywhere misses because of
+    ## this. Interning inside `strongIdentityPayload` would have shifted every
+    ## strong fingerprint on every disk in the world; that is why the two
+    ## payloads are separate functions and must stay separate.
+  MaxRecordPathTableEntries = 4_000_000'u32
   # Per-edge record file: a small self-describing container holding the
   # edge's bounded record set. Each contained record is the existing
   # `RBAR` full-record frame, so producers/consumers (incl. the peer cache)
@@ -395,6 +415,19 @@ const
   # write sequence evicted beyond the cap), keeping the disk store small.
   PerEdgeRecFileExt = ".rec"
   MaxRecFilesPerEdge = 8
+  # Action-Cache-Per-Edge-Store.md §5.5 C1: "Give the newest container a
+  # fixed, distinguished name in the edge directory, so a consultation can
+  # open it by name."
+  #
+  # The name deliberately does NOT end in `PerEdgeRecFileExt`, `WitnessFileExt`
+  # or `DeterminismFileExt`, which is what §5.5 "Compatibility" requires: every
+  # reader that existed before this change filters on one of those three
+  # suffixes, so all of them IGNORE this file. It is invisible to the union
+  # read, to `capRecFiles`' retention accounting and to its sidecar reaper, and
+  # a binary that predates it behaves exactly as it did.
+  NewestAliasFileName = "newest.rbal"
+  NewestAliasMagic = "RBNA"
+  NewestAliasVersion = 1'u16
   AllFilePermissions {.used.} = {fpUserExec, fpUserWrite, fpUserRead,
     fpGroupExec, fpGroupWrite, fpGroupRead,
     fpOthersExec, fpOthersWrite, fpOthersRead}
@@ -941,6 +974,27 @@ var
   recordDirEntries = 0'i64
   casContentDigestCalls = 0
   casContentDigestBytes = 0'i64
+  actionRecordDecodes = 0
+  actionRecordDecodeBytes = 0'i64
+  perEdgeContainerReads = 0
+  perEdgeSidecarReads = 0
+
+proc noteActionRecordDecode(frameBytes: int) =
+  ## Count ONE decoded `RBAR` record frame and the bytes it spanned.
+  ##
+  ## Action-Cache-Per-Edge-Store.md §5.5 C1 states the property this makes
+  ## observable: "the cost of a consultation MUST be proportional to the
+  ## candidates it evaluates, not to the candidates the edge has". A
+  ## consultation that needs the edge's newest record must therefore decode
+  ## ONE record, not every record the edge has. That is a claim about work
+  ## performed, and a stopwatch cannot demonstrate it on a loaded machine --
+  ## the same command measured 351 ms and 108 ms an hour apart. A count can.
+  ##
+  ## C4 (per-record path interning) lands in the BYTES half of the same pair:
+  ## interning does not change how many records a consultation decodes, it
+  ## changes how big each one is.
+  inc actionRecordDecodes
+  actionRecordDecodeBytes += int64(frameBytes)
 
 proc noteCasContentDigest(sizeBytes: uint64) =
   ## Count one pass over an artifact's BYTES.
@@ -1735,6 +1789,31 @@ proc resetOutputStateCheckStats*() =
   recordDirEntries = 0'i64
   casContentDigestCalls = 0
   casContentDigestBytes = 0'i64
+  actionRecordDecodes = 0
+  actionRecordDecodeBytes = 0'i64
+  perEdgeContainerReads = 0
+  perEdgeSidecarReads = 0
+
+proc actionRecordDecodeStats*(): tuple[records: int; bytes: int64;
+                                       containerReads: int;
+                                       sidecarReads: int] =
+  ## How much RECORD content this build decoded to answer cache questions.
+  ##
+  ## `records` counts decoded `RBAR` frames, `bytes` their total size,
+  ## `containerReads` the `.rec` files opened by the Tier-1 read paths, and
+  ## `sidecarReads` the `.octime` / `.det` files opened alongside them.
+  ##
+  ## These are the load-independent evidence for
+  ## Action-Cache-Per-Edge-Store.md §5.5. C1 is exactly the statement
+  ## "`records` per consultation is 1, not the number of containers the edge
+  ## has"; C4 is exactly the statement "`bytes` per decoded record falls".
+  ## Asserted on by
+  ## `libs/repro_local_store/tests/t_newest_alias_decodes_one_record.nim`.
+  ##
+  ## Reset by `resetOutputStateCheckStats`, which `runBuild` calls, so a
+  ## reading after a build describes THAT build.
+  (records: actionRecordDecodes, bytes: actionRecordDecodeBytes,
+   containerReads: perEdgeContainerReads, sidecarReads: perEdgeSidecarReads)
 
 proc casContentDigestStats*(): tuple[calls: int; bytes: int64] =
   ## How much artifact CONTENT this build read to answer cache questions.
@@ -1963,32 +2042,105 @@ proc computeStrongFingerprint*(weak: ContentDigest;
   blake3DomainDigest(strongIdentityPayload(weak, inputs, envInputs),
     hdActionFingerprint)
 
+proc splitPathPrefix(path: string): tuple[prefix, name: string] =
+  ## Split at the LAST separator, keeping the separator on the prefix, so
+  ## `prefix & name == path` for every string without exception -- absolute,
+  ## relative, empty, trailing-separator, separator-only.
+  ##
+  ## Deliberately NOT `parentDir` / `extractFilename`: those normalise, and a
+  ## codec that normalises does not round-trip. A recorded input path is
+  ## compared byte-for-byte against the path the monitor observed, so a
+  ## re-encode that "tidied" one would turn a hit into a permanent miss.
+  var idx = -1
+  for i in countdown(path.high, 0):
+    if path[i] == '/' or (DirSep != '/' and path[i] == DirSep) or
+        (AltSep != '/' and path[i] == AltSep):
+      idx = i
+      break
+  if idx < 0:
+    (prefix: "", name: path)
+  else:
+    (prefix: path[0 .. idx], name: path[idx + 1 .. ^1])
+
+proc buildRecordPathTable(record: ActionResultRecord):
+    tuple[table: seq[string]; index: Table[string, int]] =
+  ## Action-Cache-Per-Edge-Store.md §5.5 C4, the table half.
+  ##
+  ## The table holds the record's distinct DIRECTORY PREFIXES, not its
+  ## distinct whole paths. §5.5 says the saving "is bounded by repetition
+  ## *within* one record, which is where the measured mass is: a record
+  ## carrying 78 inputs at p50 and 10,018 at p90 is dominated by long shared
+  ## directory prefixes from one checkout" -- and that is the repetition that
+  ## exists. Whole paths within one record are essentially all distinct, so a
+  ## table of whole paths dedups nothing and adds an index word per path.
+  ## Measured over the 5,230 containers of a live developer cache
+  ## (1.23 GB of encoded records, 84.5% of it path bytes): interning whole
+  ## paths made the store 3.3% LARGER, interning directory prefixes made it
+  ## 56.7% smaller.
+  ##
+  ## Both of §5.5's prohibitions hold, and they are the ones that separate
+  ## this from the shared `PathTable` §12.B rejected: the table is built from,
+  ## and stored inside, this record alone, so nothing is interned across
+  ## containers and no byte outside the record is needed to decode it.
+  result.index = initTable[string, int]()
+  for input in record.inputs:
+    let prefix = splitPathPrefix(input.path).prefix
+    if prefix notin result.index:
+      result.index[prefix] = result.table.len
+      result.table.add(prefix)
+  for output in record.outputs:
+    let prefix = splitPathPrefix(output.path).prefix
+    if prefix notin result.index:
+      result.index[prefix] = result.table.len
+      result.table.add(prefix)
+
+proc writeInternedPath(outp: var seq[byte]; path: string;
+                       index: Table[string, int]) =
+  let split = splitPathPrefix(path)
+  outp.writeU32Le(uint32(index[split.prefix]))
+  outp.writeString(split.name)
+
+proc readInternedPath(data: openArray[byte]; pos: var int;
+                      table: seq[string]): string =
+  let idx = int(readU32Le(data, pos))
+  if idx < 0 or idx >= table.len:
+    raiseEnvelopeError(eeMalformed, "path table index out of range")
+  table[idx] & readString(data, pos)
+
 proc encodeRecord(record: ActionResultRecord): seq[byte] =
   result.add(byte(ord(ActionRecordMagic[0])))
   result.add(byte(ord(ActionRecordMagic[1])))
   result.add(byte(ord(ActionRecordMagic[2])))
   result.add(byte(ord(ActionRecordMagic[3])))
-  # Version 4 ONLY when there is an env section to carry; see
-  # `ActionRecordVersionEnv`.
-  result.writeU16Le(
-    if record.envInputs.len > 0: ActionRecordVersionEnv
-    else: ActionRecordVersion)
+  result.writeU16Le(ActionRecordVersionInterned)
   result.writeDigest(record.weakFingerprint)
   result.add(byte(ord(record.policy)))
+  let paths = buildRecordPathTable(record)
+  result.writeU32Le(uint32(paths.table.len))
+  for prefix in paths.table:
+    result.writeString(prefix)
   result.writeU32Le(uint32(record.inputs.len))
   for input in record.inputs:
-    result.writeFingerprint(input)
-  if record.envInputs.len > 0:
-    result.writeU32Le(uint32(record.envInputs.len))
-    for env in record.envInputs:
-      result.writeString(env.name)
-      result.add(byte(if env.present: 1 else: 0))
-      result.writeString(env.value)
+    result.writeInternedPath(input.path, paths.index)
+    result.add(byte(ord(input.policy)))
+    result.writeMetadata(input.metadata)
+    result.add(if input.hasLocalHash: 1'u8 else: 0'u8)
+    if input.hasLocalHash:
+      result.writeLocalHash(input.localHash)
+  # v5 always carries the env count, zero included. v4 appended the section
+  # only when non-empty because doing otherwise would have rewritten every
+  # record's bytes for nothing; v5 is already rewriting them, so the format
+  # takes the simpler shape rather than carrying the conditional forward.
+  result.writeU32Le(uint32(record.envInputs.len))
+  for env in record.envInputs:
+    result.writeString(env.name)
+    result.add(byte(if env.present: 1 else: 0))
+    result.writeString(env.value)
   result.writeDigest(record.strongFingerprint)
   result.add(byte(ord(record.outputPayloadKind)))
   result.writeU32Le(uint32(record.outputs.len))
   for output in record.outputs:
-    result.writeString(output.path)
+    result.writeInternedPath(output.path, paths.index)
     result.writeMetadata(output.metadata)
     result.writePermissions(output.permissions)
     case record.outputPayloadKind
@@ -1999,6 +2151,10 @@ proc encodeRecord(record: ActionResultRecord): seq[byte] =
       discard
 
 proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
+  # Counted here rather than at the call sites: a record is decoded from the
+  # per-edge container read, from the shm slot, from a peer bundle and from a
+  # standalone `.rbar` file, and the property C1 states is about the total.
+  noteActionRecordDecode(payload.len)
   if payload.len < 6:
     raiseEnvelopeError(eeMalformed, "truncated action record")
   for i in 0 ..< 4:
@@ -2006,17 +2162,46 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       raiseEnvelopeError(eeUnknownMagic, "unknown action record magic")
   var pos = 4
   let version = readU16Le(payload, pos)
-  if version notin {2'u16, ActionRecordVersion, ActionRecordVersionEnv}:
+  if version notin {2'u16, ActionRecordVersion, ActionRecordVersionEnv,
+      ActionRecordVersionInterned}:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported action record version")
+  let interned = version >= ActionRecordVersionInterned
   result.weakFingerprint = readDigest(payload, pos)
   let policy = readByte(payload, pos)
   if policy > byte(ord(ffpHybrid)):
     raiseEnvelopeError(eeMalformed, "invalid record policy")
   result.policy = FileFingerprintPolicy(policy)
+  # The record-local path table (§5.5 C4). Empty for every pre-v5 record, and
+  # nothing outside this payload is ever consulted to build it -- that is the
+  # property that keeps a container independently decodable.
+  var pathTable: seq[string] = @[]
+  if interned:
+    let tableCount = readU32Le(payload, pos)
+    if tableCount > MaxRecordPathTableEntries:
+      raiseEnvelopeError(eeMalformed, "implausible record path table size")
+    pathTable = newSeq[string](int(tableCount))
+    for i in 0 ..< int(tableCount):
+      pathTable[i] = readString(payload, pos)
   let inputCount = int(readU32Le(payload, pos))
   result.inputs = newSeq[FileFingerprint](inputCount)
   for i in 0 ..< inputCount:
-    result.inputs[i] = readFingerprint(payload, pos)
+    if interned:
+      result.inputs[i].path = readInternedPath(payload, pos, pathTable)
+      let inputPolicy = readByte(payload, pos)
+      if inputPolicy > byte(ord(ffpHybrid)):
+        raiseEnvelopeError(eeMalformed, "invalid fingerprint policy")
+      result.inputs[i].policy = FileFingerprintPolicy(inputPolicy)
+      result.inputs[i].metadata = readMetadata(payload, pos)
+      case readByte(payload, pos)
+      of 0:
+        result.inputs[i].hasLocalHash = false
+      of 1:
+        result.inputs[i].hasLocalHash = true
+        result.inputs[i].localHash = readLocalHash(payload, pos)
+      else:
+        raiseEnvelopeError(eeMalformed, "invalid local hash flag")
+    else:
+      result.inputs[i] = readFingerprint(payload, pos)
   if version >= ActionRecordVersionEnv:
     let envCount = int(readU32Le(payload, pos))
     result.envInputs = newSeq[EnvFingerprint](envCount)
@@ -2035,7 +2220,9 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
   let outputCount = int(readU32Le(payload, pos))
   result.outputs = newSeq[OutputBlob](outputCount)
   for i in 0 ..< outputCount:
-    result.outputs[i].path = readString(payload, pos)
+    result.outputs[i].path =
+      if interned: readInternedPath(payload, pos, pathTable)
+      else: readString(payload, pos)
     if version >= 3'u16:
       result.outputs[i].metadata = readMetadata(payload, pos)
       result.outputs[i].permissions = readPermissions(payload, pos)
@@ -2224,6 +2411,118 @@ proc perEdgeRecordFileIsIntact*(raw: openArray[byte]): bool =
   else:
     pos == raw.len
 
+type
+  NewestAlias = object
+    ## Action-Cache-Per-Edge-Store.md §5.5 C1, the accelerator's payload.
+    ##
+    ## `<strongHex>.rec` stays THE DURABLE COPY; this names which of them was
+    ## newest when it was published, and states what the directory held at
+    ## that moment. The second half is what lets a reader tell a current
+    ## alias from a stale one without opening a single container: any publish
+    ## since either added or removed a `.rec` name (so `members` differs) or
+    ## rewrote an existing one (so its container's `writeSequence` differs
+    ## from `writeSequence` here, because every publish stamps a fresh value
+    ## from the durable `.seq` counter). Both are checked, and either one
+    ## failing sends the reader to the union read of §5.3 -- which is
+    ## unconditionally correct, because Tier 1 is authoritative.
+    ##
+    ## This is why a crash between the two renames, a race between two
+    ## publishers of the same edge, and a `.rec` written by a binary that has
+    ## never heard of this file are all handled by the same rule and none of
+    ## them can lose a record or serve a stale one.
+    writeSequence: uint64
+    strongName: string
+      ## The newest container's file name, `<strongHex>.rec`.
+    members: seq[string]
+      ## Every `.rec` name in the directory at publish time, sorted.
+
+proc encodeNewestAlias(alias: NewestAlias): seq[byte] =
+  for ch in NewestAliasMagic:
+    result.add(byte(ord(ch)))
+  result.writeU16Le(NewestAliasVersion)
+  result.writeU64Le(alias.writeSequence)
+  result.writeString(alias.strongName)
+  result.writeU32Le(uint32(alias.members.len))
+  for name in alias.members:
+    result.writeString(name)
+
+proc decodeNewestAlias(raw: openArray[byte]): Option[NewestAlias] =
+  ## Total: every malformed, truncated or future-version alias decodes to
+  ## `none`, which the caller turns into the union fallback. An accelerator
+  ## must fail like one (§5.5 C1), so nothing in here raises.
+  if raw.len < 14:
+    return none(NewestAlias)
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(NewestAliasMagic[i])):
+      return none(NewestAlias)
+  var pos = 4
+  try:
+    if readU16Le(raw, pos) != NewestAliasVersion:
+      return none(NewestAlias)
+    var alias = NewestAlias()
+    alias.writeSequence = readU64Le(raw, pos)
+    alias.strongName = readString(raw, pos)
+    let count = int(readU32Le(raw, pos))
+    if count < 0 or count > MaxRecFilesPerEdge * 4:
+      return none(NewestAlias)
+    for _ in 0 ..< count:
+      alias.members.add(readString(raw, pos))
+    if pos != raw.len:
+      return none(NewestAlias)
+    some(alias)
+  except EnvelopeError:
+    none(NewestAlias)
+
+proc listRecFileNames(dirPath: string): seq[string] =
+  ## The directory's `.rec` basenames, sorted. One directory enumeration and
+  ## no file opens; this is the cheap half of the union read, and C1 keeps it
+  ## precisely because it is what makes the alias's currency checkable.
+  for kind, path in walkDir(extendedPath(dirPath)):
+    if kind == pcFile and path.endsWith(PerEdgeRecFileExt):
+      result.add(path.extractFilename)
+  result.sort()
+
+proc newestAliasPath(dirPath: string): string =
+  dirPath / NewestAliasFileName
+
+proc publishNewestAlias(dirPath: string; alias: NewestAlias) =
+  ## §5.5 C1 step two: republish the newest container under the distinguished
+  ## name, itself by atomic rename.
+  ##
+  ## Best-effort throughout. The `<strongHex>.rec` renames have already
+  ## happened and are the durable publish; everything here only decides how
+  ## fast the NEXT reader gets to the newest one. A failure, a crash, or a
+  ## concurrent publisher that wins the race leaves the alias absent or
+  ## stale, which the reader detects and answers with the union read.
+  ##
+  ## The read-then-skip guard below is not a lock and does not pretend to be
+  ## one. It closes the ordinary interleaving -- two engines publishing the
+  ## same edge, the one that allocated the LOWER sequence renaming its alias
+  ## last -- so the alias does not routinely regress under concurrency. The
+  ## residual window it cannot close is the same one a crash opens, and the
+  ## reader's staleness check covers both.
+  if alias.strongName.len == 0 or alias.strongName notin alias.members:
+    return
+  let aliasPath = newestAliasPath(dirPath)
+  if fileExists(extendedPath(aliasPath)):
+    try:
+      let existing = decodeNewestAlias(bytes(readFile(extendedPath(aliasPath))))
+      if existing.isSome and
+          existing.get().writeSequence > alias.writeSequence and
+          existing.get().strongName in alias.members:
+        return
+    except OSError, IOError:
+      discard
+  let tmpPath = aliasPath & ".tmp." & $getCurrentProcessId() & "." &
+    $getMonoTime().ticks
+  try:
+    writeFile(extendedPath(tmpPath), byteString(encodeNewestAlias(alias)))
+    moveFile(extendedPath(tmpPath), extendedPath(aliasPath))
+  except OSError, IOError:
+    if fileExists(extendedPath(tmpPath)):
+      try: removeFile(extendedPath(tmpPath))
+      except OSError: discard
+
 proc loadLegacyPerEdgeFile(cache: ActionCache; weak: ContentDigest):
     seq[ActionResultRecord] =
   ## Read a pre-AC-1b single `hot-records/<key>` FILE if one exists (an
@@ -2305,7 +2604,134 @@ proc nextWriteSequence(cache: ActionCache): uint64 =
     result = readSequenceValue(path) + 1'u64
     writeFile(extendedPath(path), $result)
 
-proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest):
+type
+  RecContainer = object
+    ## One `<strongHex>.rec` file, decoded, with its sidecars already
+    ## attached. Shared by the union read and the C1 alias read so both
+    ## produce byte-identical records from the same file — a fast path that
+    ## reconstructed a record even slightly differently would be a
+    ## correctness hazard, not an optimization.
+    ok: bool
+    writeSequence: uint64
+    strongHex: string
+    records: seq[ActionResultRecord]
+
+proc readRecContainer(dirPath, fileName: string): RecContainer =
+  ## Read + decode ONE container and staple on its `.octime` / `.det`
+  ## sidecars. `ok = false` means "treat this file as absent", which is what
+  ## every failure here has always meant: a `.rec` this binary cannot decode
+  ## is most often one written by a NEWER reprobuild sharing the cache root,
+  ## and letting the envelope error escape would abort an otherwise healthy
+  ## build over a cache file — the opposite of the fail-closed rule in
+  ## Failure-Semantics.md.
+  let path = dirPath / fileName
+  var decoded: tuple[records: seq[ActionResultRecord]; writeSequence: uint64]
+  try:
+    let raw = bytes(readFile(extendedPath(path)))
+    inc perEdgeContainerReads
+    decoded = decodePerEdgeFileWithSeq(raw)
+  except OSError, IOError, EnvelopeError:
+    return RecContainer(ok: false)
+  # Tie-break key from the file's own strong-fp nonce (its base name), so
+  # even legacy/seq-0 files or a hypothetical duplicate sequence still sort
+  # deterministically.
+  let strongHex = fileName.splitFile.name
+  # Attach the witness sidecar, when present, to the records it belongs to.
+  # One extra small read per `.rec`; absent/undecodable means "no witness",
+  # which is the pre-change behaviour, not a hard failure.
+  var witnesses = initTable[string, OutputWitness]()
+  let witnessPath = dirPath / witnessFileName(strongHex)
+  if fileExists(extendedPath(witnessPath)):
+    try:
+      inc perEdgeSidecarReads
+      let sidecar = decodeWitnesses(bytes(readFile(extendedPath(witnessPath))))
+      # The back-reference must name the record file we just read. If an
+      # older binary rewrote the `.rec` (it cannot know about sidecars), the
+      # sequence moved and this witness describes outputs that have since
+      # been replaced -- discard it rather than fail closed against stale
+      # evidence.
+      if sidecar.recordWriteSequence == decoded.writeSequence:
+        witnesses = sidecar.witnesses
+    except OSError, IOError, EnvelopeError:
+      witnesses = initTable[string, OutputWitness]()
+  if witnesses.len > 0:
+    for i in 0 ..< decoded.records.len:
+      decoded.records[i].attachWitnesses(witnesses)
+  # The determinism sidecar, same shape and same back-reference rule as the
+  # witness one. Absent / undecodable / mismatched sequence all mean "this
+  # entry declared nothing", which is the pre-change behaviour.
+  let detPath = dirPath / determinismFileName(strongHex)
+  if fileExists(extendedPath(detPath)):
+    try:
+      inc perEdgeSidecarReads
+      let det = decodeDeterminism(bytes(readFile(extendedPath(detPath))))
+      if det.meta.declared and
+          det.recordWriteSequence == decoded.writeSequence:
+        for i in 0 ..< decoded.records.len:
+          decoded.records[i].determinism = det.meta
+    except OSError, IOError, EnvelopeError:
+      discard
+  RecContainer(ok: true, writeSequence: decoded.writeSequence,
+    strongHex: strongHex, records: decoded.records)
+
+proc loadNewestPerEdgeRecordsViaAlias(cache: ActionCache;
+                                      weak: ContentDigest):
+    Option[seq[ActionResultRecord]] =
+  ## Action-Cache-Per-Edge-Store.md §5.5 C1, the read half.
+  ##
+  ## Return the edge's NEWEST container without reading or decoding any other
+  ## container, or `none` — in which case the caller MUST take the union read
+  ## of §5.3, which is unconditionally correct because Tier 1 is
+  ## authoritative. This is the same degradation an unresolvable Tier-2
+  ## reference already takes (§8, step 5).
+  ##
+  ## `none` is returned when the alias is absent, unreadable, malformed, from
+  ## a version this binary does not know, names a container that is gone or
+  ## unreadable, or — the two staleness checks that make this sound —
+  ##
+  ##   * the directory's `.rec` name set is not the set the alias attests to,
+  ##     which catches every publish, eviction or GC that added or removed a
+  ##     container since (including one performed by a binary that has never
+  ##     heard of the alias, and one that is in flight right now, between its
+  ##     `.rec` rename and its alias rename); or
+  ##   * the named container's durable write sequence is not the one the
+  ##     alias recorded, which catches a CONVERGENT rewrite — same strong
+  ##     fingerprint, same file name, fresh sequence — that leaves the name
+  ##     set unchanged.
+  ##
+  ## Those two exhaust the ways the directory can move: every publish stamps
+  ## a fresh sequence from the durable `.seq` counter, so it either changes
+  ## the name set or changes a sequence. An alias that survives both checks
+  ## therefore names the container the union read would have ordered last.
+  let dirPath = cache.perEdgeDirPath(weak)
+  let aliasPath = newestAliasPath(dirPath)
+  var aliasRaw: seq[byte]
+  try:
+    if not fileExists(extendedPath(aliasPath)):
+      return none(seq[ActionResultRecord])
+    aliasRaw = bytes(readFile(extendedPath(aliasPath)))
+  except OSError, IOError:
+    return none(seq[ActionResultRecord])
+  let decodedAlias = decodeNewestAlias(aliasRaw)
+  if decodedAlias.isNone:
+    return none(seq[ActionResultRecord])
+  let alias = decodedAlias.get()
+  var members: seq[string]
+  try:
+    members = listRecFileNames(dirPath)
+  except OSError:
+    return none(seq[ActionResultRecord])
+  if members != alias.members:
+    return none(seq[ActionResultRecord])
+  if alias.strongName notin members:
+    return none(seq[ActionResultRecord])
+  let container = readRecContainer(dirPath, alias.strongName)
+  if not container.ok or container.writeSequence != alias.writeSequence:
+    return none(seq[ActionResultRecord])
+  some(container.records)
+
+proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
+                         warmNewestAlias = false):
     seq[ActionResultRecord] =
   ## Union-read every path-set the edge has on disk: all `<nonce>.rec` files
   ## in `hot-records/<key>/` PLUS any pre-AC-1b single-file record for
@@ -2319,6 +2745,13 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest):
   ## newest path-set first — preserving AC-1's "newest record wins /
   ## newest-corrupt rejects immediately" semantics deterministically across the
   ## multi-file split (mtime is NOT used: it is racy at sub-microsecond writes).
+  ##
+  ## `warmNewestAlias` republishes the §5.5 C1 accelerator from what this read
+  ## just established, exactly as §8 step 5 warms the shared-memory index after
+  ## a union fallback. Without it a cache written before C1 existed would keep
+  ## paying the union read forever, because the alias is only ever written by a
+  ## publish and a warm no-op build publishes nothing. Best-effort: a read-only
+  ## or full cache root simply stays on the union read.
   let dirPath = cache.perEdgeDirPath(weak)
   var seenStrong = initHashSet[string]()
   if dirExists(extendedPath(dirPath)):
@@ -2327,67 +2760,33 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest):
     # per file, so no two distinct files ever compare equal.
     var recFiles: seq[tuple[seq: uint64; strongHex: string;
         recs: seq[ActionResultRecord]]] = @[]
+    # Every `.rec` NAME in the directory, decodable or not. The alias attests
+    # to the directory's contents, so it has to name the undecodable ones too
+    # -- otherwise the reader's set comparison would fail against a directory
+    # this very read had just described, and the alias would be rewritten on
+    # every lookup and used on none.
+    var allRecNames: seq[string] = @[]
     for kind, path in walkDir(extendedPath(dirPath)):
       if kind != pcFile or not path.endsWith(PerEdgeRecFileExt):
         continue
-      var decoded: tuple[records: seq[ActionResultRecord]; writeSequence: uint64]
-      try:
-        decoded = decodePerEdgeFileWithSeq(bytes(readFile(path)))
-      except OSError, IOError:
+      allRecNames.add(path.extractFilename)
+      let container = readRecContainer(dirPath, path.extractFilename)
+      if not container.ok:
         continue
-      except EnvelopeError:
-        # A `.rec` this binary cannot decode -- most often a record written
-        # by a NEWER reprobuild sharing the same cache root, since the record
-        # version is bumped whenever the schema grows. Treat it as absent:
-        # the edge simply misses and re-executes. Letting the envelope error
-        # escape would abort an otherwise healthy build over a cache file,
-        # which is the opposite of the fail-closed rule in
-        # Failure-Semantics.md.
-        continue
-      # Tie-break key from the file's own strong-fp nonce (its base name), so
-      # even legacy/seq-0 files or a hypothetical duplicate sequence still sort
-      # deterministically.
-      let strongHex = path.splitFile.name
-      # Attach the witness sidecar, when present, to the records it belongs
-      # to. One extra small read per `.rec`; absent/undecodable means "no
-      # witness", which is the pre-change behaviour, not a hard failure.
-      var witnesses = initTable[string, OutputWitness]()
-      let witnessPath = dirPath / witnessFileName(strongHex)
-      if fileExists(extendedPath(witnessPath)):
-        try:
-          let sidecar = decodeWitnesses(bytes(readFile(witnessPath)))
-          # The back-reference must name the record file we just read. If an
-          # older binary rewrote the `.rec` (it cannot know about sidecars),
-          # the sequence moved and this witness describes outputs that have
-          # since been replaced -- discard it rather than fail closed against
-          # stale evidence.
-          if sidecar.recordWriteSequence == decoded.writeSequence:
-            witnesses = sidecar.witnesses
-        except OSError, IOError, EnvelopeError:
-          witnesses = initTable[string, OutputWitness]()
-      if witnesses.len > 0:
-        for i in 0 ..< decoded.records.len:
-          decoded.records[i].attachWitnesses(witnesses)
-      # The determinism sidecar, same shape and same back-reference rule as
-      # the witness one. Absent / undecodable / mismatched sequence all mean
-      # "this entry declared nothing", which is the pre-change behaviour.
-      let detPath = dirPath / determinismFileName(strongHex)
-      if fileExists(extendedPath(detPath)):
-        try:
-          let det = decodeDeterminism(bytes(readFile(detPath)))
-          if det.meta.declared and
-              det.recordWriteSequence == decoded.writeSequence:
-            for i in 0 ..< decoded.records.len:
-              decoded.records[i].determinism = det.meta
-        except OSError, IOError, EnvelopeError:
-          discard
-      recFiles.add((seq: decoded.writeSequence, strongHex: strongHex,
-        recs: decoded.records))
+      recFiles.add((seq: container.writeSequence,
+        strongHex: container.strongHex, recs: container.records))
     recFiles.sort(proc (a, b: tuple[seq: uint64; strongHex: string;
         recs: seq[ActionResultRecord]]): int =
       result = cmp(a.seq, b.seq)
       if result == 0:
         result = cmp(a.strongHex, b.strongHex))
+    if warmNewestAlias and recFiles.len > 0:
+      var alias = NewestAlias(
+        writeSequence: recFiles[^1].seq,
+        strongName: recFiles[^1].strongHex & PerEdgeRecFileExt,
+        members: allRecNames)
+      alias.members.sort()
+      publishNewestAlias(dirPath, alias)
     for entry in recFiles:
       for rec in entry.recs:
         let key = digestKey(rec.strongFingerprint)
@@ -2554,6 +2953,16 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
   ## lookup would have considered newest). Distinct path-sets are few, so this
   ## rarely fires; it guarantees the disk store stays small even if an
   ## adversarial stream of distinct path-sets accumulates.
+  ##
+  ## This is also where the §5.5 C1 newest-alias is (re)published, for two
+  ## reasons. It is the LAST step of every publish, so an alias written here
+  ## cannot be invalidated by an eviction that follows it -- §8.2's "cap
+  ## before insert" rule applied to the alias. And it already reads every
+  ## container's durable write sequence in order to decide what to evict, so
+  ## it can name the newest from GROUND TRUTH rather than from the assumption
+  ## that the record just written is the newest -- an assumption that is
+  ## false whenever a sibling with a higher sequence was published
+  ## concurrently, or by a binary that has never heard of the alias.
   var entries: seq[tuple[seq: uint64; strongHex, path: string]] = @[]
   for kind, path in walkDir(extendedPath(dirPath)):
     if kind == pcFile and path.endsWith(PerEdgeRecFileExt):
@@ -2577,27 +2986,39 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
           removeFile(extendedPath(path))
         except OSError:
           discard
-  if entries.len <= MaxRecFilesPerEdge:
-    return
+  # The SAME total order the union read and the lookup use: `(writeSequence,
+  # strongFpHex)`. Sorting unconditionally (rather than only above the cap)
+  # is what lets the alias below name the newest survivor in every case.
   entries.sort(proc (a, b: tuple[seq: uint64; strongHex, path: string]): int =
     result = cmp(a.seq, b.seq)
     if result == 0:
       result = cmp(a.strongHex, b.strongHex))
-  for i in 0 ..< entries.len - MaxRecFilesPerEdge:
-    try:
-      removeFile(entries[i].path)
-    except OSError:
-      discard
-    # Drop the evicted record's sidecars too, or they leak.
-    for sidecar in [entries[i].path.parentDir /
-                      witnessFileName(entries[i].strongHex),
-                    entries[i].path.parentDir /
-                      determinismFileName(entries[i].strongHex)]:
-      if fileExists(extendedPath(sidecar)):
-        try:
-          removeFile(extendedPath(sidecar))
-        except OSError:
-          discard
+  if entries.len > MaxRecFilesPerEdge:
+    for i in 0 ..< entries.len - MaxRecFilesPerEdge:
+      try:
+        removeFile(entries[i].path)
+      except OSError:
+        discard
+      # Drop the evicted record's sidecars too, or they leak.
+      for sidecar in [entries[i].path.parentDir /
+                        witnessFileName(entries[i].strongHex),
+                      entries[i].path.parentDir /
+                        determinismFileName(entries[i].strongHex)]:
+        if fileExists(extendedPath(sidecar)):
+          try:
+            removeFile(extendedPath(sidecar))
+          except OSError:
+            discard
+    entries = entries[entries.len - MaxRecFilesPerEdge .. ^1]
+  if entries.len == 0:
+    return
+  var alias = NewestAlias(
+    writeSequence: entries[^1].seq,
+    strongName: entries[^1].strongHex & PerEdgeRecFileExt)
+  for entry in entries:
+    alias.members.add(entry.strongHex & PerEdgeRecFileExt)
+  alias.members.sort()
+  publishNewestAlias(dirPath, alias)
 
 
 proc migrateLegacyFile(cache: ActionCache; weak: ContentDigest) =
@@ -2626,6 +3047,12 @@ proc migrateLegacyFile(cache: ActionCache; weak: ContentDigest) =
   for strongKey, recs in byStrong:
     cache.writeRecFileAtomically(dirPath,
       recFileNameForStrong(recs[0].strongFingerprint), recs)
+  # Migration rewrites the whole directory, so it must leave a current
+  # newest-alias behind like any other publish; otherwise every read of a
+  # just-migrated edge takes the union fallback until the edge is next
+  # recorded.
+  if byStrong.len > 0:
+    cache.capRecFiles(dirPath)
 
 type
   CacheDaemonSpawnHook* = proc (root: string; args: seq[string]): bool
@@ -2898,7 +3325,24 @@ proc readHotRecord*(cache: var ActionCache; weak: ContentDigest):
   ##     published to shm but that THIS process has not yet read from disk). Such
   ##     a shm hit is a valid record for `weak`; the caller re-checks input
   ##     freshness, so it can only become a correct hit — never a false one.
-  let records = cache.loadPerEdgeRecords(weak)
+  ##
+  ## Action-Cache-Per-Edge-Store.md §5.5 C1 names this procedure: it needs
+  ## only the newest record, and obtaining it from `loadPerEdgeRecords` meant
+  ## reading and fully decoding every container the edge had, plus their
+  ## sidecars, to find out which one that was. `loadNewestPerEdgeRecordsViaAlias`
+  ## answers the same question from one container, and returns `none` -- so
+  ## this falls through to the union read -- whenever it cannot prove that
+  ## container is the newest.
+  let viaAlias = cache.loadNewestPerEdgeRecordsViaAlias(weak)
+  if viaAlias.isSome:
+    let aliasRecords = viaAlias.get()
+    for i in countdown(aliasRecords.high, 0):
+      if aliasRecords[i].weakFingerprint == weak:
+        let shmHit = cache.shmReadRecord(weak)
+        if not shmHit.found:
+          cache.warmShmFromDisk(aliasRecords[i])
+        return (found: true, record: hotMetadataRecord(aliasRecords[i]))
+  let records = cache.loadPerEdgeRecords(weak, warmNewestAlias = true)
   for i in countdown(records.high, 0):
     if records[i].weakFingerprint == weak:
       # Disk has the edge: warm shm if it was cold, then return the disk newest.
@@ -2945,7 +3389,7 @@ proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest):
   ## union. Warm-on-miss: if disk has records but shm was cold, re-publish the
   ## newest so the next lookup / other live builds hit in shm.
   var seenStrong = initHashSet[string]()
-  for record in cache.loadPerEdgeRecords(weak):
+  for record in cache.loadPerEdgeRecords(weak, warmNewestAlias = true):
     if record.weakFingerprint == weak:
       result.add(record)
       seenStrong.incl(digestKey(record.strongFingerprint))
