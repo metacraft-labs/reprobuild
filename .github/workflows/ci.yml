@@ -637,11 +637,44 @@ jobs:
       #                      at 446/1237. The runs that did finish building
       #                      then spent 3h32m-5h55m and failed in the Python
       #                      inventory, including once on a
-      #                      CatalogEnvironmentError -- host contention
-      #                      reported as such, which is itself a symptom of
-      #                      the class rather than of the suite.
+      #                      CatalogEnvironmentError.
+      #
       #   gpu-server-001-*   between the two: ~1h04m typical, 4h01m/4h51m at
       #                      worst.
+      #
+      # CORRECTION, 2026-09-09. That CatalogEnvironmentError was read above as
+      # "host contention reported as such, which is itself a symptom of the
+      # class rather than of the suite". The second half of that is wrong, and
+      # believing it cost real time: the suite carried a defect that produces
+      # exactly this signature no matter which host class runs it.
+      #
+      # `libs/repro_cli_support/tests/`
+      # `t_develop_override_records_the_identity_it_replaced.nim` built its
+      # scenarios at MODULE scope, and building one runs the real
+      # `repro develop` verb. The Python inventory phase enumerates every
+      # binary's case catalog by executing it with `--list-json`, which runs
+      # module-level code -- so the probe ran the verb, the verb reached a
+      # monitored helper edge, and the engine spawned the image named by
+      # `getAppFilename()`, which in a TEST binary is the test binary itself.
+      # It has no `__repro-extract-interface` dispatcher, so the child re-ran
+      # module init and spawned the next generation. Measured locally: 154
+      # live generations in 20 s, host load 829, ~900 processes.
+      #
+      # That is a fork bomb inside the probe. It makes its OWN host contention,
+      # so the contention is evidence for the suite and not against it. The
+      # probe then times out, `timeout` is in ENVIRONMENTAL_QUARANTINE_REASONS,
+      # the serial retry pays 3600 s and bombs again, and the phase aborts with
+      # CatalogEnvironmentError -- with every other still-running probe on the
+      # box slowed enough to look marginal too.
+      #
+      # The per-class timing table above is unaffected and still stands. What
+      # does not survive is the inference that an inventory-phase environmental
+      # abort could be attributed to the runner class without first ruling this
+      # out; the suite reached the Nim execution phase on `gpu-server-002-*`
+      # because those hosts absorbed the storm, not because they were free of
+      # it. Diagnose a future CatalogEnvironmentError by asking WHICH binary
+      # the probe was on and whether it self-spawns, before asking which host
+      # picked the job up.
       #
       # So `REPROBUILD_BUILD_TIMEOUT` (4h, scripts/run_tests.sh) is not a
       # budget this host class overruns by a little, and the timeouts are not

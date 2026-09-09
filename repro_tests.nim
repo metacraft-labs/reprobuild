@@ -822,7 +822,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     source: "libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim",
     binary: "build/test-bin/t_develop_override_records_the_identity_it_replaced",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,
