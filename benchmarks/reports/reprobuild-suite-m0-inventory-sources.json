@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1498,
+    "nimTestBinaries": 1499,
     "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 601,
+    "pureUnitTests": 602,
     "staticallyDetectedRuntimeCompilerFlowTests": 84,
-    "testEntries": 1505
+    "testEntries": 1506
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -38,7 +38,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_build_engine",
@@ -47,6 +47,7 @@
       ],
       "owner": "libs/repro_build_engine",
       "sources": [
+        "libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim",
         "libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim",
         "libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim",
         "libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim",
@@ -1149,7 +1150,7 @@
       "graph-fixture": 16,
       "integration": 653,
       "platform/destructive": 107,
-      "pure unit": 601,
+      "pure unit": 602,
       "unclassified": 128
     },
     "graphOwnedTestArtifacts": [
@@ -1262,9 +1263,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1498,
+    "nimTestBinaryCount": 1499,
     "pythonTestFileCount": 7,
-    "testEntryCount": 1505
+    "testEntryCount": 1506
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5730,6 +5731,25 @@
       "source": "libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_warm_noop_consultation_hashes_no_bytes",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

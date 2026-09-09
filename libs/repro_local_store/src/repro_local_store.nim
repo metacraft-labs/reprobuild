@@ -939,6 +939,24 @@ var
   revalidateDirEntries = 0'i64
   recordDirWalks = 0
   recordDirEntries = 0'i64
+  casContentDigestCalls = 0
+  casContentDigestBytes = 0'i64
+
+proc noteCasContentDigest(sizeBytes: uint64) =
+  ## Count one pass over an artifact's BYTES.
+  ##
+  ## Caching-Architecture.md §"Known Limit: The Default Policy Can Serve A
+  ## Stale Result" makes the cost model explicit: "metadata comparison costs
+  ## one `lstat(2)` per input and scales with input count, while content
+  ## verification scales with input bytes. Reprobuild is not willing to pay
+  ## that on every consultation by default." That sentence is only
+  ## enforceable if the byte-scaled work is
+  ## countable, so every CAS content digest in this module is funnelled
+  ## through here. A warm no-op consultation of a metadata-only record must
+  ## leave this counter at zero; see
+  ## `t_warm_noop_consultation_hashes_no_bytes.nim`.
+  inc casContentDigestCalls
+  casContentDigestBytes += int64(sizeBytes)
 
 proc symlinkTargetOf(path: string): string =
   ## `readlink()` or "" when `path` is not a symlink. Never follows.
@@ -1400,12 +1418,14 @@ proc verifyBlob*(cas: LocalCas; blob: CasBlobRef) =
   if uint64(info.size) != blob.sizeBytes:
     raise newException(CacheIntegrityError, "CAS size mismatch for " &
       digestHex(blob.digest))
+  noteCasContentDigest(blob.sizeBytes)
   let actual = casFileDigest(extendedPath(path), blob.sizeBytes)
   if actual != blob.digest:
     raise newException(CacheIntegrityError, "CAS digest mismatch for " &
       digestHex(blob.digest))
 
 proc storeBlob*(cas: LocalCas; payload: openArray[byte]): CasBlobRef =
+  noteCasContentDigest(uint64(payload.len))
   result.digest = casDigest(payload)
   result.sizeBytes = uint64(payload.len)
   let finalPath = cas.blobPath(result.digest)
@@ -1428,6 +1448,7 @@ proc storeBlob*(cas: LocalCas; payload: openArray[byte]): CasBlobRef =
       raise
 
 proc storeFileBlob*(cas: LocalCas; path: string; sizeBytes: uint64): CasBlobRef =
+  noteCasContentDigest(sizeBytes)
   result.digest = casFileDigest(extendedPath(path), sizeBytes)
   result.sizeBytes = sizeBytes
   let finalPath = cas.blobPath(result.digest)
@@ -1464,13 +1485,16 @@ proc readBlob*(cas: Store; blob: CasBlobRef): seq[byte] =
       digestHex(blob.digest))
 
 proc verifyBlob*(cas: Store; blob: CasBlobRef) =
+  noteCasContentDigest(blob.sizeBytes)
   discard cas.readBlob(blob)
 
 proc storeBlob*(cas: var Store; payload: openArray[byte]): CasBlobRef =
+  noteCasContentDigest(uint64(payload.len))
   result.digest = r11CasDigest(cas.storeCasBlob(payload))
   result.sizeBytes = uint64(payload.len)
 
 proc storeFileBlob*(cas: var Store; path: string; sizeBytes: uint64): CasBlobRef =
+  noteCasContentDigest(sizeBytes)
   result.digest = r11CasDigest(cas.storeCasFileBlob(path, sizeBytes))
   result.sizeBytes = sizeBytes
 
@@ -1698,7 +1722,8 @@ proc declaredDeterminism*(class: EdgeDeterminism;
     buildEpoch: buildEpoch)
 
 proc resetOutputStateCheckStats*() =
-  ## Zero the accumulators. The engine calls this at the start of every build:
+  ## Zero the accumulators, including the CAS content-digest counter read by
+  ## `casContentDigestStats`. The engine calls this at the start of every build:
   ## these are process-global, and a process that runs more than one build
   ## (the daemon, the test binaries, `repro watch`) would otherwise report
   ## each build's cost plus every earlier build's.
@@ -1708,6 +1733,20 @@ proc resetOutputStateCheckStats*() =
   revalidateDirEntries = 0'i64
   recordDirWalks = 0
   recordDirEntries = 0'i64
+  casContentDigestCalls = 0
+  casContentDigestBytes = 0'i64
+
+proc casContentDigestStats*(): tuple[calls: int; bytes: int64] =
+  ## How much artifact CONTENT this build read to answer cache questions.
+  ##
+  ## `calls` is the number of CAS blobs whose bytes were hashed or re-read;
+  ## `bytes` is their total size. Both are zero for a build that only
+  ## consulted metadata-only records, which is what `repro build` publishes
+  ## and consults unless `--restore-cached-outputs` is given.
+  ##
+  ## Reset by `resetOutputStateCheckStats`, which `runBuild` calls, so the
+  ## reading after a build describes THAT build.
+  (calls: casContentDigestCalls, bytes: casContentDigestBytes)
 
 proc outputStateCheckStats*(): tuple[calls: int; nanos: int64;
                                      revalidateDirWalks: int;
