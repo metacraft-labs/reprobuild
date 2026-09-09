@@ -35,6 +35,15 @@ const InstallMirrorCoreToolNames* = ["sh", "rm", "mkdir", "cp", "touch"]
   ## these explicit so sealed action profiles never depend on ambient PATH or
   ## on an unrelated dependency happening to provide a core utility.
 
+proc typedInstallMirrorShellTools*(packageName: string): seq[string] =
+  ## Keep interface requirements and generated action refs in agreement.
+  result = @InstallMirrorCoreToolNames & @["sed", "chmod"]
+  when defined(linux):
+    result.add(["find", "head", "od", "tr", "sort", "grep",
+      "dirname", "basename", "wc", "patchelf"])
+    if packageName == "glibcSource":
+      result.add(["readlink", "ln"])
+
 proc currentInstallMirrorMode*(): InstallMirrorMode =
   case getEnv(InstallMirrorModeEnvVar).toLowerAscii()
   of "hashed":

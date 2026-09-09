@@ -945,6 +945,7 @@ tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.n
 tests/integration/t_cli_repro_lock_explain.nim	nim	5
 tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim	nim	2
 tests/integration/t_cmake_fresh_configure.nim	nim	1
+tests/integration/t_cmake_install_mirror_tools.nim	nim	1
 tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	nim	3
 tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	nim	1
 tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	nim	1
@@ -1406,6 +1407,8 @@ tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_host_system_tools.nim	nim	4
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_install_mirror_optional_version.nim	nim	3
+tests/unit/t_install_mirror_shell_tools.nim	nim	2
+tests/unit/t_install_mirror_tool_metadata.nim	nim	7
 tests/unit/t_library_stage_alias.nim	nim	3
 tests/unit/t_m21_history_fed_scheduling.nim	nim	22
 tests/unit/t_m9q_from_source_provisioning.nim	nim	9

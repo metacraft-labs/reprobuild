@@ -161,6 +161,30 @@ package `head`:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+package od:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/od",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package tr:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/tr",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package wc:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/wc",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package readlink:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/readlink",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package `ln`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/ln",
@@ -218,6 +242,12 @@ package `rm`:
 package `find`:
   provisioning:
     nixPackage "nixpkgs#findutils", executablePath = "bin/find",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package patchelf:
+  provisioning:
+    nixPackage "nixpkgs#patchelf", executablePath = "bin/patchelf",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
