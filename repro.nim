@@ -130,6 +130,104 @@ import ct_test_nim_unittest
 # inside the ``build:`` block below where a build context is active.
 import ct_test_runner_install
 
+# Graph-Owned-Test-Artifacts M3: the test → graph-built-artifact table.
+#
+# The single place that answers "which graph-built artifacts does this test
+# EXECUTE?". The test-execute loop below reads it to put each artifact's path
+# on the edge as a typed input and each artifact's action id on the edge as an
+# ordering dep; ``scripts/check_test_body_helper_compilation.py`` reads it to
+# tell a migrated test apart from one that still compiles its own helper.
+#
+# ON PATHS, AND WHY THEY ARE SPELLED REPO-RELATIVE HERE.
+#
+# M3's open question was how a helper's location reaches the test binary
+# "without reintroducing host-local assumptions", and this repository has been
+# bitten by host paths reaching cache keys more than once. The answer used
+# here is the one already established by ``reproBinaryPath`` in
+# ``repro_test_support``: NOTHING absolute is written down. The graph names the
+# artifact by a repo-relative path, which is what the engine fingerprints; the
+# test resolves the same repo-relative path against ``ReprobuildRepoRoot``,
+# which is derived from ``currentSourcePath()`` — the checkout that contains
+# the test source — rather than from ``$PWD``, ``$HOME`` or an environment
+# variable a runner may or may not have set. The absolute path exists only as
+# a value inside the running test process; it never enters a fingerprint, an
+# action id, or a tracked artifact.
+#
+# The corollary, and the reason this is a table rather than an env var: an
+# artifact a test needs must be DECLARED, so that the edge re-runs when the
+# artifact changes. Passing a path through the environment would move the
+# dependency out of the graph's sight, which is the failure M3 is closing, not
+# a way to close it.
+type
+  TestGraphArtifact* = object
+    path*: string      ## repo-relative output path, as the producing edge declares it
+    actionId*: string  ## the producing edge's action id
+  TestGraphArtifacts* = object
+    source*: string
+    artifacts*: seq[TestGraphArtifact]
+
+const
+  ctShimFixtureRoot = "build/test-fixtures/ct-test-unittest-parallel"
+
+  ctShimProtocolThreeTests = TestGraphArtifact(
+    path: ctShimFixtureRoot & "/fixture_protocol_three_tests",
+    actionId: "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests")
+  ctShimM4ParitySuite = TestGraphArtifact(
+    path: ctShimFixtureRoot & "/fixture_m4_parity_suite",
+    actionId: "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite")
+  ctShimBaselineStdUnittest = TestGraphArtifact(
+    path: ctShimFixtureRoot & "/fixture_baseline_std_unittest",
+    actionId: "reprobuild.test_fixtures.ct_shim_fixture_baseline")
+
+  testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
+    # SHARED, and deliberately so. ``fixture_protocol_three_tests`` is one
+    # artifact behind two tests (six cases); before M3 each case compiled a
+    # private copy into its own scratch directory to avoid relinking a binary
+    # a sibling case was executing.
+    TestGraphArtifacts(
+      source: "libs/ct_test_unittest_parallel/tests/" &
+        "t_every_test_binary_speaks_list_json_protocol.nim",
+      artifacts: @[ctShimProtocolThreeTests]),
+    TestGraphArtifacts(
+      source: "libs/ct_test_unittest_parallel/tests/" &
+        "t_test_binary_run_one_writes_result_file.nim",
+      artifacts: @[ctShimProtocolThreeTests]),
+    # SHARED likewise: one parity fixture behind the parity test and the
+    # partition-file test.
+    TestGraphArtifacts(
+      source: "libs/ct_test_unittest_parallel/tests/" &
+        "t_ct_test_runner_full_suite_parity.nim",
+      artifacts: @[ctShimM4ParitySuite]),
+    TestGraphArtifacts(
+      source: "libs/ct_test_unittest_parallel/tests/" &
+        "t_ct_test_runner_partition_file_mode.nim",
+      artifacts: @[ctShimM4ParitySuite]),
+    TestGraphArtifacts(
+      source: "libs/ct_test_unittest_parallel/tests/" &
+        "t_backward_compat_std_unittest_test_runs_unchanged.nim",
+      artifacts: @[ctShimBaselineStdUnittest]),
+    # THE SHIPPING APP BINARY, not a test-only rebuild of it.
+    # ``apps/repro-peer-cache-admin/repro_peer_cache_admin.nim`` is listed in
+    # ``apps/entrypoints.txt`` and is already built by the ``apps`` collection
+    # (edge ``reprobuild.apps.repro-peer-cache-admin`` →
+    # ``build/bin/repro-peer-cache-admin``). Declaring a SECOND edge over the
+    # same source, into ``build/test-bin`` with a second nimcache, would be two
+    # builds of one source — which is precisely what "built once through the
+    # graph" forbids, and would have made M3 violate the property it exists to
+    # establish. The test consumes the app edge's output.
+    TestGraphArtifacts(
+      source: "libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-peer-cache-admin",
+        actionId: "reprobuild.apps.repro-peer-cache-admin")]),
+    TestGraphArtifacts(
+      source: "tools/catalog-harvester/tests/" &
+        "test_harvester_app_name_validation.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/test-bin/repro_catalog_harvester",
+        actionId: "reprobuild.test_helpers.repro_catalog_harvester")]),
+  ]
+
 # Project-DSL-Composition M6: the generated test-edge table.
 # ``repro_tests.nim`` exports ``reprobuildTestSpecs*: seq[TestSpec]``;
 # the ``build:`` block below iterates the table and registers one
@@ -1043,13 +1141,51 @@ package reprobuild:
       var executeDeps: seq[string] = @[]
       if spec.requiresReproBinary:
         requiredBinaries.add(reproBinaryPath)
-      if spec.source ==
-          "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim":
-        when not defined(windows):
+      # Graph-Owned-Test-Artifacts M3: typed fixture inputs on the EXECUTE
+      # edge, read from ONE table instead of a chain of source-path ``if``s.
+      #
+      # ``testFixtureArtifacts`` (above, at file scope) maps a test source to
+      # the graph-built artifacts its body executes. Each entry contributes
+      # BOTH halves and they are not interchangeable:
+      #
+      #   * the PATH goes in ``requiredBinaries`` — a typed input, so the
+      #     artifact's content is in this edge's fingerprint and rebuilding
+      #     the fixture re-runs the test instead of serving a cached pass
+      #     against a stale binary;
+      #   * the ACTION ID goes in ``deps`` — an ordering contract, so a
+      #     focused ``repro build '.#test#<name>'`` materialises the fixture
+      #     first rather than failing on a missing file. The fixture edges are
+      #     DECLARED LATER in this block than this loop runs, which is exactly
+      #     why the dependency is spelled by id rather than by object.
+      #
+      # Adding a row here is the supported way to give a test a graph-owned
+      # helper. Compiling one from the test body is what M3 removed.
+      #
+      # THE ``.exe`` SUFFIX IS ADDED HERE, NOT SPELLED IN THE TABLE. ``nim.c``
+      # appends it on Windows regardless of what ``binary =`` says (nim does,
+      # and the edge has to declare the file that actually appears, or the
+      # engine cannot capture the output and the edge is permanently
+      # uncacheable — see the note in ``repro_dsl_stdlib/packages/nim.nim``).
+      # A typed input naming an extension-less path on Windows would name a
+      # file no edge produces. The test side matches: every path helper in
+      # ``repro_test_support`` resolves through ``addFileExt(ExeExt)``.
+      for entry in testFixtureArtifacts:
+        if entry.source != spec.source:
+          continue
+        for artifact in entry.artifacts:
+          let artifactPath =
+            when defined(windows): artifact.path & ".exe"
+            else: artifact.path
+          requiredBinaries.add(artifactPath)
+          executeDeps.add(artifact.actionId)
+      when not defined(windows):
+        if spec.source ==
+            "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim":
           # Both separately compiled compatibility peers are runtime fixtures
-          # of this integration binary. The typed input paths make a focused
-          # graph target build them, while the explicit ids make the ordering
-          # contract unambiguous even though helper declarations occur later.
+          # of this integration binary. Kept out of the table above because the
+          # pair is POSIX-only: the two peer edges themselves sit under a
+          # ``when not defined(windows)`` guard, so declaring them
+          # unconditionally would name outputs that no edge produces.
           requiredBinaries.add("build/test-bin/legacy_cache_peer_origin_dev")
           requiredBinaries.add("build/test-bin/legacy_cache_peer_legacy_wire")
           executeDeps.add(
@@ -1750,6 +1886,38 @@ package reprobuild:
       nimcache = "build/nimcache/repro_binary_cache_client_cli",
       actionId = "reprobuild.test_helpers.repro_binary_cache_client_cli"))
 
+    # Graph-Owned-Test-Artifacts M3: the catalog harvester, a TOOL binary a
+    # test used to compile from its own body.
+    #
+    # It was a ``nim c`` shell-out behind an ``ensureHarvesterBuilt()`` that
+    # compiled on demand "so the test runner does not depend on an external
+    # build orchestration step". That reasoning is exactly what M3 retires: the
+    # build orchestration step IS the graph, and an on-demand compile inside a
+    # test body is an undeclared input, an uncached rebuild, and a compiler
+    # racing whatever else the runner has in flight.
+    #
+    # ``tools/catalog-harvester/repro_catalog_harvester.nim`` is NOT a shipping
+    # entrypoint — it is absent from ``apps/entrypoints.txt`` (checked: the
+    # file names ``apps/…`` sources only, and no row names this tool) — so it
+    # belongs in ``test-helpers`` next to the other test scaffolding rather
+    # than in ``apps``, and this is the ONLY edge over that source.
+    #
+    # THE OTHER HALF OF THIS MIGRATION HAS NO EDGE HERE, DELIBERATELY.
+    # ``t_peer_cache_admin_cli_status`` also compiled its helper in its body,
+    # but its helper is ``apps/repro-peer-cache-admin`` — a shipping entrypoint
+    # (``apps/entrypoints.txt``) already built by the ``apps`` collection above
+    # as ``reprobuild.apps.repro-peer-cache-admin``. Adding a test-bin edge for
+    # it would compile one source twice. That test names the app edge in
+    # ``testFixtureArtifacts`` instead; see the note there.
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tools/catalog-harvester/repro_catalog_harvester.nim",
+      binary = "build/test-bin/repro_catalog_harvester",
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro_catalog_harvester",
+      actionId = "reprobuild.test_helpers.repro_catalog_harvester"))
+
     discard collect("test-helpers", reprobuildTestHelpersActions)
 
     # Test-Fixtures-In-Build-Graph M2: the monitor-shim ``test-fixtures``
@@ -1820,6 +1988,87 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/buildtype_output_probe",
       actionId = "reprobuild.test_fixtures.buildtype_output_probe"))
+
+    # Graph-Owned-Test-Artifacts M3: the ct_test_unittest_parallel protocol
+    # fixtures.
+    #
+    # Five of the shim's own tests each ran ``nim c`` on one of these three
+    # CHECKED-IN fixture sources before asserting anything. That is the M3
+    # target shape, but the judgement is not "no compilation in a test that
+    # tests a compiler-facing library" — it is narrower and worth stating,
+    # because a blunter rule deletes the subject:
+    #
+    #   * ``t_smoke_ct_test_unittest_parallel`` compiles NOTHING at run time.
+    #     It IMPORTS the shim, so its own binary is the artifact under test
+    #     and the M2 migration correctly left it alone. It is not touched
+    #     here either.
+    #   * These three fixtures are ordinary static sources whose only role is
+    #     to exist as a binary the test then drives over the protocol
+    #     (``--list-json``, ``--run``, ``$NIMTEST_RESULT_FILE``, and the
+    #     ct-test-runner parity/partition paths). Compilation is
+    #     MATERIALIZATION, not the assertion; nothing downstream of the
+    #     compile inspects the compiler's behaviour.
+    #   * ``t_backward_compat_std_unittest_test_runs_unchanged`` is the one
+    #     that needs an explicit answer, because its docstring lists "the
+    #     binary compiles cleanly" as assertion 1. A graph edge does not drop
+    #     that assertion, it RELOCATES it: if the baseline fixture stops
+    #     compiling, this edge fails and the suite cannot run. The remaining
+    #     assertions (std/unittest console shape, exit-code convention) are
+    #     about the binary's behaviour and are unchanged.
+    #
+    # Two of the three are SHARED, which is the other half of the point:
+    # ``fixture_protocol_three_tests`` backs both
+    # ``t_every_test_binary_speaks_list_json_protocol`` and
+    # ``t_test_binary_run_one_writes_result_file``; ``fixture_m4_parity_suite``
+    # backs both ``t_ct_test_runner_full_suite_parity`` and
+    # ``t_ct_test_runner_partition_file_mode``. Before this edge existed, all
+    # SIX cases across those four tests compiled their own private copy into a
+    # per-case scratch directory — deliberately, because a shared output path
+    # plus a shared nimcache meant one case's ``nim c`` relinked a binary
+    # another case was executing. One graph-owned, read-only artifact removes
+    # the race rather than working around it.
+    #
+    # NOT ``build/test-bin``: ``fixture_protocol_three_tests`` contains a
+    # deliberately FAILING case, and the suite runner enumerates
+    # ``build/test-bin``. These land under ``build/test-fixtures`` so a fixture
+    # is never mistaken for a test.
+    #
+    # ``ctShimFixtureRoot`` is the module-scope const the ``testFixtureArtifacts``
+    # table also uses, so the producing edge and the consuming declaration
+    # cannot drift apart. The THIRD spelling — ``CtShimFixtureDir`` in
+    # ``repro_test_support``, which the tests resolve at run time — cannot share
+    # this symbol (that module must not import ``repro.nim``), so a test asserts
+    # the two agree instead. See
+    # ``tests/unit/test_graph_owned_test_artifacts.py``.
+    let ctShimFixtureDir = ctShimFixtureRoot
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "libs/ct_test_unittest_parallel/tests/fixtures/" &
+        "fixture_baseline_std_unittest.nim",
+      binary = ctShimFixtureDir & "/fixture_baseline_std_unittest",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/ct_shim_fixture_baseline_std_unittest",
+      actionId = "reprobuild.test_fixtures.ct_shim_fixture_baseline"))
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "libs/ct_test_unittest_parallel/tests/fixtures/" &
+        "fixture_protocol_three_tests.nim",
+      binary = ctShimFixtureDir & "/fixture_protocol_three_tests",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/ct_shim_fixture_protocol_three_tests",
+      actionId = "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests"))
+    # ``--threads:on`` matches what the two ct-test-runner tests passed by
+    # hand; the parity assertion compares this binary under two different
+    # runners, so its compile flags have to stay pinned rather than inherited.
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "libs/ct_test_unittest_parallel/tests/fixtures/" &
+        "fixture_m4_parity_suite.nim",
+      binary = ctShimFixtureDir & "/fixture_m4_parity_suite",
+      threadsOn = true,
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/ct_shim_fixture_m4_parity_suite",
+      actionId = "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite"))
 
     let ioMonSrc = block:
       let fromEnv = CompileTimeIoMonSrc

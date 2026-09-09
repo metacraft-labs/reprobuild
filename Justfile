@@ -475,6 +475,14 @@ lint:
     # surface it. See the script header for the 268-case incident that
     # motivated it.
     python3 ./scripts/check_vacuous_test_cases.py 2>&1 | tee -a test-logs/lint.log
+    # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
+    # program in its own body instead of declaring a `repro.nim` build edge.
+    # Source scan, no compiler, same class as the two gates above. It does NOT
+    # flag a test for invoking `repro` -- the product runs compilers by design
+    # and M3 says to preserve those tests; see the script header for how the
+    # two are told apart, and scripts/test-body-helper-compilation-dispositions.tsv
+    # for the reviewed baseline.
+    python3 ./scripts/check_test_body_helper_compilation.py 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
 
 format:

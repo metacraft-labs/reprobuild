@@ -1,0 +1,30 @@
+\
+import std/[os, osproc, unittest]
+
+# The second `=`-spelled spelling, with a different switch and a different
+# verb: `check --nimcache=…`. One fixture per switch so that a rule which
+# happened to special-case `out` alone would still leave this one red.
+#
+# Same reasoning as equals_separator_out_body: `{':', '='}` at
+# `codetracer-nim/compiler/commands.nim:140` and :202 makes both spellings
+# valid, so the separator cannot be the discriminator.
+#
+# Also spelled through concatenation so only `nim-compile-verb` can fire.
+
+proc typechecks(body: string): bool =
+  let dir = "build" / "test-tmp" / "synthetic-equals-nimcache"
+  createDir(dir)
+  let path = dir / "probe.nim"
+  writeFile(path, body)
+  let nimExe = findExe("nim")
+  doAssert nimExe.len > 0, "compiler not on PATH"
+  let cmd = quoteShell(nimExe) &
+    " check --nimcache=" & quoteShell(dir / "nc") &
+    " --hints=off " & quoteShell(path)
+  let (output, code) = execCmdEx(cmd)
+  discard output
+  code == 0
+
+suite "synthetic":
+  test "the probe type-checks":
+    check typechecks("let x: int = 1\n")

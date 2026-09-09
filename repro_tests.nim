@@ -13587,6 +13587,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_continuous_benchmarking_policy.py",
   "tests/unit/test_ct_test_surface_addressability.py",
   "tests/unit/test_dev_shell_hook_scope.py",
+  "tests/unit/test_graph_owned_test_artifacts.py",
   "tests/unit/test_package_root_anchor.py",
   "tests/unit/test_reprobuild_suite_inventory.py"
 ]

@@ -1,0 +1,3 @@
+
+let realCmd = "nim c --out:x helper.nim"
+discard execCmdEx(realCmd)

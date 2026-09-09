@@ -18,12 +18,7 @@
 ##   a one-time warning (per codetracer-specs §15.1).
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
-
-const FixtureSrc = currentSourcePath().parentDir() /
-  "fixtures" / "fixture_m4_parity_suite.nim"
-
-proc shimSrcDir(): string =
-  currentSourcePath().parentDir().parentDir() / "src"
+from repro_test_support import ctShimFixturePath, requireBinary
 
 proc workspaceRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -36,13 +31,23 @@ proc workspaceRoot(): string =
     dir = parent
   ""
 
-proc compileFixture(workRoot, outBin: string): bool =
-  let cmd = "nim c --threads:on --hints:off --warnings:off " &
-    "--path:" & quoteShell(shimSrcDir()) & " " &
-    "--nimcache:" & quoteShell(workRoot / "nimcache") & " " &
-    "--out:" & quoteShell(outBin) & " " &
-    quoteShell(FixtureSrc)
-  execCmd(cmd) == 0
+proc placeFixture(outBin: string) =
+  ## Graph-Owned-Test-Artifacts M3: the fixture is BUILT BY THE GRAPH, by edge
+  ## ``reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite`` — the same
+  ## single artifact ``t_ct_test_runner_full_suite_parity`` uses — and declared
+  ## as a typed input on this test's execute edge.
+  ##
+  ## This proc used to be a ``nim c``. The subject here is ct-test-runner's
+  ## ``--partition file:`` selection, so the binary is an input to the
+  ## assertion, not part of it. The copy remains because the runner scans a
+  ## DIRECTORY and each case needs its own scan target under a case-specific
+  ## name; the graph artifact itself is shared and read-only.
+  copyFile(requireBinary(ctShimFixturePath("fixture_m4_parity_suite"),
+    "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite"), outBin)
+  when not defined(windows):
+    var info = getFileInfo(outBin)
+    info.permissions.incl({fpUserExec, fpGroupExec, fpOthersExec})
+    setFilePermissions(outBin, info.permissions)
 
 proc m4RunnerPath(): string =
   let ws = workspaceRoot()
@@ -60,10 +65,7 @@ proc runPartitionFileCase(): bool =
   let tempRoot = createTempDir("ct-test-m4-part-", "")
   defer: removeDir(tempRoot)
   let fixtureBin = tempRoot / addFileExt("t_m4_part_fixture", ExeExt)
-  let okBuild = compileFixture(tempRoot, fixtureBin)
-  check okBuild
-  if not okBuild:
-    return true
+  placeFixture(fixtureBin)
 
   # Pick 3 of the 5 cases. The other 2 must NOT appear in the
   # executed-tests array of the summary.
@@ -149,10 +151,7 @@ proc runPartitionMissingNamesCase(): bool =
   defer: removeDir(tempRoot)
   let fixtureBin = tempRoot / addFileExt("t_m4_part_miss_fixture",
     ExeExt)
-  let okBuild = compileFixture(tempRoot, fixtureBin)
-  check okBuild
-  if not okBuild:
-    return true
+  placeFixture(fixtureBin)
 
   let partitionFile = tempRoot / "partition.txt"
   writeFile(partitionFile, """

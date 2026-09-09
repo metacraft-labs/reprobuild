@@ -1,0 +1,253 @@
+# Graph-Owned-Test-Artifacts M3 -- disposition of every runtime compiler flow
+# THIS DETECTOR FINDS in a declared test source.
+#
+# WHAT "EVERY" MEANS HERE, AND WHAT IT DOES NOT.  The set is exactly what
+# `compiler_invocations` in scripts/reprobuild_suite_inventory.py detects: a
+# static, regex-plus-dataflow scan over test sources.  It is not a claim about
+# every runtime compile that exists.  A flow this detector cannot see is not
+# dispositioned below and is not refused by the gate, and the detector has
+# known blind spots (a compiler reached through a helper in another module; a
+# command assembled across procs; a spelling absent from COMPILER_PATTERNS).
+# Read every count in this file, and the `test_no_test_body_helper_compilation`
+# assertion that consumes it, with that scope attached.
+#
+# THAT SCOPE IS NOT THEORETICAL.  Two spellings walked straight through the
+# patterns until this change: `nim check`, which had no pattern at all, and a
+# compile verb carried in a fragment beginning with a space
+# (`nimExe & " c --compileOnly ..."`), which the verb pattern's anchor
+# excluded -- the repository's most common spelling, not an exotic one.  A
+# third hole sat one layer down: a compiler fragment on a CONTINUATION LINE of
+# an open `execCmdEx(` was matched and then discarded, because the line has no
+# executor token of its own and `let (a, b) =` defeats the assignment tracker.
+# Ten declared test sources hid a real compiler spawn behind those three.
+#
+# A FOURTH was introduced BY THE FIX for the second and caught before it shipped,
+# which is the honest reason to expect more rather than fewer.  Separating nim's
+# switches from this repository's CLI flags was first attempted on PUNCTUATION:
+# `--name:value` for nim, `--name=value` for everything else.  Nim accepts both
+# (codetracer-nim/compiler/commands.nim:140, `elif switch[i] in {':', '='}`), so
+# `" c --out=x"` walked straight through the fix for `" c --out:x"`.  Widening
+# that rule to accept `=` would have been worse than the bug it fixed: 20
+# declared test sources here spell `repro check --mode=...` (31 occurrences across
+# 22 files -- the other two are the CLI's own usage text in
+# libs/repro_cli_support and an imported, non-declared fixture module, neither of
+# which this check scans -- every one the PRODUCT, none a compile) and all 20
+# would have been condemned.  The rule now
+# keys on nim's switch VOCABULARY, extracted from `processSwitch`'s own case
+# block, which holds under either separator and admits neither `--mode` nor
+# `--write-report`.
+#
+# The gate is only as wide as its patterns, so widening them is how the list
+# grows; `TheRatchetHasNoWalkableBypass` in
+# tests/unit/test_graph_owned_test_artifacts.py pins the closed spellings in BOTH
+# directions -- four arms require a real compile to be detected, one requires
+# `repro check --mode=pre-push` NOT to be.  A rule satisfying only one direction
+# is cheap and worthless.
+#
+# Format: <source>\t<verdict>\t<justification>.  Tab-separated, three fields,
+# sorted in C byte order.  Enforced by scripts/check_test_body_helper_compilation.py.
+#
+# PROVENANCE.  Re-derived at reprobuild 64e719c9f (origin/dev merged) from the
+# SOURCE-ONLY inventory benchmarks/reports/reprobuild-suite-m0-inventory-sources.json,
+# rebuilt with `python3 scripts/reprobuild_suite_inventory.py
+# --write-inventory-sources` and byte-identical to the checked-in artifact:
+# 87 records -- 12 classified graph-fixture, 65 integration,
+# 10 platform/destructive.  The audit agrees independently:
+# `python3 scripts/check_test_body_helper_compilation.py --list | wc -l` = 87.
+# The milestone's 63 / 64 / 65 figures are from July 2026 and no longer
+# describe any tree.  The build-dependent reprobuild-suite-m0-inventory.json is
+# stale by construction; do not reconcile against it.
+#
+# 94 is the BEFORE figure and is what this list dispositions: the 87 sources
+# the tree still detects, plus the 7 `graph-owned` sources whose flows this
+# change removed.  Every row below is one of those 94.  The seven stay -- that is the whole
+# point of the `graph-owned` verdict.  It is not a stale-row bug, and the audit
+# knows the difference: a row with any OTHER verdict whose flow has disappeared
+# is reported STALE.
+#
+# (The previous header said 84 / 77 against the pre-fix patterns.  The delta is
+# the ten sources those patterns could not see, not ten new tests.)
+#
+# BUCKET TALLY at the commit above, from the rows below:
+#   product-api 18 | compiler-is-subject 18 | dynamic-source 11
+#   mutated-artifact 4 | optional-host-tool 2 | graph-owned 7
+#   migrate-pending 34
+#
+# THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
+# graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
+# which compiles a checked-in fixture exactly like its four siblings but is
+# labelled `integration` because it also needs the repro binary.  Counted at
+# 64e719c9f against the class field of the source inventory: of the 41 rows now
+# carrying `graph-owned` or `migrate-pending`, exactly ONE is classified
+# graph-fixture; 34 are `integration` and 6 are `platform/destructive`, and 22
+# of those sit under tests/integration/.  Every entry below was read
+# individually.
+#
+# VERDICTS
+#   graph-owned          Migrated: a repro.nim edge builds the artifact and the
+#                        test's execute edge declares it. Re-acquiring a compiler
+#                        spawn is a FAILURE, not a new baseline row.
+#   product-api          The flow is a call into reprobuild's own compilation API.
+#                        The product compiles; that is the subject. M3 says to
+#                        preserve these.
+#   compiler-is-subject  The compiler's own behaviour -- its diagnostics, its
+#                        argv, its timing, or the fact that it ran at all -- is
+#                        what the test asserts.
+#   dynamic-source       The compiled text is generated at run time, so there is
+#                        no static file for an edge to name.
+#   mutated-artifact     The produced binary is destructively rewritten by the
+#                        test; a shared read-only graph output cannot serve.
+#   optional-host-tool   A host-installed packer/installer, not a compiler
+#                        producing a helper binary; the test skips without it.
+#   migrate-pending      ACCEPTED DEBT. This entry should become graph-owned and
+#                        has not been done. Every row says what blocks it.
+#
+# THE APPLIED CRITERION, stated once so it can be checked against the rows:
+# IF THE COMPILED TEXT NEVER VARIES, THE ROW IS migrate-pending, whatever the
+# text is spelled in.  A fixed `const` written verbatim is a checked-in fixture
+# that has not been checked in yet; calling it `dynamic-source` parks migration
+# debt in a KEEP bucket, where it stops being counted.  `dynamic-source` is for
+# text that actually differs run to run -- a host path baked in, a per-index or
+# per-fixture substitution, a template rendered from live data.
+#
+# ELEVEN ROWS WERE MOVED under that criterion (all were `dynamic-source`):
+# t_d6_runner_test_timeout and t_integration_launch_plan_binding_strategies
+# (Nim-only, nothing blocks them but the work);
+# t_integration_provider_fragment_refresh_and_pruning, whose fixture text is a
+# concatenation of module-level consts and whose drift comes from three -d:
+# defines, i.e. three nim.c(defines = ...) edges; and eight whose fixed const
+# is compiled with `cc`, blocked exactly like the three below.
+#
+# STANDING BLOCKER, counted rather than estimated: repro.nim has no C-compiler
+# build edge at all -- every nim.c(...) edge is Nim-only -- so a fixture built
+# with cc/gcc/clang cannot be lifted into the graph today no matter how static
+# its source is. That blocks ELEVEN of the 34 migrate-pending rows:
+#
+#   tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim
+#   tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim
+#   tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim
+#   tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim
+#   tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim
+#   tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim
+#   tests/e2e/watch/t_e2e_repro_watch.nim
+#   tests/integration/t_every_launch_path_is_monitored.nim
+#   tests/integration/t_integration_scheduler_dependency_gathering_policies.nim
+#   tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim
+#   tests/integration/t_stackable_hooks_extracted_process_tree.nim
+#
+# (The first is blocked only in part: its `nim c` half is liftable today, its
+# `clang -c` half is not.) The other twenty-three are blocked on nothing but
+# the work, except t_spec_example_fixtures_compile and
+# t_b0_runquota_repro_nim_compiles, whose rows name their own blockers.
+#
+# NINE of the KEEP rows also compile C, and those are a separate matter -- they
+# WOULD stay KEEP even if a C edge existed: 2 compiler-is-subject (the
+# compile's outcome is the assertion, and one of those compiles must FAIL),
+# 3 dynamic-source, 4 mutated-artifact (the binary is rewritten in place).
+# Two of the three dynamic-source rows substitute into the C text (a host gcc
+# path in t_e2e_codetracer_in_place_project_file, a per-package version in
+# t_e2e_windows_launcher_isolation).  The third,
+# t_e2e_local_reprobuild_project_build, is MIXED and is the one row here whose
+# label fits only part of it: its C fixtures ARE fixed consts, but the file's
+# other flow is a `nim check` over a reprobuild.nim written at run time whose
+# FAILURE is asserted, which no graph edge can express.  Nothing actionable is
+# parked -- its C half is blocked on the missing C edge either way.
+# Derived by re-scanning every row for a C-compiler pattern at 64e719c9f, not
+# estimated: the count is over rows whose DETECTED flows carry a C pattern.
+# (The previous header said seventeen, which counted the eight rows moved above
+# as if they were staying; the revision after it said ten, one too many.)
+
+libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim	graph-owned	Built by edge reprobuild.test_fixtures.ct_shim_fixture_baseline. Its docstring lists 'the binary compiles cleanly' as assertion 1; the graph edge does not drop that assertion, it relocates it -- a fixture that stops compiling fails the edge and the suite cannot run. The remaining assertions are about the binary's stdout shape and exit code.
+libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim	graph-owned	Built by edge reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite, shared with t_ct_test_runner_partition_file_mode. The subject is the pass/fail/skip parity of two RUNNERS over one binary; compiling that binary is materialization. Classified 'integration' by the inventory only because it needs the repro binary -- proof that the class label does not partition migrate from keep.
+libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	graph-owned	Built by edge reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite, shared with the parity test. The subject is ct-test-runner's --partition file: handling, not the compile.
+libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim	graph-owned	Built by edge reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests, shared with t_test_binary_run_one_writes_result_file. The subject is the --list-json protocol document the fixture emits at run time. NOT the trap that spared t_smoke_ct_test_unittest_parallel: that test IMPORTS the shim so its own binary is the artifact under test, whereas this one only executes a separate binary built from a checked-in fixture.
+libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim	graph-owned	Built by edge reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests, shared with t_every_test_binary_speaks_list_json_protocol. Six cases across the two tests previously compiled a private copy each into per-case scratch dirs to stop one case relinking a binary another was executing; one read-only graph artifact removes the race instead of working around it.
+libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim	compiler-is-subject	The compiler's ACCEPT/REJECT verdict is the assertion: probes() (:91) returns six probes carrying mustCompile true/false and the loop (:275) fails when compiled != probe.mustCompile. FOUR OF THE SIX MUST NOT COMPILE, so no build edge can produce them -- an edge that fails is a broken build, not a passing test. Newly detected: the fragment is ' c --threads:on ...' on a continuation line of an open execCmdEx( call (:268-271), which the pre-fix detector matched and then discarded.
+libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim	compiler-is-subject	The compiler's DIAGNOSTIC is the assertion: the helper (:196) runs nim check on a generated interface module and returns (ok, output) so the test can assert a specific REFUSAL message. A graph edge cannot produce an artifact whose compile is required to fail. Newly detected: 'nim check' had no pattern at all before this change.
+libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	optional-host-tool	quoteShell(candle)/quoteShell(light) drive WiX to synthesize an MSI fixture from generated .wxs. The tool is a host-installed installer packer, not a compiler producing a helper binary; the test skips when it is absent, and a graph edge for it could only be expressed with a host-local assumption about where WiX lives.
+libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim	optional-host-tool	quoteShell(iscc) drives the Inno Setup compiler over a generated .iss to synthesize an installer fixture; skips when iscc is off PATH. Same reasoning as t_builtin_adapter_installer.
+libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim	migrate-pending	MIGRATABLE: the compiled text is the fixed const MacroFormFixture, so a checked-in fixture plus a nim.c edge would work. Not done in this pass. One real constraint to carry over: the fixture must sit under the repo root so nim walks up to config.nims for the --path:libs/*/src switches.
+libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim	graph-owned	Built by edge reprobuild.apps.repro-peer-cache-admin -- the SHIPPING app edge (build/bin/repro-peer-cache-admin), not a second test-only build of the same source. apps/repro-peer-cache-admin/repro_peer_cache_admin.nim is listed in apps/entrypoints.txt:52, so a test-bin edge over it would compile one source twice and break the very property M3 establishes. The test body compiled that app source into a temp dir on every run; the subject is the admin CLI's rendered status output against a live metrics endpoint.
+libs/repro_profile_compile/tests/t_smoke_module_imports.nim	product-api	compileProfileBinary is reprobuild's own profile compiler; the test asserts its sibling-module resolution and its CompileFailure diagnostics. The product compiles -- that is the subject.
+libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	product-api	compileProfileToRbpi is the product entry point; the assertions are on its cache fast path and its ProfileCompileError argument validation.
+libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	product-api	compileProfileBinary again; the subject is a Nim template-hygiene regression surfacing as a CompileFailure through the product's pipeline.
+tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim	dynamic-source	The cc compile is a gcc proxy whose source is GccProxySource.replace('@REAL_GCC_PATH@', realGcc) -- host-dependent text with no static file. The repro binary and monitor shim already come from requireBinary.
+tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	product-api	compileFloorProvider is extractInterfaceFromModule + compileProviderBinary.
+tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	product-api	compileFixtureProvider is extractInterfaceFromModule + compileProviderBinary over a provider recipe written per test.
+tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	migrate-pending	MIGRATABLE IN PART: 'nim c --threads:on --out:build/test-bin/hcr_m28_target' on the git-tracked hcr_m28_target.nim is a plain fixture materialization. The OTHER compile in this file -- buildDebugObject's 'clang -c' of a .s written at run time -- must stay, and there is no cc/clang graph edge in repro.nim today.
+tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	migrate-pending	MIGRATABLE: nim c over the git-tracked hcr_m27_target.nim; only post-conditions on the artifact and its stdout are asserted. Not done in this pass.
+tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	migrate-pending	MIGRATABLE: prepareGccProxy (:108) writes the fixed const GccProxySource (:9) verbatim (:113) then cc (:114). No .replace() anywhere in the file, unlike t_e2e_codetracer_in_place_project_file whose proxy bakes in a host gcc path. The repro binary is already requireBinary'd. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
+tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	migrate-pending	MIGRATABLE: same shape -- fixed const GccProxySource (:42) written verbatim (:169) then cc; no substitution in the file. Everything else resolves through requireBinary. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
+tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	migrate-pending	MIGRATABLE: same shape -- fixed const GccProxySource (:35) written verbatim (:158) then cc; no substitution in the file. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
+tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim	migrate-pending	MIGRATABLE: FixtureSource is a fixed const (:21) written verbatim (:260) then cc -pthread (:200) -- no substitution anywhere. The shim and CLI are already requireBinary'd. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
+tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim	dynamic-source	The DLL fixtures are per-package: FixtureDllSourceTemplate.replace('$VERSION', version) then gcc -shared. NOTE the migratable half: compileWindowsLauncher nim c's the tracked apps/repro-launcher/repro_launcher.nim at four call sites; that source is absent from apps/entrypoints.txt and has no graph edge.
+tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	dynamic-source	writeMonitorFixtureTool / writeM52StdlibFixtureTools cc const C strings into a per-test bin dir, and one nim check deliberately asserts a compile FAILURE on a run-time-written reprobuild.nim.
+tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim	product-api	compileAndAdaptHomeProfile feeding opts.preLoadedProfile; the subject is the byte-identical stow target being a cache hit.
+tests/e2e/m83/t_e2e_phase_g_action_edges.nim	migrate-pending	MIGRATABLE, arguably: compileAndRun nim c's a tracked tests/fixtures/m83 source. The macro expansion is close to being the subject, and the file's ETXTBSY note requires a per-case output path, so a graph edge has to keep per-case outputs or prove the shared one is safe.
+tests/e2e/m83/t_e2e_profile_modules.nim	product-api	Six compileProfileToRbpi calls; the docstring names it 'the production library entry point'.
+tests/e2e/m83/t_e2e_repro_profile_compile.nim	migrate-pending	MIGRATABLE IN PART: compileAndRun over seven tracked tests/fixtures/m83 sources. One of them, home_compile_fail.nim, asserts a compile FAILURE and must stay out of the graph -- a graph edge that fails is a broken build, not a passing test.
+tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim	product-api	Drives compileProfileToRbpi across cache miss/hit/force/failure plus the repro __repro-compile-profile helper subcommand.
+tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim	migrate-pending	MIGRATABLE: FixtureSource is a fixed const (:7) written verbatim (:227) then cc -pthread (:175). The shim and CLI are already requireBinary'd. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
+tests/e2e/path-only/t_path_only_tool_interfaces.nim	migrate-pending	MIGRATABLE: requireSuccess(@['nim','c',...,'--out:'&reproBin, apps/repro/repro.nim]) rebuilds the CLI that edge reprobuild.apps.repro already produces. Every other suite reaches it through requireBinary. Not done in this pass.
+tests/e2e/watch/t_e2e_repro_watch.nim	migrate-pending	MIGRATABLE: GccProxySource (:7) and StylusFixtureSource (:47) are fixed consts written verbatim (:733, :739) then cc; no .replace() in the file. compilePublicReproTestBin is already a requireBinary stub. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
+tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim	compiler-is-subject	Its own docstring: 'this test compiles fixture recipes with nim c rather than calling a proc: the behaviour under test IS the compile'. Assertion 1 is a compile FAILURE.
+tests/integration/t_b0_runquota_repro_nim_compiles.nim	migrate-pending	MIGRATABLE in principle, same shape as t_spec_example_fixtures_compile: a tracked file, nim check'ed (:85-:103) for a bare exit-0. TWO BLOCKERS, both named: (1) the source is ../runquota/repro.nim, in a SIBLING repo resolved at run time by requireRunQuotaSourceRoot, and repro.nim edges name repo-relative sources -- this needs the cross-repo source-consumption path; (2) no type-check-only edge kind exists. The file's second assertion (substring checks on the package/executable/library shape) is deliberately syntactic and is unaffected either way. Newly detected: the argv form '"nim", "check",' (:85).
+tests/integration/t_compiler_scratch_isolation.nim	product-api	Concurrent compileProviderBinary + extractInterfaceFromModule; the subject is the product's scratch/CWD allocation under concurrency.
+tests/integration/t_d6_runner_test_timeout.nim	migrate-pending	MIGRATABLE: FixtureSource and ProgressFixtureSource are fixed consts and writeFile(fixtureSrc, source) (:109) writes one of them verbatim -- zero substitution -- before nim c (:113). Nim-only, so nothing blocks it but the work. Carry over one real constraint: the artifact is a 60s sleeper that must never land in the runner-scanned build/test-bin, which is the problem CtShimFixtureDir (build/test-fixtures/) already solves for the ct-shim fixtures.
+tests/integration/t_dev_env_artifact.nim	product-api	extractInterfaceFromModule + compileProviderBinary over a provider written per test.
+tests/integration/t_e2e_cross_compilation_aarch64.nim	compiler-is-subject	Executes the resolved Toolchain.compile/link argv the cross adapter produced and checks the resulting ELF; skips when no aarch64 probe resolves. The argv IS the assertion.
+tests/integration/t_e2e_selectable_toolchain_fixture.nim	migrate-pending	MIGRATABLE: ProbeSrcTemplate.replace('@ROOT@', root) + nim c is byte-for-byte the shape already migrated as reprobuild.test_fixtures.variant_feature_flag_probe. @ROOT@ exists only to make the fixture's import resolve, which a checked-in probe does not need.
+tests/integration/t_every_launch_path_is_monitored.nim	migrate-pending	MIGRATABLE: FixtureSource is a fixed const (:435) written verbatim (:2440) then cc (:1317). That the fixture exists to be OBSERVED by io-mon does not make its text dynamic -- a graph-built binary is observed the same way. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
+tests/integration/t_executed_binary_is_a_recorded_input.nim	mutated-artifact	compileHelper rebuilds the helper IN PLACE with -DGEN=<n> for new bytes and a new mtime; the in-place swap is the experiment, so a shared read-only graph output cannot serve.
+tests/integration/t_ext_test_execution_rows.nim	dynamic-source	Fixture suites are written from triple-quoted strings that themselves contain 'import ct_test_unittest_parallel' -- the embedded-fixture trap. They are deliberately failing / memory-hungry binaries that must not enter the graph or build/test-bin.
+tests/integration/t_extension_type_lifted_and_consumed.nim	dynamic-source	The lift is extractInterfaceFromModule; the three nim c calls compile marshaller/consumer sources written into a per-pid scratch dir that import the JUST-LIFTED stub, so no static source exists.
+tests/integration/t_installed_engine_read_only_source_tree.nim	compiler-is-subject	The compiler's behaviour against a genuinely read-only source tree is the subject -- the defect this pins is an OSError unwinding out of the Nim VM. compileConsumer (:193) is asserted BOTH ways: compiled.ok (:253) and 'not compiled.ok' (:308). A required compile failure cannot be a build edge. Newly detected: ' c --compileOnly' after quoteShell(nimExe) (:198).
+tests/integration/t_integration_cross_compilation_fixture_compiles.nim	migrate-pending	MIGRATABLE: same ProbeSrcTemplate.replace('@ROOT@', root) + nim c shape as t_e2e_selectable_toolchain_fixture. The run-time variance is putEnv('REPRO_VARIANTS', ...) at EXEC time, not at compile time.
+tests/integration/t_integration_launch_plan_binding_strategies.nim	migrate-pending	MIGRATABLE, both halves, and neither needs C. The fixture exe is a fixed 3-line literal written at :413 with no substitution and compiled at :420; compileWindowsLauncher (:325, called at :353 and :450) nim c's the TRACKED apps/repro-launcher/repro_launcher.nim, which has no graph edge. Formerly dynamic-source on the strength of the word 'inline', but inline text that never varies is a checked-in fixture that has not been checked in.
+tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim	migrate-pending	MOVED DELIBERATELY, and the previous justification was accurate -- only the bucket was wrong. writeFixtureProvider (:38) concatenates seven MODULE-LEVEL CONSTS (:9-15), so the rendered text is invariant; the drift comes from compiling that one invariant source three times (:230, :304, :320) under different -d: defines. That is not 'text generated at run time', it is three build variants, which nim.c(defines = ...) expresses directly -- so a checked-in fixture plus three edges would work. Nim-only; nothing blocks it but the work.
+tests/integration/t_integration_reprobuild_sessions_share_runquota.nim	migrate-pending	MIGRATABLE: writeTimingHelper's text is invariant, so checking it in and adding a test_helpers nim.c edge would work. The strongest remaining candidate in the e2e/integration set. Not done in this pass.
+tests/integration/t_integration_scheduler_dependency_gathering_policies.nim	migrate-pending	MIGRATABLE: FixtureSource is a fixed const (:17) written verbatim (:406, :493) then cc (:139), run under the graph-built shim and CLI (both already requireBinary'd). BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
+tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	migrate-pending	MIGRATABLE: runNim compiles the checked-in tests/fixtures/l3-build-block-publish/runner.nim with -d:reproProviderMode purely to run it for its stdout rows. Needs the define on the edge. Not done in this pass.
+tests/integration/t_library_load_evidence_is_recorded.nim	mutated-artifact	compileLibrary rebuilds libgreet.so IN PLACE with a different -DGREET_VALUE mid-test as the stimulus; a real DT_NEEDED link is part of the subject.
+tests/integration/t_m20_second_runner_generic_layer.nim	dynamic-source	writeCtFixture bakes a temp counter path into the fixture source via .replace('$COUNTER', counterPath), so no static file exists.
+tests/integration/t_m21_point_in_time_queries.nim	dynamic-source	writeFixture templates $SUITE/$TEST/$BODY per fixture across five stems plus a run-time-generated slow fixture.
+tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim	compiler-is-subject	What the compiler prints at MACRO-EXPANSION time is the assertion: the probe is compiled under a deliberately hermetic PATH (:226) and the test asserts the framed payload contains 'Nim Compiler Version' and not 'command not found' -- i.e. that the compile-time shell-out worked without a shell on PATH. The probe source is ProbeTemplate with @DIR@/@CMD@ substituted from run-time temp paths (:213-215). Newly detected: ' c --hints:off' after quoteShell(nimExe) (:220).
+tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim	migrate-pending	MIGRATABLE: const FixtureSource is fixed and the subject is a corrupted .iomon file, not the compile. Blocked on the absence of a C build edge in repro.nim -- see the note in the M3 report.
+tests/integration/t_platforms_form_diagnostics.nim	compiler-is-subject	compileFixture runs nim c --compileOnly and the test asserts on the DIAGNOSTIC text (check output.contains("undeclared identifier: 'windwos'")); sources also vary per case.
+tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	compiler-is-subject	No helper is built: a real driver is spliced into a repro.nim and the assertion is that it survives running under LD_PRELOAD=<shim>. Launching a compiler under the shim IS the assertion.
+tests/integration/t_project_interface_artifact_import_modes.nim	compiler-is-subject	Both flows are present and the SPAWN is the assertion: compileProviderBinary builds the artifact, then the test runs `nim check` on a thin consumer (requireNimSuccess) and on a consumer reaching a private symbol (requireNimFailure, asserting "undeclared identifier: privateImplementationSalt"). Whether the compile succeeds or fails is what proves the interface artifact hides what it should. Recorded as product-api first; the audit's product-api/spawn cross-check refused that and was right.
+tests/integration/t_protocol_document_survives_suite_body_echo.nim	migrate-pending	MIGRATABLE: buildFixture compiles the checked-in tests/fixtures/protocol-echo/t_fixture_echoing_suite_body.nim. Constraint to carry over: the binary must land outside build/test-bin, which the suite inventory enumerates.
+tests/integration/t_provider_file_driven_fanout_cleanup.nim	migrate-pending	MIGRATABLE: writeFixtureProvider writes a fixed inline provider with no substitution, then a plain nim c. The fan-out subject is the timeline DATA file, which the test keeps rewriting; the provider source does not change.
+tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	compiler-is-subject	providerLibraryCompileActionKey / providerLibraryCompileCommand are the APIs under test (check keyShared != keyStandalone) and the test then EXECUTES the argv they produced. Spawning nim with that argv is how the computed command is proved to work, so the compiler invocation is the assertion rather than a helper build.
+tests/integration/t_provisioning_contributions.nim	dynamic-source	The compiled probe imports catalog_interface.nim, which writeNimInterfaceStub(stub, artifact) (:62) emits at run time from a LIVE artifact obtained by artifactFromRegisteredDsl(currentSourcePath()); the test first asserts the emitted text contains the contributor and canonical strings, then compiles it (:74) to prove the emission is valid Nim. There is no static file for an edge to name, and the stub's content is derived from this module's own DSL registration. Newly detected: the 'nim c' fragment sits on a continuation line of an open execCmdEx( (:73-77).
+tests/integration/t_repro_test_runner_aggregate_exit_code.nim	dynamic-source	writeFixtureSource(path, idx, shouldFail) picks one of two bodies and substitutes $IDX across N generated variants.
+tests/integration/t_repro_test_runner_catalog_selection.nim	dynamic-source	fixtureSource('10')/('11')/('5 + 5') re-render FixtureTemplate -- EDITING THE BODY IS THE STIMULUS ('changed body => selected'). Two sub-parts (a clingo smoke fixture and one fixed inline nohash fixture) are migratable; the file as a whole is not.
+tests/integration/t_repro_test_runner_consumes_result_document.nim	migrate-pending	MIGRATABLE: three fixed consts whose only substitution is another const. Rendered text never varies.
+tests/integration/t_repro_test_runner_counts_whole_binary_skips.nim	migrate-pending	MIGRATABLE: renderFixture substitutes only from compile-time consts, so both fixtures render to fixed text.
+tests/integration/t_repro_test_runner_parallel_n_workers.nim	dynamic-source	writeFixtureSource substitutes $IDX into the suite name for NumFixtures = 12 copies; mechanically enumerable but currently per-index generated.
+tests/integration/t_repro_test_runner_process_group_cleanup.nim	migrate-pending	MIGRATABLE: both FixtureSource and ProtocolRefusalFixtureSource are fixed consts written verbatim.
+tests/integration/t_repro_test_runner_reporting_contract.nim	migrate-pending	MIGRATABLE: three fixed consts; buildAndRun writes them with no substitution.
+tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim	migrate-pending	MIGRATABLE: a single fixed const written verbatim -- the cleanest remaining migration in the suite.
+tests/integration/t_rp1_provider_compile_edge_materializes.nim	product-api	extractInterfaceFromModule plus two compileProviderBinary calls; the assertion is the cache HIT and ProviderCompileActionKey stability.
+tests/integration/t_rp2_provider_session_invoke.nim	product-api	The provider is compiled by the RP1 edge (compileProviderBinary); the session handshake is asserted over that product-built binary.
+tests/integration/t_rp3_bind_deps_and_sharing.nim	product-api	Three providers built through compileProviderBinary after extractInterfaceFromModule.
+tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim	compiler-is-subject	The compiler's verdict is the assertion in BOTH directions: compileConsumer (:172) nim check's a generated driver-free consumer and the test asserts good.ok (:253) and newBind.ok (:273) but also 'not staleBind.ok' (:277) -- a required compile FAILURE. The consumer text is generated per run (nonce in the filename, accessorSrc emitted by the RP5a path), so there is no static file either. Newly detected: ' check --hints:off' on a continuation line of an open execCmdEx( (:191-192).
+tests/integration/t_rp5b_resource_driver_via_protocol.nim	product-api	compileProviderBinary with the interface fingerprint; driver ops then run over the protocol in that binary.
+tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim	compiler-is-subject	The RP8 capability under test IS a nim check pass: a green check PROVES the exec-free interface path because nim check cannot run staticExec, and a reference to a non-existent public symbol must fail the check (falsifiability arm). The cold nim c --compileOnly (:208) exists so the test can grep the EMITTED C for the producer's private driver symbols -- the compiler's output is the evidence. The consumer repro.nim is generated per run by consumerRepro(). Newly detected: ' c --compileOnly' after nimExe (:208).
+tests/integration/t_run_consumes_opaque_out_of_tree.nim	product-api	compileProviderBinary; the out-of-tree provider must be PRODUCT-compiled so its codec is not linked in-process.
+tests/integration/t_run_consumes_session_store_out_of_tree.nim	product-api	Same shape as t_run_consumes_opaque_out_of_tree, for the session store.
+tests/integration/t_run_edge_session_resolver_auto.nim	product-api	Same shape; the auto-built session resolver is the subject.
+tests/integration/t_runner_cpu_progress_liveness.nim	migrate-pending	MIGRATABLE: three fixture consts interpolating only a compile-time const. The nimcache-collision comment in its own compileFixture is itself an argument for graph ownership.
+tests/integration/t_runner_progress_visibility.nim	migrate-pending	MIGRATABLE: writeSlowFixture and writeFailingFixture each write a fixed triple-quoted source with no substitution.
+tests/integration/t_spec_example_fixtures_compile.nim	migrate-pending	MIGRATABLE and NOT compiler-is-subject: the compiled files are CHECKED-IN (tests/fixtures/spec-examples/*/repro.nim), the assertion is a bare exit-0 with no diagnostic content and no falsifiability arm, and by M3's own reasoning for the ct-shim fixtures a graph edge does not drop a 'it compiles' assertion, it relocates it. BLOCKER, named rather than argued away: repro.nim has no type-check-only edge kind, and a nim.c edge would additionally require codegen and link of a spec-example recipe -- a different and stronger bar than the M1 scope this file states in its header, so the migration needs that scope decision first. Newly detected: 'nim check' had no pattern at all (:30).
+tests/integration/t_stackable_hooks_extracted_process_tree.nim	migrate-pending	MIGRATABLE: four fixed r-string consts compiled with cc -pthread. This file ALREADY migrated its monitor shim to edge reprobuild.test_fixtures.monitor_shim, which is the precedent. Blocked on the absence of a C build edge; repro.nim's own comment names this test as the intended M3 target.
+tests/integration/t_ti1_interface_artifact_edge.nim	product-api	liftInterfaceArtifact cold/warm/after-edit; the lift edge's caching is the assertion.
+tests/integration/t_ti2_separate_module_producer.nim	compiler-is-subject	compileConsumer's nim check vs nim c is load-bearing: staticExec runs only under nim c, and the test reads countWitness to prove which path the COMPILE took.
+tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	compiler-is-subject	Same mechanism, stated in the file: 'a consumer that type-checks under nim check PROVES it took the exec-free TI2 fast path'.
+tests/integration/t_ti3_fingerprint_split.nim	compiler-is-subject	liftInterfaceArtifact drives the fingerprint split, but the consumer is compiled as a subprocess with `nim check` vs `nim c --compileOnly` chosen per case: nim check cannot run staticExec, so a green check PROVES the consumer took the exec-free VM readFile fast path. The compiler MODE is the measurement. Recorded as product-api first; the audit refused it.
+tests/unit/t_hcr_watch_inference.nim	compiler-is-subject	Compiles OldSource, runs the inference, then OVERWRITES the same source and object paths with NewSource and recompiles: the edit-and-recompile is the stimulus the watch inference is asked about.
+tests/unit/t_m9r13a_provider_compile_sharing.nim	compiler-is-subject	compileWithMeasuredCpu times the compile and the test asserts on the RATIO between a shared and an unshared nimcache. The compiler invocation is the instrument; a cached graph artifact would measure nothing.
+tests/unit/t_m9r14f_2_rpath_patching.nim	mutated-artifact	Builds a tiny libfoo.so and main in a scratch dir precisely so patchelf --set-rpath can destructively rewrite them and the test can compare rpath before and after. A shared graph output must not be mutated in place.
+tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim	mutated-artifact	Same shape: synthetic ELFs built to be rewritten by patchelf, with the dangling-vs-real rpath entries as the assertion.
+tests/unit/t_windows_system_hash_mode.nim	compiler-is-subject	The compiler's DIAGNOSTIC OUTPUT is the assertion: the same fixture is nim check'ed twice (:106, :142) cross-targeting --os:windows --cpu:amd64 under REPROBUILD_USE_SYSTEM_HASH_LIBS 0 and 1, and the test asserts which sources the compiler resolved by what its output does and does not name (references/mold notin output). nim check produces NO artifact, so there is nothing for an edge to output, and one source under two env values is two compiler runs by construction. Newly detected: the argv form '"nim", "check",' -- 'check' was absent from the verb alternation.
+tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	graph-owned	Built by edge reprobuild.test_helpers.repro_catalog_harvester. ensureHarvesterBuilt compiled a shipping tool source on demand 'so the test runner does not depend on an external build orchestration step' -- exactly the reasoning M3 retires, since the build orchestration step is the graph.

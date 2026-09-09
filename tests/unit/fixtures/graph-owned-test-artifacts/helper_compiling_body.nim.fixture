@@ -1,0 +1,18 @@
+\
+import std/[os, osproc, unittest]
+
+const helperSource = currentSourcePath().parentDir() / "helper.nim"
+
+proc buildHelper(): string =
+  let outputPath = "build" / "test-tmp" / "helper"
+  let cmd = "nim c --hints:off --out:" & outputPath.quoteShell() &
+    " " & helperSource.quoteShell()
+  let (output, exitCode) = execCmdEx(cmd)
+  if exitCode != 0:
+    raise newException(IOError, output)
+  outputPath
+
+suite "synthetic":
+  test "runs the helper":
+    let binary = buildHelper()
+    check execCmdEx(binary).exitCode == 0

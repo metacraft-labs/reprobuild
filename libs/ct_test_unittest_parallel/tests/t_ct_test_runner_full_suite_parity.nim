@@ -15,12 +15,7 @@
 ## meaningful only when both have been built.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
-
-const FixtureSrc = currentSourcePath().parentDir() /
-  "fixtures" / "fixture_m4_parity_suite.nim"
-
-proc shimSrcDir(): string =
-  currentSourcePath().parentDir().parentDir() / "src"
+from repro_test_support import ctShimFixturePath, requireBinary
 
 proc repoRoot(): string =
   ## Walk up from libs/ct_test_unittest_parallel/tests/ until we find the
@@ -34,14 +29,6 @@ proc repoRoot(): string =
       break
     dir = parent
   ""
-
-proc compileFixture(workRoot, outBin: string): bool =
-  let cmd = "nim c --threads:on --hints:off --warnings:off " &
-    "--path:" & quoteShell(shimSrcDir()) & " " &
-    "--nimcache:" & quoteShell(workRoot / "nimcache") & " " &
-    "--out:" & quoteShell(outBin) & " " &
-    quoteShell(FixtureSrc)
-  execCmd(cmd) == 0
 
 proc copyBinaryAs(src, dst: string) =
   copyFile(src, dst)
@@ -96,14 +83,19 @@ proc runParityCase(): bool =
   let tempRoot = createTempDir("ct-test-m4-parity-", "")
   defer: removeDir(tempRoot)
 
-  # Build the fixture once, then mirror it into separate bin
-  # directories so each runner has its own scan target (and the
-  # M3 runner's exclude-list-against-itself doesn't interfere).
+  # Graph-Owned-Test-Artifacts M3: the fixture is BUILT BY THE GRAPH, by edge
+  # ``reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite`` (shared with
+  # ``t_ct_test_runner_partition_file_mode``) and declared as a typed input on
+  # this test's execute edge. What is asserted here is that TWO RUNNERS report
+  # the same pass/fail/skip totals over one binary; producing that binary was
+  # never part of the assertion, so lifting the ``nim c`` out loses nothing.
+  #
+  # It is still COPIED into the temp tree under the name the runners scan for,
+  # because the graph artifact is a shared read-only file and each runner needs
+  # its own scan directory (the M3 runner excludes itself by name).
   let fixtureBin = tempRoot / addFileExt("t_m4_parity_fixture", ExeExt)
-  let okBuild = compileFixture(tempRoot, fixtureBin)
-  check okBuild
-  if not okBuild:
-    return true   # ran (fixture build attempted); check already failed
+  copyBinaryAs(requireBinary(ctShimFixturePath("fixture_m4_parity_suite"),
+    "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite"), fixtureBin)
 
   let binDirM3 = tempRoot / "bin-m3"
   let binDirM4 = tempRoot / "bin-m4"

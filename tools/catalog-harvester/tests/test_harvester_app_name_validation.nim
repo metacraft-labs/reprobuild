@@ -32,30 +32,34 @@
 ## the contract we're regression-testing.
 
 import std/[os, osproc, strutils, unittest]
+from repro_test_support import graphArtifactPath, requireBinary
 
-# Use ExeExt so we resolve to ``repro_catalog_harvester`` on POSIX and
-# ``repro_catalog_harvester.exe`` on Windows. The pre-portability shape
-# of this constant hardcoded ``.exe`` and broke ``just test`` on Linux.
-const HarvesterExe = currentSourcePath.parentDir.parentDir /
-  ("repro_catalog_harvester" & ExeExt)
-
-const HarvesterSrc = currentSourcePath.parentDir.parentDir /
-  "repro_catalog_harvester.nim"
+# Graph-Owned-Test-Artifacts M3: the harvester binary is BUILT BY THE GRAPH.
+#
+# ``ensureHarvesterBuilt`` used to run ``nim c`` on demand, justified as
+# building "so the test runner does not depend on an external build
+# orchestration step". That is exactly the reasoning M3 retires: the build
+# orchestration step IS the graph, and an on-demand compile inside a test body
+# is an undeclared input that nothing invalidates. Worse, the old shape
+# returned early whenever the binary already existed — so a stale binary from
+# a previous checkout was silently accepted and the test asserted against code
+# that was no longer in the tree.
+#
+# Edge ``reprobuild.test_helpers.repro_catalog_harvester`` now owns it, and the
+# path is declared as a typed input on this test's execute edge
+# (``testFixtureArtifacts`` in ``repro.nim``), so a change to the harvester
+# source re-runs this test instead of being served from cache.
+#
+# ``ExeExt`` is preserved: the graph edge writes ``….exe`` on Windows.
+const HarvesterRelative = "build/test-bin/repro_catalog_harvester"
 
 const FixturesDir = currentSourcePath.parentDir / "fixtures"
 
+let HarvesterExe = graphArtifactPath(
+  HarvesterRelative.addFileExt(ExeExt))
+
 proc ensureHarvesterBuilt() =
-  ## Build the harvester binary on demand so the test runner does not
-  ## depend on an external build orchestration step. Skipped when an
-  ## existing binary is already at ``HarvesterExe``.
-  if fileExists(HarvesterExe):
-    return
-  let cmd = "nim c --hints:off --verbosity:0 --out:" & quoteShell(HarvesterExe) &
-    " " & quoteShell(HarvesterSrc)
-  let (output, rc) = execCmdEx(cmd, options = {poStdErrToStdOut})
-  if rc != 0:
-    raise newException(IOError,
-      "could not build " & HarvesterExe & " for tests: " & output)
+  requireBinary(HarvesterExe, "reprobuild.test_helpers.repro_catalog_harvester")
 
 proc runHarvester(args: openArray[string]): tuple[rc: int; output: string] =
   ## Spawn the harvester binary with ``args``, merging stderr into

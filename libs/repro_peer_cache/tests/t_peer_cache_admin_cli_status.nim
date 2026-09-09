@@ -13,6 +13,7 @@ import std/[asyncdispatch, nativesockets, net, options, os, osproc,
             strutils, unittest]
 
 import repro_peer_cache
+from repro_test_support import graphArtifactPath, requireBinary
 
 const
   PollIntervalMs = 25
@@ -33,22 +34,11 @@ proc pickEphemeralPort(): int =
   s.bindAddr(Port(0), "127.0.0.1")
   result = int(getLocalAddr(s.getFd(), Domain.AF_INET)[1])
 
-proc repoRoot(): string =
-  ## Walks up from the test binary's directory until we find an
-  ## `apps/repro-peer-cache-admin` neighbour. The tests run from
-  ## `libs/repro_peer_cache/tests/` so the walk is short.
-  var dir = getCurrentDir()
-  # Resolve based on the source file location instead; this is more
-  # reliable when CI invokes the binary from a non-standard cwd.
-  let here = currentSourcePath().parentDir()
-  var d = here
-  for _ in 0 ..< 6:
-    if dirExists(d / "apps" / "repro-peer-cache-admin"):
-      return d
-    d = d.parentDir()
-    if d.len == 0: break
-  raise newException(OSError,
-    "could not locate repo root from " & here)
+# ``repoRoot()`` used to live here: a six-level walk upwards looking for an
+# ``apps/repro-peer-cache-admin`` neighbour, whose only purpose was to feed the
+# ad-hoc ``nim c`` this file no longer runs. ``graphArtifactPath`` resolves the
+# graph-built binary against ``ReprobuildRepoRoot`` instead, which is derived
+# once, in one place, from the checkout that contains the test-support source.
 
 suite "peer-cache M4 admin CLI status":
   test "status sub-command prints active-peer count and pool stats":
@@ -83,19 +73,30 @@ suite "peer-cache M4 admin CLI status":
     defer: server.close()
     pumpDispatcher(200)
 
-    # 3. Locate + build the admin CLI binary.
-    let root = repoRoot()
-    let src = root / "apps" / "repro-peer-cache-admin" /
-              "repro_peer_cache_admin.nim"
+    # 3. Resolve the graph-built admin CLI binary.
+    #
+    # Graph-Owned-Test-Artifacts M3: this block used to run ``nim c`` on
+    # ``apps/repro-peer-cache-admin/repro_peer_cache_admin.nim`` into a temp
+    # directory, on every run of every case. It is now resolved from the
+    # SHIPPING app binary — the source is an entrypoint in
+    # ``apps/entrypoints.txt`` and edge ``reprobuild.apps.repro-peer-cache-admin``
+    # already builds it as ``build/bin/repro-peer-cache-admin`` — declared as a
+    # typed input on this test's execute edge (``testFixtureArtifacts`` in
+    # ``repro.nim``), so a change to the admin CLI re-runs this test rather
+    # than being recompiled underneath it.
+    #
+    # Deliberately the app edge and not a test-only copy: a second edge over
+    # the same source would build it twice, which is the property M3 exists to
+    # remove. The binary a user ships is the binary this test exercises.
+    #
+    # The subject was never the compile: it is the text the admin CLI renders
+    # from a live metrics endpoint.
+    let binPath = requireBinary(
+      graphArtifactPath("build/bin/repro-peer-cache-admin".addFileExt(
+        ExeExt)),
+      "reprobuild.apps.repro-peer-cache-admin")
     let binDir = getTempDir() / "t_peer_cache_admin_cli"
     createDir(binDir)
-    let binPath = binDir / "repro_peer_cache_admin_under_test"
-    let libPath = root / "libs" / "repro_peer_cache" / "src"
-    let compileCmd = "nim c --hints:off --path:" & libPath &
-                     " -o:" & binPath & " " & src
-    let compileResult = execCmdEx(compileCmd)
-    check compileResult.exitCode == 0
-    check fileExists(binPath)
 
     # 4. Run admin subcommands. The server lives on the test's
     # dispatcher; we run the child with stdout/stderr redirected to a
