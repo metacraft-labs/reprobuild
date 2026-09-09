@@ -154,6 +154,20 @@ proc seedManifestGitLayer(gitBin, manifestsRoot, bare: string; branch = "main") 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-ra25-sync-" & slug & "-", "")
   result.reproBin = reproBinary()
+  # HERMETICITY: the managed hooks this fixture installs are SELF-REPAIRING —
+  # a `git commit` here fires `post-commit`, which re-runs `hooks ensure` and
+  # rewrites every hook to the canonical content of whichever `repro` it
+  # resolves. That resolution prefers ``REPROBUILD_REPRO`` and falls back to
+  # PATH, so without this the ambient (installed, possibly older) `repro`
+  # silently rewrites the fixture's hooks mid-test. The push under test then
+  # meets hooks written by a DIFFERENT binary and stops at `hook-preflight`
+  # with "installed Reprobuild pre-push hooks are old or partially upgraded",
+  # long before it reaches the sync behaviour these cases are about.
+  #
+  # Exported for the whole process, not just the push invocation: the rewrite
+  # is triggered by the fixture's own plain `git` calls, which `invokePush`'s
+  # per-command environment never covers.
+  putEnv("REPROBUILD_REPRO", result.reproBin)
   result.appOrigin = result.scratch / "origin-app.git"
   discard seedGitOrigin(gitBin, result.appOrigin,
     result.scratch / "seed-app", "README.md")
