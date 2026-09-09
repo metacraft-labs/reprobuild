@@ -38,9 +38,10 @@
 ##      with the same RPATH layout the script produces, verify
 ##      ``patchelf --print-rpath`` matches.
 
-import std/[os, osproc, streams, strutils, tempfiles, unittest]
+import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_project_dsl
+import repro_project_dsl/install_mirror_resolver
 import repro_dsl_stdlib/types/package_result
 
 suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
@@ -160,6 +161,193 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
     check script.contains("'*.so*'")
 
   when defined(linux):
+    test "linux_preserves_prelinked_libc_from_matching_link_directory":
+      let patchelfPath = findExe("patchelf")
+      let ccPath =
+        if findExe("cc").len > 0: findExe("cc")
+        elif findExe("gcc").len > 0: findExe("gcc")
+        else: ""
+      if patchelfPath.len == 0 or ccPath.len == 0:
+        skip()
+      else:
+        let scratch = createTempDir("repro-linked-libc-", "")
+        defer: removeDir(scratch)
+        let fixtureEnv = newStringTable(modeCaseSensitive)
+        for key, value in envPairs():
+          if key notin ["LIBRARY_PATH", "LD_LIBRARY_PATH"]:
+            fixtureEnv[key] = value
+
+        proc runTool(command: string; args: openArray[string]):
+            tuple[output: string, exitCode: int] =
+          let child = startProcess(command, args = args, env = fixtureEnv,
+            options = {poUsePath, poStdErrToStdOut})
+          result.output = child.outputStream.readAll()
+          result.exitCode = child.waitForExit()
+          child.close()
+
+        let mirrorUsr = scratch / "consumer" / "install" / "usr"
+        let mirrorMain = mirrorUsr / "bin" / "main"
+        let runtimeLib = scratch / "external-catalog" / "glibc" /
+          ".repro" / "output" / "install" / "usr" / "lib64"
+        let decoyLib = scratch / "decoy" / "usr" / "lib64"
+        let declaredRuntime = scratch / "declared-runtime"
+        let manifest = parentDir(mirrorUsr) / m9r30PropagatedManifestName
+        createDir(mirrorUsr / "bin")
+        createDir(runtimeLib)
+        createDir(decoyLib)
+        createSymlink(runtimeLib, declaredRuntime)
+        writeFile(scratch / "main.c", "#include <math.h>\n" &
+          "int main(void) { volatile double x = 0.5; double y = cos(x); " &
+          "return !(y > 0.87 && y < 0.88); }\n")
+        let compileResult = runTool(ccPath,
+          @["-fno-builtin", "-o", mirrorMain, scratch / "main.c", "-lm"])
+        checkpoint compileResult.output
+        require compileResult.exitCode == 0
+        let interpreter = runTool(patchelfPath,
+          @["--print-interpreter", mirrorMain])
+        require interpreter.exitCode == 0
+        let originalLoader = interpreter.output.strip()
+        require fileExists(originalLoader)
+        let originalClosure = runTool(originalLoader,
+          @["--inhibit-cache", "--list", mirrorMain])
+        checkpoint originalClosure.output
+        require originalClosure.exitCode == 0
+
+        # Resolve libraries with this ELF's own loader, never host ldd.
+        for soname in ["libc.so.6", "libm.so.6"]:
+          var sourceLibrary = ""
+          for line in originalClosure.output.splitLines():
+            let fields = line.splitWhitespace()
+            if fields.len >= 3 and fields[0] == soname and fields[1] == "=>":
+              sourceLibrary = fields[2]
+          require sourceLibrary.isAbsolute and fileExists(sourceLibrary)
+          copyFileWithPermissions(sourceLibrary, runtimeLib / soname)
+          copyFileWithPermissions(sourceLibrary, decoyLib / soname)
+        let sourceLoader = runtimeLib / extractFilename(originalLoader)
+        copyFileWithPermissions(originalLoader, sourceLoader)
+        copyFileWithPermissions(originalLoader,
+          decoyLib / extractFilename(originalLoader))
+        require not dirExists(parentDir(runtimeLib) / "lib")
+        require runTool(patchelfPath, @["--set-interpreter", sourceLoader,
+          "--remove-rpath", "--no-default-lib", mirrorMain]).exitCode == 0
+        require runTool(patchelfPath,
+          @["--print-rpath", mirrorMain]).output.strip().len == 0
+
+        let declaredTools = scratch / "declared-tools"
+        createDir(declaredTools)
+        for toolName in typedInstallMirrorShellTools("plain"):
+          let toolPath = findExe(toolName)
+          require toolPath.len > 0
+          createSymlink(toolPath, declaredTools / toolName)
+        fixtureEnv["PATH"] = declaredTools
+
+        let installScript = scratch / "patch-install-mirror.sh"
+        writeFile(installScript, m9r14fEmitRpathPatchScript(mirrorUsr, @[],
+          ownManifestPath = manifest))
+        fixtureEnv["LIBRARY_PATH"] = decoyLib
+        require runTool("/bin/sh", @[installScript]).exitCode == 0
+        check not runTool(patchelfPath,
+          @["--print-rpath", mirrorMain]).output.contains(decoyLib)
+        check readFile(manifest).strip().len == 0
+        check runTool(patchelfPath,
+          @["--print-interpreter", mirrorMain]).output.strip() == sourceLoader
+
+        # The alias requires canonical matching, not textual path equality.
+        fixtureEnv["LIBRARY_PATH"] = decoyLib & ":" & declaredRuntime
+        let installed = runTool("/bin/sh", @[installScript])
+        checkpoint installed.output
+        require installed.exitCode == 0
+        let firstRpath = runTool(patchelfPath,
+          @["--print-rpath", mirrorMain]).output.strip()
+        let firstManifest = readFile(manifest)
+        let firstInterpreter = runTool(patchelfPath,
+          @["--print-interpreter", mirrorMain]).output.strip()
+        check expandFilename(firstInterpreter) == expandFilename(sourceLoader)
+        var absoluteDirs: seq[string] = @[]
+        for entry in firstRpath.split(':'):
+          if entry.isAbsolute:
+            absoluteDirs.add(expandFilename(entry))
+        check absoluteDirs == @[runtimeLib]
+        var propagatedDirs: seq[string] = @[]
+        for entry in firstManifest.splitLines():
+          if entry.len > 0:
+            propagatedDirs.add(expandFilename(entry))
+        check propagatedDirs == @[runtimeLib]
+        check not firstRpath.contains(decoyLib)
+
+        let closure = runTool(sourceLoader,
+          @["--inhibit-cache", "--list", mirrorMain])
+        checkpoint closure.output
+        check closure.exitCode == 0
+        for soname in ["libc.so.6", "libm.so.6"]:
+          var resolvedLibrary = ""
+          for line in closure.output.splitLines():
+            let fields = line.splitWhitespace()
+            if fields.len >= 3 and fields[0] == soname and fields[1] == "=>":
+              resolvedLibrary = fields[2]
+          check resolvedLibrary.len > 0
+          if resolvedLibrary.len > 0:
+            check expandFilename(resolvedLibrary) == runtimeLib / soname
+        check runTool(mirrorMain, @[]).exitCode == 0
+
+        require runTool("/bin/sh", @[installScript]).exitCode == 0
+        check runTool(patchelfPath,
+          @["--print-rpath", mirrorMain]).output.strip() == firstRpath
+        check readFile(manifest) == firstManifest
+        check runTool(patchelfPath,
+          @["--print-interpreter", mirrorMain]).output.strip() == firstInterpreter
+
+        removeFile(runtimeLib / "libc.so.6")
+        check runTool("/bin/sh", @[installScript]).exitCode == 75
+        copyFileWithPermissions(decoyLib / "libc.so.6", runtimeLib / "libc.so.6")
+        removeFile(runtimeLib / "libm.so.6")
+        check runTool("/bin/sh", @[installScript]).exitCode == 75
+        copyFileWithPermissions(decoyLib / "libm.so.6", runtimeLib / "libm.so.6")
+
+        let otherMain = mirrorUsr / "bin" / "other"
+        let otherLoader = decoyLib / extractFilename(originalLoader)
+        copyFileWithPermissions(mirrorMain, otherMain)
+        require runTool(patchelfPath, @["--set-interpreter", otherLoader,
+          "--remove-rpath", otherMain]).exitCode == 0
+        let firstMainBytes = readFile(mirrorMain)
+        let otherMainBytes = readFile(otherMain)
+
+        checkpoint "conflicting matched interpreters must fail before mutation"
+        check runTool("/bin/sh", @[installScript]).exitCode == 75
+        let matchedMainUnchanged = readFile(mirrorMain) == firstMainBytes
+        let matchedOtherUnchanged = readFile(otherMain) == otherMainBytes
+        check matchedMainUnchanged
+        check matchedOtherUnchanged
+
+        checkpoint "one matched and one unmatched interpreter must also fail"
+        fixtureEnv["LIBRARY_PATH"] = declaredRuntime
+        check runTool("/bin/sh", @[installScript]).exitCode == 75
+        let mixedMainUnchanged = readFile(mirrorMain) == firstMainBytes
+        let mixedOtherUnchanged = readFile(otherMain) == otherMainBytes
+        check mixedMainUnchanged
+        check mixedOtherUnchanged
+
+        # An explicit dependency runtime remains authoritative over fallback,
+        # even when the installed executables originally selected different ones.
+        require runTool(patchelfPath,
+          @["--set-interpreter", otherLoader, otherMain]).exitCode == 0
+        writeFile(installScript, m9r14fEmitRpathPatchScript(mirrorUsr,
+          @[decoyLib], ownManifestPath = manifest))
+        checkpoint "declared RPATH runtime must win over the linked fallback"
+        require runTool("/bin/sh", @[installScript]).exitCode == 0
+        check readFile(manifest).strip() == decoyLib
+        for executable in [mirrorMain, otherMain]:
+          check runTool(patchelfPath,
+            @["--print-interpreter", executable]).output.strip() == otherLoader
+          let rpath = runTool(patchelfPath,
+            @["--print-rpath", executable]).output.strip()
+          check decoyLib in rpath.split(':')
+          check not rpath.contains(runtimeLib)
+          check not rpath.contains(declaredRuntime)
+          check runTool(otherLoader,
+            @["--inhibit-cache", "--list", executable]).exitCode == 0
+          check runTool(executable, @[]).exitCode == 0
+
     test "linux_end_to_end_patchelf_against_synthetic_elf":
       let patchelfPath = findExe("patchelf")
       let ccPath =

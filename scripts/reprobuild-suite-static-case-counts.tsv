@@ -1441,7 +1441,7 @@ tests/unit/t_m9r14e_1_resolver_pkg_config_paths.nim	nim	12
 tests/unit/t_m9r14e_2_install_tree_mirror.nim	nim	8
 tests/unit/t_m9r14e_3_action_env_threading.nim	nim	29
 tests/unit/t_m9r14f_1_transitive_lib_dirs.nim	nim	12
-tests/unit/t_m9r14f_2_rpath_patching.nim	nim	14
+tests/unit/t_m9r14f_2_rpath_patching.nim	nim	15
 tests/unit/t_m9r14h_1_auto_recurse_idempotency.nim	nim	15
 tests/unit/t_m9r15c_1_io_monitor_fragment_log_perf.nim	nim	3
 tests/unit/t_m9r15d_1_libegl_headers_stub.nim	nim	5

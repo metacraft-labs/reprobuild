@@ -102,12 +102,13 @@ suite "install mirror tool metadata":
     let iface = artifactFromRegisteredDsl(MirrorRecipeSource).projectInterface
     when defined(linux):
       for name in ["find", "head", "od", "tr", "sort", "grep",
-                   "dirname", "basename", "wc", "patchelf"]:
+                   "dirname", "basename", "wc", "patchelf", "readlink"]:
         let uses = iface.toolUses.filterIt(it.executableName == name)
         check uses.len == 1
         if uses.len == 1:
           check uses[0].nixProvisioning.len > 0
-    check "readlink" notin iface.toolUses.mapIt(it.executableName)
+    else:
+      check "readlink" notin iface.toolUses.mapIt(it.executableName)
     check "ln" notin iface.toolUses.mapIt(it.executableName)
 
   test "qualified constructors preserve explicit native constraints":

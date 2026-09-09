@@ -92,7 +92,7 @@ suite "M9.R.83 install mirror emitted action shape":
       check InstallMirrorPublishToolName in mirror.toolIdentityRefs
       when defined(linux):
         for toolName in ["find", "head", "od", "tr", "sort", "grep",
-                         "dirname", "basename", "wc", "patchelf"]:
+                         "dirname", "basename", "wc", "patchelf", "readlink"]:
           check toolName in mirror.toolIdentityRefs
       check "rm -rf" in script
       check "build/dest/usr" in script

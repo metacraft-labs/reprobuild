@@ -40,9 +40,9 @@ proc typedInstallMirrorShellTools*(packageName: string): seq[string] =
   result = @InstallMirrorCoreToolNames & @["sed", "chmod"]
   when defined(linux):
     result.add(["find", "head", "od", "tr", "sort", "grep",
-      "dirname", "basename", "wc", "patchelf"])
+      "dirname", "basename", "wc", "patchelf", "readlink"])
     if packageName == "glibcSource":
-      result.add(["readlink", "ln"])
+      result.add("ln")
 
 proc currentInstallMirrorMode*(): InstallMirrorMode =
   case getEnv(InstallMirrorModeEnvVar).toLowerAscii()

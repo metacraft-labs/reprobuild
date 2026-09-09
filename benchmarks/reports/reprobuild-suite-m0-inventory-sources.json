@@ -5053,12 +5053,15 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
+            "fixtureEnv",
             "installScript",
+            "interpreter",
             "mirrorMain",
             "patchelfPath",
+            "rpath",
             "scratch"
           ],
-          "line": 166,
+          "line": 167,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "cc"
@@ -5072,12 +5075,59 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
+            "fixtureEnv",
             "installScript",
+            "interpreter",
             "mirrorMain",
             "patchelfPath",
+            "rpath",
             "scratch"
           ],
-          "line": 167,
+          "line": 168,
+          "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "elif findExe(\"gcc\").len > 0: findExe(\"gcc\")"
+        },
+        {
+          "assignedCommandVariable": "ccPath",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "ccPath",
+            "expectedRpath",
+            "fixtureEnv",
+            "installScript",
+            "interpreter",
+            "mirrorMain",
+            "patchelfPath",
+            "rpath",
+            "scratch"
+          ],
+          "line": 354,
+          "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "if findExe(\"cc\").len > 0: findExe(\"cc\")"
+        },
+        {
+          "assignedCommandVariable": "ccPath",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "ccPath",
+            "expectedRpath",
+            "fixtureEnv",
+            "installScript",
+            "interpreter",
+            "mirrorMain",
+            "patchelfPath",
+            "rpath",
+            "scratch"
+          ],
+          "line": 355,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "gcc"
@@ -5091,12 +5141,15 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
+            "fixtureEnv",
             "installScript",
+            "interpreter",
             "mirrorMain",
             "patchelfPath",
+            "rpath",
             "scratch"
           ],
-          "line": 184,
+          "line": 372,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -5110,12 +5163,15 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
+            "fixtureEnv",
             "installScript",
+            "interpreter",
             "mirrorMain",
             "patchelfPath",
+            "rpath",
             "scratch"
           ],
-          "line": 189,
+          "line": 377,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -30668,7 +30724,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r14f_2_rpath_patching.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

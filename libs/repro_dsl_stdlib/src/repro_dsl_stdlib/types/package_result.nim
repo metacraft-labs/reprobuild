@@ -1359,6 +1359,48 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("for candidate in \"$rp\"/ld-linux-*.so.* \"$rp\"/ld-musl-*.so.*; do ")
   script.add("if [ -f \"$candidate\" ]; then m9r14f_runtime_loader=$candidate; break 2; fi; ")
   script.add("done; done; IFS=$OLD_IFS; ")
+  # LIBRARY_PATH carries declared link inputs, including libc directories that
+  # the engine intentionally excludes from LD_LIBRARY_PATH. If no declared
+  # mirror supplied a loader, retain only the runtime already selected by the
+  # linker. Matching PT_INTERP avoids importing unrelated compiler runtimes.
+  script.add("if [ -z \"$m9r14f_runtime_loader\" ] && [ -n \"${LIBRARY_PATH:-}\" ]; then ")
+  script.add("m9r14f_linked_loaders=$(for d in \"" & escapedDstUsr &
+    "/lib\" \"" & escapedDstUsr & "/lib64\" \"" & escapedDstUsr &
+    "/bin\" \"" & escapedDstUsr & "/sbin\"; do ")
+  script.add("if [ -d \"$d\" ]; then ")
+  script.add("find \"$d\" -type f \\( -name '*.so' -o -name '*.so.*' -o -perm -u+x \\) 2>/dev/null | ")
+  script.add("while IFS= read -r f; do ")
+  script.add("m9r14f_interp=$(patchelf --print-interpreter \"$f\" 2>/dev/null || true); ")
+  script.add("case \"$m9r14f_interp\" in /*) ")
+  script.add("readlink -f \"$m9r14f_interp\" 2>/dev/null || true;; esac; ")
+  script.add("done; fi; done | sort -u); ")
+  script.add("m9r14f_linkdirs=${LIBRARY_PATH}; m9r14f_linked_libdir=; ")
+  script.add("while [ -n \"$m9r14f_linkdirs\" ]; do ")
+  script.add("ldp=${m9r14f_linkdirs%%:*}; ")
+  script.add("if [ \"$m9r14f_linkdirs\" = \"$ldp\" ]; then m9r14f_linkdirs=; ")
+  script.add("else m9r14f_linkdirs=${m9r14f_linkdirs#*:}; fi; ")
+  script.add("case \"$ldp\" in /*) ;; *) continue;; esac; ")
+  script.add("if ! [ -d \"$ldp\" ]; then continue; fi; ")
+  script.add("for candidate in \"$ldp\"/ld-linux-*.so.* \"$ldp\"/ld-musl-*.so.*; do ")
+  script.add("if ! [ -f \"$candidate\" ]; then continue; fi; ")
+  script.add("m9r14f_linked_loader=$(readlink -f \"$candidate\" 2>/dev/null) || continue; ")
+  script.add("if ! printf '%s\\n' \"$m9r14f_linked_loaders\" | ")
+  script.add("grep -Fxq -- \"$m9r14f_linked_loader\"; then continue; fi; ")
+  script.add("if [ \"$m9r14f_linked_loaders\" != \"$m9r14f_linked_loader\" ]; then ")
+  script.add("printf '%s\\n' 'install-mirror: conflicting linked runtime loaders' >&2; exit 75; fi; ")
+  script.add("case \"${candidate##*/}\" in ld-linux-*) ")
+  script.add("for so in libc.so.6 libm.so.6; do ")
+  script.add("if [ \"$so\" = libm.so.6 ] && ! printf '%s\\n' \"$needed_sonames\" | ")
+  script.add("grep -Fxq -- \"$so\"; then continue; fi; ")
+  script.add("if ! [ -f \"$ldp/$so\" ]; then ")
+  script.add("printf '%s\\n' \"install-mirror: linked runtime $ldp is missing $so\" >&2; exit 75; ")
+  script.add("fi; done;; esac; ")
+  script.add("m9r14f_runtime_loader=$m9r14f_linked_loader; ")
+  script.add("if [ -z \"$m9r14f_linked_libdir\" ]; then m9r14f_linked_libdir=$ldp; fi; ")
+  script.add("done; done; ")
+  # Keep this libc ahead of any partial runtime directory lacking a loader.
+  script.add("if [ -n \"$m9r14f_linked_libdir\" ]; then ")
+  script.add("rpath=\"$m9r14f_linked_libdir:$rpath\"; fi; fi; ")
   # DSL-port M9.R.30.2 — write the consumer's own propagated-libdirs
   # manifest BEFORE walking the ELFs so a parallel build pass that
   # races against this consumer's downstream recipe can read the

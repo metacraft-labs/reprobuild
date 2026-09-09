@@ -3,9 +3,9 @@ import repro_project_dsl/install_mirror_resolver
 
 const Common = @["sh", "rm", "mkdir", "cp", "touch", "sed", "chmod"]
 const LinuxExtra = @["find", "head", "od", "tr", "sort", "grep",
-  "dirname", "basename", "wc", "patchelf"]
+  "dirname", "basename", "wc", "patchelf", "readlink"]
 const Expected = when defined(linux): Common & LinuxExtra else: Common
-const GlibcExpected = when defined(linux): Expected & @["readlink", "ln"]
+const GlibcExpected = when defined(linux): Expected & @["ln"]
                       else: Expected
 
 static:
@@ -17,5 +17,5 @@ suite "install mirror shell tools":
     check typedInstallMirrorShellTools("plain") == Expected
     check InstallMirrorPublishToolName notin typedInstallMirrorShellTools("plain")
 
-  test "only the Linux glibc mirror adds its symlink normalization tools":
+  test "only the Linux glibc mirror adds symlink creation":
     check typedInstallMirrorShellTools("glibcSource") == GlibcExpected
