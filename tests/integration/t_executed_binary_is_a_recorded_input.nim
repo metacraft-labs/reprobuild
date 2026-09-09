@@ -774,6 +774,153 @@ suite "a tool under a content-addressed root is in the cache key without being a
       check backToA.byId(edgeA.id).cacheDecision in ReuseDecisions
       check f.runCount("repro-store") == 2
 
+  test "a MUTABLE directory inside the store is neither elided nor keyed as content-addressed":
+    ## THE PREDICATE, not the scope — rule 8 one level down.
+    ##
+    ## `reproStoreRootPath` is the only place `contentAddressedRoot` reads
+    ## CONFIGURATION, and its own comment gives the entire justification for
+    ## letting it: "What the env var still could do is nominate a MUTABLE tree
+    ## as content-addressed within one consistent setting, and that is what
+    ## `isRealizationDirName` bounds: the only thing elided under this root is
+    ## a directory whose own name states a 16-hex realization digest."
+    ##
+    ## That bound was graded by NOTHING. MEASURED (2026-09-09): with
+    ## `isRealizationDirName`'s body replaced by `true` — the two shape checks
+    ## deleted, the trailing literal left — every other case in this file
+    ## stays green and only this one reddens, and the same mutation was
+    ## measured leaving `t_zero_evidence_edge_is_not_cacheable` at 21/21 with
+    ## no skips. The two guards on that env read are not equally covered: the
+    ## required `prefixes` segment is graded by the case above, whose fixture
+    ## is a real realization directory; the SHAPE check had a scope and no
+    ## predicate.
+    ##
+    ## THE FIXTURE IS THE SHAPE THAT ACTUALLY OCCURS. `<store>/prefixes/<pkg>/`
+    ## is a package directory whose CHILDREN are realizations, so it is exactly
+    ## where a mutable version alias lands — `latest` here. With the shape
+    ## check gone that alias becomes a content-addressed root, and BOTH halves
+    ## of class 1's licence are then false for it:
+    ##
+    ## * it is not content-addressed, so the elision drops an observation that
+    ##   nothing else accounts for — no recorded input names the tool; and
+    ## * its path is STABLE across a repoint, so the key does not move when the
+    ##   alias comes to name different bytes.
+    ##
+    ## Together those are a hit served against a different binary, which is the
+    ## same failure §"S2 and S3, settled" measured for the Nix store — reached
+    ## here through configuration rather than through a missing key component.
+    ##
+    ## The alias and the realization differ in ONE path segment's SHAPE and in
+    ## nothing else: same store root, same `prefixes` segment, same depth. So
+    ## no assertion below can be satisfied by the env var failing to take, and
+    ## nothing but the predicate can decide it.
+    let repoRoot = findRepoRoot()
+    let shells =
+      if ccPath().len == 0: newSeq[string]()
+      else: contentAddressedShells(monitorTools(repoRoot).shim)
+    if ccPath().len == 0 or shells.len < 2:
+      skip()
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.root)
+
+      let storeRoot = f.root / "store"
+      var digest: PrefixIdBytes
+      for i in 0 ..< 32:
+        digest[i] = byte(0xC0 or (i and 0x0F))
+      # A REAL realization beside the alias, built from the store's own naming
+      # contract. It is the denominator: without it a `""` for the alias would
+      # be indistinguishable from `$REPRO_STORE_ROOT` never having taken, and
+      # this case would read green while asserting nothing.
+      let realDir = storeRoot / prefixRelativePath("bash", "5.2", digest)
+      let aliasDir = storeRoot / "prefixes" / "bash" / "latest"
+      createDir(realDir / "bin")
+      createDir(aliasDir / "bin")
+      let realTool = realDir / "bin" / "sh"
+      let aliasTool = aliasDir / "bin" / "sh"
+      copyFileWithPermissions(shells[0], realTool)
+      copyFileWithPermissions(shells[0], aliasTool)
+      # THE DENOMINATOR for the repoint below: the two bashes must really be
+      # two different programs, or "the edge re-ran" says nothing.
+      check readFile(shells[0]) != readFile(shells[1])
+
+      let previousStoreRoot = getEnv(StoreRootEnvVar)
+      putEnv(StoreRootEnvVar, storeRoot)
+      defer:
+        if previousStoreRoot.len > 0: putEnv(StoreRootEnvVar, previousStoreRoot)
+        else: delEnv(StoreRootEnvVar)
+
+      # One segment apart. The realization name is recognised ...
+      check contentAddressedRoot(realTool) == realDir
+      # ... and the alias, differing from it ONLY in the shape of that one
+      # segment, is not — neither at the tool nor at the directory itself.
+      check contentAddressedRoot(aliasTool).len == 0
+      check contentAddressedRoot(aliasDir).len == 0
+
+      # NOT KEYED AS CONTENT-ADDRESSED. For a recognised root the mix moves
+      # the fingerprint; for the alias it must be the identity. A moved
+      # fingerprint here would be the worse half of the defect: it would state
+      # "this path names its own content" about a path that does not.
+      let seed = weakFingerprintFromText("execdep/store-alias")
+      check keyedOnContentAddressedToolRoot(seed, [realTool]) != seed
+      check keyedOnContentAddressedToolRoot(seed, [aliasTool]) == seed
+
+      # NOT ELIDED, end to end. The command runs the mutable helper so the
+      # edge has a class-2 input of its own and `gradeKeyedInputSet` does not
+      # decide the case before the property under test gets a turn.
+      let edge = f.monitoredEdge("execdep/store-alias",
+        [aliasTool, "-c", f.helperPath & " " & f.logPath("store-alias")])
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+
+      let first = runBuild(graph([edge]), config)
+      let r0 = first.byId(edge.id)
+      checkpoint("alias first: status=" & $r0.status & " stderr=" & r0.stderr)
+      check r0.status == asSucceeded
+      check r0.launched
+      check f.runCount("store-alias") == 1
+
+      let inputs = f.recordedInputs(edge)
+      let aliasRecorded = inputs.anyIt(it.path == aliasTool)
+      checkpoint("alias recorded inputs: " & $inputs.len &
+        "; alias tool among them: " & $aliasRecorded)
+      check inputs.len > 0
+      # A mutable tree has only the ordinary recorded-input route, and it must
+      # still be open. This is the assertion the elision closes.
+      check aliasRecorded
+
+      let warm = runBuild(graph([edge]), config)
+      checkpoint("alias warm: decision=" & $warm.byId(edge.id).cacheDecision)
+      check warm.byId(edge.id).cacheDecision in ReuseDecisions
+      check not warm.byId(edge.id).launched
+      check f.runCount("store-alias") == 1
+
+      # THE REPOINT — what makes an alias an alias. The SAME path comes to
+      # name different bytes, which a content-addressed root cannot do and is
+      # precisely why treating one as the other is unsound. The edge value is
+      # unchanged, so its weak fingerprint is unchanged: the only thing that
+      # can catch this is the recorded input asserted above.
+      #
+      # Unlink first: a store copy carries the store's read-only mode, so
+      # writing THROUGH the old entry fails with EACCES. Replacing the entry
+      # is also what a repoint actually is.
+      removeFile(aliasTool)
+      copyFileWithPermissions(shells[1], aliasTool)
+      let after = runBuild(graph([edge]), config)
+      let r1 = after.byId(edge.id)
+      checkpoint("after the alias repoint: decision=" & $r1.cacheDecision &
+        " launched=" & $r1.launched & " reason=" & r1.reason)
+      check r1.cacheDecision notin ReuseDecisions
+      check r1.launched
+      check f.runCount("store-alias") == 2
+
+      # ... and the new state is reusable, so this is revalidation working
+      # rather than the edge having become a permanent miss.
+      let settled = runBuild(graph([edge]), config)
+      checkpoint("alias settled: decision=" &
+        $settled.byId(edge.id).cacheDecision)
+      check settled.byId(edge.id).cacheDecision in ReuseDecisions
+      check not settled.byId(edge.id).launched
+      check f.runCount("store-alias") == 2
+
   test "swapping the PROGRAM inside one derivation also re-runs the edge":
     ## THE GRANULARITY CASE, and it was a live hit rather than a hypothetical.
     ## `cacheInputPaths` subtracts at the ROOT, so the root must be in the key
