@@ -29387,7 +29387,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_sync_seven_corner_cases.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
