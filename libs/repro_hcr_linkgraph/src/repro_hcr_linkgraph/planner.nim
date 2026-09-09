@@ -22,6 +22,79 @@ proc ownerFunctionName*(graph: LinkGraph; relocation: RelocationFact): string =
         return symbol.name
   ""
 
+proc classifyElfRelocation(graph: LinkGraph; relocation: RelocationFact;
+                           snapshot: DeterministicTargetSnapshot;
+                           decision: var RelocationDecision) =
+  ## x86_64 ELF relocation classification for the HLX-M1 profile.
+  ##
+  ## The supported-direct subset is deliberately narrow, and the narrowness is
+  ## the point: a relocation this provider cannot apply correctly must produce
+  ## a structured reason, not a plan that writes wrong bytes. Relocation
+  ## *semantics* remain `Relocation-Processing.md`'s; this decides only what
+  ## HLX-M1 will and will not carry.
+  if relocation.sectionId < 0 or relocation.sectionId >= graph.sections.len:
+    decision.reason =
+      "relocation names a section index outside the object's section table"
+    return
+  if graph.sections[relocation.sectionId].kind != skCode:
+    decision.reason = "HLX-M1 records " &
+      $graph.sections[relocation.sectionId].kind &
+      " relocation facts but does not apply them"
+    return
+
+  case relocation.typeCode
+  of 2'u8, 4'u8:
+    # R_X86_64_PC32 / R_X86_64_PLT32. A call or jump displacement relative to
+    # the next instruction. Applicable once the patch body's address is known,
+    # which is exactly what the provider allocates.
+    decision.requiresTargetSymbol = true
+    var address = 0'u64
+    if not snapshot.targetAddress(relocation.targetName, address):
+      decision.reason =
+        "target symbol is absent from the deterministic target snapshot"
+      return
+    decision.targetAddress = address
+    if not relocation.pcrel or relocation.lengthBytes != 4:
+      decision.reason = relocation.kindName &
+        " must be a 4-byte PC-relative field"
+      return
+    decision.support = rsSupportedDirect
+    decision.reason = relocation.kindName &
+      " direct displacement; the +-2 GiB reach check is deferred to patch-body " &
+      "placement (HLX-M2 owns the island for targets outside it)"
+  of 1'u8:
+    # R_X86_64_64: an absolute 64-bit address. Applicable, and unlike the
+    # 32-bit absolute forms it cannot overflow once the runtime address is
+    # known.
+    decision.requiresTargetSymbol = true
+    var address = 0'u64
+    if not snapshot.targetAddress(relocation.targetName, address):
+      decision.reason =
+        "target symbol is absent from the deterministic target snapshot"
+      return
+    decision.targetAddress = address
+    if relocation.lengthBytes != 8:
+      decision.reason = "R_X86_64_64 must be an 8-byte field"
+      return
+    decision.support = rsSupportedDirect
+    decision.reason = "R_X86_64_64 absolute address"
+  of 10'u8, 11'u8:
+    decision.reason = relocation.kindName &
+      " is a 32-bit absolute address; a PIE patch body is mapped far above " &
+      "4 GiB, so the field cannot represent the runtime target"
+  of 9'u8, 41'u8, 42'u8, 43'u8:
+    decision.reason = relocation.kindName &
+      " goes through the GOT; HLX-M1 allocates no GOT for a patch body, and " &
+      "reusing the target's requires the entry to already exist"
+  of 19'u8, 20'u8, 21'u8, 22'u8, 23'u8, 34'u8, 35'u8, 36'u8:
+    decision.reason = relocation.kindName &
+      " is a thread-local-storage relocation; TLS is outside the HLX-M1 profile"
+  of 0'u8:
+    decision.reason = "R_X86_64_NONE carries no fixup"
+  else:
+    decision.reason = relocation.kindName &
+      " is outside the HLX-M1 supported-direct subset"
+
 proc classifyRelocation*(graph: LinkGraph; relocation: RelocationFact;
                          snapshot: DeterministicTargetSnapshot): RelocationDecision =
   let section =
@@ -49,6 +122,10 @@ proc classifyRelocation*(graph: LinkGraph; relocation: RelocationFact;
     requiresTargetSymbol: false,
     targetAddress: 0
   )
+
+  if graph.format == ofElf64X86_64:
+    classifyElfRelocation(graph, relocation, snapshot, result)
+    return
 
   if relocation.scattered:
     result.reason = "scattered Mach-O relocations are rejected by M26"
@@ -107,7 +184,12 @@ proc patchPlan*(oldGraph, newGraph: LinkGraph;
   var fallback = initHashSet[string]()
 
   result.schemaId = "reprobuild.hcr.patch-plan-evidence.v1"
-  result.supportProfile = "m26-macho64-arm64-object-facts"
+  # The Linux profile id is stated beside the M26 Mach-O one rather than
+  # replacing it, so a plan says which platform's rules produced it.
+  result.supportProfile =
+    case newGraph.format
+    of ofMachO64Arm64: "m26-macho64-arm64-object-facts"
+    of ofElf64X86_64: "hlx-m1-elf64-x86-64-object-facts"
   result.targetSnapshotId = snapshot.snapshotId
   result.mutatesTarget = false
   result.targetMutationOperations = 0

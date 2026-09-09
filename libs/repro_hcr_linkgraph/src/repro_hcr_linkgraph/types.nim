@@ -1,6 +1,7 @@
 type
   ObjectFormat* = enum
     ofMachO64Arm64
+    ofElf64X86_64 ## HLX-M1: the Linux ELF analogue of the M26 Mach-O profile
 
   SectionKind* = enum
     skCode
