@@ -794,11 +794,66 @@ suite "a tool under a content-addressed root is in the cache key without being a
     ## is a real realization directory; the SHAPE check had a scope and no
     ## predicate.
     ##
+    ## AND THAT SHAPE CHECK IS ITSELF A CONJUNCTION OF TWO INDEPENDENT ARMS, so
+    ## a fixture that reaches one of them grades half a predicate:
+    ##
+    ##     if name.len < 17 or name[name.len - 17] != '-': return false  # arm 1
+    ##     for i in name.len - 16 ..< name.len:                          # arm 2
+    ##       if name[i] notin {'0' .. '9', 'a' .. 'f'}: return false
+    ##
+    ## MEASURED (2026-09-09) while `latest` was this case's only alias:
+    ## deleting arm 2 and keeping arm 1 left this file at 13/13 and
+    ## `t_zero_evidence_edge_is_not_cacheable` at 21/21, no skips. `latest` is
+    ## six characters, so arm 1 rejects it on its own and arm 2 never runs —
+    ## the fixture could not reach the half of the predicate that does the
+    ## DIGEST work, which is the half the quoted justification above rests on.
+    ## Probed through the shipped `contentAddressedRoot`:
+    ##
+    ##     segment                   shipped   arm 2 deleted
+    ##     5.2-c0c1c2c3c4c5c6c7      CA root   CA root
+    ##     bash-mutable-checkout     ""        CA ROOT
+    ##     latest                    ""        ""
+    ##
+    ## So EACH ARM GETS ITS OWN ALIAS below, and every alias is graded at all
+    ## four levels this case grades — the predicate, the key mix, the elision,
+    ## and the end-to-end repoint:
+    ##
+    ## * `latest` — six characters, rejected by arm 1's LENGTH half. The
+    ##   ordinary mutable version alias, and the shape this case started from.
+    ## * `c0c1c2c3c4c5c6c7c8c9dadbdcdddedf` — 32 hex characters. PASSES arm 2
+    ##   and is rejected by arm 1, because what sits at `len - 17` is another
+    ##   hex digit rather than the separator. This is a directory named by a
+    ##   bare content digest with the store's `<version>-` prefix dropped: it
+    ##   carries a digest but not the SHAPE `realizationDirName` states, and
+    ##   the separator is the only thing that tells the two apart. It grades
+    ##   arm 1 on a WRONG ANSWER — with arm 1 deleted, arm 2 accepts it —
+    ##   rather than on the IndexDefect a name shorter than 16 would raise
+    ##   from `name.len - 16` going negative.
+    ## * `bash-mutable-checkout` — 21 characters with a `-` exactly 17 from the
+    ##   end and a tail of `mutable-checkout` that is not hex. PASSES arm 1,
+    ##   rejected only by arm 2. A working checkout a person would plausibly
+    ##   drop beside the realizations, whose name merely LOOKS versioned; with
+    ##   arm 2 gone it is elided from the recorded set and keyed as if its path
+    ##   named its own content — the same defect `latest` was written for,
+    ##   reached one arm over.
+    ##
+    ## Neither arm is subsumed by the other, and the two aliases are the
+    ## witness in both directions: `bash-mutable-checkout` is accepted by arm 1
+    ## and rejected by arm 2, the bare digest is accepted by arm 2 and rejected
+    ## by arm 1. MEASURED (2026-09-09) with the aliases below in place, each
+    ## mutation applied on its own to the shipped engine and the file rebuilt
+    ## between them: deleting arm 2 reddens ONLY this case (12 [OK], 1
+    ## [FAILED], 0 [SKIPPED], exit 1) at all four levels, ending in
+    ## `after the repoint: decision=cdHit launched=false` — a hit served
+    ## against a byte-different binary; deleting arm 1 reddens ONLY this case
+    ## the same way on the bare digest and then aborts on `latest`'s
+    ## IndexDefect. Restored, the file is 13/13, 0 skips, exit 0.
+    ##
     ## THE FIXTURE IS THE SHAPE THAT ACTUALLY OCCURS. `<store>/prefixes/<pkg>/`
     ## is a package directory whose CHILDREN are realizations, so it is exactly
-    ## where a mutable version alias lands — `latest` here. With the shape
-    ## check gone that alias becomes a content-addressed root, and BOTH halves
-    ## of class 1's licence are then false for it:
+    ## where a mutable alias lands. With the shape check gone such an alias
+    ## becomes a content-addressed root, and BOTH halves of class 1's licence
+    ## are then false for it:
     ##
     ## * it is not content-addressed, so the elision drops an observation that
     ##   nothing else accounts for — no recorded input names the tool; and
@@ -809,10 +864,10 @@ suite "a tool under a content-addressed root is in the cache key without being a
     ## same failure §"S2 and S3, settled" measured for the Nix store — reached
     ## here through configuration rather than through a missing key component.
     ##
-    ## The alias and the realization differ in ONE path segment's SHAPE and in
-    ## nothing else: same store root, same `prefixes` segment, same depth. So
-    ## no assertion below can be satisfied by the env var failing to take, and
-    ## nothing but the predicate can decide it.
+    ## Every alias and the realization differ in ONE path segment's SHAPE and
+    ## in nothing else: same store root, same `prefixes` segment, same depth.
+    ## So no assertion below can be satisfied by the env var failing to take,
+    ## and nothing but the predicate can decide it.
     let repoRoot = findRepoRoot()
     let shells =
       if ccPath().len == 0: newSeq[string]()
@@ -827,19 +882,45 @@ suite "a tool under a content-addressed root is in the cache key without being a
       var digest: PrefixIdBytes
       for i in 0 ..< 32:
         digest[i] = byte(0xC0 or (i and 0x0F))
-      # A REAL realization beside the alias, built from the store's own naming
-      # contract. It is the denominator: without it a `""` for the alias would
-      # be indistinguishable from `$REPRO_STORE_ROOT` never having taken, and
-      # this case would read green while asserting nothing.
+      # A REAL realization beside the aliases, built from the store's own
+      # naming contract. It is the denominator: without it a `""` for an alias
+      # would be indistinguishable from `$REPRO_STORE_ROOT` never having taken,
+      # and this case would read green while asserting nothing.
       let realDir = storeRoot / prefixRelativePath("bash", "5.2", digest)
-      let aliasDir = storeRoot / "prefixes" / "bash" / "latest"
       createDir(realDir / "bin")
-      createDir(aliasDir / "bin")
       let realTool = realDir / "bin" / "sh"
-      let aliasTool = aliasDir / "bin" / "sh"
       copyFileWithPermissions(shells[0], realTool)
-      copyFileWithPermissions(shells[0], aliasTool)
-      # THE DENOMINATOR for the repoint below: the two bashes must really be
+
+      # ONE ALIAS PER ARM of `isRealizationDirName`, all three siblings of the
+      # realization above. `tag` only names the edge and its log; the entire
+      # property under test lives in `dirName`.
+      #
+      #   dirName                            arm 1   arm 2
+      #   c0c1c2c3c4c5c6c7c8c9dadbdcdddedf   reject  ACCEPT
+      #   bash-mutable-checkout              ACCEPT  reject
+      #   latest                             reject  (never reached)
+      #
+      # ORDER MATTERS, and only for what a failure is legible AS. A `check`
+      # failure is recorded and the loop carries on, but an EXCEPTION aborts
+      # the whole case — and `latest` raises one when arm 1 is deleted, because
+      # `name.len - 16` goes to -10 and arm 2 indexes out of bounds. Put it
+      # last and that mutation reads as three wrong answers about the bare
+      # digest followed by an IndexDefect; put it first and the IndexDefect is
+      # all you get, which says far less about what arm 1 is FOR.
+      let aliases = @[
+        (dirName: "c0c1c2c3c4c5c6c7c8c9dadbdcdddedf", tag: "bare-digest"),
+        (dirName: "bash-mutable-checkout", tag: "checkout"),
+        (dirName: "latest", tag: "latest")]
+      var aliasDirs: seq[string]
+      var aliasTools: seq[string]
+      for a in aliases:
+        let dir = storeRoot / "prefixes" / "bash" / a.dirName
+        createDir(dir / "bin")
+        copyFileWithPermissions(shells[0], dir / "bin" / "sh")
+        aliasDirs.add(dir)
+        aliasTools.add(dir / "bin" / "sh")
+
+      # THE DENOMINATOR for the repoints below: the two bashes must really be
       # two different programs, or "the edge re-ran" says nothing.
       check readFile(shells[0]) != readFile(shells[1])
 
@@ -849,77 +930,96 @@ suite "a tool under a content-addressed root is in the cache key without being a
         if previousStoreRoot.len > 0: putEnv(StoreRootEnvVar, previousStoreRoot)
         else: delEnv(StoreRootEnvVar)
 
-      # One segment apart. The realization name is recognised ...
+      # The realization name is recognised ...
       check contentAddressedRoot(realTool) == realDir
-      # ... and the alias, differing from it ONLY in the shape of that one
-      # segment, is not — neither at the tool nor at the directory itself.
-      check contentAddressedRoot(aliasTool).len == 0
-      check contentAddressedRoot(aliasDir).len == 0
-
-      # NOT KEYED AS CONTENT-ADDRESSED. For a recognised root the mix moves
-      # the fingerprint; for the alias it must be the identity. A moved
-      # fingerprint here would be the worse half of the defect: it would state
-      # "this path names its own content" about a path that does not.
       let seed = weakFingerprintFromText("execdep/store-alias")
+      # ... and for a recognised root the mix MOVES the fingerprint. Asserted
+      # once, here, so that each alias's identity below is a statement about
+      # the predicate rather than about a mix that never does anything.
       check keyedOnContentAddressedToolRoot(seed, [realTool]) != seed
-      check keyedOnContentAddressedToolRoot(seed, [aliasTool]) == seed
 
-      # NOT ELIDED, end to end. The command runs the mutable helper so the
-      # edge has a class-2 input of its own and `gradeKeyedInputSet` does not
-      # decide the case before the property under test gets a turn.
-      let edge = f.monitoredEdge("execdep/store-alias",
-        [aliasTool, "-c", f.helperPath & " " & f.logPath("store-alias")])
       let config = monitoredConfig(repoRoot, f.cacheRoot)
 
-      let first = runBuild(graph([edge]), config)
-      let r0 = first.byId(edge.id)
-      checkpoint("alias first: status=" & $r0.status & " stderr=" & r0.stderr)
-      check r0.status == asSucceeded
-      check r0.launched
-      check f.runCount("store-alias") == 1
+      for i, a in aliases:
+        let aliasDir = aliasDirs[i]
+        let aliasTool = aliasTools[i]
+        let name = "store-alias-" & a.tag
 
-      let inputs = f.recordedInputs(edge)
-      let aliasRecorded = inputs.anyIt(it.path == aliasTool)
-      checkpoint("alias recorded inputs: " & $inputs.len &
-        "; alias tool among them: " & $aliasRecorded)
-      check inputs.len > 0
-      # A mutable tree has only the ordinary recorded-input route, and it must
-      # still be open. This is the assertion the elision closes.
-      check aliasRecorded
+        # THE PREDICATE. Each alias differs from the realization in ONE path
+        # segment's SHAPE and in nothing else — same store root, same
+        # `prefixes` segment, same depth — so nothing but the predicate can
+        # decide it, at the tool or at the directory itself.
+        checkpoint(a.dirName & ": root(tool)=" &
+          contentAddressedRoot(aliasTool) & " root(dir)=" &
+          contentAddressedRoot(aliasDir))
+        check contentAddressedRoot(aliasTool).len == 0
+        check contentAddressedRoot(aliasDir).len == 0
 
-      let warm = runBuild(graph([edge]), config)
-      checkpoint("alias warm: decision=" & $warm.byId(edge.id).cacheDecision)
-      check warm.byId(edge.id).cacheDecision in ReuseDecisions
-      check not warm.byId(edge.id).launched
-      check f.runCount("store-alias") == 1
+        # NOT KEYED AS CONTENT-ADDRESSED. The realization moved the
+        # fingerprint above; for a mutable alias the mix must be the identity.
+        # A moved fingerprint here would be the worse half of the defect: it
+        # would state "this path names its own content" about a path that does
+        # not.
+        check keyedOnContentAddressedToolRoot(seed, [aliasTool]) == seed
 
-      # THE REPOINT — what makes an alias an alias. The SAME path comes to
-      # name different bytes, which a content-addressed root cannot do and is
-      # precisely why treating one as the other is unsound. The edge value is
-      # unchanged, so its weak fingerprint is unchanged: the only thing that
-      # can catch this is the recorded input asserted above.
-      #
-      # Unlink first: a store copy carries the store's read-only mode, so
-      # writing THROUGH the old entry fails with EACCES. Replacing the entry
-      # is also what a repoint actually is.
-      removeFile(aliasTool)
-      copyFileWithPermissions(shells[1], aliasTool)
-      let after = runBuild(graph([edge]), config)
-      let r1 = after.byId(edge.id)
-      checkpoint("after the alias repoint: decision=" & $r1.cacheDecision &
-        " launched=" & $r1.launched & " reason=" & r1.reason)
-      check r1.cacheDecision notin ReuseDecisions
-      check r1.launched
-      check f.runCount("store-alias") == 2
+        # NOT ELIDED, end to end. The command runs the mutable helper so the
+        # edge has a class-2 input of its own and `gradeKeyedInputSet` does not
+        # decide the case before the property under test gets a turn.
+        let edge = f.monitoredEdge("execdep/" & name,
+          [aliasTool, "-c", f.helperPath & " " & f.logPath(name)])
 
-      # ... and the new state is reusable, so this is revalidation working
-      # rather than the edge having become a permanent miss.
-      let settled = runBuild(graph([edge]), config)
-      checkpoint("alias settled: decision=" &
-        $settled.byId(edge.id).cacheDecision)
-      check settled.byId(edge.id).cacheDecision in ReuseDecisions
-      check not settled.byId(edge.id).launched
-      check f.runCount("store-alias") == 2
+        let first = runBuild(graph([edge]), config)
+        let r0 = first.byId(edge.id)
+        checkpoint(a.dirName & " first: status=" & $r0.status &
+          " stderr=" & r0.stderr)
+        check r0.status == asSucceeded
+        check r0.launched
+        check f.runCount(name) == 1
+
+        let inputs = f.recordedInputs(edge)
+        let aliasRecorded = inputs.anyIt(it.path == aliasTool)
+        checkpoint(a.dirName & " recorded inputs: " & $inputs.len &
+          "; alias tool among them: " & $aliasRecorded)
+        check inputs.len > 0
+        # A mutable tree has only the ordinary recorded-input route, and it
+        # must still be open. This is the assertion the elision closes.
+        check aliasRecorded
+
+        let warm = runBuild(graph([edge]), config)
+        checkpoint(a.dirName & " warm: decision=" &
+          $warm.byId(edge.id).cacheDecision)
+        check warm.byId(edge.id).cacheDecision in ReuseDecisions
+        check not warm.byId(edge.id).launched
+        check f.runCount(name) == 1
+
+        # THE REPOINT — what makes an alias an alias. The SAME path comes to
+        # name different bytes, which a content-addressed root cannot do and is
+        # precisely why treating one as the other is unsound. The edge value is
+        # unchanged, so its weak fingerprint is unchanged: the only thing that
+        # can catch this is the recorded input asserted above.
+        #
+        # Unlink first: a store copy carries the store's read-only mode, so
+        # writing THROUGH the old entry fails with EACCES. Replacing the entry
+        # is also what a repoint actually is.
+        removeFile(aliasTool)
+        copyFileWithPermissions(shells[1], aliasTool)
+        let after = runBuild(graph([edge]), config)
+        let r1 = after.byId(edge.id)
+        checkpoint(a.dirName & " after the repoint: decision=" &
+          $r1.cacheDecision & " launched=" & $r1.launched &
+          " reason=" & r1.reason)
+        check r1.cacheDecision notin ReuseDecisions
+        check r1.launched
+        check f.runCount(name) == 2
+
+        # ... and the new state is reusable, so this is revalidation working
+        # rather than the edge having become a permanent miss.
+        let settled = runBuild(graph([edge]), config)
+        checkpoint(a.dirName & " settled: decision=" &
+          $settled.byId(edge.id).cacheDecision)
+        check settled.byId(edge.id).cacheDecision in ReuseDecisions
+        check not settled.byId(edge.id).launched
+        check f.runCount(name) == 2
 
   test "swapping the PROGRAM inside one derivation also re-runs the edge":
     ## THE GRANULARITY CASE, and it was a live hit rather than a hypothetical.
