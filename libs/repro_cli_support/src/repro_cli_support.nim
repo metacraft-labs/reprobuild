@@ -46,6 +46,11 @@ import repro_dsl_stdlib/packages_schema
               # `repro.nim` are stdlib, not CLI. The CLI reads the two flags
               # out of the layered configuration and calls into it.
 import repro_dsl_stdlib/foreign_env/auto_load
+# `flakeSiblingIsGitCheckout` / `flakeSiblingOverrideRef` — the ONE predicate
+# deciding whether a sibling is a checkout, and the ONE spelling naming it to
+# nix. Shared with `flakePrintDevEnvArgv` so the arguments emitted here and the
+# argv `useFlakeDevShell` runs cannot describe different trees.
+import repro_dsl_stdlib/foreign_env/flake
 import repro_home_apply/package_catalog
 import repro_standard_provider_protocol
 import repro_runquota
@@ -59788,27 +59793,19 @@ proc flakeOverrideWorkspaceRoot(explicit: string): string =
     dir = parent
   resolveInvokedWorkspaceRoot("")
 
-proc flakeSiblingIsGitCheckout(dir: string): bool =
-  ## Is ``dir`` a git checkout? BOTH shapes count, and that is the whole point
-  ## of spelling this out once: in an ordinary clone ``.git`` is a DIRECTORY,
-  ## but in a linked worktree (`git worktree add`, which is how
-  ## ``repro branch ../<name>`` forks a workspace) it is a regular FILE holding
-  ## a ``gitdir:`` pointer.
-  ##
-  ## Testing only for the directory silently misclassifies every linked
-  ## worktree as "not a repo", and every caller fails OPEN in the dangerous
-  ## direction when that happens: the binder would drop the input and report
-  ## "nothing can have moved", and the dirty-sibling scope would drop the repo
-  ## and stop it blocking. Both are §3.1 reintroduced quietly, which is the one
-  ## outcome this campaign exists to prevent.
-  dirExists(extendedPath(dir / ".git")) or
-    fileExists(extendedPath(dir / ".git"))
+# ``flakeSiblingIsGitCheckout`` lives in
+# ``repro_dsl_stdlib/foreign_env/flake.nim`` beside the override-URL builder
+# that consumes it. ONE predicate, because the two must agree: the binder here
+# decides WHETHER to substitute a sibling, and that builder decides HOW to name
+# it to nix. A second copy that drifted would let this file substitute a linked
+# worktree while the builder classified it as "not a repo" and copied its build
+# output, or the reverse.
 
 type
   FlakeOverrideBinding* = object
     ## One substitution: the flake input name, the workspace repo backing it,
     ## and that repo's checkout directory. This is the answer NF-1 emits as
-    ## ``--override-input <input> path:<path>``, the answer NF-2 records into
+    ## ``--override-input <input> <ref>``, the answer NF-2 records into
     ## ``flake.lock``, and the answer NF-3 compares against the pin — ONE
     ## computation with three consumers, so the pins the lock carries cannot
     ## describe a different substitution than the one the dev shell performed,
@@ -59980,7 +59977,7 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     if not fileExists(dir / "flake.nix"):
       # The same requirement the plugin enforces (`_nfo_emit_sibling` refuses
       # a sibling with no `flake.nix`), for the same reason: `--override-input
-      # <n> path:<dir>` requires the directory to be a flake.
+      # <n> <ref>` requires the directory to be a flake.
       report.add("NOT substituted: flake input '" & name & "' resolves to " &
         dir & ", which has no flake.nix, so nix cannot take it as an input. " &
         "It keeps its flake.lock pin.")
@@ -60002,6 +59999,54 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
         "pin. Remedy: repair that checkout (`git -C " & dir &
         " rev-parse HEAD` shows the error).")
       continue
+
+    # ---- the one behavioural difference of a git tree, made LOUD -----------
+    #
+    # A substituted sibling is named to nix as `git+file:` (see
+    # ``flakeSiblingOverrideRef``), which honours `.gitignore` and so does not
+    # copy build output into the store. A DIRTY tree still contributes
+    # working-tree content, so uncommitted edits to TRACKED files reach the
+    # shell — develop mode's whole point, preserved.
+    #
+    # What git cannot enumerate, nix cannot copy: a brand-new file git has
+    # never been told about is simply absent from the build, and nix does not
+    # say so — it warns that the tree is dirty and nothing more. Silence there
+    # is §5's inert knob in miniature: the report says the sibling IS
+    # substituted while the file the developer just wrote is not in it.
+    #
+    # So it is NAMED, in the same register as every other skip above, with the
+    # command that fixes it. The remedy is `git add` with NO commit: staging is
+    # enough for git to enumerate the file, and what lands is still the
+    # WORKING-TREE content, so later edits keep flowing without re-adding.
+    #
+    # This is a notice, not a refusal. The override is correct and the shell it
+    # produces is usable; the developer simply cannot see one file yet, and
+    # refusing the whole substitution over it would be a far larger harm than
+    # the one being reported.
+    let untracked = gitRunPlain(identity,
+      ["-C", dir, "ls-files", "--others", "--exclude-standard"])
+    if untracked.code == 0:
+      var newFiles: seq[string]
+      for line in untracked.output.splitLines():
+        let f = line.strip()
+        if f.len > 0: newFiles.add(f)
+      if newFiles.len > 0:
+        const shownMax = 8
+        let shown = newFiles[0 ..< min(newFiles.len, shownMax)]
+        let elided = newFiles.len - shown.len
+        report.add("UNTRACKED files are not in what the shell builds: flake " &
+          "input '" & name & "' is substituted from " & dir &
+          ", which is taken as a git tree, so its " & $newFiles.len &
+          " untracked file(s) are not in what the shell builds: " &
+          shown.join(", ") &
+          (if elided > 0: " (+" & $elided & " more)" else: "") &
+          ". Edits to TRACKED files, committed or not, ARE included; a " &
+          "brand-new file is not, until git knows about it. Remedy: `git -C " &
+          dir & " add " & shown.join(" ") &
+          (if elided > 0: " …" else: "") &
+          "` — staging alone is enough, no commit needed, and your " &
+          "working-tree edits keep flowing afterwards.")
+
     result.add(FlakeOverrideBinding(input: name, repo: repo, path: dir,
       rev: head.output.strip()))
   result.sort(proc (a, b: FlakeOverrideBinding): int = cmp(a.input, b.input))
@@ -60245,7 +60290,7 @@ proc flakeOverrideStateReport*(flakeRoot: string;
   ## THE report of §5, and the single place at/ahead/behind is decided.
   ##
   ## ``bindings`` is the substitution set — the very list of
-  ## ``--override-input <name> path:<dir>`` arguments the dev shell was given —
+  ## ``--override-input <name> <ref>`` arguments the dev shell was given —
   ## so every row describes an input nix really is building from a workspace
   ## checkout, and every such input has a row. The report cannot describe a
   ## different substitution than the one that happened, because there is only
@@ -60442,7 +60487,7 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   ## …every other `repro develop` set-form selector] [--flake=DIR]
   ## [--strip-suffix=LIST] [--workspace-root=PATH] [--json]``.
   ##
-  ## Prints, on ONE line of stdout, the `--override-input <name> path:<dir>`
+  ## Prints, on ONE line of stdout, the `--override-input <name> <ref>`
   ## arguments that bind each of the flake's inputs to the workspace checkout
   ## of the repo it names — for exactly the repos the develop-set selection
   ## picked, and no others.
@@ -60580,7 +60625,8 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
     for e in emitted:
       words.add("--override-input")
       words.add(quoteShell(e.input))
-      words.add(quoteShell("path:" & e.path))
+      words.add(quoteShell(flakeSiblingOverrideRef(e.path,
+        identity.binaryPath)))
     # One line, `eval`-ready. Empty when nothing was bound — and that emptiness
     # is accounted for on stderr below, never left to be inferred.
     stdout.writeLine(words.join(" "))

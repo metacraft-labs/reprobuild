@@ -444,7 +444,7 @@ else
     recorded="$(grep -cve '^#' -e '^$' "$fingerprint")"
     if [[ "$recorded" -eq 0 ]]; then
       printf 'dev-shell: %s\n' \
-        'no path: overrides configured; the cached shell is built from the pinned inputs, as .envrc declares.'
+        'no sibling overrides configured; the cached shell is built from the pinned inputs, as .envrc declares.'
     else
       printf 'dev-shell: cached shell matches all %d overridden source(s).\n' \
         "$recorded"

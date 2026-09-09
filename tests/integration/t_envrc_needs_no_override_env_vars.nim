@@ -170,6 +170,24 @@ proc overridePairs(argLine: string): seq[string] =
       inc i
   result.sort()
 
+proc overrideDirPairs(argLine: string): seq[string] =
+  ## `<input>=<dir>` for every `--override-input` triple, with the fetcher
+  ## spelling reduced away — `path:<dir>` and `git+file://<dir>[?query]` both
+  ## become `<dir>`. Used where the subject is which tree an input was pointed
+  ## at rather than how nix was told to read it.
+  for pair in overridePairs(argLine):
+    let eq = pair.find('=')
+    if eq < 0: continue
+    var url = pair[eq + 1 .. ^1]
+    if url.startsWith("path:"):
+      url = url[len("path:") .. ^1]
+    elif url.startsWith("git+file://"):
+      url = url[len("git+file://") .. ^1]
+      let q = url.find('?')
+      if q >= 0: url = url[0 ..< q]
+    result.add(pair[0 ..< eq] & "=" & url)
+  result.sort()
+
 proc resolvedInputs(nixBin, flakeDir, overrideArgs, scratch: string):
     tuple[ok: bool; pairs: seq[string]; diagnostic: string] =
   ## `input=<resolved store-or-working path>` for every non-root node, as NIX
@@ -202,8 +220,27 @@ proc resolvedInputs(nixBin, flakeDir, overrideArgs, scratch: string):
     if name == doc["locks"]["root"].getStr(): continue
     if not node.hasKey("locked"): continue
     let locked = node["locked"]
+    # A local override reaches nix under one of two spellings, and both name
+    # the same working tree:
+    #
+    #   path:<dir>                 -> locked.path = <dir>
+    #   git+file://<dir>[?query]   -> locked.type = "git", locked.url = file://<dir>
+    #
+    # The subject of this file is WHICH DIRECTORY each input resolved to, not
+    # which fetcher was used to reach it, so both are reduced to the directory.
+    # Reading only `locked.path` would silently drop every git-tree override —
+    # and a dropped node does not fail loudly here, it just shrinks the set,
+    # which would make "the override was applied" and "the override vanished"
+    # look alike. That is the exact confusion this file exists to prevent.
     if locked.hasKey("path"):
       pairs.add(name & "=" & locked["path"].getStr())
+    elif locked.hasKey("url") and locked{"type"}.getStr() == "git":
+      var url = locked["url"].getStr()
+      if url.startsWith("file://"):
+        url = url[len("file://") .. ^1]
+        let q = url.find('?')
+        if q >= 0: url = url[0 ..< q]
+        pairs.add(name & "=" & url)
   pairs.sort()
   (ok: true, pairs: pairs, diagnostic: "")
 
@@ -356,7 +393,16 @@ fi
       check newRes.code == 0
 
       # ---- (1) the two forms agree, pair for pair. ------------------------
-      check overridePairs(newArgs) == overridePairs(oldArgs)
+      # On WHICH inputs and WHICH directories — deliberately not on the fetcher
+      # spelling. The six-variable plugin names a sibling `path:<dir>`; this
+      # verb names a git checkout `git+file://<dir>`, which is what keeps a
+      # gitignored build directory out of the store. The claim being made here
+      # is that the single call selects the same overrides as the six
+      # variables, and that claim is about the set, not the URL scheme.
+      #
+      # The directories are still compared exactly, so an override pointed at
+      # the wrong tree fails here as loudly as before.
+      check overrideDirPairs(newArgs) == overrideDirPairs(oldArgs)
 
       # ---- the nix-resolved arm -------------------------------------------
       let nixBin = findExe("nix")

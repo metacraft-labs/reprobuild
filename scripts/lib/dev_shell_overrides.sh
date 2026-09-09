@@ -601,13 +601,23 @@ dev_shell_git() {
 }
 
 # Describe one overridden source in a way that changes whenever the bytes nix
-# would copy change. `path:` inputs copy the working tree, so the commit alone
-# is not enough — an uncommitted edit is just as much a different input.
+# would copy change. A sibling override copies the working tree, not just the
+# commit, so the commit alone is not enough — an uncommitted edit is just as
+# much a different input.
 #
-# Known limit, stated rather than papered over: files excluded by `.gitignore`
-# are copied by `path:` but do not appear in `git status`, so an edit confined
-# to one of those is not detected. That is the residue; the reported failure —
-# a sibling that advanced by commits — is covered exactly.
+# `HEAD` plus a digest of `git status --porcelain` is exactly the right measure
+# for a sibling taken as a git tree, because that is the same set of files nix
+# enumerates: tracked content, at its working-tree bytes.
+#
+# This used to carry a known limit — files excluded by `.gitignore` were copied
+# by a `path:` override but do not appear in `git status`, so an edit confined
+# to one of those went undetected. That residue is gone rather than merely
+# tolerated: a git tree does not copy ignored files at all, so not watching
+# them is now precisely correct instead of a gap. `git status --porcelain` does
+# list untracked files, which a git tree does NOT copy — so the fingerprint can
+# now move when the built input did not. That direction is the safe one: it
+# rebuilds a shell that was already correct, where the old residue served a
+# stale one.
 dev_shell_source_state() {
   local dir="$1"
   if [[ ! -d "$dir" ]]; then
@@ -647,8 +657,21 @@ _dev_shell_digest() {
 }
 
 # Turn `flake_override_args_quoted` output (read from stdin) into
-# `input<TAB>dir` lines for the `path:` overrides — the only ones whose source
-# is a working tree this machine can change behind the cache's back.
+# `input<TAB>dir` lines for the LOCAL-DIRECTORY overrides — the only ones whose
+# source is a working tree this machine can change behind the cache's back.
+#
+# Two spellings name a local directory, and BOTH must be recognised:
+#
+#   path:/abs/dir                     a plain directory copy
+#   git+file:///abs/dir[?query]       the same directory taken as a git tree
+#
+# Matching only `path:` was safe while that was the only spelling emitted. It
+# stopped being safe the moment `repro flake override-args` began naming git
+# checkouts as git trees: this function would have matched nothing, the
+# fingerprint would have been EMPTY, and an empty fingerprint does not fail —
+# it reports "no overrides configured" and never invalidates again. That is the
+# fifteen-day-stale RUNQUOTA_SRC failure this whole file exists to prevent,
+# reintroduced by the fix for a different one.
 dev_shell_override_path_pairs_from_args() {
   local args
   args="$(cat)"
@@ -658,8 +681,22 @@ dev_shell_override_path_pairs_from_args() {
   # Both `--override-input` and `--override-flake` are exactly three words,
   # so a stride of three lands on every flag and never mid-triple.
   while (( i + 2 < ${#words[@]} )); do
-    if [[ "${words[i]:-}" == "--override-input" && "${words[i + 2]:-}" == path:* ]]; then
-      printf '%s\t%s\n' "${words[i + 1]}" "${words[i + 2]#path:}"
+    if [[ "${words[i]:-}" == "--override-input" ]]; then
+      local ref="${words[i + 2]:-}" dir=""
+      case "$ref" in
+        path:*)
+          dir="${ref#path:}"
+          ;;
+        git+file://*)
+          dir="${ref#git+file://}"
+          # Drop any `?submodules=1` — the fingerprint is about the working
+          # tree at that path, not about how nix was asked to read it.
+          dir="${dir%%\?*}"
+          ;;
+      esac
+      if [[ -n "$dir" ]]; then
+        printf '%s\t%s\n' "${words[i + 1]}" "$dir"
+      fi
     fi
     i=$((i + 3))
   done

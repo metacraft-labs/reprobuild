@@ -267,9 +267,9 @@ suite "NF-1: the emitted overrides are the develop set":
         checkpoint("stdout: " & three.outText & "\nstderr: " & three.errText)
       check three.code == 0
       check overridePairs(three.outText) == @[
-        "alpha-src=path:" & (ws / "alpha"),
-        "beta-src=path:" & (ws / "beta"),
-        "gamma-src=path:" & (ws / "gamma"),
+        "alpha-src=git+file://" & (ws / "alpha"),
+        "beta-src=git+file://" & (ws / "beta"),
+        "gamma-src=git+file://" & (ws / "gamma"),
       ]
 
       # ---- (2) the unselected repos appear NOWHERE. -----------------------
@@ -295,11 +295,11 @@ suite "NF-1: the emitted overrides are the develop set":
       let all = emit("--all")
       check all.code == 0
       check overridePairs(all.outText) == @[
-        "alpha-src=path:" & (ws / "alpha"),
-        "beta-src=path:" & (ws / "beta"),
-        "delta-src=path:" & (ws / "delta"),
-        "epsilon-src=path:" & (ws / "epsilon"),
-        "gamma-src=path:" & (ws / "gamma"),
+        "alpha-src=git+file://" & (ws / "alpha"),
+        "beta-src=git+file://" & (ws / "beta"),
+        "delta-src=git+file://" & (ws / "delta"),
+        "epsilon-src=git+file://" & (ws / "epsilon"),
+        "gamma-src=git+file://" & (ws / "gamma"),
       ]
       # `nowhere-src` is declared by the flake and has no repo at all, so it
       # keeps its pin under every selection. It is in the fixture so that "the
@@ -316,8 +316,8 @@ suite "NF-1: the emitted overrides are the develop set":
       let missing = emit("--only=alpha,beta,gamma")
       check missing.code == 0
       check overridePairs(missing.outText) == @[
-        "alpha-src=path:" & (ws / "alpha"),
-        "beta-src=path:" & (ws / "beta"),
+        "alpha-src=git+file://" & (ws / "alpha"),
+        "beta-src=git+file://" & (ws / "beta"),
       ]
       check "gamma" in missing.errText
       check (ws / "gamma") in missing.errText
@@ -356,10 +356,10 @@ suite "NF-1: the emitted overrides are the develop set":
       # Still the OUTER workspace's develop set: `gamma` is gone from disk (5),
       # the other four are unchanged.
       check overridePairs(nested.outText) == @[
-        "alpha-src=path:" & (ws / "alpha"),
-        "beta-src=path:" & (ws / "beta"),
-        "delta-src=path:" & (ws / "delta"),
-        "epsilon-src=path:" & (ws / "epsilon"),
+        "alpha-src=git+file://" & (ws / "alpha"),
+        "beta-src=git+file://" & (ws / "beta"),
+        "delta-src=git+file://" & (ws / "delta"),
+        "epsilon-src=git+file://" & (ws / "epsilon"),
       ]
 
       # ---- (7) NF-1 wrote no lock. ---------------------------------------

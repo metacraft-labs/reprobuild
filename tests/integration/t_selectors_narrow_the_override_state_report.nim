@@ -106,7 +106,7 @@ suite "NF-3: selectors narrow the override-state report":
       check args.code == 0
       check args.stdout.contains("--override-input")
       check args.stdout.contains("alpha-src")
-      check args.stdout.contains("path:" & siblingDir(fx, "alpha"))
+      check args.stdout.contains("git+file://" & siblingDir(fx, "alpha"))
       check not args.stdout.contains("beta-src")
       check not args.stdout.contains("gamma-src")
       # The drift report rides along on stderr, from the SAME bindings.
