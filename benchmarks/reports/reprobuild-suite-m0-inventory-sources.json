@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1499,
-    "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 602,
+    "nimTestBinaries": 1503,
+    "pureUnitConsolidationGroups": 53,
+    "pureUnitTests": 606,
     "staticallyDetectedRuntimeCompilerFlowTests": 87,
-    "testEntries": 1507
+    "testEntries": 1511
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -47,8 +47,8 @@
       ],
       "owner": "libs/repro_build_engine",
       "sources": [
-        "libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim",
         "libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim",
+        "libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim",
         "libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim",
         "libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim",
         "libs/repro_build_engine/tests/test_no_progress_diagnostic.nim"
@@ -1130,6 +1130,21 @@
       "targetOs": "soAny"
     },
     {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_stale_artifact_names_what_changed.nim",
+        "tests/unit/t_substituted_edge_does_not_go_stale.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 4,
       "defines": [],
       "dependencyShape": [
@@ -1150,7 +1165,7 @@
       "graph-fixture": 12,
       "integration": 658,
       "platform/destructive": 107,
-      "pure unit": 602,
+      "pure unit": 606,
       "unclassified": 128
     },
     "graphOwnedTestArtifacts": [
@@ -1287,9 +1302,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1499,
+    "nimTestBinaryCount": 1503,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1507
+    "testEntryCount": 1511
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10348,7 +10363,7 @@
     {
       "binary": "build/test-bin/t_peer_cache_admin_cli_status",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -10356,7 +10371,7 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_peer_cache",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -31408,6 +31423,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_provider_compile_cache_entry_is_content_addressed",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_build_engine",
+        "repro_core",
+        "repro_hash",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_run_consumes",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -31549,6 +31585,64 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_source_fetch_tool_metadata.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_stale_artifact_names_what_changed",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_stale_artifact_names_what_changed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_substituted_edge_does_not_go_stale",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_substituted_edge_does_not_go_stale.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_substituted_provider_compile_is_verified",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_core",
+        "repro_hash",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_substituted_provider_compile_is_verified.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,

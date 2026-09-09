@@ -1491,6 +1491,7 @@ tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	19
 tests/unit/t_measurement_axes.nim	nim	14
 tests/unit/t_nix_propagated_store_paths.nim	nim	2
+tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
 tests/unit/t_run_consumes.nim	nim	6
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
@@ -1499,6 +1500,9 @@ tests/unit/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling.nim	nim	4
 tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	5
 tests/unit/t_shared_mime_info_dev_stub.nim	nim	1
 tests/unit/t_source_fetch_tool_metadata.nim	nim	7
+tests/unit/t_stale_artifact_names_what_changed.nim	nim	5
+tests/unit/t_substituted_edge_does_not_go_stale.nim	nim	4
+tests/unit/t_substituted_provider_compile_is_verified.nim	nim	7
 tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
 tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
 tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10

@@ -192,6 +192,12 @@ import repro_lock_store
 # ``libs/repro_binary_cache_client/src/repro_binary_cache_client/
 # engine_publisher.nim`` for the contract.
 import repro_binary_cache_client/engine_publisher
+# The provider-compile edge's own binary-cache participation. It is a
+# separate module from ``engine_publisher`` because it does not ride the
+# engine's publish hook at all: the scheduler has no binary-cache lookup on
+# a local miss, so this edge publishes and substitutes AROUND itself, the way
+# ``repro_profile_compile``'s build-action edges already do.
+import repro_binary_cache_client/provider_compile_cache
 import repro_binary_cache_client/caches_config as bcCachesConfig
 # Binary-Caches.md §"Client CLI Surface (`repro cache`)" — the shared
 # single-entry publish/substitute dispatch (folded out of the retired
@@ -5367,6 +5373,121 @@ proc providerCompileInvocationSummary(): string =
   " consultations=" & $providerCompileConsultations &
     " compiled=" & $providerCompileLaunchedInThisProcess
 
+# ---------------------------------------------------------------------
+# Provider-compile binary-cache participation.
+#
+# The provider compile is the step the materialized-output cache cannot
+# shorten: a substituted package still pays a full single-threaded ``nim c``
+# for its provider before the payload it is going to restore is even
+# addressable. ``repro_binary_cache_client/provider_compile_cache`` gives that
+# edge its own content-addressed entry; this is where the two build entry
+# points opt into it.
+#
+# Modes (``REPRO_PROVIDER_COMPILE_CACHE``):
+#
+#   * ``substitute`` (default) — read only. A hit skips the compile; a miss,
+#     or an entry the consistency check rejects, compiles as before. Reading
+#     is the safe default because a wrong entry cannot be served: every
+#     restore is verified by ``providerCompileConsistencyAfterExecution``.
+#   * ``publish`` — read AND write. Opt-in, because a network write is not
+#     something an ordinary build should perform without being asked, and
+#     because the run that populates a cache is a deliberate act.
+#   * ``off`` — neither. ``REPRO_CACHE_DISABLE`` also turns everything off,
+#     the same way it does for materialized substitution.
+# ---------------------------------------------------------------------
+
+const ProviderCompileCacheModeEnv* = "REPRO_PROVIDER_COMPILE_CACHE"
+
+type ProviderCompileCacheMode = enum
+  pccOff, pccSubstitute, pccPublish
+
+proc providerCompileCacheMode(): ProviderCompileCacheMode =
+  case getEnv(ProviderCompileCacheModeEnv, "").strip().toLowerAscii()
+  of "off", "0", "none": pccOff
+  of "publish", "write", "populate": pccPublish
+  else: pccSubstitute
+
+var providerCompileCacheConfigCache: Option[ProviderCompileCacheConfig]
+
+proc providerCompileCacheConfig(): ProviderCompileCacheConfig =
+  ## Latched for the process: the trust list and the credential paths are
+  ## read once so a long build does not re-parse ``caches.conf`` per package,
+  ## and so a mid-build env flip cannot make two packages disagree about
+  ## which cache they are talking to.
+  if providerCompileCacheConfigCache.isNone:
+    providerCompileCacheConfigCache = some(resolveProviderCompileCacheConfig())
+  providerCompileCacheConfigCache.get()
+
+proc providerCompileOutputsPresent(plan: ProviderCompilePlan;
+                                   artifactPath: string): bool =
+  fileExists(extendedPath(artifactPath)) and
+    fileExists(extendedPath(normalizedProviderOutputPath(plan.outputBinaryPath)))
+
+type ProviderCompileCacheLogger* = proc(line: string) {.closure.}
+  ## The two build entry points render diagnostics through different local
+  ## loggers, and one of them renders none at all. Passing the sink in keeps
+  ## these helpers out of that difference instead of duplicating them.
+
+proc tryProviderCompileSubstitution(plan: ProviderCompilePlan;
+                                    projectName, artifactPath,
+                                    scratchRoot: string;
+                                    forceRebuild, dryRun: bool;
+                                    log: ProviderCompileCacheLogger = nil):
+    Option[ProviderCompileArtifact] =
+  ## Attempt to serve this provider compile from the binary cache.
+  ##
+  ## Only attempted when there is nothing on disk to reuse. That rule carries
+  ## no soundness content — the edge still runs afterwards and the engine
+  ## still decides — it just keeps a warm tree from paying a network round
+  ## trip per package for an edge the local action cache is about to
+  ## revalidate anyway.
+  if forceRebuild or dryRun:
+    return none(ProviderCompileArtifact)
+  if providerCompileCacheMode() == pccOff:
+    return none(ProviderCompileArtifact)
+  if providerCompileOutputsPresent(plan, artifactPath):
+    return none(ProviderCompileArtifact)
+  let cfg = providerCompileCacheConfig()
+  if not cfg.configured:
+    return none(ProviderCompileArtifact)
+  let attempt = trySubstituteProviderCompile(plan, projectName, artifactPath,
+    scratchRoot, cfg)
+  if not attempt.hit:
+    if log != nil and attempt.entryKeyHex.len > 0:
+      log("provider compile cache miss: \"" & projectName & "\" (" &
+        attempt.entryKeyHex & ") — " & attempt.reason)
+    return none(ProviderCompileArtifact)
+  if log != nil:
+    log("provider compile cache substitute: restored \"" & projectName &
+      "\" (" & attempt.entryKeyHex & ", " & $attempt.bytesFetched & " bytes)")
+  try:
+    some(readProviderCompileArtifact(artifactPath))
+  except CatchableError:
+    none(ProviderCompileArtifact)
+
+proc publishProviderCompileIfRequested(plan: ProviderCompilePlan;
+                                       projectName, artifactPath,
+                                       scratchRoot: string;
+                                       log: ProviderCompileCacheLogger = nil) =
+  ## Publish this provider compile when the invocation asked to populate the
+  ## cache. Best-effort and loud: a publish failure is reported and never
+  ## fails the build, because the compile it describes already succeeded.
+  if providerCompileCacheMode() != pccPublish:
+    return
+  let cfg = providerCompileCacheConfig()
+  if not cfg.configured:
+    return
+  let attempt = publishProviderCompile(plan, projectName, artifactPath,
+    scratchRoot, cfg)
+  if log == nil:
+    return
+  if attempt.ok:
+    log("provider compile cache publish: \"" & projectName & "\" (" &
+      attempt.entryKeyHex & ", " & $attempt.bytesUploaded & " bytes)")
+  else:
+    log("provider compile cache publish SKIPPED for \"" & projectName &
+      "\": " & attempt.reason)
+
 proc providerCompileFailure(buildResult: BuildRunResult): string =
   for item in buildResult.results:
     if item.status in {asFailed, asBlocked}:
@@ -9441,13 +9562,19 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var provider: ProviderCompileArtifact
     let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
       artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
-    let cachedProvider =
+    var cachedProvider =
       if forceRebuild and not dryRun:
         none(ProviderCompileArtifact)
       else:
         staticFreshnessFallbackProvider(providerPlan, providerArtifactPath,
           modulePath, providerBinaryPath, artifact.interfaceFingerprint,
           compileWorkDir)
+    let providerCacheLog: ProviderCompileCacheLogger =
+      proc(line: string) = logSummary(line)
+    if cachedProvider.isNone:
+      cachedProvider = tryProviderCompileSubstitution(providerPlan,
+        artifact.projectInterface.projectName, providerArtifactPath,
+        compileScratchDir, forceRebuild, dryRun, providerCacheLog)
     if cachedProvider.isSome:
       provider = cachedProvider.get()
     else:
@@ -9520,12 +9647,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         raise newException(IOError,
           "provider compile edge did not write artifact: " & providerArtifactPath)
       provider = readProviderCompileArtifact(providerArtifactPath)
-      if not providerCompileArtifactFresh(providerArtifactPath,
-          providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
-          providerPlan.providerFingerprint, providerPlan.workDir):
+      let providerConsistency = providerCompileConsistencyAfterExecution(
+        providerPlan, providerArtifactPath)
+      if not providerConsistency.fresh:
         raise newException(IOError,
           "provider compile artifact is stale after edge execution: " &
-            providerArtifactPath)
+            providerArtifactPath & "\n" & providerConsistency.detail)
+      if providerConsistency.reconciled:
+        logSummary("providerCompile: " & providerConsistency.detail)
+      publishProviderCompileIfRequested(providerPlan,
+        artifact.projectInterface.projectName, providerArtifactPath,
+        compileScratchDir, providerCacheLog)
     finishStat(buildStats, statsEnabled, "repro provider compile",
       providerCompileStart)
     let providerArtifactId = digestHex(provider.providerFingerprint)
@@ -15742,6 +15874,17 @@ const
     "REPRO_CACHES_CONFIG", "REPRO_BINARY_CACHE_URL",
     "REPRO_BINARY_CACHE_KEY_PATH", "REPRO_BINARY_CACHE_CERT_PATH",
     "REPRO_BINARY_CACHE_SCOPE",
+    # The provider-compile edge's own cache participation. A daemon-hosted
+    # build is where the 121 provider compiles of a package closure actually
+    # happen, so a mode that does not cross this boundary would silently do
+    # nothing for the one workload it exists for.
+    ProviderCompileCacheModeEnv,
+    "REPRO_CACHE_DISABLE",
+    # Log verbosity, for the same reason. Without it a daemon-hosted build
+    # silently falls back to the quiet default no matter what the operator
+    # asked for, so the one workload whose cache behaviour is worth watching
+    # is the one workload that cannot be made to report it.
+    "REPROBUILD_LOG",
     # Source checkout overrides used by repro.nim/config.nims to resolve
     # workspace sibling libraries when the daemon-hosted executor evaluates the
     # provider under a login-launched daemon environment.
@@ -19933,13 +20076,17 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   var provider: ProviderCompileArtifact
   let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
     artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
-  let cachedProvider =
+  var cachedProvider =
     if forceRefresh:
       none(ProviderCompileArtifact)
     else:
       staticFreshnessFallbackProvider(providerPlan, providerArtifactPath,
         modulePath, providerBinaryPath, artifact.interfaceFingerprint,
         compileWorkDir)
+  if cachedProvider.isNone:
+    cachedProvider = tryProviderCompileSubstitution(providerPlan,
+      artifact.projectInterface.projectName, providerArtifactPath,
+      compileScratchDir, forceRefresh, false)
   if cachedProvider.isSome:
     provider = cachedProvider.get()
     result.providerCompileCacheHit = true
@@ -19992,12 +20139,15 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       raise newException(IOError,
         "provider compile edge did not write artifact: " & providerArtifactPath)
     provider = readProviderCompileArtifact(providerArtifactPath)
-    if not providerCompileArtifactFresh(providerArtifactPath,
-        providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
-        providerPlan.providerFingerprint, providerPlan.workDir):
+    let providerConsistency = providerCompileConsistencyAfterExecution(
+      providerPlan, providerArtifactPath)
+    if not providerConsistency.fresh:
       raise newException(IOError,
         "provider compile artifact is stale after edge execution: " &
-          providerArtifactPath)
+          providerArtifactPath & "\n" & providerConsistency.detail)
+    publishProviderCompileIfRequested(providerPlan,
+      artifact.projectInterface.projectName, providerArtifactPath,
+      compileScratchDir)
 
   result.providerArtifactId = digestHex(provider.providerFingerprint)
   result.providerBinaryPath = provider.outputBinaryPath
@@ -56413,12 +56563,12 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           skipCacheHitEvidence: true))
         if compiled.hasFailedActions():
           raise newException(OSError, providerCompileFailure(compiled))
-        if not providerCompileArtifactFresh(providerArtifactPath,
-            plan.outputBinaryPath, plan.interfaceFingerprint,
-            plan.providerFingerprint, plan.workDir):
+        let lockProviderConsistency = providerCompileConsistencyAfterExecution(
+          plan, providerArtifactPath)
+        if not lockProviderConsistency.fresh:
           raise newException(IOError,
             "lock metadata provider artifact is stale after edge execution: " &
-              providerArtifactPath)
+              providerArtifactPath & "\n" & lockProviderConsistency.detail)
         readProviderCompileArtifact(providerArtifactPath)
     let emitPath = scratchRoot / "solver-inputs.explain"
     let protocolRoot = scratchRoot / "protocol"

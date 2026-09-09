@@ -343,6 +343,19 @@ type
       ## RP1: the v1 ``ProviderCompileActionKey`` used as the engine edge's
       ## action key. See ``computeProviderCompileActionKey``.
     workDir*: string
+    fingerprintInputStamps*: seq[FileStamp]
+      ## Stamps of EVERY file whose content feeds ``providerFingerprint``,
+      ## captured when the plan was made: the recipe's own source closure plus
+      ## the reprobuild library sources ``reproLibSourceFingerprint`` folds in.
+      ##
+      ## The provider compile is a multi-minute edge run in a child process,
+      ## and the child recomputes ``providerFingerprint`` from the state it
+      ## sees when it runs. Any of these files being rewritten in between —
+      ## which, for the library sources, means anybody editing the reprobuild
+      ## checkout while a long build is in flight — makes the child's digest
+      ## legitimately differ from the plan's. This snapshot is what lets the
+      ## post-execution check tell that apart from a genuinely wrong artifact,
+      ## and name the file responsible either way.
 
   ProviderCompileArtifact* = object
     inputSources*: seq[string]
@@ -393,17 +406,21 @@ type
       ## ``interfaceLiftActionKey``: it is scratch, so keying on it would make
       ## the same lift a miss in every workspace.
 
-  FileStampKind = enum
+  FileStampKind* = enum
     fskMissing
     fskRegular
     fskDirectory
     fskOther
 
-  FileStamp = object
-    path: string
-    kind: FileStampKind
-    sizeBytes: uint64
-    mtimeNs: uint64
+  FileStamp* = object
+    ## Exported so a caller can be TOLD which file moved under it, not merely
+    ## that something did. ``ProviderCompilePlan.fingerprintInputStamps``
+    ## carries these across the provider-compile edge so the post-execution
+    ## consistency check can name the changed inputs by path, size and mtime.
+    path*: string
+    kind*: FileStampKind
+    sizeBytes*: uint64
+    mtimeNs*: uint64
 
   InterfaceExtractionContext = object
     modulePath: string
@@ -5401,7 +5418,13 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     providerFingerprint: providerFingerprint,
     providerArtifactId: providerArtifactId,
     providerCompileActionKey: providerCompileActionKey,
-    workDir: workDir)
+    workDir: workDir,
+    # Same input set ``providerFingerprintFor`` just hashed, stamped rather
+    # than read: the recipe closure plus the reprobuild library sources.
+    # ``reproLibStampsForCache`` is empty for an immutable-store workDir,
+    # where those files cannot change and so need no snapshot.
+    fingerprintInputStamps: fileStamps(sources) &
+      reproLibStampsForCache(workDir))
 
 proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
                                    interfaceFingerprint,
@@ -5427,6 +5450,162 @@ proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
     return true
   except CatchableError:
     false
+
+# ---------------------------------------------------------------------
+# Post-execution consistency of the provider-compile edge.
+#
+# ``providerCompileArtifactFresh`` above answers a PLANNING question: "may I
+# skip the compile?". Asking it again AFTER the edge has run asks something it
+# was never able to answer, and gets it wrong in one specific, expensive way.
+#
+# ``providerFingerprint`` covers the recipe's source closure AND — through
+# ``reproLibSourceFingerprint`` — every reprobuild library source. The plan
+# hashes those before the edge is scheduled; the compile then runs for minutes
+# in a child process and hashes them again when it writes the artifact. If any
+# of those files is rewritten in between, the two digests differ *by
+# construction* and neither is wrong: the child's artifact faithfully
+# describes the binary it just produced from the sources that were there. The
+# planning-time comparison then rejects a perfectly good artifact, and the
+# only thing it says about it is "is stale".
+#
+# So the post-execution question is asked directly instead: does the artifact
+# describe THIS compile, of THIS project, into THIS binary? Those properties
+# are time-invariant and are checked strictly. The fingerprint is reconciled
+# against the inputs as they stand now, and when it still does not match, the
+# files that moved are named.
+# ---------------------------------------------------------------------
+
+type
+  ProviderCompileConsistency* = object
+    ## The verdict of ``providerCompileConsistencyAfterExecution``.
+    fresh*: bool
+      ## The artifact may be used.
+    reconciled*: bool
+      ## True when ``fresh`` was reached only after re-deriving the expected
+      ## fingerprint from the inputs as they stand now — i.e. an input was
+      ## rewritten while the compile ran. The artifact is usable; the caller
+      ## should say so rather than pass over it silently.
+    detail*: string
+      ## Human-readable explanation. Non-empty whenever ``fresh`` is false,
+      ## and also on the ``reconciled`` path. Always names the specific input,
+      ## path or digest that produced the verdict.
+
+proc describeStampChange(before: FileStamp; after: FileStamp): string =
+  if before.kind != after.kind:
+    return " (" & $before.kind & " -> " & $after.kind & ")"
+  var parts: seq[string] = @[]
+  if before.sizeBytes != after.sizeBytes:
+    parts.add("size " & $before.sizeBytes & " -> " & $after.sizeBytes)
+  if before.mtimeNs != after.mtimeNs:
+    parts.add("mtime " & $before.mtimeNs & " -> " & $after.mtimeNs)
+  if parts.len == 0:
+    return ""
+  " (" & parts.join(", ") & ")"
+
+proc changedFingerprintInputs(plan: ProviderCompilePlan): seq[string] =
+  ## The fingerprint inputs whose on-disk stamp no longer matches the one the
+  ## plan recorded. This is the answer to "what changed?" — the whole reason
+  ## ``fingerprintInputStamps`` is carried across the edge.
+  for recorded in plan.fingerprintInputStamps:
+    let current = fileStamp(recorded.path)
+    if current != recorded:
+      result.add(recorded.path & describeStampChange(recorded, current))
+
+proc renderChangedInputs(changed: openArray[string]): string =
+  const maxListed = 10
+  if changed.len == 0:
+    return "  no declared provider-compile input changed on disk\n"
+  result = "  provider-compile inputs that changed while the compile ran (" &
+    $changed.len & "):\n"
+  for i, entry in changed:
+    if i >= maxListed:
+      result.add("    ... and " & $(changed.len - maxListed) & " more\n")
+      break
+    result.add("    " & entry & "\n")
+
+proc providerCompileConsistencyAfterExecution*(plan: ProviderCompilePlan;
+                                               artifactPath: string):
+    ProviderCompileConsistency =
+  ## Validate the artifact the provider-compile edge just produced or
+  ## restored. See the block comment above for why this is NOT
+  ## ``providerCompileArtifactFresh``.
+  let normalizedOutputPath = normalizedProviderOutputPath(plan.outputBinaryPath)
+  if not fileExists(extendedPath(artifactPath)):
+    return ProviderCompileConsistency(fresh: false,
+      detail: "the compile artifact is missing: " & artifactPath)
+  if not fileExists(extendedPath(normalizedOutputPath)):
+    return ProviderCompileConsistency(fresh: false,
+      detail: "the provider binary the artifact should describe is missing: " &
+        normalizedOutputPath)
+  var cached: ProviderCompileArtifact
+  try:
+    cached = readProviderCompileArtifact(artifactPath)
+  except CatchableError as err:
+    return ProviderCompileConsistency(fresh: false,
+      detail: "the compile artifact could not be decoded: " & err.msg)
+
+  # (1) Identity of the thing compiled. Neither of these can drift under a
+  # running compile: both are decided before the edge is scheduled, so a
+  # mismatch means the artifact belongs to a DIFFERENT compile.
+  if cached.interfaceFingerprint != plan.interfaceFingerprint:
+    return ProviderCompileConsistency(fresh: false,
+      detail: "the artifact was produced for a different project interface\n" &
+        "  interface requested: " & toHex(plan.interfaceFingerprint.bytes) &
+        "\n  interface recorded:  " & toHex(cached.interfaceFingerprint.bytes) &
+        "\n")
+  if cached.outputBinaryPath != normalizedOutputPath:
+    return ProviderCompileConsistency(fresh: false,
+      detail: "the artifact describes a different provider binary\n" &
+        "  binary requested: " & normalizedOutputPath &
+        "\n  binary recorded:  " & cached.outputBinaryPath & "\n")
+
+  # (2) Self-consistency: the artifact must describe the binary that is
+  # actually on disk. This is the check that catches a cache serving the
+  # wrong payload, and it is exact rather than stamp-based on purpose.
+  var actualBinaryFingerprint: ContentDigest
+  try:
+    actualBinaryFingerprint = casDigest(toBytes(readFile(
+      extendedPath(normalizedOutputPath))))
+  except CatchableError as err:
+    return ProviderCompileConsistency(fresh: false,
+      detail: "the provider binary could not be read back: " & err.msg)
+  if cached.outputBinaryFingerprint != actualBinaryFingerprint:
+    return ProviderCompileConsistency(fresh: false,
+      detail: "the provider binary on disk is not the one the artifact " &
+        "describes\n  binary: " & normalizedOutputPath &
+        "\n  artifact records: " & toHex(cached.outputBinaryFingerprint.bytes) &
+        "\n  binary hashes to: " & toHex(actualBinaryFingerprint.bytes) & "\n")
+
+  # (3) The source fingerprint. Unlike (1) and (2) this one CAN drift while
+  # the compile runs, so a mismatch against the plan is re-derived against the
+  # inputs as they stand before it is called a failure.
+  if cached.providerFingerprint == plan.providerFingerprint:
+    return ProviderCompileConsistency(fresh: true)
+
+  let changed = changedFingerprintInputs(plan)
+  var currentFingerprint: ContentDigest
+  var currentReadable = true
+  try:
+    currentFingerprint = providerFingerprintFor(plan.inputSources,
+      plan.interfaceFingerprint, plan.workDir)
+  except CatchableError:
+    currentReadable = false
+  if currentReadable and currentFingerprint == cached.providerFingerprint:
+    return ProviderCompileConsistency(fresh: true, reconciled: true,
+      detail: "provider-compile inputs changed while the compile ran; the " &
+        "artifact matches the inputs as they stand now and was accepted\n" &
+        renderChangedInputs(changed))
+
+  ProviderCompileConsistency(fresh: false,
+    detail: "the artifact does not match the sources it was compiled from\n" &
+      renderChangedInputs(changed) &
+      "  providerFingerprint planned:  " &
+        toHex(plan.providerFingerprint.bytes) & "\n" &
+      "  providerFingerprint recorded: " &
+        toHex(cached.providerFingerprint.bytes) & "\n" &
+      "  providerFingerprint now:      " &
+        (if currentReadable: toHex(currentFingerprint.bytes)
+         else: "<a provider-compile input could not be read>") & "\n")
 
 proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
                                        outputBinaryPath: string;
