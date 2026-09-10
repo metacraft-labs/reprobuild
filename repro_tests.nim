@@ -10467,6 +10467,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_nested_bootstrap_runtime_closure.nim",
+    binary: "build/test-bin/t_nested_bootstrap_runtime_closure",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_nested_lock_push_capability_security.nim",
     binary: "build/test-bin/t_nested_lock_push_capability_security",
     defines: @[],
