@@ -886,7 +886,25 @@ when defined(windows):
 
 proc fingerprintMetadata(path: string): FileMetadata =
   let fsPath = extendedPath(path)
-  when defined(linux):
+  when defined(posix):
+    # ONE `lstat(2)` answers kind, size and mtime together.
+    #
+    # This branch used to be `when defined(linux)`, and every other POSIX host
+    # -- macOS above all -- fell through to the generic branch below, which
+    # asks the same kernel the same question three times: `fileExists`, then
+    # `dirExists`, then `getFileInfo`. Measured on a warm no-op of the zlib
+    # CMake project, 4,359 calls cost 37.3 ms, of which the two existence
+    # probes were 36.4 ms and the `getFileInfo` that actually produces the
+    # answer was 0.67 ms. The probes dominate because 3,928 of the 4,363
+    # recorded inputs DO NOT EXIST -- they are linker and CMake library-search
+    # paths -- so the common case paid a failed `stat` for `fileExists` AND a
+    # failed `stat` for `dirExists` before concluding nothing, and a negative
+    # path lookup costs roughly twice a positive one.
+    #
+    # The two branches did not agree on every entity, and widening this one
+    # settles the disagreement in its favour. Both divergences are argued at
+    # the arm that causes them and pinned by
+    # `t_fingerprint_metadata_classifies_every_posix_entity`.
     var stat: Stat
     if lstat(fsPath.cstring, stat) != 0:
       return FileMetadata(kind: ffkMissing)
@@ -896,6 +914,33 @@ proc fingerprintMetadata(path: string): FileMetadata =
       elif S_ISDIR(stat.st_mode):
         ffkDirectory
       elif S_ISLNK(stat.st_mode):
+        # A symlink is classified by what it points AT while carrying the
+        # LINK's own size and mtime -- Incremental-Invalidation.md §"Symlink
+        # outputs": "A symlink to a file is classified as a regular file
+        # carrying the *link's own* size and mtime". A DANGLING symlink has no
+        # target to classify by and lands on `ffkRegular`, which is the only
+        # honest answer a four-kind format has for it: the entity exists,
+        # `lstat` describes it, and its own size (the length of the target
+        # string) and mtime are recorded facts that MOVE when the link is
+        # retargeted.
+        #
+        # The generic branch answered `ffkMissing` here, because `fileExists`
+        # follows the link and fails. That is not a cheaper spelling of this
+        # rule, it is a different rule, and the two have opposite holes.
+        # `ffkMissing` records 0/0, so retargeting a dangling link at another
+        # absent target is invisible to it; and on the OUTPUT side
+        # `outputStateMismatchImpl` SKIPS EVERY CHECK for an output recorded
+        # `ffkMissing`, so a dangling symlink output was recorded as
+        # unverifiable and then never verified. `ffkRegular` keeps the retarget
+        # signal and the whole output check set, `linkTarget` witness included.
+        #
+        # What `ffkRegular` cannot see, and `ffkMissing` could: the link's
+        # target APPEARING. `lstat` of the link is byte-identical before and
+        # after, so that transition stops invalidating. It never invalidated on
+        # Linux either. Closing it needs a recorded link target for INPUTS --
+        # Incremental-Invalidation.md already requires one for outputs
+        # (`OutputWitness.linkTarget`) and `FileFingerprint` has no equivalent
+        # field -- so it is a record-format question, not a syscall-count one.
         try:
           let info = getFileInfo(fsPath, followSymlink = false)
           case info.kind
@@ -906,6 +951,12 @@ proc fingerprintMetadata(path: string): FileMetadata =
         except OSError:
           ffkMissing
       else:
+        # FIFOs, sockets, devices. `isRecordableInput` drops `ffkOther`
+        # entirely, which is the point: a socket has no meaningful size or
+        # mtime, so recording one as a comparable input asserts something that
+        # is not true. The generic branch called these `ffkMissing` --
+        # `fileExists` is false for a FIFO -- and so recorded a path that
+        # exists as an absent-path probe.
         ffkOther
     result.sizeBytes =
       if stat.st_size < 0: 0'u64 else: uint64(stat.st_size)
@@ -930,6 +981,11 @@ proc fingerprintMetadata(path: string): FileMetadata =
       if unixNs100 > 0:
         result.mtimeNs = uint64(unixNs100) * 100'u64
   else:
+    # Stdlib-only fallback for a host that is neither POSIX nor Windows. No
+    # such host is supported today; this exists so the module still compiles
+    # for one. Three syscalls where the branches above need one, and it cannot
+    # tell a dangling symlink or a FIFO apart from an absent path -- see the
+    # POSIX branch for why that matters. Do not route a platform back onto it.
     if not fileExists(fsPath) and not dirExists(fsPath):
       return FileMetadata(kind: ffkMissing)
     let info = getFileInfo(fsPath, followSymlink = false)

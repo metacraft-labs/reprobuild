@@ -2223,6 +2223,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim",
+    binary: "build/test-bin/t_fingerprint_metadata_classifies_every_posix_entity",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_m8_multi_output_realize.nim",
     binary: "build/test-bin/t_m8_multi_output_realize",
     defines: @[],
