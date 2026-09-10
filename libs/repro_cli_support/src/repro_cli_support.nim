@@ -25481,8 +25481,9 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       "there is nothing `repro develop` can manage. Every backend the " &
       "configuration plane resolved was consulted:\n" & inventory.join("\n") &
       "\nPublish a lock record through one of them (`repro lock refresh` " &
-      "writes the committed lock; `repro workspace lock` records a routed " &
-      "tier's per-repo entries)."
+      "writes a repo's own committed lock and must RUN IN that repo, beside " &
+      "its project file — there is no workspace-wide `repro.lock`; " &
+      "`repro workspace lock` records a routed tier's per-repo entries)."
     var r = failure(msg, notices, 1)
     r.backends = composed.backends
     return r
@@ -32846,6 +32847,102 @@ proc lockRecordAtCommitOrAncestor*(store: LockStore; project, repo, sha: string;
     if rec.isSome:
       return (rec: rec, foundAt: ancestor, distance: idx)
 
+type
+  PublicTierCommittedLocks = object
+    ## The PUBLIC tier's committed-lock medium, read across the workspace.
+    ##
+    ## The public tier's durable backend is "the **in-repo** committed
+    ## `repro.lock`" (Unified-Locking-And-Hooks.md §3, the *public* row, whose
+    ## record is "the solved-graph pins for **the repo's** public dependencies +
+    ## **the repo's own** public coordinates"), and MO-1 puts that file *in the
+    ## project repo* (Workspace-Manifest-Optional.milestones.org MO-1: "a lock
+    ## file **committed in the project repo**"). A workspace root is such a repo
+    ## only when it is itself a project; for a multi-repo workspace the root is
+    ## the *bill of materials*, and `<workspaceRoot>/repro.lock` is a file the
+    ## model has no place for. Reading only that one path therefore answers
+    ## "this workspace has no public lock record at all" for a workspace in
+    ## which every participating repo commits one — which is the shape
+    ## CLAUDE.md states outright ("Locking is **per repo**: each participating
+    ## repo commits its own `repro.lock` … There is no workspace-wide lock file")
+    ## and which CLI/develop.md §"The Develop Set Is The Workspace Lock Set"
+    ## legislates for directly:
+    ##
+    ##   > A repo is *develop-manageable* in workspace `W` if some lock record
+    ##   > readable from `W` names it and pins it to an exact revision. Which
+    ##   > **file** that record lives in is a storage detail, not a boundary the
+    ##   > user should have to think about.
+    ##
+    ## So the medium is read at every participating repo, and the reads compose:
+    ## the root's own lock (present exactly when the root IS a project repo, and
+    ## the whole of the pre-DS-1 read) plus, for each participating repo, the
+    ## record that repo publishes for ITSELF.
+    deps: seq[LockedDep]        ## the per-repo self-records, workspace-rebased
+    probed: seq[string]         ## repo paths whose checkout was probed
+    carrying: seq[string]       ## repo paths that actually carried a lock
+
+proc participatingRepoCommittedLocks(workspaceRoot: string):
+    PublicTierCommittedLocks =
+  ## Read every participating repo's OWN in-repo committed lock and return the
+  ## record each one publishes for ITSELF, rebased onto workspace-relative
+  ## paths.
+  ##
+  ## Only the repo's own record is taken, deliberately. A repo's lock also pins
+  ## that repo's dependencies, but two participating repos may legitimately pin
+  ## a third at different revisions (that is precisely the disagreement
+  ## `collectLockCoherence` reports, and reports as ADVISORY —
+  ## `t_lock_coherence_reports_the_diff_advisory_only`). Folding those cross
+  ## claims into the union would turn an advisory diff into the composer's
+  ## fatal DS-2 "two backends disagree" refusal. Each repo is the sole authority
+  ## on its own pin, so restricting the fold to self-records is both the §3
+  ## reading ("the repo's own public coordinates") and conflict-free by
+  ## construction.
+  ##
+  ## Best-effort by design: this is the *public* tier's medium, whose absence is
+  ## never a refusal ("An ABSENT `repro.lock` … is recorded as a backend that
+  ## contributed nothing — NOT as a refusal"). A workspace whose membership
+  ## cannot be resolved at all contributes no per-repo records and is reported
+  ## by the composer's own membership refusal further down, not here.
+  let root = absolutePath(workspaceRoot)
+  var repos: seq[ResolvedRepo]
+  try:
+    repos = resolveWorkspaceProjectShared(root, "", "`repro develop`").resolved.repos
+  except CatchableError:
+    return
+  for repo in repos:
+    # ``.`` (or an empty path) is the workspace root itself, already read as the
+    # root committed lock by the caller; re-reading it here would duplicate
+    # every dep it holds.
+    if repo.path.len == 0 or repo.path == ".": continue
+    let repoRoot = root / repo.path
+    if not dirExists(extendedPath(repoRoot)): continue
+    result.probed.add(repo.path)
+    let lockP = committedLockPath(repoRoot)
+    if not fileExists(extendedPath(lockP)): continue
+    var parsed: LockedDependencies
+    try:
+      parsed = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+    except CatchableError:
+      # An unparseable in-repo lock is the lock verbs' loud business (`repro
+      # lock validate`), not a reason to refuse the whole develop set — the
+      # same judgement `collectLockCoherence` makes about the same file.
+      continue
+    result.carrying.add(repo.path)
+    for dep in parsed.deps:
+      # The lock's OWN repo: `path == "."` / empty, exactly as
+      # ``isRootLockedDep`` and ``collectLockCoherence`` read it.
+      if not (dep.path.len == 0 or dep.path == "."): continue
+      if dep.coordinates.kind != ckVcs: continue
+      if dep.coordinates.revision.len == 0: continue
+      var rebased = dep
+      # Rebase onto the workspace: inside its own lock the repo is the root
+      # consumer (`.`); inside the WORKSPACE's lock set it is a repo at its
+      # workspace-relative path, which is what makes it develop-manageable and
+      # what a checkout row is keyed on.
+      rebased.path = repo.path
+      if rebased.name.len == 0: rebased.name = repo.name
+      result.deps.add(rebased)
+      break
+
 proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
                            args: DevelopAllArgs): DevelopLockSet =
   let root = absolutePath(workspaceRoot)
@@ -32885,12 +32982,59 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   if publicContributes:
     result.lock = populateLockedDeps(
       LockSource(kind: lskCommittedLock, workspaceRoot: root))
+  # …and the SAME medium at every OTHER participating repo. The public tier's
+  # backend is the in-repo committed lock, and in a multi-repo workspace there
+  # is one per repo, not one at the root (see
+  # ``participatingRepoCommittedLocks``). Reading only the root path made a
+  # workspace in which every repo commits its own lock resolve NOTHING, and
+  # since "An empty union … is the only lock-set failure" that turned a
+  # perfectly locked workspace into an unresolvable one — with no repair, since
+  # a root `repro.lock` is a file the model forbids at a non-project root
+  # (`repro lock refresh` there correctly answers "no solver inputs found").
+  var perRepo: PublicTierCommittedLocks
+  var perRepoContributed = 0
+  if publicContributes:
+    perRepo = participatingRepoCommittedLocks(root)
+    # The ROOT lock wins where both speak. Its entry for a repo is this
+    # workspace's own solved pin; the repo's self-record is what that repo last
+    # published about itself, and the two disagreeing is a lock-coherence
+    # observation (advisory, and already reported as such), never a develop-set
+    # failure. Gap-filling keeps the composed set a strict superset of the
+    # pre-DS-1 read for every workspace that has a root lock.
+    var haveNames = initHashSet[string]()
+    var havePaths = initHashSet[string]()
+    for d in result.lock.deps:
+      if d.name.len > 0: haveNames.incl(d.name)
+      if d.path.len > 0: havePaths.incl(d.path)
+    for d in perRepo.deps:
+      if (d.name.len > 0 and d.name in haveNames) or
+          (d.path.len > 0 and d.path in havePaths):
+        continue
+      if d.name.len > 0: haveNames.incl(d.name)
+      if d.path.len > 0: havePaths.incl(d.path)
+      result.lock.deps.add(d)
+      inc perRepoContributed
+  let perRepoLocation =
+    "the in-repo repro.lock of each participating repo under " & root
   var committedLockReport = DevelopBackendReport(tier: "public",
-    backendKind: "committed-lock", location: committedLockP,
-    reachable: committedLockPresent,
+    backendKind: "committed-lock",
+    # Name the medium that actually answered. A workspace whose records live in
+    # the participating repos must not have its inventory line point at a root
+    # path nothing reads and nothing may write.
+    location:
+      (if committedLockPresent or perRepoContributed == 0: committedLockP
+       else: perRepoLocation),
+    reachable: committedLockPresent or perRepoContributed > 0,
     diagnostic:
-      (if committedLockPresent: ""
-       else: "no committed lock at " & committedLockP),
+      (if committedLockPresent or perRepoContributed > 0: ""
+       elif perRepo.probed.len == 0: "no committed lock at " & committedLockP
+       else: "no committed lock at " & committedLockP & ", and none of the " &
+         $perRepo.probed.len & " participating repo checkout(s) under " & root &
+         " carries one either" &
+         (if perRepo.carrying.len > 0:
+            " that pins its own revision (read: " &
+              perRepo.carrying.join(", ") & ")"
+          else: "")),
     records: result.lock.deps.len)
   if not publicContributes:
     # DS-8 — ``--tier`` excluded the public tier. The committed lock is not
@@ -36089,6 +36233,18 @@ type
       ## MO-4 — per-repo participation recorded through each repo's ASSIGNED
       ## locking backend (empty unless the host bootstrap config declares
       ## `[locking]` routes; the all-public default records nothing here).
+    routed*: bool
+      ## Whether ANY configuration layer declares a `[locking]` route for this
+      ## workspace (`ComposedRouting.hasExplicitRoutes`). False is the
+      ## public-only shape of Unified-Locking-And-Hooks.md §10 ("A workspace
+      ## with neither a configured route nor a record store is public-only and
+      ## writes only `repro.lock`"), in which this command has no backend to
+      ## record into and legitimately writes nothing.
+      ##
+      ## Carried on the REPORT rather than re-derived by each surface because
+      ## `participation` is filled only on the non-deferred path, so "empty
+      ## participation" cannot by itself distinguish "public-only" from "the
+      ## participation writes were deferred to the gate".
     exitCode*: int
 
   WorkspaceLockOutcome* = object
@@ -36107,6 +36263,7 @@ proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
   result["createdAt"] = %report.createdAt
   result["workspaceBranch"] = %report.workspaceBranch
   result["replacedExistingEntry"] = %report.replacedExistingEntry
+  result["routed"] = %report.routed
   var repos = newJArray()
   for entry in report.repos:
     var obj = newJObject()
@@ -36159,15 +36316,63 @@ proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
         " (trigger=" & report.triggerRepo & "@" &
         report.triggerSha & ")")
     else:
-      # HL-2 (§6 Decision 1) routed case: no manifest partition lock was
-      # written because the git-checkout manifest backend owns no repo in this
-      # workspace (every declared route points elsewhere, or the workspace is
-      # public-only). Each repo's record went to its assigned backend and is
-      # reported by the `recorded … via … backend` lines below. Avoid printing
-      # a blank path.
-      result.add("workspace lock: recorded per-repo lock entries" &
-        " (trigger=" & report.triggerRepo & "@" &
-        report.triggerSha & ")")
+      # No manifest partition lock was written. Two very different situations
+      # reach here, and they must not be reported with the same sentence.
+      var recordedAny = false
+      for p in report.participation:
+        if p.recorded:
+          recordedAny = true
+          break
+      if not report.routed:
+        # PUBLIC-ONLY: no `[locking]` route and no record store, so there is no
+        # backend to record anything into and this command wrote NOTHING. That
+        # is the specified outcome — Unified-Locking-And-Hooks.md §8.4,
+        # "Public-only workspace, no configured route and no record store": "No
+        # store is synthesized: the record-store root is unset, no `locks/`
+        # record is written … Publication is the repo's own push of its in-tree
+        # `repro.lock`", and §6 Decision 1's public row: the public partition is
+        # "recorded in the committed `repro.lock` … for the MO-1 sentinel this
+        # is `repro lock refresh`, not a separate store write".
+        #
+        # Writing nothing is therefore CORRECT. Claiming to have "recorded
+        # per-repo lock entries" is not: this branch printed that sentence
+        # unconditionally, so the one observable difference between a
+        # public-only no-op and a successful routed fan-out was that the no-op
+        # ALSO listed no entries — a distinction nobody reading a success line
+        # looks for. An operation must not report work it did not do.
+        result.add("workspace lock: recorded nothing: this workspace declares " &
+          "no lock route and has no record store, so it is public-only and " &
+          "there is no backend for a workspace lock record. Each repo's own " &
+          "committed repro.lock is its lock record — refresh one with " &
+          "`repro lock refresh` in that repo, and publish it by pushing the " &
+          "repo.")
+      elif recordedAny:
+        # HL-2 (§6 Decision 1) routed case: the git-checkout manifest backend
+        # owns no repo in this workspace (every declared route points
+        # elsewhere), so each repo's record went to its assigned backend and is
+        # reported by the `recorded … via … backend` lines below. Avoid
+        # printing a blank path.
+        result.add("workspace lock: recorded per-repo lock entries" &
+          " (trigger=" & report.triggerRepo & "@" &
+          report.triggerSha & ")")
+      elif report.participation.len > 0:
+        # Routed (``[locking]`` routes ARE declared — that is the only thing
+        # that makes ``recordRoutedParticipation`` report at all), but no repo's
+        # record was actually written: every one was either covered by its
+        # committed lock or failed. Both are spelled out per repo immediately
+        # below, so this line states the outcome and defers the reasons rather
+        # than claiming entries that do not exist.
+        result.add("workspace lock: no lock record was written" &
+          " (trigger=" & report.triggerRepo & "@" &
+          report.triggerSha & ") — see the per-repo lines below")
+      else:
+        # Routed, participation was DEFERRED (the pre-push path builds the
+        # writes and executes them itself), so this renderer has no per-repo
+        # outcomes to report. Say that, rather than claiming either extreme.
+        result.add("workspace lock: no lock record was written here" &
+          " (trigger=" & report.triggerRepo & "@" &
+          report.triggerSha & "); the routed per-repo writes are reported by " &
+          "whoever executes them")
     for entry in report.repos:
       result.add("workspace lock: locked " & entry.path & " @ " &
         entry.revision &
@@ -36706,6 +36911,12 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # never silently go public-only; warn (once) and name the ``adopt-manifest``
   # remedy. Best-effort — never blocks the lock.
   maybeWarnLegacyManifestWithoutTeamRoute(args.workspaceRoot, composed)
+  # Carried into the report so every surface can tell a public-only workspace
+  # (no route, no store, nothing to record — §10) apart from a routed one whose
+  # per-repo writes went elsewhere or were deferred. Without it the two are
+  # indistinguishable downstream, and the renderer reported the first as the
+  # second.
+  report.routed = composed.hasExplicitRoutes
   let manifestRepos = manifestOwnedRepos(
     composed, lockRepos, args.workspaceRoot, manifestLayerRoot, identity)
 

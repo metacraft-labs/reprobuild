@@ -8928,6 +8928,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_develop_reads_each_participating_repos_committed_lock.nim",
+    binary: "build/test-bin/t_develop_reads_each_participating_repos_committed_lock",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_develop_refuses_cross_backend_revision_conflict.nim",
     binary: "build/test-bin/t_develop_refuses_cross_backend_revision_conflict",
     defines: @[],
@@ -12089,6 +12098,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_lock_partition_resolves_a_sibling_for_ci.nim",
     binary: "build/test-bin/t_workspace_lock_partition_resolves_a_sibling_for_ci",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_workspace_lock_public_only_reports_it_recorded_nothing.nim",
+    binary: "build/test-bin/t_workspace_lock_public_only_reports_it_recorded_nothing",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

@@ -998,6 +998,7 @@ tests/integration/t_develop_list_reports_tier_and_backend.nim	nim	1
 tests/integration/t_develop_lock_store_supplies_private_route.nim	nim	1
 tests/integration/t_develop_only_except_refuse_unknown_names.nim	nim	1
 tests/integration/t_develop_public_only_unchanged.nim	nim	1
+tests/integration/t_develop_reads_each_participating_repos_committed_lock.nim	nim	1
 tests/integration/t_develop_refuses_cross_backend_revision_conflict.nim	nim	1
 tests/integration/t_develop_refuses_inexact_revision_and_leaves_no_checkout.nim	nim	1
 tests/integration/t_develop_refuses_unreachable_team_backend.nim	nim	1
@@ -1350,6 +1351,7 @@ tests/integration/t_workspace_init_resolves_url_shorthand_and_default_host.nim	n
 tests/integration/t_workspace_list_walks_resolved_repos.nim	nim	3
 tests/integration/t_workspace_lock_latest_resolves_via_git_history_per_repo.nim	nim	1
 tests/integration/t_workspace_lock_partition_resolves_a_sibling_for_ci.nim	nim	1
+tests/integration/t_workspace_lock_public_only_reports_it_recorded_nothing.nim	nim	1
 tests/integration/t_workspace_lock_round_trips_through_resolver.nim	nim	5
 tests/integration/t_workspace_manifest_refresh_after_post_merge.nim	nim	1
 tests/integration/t_workspace_manifest_refresh_skips_when_divergent.nim	nim	1
