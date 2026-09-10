@@ -185,6 +185,14 @@ libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_nim_ssl_dependency.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_one_toolchain_resolution_path.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_openssl_windows_link_channel.nim	nim	12
+libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim	nim	9
+libs/repro_dsl_stdlib/tests/t_packaging_deb_authoring.nim	nim	17
+libs/repro_dsl_stdlib/tests/t_packaging_engine_has_no_format_knowledge.nim	nim	3
+libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim	nim	15
+libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim	nim	7
+libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
+libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
+libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_smoke_catalog_audit_m29.nim	nim	5

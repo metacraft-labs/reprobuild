@@ -511,6 +511,30 @@ proc acceptPythonTest(rel: string): bool =
   ## generator preserves the same discovery rule.
   if not rel.endsWith(".py"):
     return false
+  # Fixture trees are excluded for the same reason ``acceptTestsTree``
+  # excludes them on the Nim side: they are spec exhibits and test
+  # scaffolding, not reprobuild's own tests.
+  #
+  # The Python arm needs the rule MORE than the Nim arm does, and did
+  # not have it. A fixture that is itself a reprobuild project leaves a
+  # generated ``.repro/`` and ``build/`` tree beside its recipe, and
+  # those trees contain whatever the fixture PROVISIONED — which for
+  # any fixture that pulls a toolchain includes a full Python
+  # distribution, and therefore several hundred upstream
+  # ``test_*.py`` files from CPython's own ``unittest`` suite. Without
+  # this guard they are enumerated as reprobuild tests, the suite
+  # inventory's case counts move by hundreds, and the numbers stop
+  # meaning anything. (Surfaced by
+  # ``tests/fixtures/packaging/two-binary-dist``, whose ``uses:
+  # "gcc"`` provisions a mingw distribution with Python inside it.)
+  if rel.startsWith("tests/fixtures/"):
+    return false
+  # Generated trees anywhere else under ``tests/`` are excluded for the
+  # same reason, by path segment rather than by prefix, so a fixture
+  # added in a different location cannot reintroduce the problem.
+  for segment in rel.split('/'):
+    if segment == ".repro" or segment == "build":
+      return false
   let stem = rel.splitFile().name
   stem.startsWith("test_")
 

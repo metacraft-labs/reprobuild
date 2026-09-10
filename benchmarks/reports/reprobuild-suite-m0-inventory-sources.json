@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1512,
-    "pureUnitConsolidationGroups": 55,
-    "pureUnitTests": 611,
+    "nimTestBinaries": 1520,
+    "pureUnitConsolidationGroups": 56,
+    "pureUnitTests": 618,
     "staticallyDetectedRuntimeCompilerFlowTests": 89,
-    "testEntries": 1520
+    "testEntries": 1528
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -174,7 +174,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 13,
+      "count": 14,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib"
@@ -190,10 +190,22 @@
         "libs/repro_dsl_stdlib/tests/t_d2_pacman_index.nim",
         "libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim",
         "libs/repro_dsl_stdlib/tests/t_m8_bulk_catalog.nim",
+        "libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim",
         "libs/repro_dsl_stdlib/tests/t_smoke_catalog_audit_m29.nim",
         "libs/repro_dsl_stdlib/tests/t_smoke_configurables.nim",
         "libs/repro_dsl_stdlib/tests/t_undeclared_lock_file_is_compile_error.nim",
         "libs/repro_dsl_stdlib/tests/t_versioned_provisioning_schema.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [],
+      "owner": "libs/repro_dsl_stdlib",
+      "sources": [
+        "libs/repro_dsl_stdlib/tests/t_doc_comment_malformed_directive_is_compile_error.nim",
+        "libs/repro_dsl_stdlib/tests/t_packaging_engine_has_no_format_knowledge.nim"
       ],
       "targetOs": "soAny"
     },
@@ -212,7 +224,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 16,
+      "count": 21,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -234,6 +246,11 @@
         "libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim",
         "libs/repro_dsl_stdlib/tests/t_nim_c_cpu_flag.nim",
         "libs/repro_dsl_stdlib/tests/t_nim_c_ssl_link_path.nim",
+        "libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim",
+        "libs/repro_dsl_stdlib/tests/t_packaging_deb_authoring.nim",
+        "libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim",
+        "libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim",
+        "libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim",
         "libs/repro_dsl_stdlib/tests/t_prefix_layout.nim",
         "libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim"
       ],
@@ -1197,8 +1214,8 @@
     "classificationCounts": {
       "graph-fixture": 12,
       "integration": 663,
-      "platform/destructive": 107,
-      "pure unit": 611,
+      "platform/destructive": 108,
+      "pure unit": 618,
       "unclassified": 127
     },
     "graphOwnedTestArtifacts": [
@@ -1335,9 +1352,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1512,
+    "nimTestBinaryCount": 1520,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1520
+    "testEntryCount": 1528
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8417,6 +8434,146 @@
       "source": "libs/repro_dsl_stdlib/tests/t_openssl_windows_link_channel.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_content_addressed",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_deb_authoring",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_deb_authoring.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 17,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_engine_has_no_format_knowledge",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_engine_has_no_format_knowledge.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_msi_authoring",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_producer_tool_dependencies",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_runtime_contract_once",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_third_party_producer",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_wrapper_vars_match_flake",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
