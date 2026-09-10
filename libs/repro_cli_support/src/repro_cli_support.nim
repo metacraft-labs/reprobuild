@@ -9153,10 +9153,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "\" through stdlib provisioning to break cycle " &
           cycle.join(" -> "))
         fromSourceCycleBrokenTools.incl(toolName)
-        # Mark the recipe as "already resolved" so the caller doesn't
-        # try to recurse again on the next probe pass — the closing-edge
-        # tool resolves via stdlib from here on.
-        fromSourceResolvedRecipes.incl(siblingRecipeDir)
+        # A bootstrap choice is not a completed source producer. Nested
+        # consumers must still prepare its runtime closure; an ancestor's
+        # queued dependencies may be waiting behind that nested build.
         enqueueSourceDependencies(siblingRecipeDir, true)
         continue
       if fromSourceBuildStack.len >= FromSourceMaxRecursionDepth:

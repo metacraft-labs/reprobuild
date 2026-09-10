@@ -578,9 +578,20 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
             test importing it is judged to import something unrecognized, and
             `pure unit` silently becomes `unclassified` for reasons that exist
             only in the fixture.
+          * every file on a source's REPO-LOCAL IMPORT CLOSURE -- the pure-unit
+            predicate follows a test's path imports (`./nlf_m6_fixture`, an
+            `apps/` entry point, another library's `src/` reached relatively)
+            and judges those files too. A fixture tree that copied only the
+            declared sources made twenty `libs/repro_lock_gen` tests read as
+            `pure unit` here and `unclassified` in the real tree, because the
+            fixture module that starts their loopback server was not on disk to
+            be found. That is the same fixture-only reclassification the
+            `libs/<name>` note above describes, one hop further out; the fix is
+            the same one, which is to make the fixture's input set match the
+            scan's.
 
-        Both are pure source reads. Nothing added here needs a build, which is
-        the property `test_the_gate_needs_nothing_built` exists to hold.
+        All three are pure source reads. Nothing added here needs a build, which
+        is the property `test_the_gate_needs_nothing_built` exists to hold.
         """
         recorded = inventory.load_static_case_counts(REPO_ROOT)
         wanted = [
@@ -597,6 +608,16 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
                 REPO_ROOT, source, inventory.read_text(REPO_ROOT / source)
             )
             wanted.extend(Path(member) for member in members)
+        for relative in list(wanted):
+            if relative.suffix != ".nim":
+                continue
+            absolute = REPO_ROOT / relative
+            if not absolute.is_file():
+                continue
+            for reached in inventory.repo_local_import_closure(
+                REPO_ROOT, absolute
+            ):
+                wanted.append(Path(reached).relative_to(REPO_ROOT.resolve()))
         for relative in wanted:
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)

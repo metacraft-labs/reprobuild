@@ -183,6 +183,11 @@ const
     path: ctShimFixtureRoot & "/fixture_baseline_std_unittest",
     actionId: "reprobuild.test_fixtures.ct_shim_fixture_baseline")
 
+  M4ConsolidationVerificationTest* =
+    "tests/integration/t_m4_pure_unit_consolidation.nim"
+    ## Suite-Modernization M4. The one test whose execute edge takes EVERY
+    ## shared pure-unit binary as a typed input; see the loop below.
+
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
     # SHARED, and deliberately so. ``fixture_protocol_three_tests`` is one
     # artifact behind two tests (six cases); before M3 each case compiled a
@@ -724,9 +729,6 @@ package reprobuild:
   executable repro:
     discard
 
-  executable reproCacheDaemon:
-    name: "repro-cache-daemon"
-
   executable reproPeerCacheTier2:
     name: "repro-peer-cache-tier2"
 
@@ -770,9 +772,6 @@ package reprobuild:
 
   executable harnessApplyLockHolder:
     name: "harness_apply_lock_holder"
-
-  executable legacyCachePeerOriginDev:
-    name: "legacy_cache_peer_origin_dev"
 
   # The A2/A2.5/A3/A4 binary-cache integration tests under
   # ``libs/repro_binary_cache_client/tests/`` spawn the
@@ -1081,11 +1080,27 @@ package reprobuild:
           sourceOnlyEnv.add(entry)
     let testNimPaths = ioMonNimPaths & sourceOnlyNimPaths
 
+    # Suite-Modernization M4: the shared pure-unit binaries, as (path, action
+    # id) pairs, filled in as this loop passes over them.
+    #
+    # The M4 verification test reads those binaries — it asks each one for its
+    # `--list-json` catalog and then runs every case through `--run` — so it
+    # has to declare them, for both halves of the same reason the
+    # `testFixtureArtifacts` note below gives: the PATH so a rebuilt bundle
+    # re-runs the check instead of serving a cached pass against a stale
+    # binary, and the ACTION ID so a focused build materialises the bundles
+    # first instead of failing on a missing file.
+    #
+    # Collected rather than spelled in a table because a bundle's build-edge id
+    # is content-derived (`nim-c-<hash>`) and cannot be written down. The order
+    # is safe by construction: `generate_test_edges.nim` sorts its specs by
+    # source path, `tests/bundles/` sorts before `tests/integration/`, and
+    # `checkBundleLimits` refuses a bundle that lives anywhere else.
+    var pureUnitBundleArtifacts: seq[TestGraphArtifact] = @[]
+
     for spec in reprobuildTestSpecs:
       when defined(windows):
-        if spec.source.contains("shm_index") or
-           spec.source.contains("cache_daemon") or
-           spec.source.contains("nix_daemon"):
+        if spec.source.contains("nix_daemon"):
           continue
 
       let platformPassC: seq[string] =
@@ -1102,6 +1117,12 @@ package reprobuild:
         extraEnv = sourceOnlyEnv,
         )
       reprobuildTestBuildActions.add(edge.action)
+      if spec.source.startsWith("tests/bundles/"):
+        pureUnitBundleArtifacts.add(TestGraphArtifact(
+          path:
+            when defined(windows): spec.binary & ".exe"
+            else: spec.binary,
+          actionId: edge.action.id))
       # THE C BACKEND, DECLARED ON THE TEST-BUILD EDGES TOO.
       #
       # ``nim c`` emits C and shells out to a BARE ``gcc``. ``nim.c(...)``
@@ -1145,6 +1166,17 @@ package reprobuild:
       var executeDeps: seq[string] = @[]
       if spec.requiresReproBinary:
         requiredBinaries.add(reproBinaryPath)
+      if spec.source == M4ConsolidationVerificationTest:
+        # Suite-Modernization M4: this one test consumes EVERY shared pure-unit
+        # binary — it asks each for its ``--list-json`` catalog and then runs
+        # every case through ``--run`` — so its inputs are the collected list
+        # rather than a row in ``testFixtureArtifacts``. Adding a bundle
+        # therefore extends this edge automatically, which is the property
+        # that matters: a bundle whose cases nobody checks is exactly the
+        # shape M4 must not ship.
+        for artifact in pureUnitBundleArtifacts:
+          requiredBinaries.add(artifact.path)
+          executeDeps.add(artifact.actionId)
       # Graph-Owned-Test-Artifacts M3: typed fixture inputs on the EXECUTE
       # edge, read from ONE table instead of a chain of source-path ``if``s.
       #
@@ -1189,20 +1221,6 @@ package reprobuild:
           requiredBinaries.add(installMirrorFixtureRoot & "/librepro_mirror_fixture.so")
           executeDeps.add("reprobuild.test_fixtures.install_mirror_library")
           executeDeps.add("reprobuild.test_fixtures.install_mirror_probe")
-      when not defined(windows):
-        if spec.source ==
-            "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim":
-          # Both separately compiled compatibility peers are runtime fixtures
-          # of this integration binary. Kept out of the table above because the
-          # pair is POSIX-only: the two peer edges themselves sit under a
-          # ``when not defined(windows)`` guard, so declaring them
-          # unconditionally would name outputs that no edge produces.
-          requiredBinaries.add("build/test-bin/legacy_cache_peer_origin_dev")
-          requiredBinaries.add("build/test-bin/legacy_cache_peer_legacy_wire")
-          executeDeps.add(
-            "reprobuild.test_helpers.legacy_cache_peer_origin_dev")
-          executeDeps.add(
-            "reprobuild.test_helpers.legacy_cache_peer_legacy_wire")
       # NO TOOL REFS ON THE EXECUTE EDGE, AND THAT IS A DECISION.
       #
       # The BUILD edge above declares `gcc` because `nim c` shells out to
@@ -1436,19 +1454,6 @@ package reprobuild:
       # does not load the system libblake3 -> TBB/C++ runtime closure.
       extraEnv = sourceOnlyEnv & @[("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0")],
       actionId = "reprobuild.apps.repro"))
-
-    # The shared-memory action-cache daemon is spawned by build processes, so
-    # it must be graph-owned alongside the engine binary. In particular, a
-    # warm checkout must not retain an older daemon after the imported
-    # repro_shm_index implementation changes.
-    reprobuildAppsActions.add(nim.c(
-      source = "apps/repro-cache-daemon/repro_cache_daemon.nim",
-      binary = "build/bin/repro-cache-daemon",
-      defines = @["release"],
-      paths = sourceOnlyNimPaths,
-      extraEnv = sourceOnlyEnv,
-      nimcache = "build/nimcache/repro-cache-daemon",
-      actionId = "reprobuild.apps.repro-cache-daemon"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
@@ -1750,90 +1755,6 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/harness_apply_lock_holder",
       actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
-
-    # Cross-version action-cache lifecycle peers. The exact peer compiles all
-    # implementation files byte-for-byte from the pinned origin/dev commit.
-    # The legacy-wire peer is generated from those same audited blobs; five
-    # modules remain byte-identical and only the top/segment modules receive
-    # cardinality-checked Darwin boot-id + lifecycle-name substitutions.
-    let legacyWireGeneratedRoot =
-      "build/test-fixtures/cache-daemon-legacy-wire"
-    let legacyWireGeneratedSources = @[
-      legacyWireGeneratedRoot &
-        "/libs/repro_shm_index/src/repro_shm_index.nim",
-      legacyWireGeneratedRoot &
-        "/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
-      legacyWireGeneratedRoot &
-        "/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
-      legacyWireGeneratedRoot &
-        "/libs/repro_shm_index/src/repro_shm_index/layout.nim",
-      legacyWireGeneratedRoot &
-        "/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
-      legacyWireGeneratedRoot &
-        "/libs/repro_shm_index/src/repro_shm_index/ring.nim",
-      legacyWireGeneratedRoot &
-        "/libs/repro_shm_index/src/repro_shm_index/segment.nim",
-    ]
-    let legacyWireOriginSources = @[
-      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
-      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
-      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
-      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/layout.nim",
-      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
-      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/ring.nim",
-      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/segment.nim",
-    ]
-    let legacyWireGenerator = sh.shell(
-      command = "python3 tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py --output-root " &
-        legacyWireGeneratedRoot,
-      actionId = "reprobuild.test_helpers.generate_legacy_cache_peer_wire",
-      extraInputs = legacyWireOriginSources & @[
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py",
-      ],
-      extraOutputs = legacyWireGeneratedSources,
-      cacheable = false)
-    # The bare interpreter this shell line runs. ``python3`` is in the
-    # package's ``uses:`` list, but a ``uses:`` entry alone does not put
-    # a tool on an action's PATH — the edge has to name it, both so the
-    # directory joins this edge's PATH and so the identity survives the
-    # selection-scoped realization (``scopedToolArtifact``).
-    appendRegisteredActionToolIdentityRefs(legacyWireGenerator.id,
-      ["python3"])
-    reprobuildTestHelpersActions.add(legacyWireGenerator)
-
-    when not defined(windows):
-      reprobuildTestHelpersActions.add(nim.c(
-        source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer.nim",
-        binary = "build/test-bin/legacy_cache_peer_origin_dev",
-        paths = sourceOnlyNimPaths,
-        extraInputs = @[
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/layout.nim",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/ring.nim",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/segment.nim",
-        ],
-        extraEnv = sourceOnlyEnv,
-        nimcache = "build/nimcache/legacy_cache_peer_origin_dev",
-        actionId = "reprobuild.test_helpers.legacy_cache_peer_origin_dev"))
-
-      reprobuildTestHelpersActions.add(nim.c(
-        source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_legacy_wire.nim",
-        binary = "build/test-bin/legacy_cache_peer_legacy_wire",
-        paths = sourceOnlyNimPaths,
-        extraInputs = legacyWireGeneratedSources & @[
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py",
-          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
-        ],
-        after = [legacyWireGenerator],
-        extraEnv = sourceOnlyEnv,
-        nimcache = "build/nimcache/legacy_cache_peer_legacy_wire",
-        actionId = "reprobuild.test_helpers.legacy_cache_peer_legacy_wire"))
 
     # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
     #

@@ -332,10 +332,6 @@ for libName in [
   # verify / path / gc imports ``repro_cas_store`` so it does not gain
   # access to the Layer-2 prefix / receipt / root / recovery surface.
   "repro_cas_store",
-  # Action-Cache-Per-Edge-Store AC-2a: shared-memory hot-tier data structures
-  # (control region, generation segments, seqlock table, MPSC ring). Pure data
-  # structures — no daemon (AC-2b) / engine wiring (AC-2c) yet.
-  "repro_shm_index",
   "repro_store_daemon",
   "repro_launch_plan",
   "repro_runquota",
@@ -543,11 +539,13 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
   ".." / "nim-stackable-hooks" / "src",
 ], "stackable_hooks.nim")
 
-# SHM-QUEUE-MIGRATE / io-mon LOSSLESS M1: reprobuild's action-cache submission
-# ring (libs/repro_shm_index) AND the io-mon sibling's dependency queue BOTH sit
-# on nim-shm-queue's Layer-1 MPSC ring; the io-mon sibling ALSO sits on
-# nim-shm-gset (``shm_gset/transport``). Because config.nims compiles whichever
-# io-mon the block above selected — $IO_MON_SRC when it is set (the usual case
+# SHM-QUEUE-MIGRATE / io-mon LOSSLESS M1: the io-mon sibling's dependency
+# capture sits on nim-shm-gset (``shm_gset/transport``) and still pulls
+# nim-shm-queue's Layer-1 MPSC ring through its own tree. Reprobuild's action
+# cache used to sit on that ring too; it now sits on the same grow-only set
+# (``libs/repro_local_store/src/repro_local_store/action_index.nim``), for a
+# different purpose and under a different key discipline. Because config.nims
+# compiles whichever io-mon the block above selected — $IO_MON_SRC when it is set (the usual case
 # in CI and the sandboxed package build, where the flake exports it), and the
 # ``../io-mon`` sibling only as the fallback when it is not —
 # these shm packages MUST resolve to their co-developed siblings too — otherwise
@@ -566,16 +564,27 @@ addSiblingFirstPackagePath(".." / "nim-shm-queue" / "src", "SHM_QUEUE_SRC",
 addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
   "shm_gset.nim")
 
-# SHM-GSET: io-mon's Linux dependency-capture channel is the grow-only
+# SHM-GSET: TWO independent users of one data structure, and the distinction is
+# easy to lose. io-mon's Linux dependency-capture channel is the grow-only
 # shared-memory set ``shm_gset`` (nim-shm-gset — Candidate C of the Lossless
-# Event Capture campaign; dedup-at-source over file-backed shards). reprobuild
-# does not import it directly, but io_mon's fs_snoop.nim / writer.nim do, so the
-# io-mon compile that flows in through ``import io_mon`` needs ``shm_gset`` on the
-# --path. Resolve it like every other Nim sibling: prefer ``$SHM_GSET_SRC``, then
-# the sibling checkout.
-addPackagePath("SHM_GSET_SRC", [
-  ".." / "nim-shm-gset" / "src",
-], "shm_gset.nim", useDevShellFallback = true)
+# Event Capture campaign; dedup-at-source over file-backed shards), reaching
+# reprobuild only through ``import io_mon``. Reprobuild ALSO imports the same
+# library directly, for its action-cache Tier-2 index — the same structure
+# keyed on fingerprints rather than on observed paths
+# (Action-Cache-Per-Edge-Store.md §6.1).
+#
+# ``addSiblingFirstPackagePath`` above is the ONE registration, and there used
+# to be a second one here that pinned ``$SHM_GSET_SRC`` unconditionally. Nim
+# searches ``--path`` entries most-recently-added first, so that second
+# registration silently DEFEATED the sibling-first policy the first one
+# states: a checkout with a live ``../nim-shm-gset`` still compiled against the
+# devshell's pinned store copy, and an edit to the sibling had no effect on
+# anything until the pin moved. That was invisible while reprobuild only
+# reached the library transitively through io-mon; it is not invisible now that
+# the action cache imports it directly. The sibling-first helper already falls
+# back to ``$SHM_GSET_SRC`` and then to the devshell when no sibling checkout
+# exists, so removing the duplicate loses no resolution and restores the
+# policy.
 
 # R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test
