@@ -154,8 +154,17 @@ suite "packaging: the vendored runtime-library closure":
     discard stageInstallTree(sampleDistribution(toLinux), "deb")
     let edge = closureEdges()[0]
     check edge.declaredOutputs.len == 1
-    check edge.outputs.len == 1
-    check edge.outputs[0].endsWith("deb-runtime-closure.manifest")
+    # TWO ordinary outputs beside the write root: the manifest, and the
+    # C-library floor. Both are BUILD data rather than payload -- the
+    # manifest tells the artifact edge the vendored set moved, and the
+    # floor is spliced into a control stanza -- so neither is in the
+    # tree, and the write root is still the only thing declared as one.
+    check edge.outputs.len == 2
+    var outputTails: seq[string] = @[]
+    for o in edge.outputs:
+      outputTails.add(o[o.rfind('/') + 1 .. ^1])
+    check "deb-runtime-closure.manifest" in outputTails
+    check "deb-glibc-floor.txt" in outputTails
 
   test "the closure edge names sh, patchelf and coreutils":
     # An action's PATH holds only the tools its own edge named. The walk

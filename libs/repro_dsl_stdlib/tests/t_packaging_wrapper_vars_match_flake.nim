@@ -74,7 +74,65 @@ suite "packaging: the §5 wrapper-var list tracks flake.nix":
     # dlopen'd by leaf name". Those last two are the reason the RPATH is
     # mandatory rather than merely tidy, so they are named in the layer
     # rather than left implicit in the closure.
-    check @ReprobuildDlopenLeafNames == @["zstd", "clingo"]
+    check @ReprobuildDlopenPackages == @["zstd", "clingo"]
+
+  test "the leaf names are LOADER names, not package names":
+    # M0's residual R3. ``RuntimeContract.dlopenLeafNames`` became a
+    # CHECKED post-condition -- the closure walk resolves each name by
+    # exact file name and fails the build when it cannot -- while the
+    # constant feeding it still held §5's package names. A recipe that
+    # passed one to the other would have failed the build with "no
+    # search path contains it", naming ``zstd``.
+    #
+    # The case is written as a shape assertion rather than as a literal
+    # comparison, because a literal comparison would have passed
+    # against the broken value too if someone had pasted it in.
+    for targetOs in [toLinux, toDarwin, toWindows]:
+      let leaves = reprobuildDlopenLeafNames(targetOs)
+      check leaves.len == ReprobuildDlopenPackages.len
+      for leaf in leaves:
+        # A loader name has an extension; a package name does not.
+        check leaf.contains(".")
+        # And it is a LEAF: the ``@rpath/`` prefix is part of the
+        # Darwin dlopen ARGUMENT, not part of the file's name, and the
+        # walk looks for a file.
+        check not leaf.contains("/")
+      check leaves != @ReprobuildDlopenPackages
+
+  test "the leaf names match the modules that actually dlopen them":
+    # The drift guard, and the reason the values are not a guess: the
+    # dlopen strings are stated exactly once each, per target, at the
+    # call sites. Read them back rather than trusting a transcription.
+    #
+    # A TEXT scan rather than an import: importing repro_solver and the
+    # binary-cache client into the DSL stdlib's test binary would pull
+    # two of the heaviest modules in the tree in for two string
+    # literals, and importing them into the LAYER (which every recipe
+    # compiles) would be worse still.
+    let zstdSrc = readFile(repoRootFromTest() &
+      "/libs/repro_binary_cache_client/src/repro_binary_cache_client/" &
+      "dynlib_names.nim")
+    let clingoSrc = readFile(repoRootFromTest() &
+      "/libs/repro_solver/src/repro_solver/dynlib_names.nim")
+    # Guard against the scan matching nothing after an unrelated edit,
+    # which would make every check below pass vacuously.
+    check zstdSrc.contains("zstdDynlibName")
+    check clingoSrc.contains("clingoDynlibName")
+
+    proc namesAppear(src: string; leaves: seq[string]) =
+      for leaf in leaves:
+        doAssert src.contains("\"" & leaf & "\"") or
+                 src.contains("/" & leaf & "\""),
+          "the packaging layer claims reprobuild dlopens '" & leaf &
+          "', but no such string literal appears in the module that " &
+          "does the dlopen; one of the two has drifted"
+
+    namesAppear(zstdSrc, @[reprobuildDlopenLeafNames(toLinux)[0]])
+    namesAppear(zstdSrc, @[reprobuildDlopenLeafNames(toDarwin)[0]])
+    namesAppear(zstdSrc, @[reprobuildDlopenLeafNames(toWindows)[0]])
+    namesAppear(clingoSrc, @[reprobuildDlopenLeafNames(toLinux)[1]])
+    namesAppear(clingoSrc, @[reprobuildDlopenLeafNames(toDarwin)[1]])
+    namesAppear(clingoSrc, @[reprobuildDlopenLeafNames(toWindows)[1]])
 
   test "the list is names only, with no Nix store paths":
     # The VALUES cannot come from the flake: they are /nix/store paths,

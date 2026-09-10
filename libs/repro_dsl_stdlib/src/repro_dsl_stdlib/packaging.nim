@@ -67,11 +67,14 @@ import ./packaging/types
 import ./packaging/runtime_contract
 import ./packaging/services
 import ./packaging/producer
+import ./packaging/reprobuild_dist
 import ./packaging/producers/tarball
 import ./packaging/producers/deb
+import ./packaging/producers/rpm
 import ./packaging/producers/msi
 
-export types, runtime_contract, services, producer, tarball, deb, msi
+export types, runtime_contract, services, producer, reprobuild_dist
+export tarball, deb, rpm, msi
 
 proc packagingSite*(packageName: string;
                     sourceFile = ""; sourceLine = 0): ToolDependencySite =

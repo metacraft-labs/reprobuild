@@ -45,7 +45,7 @@
 ##    So ``mode`` is a "0 means the role default" int and the Windows
 ##    staging path simply never applies it (see ``runtime_contract.nim``).
 
-import std/[strutils, tables]
+import std/[algorithm, strutils, tables]
 
 import repro_project_dsl
 
@@ -80,6 +80,27 @@ type
       ## under ``libexec/<package>``, mode 0755, RPATH-patched but NOT
       ## wrapped — a wrapper on a helper would double-apply the env
       ## defaults its parent already exported.
+    crHelperScript
+      ## An internal helper that is NOT an ELF image — a shell script,
+      ## a Python entry point, anything the loader never sees.
+      ##
+      ## Same location and mode as ``crHelperExecutable``
+      ## (``libexec/<package>``, 0755) and deliberately a separate role
+      ## rather than a flag on that one, because the difference is not a
+      ## preference: ``stageInstallTree`` runs ``patchelf`` over every
+      ## Linux executable component to rewrite its RPATH and its ELF
+      ## interpreter, and patchelf on a shell script exits 1 with
+      ## ``not an ELF executable: Invalid argument``. Found by packaging
+      ## reprobuild itself: the flake installs
+      ## ``libexec/reprobuild-nix-daemon`` as a SCRIPT, and the first
+      ## build of the reprobuild distribution failed on it in all three
+      ## formats at once.
+      ##
+      ## It is also not merely "skip patchelf". A script has no
+      ## DT_NEEDED, so it contributes nothing to the runtime-closure
+      ## walk either — and a script that needs a library would have to
+      ## say so through ``runtime.dlopenLeafNames``, because nothing can
+      ## read it out of the file.
     crRuntimeLibrary
       ## A vendored shared library from the runtime closure (§5). Goes
       ## under the package's PRIVATE libdir and is what the RPATH points
@@ -259,6 +280,33 @@ type
       ## the right choice for a distribution with no env defaults, and
       ## the reason ``envDefaults`` being empty is not by itself taken
       ## as "no wrapper wanted".
+    computeDependencyFloor*: bool
+      ## Compute the minimum C-library version the produced package
+      ## needs and hand it to each format's native dependency syntax.
+      ##
+      ## **Why this is not optional in practice, and why it is a field
+      ## anyway.** Rewriting ``PT_INTERP`` to the target's canonical
+      ## loader path (``interpreterPathFor``) binds the package to the
+      ## TARGET's C library. A target whose glibc is older than the
+      ## builder's then installs the package cleanly and cannot start
+      ## it — measured, not predicted: a tree built against glibc 2.40
+      ## installs on Ubuntu 22.04 (glibc 2.35) and dies with
+      ## ``libc.so.6: version 'GLIBC_2.38' not found``, required by the
+      ## VENDORED ``libtbb``/``libstdc++`` rather than by the payload.
+      ## Expressing "I need glibc >= X" is precisely what ``Depends:``
+      ## and ``Requires:`` are for, and it is the half of the
+      ## interpreter-rewrite decision that makes the other half
+      ## honest.
+      ##
+      ## It is a field rather than an unconditional behaviour for one
+      ## reason: the floor is read out of ``.gnu.version_r`` by a
+      ## ``readelf`` on the closure edge, so switching it off is how a
+      ## distribution that must not take that tool dependency (a
+      ## non-glibc target, a cross-staged tree whose objects the
+      ## builder's readelf cannot read) says so. Defaults to true via
+      ## ``newDistribution``; inert on non-Linux targets and on a
+      ## distribution with ``vendorRuntimeClosure = false``, since both
+      ## mean there is no closure edge to compute it on.
 
   DistMetadata* = object
     summary*: string
@@ -286,6 +334,15 @@ type
       ## dependency ontology — a much larger problem than packaging, and
       ## not one M0 is solving. Two named fields say that honestly; one
       ## abstract field would have hidden it.
+    debControlExtraFields*: seq[(string, string)]
+      ## Extra ``DEBIAN/control`` fields, VERBATIM, appended after the
+      ## producer's own. For the fields the layer has no opinion about
+      ## — ``Conflicts``, ``Replaces``, ``Provides``, ``Recommends`` — a
+      ## producer that grew a named field per Debian policy stanza would
+      ## be a closed enum of exactly the kind §6 rule 3 forbids, and the
+      ## list of stanzas Debian policy defines is long and still
+      ## growing. Same reasoning as ``debDepends``/``rpmRequires``:
+      ## VERBATIM per format, not abstracted across them.
     upgradeCode*: string
       ## MSI only: the stable GUID that makes two versions of the
       ## package a single upgradeable product. It MUST be constant
@@ -332,9 +389,69 @@ type
       ## root, which is what makes the producers content-addressed.
     outputDir*: string
       ## Build-tree directory the finished artifacts land in.
+    sourceDateEpoch*: int64
+      ## The one timestamp every producer stamps into its archive.
+      ##
+      ## **Why this is graph data and not an environment variable.** A
+      ## producer is a content-addressed build edge, so its output must
+      ## be a function of the graph and of nothing else. ``tar`` was
+      ## always fine here — the tarball producer passes its own
+      ## ``--mtime`` — but ``dpkg-deb`` reads ``SOURCE_DATE_EPOCH`` out
+      ## of the ENVIRONMENT, and the deb producer used to pass nothing,
+      ## so the archive inherited whatever the calling shell had.
+      ## Inside ``nix develop`` that is 315532800 and three passes of
+      ## the milestone never saw the problem; unset, the archive takes
+      ## wall-clock mtimes and differs run to run. That is the same
+      ## failure in kind as letting the builder's installed packages
+      ## decide a package's CONTENTS, which the system/private rule
+      ## exists to forbid — the bytes were reproducible because of the
+      ## SHELL rather than because of the graph.
+      ##
+      ## Naming it here rather than in each producer is what makes the
+      ## property uniform: every format's timestamps come from this one
+      ## number, and a recipe that wants a different one changes it
+      ## once. ``DefaultSourceDateEpoch`` explains the value.
 
 const
   DefaultPrivateLibSubdir* = "lib"
+
+  DefaultSourceDateEpoch* = 315532800'i64
+    ## 1980-01-01T00:00:00Z, the ``SOURCE_DATE_EPOCH`` the
+    ## reproducible-builds ecosystem converged on and the value
+    ## ``nix develop`` exports in this repository.
+    ##
+    ## It is NOT zero, and that is the whole reason a default has to be
+    ## chosen deliberately rather than picked for tidiness.
+    ## ``dpkg-deb`` does not SET member mtimes from
+    ## ``SOURCE_DATE_EPOCH``, it CLAMPS them to it (``tar
+    ## --clamp-mtime --mtime=@N``): a file older than the epoch keeps
+    ## its own timestamp. At epoch 0 nothing is older, so every staged
+    ## file would keep the wall-clock mtime the build gave it and the
+    ## archive would still differ run to run — a fix that reproduces
+    ## the bug. Any epoch later than the build tree's files works; 1980
+    ## is the conventional one, and it is also the value the M0
+    ## measurements were taken at, so the recorded artifact hashes
+    ## remain the hashes this default produces.
+    ##
+    ## 1980 rather than 1970 for a second, independent reason: the ZIP
+    ## format (and therefore MSI cabinets and every archive that
+    ## borrows its date encoding) cannot represent a year before 1980
+    ## at all.
+
+  GlibcFloorToken* = "@GLIBC_FLOOR@"
+    ## Placeholder a producer writes into a dependency field for the
+    ## C-library floor that only an ACTION can know.
+    ##
+    ## The floor is the maximum ``GLIBC_x.y`` version reference across
+    ## the payload and the vendored closure, and both of those are
+    ## files no edge has produced at the moment the graph is built — the
+    ## same reason the closure walk is a script rather than Nim code.
+    ## So the control stanza is authored at graph time with this token
+    ## in it and the value is spliced in by the edge that computed it
+    ## (``StagedTree.glibcFloorPath``). Deliberately the same shape as
+    ## ``PrefixToken``, and deliberately a DIFFERENT token: ``@PREFIX@``
+    ## is expanded by the shipped wrapper at RUN time and must survive
+    ## into the package, this one must not survive past the build.
 
 proc extractFilenameSlashOnly*(path: string): string =
   ## Basename over ``/`` AND ``\``.
@@ -385,9 +502,11 @@ proc newDistribution*(name, version: string;
     layout: layout,
     stagingRoot: root,
     outputDir: outs,
+    sourceDateEpoch: DefaultSourceDateEpoch,
     runtime: RuntimeContract(
       privateLibSubdir: DefaultPrivateLibSubdir,
       vendorRuntimeClosure: true,
+      computeDependencyFloor: true,
       wrapExecutables: false))
 
 proc defaultInstallName*(component: DistComponent): string =
@@ -400,7 +519,7 @@ proc defaultInstallName*(component: DistComponent): string =
 proc roleDefaultMode*(role: ComponentRole): int =
   ## POSIX mode for a role. Consulted only on POSIX targets.
   case role
-  of crExecutable, crHelperExecutable: 0o755
+  of crExecutable, crHelperExecutable, crHelperScript: 0o755
   of crRuntimeLibrary, crConfigFile, crDataFile: 0o644
 
 proc roleDefaultSubdir*(dist: Distribution; role: ComponentRole): string =
@@ -408,7 +527,7 @@ proc roleDefaultSubdir*(dist: Distribution; role: ComponentRole): string =
   case role
   of crExecutable:
     binDir(dist.layout)
-  of crHelperExecutable:
+  of crHelperExecutable, crHelperScript:
     if dist.targetOs == toWindows: binDir(dist.layout)
     else: "libexec/" & dist.name
   of crRuntimeLibrary:
@@ -579,6 +698,72 @@ const
   ]
     ## The glibc set, by SONAME stem (the part before ``.so``).
 
+const
+  SystemDirectories* = [
+    "", "bin", "sbin", "lib", "lib64", "libexec", "etc", "opt", "srv",
+    "var", "usr", "usr/bin", "usr/sbin", "usr/lib", "usr/lib64",
+    "usr/libexec", "usr/share", "usr/include", "usr/local", "usr/src",
+    "var/lib", "var/log", "var/cache", "var/run",
+    "lib/systemd", "lib/systemd/system", "lib/systemd/user",
+    "usr/lib/systemd", "usr/lib/systemd/system", "usr/lib/systemd/user",
+    "usr/share/man", "usr/share/doc", "usr/share/applications",
+    "usr/share/licenses", "usr/share/bash-completion",
+    "usr/share/bash-completion/completions"
+  ]
+    ## Root-relative directories a package must never claim OWNERSHIP
+    ## of, however many of its files land in them.
+    ##
+    ## ## Why this exists, and why only rpm needs it
+    ##
+    ## dpkg tracks the directories it creates and removes each one at
+    ## uninstall time when nothing is left in it, so a .deb needs no
+    ## directory list at all. rpm removes only what its ``%files`` list
+    ## NAMES, so a package that lists its files and not the directories
+    ## it made leaves them behind — measured, not predicted: the first
+    ## ``rpm -e`` of the reprobuild package left ``/usr/libexec/reprobuild``
+    ## standing while the identical ``dpkg -r`` did not.
+    ##
+    ## ## Why a CLOSED set rather than "whatever the target has"
+    ##
+    ## The same argument as ``SystemLibraryStems``. A rule that consulted
+    ## the BUILDER's filesystem would make the package's contents a
+    ## function of which distro packages the builder happened to have,
+    ## which a content-addressed producer must not be — and the answer
+    ## would be wrong in both directions anyway, since the question is
+    ## about the TARGET.
+    ##
+    ## Owning ``/usr/bin`` is not a cosmetic error: rpm would then apply
+    ## this package's mode and ownership to it, and removing the package
+    ## would ask rpm to remove a directory every other package on the
+    ## system is using.
+
+proc isSystemDirectory*(rootRelDir: string): bool =
+  ## Whether ``rootRelDir`` (root-relative, no leading slash) is a
+  ## directory the target owns rather than the package.
+  for d in SystemDirectories:
+    if d == rootRelDir: return true
+  false
+
+proc ownedDirectories*(rootRelPaths: openArray[string]): seq[string] =
+  ## Every directory a package must own, given the root-relative paths
+  ## of the files it ships: each file's ancestor directories, minus the
+  ## system ones, deepest-last so a caller can emit them in creation
+  ## order and remove them in reverse.
+  var seen = initTable[string, bool]()
+  for path in rootRelPaths:
+    var parts: seq[string] = @[]
+    for part in path.split('/'):
+      if part.len == 0: continue
+      parts.add(part)
+    # The last part is the FILE; every prefix of the rest is a directory.
+    for i in 0 ..< parts.len - 1:
+      let dir = parts[0 .. i].join("/")
+      if isSystemDirectory(dir): continue
+      if dir in seen: continue
+      seen[dir] = true
+      result.add(dir)
+  result.sort()
+
 proc libraryStem*(leafName: string): string =
   ## ``libxxhash.so.0.8.3`` -> ``libxxhash``; ``ld-linux-x86-64.so.2`` ->
   ## ``ld-linux-x86-64``. Cutting at the FIRST ``.so`` rather than at the
@@ -646,6 +831,19 @@ proc privateLibPrefixRelDir*(dist: Distribution): string =
   ## apart in the first place.
   roleDefaultSubdir(dist, crRuntimeLibrary)
 
+proc computesDependencyFloor*(dist: Distribution): bool =
+  ## Whether this distribution's staging emits the C-library floor.
+  ##
+  ## Three conditions, and each is a real one rather than a guard for
+  ## tidiness. ELF ``.gnu.version_r`` is what the floor is read from, so
+  ## the target must be Linux. The vendored closure is half of what the
+  ## floor covers (on the M0 fixture it is the ENTIRE reason the floor
+  ## is 2.38 rather than 2.34 — the payload asks for far less than
+  ## ``libtbb`` does), so a distribution that vendors nothing has no
+  ## closure edge to compute it on. And the recipe has to want it.
+  dist.targetOs == toLinux and dist.runtime.vendorRuntimeClosure and
+    dist.runtime.computeDependencyFloor
+
 proc validate*(dist: Distribution) =
   ## Reject a distribution no producer could translate, at the point the
   ## recipe made the mistake rather than inside whichever producer was
@@ -659,6 +857,20 @@ proc validate*(dist: Distribution) =
   if dist.components.len == 0:
     raise newException(ValueError,
       "distribution '" & dist.name & "': at least one component is required")
+  if dist.sourceDateEpoch <= 0:
+    # Refused rather than silently coerced. Zero is the value a
+    # zero-initialised ``Distribution`` literal carries, and it is also
+    # the one value that LOOKS like "epoch start, maximally
+    # deterministic" and is not: dpkg-deb CLAMPS mtimes to
+    # ``SOURCE_DATE_EPOCH`` rather than setting them, so at zero every
+    # staged file keeps its wall-clock mtime and the archive stops
+    # being reproducible in exactly the way this field exists to
+    # prevent. See ``DefaultSourceDateEpoch``.
+    raise newException(ValueError,
+      "distribution '" & dist.name & "': sourceDateEpoch must be a " &
+      "positive Unix time later than the build tree's files (got " &
+      $dist.sourceDateEpoch & "); use newDistribution, or set it to " &
+      "DefaultSourceDateEpoch")
   var seen = initTable[string, string]()
   for c in dist.components:
     let rel = installRelPath(dist, c)

@@ -165,6 +165,86 @@ proc debPreRmText*(dist: Distribution): string =
   result.add("exit 0\n")
 
 # ---------------------------------------------------------------------------
+# The rpm arm.
+#
+# Same systemd unit, different scriptlet vocabulary. Deliberately plain
+# ``/bin/sh`` rather than the ``%systemd_post`` / ``%systemd_preun``
+# macros: those come from the ``systemd-rpm-macros`` package, which a
+# minimal image (and every non-systemd rpm distribution) need not carry,
+# and a spec that used them would fail to BUILD on a host without them
+# — turning a runtime concern into a build-time host assumption, which
+# is the thing §6 rule 1 is about.
+#
+# The guard is the same one the deb scriptlets use, for the same
+# reason: without ``/run/systemd/system`` there is no systemd running
+# and ``systemctl`` would either fail or, worse, talk to the host's
+# systemd from inside a container.
+# ---------------------------------------------------------------------------
+
+proc rpmPostText*(dist: Distribution): string =
+  ## The ``%post`` scriptlet. rpm passes the number of packages of this
+  ## name that will be installed once the transaction completes: 1 on a
+  ## first install, 2 on an upgrade. Enabling on an upgrade would
+  ## re-enable a unit the admin had deliberately disabled, so the
+  ## enable arm is guarded on ``$1 = 1``.
+  let system = systemServices(dist)
+  if system.len == 0:
+    return "/bin/true\n"
+  result = "if [ -d /run/systemd/system ] && " &
+    "command -v systemctl >/dev/null 2>&1; then\n"
+  result.add("  systemctl daemon-reload >/dev/null 2>&1 || true\n")
+  var anyBoot = false
+  for svc in system:
+    if svc.startAtBoot: anyBoot = true
+  if anyBoot:
+    result.add("  if [ \"$1\" = \"1\" ]; then\n")
+    for svc in system:
+      if svc.startAtBoot:
+        let unit = systemdUnitFileName(svc)
+        result.add("    systemctl enable " & unit &
+          " >/dev/null 2>&1 || true\n")
+        result.add("    systemctl start " & unit &
+          " >/dev/null 2>&1 || true\n")
+    result.add("  fi\n")
+  result.add("fi\n")
+  result.add("exit 0\n")
+
+proc rpmPreUnText*(dist: Distribution): string =
+  ## The ``%preun`` scriptlet. ``$1`` is the number of instances that
+  ## will REMAIN: 0 on a real removal, 1 during an upgrade's removal of
+  ## the old package. Stopping on an upgrade would take the service down
+  ## and leave it down, so this fires only at ``$1 = 0`` — which is the
+  ## one place rpm's scriptlet contract differs materially from deb's
+  ## ``prerm`` and the reason these are two procs rather than one.
+  let system = systemServices(dist)
+  if system.len == 0:
+    return "/bin/true\n"
+  result = "if [ \"$1\" = \"0\" ]; then\n"
+  result.add("  if [ -d /run/systemd/system ] && " &
+    "command -v systemctl >/dev/null 2>&1; then\n")
+  for svc in system:
+    let unit = systemdUnitFileName(svc)
+    result.add("    systemctl stop " & unit & " >/dev/null 2>&1 || true\n")
+    result.add("    systemctl disable " & unit & " >/dev/null 2>&1 || true\n")
+  result.add("  fi\n")
+  result.add("fi\n")
+  result.add("exit 0\n")
+
+proc rpmPostUnText*(dist: Distribution): string =
+  ## The ``%postun`` scriptlet: tell systemd the unit files are gone.
+  ## Separate from ``%preun`` because at ``%preun`` time the files are
+  ## still on disk, so a ``daemon-reload`` there would re-read the unit
+  ## that is about to vanish.
+  let system = systemServices(dist)
+  if system.len == 0:
+    return "/bin/true\n"
+  result = "if [ -d /run/systemd/system ] && " &
+    "command -v systemctl >/dev/null 2>&1; then\n"
+  result.add("  systemctl daemon-reload >/dev/null 2>&1 || true\n")
+  result.add("fi\n")
+  result.add("exit 0\n")
+
+# ---------------------------------------------------------------------------
 # The Windows arm.
 # ---------------------------------------------------------------------------
 

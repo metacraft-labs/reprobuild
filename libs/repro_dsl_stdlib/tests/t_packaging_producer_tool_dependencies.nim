@@ -145,10 +145,45 @@ suite "packaging: producers declare a real dependency on their tool":
     let fixture = repoRootFromTest() &
       "/tests/fixtures/packaging/two-binary-dist/repro.nim"
     let text = readFile(fixture)
-    for selector in [DpkgDebSelector, TarSelector, GzipSelector,
-                     CandleSelector, LightSelector, PatchelfSelector,
-                     InstallSelector, ShSelector]:
+    for selector in [DpkgDebSelector, RpmbuildSelector, TarSelector,
+                     GzipSelector, CandleSelector, LightSelector,
+                     PatchelfSelector, InstallSelector, ShSelector,
+                     ReadelfSelector]:
       check text.contains("\"" & selector & "\"")
+    for selector in RpmScriptletSelectors:
+      check text.contains("\"" & selector & "\"")
+
+  test "the rpm producer declares its own tool and the staging set":
+    resetBuildActionRegistry()
+    let rpm = rpmPackage(sampleDistribution(toLinux))
+    check RpmbuildSelector in rpm.toolSelectors
+    check RpmbuildSelector in toolRefsFor(rpm.edge.id)
+    # The tools rpmbuild EXECS, on the SAME edge -- an action's PATH
+    # holds only what its own edge named, so a separate edge would put
+    # them on the PATH of an action that never runs them.
+    for selector in RpmScriptletSelectors:
+      check selector in rpm.toolSelectors
+      check selector in toolRefsFor(rpm.edge.id)
+    # ...and not the OTHER Linux format's, which would make a project
+    # that asked for an rpm fetch dpkg.
+    check DpkgDebSelector notin rpm.toolSelectors
+    check TarSelector notin rpm.toolSelectors
+
+  test "readelf rides on the closure edge, not on an edge of its own":
+    # The floor covers the VENDORED set, and the vendored set does not
+    # exist until the walk has put it there. Same shape as gzip on the
+    # tar edge: a tool named on the wrong edge is on the PATH of an
+    # action that never runs it, and absent from the one that does.
+    resetBuildActionRegistry()
+    discard debPackage(sampleDistribution(toLinux))
+    var closureId = ""
+    for act in registeredBuildActions():
+      if act.id.endsWith("runtime-closure"): closureId = act.id
+    check closureId.len > 0
+    check ReadelfSelector in toolRefsFor(closureId)
+    for act in registeredBuildActions():
+      if act.id != closureId:
+        check ReadelfSelector notin toolRefsFor(act.id)
 
   test "no producer edge is marked uncacheable":
     # §6: "each producer is an ordinary reprobuild build edge

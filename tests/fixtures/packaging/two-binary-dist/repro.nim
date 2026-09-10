@@ -180,7 +180,27 @@ package sampletool:
     # Linux build of this fixture failed.
     "gzip"
     "dpkg-deb"
+    "rpmbuild"
+    # rpmbuild EXECS these; they appear in no argv this recipe or the
+    # producer writes. rpm runs three shell scriptlets of its own around
+    # the packaging step -- %mkbuilddir, lib/rpm/check-files and the
+    # build-directory teardown -- and between them they need mktemp, rm
+    # and sort (coreutils, reached through install-file), find, diff and
+    # sed. The first real Linux rpm build failed with five
+    # "command not found" lines because of exactly this. Pinned against
+    # ``producers/rpm.RpmScriptletSelectors``.
+    "find"
+    "diff"
+    "sed"
     "patchelf"
+    # The dependency FLOOR's reader. patchelf edits DT_* entries and has
+    # no reader for ``.gnu.version_r``, which is where the maximum
+    # GLIBC_x.y reference across the payload and the vendored closure
+    # lives -- and that number is what the produced .deb's
+    # ``Depends: libc6 (>= X)`` and the .rpm's ``Requires: glibc >= X``
+    # say. Named on the SAME edge as the closure walk, because the walk
+    # is what knows which files got shipped.
+    "readelf"
     "install-file"
     # The runtime-closure walk runs as a shell program: the DT_NEEDED
     # closure of a binary is not knowable until the binary exists, so it
@@ -207,6 +227,17 @@ package sampletool:
       # format the amended M0 gate exists to exercise.
       discard msiPackage(dist, site)
     else:
-      # ``dist.deb`` and ``dist.tarball`` in §6's table.
+      # ``dist.deb``, ``dist.rpm`` and ``dist.tarball`` in §6's table.
+      #
+      # THREE producers over ONE Distribution, which is a sharper test
+      # of the layer than two were: deb and rpm agree on the install
+      # model and disagree on almost everything else about how a package
+      # is DESCRIBED -- rpm's spec sits outside the payload where deb's
+      # control sits inside it, rpm's scriptlet arguments count
+      # remaining instances where deb's name an action, rpm
+      # post-processes the buildroot unless told not to and deb never
+      # touches it. Both trees are staged by one proc and neither
+      # producer can see the §5 contract.
       discard debPackage(dist, site)
+      discard rpmPackage(dist, site)
       discard tarballPackage(dist, site)

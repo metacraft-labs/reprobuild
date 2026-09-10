@@ -308,11 +308,30 @@ proc wxsText*(dist: Distribution; tree: StagedTree): string =
       "\"http://schemas.microsoft.com/wix/UtilExtension\"")
   result.add(">\n")
   result.add("  <Product Id=\"*\" Name=\"" & xmlEscape(dist.name) &
-    "\" Language=\"1033\" Version=\"" & msiProductVersion(dist) &
+    # UTF-8, explicitly. Without a Codepage the MSI database defaults to
+    # 1252 and ``light`` REFUSES any metadata string it cannot map --
+    # LGHT0311, naming a code page rather than the character or the
+    # field. Measured while packaging reprobuild itself, whose one-line
+    # summary contains an em dash; the deb and rpm producers took the
+    # same string without comment, so the failure looks like a WiX bug
+    # and is really a package-metadata encoding decision this producer
+    # had never made.
+    "\" Codepage=\"65001\" Language=\"1033\" Version=\"" &
+    msiProductVersion(dist) &
     "\" Manufacturer=\"" & xmlEscape(manufacturer) &
     "\" UpgradeCode=\"" & xmlEscape(dist.metadata.upgradeCode) & "\">\n")
   result.add("    <Package InstallerVersion=\"" & installerVersion &
-    "\" Compressed=\"yes\" InstallScope=\"perMachine\"")
+    # The DATABASE is UTF-8 (``Product/@Codepage`` above); the SUMMARY
+    # INFORMATION stream cannot be. It is an OLE property set whose
+    # strings are ANSI by format, and ``candle`` refuses 65001 outright
+    # with CNDL0349 "You must specify an ANSI code page". So the two
+    # differ on purpose: 1252 here is the widest ANSI page and covers
+    # the punctuation a summary line actually uses (the em dash in
+    # reprobuild's own is 0x97 in it). A distribution whose summary
+    # needs more than 1252 must say less in the summary; there is no
+    # third option, because the limit is the MSI format's.
+    "\" SummaryCodepage=\"1252\"" &
+    " Compressed=\"yes\" InstallScope=\"perMachine\"")
   if dist.metadata.summary.len > 0:
     result.add(" Comments=\"" &
       xmlEscape(dist.metadata.summary.splitLines()[0]) & "\"")
