@@ -524,11 +524,148 @@ is an explicit list in the generator rather than a directory glob precisely so
 a newly added test cannot join a shared process without a human deciding it
 tolerates neighbours.
 
+## Batch 1 landed: `libs/repro_lock_files` + `libs/repro_peer_cache`
+
+Recorded in full, with per-member figures, in
+`reprobuild-suite-m4-consolidation-batch1.json`. Measured at Reprobuild
+`16a992fd5`, Nim 2.3.1 from the dev shell, gcc 15.2.0, on the same shared
+32-core host at load 75–140. Every binary compiled fresh; nothing below is read
+back out of a pre-existing artifact or carried forward from the sections above.
+
+| Group | Members | Cases | Compile CPU s | nimcache MB | C files | Binary MB | Warm per-case run s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `libs/repro_lock_files` before | 8 | 42 | 710.5 | 38.4 | 336 | 7.86 | 0.80 |
+| `libs/repro_lock_files` after | 1 | 42 | **114.6** | **7.8** | **50** | **1.51** | 0.82 |
+| `libs/repro_peer_cache` before | 13 | 29 | 2,272.4 | 47.2 | 770 | 11.51 | 0.72 |
+| `libs/repro_peer_cache` after | 1 | 29 | **250.4** | **9.4** | **94** | **1.95** | 0.77 |
+| **batch total before** | **21** | **71** | **2,982.9** | **85.6** | **1,106** | **19.4** | **1.52** |
+| **batch total after** | **2** | **71** | **365.0** | **17.2** | **144** | **3.5** | **1.59** |
+
+Build cost falls **8.2x** in CPU seconds, nimcache **5.0x**, test-binary bytes
+**5.6x**, binaries 21 → 2. Both bundles exit 0 run whole and pass 42/42 and
+29/29 individually under `--run`. Catalog parity is exact in both directions:
+zero missing, zero extra. Of the protocol fields only `bodyHash` moves — 37 of
+42 and 26 of 29 — which is a one-off re-run for hash-difference selection, not
+a loss of identity; `file`, `line`, `column`, `suite`, `name`, `kind`, `group`,
+`threadsRequired`, `xfail`, `tags` and `deterministic` are unchanged.
+
+**The warm run does not get faster, and is very slightly slower**: 1.52 s →
+1.59 s over the same 71 cases (+4.6%). That is the per-case module-init term
+the section above predicts, and at this bundle size it is small and flat rather
+than explosive. Consolidation is a BUILD-cost optimisation; anyone quoting it
+as a run-time one is quoting the wrong column.
+
+Suite-wide: 1,528 → 1,510 Nim test binaries. The fall is 18 rather than 19
+because the batch brings its own verification binary
+(`tests/integration/t_m4_pure_unit_consolidation.nim`) with it; both numbers
+are in the ledger rather than netted. Static case count 8,766 → 8,769, the +3
+being that verification test's own cases — **consolidation contributes zero**,
+which is the point.
+
+### The gates, and the runs that show they can fail
+
+Seven mutations are recorded in the ledger's `mutations` block, with the
+verification test's three cases reported separately for each, because a gate
+that only ever fails alongside its neighbours is a gate nobody can attribute.
+The discriminating one is **M3**: renaming a member's `suite` while keeping its
+case count at five turns cases 1 and 3 red and leaves case 2 **green** — case 2
+compares counts and bytes, which a rename does not touch. Two more make the
+generator's `checkBundleLimits` refuse (a second owner; a 25th member), one
+makes the "every declared bundle is measured or named" gate refuse, and one
+collapses the new import closure to a no-op and shows
+`--check-inventory` reddening on exactly the 31 entries — which is what covers
+the closure machinery, since it has no unit test of its own.
+
+`--run` was also shown to discriminate: a name that cannot exist, and a bare
+test name with the suite stripped off, both exit non-zero. Without that, every
+per-case exit-0 assertion in the verification test would be vacuous.
+
+### The predicate hole this batch found
+
+`libs/repro_lock_gen` (11 members, one owner, one dependency shape, classified
+`pure unit`) was the obvious batch and is not in it. Its shared fixture starts
+a **real loopback TCP listener on a background thread** —
+`libs/repro_lock_gen/tests/loopback_metadata_server.nim` imports `std/net`,
+calls `newSocket()`, `bindAddr(Port(0), "127.0.0.1")` and `listen()`, and hands
+the socket to `createThread`. The predicate could not see it: all eleven
+members of that group reach it through `./nlf_m6_fixture` (which imports
+`./loopback_metadata_server` directly), and the allowlist read only the test's
+own import clause. Consolidating that group would have put eleven listeners and
+their threads in one process.
+
+The hole was not "one hop too shallow"; it had no depth at all. The old
+predicate's first branch was `if name.startswith(".") … continue`, so a
+**relative import was skipped outright** — three other `repro_lock_gen` tests
+import `./loopback_metadata_server` with no intermediate file whatsoever and
+were still classified `pure unit`. Anything a test reached by path was
+invisible, at any distance.
+
+The predicate is now closed over the test's repository-local path imports, and
+a refusal names the file that earned it. Suite-wide effect, all in the refusing
+direction: **31 entries move `pure unit` → `unclassified`** (20 `repro_lock_gen`,
+4 `repro_deploy_agent`, 2 `repro_binary_cache_client`, 2 `repro_dsl_stdlib`,
+2 `repro_peer_cache` mint-cert, 1 `repro_binary_cache_server`), zero move the
+other way. Pure unit 619 → 569, unclassified 129 → 160, consolidation groups
+56 → 48 (2 consumed by this batch, 6 by the refusals).
+
+The pure-unit figure moves for two reasons at once, so it is decomposed rather
+than quoted whole: **619 → 588** is the predicate repair alone, measured by
+running both predicates over the *identical* `origin/dev` entry list, and
+**588 − 21 + 2 = 569** is this batch removing 21 member entries and adding 2
+bundles. Read against the entry list alone the fall is 31; read against the
+tree it is 50, and the two are not the same measurement. (Unclassified 129 →
+160 is 31 exactly. Eight of the 129/160 are Python entries, which the
+predicate never reaches; over Nim entries only it is 123 → 154.)
+
+The refusals break down by reason as: 20 `creates threads`, 5 `binds a fixed
+OS-global port`, 2 `spawns a subprocess`, 2 `module initialization reads the
+argument vector`, 1 `imports dynlib`, 1 `imports httpclient`.
+
+Known over-approximation, stated rather than hidden: **five** of those refusals
+are `binds a fixed OS-global port` earned by `port: Port(DefaultMulticastPort)`
+at `libs/repro_peer_cache/src/repro_peer_cache/types.nim:444` — a *types*
+module that declares a constant and contains no `bindAddr`, `listen` or
+`newSocket` at all. That is a false refusal in the safe direction — it costs
+consolidation candidates, never correctness — and it is worth a follow-up, not
+a relaxation.
+
+(An earlier revision of this section said "seven". Recomputed at review by
+running the `origin/dev` and batch predicates over the identical `origin/dev`
+entry list and grouping the 31 refusal reasons: the count is five, and the
+`Port(...)` site is the single one named above.)
+
+And the over-approximation turns out to cost nothing at all on this tree, which
+is stronger than "false but safe". Deleting the `Port(...)` pattern from
+`PURE_UNIT_DISQUALIFYING_SYMBOLS` outright and re-running the predicate leaves
+all five entries refused, for `imports nativesockets` through the same
+`types.nim` — that module's line 18 is `import std/[hashes, nativesockets, net,
+options]`, and both `nativesockets` and `net` are already in
+`PURE_UNIT_FORBIDDEN_MODULES`. The refusal is doubly earned, so the follow-up
+above buys back **zero** consolidation candidates here; it is worth doing for
+the reason the refusal should be attributable, not because anything is blocked
+by it.
+
+### A group measured and dropped
+
+`libs/repro_cli_support` (5 members, 22 cases) was measured and excluded:
+`test_m2_env_ps1_migration_clean.nim` fails **4 of its 8 cases standalone** on
+this tree before any consolidation (`Check failed: line.kind != moUnknown`,
+line 211, twelve times), and its binary exits 1 run whole. This is a
+pre-existing `origin/dev` failure, not a consolidation effect — but a group
+carrying a red case cannot be evidence that consolidation preserved outcomes.
+
 ## Recommended next batch
 
-`libs/repro_peer_cache` is the largest measured prize at 20.5x, but it must
-first either fix the fixed-port multicast test or model its isolation
-explicitly — it is the group whose merged binary exits 1 run whole.
+`libs/repro_peer_cache` was the largest measured prize at 20.5x and is now
+landed — the fixed-port multicast test that made its merged binary exit 1 is
+excluded by the predicate rather than by hand, so the 13 members that remain
+are the ones the scan can show tolerate neighbours.
+
+Next: `libs/repro_lock_files` also has a second group (3 members, dependency
+shape `['repro_lock_files']`) and `libs/repro_core` has two 3-member groups, one
+of which (`t_convention_attribution`, 40 cases) is the largest single-source
+case count among the small groups. `libs/repro_project_dsl`'s 41- and 38-member
+groups are over the 24 limit and would have to be split.
 
 The recipe family should not be consolidated on the strength of this report.
 Its 16-per-binary figure is **a bound we failed to falsify, not a measured

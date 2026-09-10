@@ -1,0 +1,660 @@
+{
+ "schema": 1,
+ "provenance": {
+  "head": "16a992fd5251db9abbcc12c8938631e28fbb5499",
+  "branchedFrom": "origin/dev",
+  "nim": "Nim Compiler Version 2.3.1 [Linux: amd64] (codetracer-nim fork, from the dev shell)",
+  "cc": "gcc (GCC) 15.2.0",
+  "host": "32 logical cores, shared CI runner, load average 75-140 throughout",
+  "compileCommand": "nim c --threads:on --hints:off --warnings:off --nimcache:<private> --out:<private> <source>",
+  "costMetric": "CPU seconds (ru_utime+ru_stime of the waited-for child tree). Wall time is recorded per compile but is NOT comparable between the before and after columns and no claim rests on it: the 21 standalone compiles ran 5-way parallel and the 2 bundle compiles 2-way, on a host carrying unrelated load at average 75-140 on 32 cores. CPU seconds are stable under contention and are what CI is billed for.",
+  "runMetric": "one process per case, `--run \"suite::test\"`; two passes, the second reported",
+  "note": "Every binary here was compiled fresh. No figure is read back out of a pre-existing artifact, and none is carried forward from the earlier campaign report."
+ },
+ "limits": {
+  "maxBundleMembers": 24,
+  "maxBundleOwners": 1,
+  "maxDependencyRoots": 4,
+  "rationale": "See `MaxBundleMembers` in scripts/generate_test_edges.nim. 24 is the largest membership executed clean end to end (the repro_solver bundle); it bounds what may be attempted, and every bundle still has to show per-case pass plus whole-binary exit 0 on its own evidence."
+ },
+ "mutations": {
+  "note": "Mutation runs that show the three verification cases in tests/integration/t_m4_pure_unit_consolidation.nim CAN fail, and fail SEPARATELY. Run at review against freshly compiled binaries (the 21 member sources and both bundles rebuilt from scratch with the compileCommand above). Recorded here because scripts/generate_test_edges.nim cites this file for them; before this block that citation pointed at nothing.",
+  "harness": "Backup/restore is an explicit byte snapshot of exactly the files each mutation touches, NOT `git checkout --`: this batch adds untracked files and `git checkout -- .` refuses wholesale when any path is untracked, which once left the tree dirty and made a suite-rename read as a larger break than it was. `git status --porcelain` was compared to the pre-mutation listing after every run and matched exactly, and the bundle binary's md5 was confirmed unchanged after the two mutations that rebuild it.",
+  "caseOrder": [
+   "test_consolidated_pure_unit_cases_list_individually",
+   "test_consolidation_reduces_binary_footprint",
+   "test_consolidation_preserves_selection_names"
+  ],
+  "baseline": {
+   "mutation": "none",
+   "verificationExitCode": 0,
+   "cases": [
+    "OK",
+    "OK",
+    "OK"
+   ]
+  },
+  "runs": [
+   {
+    "mutation": "M1",
+    "what": "delete one `test` block (`the co-linking error fires`) from libs/repro_lock_files/tests/t_default_is_restrictive.nim and rebuild the bundle, so the bundle enumerates 41 where the ledger records 42",
+    "verificationExitCode": 1,
+    "cases": [
+     "FAILED",
+     "FAILED",
+     "FAILED"
+    ],
+    "reads": "a lost case is caught three ways: the catalog is missing a name, the counts disagree with both the ledger and the static table, and the selector no longer resolves"
+   },
+   {
+    "mutation": "M2b",
+    "what": "remove one member's row from this ledger's `bundles[0].members` and leave the bundle binary untouched",
+    "verificationExitCode": 1,
+    "cases": [
+     "FAILED",
+     "FAILED",
+     "OK"
+    ],
+    "reads": "case 3 stays green BY CONSTRUCTION \u2014 it only checks selectors the ledger still lists, and the dropped rows list none. Cases 1 and 2 catch it, which is what stops a ledger edit from quietly shrinking the denominator"
+   },
+   {
+    "mutation": "M3",
+    "what": "rename the suite in that member (`NLF-DIA-4 the default is restrictive` -> `... (renamed)`), keeping the case COUNT at 5, and rebuild the bundle",
+    "verificationExitCode": 1,
+    "cases": [
+     "FAILED",
+     "OK",
+     "FAILED"
+    ],
+    "reads": "THE DISCRIMINATING ONE. Case 2 compares counts and bytes only, all of which a rename leaves alone, so it is green \u2014 and the separation is structural, not luck. Cases 1 and 3 are red because the `suite::test` selector changed, which is the whole reason case 3 exists"
+   },
+   {
+    "mutation": "M4-gen-owners",
+    "what": "add a libs/repro_peer_cache member to the libs/repro_lock_files bundle in scripts/generate_test_edges.nim",
+    "verificationExitCode": 1,
+    "cases": null,
+    "reads": "the GENERATOR refuses before writing anything: `bundle_repro_lock_files_pure_unit: spans 2 owners (libs/repro_lock_files, libs/repro_peer_cache); MaxBundleOwners=1`, quit 1"
+   },
+   {
+    "mutation": "M5-gen-size",
+    "what": "add a 25th member to bundle_repro_solver_pure_unit in scripts/generate_test_edges.nim",
+    "verificationExitCode": 1,
+    "cases": null,
+    "reads": "the GENERATOR refuses before writing anything: `bundle_repro_solver_pure_unit: 25 members exceeds MaxBundleMembers=24`, quit 1"
+   },
+   {
+    "mutation": "M6-coverage",
+    "what": "empty this ledger's `bundlesNotCoveredByThisLedger` table, so bundle_repro_solver_pure_unit is declared in the generator and named nowhere in the ledger",
+    "verificationExitCode": 1,
+    "cases": [
+     "FAILED",
+     "OK",
+     "OK"
+    ],
+    "reads": "`Check failed: declared in covered / declared was bundle_repro_solver_pure_unit`. This is the gate that stops a bundle being built, depended on, and never asked whether it kept its cases. Cases 2 and 3 stay green because they only look at bundles the ledger DOES list, which is exactly why case 1 has to carry this one."
+   },
+   {
+    "mutation": "M7-closure",
+    "what": "make `repo_local_import_edges` in scripts/reprobuild_suite_inventory.py return the empty list, so the purity predicate's closure resolves nothing and collapses back to reading each test's own import clause",
+    "gate": "python3 scripts/reprobuild_suite_inventory.py --check-inventory",
+    "gateExitCode": 1,
+    "reads": "exactly the 31 refused entries flip back to `pure unit` and the gate names each one with its lost reason, plus `aggregate sections that no longer match: static, observedStructuralFacts, pureUnitConsolidationCandidates`. Recorded because the new closure machinery has no direct unit test of its own: this is the check that covers it, and this run is the evidence that the check DISCRIMINATES rather than agreeing with whatever the scan happens to produce."
+   }
+  ],
+  "limitEnforcementPoints": "maxBundleMembers and maxBundleOwners are enforced in the generator (checkBundleLimits, which quits rather than warns, verified live by M4-gen-owners and M5-gen-size) AND asserted from this ledger by test_consolidation_reduces_binary_footprint. maxDependencyRoots is asserted from this ledger ONLY; the generator has no corresponding constant.",
+  "negativeControls": "`--run` was confirmed to DISCRIMINATE rather than exit 0 for anything: `--run \"no such suite::no such test\"` exits 1, and a bare test name with the suite stripped off exits 1, both against a real bundle. Without this every per-case exit-0 assertion in the verification test would be vacuous."
+ },
+ "compatibilityAliases": {},
+ "bundlesNotCoveredByThisLedger": {
+  "bundle_repro_solver_pure_unit": "Landed by the earlier batch recorded in reprobuild-suite-m4-consolidation.md. Its 24 members no longer have standalone binaries, so the per-member \"before\" case lists this ledger is built from cannot be measured for it without reverting the batch. Named here rather than silently uncovered: the verification test requires every bundle the generator declares to be either in `bundles` or in this table, so a NEW bundle cannot arrive unchecked."
+ },
+ "suite": {
+  "nimTestBinariesBefore": 1528,
+  "nimTestBinariesAfter": 1510,
+  "binariesAddedByThisBatch": 1,
+  "binariesAddedByThisBatchNote": "tests/integration/t_m4_pure_unit_consolidation.nim, the verification test this batch brings with it. Stated separately so the consolidation delta is not quietly netted against it: 21 members leave, 2 bundles and 1 verification binary arrive, so the suite falls by 18 while consolidation removes 19.",
+  "testEntriesBefore": 1536,
+  "testEntriesAfter": 1518,
+  "staticCaseSumBefore": 8766,
+  "staticCaseSumAfter": 8769,
+  "staticCaseSumNote": "the +3 is this batch's own verification test (tests/integration/t_m4_pure_unit_consolidation.nim); consolidation itself contributes 0",
+  "consolidationGroupsBefore": 56,
+  "consolidationGroupsAfter": 48,
+  "consolidationGroupsNote": "-2 consumed by this batch; the other -6 are the closure repair to the pure-unit predicate, which refuses 31 entries that reach a disqualifier through a repository-local path import"
+ },
+ "bundles": [
+  {
+   "name": "bundle_repro_lock_files_pure_unit",
+   "source": "tests/bundles/bundle_repro_lock_files_pure_unit.nim",
+   "binary": "build/test-bin/bundle_repro_lock_files_pure_unit",
+   "owner": "libs/repro_lock_files",
+   "dependencyShape": [],
+   "members": [
+    {
+     "source": "libs/repro_lock_files/tests/t_default_is_restrictive.nim",
+     "cases": [
+      "NLF-DIA-4 the default is restrictive::an undeclared library resolves to `forbidden`",
+      "NLF-DIA-4 the default is restrictive::and it does NOT fire when the two demands reconcile",
+      "NLF-DIA-4 the default is restrictive::the co-linking error fires",
+      "NLF-DIA-4 the default is restrictive::the error is identical in SHAPE to NLF-DIA-2's",
+      "NLF-DIA-4 the default is restrictive::the library really did declare nothing"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 87.523,
+      "compileWallSeconds": 73.082,
+      "nimcacheBytes": 4749539,
+      "nimcacheCFiles": 42,
+      "binaryBytes": 972752,
+      "warmRunWallSeconds": 0.099,
+      "warmRunCpuSeconds": 0.073,
+      "warmRunExitCodes": {
+       "0": 5
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_lock_files/tests/t_inherited_default_is_traceable.nim",
+     "cases": [
+      "NLF-DIA-8 an inherited multiVersion default is traceable::a different language names a different convention",
+      "NLF-DIA-8 an inherited multiVersion default is traceable::a language nobody has characterised inherits `forbidden`, and says so",
+      "NLF-DIA-8 an inherited multiVersion default is traceable::a language whose runtime keeps versions apart inherits `allowed`",
+      "NLF-DIA-8 an inherited multiVersion default is traceable::a library that DECLARED the same answer is not marked inherited",
+      "NLF-DIA-8 an inherited multiVersion default is traceable::the error names the language convention and cites its source",
+      "NLF-DIA-8 an inherited multiVersion default is traceable::the error says the default was inherited, and does not claim a declaration",
+      "NLF-DIA-8 an inherited multiVersion default is traceable::the resolution records that the answer was inherited"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 90.011,
+      "compileWallSeconds": 67.967,
+      "nimcacheBytes": 4882651,
+      "nimcacheCFiles": 42,
+      "binaryBytes": 1001032,
+      "warmRunWallSeconds": 0.132,
+      "warmRunCpuSeconds": 0.107,
+      "warmRunExitCodes": {
+       "0": 7
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_lock_files/tests/t_multi_version_allowed_builds.nim",
+     "cases": [
+      "NLF-DIA-3 two versions in one link, permitted, allowed::both versions are present in the one link",
+      "NLF-DIA-3 two versions in one link, permitted, allowed::no co-linking error is reported",
+      "NLF-DIA-3 two versions in one link, permitted, allowed::the CONTROL: the same workspace with `forbidden` does error"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 87.027,
+      "compileWallSeconds": 67.729,
+      "nimcacheBytes": 4637618,
+      "nimcacheCFiles": 42,
+      "binaryBytes": 950112,
+      "warmRunWallSeconds": 0.06,
+      "warmRunCpuSeconds": 0.049,
+      "warmRunExitCodes": {
+       "0": 3
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_lock_files/tests/t_opaque_consumption_never_refused.nim",
+     "cases": [
+      "NLF-DIA-5 opaque artifact consumption is never refused::and libfoo really would refuse the co-link",
+      "NLF-DIA-5 opaque artifact consumption is never refused::and the recipe contains no cross-lock-file annotation",
+      "NLF-DIA-5 opaque artifact consumption is never refused::nothing is refused",
+      "NLF-DIA-5 opaque artifact consumption is never refused::the shipped binary's link closure reaches ONE version",
+      "NLF-DIA-5 opaque artifact consumption is never refused::the two lock files really do disagree about libfoo"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 87.777,
+      "compileWallSeconds": 68.182,
+      "nimcacheBytes": 4783708,
+      "nimcacheCFiles": 42,
+      "binaryBytes": 977656,
+      "warmRunWallSeconds": 0.096,
+      "warmRunCpuSeconds": 0.069,
+      "warmRunExitCodes": {
+       "0": 5
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_lock_files/tests/t_split_is_reported.nim",
+     "cases": [
+      "NLF-DIA-7 a split is reported, not silent::reporting is independent of whether anybody objected",
+      "NLF-DIA-7 a split is reported, not silent::the build succeeds with two instances",
+      "NLF-DIA-7 a split is reported, not silent::the report names BOTH versions",
+      "NLF-DIA-7 a split is reported, not silent::the report names the constraints that forced it",
+      "NLF-DIA-7 a split is reported, not silent::the report names the lock files involved",
+      "NLF-DIA-7 a split is reported, not silent::the split is reported"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 90.212,
+      "compileWallSeconds": 63.921,
+      "nimcacheBytes": 4893481,
+      "nimcacheCFiles": 42,
+      "binaryBytes": 1003288,
+      "warmRunWallSeconds": 0.115,
+      "warmRunCpuSeconds": 0.092,
+      "warmRunExitCodes": {
+       "0": 6
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_lock_files/tests/t_two_versions_one_link_forbidden_errors.nim",
+     "cases": [
+      "NLF-DIA-2 two versions in one link, forbidden, clear error::one binary reaches BOTH versions and a conflict is reported",
+      "NLF-DIA-2 two versions in one link, forbidden, clear error::the diagnostic cites the declaration's file:line",
+      "NLF-DIA-2 two versions in one link, forbidden, clear error::the diagnostic names BOTH dependency PATHS, not just the packages",
+      "NLF-DIA-2 two versions in one link, forbidden, clear error::the diagnostic names BOTH versions",
+      "NLF-DIA-2 two versions in one link, forbidden, clear error::the diagnostic states that unification was ATTEMPTED, and why it failed",
+      "NLF-DIA-2 two versions in one link, forbidden, clear error::the resolutions block offers all THREE remedies",
+      "NLF-DIA-2 two versions in one link, forbidden, clear error::the solve SPLITS rather than reporting a bare unsat"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 89.59,
+      "compileWallSeconds": 72.445,
+      "nimcacheBytes": 4906916,
+      "nimcacheCFiles": 42,
+      "binaryBytes": 1001728,
+      "warmRunWallSeconds": 0.146,
+      "warmRunCpuSeconds": 0.106,
+      "warmRunExitCodes": {
+       "0": 7
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_lock_files/tests/t_two_versions_separate_binaries_allowed.nim",
+     "cases": [
+      "NLF-DIA-1 two versions, two separate binaries, allowed::libfoo really does forbid co-linking",
+      "NLF-DIA-1 two versions, two separate binaries, allowed::neither binary links two versions",
+      "NLF-DIA-1 two versions, two separate binaries, allowed::no co-linking error is reported",
+      "NLF-DIA-1 two versions, two separate binaries, allowed::the workspace really does carry two versions of libfoo"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 88.259,
+      "compileWallSeconds": 71.365,
+      "nimcacheBytes": 4720913,
+      "nimcacheCFiles": 42,
+      "binaryBytes": 967096,
+      "warmRunWallSeconds": 0.063,
+      "warmRunCpuSeconds": 0.053,
+      "warmRunExitCodes": {
+       "0": 4
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_lock_files/tests/t_unification_attempted_before_splitting.nim",
+     "cases": [
+      "NLF-DIA-6 unification is attempted before splitting::and nothing is reported as split",
+      "NLF-DIA-6 unification is attempted before splitting::both binaries link the SAME version",
+      "NLF-DIA-6 unification is attempted before splitting::the encoder emits a unification objective for libfoo",
+      "NLF-DIA-6 unification is attempted before splitting::the solve yields ONE instance, in the intersection",
+      "NLF-DIA-6 unification is attempted before splitting::the two consumers really are under two different lock files"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 90.051,
+      "compileWallSeconds": 68.85,
+      "nimcacheBytes": 4855759,
+      "nimcacheCFiles": 42,
+      "binaryBytes": 988920,
+      "warmRunWallSeconds": 0.092,
+      "warmRunCpuSeconds": 0.074,
+      "warmRunExitCodes": {
+       "0": 5
+      },
+      "wholeBinaryExitCode": 0
+     }
+    }
+   ],
+   "before": {
+    "binaries": 8,
+    "cases": 42,
+    "compileCpuSeconds": 710.5,
+    "compileWallSeconds": 553.5,
+    "nimcacheBytes": 38430585,
+    "nimcacheCFiles": 336,
+    "binaryBytes": 7862584,
+    "warmRunWallSeconds": 0.803,
+    "warmRunCpuSeconds": 0.623
+   },
+   "after": {
+    "binaries": 1,
+    "cases": 42,
+    "compileCpuSeconds": 114.603,
+    "compileWallSeconds": 33.642,
+    "nimcacheBytes": 7805721,
+    "nimcacheCFiles": 50,
+    "binaryBytes": 1514816,
+    "warmRunWallSeconds": 0.821,
+    "warmRunCpuSeconds": 0.596,
+    "warmRunExitCodes": {
+     "0": 42
+    },
+    "wholeBinaryExitCode": 0,
+    "enumeratedCases": 42,
+    "catalogMissing": 0,
+    "catalogExtra": 0,
+    "protocolFieldsMoved": {
+     "bodyHash": 37
+    }
+   }
+  },
+  {
+   "name": "bundle_repro_peer_cache_pure_unit",
+   "source": "tests/bundles/bundle_repro_peer_cache_pure_unit.nim",
+   "binary": "build/test-bin/bundle_repro_peer_cache_pure_unit",
+   "owner": "libs/repro_peer_cache",
+   "dependencyShape": [
+    "repro_peer_cache"
+   ],
+   "members": [
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_advertise_v2_codec_round_trip.nim",
+     "cases": [
+      "peer-cache AdvertiseV2 codec round trip::AdvertiseV2 round-trips and the decoded filter answers queries"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 179.196,
+      "compileWallSeconds": 118.062,
+      "nimcacheBytes": 3552003,
+      "nimcacheCFiles": 57,
+      "binaryBytes": 876864,
+      "warmRunWallSeconds": 0.01,
+      "warmRunCpuSeconds": 0.008,
+      "warmRunExitCodes": {
+       "0": 1
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_bearssl_ecdsa_smoke.nim",
+     "cases": [
+      "peer-cache bearssl ecdsa-p256 signing smoke::ECDSA-P256 sign/verify round-trip"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 86.782,
+      "compileWallSeconds": 58.644,
+      "nimcacheBytes": 2119201,
+      "nimcacheCFiles": 31,
+      "binaryBytes": 545624,
+      "warmRunWallSeconds": 0.014,
+      "warmRunCpuSeconds": 0.013,
+      "warmRunExitCodes": {
+       "0": 1
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_cert_validity_window_enforced.nim",
+     "cases": [
+      "peer-cache cert validity window (M2)::expired cert is rejected; valid cert is accepted"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 188.289,
+      "compileWallSeconds": 115.074,
+      "nimcacheBytes": 4251770,
+      "nimcacheCFiles": 68,
+      "binaryBytes": 1001552,
+      "warmRunWallSeconds": 0.012,
+      "warmRunCpuSeconds": 0.011,
+      "warmRunExitCodes": {
+       "0": 1
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_codec_frame_round_trip.nim",
+     "cases": [
+      "peer-cache codec frame round trip::Advertise round-trips with randomised added/removed lengths",
+      "peer-cache codec frame round trip::FetchRequest round-trips",
+      "peer-cache codec frame round trip::FetchResponse round-trips (empty + populated + truncated)",
+      "peer-cache codec frame round trip::Hello round-trips",
+      "peer-cache codec frame round trip::HelloOk round-trips",
+      "peer-cache codec frame round trip::Ping / Pong / Goodbye round-trip with empty payloads",
+      "peer-cache codec frame round trip::Want round-trips"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 186.559,
+      "compileWallSeconds": 232.101,
+      "nimcacheBytes": 3917707,
+      "nimcacheCFiles": 57,
+      "binaryBytes": 946496,
+      "warmRunWallSeconds": 0.08,
+      "warmRunCpuSeconds": 0.068,
+      "warmRunExitCodes": {
+       "0": 7
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_codec_version_mismatch_rejected.nim",
+     "cases": [
+      "peer-cache codec version mismatch::version=0 frame is rejected",
+      "peer-cache codec version mismatch::version=1 frame parses cleanly (sanity check)",
+      "peer-cache codec version mismatch::version=2 frame is rejected with the observed version in the message",
+      "peer-cache codec version mismatch::version=42 frame is rejected with the value in the message"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 174.608,
+      "compileWallSeconds": 189.656,
+      "nimcacheBytes": 3416348,
+      "nimcacheCFiles": 57,
+      "binaryBytes": 853656,
+      "warmRunWallSeconds": 0.058,
+      "warmRunCpuSeconds": 0.041,
+      "warmRunExitCodes": {
+       "0": 4
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_cuckoo_filter_delete_round_trip.nim",
+     "cases": [
+      "peer-cache cuckoo filter delete round trip::inserts/deletes preserve no-false-negatives + re-insert works"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 172.331,
+      "compileWallSeconds": 113.852,
+      "nimcacheBytes": 3277591,
+      "nimcacheCFiles": 55,
+      "binaryBytes": 825280,
+      "warmRunWallSeconds": 0.014,
+      "warmRunCpuSeconds": 0.013,
+      "warmRunExitCodes": {
+       "0": 1
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_cuckoo_filter_false_positive_rate.nim",
+     "cases": [
+      "peer-cache cuckoo filter false-positive rate::1000 inserts + 10000 negative queries yields FPR <= 3%"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 177.009,
+      "compileWallSeconds": 136.358,
+      "nimcacheBytes": 3376147,
+      "nimcacheCFiles": 57,
+      "binaryBytes": 845264,
+      "warmRunWallSeconds": 0.26,
+      "warmRunCpuSeconds": 0.214,
+      "warmRunExitCodes": {
+       "0": 1
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_sign_verify_round_trip.nim",
+     "cases": [
+      "peer-cache ECDSA-P256 sign / verify round trip::tampered message bytes flip verify to false",
+      "peer-cache ECDSA-P256 sign / verify round trip::tampered signature byte flips verify to false",
+      "peer-cache ECDSA-P256 sign / verify round trip::two fresh keypairs sign + verify each other's advertisement",
+      "peer-cache ECDSA-P256 sign / verify round trip::wrong-pubkey verify rejects"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 174.963,
+      "compileWallSeconds": 135.888,
+      "nimcacheBytes": 3386514,
+      "nimcacheCFiles": 56,
+      "binaryBytes": 845248,
+      "warmRunWallSeconds": 0.073,
+      "warmRunCpuSeconds": 0.056,
+      "warmRunExitCodes": {
+       "0": 4
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_trust_anchor_file_format.nim",
+     "cases": [
+      "peer-cache ECDSA-P256 trust-anchor file format::hex-pubkey-per-line parses cleanly",
+      "peer-cache ECDSA-P256 trust-anchor file format::legacy `<pub>:<priv>` format rejected with clear error",
+      "peer-cache ECDSA-P256 trust-anchor file format::malformed hex raises AuthError with line number",
+      "peer-cache ECDSA-P256 trust-anchor file format::round-trip: write -> load -> write -> load is idempotent"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 181.757,
+      "compileWallSeconds": 140.431,
+      "nimcacheBytes": 3815769,
+      "nimcacheCFiles": 63,
+      "binaryBytes": 923904,
+      "warmRunWallSeconds": 0.055,
+      "warmRunCpuSeconds": 0.047,
+      "warmRunExitCodes": {
+       "0": 4
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_event_stream_jsonl_round_trip.nim",
+     "cases": [
+      "peer-cache M4 event stream JSONL round trip::emit + parseJson round trip preserves event + payload fields"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 188.109,
+      "compileWallSeconds": 118.305,
+      "nimcacheBytes": 4114305,
+      "nimcacheCFiles": 64,
+      "binaryBytes": 996512,
+      "warmRunWallSeconds": 0.013,
+      "warmRunCpuSeconds": 0.012,
+      "warmRunExitCodes": {
+       "0": 1
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_self_signed_cert_round_trip.nim",
+     "cases": [
+      "peer-cache self-signed cert round trip (M2)::generate, write, load, verify self-signature",
+      "peer-cache self-signed cert round trip (M2)::tampered cert signature fails BearSSL verification"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 190.79,
+      "compileWallSeconds": 118.3,
+      "nimcacheBytes": 4193075,
+      "nimcacheCFiles": 68,
+      "binaryBytes": 985376,
+      "warmRunWallSeconds": 0.032,
+      "warmRunCpuSeconds": 0.027,
+      "warmRunExitCodes": {
+       "0": 2
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_tier2_central_fallthrough.nim",
+     "cases": [
+      "peer-cache-scale M2 tier-2 central fall-through::missing blob is fetched from upstream, cached, served from disk next time"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 189.948,
+      "compileWallSeconds": 135.51,
+      "nimcacheBytes": 4101251,
+      "nimcacheCFiles": 70,
+      "binaryBytes": 973464,
+      "warmRunWallSeconds": 0.015,
+      "warmRunCpuSeconds": 0.011,
+      "warmRunExitCodes": {
+       "0": 1
+      },
+      "wholeBinaryExitCode": 0
+     }
+    },
+    {
+     "source": "libs/repro_peer_cache/tests/t_peer_cache_tier2_eviction_policy.nim",
+     "cases": [
+      "peer-cache-scale M2 DiskStore LRU eviction policy::1024-cap store evicts oldest to keep currentBytes <= maxBytes"
+     ],
+     "standalone": {
+      "compileCpuSeconds": 182.041,
+      "compileWallSeconds": 128.567,
+      "nimcacheBytes": 3677095,
+      "nimcacheCFiles": 67,
+      "binaryBytes": 893288,
+      "warmRunWallSeconds": 0.08,
+      "warmRunCpuSeconds": 0.012,
+      "warmRunExitCodes": {
+       "0": 1
+      },
+      "wholeBinaryExitCode": 0
+     }
+    }
+   ],
+   "before": {
+    "binaries": 13,
+    "cases": 29,
+    "compileCpuSeconds": 2272.4,
+    "compileWallSeconds": 1740.7,
+    "nimcacheBytes": 47198776,
+    "nimcacheCFiles": 770,
+    "binaryBytes": 11512528,
+    "warmRunWallSeconds": 0.716,
+    "warmRunCpuSeconds": 0.533
+   },
+   "after": {
+    "binaries": 1,
+    "cases": 29,
+    "compileCpuSeconds": 250.438,
+    "compileWallSeconds": 69.155,
+    "nimcacheBytes": 9358796,
+    "nimcacheCFiles": 94,
+    "binaryBytes": 1952448,
+    "warmRunWallSeconds": 0.766,
+    "warmRunCpuSeconds": 0.558,
+    "warmRunExitCodes": {
+     "0": 29
+    },
+    "wholeBinaryExitCode": 0,
+    "enumeratedCases": 29,
+    "catalogMissing": 0,
+    "catalogExtra": 0,
+    "protocolFieldsMoved": {
+     "bodyHash": 26
+    }
+   }
+  }
+ ]
+}

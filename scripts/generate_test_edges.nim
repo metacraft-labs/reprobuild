@@ -101,6 +101,30 @@ type
     name: string          # binary stem, also the generated source's stem
     members: seq[string]  # repo-relative .nim paths folded into the binary
 
+const
+  MaxBundleMembers = 24
+    ## THE SIZE LIMIT, and what it is and is not.
+    ##
+    ## 24 is the largest membership this campaign has built and executed clean
+    ## end to end: the `libs/repro_solver` bundle, 24 members, 82/82 cases
+    ## passing individually under ``--run`` and exit 0 run whole. It is a
+    ## ceiling on what may be ATTEMPTED, not a certificate that 24 is safe. The
+    ## from-source recipe family failed at 24 and passed at 16 on the same
+    ## measurement, so no single number is safe for every group; every bundle
+    ## has to show per-case pass plus whole-binary exit 0 on its own evidence
+    ## before it lands, and the batch that lands it records those numbers.
+    ##
+    ## The limit exists because the milestone asks for one, and because the
+    ## measured cost curve has an optimum rather than a monotone slope: past
+    ## it, one process's module-init cost is paid once per case and the build
+    ## saving is repaid with interest.
+
+  MaxBundleOwners = 1
+    ## A bundle carries exactly one owning directory. The inventory groups
+    ## consolidation candidates by (owner, dependency shape, defines, target
+    ## OS); a bundle spanning two owners is a bundle spanning two groups, and
+    ## the failure it eventually produces is no longer bisectable to a group.
+
 const PureUnitBundles: seq[PureUnitBundle] = @[
   # The only group cleared so far. It is clean on every axis measured:
   # module-init cost unchanged from standalone (0.006 s), 82/82 cases pass
@@ -137,6 +161,65 @@ const PureUnitBundles: seq[PureUnitBundle] = @[
       "libs/repro_solver/tests/t_version_encoder_constraints.nim",
       "libs/repro_solver/tests/t_version_encoder_transitive.nim",
       "libs/repro_solver/tests/t_version_encoder_universe.nim",
+    ]),
+
+  # Suite-Modernization M4, batch 1 (two groups, 21 members, 21 -> 2
+  # binaries). Each is one whole `pureUnitConsolidationCandidates` group —
+  # same owner, same dependency shape, same defines, same target OS — and each
+  # was measured standalone and bundled before it was written here. The
+  # numbers are in
+  # `benchmarks/reports/reprobuild-suite-m4-consolidation-batch1.json`, and the
+  # mutation runs that show the verification gates can fail — and fail
+  # SEPARATELY, so no one of them is carrying the other two — are in that
+  # file's `mutations` block, including the two that make THIS file's
+  # `checkBundleLimits` refuse.
+  #
+  # TWO groups the batch deliberately does NOT contain, because both say
+  # something a later batch needs to know:
+  #
+  #   * `libs/repro_lock_gen` (11 members, same owner, same dependency shape,
+  #     and classified `pure unit` at the time) was the obvious next batch. Its
+  #     shared fixture starts a REAL loopback TCP listener on a background
+  #     thread. The purity predicate could not see that: it read the test's own
+  #     import clause, and the reach was one hop away through
+  #     `./nlf_m6_fixture`. Closing the predicate over repository-local path
+  #     imports refuses that group and 20 other entries — see the note above
+  #     `PURE_UNIT_FORBIDDEN_MODULES` in `scripts/reprobuild_suite_inventory.py`.
+  #   * `libs/repro_cli_support` (5 members) was measured and then dropped:
+  #     `test_m2_env_ps1_migration_clean.nim` fails 4 of its 8 cases STANDALONE
+  #     on this tree, before any consolidation (`moUnknown` pins at line 211).
+  #     A group carrying a red case cannot be evidence that consolidation
+  #     preserved outcomes, whichever way it then behaves.
+
+  PureUnitBundle(
+    name: "bundle_repro_lock_files_pure_unit",
+    members: @[
+      "libs/repro_lock_files/tests/t_default_is_restrictive.nim",
+      "libs/repro_lock_files/tests/t_inherited_default_is_traceable.nim",
+      "libs/repro_lock_files/tests/t_multi_version_allowed_builds.nim",
+      "libs/repro_lock_files/tests/t_opaque_consumption_never_refused.nim",
+      "libs/repro_lock_files/tests/t_split_is_reported.nim",
+      "libs/repro_lock_files/tests/t_two_versions_one_link_forbidden_errors.nim",
+      "libs/repro_lock_files/tests/t_two_versions_separate_binaries_allowed.nim",
+      "libs/repro_lock_files/tests/t_unification_attempted_before_splitting.nim",
+    ]),
+
+  PureUnitBundle(
+    name: "bundle_repro_peer_cache_pure_unit",
+    members: @[
+      "libs/repro_peer_cache/tests/t_peer_cache_advertise_v2_codec_round_trip.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_bearssl_ecdsa_smoke.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_cert_validity_window_enforced.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_codec_frame_round_trip.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_codec_version_mismatch_rejected.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_cuckoo_filter_delete_round_trip.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_cuckoo_filter_false_positive_rate.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_sign_verify_round_trip.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_ecdsa_trust_anchor_file_format.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_event_stream_jsonl_round_trip.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_self_signed_cert_round_trip.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_tier2_central_fallthrough.nim",
+      "libs/repro_peer_cache/tests/t_peer_cache_tier2_eviction_policy.nim",
     ]),
 ]
 
@@ -416,6 +499,59 @@ proc renderBundleSource(bundle: PureUnitBundle): string =
   for member in bundle.members:
     result.add("import \"" & upDir & member[0 ..< member.len - 4] & "\"\n")
 
+proc ownerOf(member: string): string =
+  ## The consolidation-group owner of a member path: ``libs/<lib>`` for a
+  ## library-local test, the containing directory otherwise. Same rule the
+  ## inventory's ``TestSpec.owner`` uses, restated here because the generator
+  ## must not import Python to check its own table.
+  let parts = member.split('/')
+  if parts.len >= 2 and parts[0] == "libs":
+    parts[0] & "/" & parts[1]
+  else:
+    member.parentDir()
+
+proc checkBundleLimits(repoRoot: string) =
+  ## Refuse to emit a bundle that breaks a stated limit.
+  ##
+  ## This runs BEFORE anything is written, and it quits rather than warns. A
+  ## warning on a generator whose output is checked in is a warning nobody
+  ## reads: the diff lands, the bundle compiles, and the limit is discovered
+  ## by the failure it was supposed to prevent.
+  var seenMembers = initHashSet[string]()
+  var failures: seq[string] = @[]
+  for bundle in PureUnitBundles:
+    if bundle.members.len < 2:
+      failures.add(bundle.name & ": " & $bundle.members.len &
+        " member(s); a bundle of one removes no binary and buys nothing")
+    if bundle.members.len > MaxBundleMembers:
+      failures.add(bundle.name & ": " & $bundle.members.len &
+        " members exceeds MaxBundleMembers=" & $MaxBundleMembers)
+    var owners = initHashSet[string]()
+    for member in bundle.members:
+      owners.incl(ownerOf(member))
+      if member in seenMembers:
+        failures.add(bundle.name & ": '" & member &
+          "' is a member of more than one bundle; its cases would be " &
+          "compiled and counted twice")
+      seenMembers.incl(member)
+      if not fileExists(repoRoot / member):
+        failures.add(bundle.name & ": member '" & member & "' does not exist")
+      if member.startsWith(BundleRoot):
+        failures.add(bundle.name & ": member '" & member &
+          "' is itself a bundle")
+    if owners.len > MaxBundleOwners:
+      var names: seq[string] = @[]
+      for owner in owners:
+        names.add(owner)
+      names.sort()
+      failures.add(bundle.name & ": spans " & $owners.len & " owners (" &
+        names.join(", ") & "); MaxBundleOwners=" & $MaxBundleOwners)
+  if failures.len > 0:
+    stderr.writeLine("generate_test_edges: pure-unit bundle limits violated:")
+    for failure in failures:
+      stderr.writeLine("  " & failure)
+    quit(1)
+
 proc writeBundleSources(repoRoot: string): int =
   ## Materialise every bundle source. Returns the number of files written
   ## (0 when all are already up to date), so the run stays idempotent and a
@@ -423,6 +559,7 @@ proc writeBundleSources(repoRoot: string): int =
   result = 0
   if PureUnitBundles.len == 0:
     return
+  checkBundleLimits(repoRoot)
   createDir(repoRoot / BundleRoot)
   for bundle in PureUnitBundles:
     let path = repoRoot / bundleSourcePath(bundle)
