@@ -131,10 +131,10 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
       dd / "nim-bearssl",
       repoRootAbs / "libs" / "nim-bearssl",
     ], "bearssl.nim")
-    # ``repro_local_store`` imports ``repro_shm_index``, whose ``layout.nim``
-    # / ``ring.nim`` import ``shm_queue/...`` from the ``nim-shm-queue``
-    # sibling (and ``shm_gset`` from ``nim-shm-gset``). Neither package
-    # lives under ``libs/*/src``, so ``profileNimPaths`` cannot supply them.
+    # ``repro_local_store`` imports ``shm_gset`` from the ``nim-shm-gset``
+    # sibling (the action cache's Tier-2 index), and io-mon pulls
+    # ``shm_queue/...`` from ``nim-shm-queue``. Neither package lives under
+    # ``libs/*/src``, so ``profileNimPaths`` cannot supply them.
     # config.nims resolves both through ``$SHM_QUEUE_SRC`` / ``$SHM_GSET_SRC``
     # first, then a relative sibling probe, then a nix-devshell fallback —
     # but the relative probe runs from the PROFILE directory (see the

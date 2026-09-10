@@ -17,8 +17,8 @@
 ##     Error: cannot open file: repro_local_store
 ##
 ## and it was not alone — `repro_peer_cache`, `repro_provider_runtime`,
-## `repro_shm_index`, `repro_solver` and `repro_system_apply` were missing
-## from the same array for the same reason. The breakage stayed invisible
+## `repro_solver` and `repro_system_apply` were missing from the same array
+## for the same reason. The breakage stayed invisible
 ## because a successful compile is cached as an `.rbpi` envelope keyed on
 ## the PROFILE's source digest: as long as a machine's profile text did not
 ## change, the cached envelope was served and `nim c` never ran. Editing any
@@ -85,13 +85,16 @@ suite "profile-compile Nim path closure":
       check expected in emitted
 
   test "profileNimPaths carries the transitively-imported libs the old list omitted":
-    # Named canaries for the six libraries the hand-maintained array was
-    # missing. Each is reachable only transitively from `import
-    # repro_profile`, which is why each was easy to forget.
+    # Named canaries for the libraries the hand-maintained array was missing.
+    # Each is reachable only transitively from `import repro_profile`, which is
+    # why each was easy to forget. `repro_shm_index` was one of them and is
+    # gone: the action cache's Tier-2 index is now the `shm_gset` sibling,
+    # reached through `repro_local_store`, so the canary that named it moved
+    # with the dependency rather than being dropped.
     let repoRoot = reprobuildRepoRoot()
     let emitted = profileNimPaths(repoRoot)
     for name in ["repro_local_store", "repro_peer_cache",
-                 "repro_provider_runtime", "repro_shm_index",
+                 "repro_provider_runtime",
                  "repro_solver", "repro_system_apply"]:
       check (repoRoot / "libs" / name / "src") in emitted
 

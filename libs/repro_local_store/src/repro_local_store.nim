@@ -1,4 +1,4 @@
-import std/[algorithm, monotimes, nativesockets, options, os, osproc, sets,
+import std/[algorithm, monotimes, nativesockets, options, os, sets,
             strutils, tables, times]
 
 when defined(posix):
@@ -21,17 +21,18 @@ when defined(posix):
 
 import repro_core
 import repro_hash
-import repro_shm_index
 
 # Re-export the new M56 content-addressed local store API. The pre-M56
 # `LocalCas` and `ActionCache` types below remain for the action-cache
 # code path the M9 build engine still consumes; the M56 entry points
 # live in `repro_local_store/store.nim` and
 # `repro_local_store/sqlite3_binding.nim`.
+import ./repro_local_store/action_index
 import ./repro_local_store/sqlite3_binding
 import ./repro_local_store/store
 import ./repro_local_store/lru_eviction
 import ./repro_local_store/sandbox_manifest
+export action_index
 export sqlite3_binding
 export store
 export lru_eviction
@@ -233,35 +234,38 @@ type
     root*: string
 
   ShmTier* = ref object
-    ## The engine's attached view of the shared-memory hot tier (AC-2c) for one
-    ## cache root. A `ref` so an `ActionCache` VALUE can be copied (the warm
-    ## handle in the engine is copied in/out of a process-wide table) without
-    ## duplicating the mapped fds / double-attaching / double-closing — every
-    ## copy shares the one attached index. `enabled` gates the whole tier: when
-    ## false (non-POSIX, no atomics, attach failed, or opted out) every read is
-    ## pure Tier-1 disk and every record is Tier-1-only — exactly AC-1b behavior.
+    ## The engine's attached view of the Tier-2 shared-memory index
+    ## (Action-Cache-Per-Edge-Store.md §6) for one cache root. A `ref` so an
+    ## `ActionCache` VALUE can be copied (the warm handle in the engine is
+    ## copied in and out of a process-wide table) without duplicating the
+    ## mapping or double-detaching — every copy shares the one attached chain.
+    ##
+    ## `enabled` gates the whole tier: when false (non-POSIX, attach failed, or
+    ## opted out) every read is pure Tier-1 disk and every record is Tier-1
+    ## only — the identical decision, reached without the accelerator.
+    ##
+    ## There is no submission slot here and no size test anywhere on the write
+    ## path. The index holds 84-byte REFERENCES, so a record's size is not an
+    ## admission criterion: the structure grows by sharding, an insert never
+    ## blocks and nothing is ever dropped for want of capacity.
     enabled*: bool
-    idx*: ShmIndex
-    readerSlot*: int
-    oversizedSubmits*: int
-      ## How many records this process declined to submit because their
-      ## ENCODED form exceeded the inline slot cap. Not a curiosity: a
-      ## build whose records are all over the cap bypasses the shm tier
-      ## 100% of the time and, from outside, looks IDENTICAL to a healthy
-      ## one — the ring stays empty, no daemon is ever asked to publish,
-      ## and every lookup quietly falls through to Tier-1 disk.
-    oversizedReported*: bool
-      ## The first drop prints; the rest only count. One line per process
-      ## per cache root says the tier is being bypassed without turning a
-      ## large build's stderr into a wall of identical warnings.
+    idx*: ActionIndex
+    bypassNoted*: bool
+      ## §6.8: an engine that declines the index still writes Tier 1, so it
+      ## bumps `bypassWrites` ONCE before its first write if a chain exists.
+      ## That voids every completeness claim in the chain until the next
+      ## flatten, which is what keeps the escape hatch safe rather than merely
+      ## documented.
 
   ActionCache* = object
     root*: string
     shm*: ShmTier
-      ## The optional shared-memory accelerator (AC-2c). nil / disabled ⇒ pure
-      ## Tier-1 disk-only (the AC-1b path). The DECISION (hit/miss/strong-fp) is
-      ## identical either way; shm only changes where a metadata record is
-      ## SOURCED (shm-first, warm-on-miss) and adds a ring submit on record.
+      ## The optional Tier-2 shared-memory index (§6). nil / disabled ⇒ pure
+      ## Tier-1 disk-only. The DECISION (hit/miss/strong-fp) is identical
+      ## either way; the index only changes HOW the candidate set for an edge
+      ## is discovered — from mapped memory instead of from a directory
+      ## enumeration — and can turn a miss into a hit when another engine on
+      ## the host published a record this process has not read from disk.
     # Root holding the authoritative per-edge record store. Each edge (keyed
     # by its weak fingerprint via `perEdgeDirName`) owns a DIRECTORY
     # `hot-records/<key>/` containing one `<nonce>.rec` file per observed
@@ -1034,8 +1038,10 @@ var
   actionRecordDecodeBytes = 0'i64
   perEdgeContainerReads = 0
   perEdgeSidecarReads = 0
-  shmOversizedSubmitCount = 0
-  shmOversizedSubmitFloorBytes = 0'i64
+  actionIndexNegativeHits = 0
+  actionIndexResolvedHits = 0
+  actionIndexUnionFallbacks = 0
+  actionIndexUnresolvedRefs = 0
 
 proc noteActionRecordDecode(frameBytes: int) =
   ## Count ONE decoded `RBAR` record frame and the bytes it spanned.
@@ -1851,27 +1857,30 @@ proc resetOutputStateCheckStats*() =
   actionRecordDecodeBytes = 0'i64
   perEdgeContainerReads = 0
   perEdgeSidecarReads = 0
-  shmOversizedSubmitCount = 0
-  shmOversizedSubmitFloorBytes = 0'i64
+  actionIndexNegativeHits = 0
+  actionIndexResolvedHits = 0
+  actionIndexUnionFallbacks = 0
+  actionIndexUnresolvedRefs = 0
 
-proc shmSubmitStats*(): tuple[oversized: int; oversizedFloorBytes: int64] =
-  ## How many records this build refused to hand to the shared-memory tier
-  ## because they cannot fit an inline slot, and the summed size those records
-  ## were known to be at least.
+proc actionIndexStats*(): tuple[negativeHits, resolvedHits, unionFallbacks,
+                                unresolvedReferences: int] =
+  ## What the Tier-2 index actually did for THIS build
+  ## (Action-Cache-Per-Edge-Store.md §11, §8.1).
   ##
-  ## `ShmTier.oversizedSubmits` counts the same event per attached tier; this
-  ## is the BUILD-WIDE total, which is the number `--show=timing` wants and the
-  ## only one a reader can compare against the build's other counters.
+  ## `negativeHits` is the effect the tier exists for: an edge the index
+  ## reported complete and empty, answered from mapped memory with zero
+  ## filesystem operations. It applies to every cache miss, the dominant case
+  ## in a cold build, and it is what lets the batch up-to-date scan
+  ## short-circuit on the first probe with no record.
   ##
-  ## Worth a permanent row for the reason `observationsContradictory` is: a
-  ## build whose records are all over the cap bypasses the shm tier 100% of the
-  ## time and, from outside, looks IDENTICAL to a healthy one -- the ring stays
-  ## empty, no daemon is ever asked to publish, every lookup falls through to
-  ## Tier-1 disk, and nothing anywhere says so. That state was worth 8.4 ms of a
-  ## 61 ms warm no-op here and took a profiler to find. It should have taken
-  ## reading one row.
-  (oversized: shmOversizedSubmitCount,
-   oversizedFloorBytes: shmOversizedSubmitFloorBytes)
+  ## `unionFallbacks` is its complement — every lookup that had to list a
+  ## directory — and the two together are the only honest way to say whether
+  ## the accelerator is engaged. A build where the index is attached, healthy
+  ## and answering nothing looks, from the outside, exactly like a build where
+  ## it is working; these rows are the difference.
+  (negativeHits: actionIndexNegativeHits, resolvedHits: actionIndexResolvedHits,
+   unionFallbacks: actionIndexUnionFallbacks,
+   unresolvedReferences: actionIndexUnresolvedRefs)
 
 proc actionRecordDecodeStats*(): tuple[records: int; bytes: int64;
                                        containerReads: int;
@@ -2810,7 +2819,8 @@ proc loadNewestPerEdgeRecordsViaAlias(cache: ActionCache;
   some(container.records)
 
 proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
-                         warmNewestAlias = false):
+                         warmNewestAlias = false;
+                         undecodableContainers: ptr int = nil):
     seq[ActionResultRecord] =
   ## Union-read every path-set the edge has on disk: all `<nonce>.rec` files
   ## in `hot-records/<key>/` PLUS any pre-AC-1b single-file record for
@@ -2850,7 +2860,21 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
         continue
       allRecNames.add(path.extractFilename)
       let container = readRecContainer(dirPath, path.extractFilename)
-      if not container.ok:
+      # A `.rec` this binary cannot interpret is skipped here exactly as it
+      # always was. What is new is that it is REPORTED, so a caller warming the
+      # Tier-2 index knows not to claim the edge complete over a directory it
+      # could only partly read.
+      #
+      # "Cannot interpret" is deliberately wider than "raised". The container
+      # decoder is TOLERANT by design: a wrong magic, an unknown version, or a
+      # torn body all return an empty record set rather than an error, because
+      # the common cause is a container written by a NEWER reprobuild sharing
+      # the cache root — precisely the reader whose completeness claim must not
+      # be falsified. A container is never legitimately empty (a publish always
+      # writes at least one record), so zero records means the same thing an
+      # I/O failure does here.
+      if not container.ok or container.records.len == 0:
+        if undecodableContainers != nil: inc undecodableContainers[]
         continue
       recFiles.add((seq: container.writeSequence,
         strongHex: container.strongHex, recs: container.records))
@@ -3025,7 +3049,8 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
       try: removeFile(extendedPath(detPath))
       except OSError: discard
 
-proc capRecFiles(cache: ActionCache; dirPath: string) =
+proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
+    {.discardable.} =
   ## Bound the per-edge directory: keep at most `MaxRecFilesPerEdge` `.rec`
   ## files, evicting the OLDEST by DURABLE write sequence beyond the cap (the
   ## same total order the lookup uses, so eviction never drops a record the
@@ -3042,6 +3067,12 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
   ## that the record just written is the newest -- an assumption that is
   ## false whenever a sibling with a higher sequence was published
   ## concurrently, or by a binary that has never heard of the alias.
+  ##
+  ## Returns the strong-fingerprint hex of every container it UNLINKED, so the
+  ## caller can follow each unlink with a Tier-2 tombstone. §8.2 requires that
+  ## order, and it requires the cap to run BEFORE the insert for the record
+  ## just written, so a record can never be published to the index and then
+  ## immediately capped by its own writer.
   var entries: seq[tuple[seq: uint64; strongHex, path: string]] = @[]
   for kind, path in walkDir(extendedPath(dirPath)):
     if kind == pcFile and path.endsWith(PerEdgeRecFileExt):
@@ -3076,6 +3107,7 @@ proc capRecFiles(cache: ActionCache; dirPath: string) =
     for i in 0 ..< entries.len - MaxRecFilesPerEdge:
       try:
         removeFile(entries[i].path)
+        result.add(entries[i].strongHex)
       except OSError:
         discard
       # Drop the evicted record's sidecars too, or they leak.
@@ -3131,198 +3163,52 @@ proc migrateLegacyFile(cache: ActionCache; weak: ContentDigest) =
   # just-migrated edge takes the union fallback until the edge is next
   # recorded.
   if byStrong.len > 0:
-    cache.capRecFiles(dirPath)
+    discard cache.capRecFiles(dirPath)
 
-type
-  CacheDaemonSpawnHook* = proc (root: string; args: seq[string]): bool
-    {.closure, gcsafe.}
-    ## Optional deterministic spawn seam. Nil launches the real detached
-    ## daemon; production never installs this hook.
+# --- Tier-2 index writes (Action-Cache-Per-Edge-Store.md §9, §8.2) ---------
 
-  CacheDaemonLaunchHook* = proc () {.closure.}
-    ## Deterministic seam at a launch state-machine boundary. Production leaves
-    ## it nil.
-
-proc ensureCacheDaemon*(root: string; idx: ShmIndex;
-    livenessProbe: ProcessLivenessProbe = nil;
-    spawnHook: CacheDaemonSpawnHook = nil;
-    force = false; atSeconds = 0'u64;
-    ackWaitMs = WorkAckProbeGraceMs;
-    afterLeaseReserved: CacheDaemonLaunchHook = nil;
-    afterAuthorizationBeforeSpawn: CacheDaemonLaunchHook = nil): bool
-
-const
-  # The floor cost of an `RBAR` frame, in the shapes `encodeRecord` writes.
-  # Every term below is a field that is ALWAYS written, so the sum is a sound
-  # lower bound and never an estimate that could come in over the truth.
-  RecordFrameFloorBytes =
-    4 +   # magic "RBAR"
-    2 +   # version u16
-    34 +  # weak fingerprint: algorithm + domain + 32 digest bytes
-    1 +   # policy
-    4 +   # path-table entry count u32 (the entries themselves counted as 0)
-    4 +   # input count u32
-    4 +   # env count u32
-    34 +  # strong fingerprint
-    1 +   # output payload kind
-    4     # output count u32
-  RecordInputFloorBytes =
-    4 +   # interned prefix index u32
-    4 +   # name length u32 (the name itself counted as 0)
-    1 +   # per-input policy
-    17 +  # metadata: kind + size u64 + mtime u64
-    1     # has-local-hash flag
-  RecordEnvFloorBytes =
-    4 + 1 + 4  # name length + present flag + value length
-  RecordOutputFloorBytes =
-    4 + 4 +  # interned prefix index + name length
-    17 +     # metadata
-    2        # permission mask u16
-  RecordCasBlobBytes =
-    34 + 8   # blob digest + blob size u64
-
-proc encodedRecordSizeFloor*(record: ActionResultRecord): int =
-  ## A LOWER BOUND on `encodeActionResultRecord(record).len`, computed without
-  ## encoding anything.
+proc indexRecord(cache: ActionCache; weak, strong: ContentDigest) =
+  ## Publish ONE reference into the shared-memory index. This is the engine's
+  ## ENTIRE Tier-2 write cost: a probe-run walk plus, at most, one arena bump
+  ## and one CAS. Re-recording an unchanged path-set stops at the liveness
+  ## probe and writes nothing at all.
   ##
-  ## Why this exists: `submitToShm` used to encode every record and only then
-  ## compare the result against `SlotInlineCap`. When a build's records are all
-  ## far over the cap that is pure waste, and it is waste paid on EVERY build,
-  ## because a submit that always fails means the shm slot is never populated,
-  ## so `readHotRecord`'s warm-on-miss path re-submits the same doomed record
-  ## next time. Measured on a warm no-op of the zlib CMake project: 38 submits,
-  ## 38 rejections, 900,252 bytes encoded and immediately discarded, 8.39 ms
-  ## (13.8% of the `cache lookup` total) -- identically every run. The loop
-  ## cannot converge by construction for any record over the cap.
-  ##
-  ## Soundness. Each term is a field `encodeRecord` writes unconditionally,
-  ## with every variable-length payload counted as ZERO bytes, so the bound can
-  ## only sit below the real encoding. The one non-constant term is
-  ## `maxPathLen`: the longest path in the record contributes its directory
-  ## prefix (which is IN the path table, counted nowhere above) plus its file
-  ## name (counted as zero above), and prefix + name is the whole path by
-  ## `splitPathPrefix`'s construction. Adding it therefore double-counts
-  ## nothing.
-  ##
-  ## Tightness is not the point and is not claimed: a record that clears the
-  ## floor is still encoded and still measured exactly. The bound only has to
-  ## be cheap and never wrong, and it is `O(inputs + outputs)` length reads
-  ## with no allocation, against an encode that copies every path byte and
-  ## builds a hash table.
-  ##
-  ## EXPORTED so the bound can be checked against the real encoder rather than
-  ## argued about. A floor that ever exceeded the true encoded size would make
-  ## a record that FITS get refused, and the only way to know it does not is to
-  ## compare the two over records of every shape -- which is what
-  ## `t_shm_submit_refuses_an_impossible_record_without_encoding_it` does.
-  result = RecordFrameFloorBytes +
-    record.inputs.len * RecordInputFloorBytes +
-    record.envInputs.len * RecordEnvFloorBytes +
-    record.outputs.len * RecordOutputFloorBytes
-  if record.outputPayloadKind == opkCasBlobs:
-    result += record.outputs.len * RecordCasBlobBytes
-  var maxPathLen = 0
-  for input in record.inputs:
-    if input.path.len > maxPathLen: maxPathLen = input.path.len
-  for output in record.outputs:
-    if output.path.len > maxPathLen: maxPathLen = output.path.len
-  result += maxPathLen
-
-proc noteOversizedShmSubmit(cache: ActionCache; encodedBytes: int;
-                            exact = true) =
-  ## SIGNAL a record the shared-memory tier will not carry.
-  ##
-  ## Before this existed the drop was completely silent, and the drop is
-  ## not rare: the encoded record is dominated by ABSOLUTE PATH strings,
-  ## so whether the shm tier engages at all is a function of how long the
-  ## checkout / temp path happens to be. Measured on a one-edge graph:
-  ## a 19-character root encodes to 173 B and is carried; a 104-character
-  ## root encodes to 258 B and is not. That is roughly one byte per
-  ## character of root, with the cliff around 102 characters.
-  ##
-  ## The consequence of silence is not a wrong build — Tier-1 disk stays
-  ## authoritative and the decision is unchanged — but an unfalsifiable
-  ## one: a developer in a deep checkout gets no live cross-build sharing
-  ## and no way to discover it, and two engineers on the same branch can
-  ## get different cache behaviour with nothing to point at. That has
-  ## already happened here.
-  ##
-  ## Printed once per process per cache root; the rest are counted in
-  ## `ShmTier.oversizedSubmits` and reported by `--show=timing` as
-  ## `repro shm oversized submit`.
-  ##
-  ## `exact = false` means the record was refused on `encodedRecordSizeFloor`, so
-  ## `encodedBytes` is a lower bound on a size nobody paid to compute. The
-  ## message says which, because "encoded 24,243 B" and "encodes to at least
-  ## 8,721 B" are different claims and a reader chasing the slot cap needs to
-  ## know that the second one is not the real width.
-  if cache.shm == nil: return
-  inc cache.shm.oversizedSubmits
-  inc shmOversizedSubmitCount
-  shmOversizedSubmitFloorBytes += int64(encodedBytes)
-  if cache.shm.oversizedReported: return
-  cache.shm.oversizedReported = true
-  when shmIndexSupported:
-    stderr.writeLine("repro: warning: shared-memory cache tier: record not " &
-      "submitted, " &
-      (if exact: "encoded " & $encodedBytes & " B"
-       else: "encodes to at least " & $encodedBytes & " B") &
-      " exceeds the " &
-      $SlotInlineCap & " B inline slot cap. This edge is served from the " &
-      "on-disk cache tier only; live cross-build sharing is off for it. " &
-      "Encoded size is dominated by absolute paths, so a deeper checkout " &
-      "drops more records -- cache root " & cache.root & " is " &
-      $cache.root.len & " characters. Further drops in this process are " &
-      "counted, not printed.")
-    stderr.flushFile()
-
-proc shmOversizedSubmits*(cache: ActionCache): int =
-  ## How many records this process declined to hand to the shared-memory
-  ## tier because they did not fit an inline slot. Zero on a cache with no
-  ## shm tier attached — which is not the same statement, and callers that
-  ## care should check `cache.shm` too.
-  if cache.shm == nil: 0 else: cache.shm.oversizedSubmits
-
-proc submitToShm(cache: ActionCache; record: ActionResultRecord) =
-  ## AC-2c engine WRITE path (§4.4): submit `record`'s METADATA-ONLY encoding to
-  ## the MPSC ring so the single-writer daemon publishes it to the shared table
-  ## for OTHER concurrently-running builds (live cross-build sharing). The engine
-  ## NEVER writes the shared table itself — only the daemon does. Best-effort:
-  ## a full ring (signalled drop) or oversized metadata (> the inline slot cap)
-  ## just leaves the record Tier-1-only; its future lookups fall through to disk
-  ## — still correct. The keyDigest is the weak fingerprint's 32 bytes.
-  ##
-  ## We submit the FULL encoded record (same bytes the engine just wrote to
-  ## Tier-1). This keeps the STRONG fingerprint + inputs intact so (a) the
-  ## daemon's Tier-1 persist round-trips byte-identically (never downgrading the
-  ## durable record) and (b) a shm-served read reconstructs the SAME record the
-  ## disk read would — the decision is unchanged. Records whose full encoding
-  ## exceeds the inline slot cap are not shm-cached (Tier-1-only) — and that
-  ## rejection is REPORTED, see `noteOversizedShmSubmit`.
-  ##
-  ## The cap is checked BEFORE the encode whenever `encodedRecordSizeFloor` can prove
-  ## the record cannot fit. Encoding a record to discover it is 93× over the cap
-  ## is work with no possible consumer, and it was being repeated every build
-  ## for every edge: see `encodedRecordSizeFloor` for the measurement and for why the
-  ## warm-on-miss loop cannot converge on such a record.
+  ## There is no size test here, and that absence is the point. The tier this
+  ## replaces refused any record whose encoded form exceeded a 256 B inline
+  ## slot — 93% of a measured developer cache — and the refusal could not
+  ## converge: the submit always failed, so the shared read could never hit, so
+  ## the warm-on-miss path re-encoded the same doomed record on the next build.
+  ## An 84-byte reference is the same 84 bytes whatever the record weighs.
   if cache.shm == nil or not cache.shm.enabled: return
-  when shmIndexSupported:
-    let floor = encodedRecordSizeFloor(record)
-    if floor > SlotInlineCap:
-      cache.noteOversizedShmSubmit(floor, exact = false)
-      return
-  let enc = encodeActionResultRecord(record)
-  when shmIndexSupported:
-    if enc.len > SlotInlineCap:
-      cache.noteOversizedShmSubmit(enc.len)
-      return
-  let submitted = cache.shm.idx.submitRecord(record.weakFingerprint.bytes, enc)
-  # The daemon self-reaps or may hard-crash while this handle remains live.
-  # Every successful append increments a shared work generation. Exactly one
-  # full-width launch-lease winner checks/starts the daemon for that generation;
-  # a healthy daemon acknowledges the exact generation after a stable drain.
-  if submitted:
-    discard ensureCacheDaemon(cache.root, cache.shm.idx)
+  discard cache.shm.idx.insertRecord(weak, strong)
+
+proc indexEvictByHex(cache: ActionCache; weak: ContentDigest;
+                     strongHexes: openArray[string]) =
+  ## §8.2's "unlink before tombstone": the `.rec` file is removed BEFORE the
+  ## tombstone for its key is inserted. The window in between shows a live key
+  ## that does not resolve, which the read path turns into the union fallback —
+  ## correct. The reverse order would show a complete-looking edge missing a
+  ## file that is still on disk, which could turn a hit into a miss.
+  ##
+  ## The evicted key is recovered from the INDEX rather than reconstructed from
+  ## the file name: a `.rec` name carries only the strong fingerprint's hex, not
+  ## its algorithm or domain, and a tombstone whose bytes are not a pure
+  ## function of the element it retires would simply fail to retire it.
+  if cache.shm == nil or not cache.shm.enabled: return
+  if strongHexes.len == 0: return
+  for elem in cache.shm.idx.enumerateEdge(weak).liveStrong:
+    if toHex(elem.bytes) in strongHexes:
+      discard cache.shm.idx.evictRecord(weak, elem)
+
+proc indexBypassOnce(cache: ActionCache) =
+  ## §6.8. An engine that declined the index still writes Tier 1, so before its
+  ## first write it says so in the chain — if a chain exists at all. A nonzero
+  ## `bypassWrites` voids every completeness claim in the chain until the next
+  ## flatten, so the opt-out cannot leave another engine trusting a claim this
+  ## one has quietly falsified.
+  if cache.shm == nil or cache.shm.enabled or cache.shm.bypassNoted: return
+  cache.shm.bypassNoted = true
+  if cache.shm.idx != nil: cache.shm.idx.noteBypassWrite()
 
 proc writePerEdgeRecord(cache: ActionCache; record: ActionResultRecord) =
   ## Publish ONE path-set's record into its edge directory
@@ -3331,14 +3217,20 @@ proc writePerEdgeRecord(cache: ActionCache; record: ActionResultRecord) =
   ## Same strong fingerprint → same filename → convergence (an overwrite, never
   ## an accumulation). Bounded by `MaxRecFilesPerEdge`.
   ##
-  ## AC-2c: the DURABLE Tier-1 write is unchanged (the backstop); we ALSO submit
-  ## the metadata record to the shm ring so the daemon warms other live builds.
+  ## The DURABLE Tier-1 write is unchanged and remains the backstop. What
+  ## follows it is §9's three steps, in §8.2's order: publish before reference
+  ## (the rename completes before the element is inserted, so a reader that
+  ## sees an element finds the file); cap before insert (so a record can never
+  ## be published to the index and then immediately capped by its own writer);
+  ## unlink before tombstone.
+  cache.indexBypassOnce()
   cache.migrateLegacyFile(record.weakFingerprint)
   let dirPath = cache.perEdgeDirPath(record.weakFingerprint)
   cache.writeRecFileAtomically(dirPath,
     recFileNameForStrong(record.strongFingerprint), @[record])
-  cache.capRecFiles(dirPath)
-  cache.submitToShm(record)
+  let evicted = cache.capRecFiles(dirPath)
+  cache.indexEvictByHex(record.weakFingerprint, evicted)
+  cache.indexRecord(record.weakFingerprint, record.strongFingerprint)
 
 proc writePerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
                          records: openArray[ActionResultRecord]) =
@@ -3359,7 +3251,11 @@ proc writePerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
     cache.writeRecFileAtomically(dirPath,
       recFileNameForStrong(recs[0].strongFingerprint), recs)
   if byStrong.len > 0:
-    cache.capRecFiles(dirPath)
+    cache.indexBypassOnce()
+    let evicted = cache.capRecFiles(dirPath)
+    cache.indexEvictByHex(weak, evicted)
+    for _, recs in byStrong:
+      cache.indexRecord(weak, recs[0].strongFingerprint)
 
 proc hotInputKey(input: FileFingerprint): string =
   input.path & "\0" & $ord(input.policy) & "\0" &
@@ -3397,6 +3293,168 @@ proc envInputChanged*(record: ActionResultRecord; resolver: EnvResolver;
       return true
   false
 
+proc warmIndexFromDisk(cache: ActionCache; weak: ContentDigest;
+                       records: openArray[ActionResultRecord];
+                       everyContainerDecoded: bool) =
+  ## §8 step 5's second half. A union fallback has just established the edge's
+  ## true contents, so publish them: a `record` element for every record read,
+  ## and — ONLY after all of them succeed — the `edge-complete` element.
+  ##
+  ## "Records before completeness" is §8.2 and it is the rule the whole
+  ## index-first read rests on. An `edge-complete` element that outran one of
+  ## its records would direct a later reader at an incomplete candidate set,
+  ## and an incomplete candidate set is how a newest-corrupt-rejects case
+  ## becomes a hit from an older record. The completeness claim is a claim
+  ## about the DIRECTORY, so a container this binary could not decode also
+  ## withholds it: the claim would be false, and a false claim is the one
+  ## failure mode this tier is not allowed to have.
+  if cache.shm == nil or not cache.shm.enabled: return
+  var everyInsert = true
+  for record in records:
+    if cache.shm.idx.insertRecord(weak, record.strongFingerprint) == isSaturated:
+      everyInsert = false
+  if everyInsert and everyContainerDecoded:
+    discard cache.shm.idx.insertEdgeComplete(weak)
+
+proc indexedRecordsForWeak(cache: ActionCache; weak: ContentDigest):
+    Option[seq[ActionResultRecord]] =
+  ## §8 steps 1-4: the index-first arm.
+  ##
+  ## `none` means "the index cannot answer for this edge" and the caller MUST
+  ## take the Tier-1 union read, which is unconditionally correct because
+  ## Tier 1 is authoritative. `some(@[])` is the answer this tier exists for:
+  ## the edge is known to have NO record, reached with ZERO filesystem
+  ## operations — no `dirExists`, no directory enumeration, no `open`. That is
+  ## the largest single effect, because it applies to every cache miss, the
+  ## dominant case in a cold build.
+  ##
+  ## A positive answer still opens and decodes the containers it resolves: the
+  ## decision needs the recorded input paths and their metadata, and those are
+  ## 78-81% of record bytes — the very bytes the index does not hold. What it
+  ## saves on a positive lookup is the directory enumeration, not the reads.
+  ##
+  ## An unresolvable reference is a MISS, never an error and never a false hit:
+  ## it is counted and the caller falls back to the path that does not depend
+  ## on the index at all.
+  if cache.shm == nil or not cache.shm.enabled:
+    return none(seq[ActionResultRecord])
+  let view = cache.shm.idx.enumerateEdge(weak)
+  if not view.attached or not view.complete:
+    return none(seq[ActionResultRecord])
+  if view.liveStrong.len == 0:
+    inc actionIndexNegativeHits
+    return some(newSeq[ActionResultRecord]())
+  let dirPath = cache.perEdgeDirPath(weak)
+  var containers: seq[RecContainer] = @[]
+  for strong in view.liveStrong:
+    let container = readRecContainer(dirPath, recFileNameForStrong(strong))
+    if not container.ok:
+      cache.shm.idx.noteUnresolvedReference()
+      inc actionIndexUnresolvedRefs
+      return none(seq[ActionResultRecord])
+    containers.add(container)
+  # The SAME total order §5.3 makes semantic, recovered from the containers'
+  # own trailers. The index deliberately does not carry the write sequence
+  # (§12.E): carrying it would make the element bytes change on every
+  # convergent rewrite of one path-set, so the element count would grow with
+  # WRITES instead of with distinct keys — the one property the structure is
+  # chosen for.
+  containers.sort(proc (a, b: RecContainer): int =
+    result = cmp(a.writeSequence, b.writeSequence)
+    if result == 0:
+      result = cmp(a.strongHex, b.strongHex))
+  inc actionIndexResolvedHits
+  var records: seq[ActionResultRecord] = @[]
+  var seenStrong = initHashSet[string]()
+  for container in containers:
+    for record in container.records:
+      let key = digestKey(record.strongFingerprint)
+      if key notin seenStrong:
+        seenStrong.incl(key)
+        records.add(record)
+  some(records)
+
+proc unionReadEdge(cache: ActionCache; weak: ContentDigest):
+    seq[ActionResultRecord] =
+  ## §8 step 5: the full Tier-1 read, followed by the index warm. Every path
+  ## that cannot be answered from the index lands here, and it is the only
+  ## place the index learns what an edge holds.
+  inc actionIndexUnionFallbacks
+  var undecodable = 0
+  result = cache.loadPerEdgeRecords(weak, warmNewestAlias = true,
+    undecodableContainers = addr undecodable)
+  cache.warmIndexFromDisk(weak, result, undecodable == 0)
+
+proc readHotRecord*(cache: var ActionCache; weak: ContentDigest):
+    tuple[found: bool; record: ActionResultRecord] =
+  ## Read the newest metadata-only view of the edge's record.
+  ##
+  ## Index first (§8): an edge the index reports complete and empty is answered
+  ## from mapped memory with no syscall at all, which is what makes the
+  ## engine's batch up-to-date scan short-circuit on the first probe with no
+  ## record. An edge it reports complete and non-empty is answered from exactly
+  ## the referenced containers, with no directory enumeration.
+  ##
+  ## Otherwise the C1 newest-alias accelerator (§5.5) still applies: it answers
+  ## the same question from ONE container and returns `none` — falling through
+  ## to the union read — whenever it cannot prove that container is the newest.
+  ## The union read is last and is unconditionally correct.
+  let indexed = cache.indexedRecordsForWeak(weak)
+  if indexed.isSome:
+    let candidates = indexed.get()
+    for i in countdown(candidates.high, 0):
+      if candidates[i].weakFingerprint == weak:
+        return (found: true, record: hotMetadataRecord(candidates[i]))
+    return (found: false, record: ActionResultRecord())
+  let viaAlias = cache.loadNewestPerEdgeRecordsViaAlias(weak)
+  if viaAlias.isSome:
+    let aliasRecords = viaAlias.get()
+    for i in countdown(aliasRecords.high, 0):
+      if aliasRecords[i].weakFingerprint == weak:
+        return (found: true, record: hotMetadataRecord(aliasRecords[i]))
+  let records = cache.unionReadEdge(weak)
+  for i in countdown(records.high, 0):
+    if records[i].weakFingerprint == weak:
+      return (found: true, record: hotMetadataRecord(records[i]))
+  (found: false, record: ActionResultRecord())
+
+proc appendActionResultRecord*(cache: var ActionCache;
+                               record: ActionResultRecord) {.gcsafe.} =
+  ## Public bridge so the peer-cache reader can install a peer-fetched
+  ## record into the local action cache. Writes the edge's per-edge file
+  ## (temp + atomic rename), never an append. Idempotency is bounded by
+  ## `MaxRecordsPerWeakFingerprint`; re-installing an identical record
+  ## leaves the file's record set unchanged.
+  {.cast(gcsafe).}:
+    cache.writePerEdgeRecord(record)
+
+proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest):
+    seq[ActionResultRecord] =
+  ## Full-record candidate set for one edge, ordered OLDEST→NEWEST so the
+  ## decision loop iterating in reverse considers the truly newest path-set
+  ## first.
+  ##
+  ## Index first (§8): when the chain reports the edge complete, the candidate
+  ## set comes from the index and the reads are directed at exactly the
+  ## referenced files. Because the completeness claim means the index's key set
+  ## for this edge EQUALS the directory's, that candidate set and that order
+  ## are exactly what a Tier-1 union read would have produced — so the
+  ## hit/miss, strong-fingerprint and newest-corrupt-rejects outcomes are
+  ## byte-identical to the Tier-1-only decision. Otherwise, or on any
+  ## unresolvable reference, the union read of §5.3 answers and warms the
+  ## index.
+  ##
+  ## Either way this is O(records for THIS edge) and never a whole-cache scan.
+  let indexed = cache.indexedRecordsForWeak(weak)
+  let candidates =
+    if indexed.isSome: indexed.get()
+    else: cache.unionReadEdge(weak)
+  for record in candidates:
+    if record.weakFingerprint == weak:
+      result.add(record)
+      if result.len > MaxRecFilesPerEdge:
+        result = result[result.len - MaxRecFilesPerEdge .. ^1]
+
 proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
                                           probes: openArray[HotMetadataProbe];
                                           metadataCache: ptr FileMetadataCache = nil;
@@ -3414,7 +3472,7 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
   var checkedInputs = 0
   var totalRecords = 0
   for probeIndex, probe in probes:
-    let records = cache.loadPerEdgeRecords(probe.weakFingerprint)
+    let records = cache.loadRecordsForWeak(probe.weakFingerprint)
     var matched = false
     for record in records:
       inc totalRecords
@@ -3459,134 +3517,6 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
   HotMetadataScan(status: hmssHit, recordCount: totalRecords,
     checkedInputCount: checkedInputs)
 
-proc shmReadRecord(cache: ActionCache; weak: ContentDigest):
-    tuple[found: bool; record: ActionResultRecord] =
-  ## AC-2c engine READ path (§4.3): lock-free seqlock read of the shm slot for
-  ## `weak` on the current generation. On a hit the inline bytes decode to the
-  ## FULL record another build submitted (byte-identical to what it wrote to
-  ## Tier-1), so this is a genuine shm-SERVED record — visible the instant the
-  ## daemon publishes it, independent of THIS process's Tier-1 view. A miss /
-  ## torn-after-retries / disabled tier returns not-found and the caller reads
-  ## Tier-1 disk (the decision is unchanged; shm is purely an accelerator).
-  if cache.shm == nil or not cache.shm.enabled:
-    return (found: false, record: ActionResultRecord())
-  var rec: seq[byte]
-  if not cache.shm.idx.lookupMetadata(weak.bytes, cache.shm.readerSlot, rec):
-    return (found: false, record: ActionResultRecord())
-  try:
-    let decoded = decodeActionResultRecord(rec)
-    if decoded.weakFingerprint == weak:
-      return (found: true, record: decoded)
-  except CatchableError:
-    discard
-  (found: false, record: ActionResultRecord())
-
-proc warmShmFromDisk(cache: ActionCache; record: ActionResultRecord) =
-  ## AC-2c warm-on-miss (§4.3): the record was found on Tier-1 disk but the shm
-  ## slot missed (a fresh daemon / evicted slot / another build's record we saw
-  ## on disk first). Submit it so the daemon publishes it to the shared table
-  ## for the NEXT lookup / other live builds. Best-effort (same submit path as
-  ## record).
-  cache.submitToShm(record)
-
-proc readHotRecord*(cache: var ActionCache; weak: ContentDigest):
-    tuple[found: bool; record: ActionResultRecord] =
-  ## Read the newest metadata-only view of the edge's record.
-  ##
-  ## AC-2c: shm-first for the SHARED case, but Tier-1 disk stays authoritative
-  ## for the edge's NEWEST record so the decision is provably identical to
-  ## AC-1b. Concretely:
-  ##   * Read the edge's Tier-1 records (union of all path-sets, newest-ordered).
-  ##     If ANY match, return the disk newest exactly as AC-1b did AND — if the
-  ##     shm slot missed — warm it (submit) so future reads hit in shm. This
-  ##     NEVER lets a stale shm slot override the disk newest (no false miss).
-  ##   * Only when the edge has NO Tier-1 record at all do we consult shm: a
-  ##     genuine live-sharing rescue (another build's in-flight record the daemon
-  ##     published to shm but that THIS process has not yet read from disk). Such
-  ##     a shm hit is a valid record for `weak`; the caller re-checks input
-  ##     freshness, so it can only become a correct hit — never a false one.
-  ##
-  ## Action-Cache-Per-Edge-Store.md §5.5 C1 names this procedure: it needs
-  ## only the newest record, and obtaining it from `loadPerEdgeRecords` meant
-  ## reading and fully decoding every container the edge had, plus their
-  ## sidecars, to find out which one that was. `loadNewestPerEdgeRecordsViaAlias`
-  ## answers the same question from one container, and returns `none` -- so
-  ## this falls through to the union read -- whenever it cannot prove that
-  ## container is the newest.
-  let viaAlias = cache.loadNewestPerEdgeRecordsViaAlias(weak)
-  if viaAlias.isSome:
-    let aliasRecords = viaAlias.get()
-    for i in countdown(aliasRecords.high, 0):
-      if aliasRecords[i].weakFingerprint == weak:
-        let shmHit = cache.shmReadRecord(weak)
-        if not shmHit.found:
-          cache.warmShmFromDisk(aliasRecords[i])
-        return (found: true, record: hotMetadataRecord(aliasRecords[i]))
-  let records = cache.loadPerEdgeRecords(weak, warmNewestAlias = true)
-  for i in countdown(records.high, 0):
-    if records[i].weakFingerprint == weak:
-      # Disk has the edge: warm shm if it was cold, then return the disk newest.
-      let shmHit = cache.shmReadRecord(weak)
-      if not shmHit.found:
-        cache.warmShmFromDisk(records[i])
-      return (found: true, record: hotMetadataRecord(records[i]))
-  # Disk miss: the only possible hit is a live-shared record served from shm.
-  let shmHit = cache.shmReadRecord(weak)
-  if shmHit.found:
-    return (found: true, record: hotMetadataRecord(shmHit.record))
-  (found: false, record: ActionResultRecord())
-
-proc appendActionResultRecord*(cache: var ActionCache;
-                               record: ActionResultRecord) {.gcsafe.} =
-  ## Public bridge so the peer-cache reader can install a peer-fetched
-  ## record into the local action cache. Writes the edge's per-edge file
-  ## (temp + atomic rename), never an append. Idempotency is bounded by
-  ## `MaxRecordsPerWeakFingerprint`; re-installing an identical record
-  ## leaves the file's record set unchanged.
-  {.cast(gcsafe).}:
-    cache.writePerEdgeRecord(record)
-
-proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest):
-    seq[ActionResultRecord] =
-  ## Full-record lookup for one edge: UNION-read every path-set the edge has on
-  ## disk (all `<nonce>.rec` files under `hot-records/<key>/`), keeping only
-  ## records whose weak fingerprint matches (defensive against a hash collision
-  ## on the directory name). O(records for THIS edge) — never a whole-cache
-  ## scan. All distinct concurrent path-sets are considered, so the normal
-  ## strong-fingerprint match can hit whichever path-set matches the current
-  ## inputs (AC-1b). Bounded by `MaxRecFilesPerEdge` (the disk cap).
-  ##
-  ## AC-2c (§4.3): the shm slot for `weak` is UNIONED in as an ADDITIONAL
-  ## candidate (a live-shared record another build published that this process
-  ## has not yet read from disk). This is DECISION-SAFE: every candidate — disk
-  ## or shm — is run through the SAME weak→strong / input-freshness / output-
-  ## verify check by `lookupActionResult`, so a shm candidate can only turn a
-  ## MISS into a HIT (live sharing) or be a no-op (deduped / rejected). It can
-  ## never produce a FALSE hit (the strong-fp + output check still gate it) nor
-  ## a FALSE miss (every disk record is still present). The shm candidate is
-  ## appended LAST so the reverse-iterating decision considers the freshest
-  ## cross-build record FIRST; on a shm miss the result is exactly AC-1b's disk
-  ## union. Warm-on-miss: if disk has records but shm was cold, re-publish the
-  ## newest so the next lookup / other live builds hit in shm.
-  var seenStrong = initHashSet[string]()
-  for record in cache.loadPerEdgeRecords(weak, warmNewestAlias = true):
-    if record.weakFingerprint == weak:
-      result.add(record)
-      seenStrong.incl(digestKey(record.strongFingerprint))
-      if result.len > MaxRecFilesPerEdge:
-        result = result[result.len - MaxRecFilesPerEdge .. ^1]
-  let shmHit = cache.shmReadRecord(weak)
-  if shmHit.found and shmHit.record.weakFingerprint == weak and
-      not seenStrong.contains(digestKey(shmHit.record.strongFingerprint)):
-    # A live-shared record this process's disk union does not have yet: consider
-    # it FIRST (append last → reverse iteration hits it first).
-    result.add(shmHit.record)
-    if result.len > MaxRecFilesPerEdge:
-      result = result[result.len - MaxRecFilesPerEdge .. ^1]
-  elif not shmHit.found and result.len > 0:
-    # Disk hit but shm cold: warm the slot for the next lookup / other builds.
-    cache.warmShmFromDisk(result[^1])
-
 const LegacyGlobalStoreFiles = [
   "action-results.records",
   "action-results.hot.records",
@@ -3606,237 +3536,117 @@ proc removeLegacyGlobalStore(root: string) =
       except OSError:
         discard
 
-# --- Tier-2 shared-memory accelerator wiring (AC-2c) ----------------------
+# --- Tier-2 shared-memory index wiring (Action-Cache-Per-Edge-Store.md §6) --
 #
-# The shm tier is OPTIONAL and BEST-EFFORT (Action-Cache-Per-Edge-Store.md §4.6,
-# §4.7). `openActionCache` attempts to attach the shm index for the root and to
-# ensure a cache daemon owns it; ANY failure (non-POSIX, no atomics, permission,
-# opted out via env) leaves `cache.shm` disabled and the engine runs pure Tier-1
-# disk-only — exactly the AC-1b behavior. A build NEVER fails or blocks because
-# the shm tier is unavailable.
+# The index is OPTIONAL and BEST-EFFORT (§6.8, §10). `openActionCache` attempts
+# to attach the chain for the root; ANY failure (non-POSIX, permission, a stale
+# post-reboot chain that could not be recreated, opted out via env) leaves
+# `cache.shm` disabled and the engine runs pure Tier-1 — the identical
+# decision. A build NEVER fails or blocks because the index is unavailable.
+#
+# There is no process to exist. No ownership election, no PID or heartbeat
+# arbitration, no stale-owner takeover, no self-reaping, no respawn-on-submit
+# and no launch-coordination protocol: every participant is an engine, and
+# every shared-memory operation an engine performs is an insert into a
+# structure whose merge is set union.
 
 const
   ShmDisableEnv = "REPRO_ACTION_CACHE_SHM"
-    ## Set to "0"/"off"/"false"/"no" to force pure Tier-1 (disable the shm
-    ## accelerator) — used by the fallback subtest and by callers on hosts where
-    ## shared memory is undesirable.
-  CacheDaemonEnv = "REPRO_CACHE_DAEMON_BIN"
-    ## Optional override of the `repro-cache-daemon` binary path the engine
-    ## auto-spawns. Defaults to a sibling of the current executable.
-  CacheDaemonIdleEnv = "REPRO_CACHE_DAEMON_IDLE_MS"
-    ## Optional override of the auto-spawned daemon's self-reap idle window (ms).
-    ## Hermetic tests set a small value so an isolated-root daemon exits promptly
-    ## and does not linger holding the temp cache root; the daemon's own default
-    ## (30 s, §4.7) applies when unset.
+    ## §6.8's opt-out. Set to "0"/"off"/"false"/"no" to force pure Tier-1.
+    ## Such an engine still writes Tier 1, so it bumps `bypassWrites` in the
+    ## chain before its first write if a chain exists — see `indexBypassOnce`.
+
+const LegacyRingTierFiles = ["action-index.ctl"]
+const LegacyRingSegmentPrefix = "action-index."
+
+proc removeLegacyRingTier(root: string) =
+  ## Ignore-then-delete the shared-memory state of the RETIRED ring tier —
+  ## `action-index.ctl` and every `action-index.<gen>.seg` — exactly as this
+  ## store already does for the removed global `action-results.*` files.
+  ##
+  ## Shared-memory state is a cache of a cache, so nothing is migrated: the
+  ## shard chain starts empty and warms itself from Tier 1 on the first
+  ## lookups. Best-effort; a file that will not unlink is never read again
+  ## either way.
+  for name in LegacyRingTierFiles:
+    let path = root / name
+    if fileExists(extendedPath(path)):
+      try: removeFile(extendedPath(path))
+      except OSError: discard
+  try:
+    for kind, path in walkDir(extendedPath(root)):
+      if kind != pcFile: continue
+      let name = path.extractFilename
+      if name.startsWith(LegacyRingSegmentPrefix) and name.endsWith(".seg"):
+        try: removeFile(path)
+        except OSError: discard
+  except OSError:
+    discard
 
 proc shmTierEnabledByEnv(): bool =
-  ## The shm tier is on by default; an explicit falsey env var forces it off.
+  ## The index is on by default for callers that ask for it; an explicit falsey
+  ## env var forces it off.
   let v = getEnv(ShmDisableEnv, "1").toLowerAscii()
   v notin ["0", "off", "false", "no"]
 
-proc cacheDaemonBinPath(): string =
-  ## Locate the `repro-cache-daemon` binary: an explicit override, else a
-  ## sibling of the current executable (both are installed into the same
-  ## `build/bin` / package `bin`). Empty if none is found (⇒ no auto-spawn; the
-  ## engine still reads/submits shm, and any co-running engine that DID spawn a
-  ## daemon services the table — else pure Tier-1).
-  let overridePath = getEnv(CacheDaemonEnv, "")
-  if overridePath.len > 0 and fileExists(overridePath):
-    return overridePath
-  try:
-    let selfDir = getAppDir()
-    for name in ["repro-cache-daemon", "repro_cache_daemon"]:
-      let p = selfDir / name
-      if fileExists(p):
-        return p
-  except CatchableError:
-    discard
-  ""
-
-proc ensureCacheDaemon*(root: string; idx: ShmIndex;
-    livenessProbe: ProcessLivenessProbe = nil;
-    spawnHook: CacheDaemonSpawnHook = nil;
-    force = false; atSeconds = 0'u64;
-    ackWaitMs = WorkAckProbeGraceMs;
-    afterLeaseReserved: CacheDaemonLaunchHook = nil;
-    afterAuthorizationBeforeSpawn: CacheDaemonLaunchHook = nil): bool =
-  ## Best-effort, cross-process bounded daemon launch. A full-width exact lease
-  ## elects one responsible producer for an unacknowledged work generation (or
-  ## the initial force-on-open). Healthy heartbeat freshness is checked before
-  ## any kill(2). A first fresh notification remains syscall-free; a second
-  ## generation arriving while the first is still unacknowledged (or one whose
-  ## full-width age passed the grace) authorizes one elected liveness probe.
-  ## Thus sequential submit/drain cycles perform zero OS probes while the next
-  ## submission after a crash-with-outstanding-work recovers promptly.
-  when shmIndexSupported:
-    if not idx.available: return false
-    let targetSequence = idx.workSequence()
-    if not force and idx.workAckSequence() == targetSequence:
-      return false
-    let launchToken = idx.tryAcquireDaemonLaunchLease(atSeconds,
-      probe = livenessProbe)
-    if launchToken == 0: return false
-    if afterLeaseReserved != nil:
-      afterLeaseReserved()
-
-    # Reassignment, final authorization, and the external side effect share one
-    # exact gate. A successor cannot expire/reassign the lease after this check
-    # and before `startProcess`/the hook executes.
-    if not idx.tryAcquireWriterGate(launchToken, livenessProbe, atSeconds):
-      discard idx.releaseDaemonLaunchLease(launchToken)
-      discard idx.releaseCoordToken(launchToken)
-      return false
-
-    template abandonLaunch(): untyped =
-      discard idx.releaseDaemonLaunchLease(launchToken)
-      discard idx.releaseWriterGate(launchToken)
-      discard idx.releaseCoordToken(launchToken)
-
-    template retainLaunch(): untyped =
-      discard idx.releaseWriterGate(launchToken)
-
-    # A predecessor may have drained while we won the election.
-    if not force and idx.workAckSequence() == targetSequence:
-      abandonLaunch()
-      return false
-    if idx.daemonLaunchLease() != launchToken:
-      discard idx.releaseWriterGate(launchToken)
-      discard idx.releaseCoordToken(launchToken)
-      return false
-
-    let pid = idx.rawOwnerPid()
-    if pid != 0 and idx.heartbeatIsFresh(atSeconds):
-      if force or idx.workAckSequence() == targetSequence:
-        abandonLaunch()
-        return false
-      let association = idx.workAssociation(targetSequence)
-      let nowMs =
-        if atSeconds == 0: uint64(epochTime() * 1000.0)
-        else: atSeconds * 1000'u64
-      let hadOutstanding = association.sequence == targetSequence and
-        association.ackAtStart != association.previousSequence
-      let aged = ackWaitMs == 0 or (association.startedMs != 0 and
-        nowMs > association.startedMs + ackWaitMs)
-      if not hadOutstanding and not aged:
-        # First fresh notification: the polling daemon will see it without a
-        # syscall. Retain responsibility through the stable drain so concurrent
-        # followers also remain probe-free.
-        retainLaunch()
-        return false
-      # This is the only healthy-looking path that probes, specifically to
-      # distinguish a recent hard crash with already-outstanding work.
-      let ownerIdentity = idx.currentOwnerIdentity()
-      let identity =
-        if ownerIdentity.nonce != 0: ownerIdentity
-        else: OwnerIdentity(pid: pid)
-      if idx.probeProcess(identity, livenessProbe) != plDead:
-        # Keep one responsibility lease until the live owner acknowledges the
-        # generation (drain clears it under the writer gate), bounding a burst
-        # to one exceptional liveness probe.
-        retainLaunch()
-        return false
-    elif pid != 0:
-      let capable = idx.isCapableOwner()
-      if not capable and
-          idx.probeProcess(OwnerIdentity(pid: pid), livenessProbe) != plDead:
-        # A stale legacy heartbeat never authorizes takeover by itself.
-        retainLaunch()
-        return false
-      # A stale capable owner is replaceable only by a daemon candidate that
-      # later acquires the same writer gate. If it is paused inside the gate,
-      # that candidate cannot claim and cannot mutate.
-
-    var args = @["--action-cache-root=" & root]
-    let idleMs = getEnv(CacheDaemonIdleEnv, "")
-    if idleMs.len > 0:
-      args.add("--idle-exit-ms=" & idleMs)
-    if spawnHook != nil:
-      discard idx.setCoordFlags(launchToken, 1)
-      if afterAuthorizationBeforeSpawn != nil:
-        afterAuthorizationBeforeSpawn()
-      if idx.daemonLaunchLease() != launchToken:
-        discard idx.releaseWriterGate(launchToken)
-        discard idx.releaseCoordToken(launchToken)
-        return false
-      try:
-        idx.noteDaemonSpawnAttempt()
-        result = spawnHook(root, args)
-      except CatchableError:
-        result = false
-      if result:
-        discard idx.setCoordFlags(launchToken, 2)
-        retainLaunch()
-      else:
-        abandonLaunch()
-      return
-    let bin = cacheDaemonBinPath()
-    if bin.len == 0:
-      abandonLaunch()
-      return false
-    if idx.daemonLaunchLease() != launchToken:
-      discard idx.releaseWriterGate(launchToken)
-      discard idx.releaseCoordToken(launchToken)
-      return false
-    discard idx.setCoordFlags(launchToken, 1)
-    if afterAuthorizationBeforeSpawn != nil:
-      afterAuthorizationBeforeSpawn()
-    if idx.daemonLaunchLease() != launchToken:
-      discard idx.releaseWriterGate(launchToken)
-      discard idx.releaseCoordToken(launchToken)
-      return false
-    try:
-      idx.noteDaemonSpawnAttempt()
-      let p = startProcess(bin, args = args,
-        options = {poDaemon, poStdErrToStdOut})
-      # Detach: we do not wait on it. `poDaemon` puts it in its own session so
-      # it outlives this engine (and services other concurrent builds).
-      close(p)
-      result = true
-      discard idx.setCoordFlags(launchToken, 2)
-      retainLaunch()
-    except CatchableError, OSError:
-      result = false
-      abandonLaunch()
-  else:
-    false
-
 proc attachShmTier(root: string): ShmTier =
-  ## Attach the shm index for `root` and ensure a daemon owns it. Best-effort:
-  ## returns a DISABLED tier (engine runs pure Tier-1) on any failure or opt-out.
-  result = ShmTier(enabled: false, readerSlot: 0)
-  when shmIndexSupported:
-    if not shmIndexSupported: return
-    if not shmTierEnabledByEnv(): return
-    var idx = openShmIndex(root)               # create ctl + gen-0 if absent
-    if not idx.available:
-      return
-    result.idx = idx
-    result.readerSlot = readerSlotForPid()
-    result.enabled = true
-    discard ensureCacheDaemon(root, idx, force = true)
+  ## Create-or-attach the chain for `root` (§6.1). Best-effort in every
+  ## direction. When the caller opted out, the tier is disabled but the chain
+  ## handle is still opened if one exists, so `indexBypassOnce` can record the
+  ## bypass — an opt-out that left other engines trusting a completeness claim
+  ## it had quietly falsified would be an escape hatch that is not safe.
+  result = ShmTier(enabled: false)
+  when actionIndexSupported:
+    let wanted = shmTierEnabledByEnv()
+    let idx = openActionIndex(root)
+    if idx.attached:
+      result.idx = idx
+      result.enabled = wanted
+      if not wanted:
+        result.bypassNoted = true
+        idx.noteBypassWrite()
 
 proc openActionCache*(root: string; attachShm = true): ActionCache =
-  ## Open the per-edge Tier-1 store for `root`. When `attachShm` (the default,
-  ## the ENGINE path) it also attaches the OPTIONAL shared-memory hot tier and
-  ## ensures its daemon (AC-2c). The DAEMON opens its OWN store with
-  ## `attachShm = false` — it manages the shm table directly and must not
-  ## recursively auto-spawn itself nor submit its persisted records back into
-  ## the ring it drains.
+  ## Open the per-edge Tier-1 store for `root`, and — when `attachShm` — the
+  ## optional Tier-2 index over it. `attachShm = false` is a pure Tier-1 store
+  ## for callers that must not touch shared memory at all (hermetic fixtures,
+  ## tools that only inspect the durable files).
   result.root = root
   result.hotRoot = root / "hot-records"
   createDir(extendedPath(result.root))
   createDir(extendedPath(result.hotRoot))
-  # One-time cleanup: the old global append-log store is gone. Ignore any
-  # pre-existing `action-results.*` files and delete them on open so a
-  # migrated cache root stops growing without a re-init.
+  # One-time cleanup: the old global append-log store and the retired ring
+  # tier are both gone. Ignore any pre-existing files of either and delete them
+  # on open, so a migrated cache root stops carrying them without a re-init.
   removeLegacyGlobalStore(result.root)
-  # Attach the OPTIONAL shared-memory hot tier (AC-2c) + ensure its daemon. On
-  # any failure (or `attachShm = false`) this is a disabled tier and the cache
-  # is pure Tier-1 (AC-1b).
+  removeLegacyRingTier(result.root)
   if attachShm:
     result.shm = attachShmTier(root)
   else:
     result.shm = ShmTier(enabled: false)
+
+proc actionIndexCounters*(cache: ActionCache):
+    tuple[attached: bool; shards: int; liveElements: uint64;
+          growthFailed, unresolvedReferences, bypassWrites: uint64] =
+  ## §11's observability surface. On a healthy root `growthFailed`,
+  ## `unresolvedReferences` and `bypassWrites` are all zero; a climbing
+  ## `unresolvedReferences` means Tier-1 retention and index retirement have
+  ## drifted apart. They exist because a silently bypassed accelerator is
+  ## indistinguishable from a healthy idle one.
+  if cache.shm == nil or cache.shm.idx == nil:
+    return
+  let idx = cache.shm.idx
+  (attached: cache.shm.enabled, shards: idx.shardCount(),
+   liveElements: idx.liveElementCount(), growthFailed: idx.growthFailed(),
+   unresolvedReferences: idx.unresolvedReferences(),
+   bypassWrites: idx.bypassWrites())
+
+proc flattenActionIndex*(cache: ActionCache): bool {.discardable.} =
+  ## §6.7's maintenance pass, `flock`-guarded so at most one flattener runs per
+  ## root and every other process simply skips it. Not a daemon: no election,
+  ## no heartbeat, no long-lived state, and it blocks nothing.
+  if cache.shm == nil or cache.shm.idx == nil: return false
+  cache.shm.idx.flattenChain()
 
 proc flushHotIndex*(cache: var ActionCache) =
   ## Retained as a public no-op for callers that flushed the former
@@ -3846,13 +3656,13 @@ proc flushHotIndex*(cache: var ActionCache) =
   discard
 
 proc closeShmTier*(cache: var ActionCache) =
-  ## Detach the optional shm hot tier (unmap + close fds). Best-effort; safe to
-  ## call on a disabled/nil tier. The engine's process-long warm handle need not
-  ## call this (process exit reclaims the mappings); hermetic tests that open +
-  ## discard many caches call it to avoid fd growth. Does NOT stop the daemon —
-  ## the daemon self-reaps after its idle window (§4.7).
-  if cache.shm != nil and cache.shm.enabled:
-    cache.shm.idx.close()
+  ## Detach the Tier-2 index (unmap + drop the producer registration).
+  ## Best-effort; safe to call on a disabled or nil tier. The engine's
+  ## process-long warm handle need not call it — process exit reclaims the
+  ## mappings — but a test that opens and discards many caches does, to avoid
+  ## fd growth. There is nothing else to stop: no process owns the chain.
+  if cache.shm != nil and cache.shm.idx != nil:
+    cache.shm.idx.closeActionIndex()
     cache.shm.enabled = false
 
 proc lookupHotMetadataRecord*(cache: var ActionCache; weak: ContentDigest;

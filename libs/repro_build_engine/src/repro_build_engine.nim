@@ -9158,20 +9158,28 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       ard.containerReads, 0.0)
     stats.addCountedMetric("repro per-edge sidecar read",
       ard.sidecarReads, 0.0)
-    # Action-Cache-Per-Edge-Store.md §4.4's shared-memory tier is an
-    # ACCELERATOR, so it fails silently by design: an oversized record just
-    # stays Tier-1-only and the build is still correct. The failure mode that
-    # makes silence expensive is a build where EVERY record is over the inline
-    # slot cap. Nothing is ever submitted, no daemon is ever asked to publish,
-    # every lookup falls through to disk, and from the outside that is
-    # indistinguishable from a healthy tier. Here it was 8.4 ms of a 61 ms warm
-    # no-op and it took a profiler to find. A zero row is not rendered, so a
-    # build with a working tier pays a reader nothing for this.
-    let shmSubmits = shmSubmitStats()
-    stats.addCountedMetric("repro shm oversized submit",
-      shmSubmits.oversized, 0.0)
-    stats.addCountedMetric("repro shm oversized submit floor bytes",
-      int(shmSubmits.oversizedFloorBytes), 0.0)
+    # Action-Cache-Per-Edge-Store.md §11. The Tier-2 index is an ACCELERATOR
+    # and fails silently by design, which is exactly why its health has to be
+    # legible: a silently bypassed accelerator is indistinguishable from a
+    # healthy idle one. `growthFailed` says the chain is saturated and every
+    # completeness claim is void; `unresolvedReferences` says Tier-1 retention
+    # and index retirement have drifted apart; `bypassWrites` says something
+    # wrote Tier 1 without telling the index. On a healthy root all three are
+    # zero, and a zero row is not rendered, so a working tier costs a reader
+    # nothing.
+    #
+    # The row this replaces counted records REFUSED for their size. That
+    # admission decision no longer exists: the index holds 84-byte references,
+    # so a record's size never enters it, and there is nothing left to refuse.
+    let aix = actionIndexStats()
+    stats.addCountedMetric("repro action index negative hit",
+      aix.negativeHits, 0.0)
+    stats.addCountedMetric("repro action index resolved hit",
+      aix.resolvedHits, 0.0)
+    stats.addCountedMetric("repro action index union fallback",
+      aix.unionFallbacks, 0.0)
+    stats.addCountedMetric("repro action index unresolved reference",
+      aix.unresolvedReferences, 0.0)
 
   proc finishMetadataCacheStats(cache: FileMetadataCache) =
     if not config.statsEnabled:

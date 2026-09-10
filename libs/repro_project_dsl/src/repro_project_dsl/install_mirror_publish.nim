@@ -8,7 +8,7 @@
 ## the import closure of every *profile* compile
 ## (``repro_profile_compile``). A profile compile's ``--path`` set
 ## deliberately excludes the store runtime's SQLite binding and its
-## ``repro_shm_index`` -> ``shm_queue`` sibling dependency, so importing
+## ``shm_gset`` sibling dependency, so importing
 ## ``repro_local_store`` from the resolver broke every profile compile
 ## with ``cannot open file: repro_local_store``. Keeping the publisher in
 ## its own module — imported only by ``repro-install-mirror-publish`` and
