@@ -101,6 +101,7 @@ libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	8
 libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim	nim	17
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	nim	8
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	nim	3
+libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
 libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim	nim	6
 libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim	nim	5
 libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	7
@@ -189,12 +190,15 @@ libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_packaging_deb_authoring.nim	nim	17
 libs/repro_dsl_stdlib/tests/t_packaging_dependency_floor.nim	nim	23
 libs/repro_dsl_stdlib/tests/t_packaging_engine_has_no_format_knowledge.nim	nim	3
+libs/repro_dsl_stdlib/tests/t_packaging_launchd_renderer.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim	nim	20
 libs/repro_dsl_stdlib/tests/t_packaging_rpm_authoring.nim	nim	23
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
+libs/repro_dsl_stdlib/tests/t_packaging_scoop_manifest.nim	nim	9
+libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7

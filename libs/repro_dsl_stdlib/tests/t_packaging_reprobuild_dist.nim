@@ -1,11 +1,11 @@
 ## Reprobuild's own distribution — the values M0 left for M1.
 ##
-## M0 put the twenty wrapper-variable NAMES in the layer and said why it
+## M0 put the wrapper-variable NAMES in the layer and said why it
 ## stopped: "M0's job is to have the list in the layer, under one name,
 ## so M1 supplies values for it instead of rediscovering it."
 ## ``reprobuild_dist`` is that supply, and these cases are what keeps it
 ## honest — because the failure it prevents is invisible on the build
-## host. Every developer has all twenty variables exported in their dev
+## host. Every developer has all of them exported in their dev
 ## shell, so a package that shipped the wrong value, or dropped one
 ## entirely, works everywhere it is tested and dies on the first machine
 ## that is not a developer's.
@@ -24,14 +24,14 @@ proc reprobuildSample(targetOs = toLinux): Distribution =
     prefix = (if targetOs == toWindows: "" else: "/usr"))
   result.components = @[
     executableComponent("build/bin/repro" & sfx),
-    component(crHelperExecutable, "build/bin/repro-cache-daemon" & sfx),
+    component(crHelperExecutable, "build/bin/repro-standard-provider" & sfx),
     component(crConfigFile, "build/gen/caches.conf",
       installName = "caches.conf", subdir = "repro")
   ]
 
 suite "packaging: reprobuild's own distribution":
 
-  test "the twenty wrapper variables are all supplied, in flake order":
+  test "every wrapper variable is supplied, in flake order":
     # A DROPPED variable is the failure mode this case exists for, and
     # it is silent: the wrapper simply does not set it, the binary falls
     # back to whatever the environment has, and on the build host the
@@ -84,11 +84,13 @@ suite "packaging: reprobuild's own distribution":
     for leaf in dist.runtime.dlopenLeafNames:
       check leaf.contains(".so")
 
-  test "the three daemon roles are three, and only two get units":
-    # §4 warns "do not conflate them". The shm action-cache owner has NO
-    # unit on purpose: it is auto-spawned per action-cache root and
-    # self-reaps, so a service manager starting one would be starting a
-    # second owner of a single-writer resource.
+  test "the daemon roles that have units are exactly two":
+    # §4 warns "do not conflate them" and names three. The third, the shm
+    # action-cache owner, was DELETED by Action-Cache-Per-Edge-Store
+    # along with the control region it owned -- see the module header --
+    # so what is left to pin is the shape the layer models: a helper
+    # process that ships WITHOUT a unit, which is what a role that is
+    # spawned by the engine rather than by a service manager needs.
     let cli = reprobuildSample()
     let cache = newReprobuildCacheDistribution("0.1.3", toLinux)
     check cli.services.len == 1
@@ -97,11 +99,11 @@ suite "packaging: reprobuild's own distribution":
     check cache.services.len == 1
     check cache.services[0].scope == ssSystem
     check cache.services[0].execComponent == "repro-binary-cache"
-    # The third role ships as an executable and names no service.
-    var sawCacheDaemon = false
+    # A helper ships as an executable and names no service.
+    var sawHelper = false
     for c in cli.components:
-      if c.buildPath.contains("repro-cache-daemon"): sawCacheDaemon = true
-    check sawCacheDaemon
+      if c.role == crHelperExecutable: sawHelper = true
+    check sawHelper
     for svc in cli.services & cache.services:
       check not svc.name.contains("cache-daemon")
 
@@ -264,7 +266,7 @@ suite "packaging: reprobuild's own distribution":
       relPaths.add(f.rootRelPath)
     check "usr/bin/repro" in relPaths
     check "usr/bin/repro.real" in relPaths
-    check "usr/libexec/reprobuild/repro-cache-daemon" in relPaths
+    check "usr/libexec/reprobuild/repro-standard-provider" in relPaths
     check "etc/repro/caches.conf" in relPaths
     check "lib/systemd/user/repro-daemon.service" in relPaths
     # ...and the floor is computed for it, like any other Linux package.

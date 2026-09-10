@@ -1718,16 +1718,39 @@ proc resolveMonitorShimLibPath(): string =
   ##    threads the user's checkout through ``REPROBUILD_SOURCE_ROOT`` (and
   ##    the daemon forwards it), so this fallback recovers the shim in the
   ##    daemon-hosted CMake develop flow.
-  ## 4. Empty string when none match; the caller (the engine's monitor
+  ## 4. ``$REPROBUILD_RUNTIME_LIBRARY_PATH`` — the INSTALLED-PACKAGE arm.
+  ##    Arms (2) and (3) both look for a reprobuild SOURCE CHECKOUT with a
+  ##    ``build/`` directory in it, and an installed ``/usr/bin/repro.real``
+  ##    is inside no such thing however the package lays its files out, so
+  ##    before this arm existed a native package could not resolve the shim
+  ##    at all — the FIRST error of every ``repro build`` from a .deb/.rpm
+  ##    was ``repro internal io monitor: error: cannot find
+  ##    librepro_monitor_shim.so`` (Distribution-And-Packaging M1 N7).
+  ##    Shipping the file was necessary and not sufficient: the resolver
+  ##    had no arm that could name it.
+  ##
+  ##    The variable is the natural one rather than a new one. It is
+  ##    already part of the §5 wrapper contract
+  ##    (``runtime_contract.ReprobuildWrapperVariables``), the wrapper
+  ##    already sets it to ``<prefix>/lib/repro`` — the package's private
+  ##    libdir, which is exactly where the shipped shim lands as a
+  ##    ``crRuntimeLibrary`` component — and under Nix it is already the
+  ##    library search path of the installed closure. So no new variable,
+  ##    no new drift guard, and the same arm serves both worlds. It is a
+  ##    ``PathSep``-separated LIST (the flake sets six directories), so
+  ##    every entry is probed in order.
+  ##
+  ##    LAST, deliberately: a develop-mode checkout beside the running
+  ##    binary must keep winning over an installed copy, because that is
+  ##    the whole point of arms (2) and (3). This arm only fires where
+  ##    they all return empty.
+  ## 5. Empty string when none match; the caller (the engine's monitor
   ##    launcher) treats that as "monitor not configured" and falls back
   ##    to ``REPRO_MONITOR_BYPASS=1`` semantics.
   let override = getEnv("REPRO_MONITOR_SHIM_LIB")
   if override.len > 0:
     return override
-  const dllExt =
-    when defined(windows): "dll"
-    elif defined(macosx):  "dylib"
-    else:                  "so"
+  const dllExt = HostDynamicLibraryExt
   let exePath = getAppFilename()
   if exePath.len > 0:
     let localSourceRoot =
@@ -1745,10 +1768,15 @@ proc resolveMonitorShimLibPath(): string =
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
     let candidate = sourceRoot / "build" / "lib" /
-      ("librepro_monitor_shim." & dllExt)
+      (MonitorShimLibStem & "." & dllExt)
     if fileExists(extendedPath(candidate)):
       return candidate
-  ""
+  # Arm 4 — the installed package. The arm itself lives in
+  # ``repro_build_engine`` because that is where the seed the ORDINARY
+  # build path uses is computed; this proc only ever reaches the dev-env
+  # engine. Both call the same code so the two cannot answer differently.
+  monitorShimLibInLibraryPath(getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH"),
+    dllExt, proc(path: string): bool = fileExists(extendedPath(path)))
 
 proc moduleHasBuildBlock(modulePath: string): bool =
   for line in readFile(extendedPath(modulePath)).splitLines:
@@ -8388,7 +8416,31 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # entirely: every action goes through the bypass-spawn path with no lease
   # round-trip. Default is "use runquota when reachable, fall back if not".
   let bypassRunQuota = bypassRunQuotaExplicit
-  var fallbackToRunQuotaBypass = mode in {tpmPathOnly, tpmScoop}
+  # ``tpmUnspecified`` sits with ``path``/``scoop`` rather than with
+  # ``from-source``, and that is the whole of M1's N8 fix.
+  #
+  # The mode is UNSPECIFIED for every invocation that does not pass
+  # ``--tool-provisioning`` and sets no ``REPRO_TOOL_PROVISIONING``: the
+  # project's own ``defaultToolProvisioning`` is not readable until the
+  # interface has been extracted, and it is re-resolved below (search for
+  # the second assignment to this variable) the moment it is. But
+  # extracting that interface IS a build, and it therefore hit the
+  # runquota gate while the mode was still unspecified — so a plain
+  # ``repro build``, on any machine with no ``runquotad``, died on its
+  # FIRST edge with ``runquota daemon unreachable and bypass is
+  # disabled``, remediating to ``cd ../runquota && just build``. That is
+  # advice a user who installed a PACKAGE cannot follow, and it made the
+  # shipped tool's primary verb depend on an undocumented environment
+  # variable (``REPROBUILD_NO_RUNQUOTA=1``) that every measurement in the
+  # packaging milestone had to set by hand.
+  #
+  # Falling back is right here rather than merely convenient: refusing is
+  # only correct for a mode that DEMANDS a lease coordinator, and the one
+  # such mode is ``from-source``. Nothing is silently lost — the fallback
+  # path logs the same ``WARNING runquotad is not reachable`` line it logs
+  # for ``path``, and the re-resolution below still refuses when the
+  # project turns out to want ``from-source``.
+  var fallbackToRunQuotaBypass = mode in {tpmUnspecified, tpmPathOnly, tpmScoop}
   var warnedRunQuotaBypass = false
 
   template logSummary(line: string) =

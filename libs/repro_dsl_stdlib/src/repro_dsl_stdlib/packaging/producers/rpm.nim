@@ -176,9 +176,25 @@ proc rpmFilesSection*(dist: Distribution; tree: StagedTree): seq[string] =
       "/" & prefixRelToRoot(dist, privateLibPrefixRelDir(dist))
     else:
       ""
+  proc insideSourceTree(rootRel: string): bool =
+    ## Whether a staged path is INSIDE one of the shipped source trees.
+    ##
+    ## Those are listed by their root instead, once each: naming a
+    ## directory in ``%files`` owns it and everything below it, so the
+    ## ~1,000 files of a mirrored ``libs/`` tree collapse to one line —
+    ## and listing both the directory and its contents is a duplicate
+    ## that rpmbuild rejects outright, the same way a staged
+    ## ``crRuntimeLibrary`` inside the private libdir does above.
+    for treeRoot in tree.sourceTreeRoots:
+      if rootRel == treeRoot or rootRel.startsWith(treeRoot & "/"):
+        return true
+    false
+
   for f in tree.files:
     let abs = "/" & f.rootRelPath
     if privateLibRoot.len > 0 and abs.startsWith(privateLibRoot & "/"):
+      continue
+    if insideSourceTree(f.rootRelPath):
       continue
     if f.role == crConfigFile:
       # ``%config(noreplace)`` is rpm's answer to dpkg's ``conffiles``:
@@ -191,6 +207,8 @@ proc rpmFilesSection*(dist: Distribution; tree: StagedTree): seq[string] =
       result.add(abs)
   if privateLibRoot.len > 0:
     result.add(privateLibRoot & "/*")
+  for treeRoot in tree.sourceTreeRoots:
+    result.add("/" & treeRoot)
   # EVERY directory the package creates and the target does not already
   # own, not just the private libdir.
   #
@@ -205,7 +223,14 @@ proc rpmFilesSection*(dist: Distribution; tree: StagedTree): seq[string] =
   # is about the TARGET anyway.
   var staged: seq[string] = @[]
   for f in tree.files:
+    if insideSourceTree(f.rootRelPath):
+      continue
     staged.add(f.rootRelPath)
+  for treeRoot in tree.sourceTreeRoots:
+    # The tree ROOT is owned by the ``%files`` entry above; what this
+    # adds is its ANCESTORS (``usr/share/repro/src`` and friends),
+    # which nothing else in the package creates.
+    staged.add(treeRoot & "/.")
   if privateLibRoot.len > 0:
     # The vendored files are not staged paths -- the walk writes them --
     # so name the directory itself for the ancestor derivation.

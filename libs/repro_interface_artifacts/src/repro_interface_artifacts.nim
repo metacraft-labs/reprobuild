@@ -4497,12 +4497,69 @@ proc providerDynamicEnabled(): bool =
   let raw = getEnv("REPRO_PROVIDER_DYNAMIC").toLowerAscii()
   raw in ["1", "true", "yes", "on"]
 
+const ProjectDslRuntimeLibStem* = "librepro_project_dsl_runtime"
+  ## The shared DSL runtime library's file stem, without the platform's
+  ## dynamic-library extension. Named once so the resolver below and the
+  ## packaging recipe that ships the file cannot drift apart.
+
+proc dslRuntimeLibDirInLibraryPath*(runtimeLibraryPath, dllExt: string;
+                                    probe: proc(path: string): bool): string =
+  ## The INSTALLED-PACKAGE arm of ``providerDynamicLibDir``: the first
+  ## entry of a ``PathSep``-separated ``$REPROBUILD_RUNTIME_LIBRARY_PATH``
+  ## that actually holds ``librepro_project_dsl_runtime.<ext>``.
+  ##
+  ## Same shape, and the same defect, as
+  ## ``repro_cli_support.resolveMonitorShimLibPath``: both name a file
+  ## the flake installs out of ``build/lib``, and both looked for it
+  ## ONLY under a reprobuild SOURCE CHECKOUT. An installed
+  ## ``/usr/bin/repro.real`` is inside no checkout, so
+  ## ``<workDir>/build/lib`` is a directory that does not exist there and
+  ## the ``-L``/``-l`` pair below would point at nothing — shipping the
+  ## library as a ``crRuntimeLibrary`` component would have been payload
+  ## with no consumer. The private libdir the package puts it in is
+  ## exactly what the wrapper publishes in
+  ## ``REPROBUILD_RUNTIME_LIBRARY_PATH``, so that variable answers here
+  ## too and no new one is invented.
+  ##
+  ## The extension and the probe are parameters for the same reason they
+  ## are in the shim resolver: the layout this arm exists for is an
+  ## installed prefix, which is by construction not the test host's.
+  if runtimeLibraryPath.len == 0:
+    return ""
+  let leaf = ProjectDslRuntimeLibStem & "." & dllExt
+  for entry in runtimeLibraryPath.split(PathSep):
+    let dir = entry.strip()
+    if dir.len == 0:
+      continue
+    if probe(dir / leaf):
+      return dir
+  ""
+
 proc providerDynamicLibDir(workDir: string): string =
   ## Filesystem directory that the per-project provider link step
-  ## searches for the shared DSL runtime DLL. This matches the build
-  ## script's output location
-  ## (``build/lib/librepro_project_dsl_runtime.{dll,so,dylib}``).
-  workDir / "build" / "lib"
+  ## searches for the shared DSL runtime DLL.
+  ##
+  ## 1. ``<workDir>/build/lib`` — the build script's output location
+  ##    (``build/lib/librepro_project_dsl_runtime.{dll,so,dylib}``), and
+  ##    the develop-mode default. Kept FIRST so a working tree always
+  ##    wins over an installed copy.
+  ## 2. The package's private libdir, via
+  ##    ``$REPROBUILD_RUNTIME_LIBRARY_PATH`` — see
+  ##    ``dslRuntimeLibDirInLibraryPath``.
+  const dllExt =
+    when defined(windows): "dll"
+    elif defined(macosx):  "dylib"
+    else:                  "so"
+  let developDir = workDir / "build" / "lib"
+  if fileExists(extendedPath(developDir / (ProjectDslRuntimeLibStem & "." &
+      dllExt))):
+    return developDir
+  let installed = dslRuntimeLibDirInLibraryPath(
+    getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH"), dllExt,
+    proc(path: string): bool = fileExists(extendedPath(path)))
+  if installed.len > 0:
+    return installed
+  developDir
 
 proc buildScratchRoot(workDir, scratchDir: string): string =
   if scratchDir.len > 0:

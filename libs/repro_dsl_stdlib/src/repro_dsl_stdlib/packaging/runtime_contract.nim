@@ -44,7 +44,7 @@
 ## rebuild is a cache hit rather than a re-run that happens to produce
 ## the same bytes.
 
-import std/[strutils]
+import std/[strutils, algorithm, os]
 
 import repro_project_dsl
 import ../fs as dslfs
@@ -187,6 +187,20 @@ type
       ## being per-file edge outputs, so there is no staged path for the
       ## producer to name, and without the manifest the artifact edge
       ## would not be re-run when the closure changed.
+    sourceTreeRoots*: seq[string]
+      ## Root-relative directory of every ``crSourceTree`` component in
+      ## this tree.
+      ##
+      ## Carried separately from ``files`` because two producers need
+      ## the DIRECTORY rather than its contents. rpm's ``%files`` owns a
+      ## directory and everything under it recursively when it names the
+      ## directory, so one entry replaces ~1,000 — and the alternative
+      ## is not merely verbose: ``ownedDirectories`` would then emit a
+      ## ``%dir`` line for every subdirectory of every shipped source
+      ## tree, which is a spec the size of the payload. The tarball and
+      ## the deb need neither, and the MSI needs the per-file list it
+      ## already gets from ``files``, so this is additive rather than a
+      ## replacement.
     glibcFloorPath*: string
       ## Build-tree path of the one-line file holding the C-library
       ## floor this tree needs (``2.38``), or empty when the tree
@@ -1016,6 +1030,40 @@ proc stagedIdPrefix*(dist: Distribution; variant: string): string =
   ## inside the other's.
   "pkg-" & sanitizeIdPart(variant) & "-" & sanitizeIdPart(dist.name) & "-"
 
+proc sourceTreeRelFiles*(root: string): seq[string] =
+  ## Every regular file under ``root``, as ``/``-separated paths
+  ## relative to it, SORTED.
+  ##
+  ## Walked at GRAPH TIME, which is the same thing
+  ## ``repro_project_dsl.fs.preserveTree`` does with the same directory
+  ## a line later — the staging edge below hands ``preserveTree`` the
+  ## root and this walk enumerates it again so the ``StagedTree`` can
+  ## tell a producer WHICH files the edge is going to write. rpm needs
+  ## that to own the directory, the MSI needs it to emit one component
+  ## per file, and the tarball and deb need it not at all.
+  ##
+  ## Sorted because a producer's output is a function of this list and
+  ## ``walkDir`` order is a property of the filesystem, not of the
+  ## graph. Symlinks are followed as their KIND rather than resolved:
+  ## ``preserveTree`` re-creates a symlink as a symlink, so a link to a
+  ## file is one entry here exactly as it is one entry there.
+  if not dirExists(root):
+    return @[]
+  var pending = @[""]
+  while pending.len > 0:
+    let rel = pending.pop()
+    let dir = if rel.len == 0: root else: root / rel
+    for kind, child in walkDir(dir, relative = true):
+      let childRel = if rel.len == 0: child else: rel & "/" & child
+      case kind
+      of pcDir:
+        pending.add(childRel)
+      of pcFile, pcLinkToFile:
+        result.add(childRel)
+      of pcLinkToDir:
+        result.add(childRel)
+  result.sort(system.cmp[string])
+
 proc stageInstallTree*(dist: Distribution; variant: string;
                        site = noSite()): StagedTree =
   ## Build the edges that materialise ``dist``'s install tree, with the
@@ -1112,6 +1160,52 @@ proc stageInstallTree*(dist: Distribution; variant: string;
     let publicName = defaultInstallName(component)
     let prefixRel = installRelPath(dist, component)
     let prefixRelDir = dirOf(prefixRel)
+
+    # ---- 0. a whole SOURCE TREE ------------------------------------
+    #
+    # Handled before everything else and by ``continue``, because none
+    # of what follows applies: a source tree has no wrapper, no RPATH,
+    # no ELF interpreter, no mode of its own and no place in the
+    # runtime-closure walk. It is the one component role whose payload
+    # is a directory, and ``fs.preserveTree`` -- an engine BUILTIN --
+    # is what mirrors it, so this arm adds no tool dependency and
+    # behaves identically on Windows.
+    if component.role == crSourceTree:
+      let treeRootRel = rootRelFor(prefixRel, crSourceTree)
+      let destDir = treeRoot & "/" & treeRootRel
+      let relFiles = sourceTreeRelFiles(component.buildPath)
+      if relFiles.len == 0:
+        # REFUSED, rather than staged empty. ``preserveTree`` over a
+        # directory that does not exist (or that holds nothing) is
+        # SILENT: it enumerates no entries, declares no outputs and
+        # creates an empty directory in the tree. The package then
+        # installs, its wrapper names the directory, the directory is
+        # there -- and the compile that the tree exists to serve fails
+        # on the target with a missing import. That is precisely the
+        # failure mode this whole component role was added to close, so
+        # it must not be reachable by forgetting to stage a payload.
+        raise newException(ValueError,
+          "distribution '" & dist.name & "': crSourceTree component '" &
+          component.buildPath & "' (installing to '" & treeRootRel &
+          "') contains no files; a source tree that stages empty would " &
+          "give the target a directory the wrapper names and nothing " &
+          "to compile against")
+      let edge = dslfs.preserveTree(component.buildPath, destDir,
+        actionId = idPrefix & "srctree-" & sanitizeIdPart(treeRootRel),
+        after = component.producedBy)
+      # One ``StagedFile`` per mirrored file, all naming the SAME edge.
+      # That is not a fiction: ``preserveTree`` declares every one of
+      # them as an output, so a producer that depends on these paths
+      # depends on exactly the edge that writes them.
+      for rel in relFiles:
+        result.files.add(StagedFile(
+          rootRelPath: treeRootRel & "/" & rel,
+          edge: edge,
+          role: crSourceTree,
+          isPublicEntryPoint: false))
+      result.terminal.add(edge)
+      result.sourceTreeRoots.add(treeRootRel)
+      continue
     let mode = if component.mode != 0: component.mode
                else: roleDefaultMode(component.role)
     let wrapThis =
@@ -1514,7 +1608,8 @@ const
     "RUNQUOTA_SRC",
     "SQLITE_PREFIX",
     "XXHASH_PREFIX",
-    "CLINGO_PREFIX"
+    "CLINGO_PREFIX",
+    "REPRO_NIM_COMPILER"
   ]
     ## §12's first open question — "exact ``REPROBUILD_*``/``*_PREFIX``
     ## wrapper-var list to encode in the packaging layer (derive
@@ -1532,6 +1627,33 @@ const
     ## store paths in the flake and cannot be: a native package's values
     ## are paths inside its own install prefix, which is what
     ## ``PrefixToken`` exists to express.
+    ##
+    ## ``REPRO_NIM_COMPILER`` IS THE TWENTY-FIRST, AND IT WAS ADDED TO
+    ## BOTH WORLDS AT ONCE. It is not a packaging invention: the
+    ## resolver that consumes it (``repro_interface_artifacts.
+    ## nimCompilerPath``) has always taken it as its highest-priority
+    ## arm, and its next arm is ``BuiltNimCompilerPath``, a constant
+    ## baked at COMPILE TIME out of ``staticExec("command -v nim")``.
+    ## Under Nix that constant is a store path that exists, so the flake
+    ## never needed to say anything; in a native package it is a store
+    ## path that does not, and the arm after it is ``nim`` on ``$PATH``.
+    ##
+    ## That last arm is where the measurement bites. Neither
+    ## ``debian:trixie-slim`` nor ``fedora:latest`` PACKAGES A NIM
+    ## COMPILER AT ALL (Debian bookworm's is 1.6.10, older than the
+    ## sources this package ships; Arch's is 2.2.12 and is the only
+    ## adequate distribution build found), so ``Depends: nim`` is not a
+    ## dependency a package manager could satisfy on the two images M1's
+    ## gate uses -- it is a package that will not install. And
+    ## reprobuild's own tool-provisioning cannot supply it either,
+    ## because the compile that needs it is the one that READS THE
+    ## RECIPE that would declare it. A bootstrap dependency with no
+    ## external supplier is exactly the case for vendoring, so the
+    ## package ships a toolchain and this variable names it.
+    ##
+    ## The flake sets it too, at the same store path its
+    ## ``BuiltNimCompilerPath`` would have found, which makes the
+    ## resolution explicit in both worlds rather than implicit in one.
 
   ReprobuildDlopenPackages* = ["zstd", "clingo"]
     ## §5: "clingo and zstd … the last two ``dlopen``'d by leaf name".

@@ -6078,6 +6078,75 @@ proc applyNimPathArgs*(argv: openArray[string];
   for i in base + 2 ..< argv.len:
     result.add(argv[i])
 
+const MonitorShimLibStem* = "librepro_monitor_shim"
+  ## The shim's file stem, without the platform's dynamic-library
+  ## extension. Named once so the engine's seed, ``repro_cli_support``'s
+  ## develop-mode resolver and the packaging recipe that ships the file
+  ## cannot drift apart.
+
+const HostDynamicLibraryExt* =
+  when defined(windows): "dll"
+  elif defined(macosx):  "dylib"
+  else:                  "so"
+  ## The host's dynamic-library extension, without a leading dot.
+
+proc monitorShimLibInLibraryPath*(runtimeLibraryPath, dllExt: string;
+                                  probe: proc(path: string): bool): string =
+  ## THE INSTALLED-PACKAGE ARM: probe each entry of a
+  ## ``PathSep``-separated ``$REPROBUILD_RUNTIME_LIBRARY_PATH`` for
+  ## ``librepro_monitor_shim.<ext>`` and return the first hit.
+  ##
+  ## The extension and the existence probe are both parameters, for the
+  ## same reason ``runtime_contract.runtimeRpathCompilerFlags`` takes a
+  ## target rather than reading ``defined(...)``: the situation this arm
+  ## exists for is an INSTALLED PREFIX, which by construction is not the
+  ## layout of the machine running the test, and a resolver that could
+  ## only be exercised by installing a package would be verified by the
+  ## packaging gate alone -- which is the state that let the gap ship.
+  if runtimeLibraryPath.len == 0:
+    return ""
+  let leaf = MonitorShimLibStem & "." & dllExt
+  for entry in runtimeLibraryPath.split(PathSep):
+    let dir = entry.strip()
+    if dir.len == 0:
+      continue
+    let candidate = dir / leaf
+    if probe(candidate):
+      return candidate
+  ""
+
+proc resolveMonitorShimLibForInstall*(): string =
+  ## io-mon's four discovery arms, then the package's private libdir.
+  ##
+  ## THIS IS THE RESOLVER THAT DECIDES WHETHER AN INSTALLED PACKAGE CAN
+  ## BUILD, and finding that out took measuring rather than reading.
+  ## ``repro_cli_support.resolveMonitorShimLibPath`` looks like the
+  ## resolver -- it has the develop-mode arms and the doc comment -- but
+  ## its answer only ever reaches the DEV-ENV engine. The ordinary build
+  ## path seeds ``REPRO_MONITOR_SHIM_LIB`` from HERE, and until this proc
+  ## existed it seeded it from ``io_mon.findShimLibrary`` alone.
+  ##
+  ## io-mon's four arms are an env override, ``<appDir>/../lib``,
+  ## ``<appDir>/`` (Windows side-by-side) and ``<cwd>/build/lib``. The
+  ## second is the FLAKE's layout exactly -- ``$out/bin`` beside
+  ## ``$out/lib`` -- which is why this never came up under Nix. A native
+  ## package cannot use it: at prefix ``/usr`` it resolves to
+  ## ``/usr/lib/librepro_monitor_shim.so``, and a package that dropped a
+  ## private library straight into ``/usr/lib`` would be doing the thing
+  ## ``ReprobuildPrivateLibSubdir`` exists to prevent. So the shim lives
+  ## in the private libdir and this arm is how it is found there.
+  ##
+  ## LAST, so a develop checkout and an operator's explicit override both
+  ## keep winning. Empty means "monitoring not configured", which the
+  ## caller turns into a bypass rather than into a failure.
+  result = findShimLibrary()
+  if result.len > 0:
+    return result
+  result = monitorShimLibInLibraryPath(
+    getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH"),
+    HostDynamicLibraryExt,
+    proc(path: string): bool = fileExists(extendedPath(path)))
+
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
   ## Nested-build resource model: an action's child process tree may itself
@@ -6207,7 +6276,7 @@ proc launchChildEnv(action: BuildAction;
   # asks loses it; the default is false.
   let shimLib =
     if action.dependencyPolicy.suppressMonitorShimSeed: ""
-    else: findShimLibrary()
+    else: resolveMonitorShimLibForInstall()
   if shimLib.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)
     # NO ``REPRO_MONITOR_INTEREST`` SEED HERE, DELIBERATELY. There used to be

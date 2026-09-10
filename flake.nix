@@ -957,7 +957,8 @@
                   --set-default RUNQUOTA_SRC ${runquota-src} \
                   --set-default SQLITE_PREFIX ${pkgs.sqlite.out} \
                   --set-default XXHASH_PREFIX ${pkgs.xxHash} \
-                  --set-default CLINGO_PREFIX ${pkgs.clingo}
+                  --set-default CLINGO_PREFIX ${pkgs.clingo} \
+                  --set-default REPRO_NIM_COMPILER ${nimFork}/bin/nim
               done
             '';
 
@@ -1095,6 +1096,7 @@
                 SQLITE_PREFIX|${pkgs.sqlite.out}
                 XXHASH_PREFIX|${pkgs.xxHash}
                 CLINGO_PREFIX|${pkgs.clingo}
+                REPRO_NIM_COMPILER|${nimFork}/bin/nim
                 DEFAULTS
                                       wrapperCount=$((wrapperCount + 1))
                                     done

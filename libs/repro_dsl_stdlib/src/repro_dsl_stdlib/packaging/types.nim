@@ -111,6 +111,36 @@ type
       ## conffiles so a local edit survives upgrade.
     crDataFile
       ## Anything else — docs, licences, completion scripts.
+    crSourceTree
+      ## A whole DIRECTORY of source the installed package must be able
+      ## to compile against — reprobuild's own ``libs/`` and the
+      ## sibling package trees the ``*_SRC`` wrapper variables name.
+      ##
+      ## ## Why a directory role rather than N file components
+      ##
+      ## Every other role names ONE file, and that is right for them: a
+      ## binary, a unit, a config file each have an identity the recipe
+      ## states. A source tree does not. What the recipe knows — and
+      ## all it knows — is that ``$NIMCRYPTO_SRC`` must be a directory
+      ## Nim can put on ``--path:``, and Nim resolves imports across it
+      ## by NAME, so the set of files that matter is a property of the
+      ## recipe being compiled rather than of this package. Enumerating
+      ## the files here would make the recipe restate a directory
+      ## listing it does not own, and would put ~2,900 per-file edges in
+      ## a graph whose meaning is 13 directories.
+      ##
+      ## Staged by ``fs.preserveTree`` — an ENGINE BUILTIN, not a tool —
+      ## so the role needs no ``uses:`` entry and works identically on
+      ## Windows, where the ``sh``/``find``/``install`` trio the POSIX
+      ## staging path leans on does not exist. It preserves the source
+      ## mode bits, which is what keeps an executable helper script
+      ## inside such a tree executable.
+      ##
+      ## Mode is therefore NOT a property of this role (the tree carries
+      ## its own), and neither is the §5 wrapper contract: nothing in a
+      ## source tree is an ELF image the loader ever sees, so it is
+      ## RPATH-patched no more than a ``crHelperScript`` is, and it
+      ## contributes nothing to the runtime-closure walk.
 
   DistComponent* = object
     ## One file in the install tree.
@@ -453,6 +483,35 @@ const
     ## is expanded by the shipped wrapper at RUN time and must survive
     ## into the package, this one must not survive past the build.
 
+  ScoopHashToken* = "@SCOOP_SHA256@"
+    ## Placeholder for the SHA-256 of the archive a Scoop manifest
+    ## points at.
+    ##
+    ## Exactly ``GlibcFloorToken``'s shape and for exactly its reason:
+    ## the value is a digest of a file no edge has produced when the
+    ## manifest text is authored, so the text carries a token and the
+    ## action that measured the archive splices the value in
+    ## (``runtime_contract.substitutionScript``). Like the floor and
+    ## unlike ``PrefixToken``, it must NOT survive into the artifact --
+    ## a manifest still carrying it would make Scoop reject every
+    ## download with a hash mismatch, which is the loud failure rather
+    ## than the quiet one.
+
+  ScoopUrlToken* = "@SCOOP_URL@"
+    ## Placeholder for the URL a Scoop manifest downloads from, used
+    ## when the recipe supplies none.
+    ##
+    ## Where an artifact will be PUBLISHED is a hosting fact (M3), not a
+    ## build fact, and this layer has no way to know it. The honest
+    ## options were to refuse a manifest without a URL, to invent a
+    ## plausible one, or to emit a token. Inventing one is the dangerous
+    ## answer -- a manifest with a well-formed but wrong URL installs
+    ## whatever is at that address on the day someone points a bucket at
+    ## it -- and refusing would make the producer unusable before M3
+    ## lands. A token is visibly not a URL, so a release pipeline
+    ## substitutes it and a manifest that reached a user unsubstituted
+    ## fails at DOWNLOAD, before any bytes are trusted.
+
 proc extractFilenameSlashOnly*(path: string): string =
   ## Basename over ``/`` AND ``\``.
   ##
@@ -521,6 +580,12 @@ proc roleDefaultMode*(role: ComponentRole): int =
   case role
   of crExecutable, crHelperExecutable, crHelperScript: 0o755
   of crRuntimeLibrary, crConfigFile, crDataFile: 0o644
+  # ``crSourceTree``'s mode is never consulted: that role is staged by
+  # ``preserveTree``, which mirrors each file's own mode bits. The
+  # branch exists because the case is exhaustive, and answers 0644
+  # rather than 0755 because that is what the overwhelming majority of
+  # the files in such a tree are.
+  of crSourceTree: 0o644
 
 proc roleDefaultSubdir*(dist: Distribution; role: ComponentRole): string =
   ## Prefix-relative directory for a role, under ``dist.layout``.
@@ -543,6 +608,21 @@ proc roleDefaultSubdir*(dist: Distribution; role: ComponentRole): string =
     else: runtimeLibDir(dist.layout)
   of crConfigFile: "etc"
   of crDataFile: "share/" & dist.name
+  # ``crSourceTree`` has NO default at all: the component's ``subdir``
+  # carries the whole prefix-relative directory. It is the one role
+  # whose location is not derivable from the role, because a source
+  # tree's install path is DICTATED by the wrapper variable that names
+  # it — ``$NIMCRYPTO_SRC`` is ``<prefix>/share/repro/src/nimcrypto``
+  # and ``$BLAKE3_PREFIX``'s headers are ``<prefix>/lib/repro/include``,
+  # which are not even under the same top-level directory, so a default
+  # would have to be overridden every time it was used.
+  #
+  # It also could not be ``share/<dist.name>`` the way ``crDataFile``
+  # is: those values are the SAME for the ``reprobuild`` and
+  # ``reprobuild-binary-cache`` packages, because one installed source
+  # tree serves both, and a default keyed on the package name would
+  # give two answers to a question that has one.
+  of crSourceTree: ""
 
 proc installRelPath*(dist: Distribution; component: DistComponent): string =
   ## Where the component lands, RELATIVE TO THE PREFIX, with ``/``
@@ -612,6 +692,21 @@ proc runtimeLibraryComponent*(buildPath: string;
                               producedBy: openArray[BuildActionDef] = [];
                               installName = ""): DistComponent =
   component(crRuntimeLibrary, buildPath, producedBy, installName)
+
+proc sourceTreeComponent*(buildPath: string;
+                          subdir: string;
+                          installName = "";
+                          producedBy: openArray[BuildActionDef] = []):
+    DistComponent =
+  ## A ``crSourceTree`` component. ``buildPath`` is a DIRECTORY in the
+  ## build tree; ``subdir`` is its prefix-relative PARENT directory and
+  ## ``installName`` its name there (defaulting, as everywhere else, to
+  ## ``buildPath``'s own basename).
+  component(crSourceTree, buildPath, producedBy, installName, subdir)
+
+proc sourceTrees*(dist: Distribution): seq[DistComponent] =
+  for c in dist.components:
+    if c.role == crSourceTree: result.add(c)
 
 proc debArchitecture*(dist: Distribution): string =
   ## reprobuild's architecture vocabulary → Debian's.
