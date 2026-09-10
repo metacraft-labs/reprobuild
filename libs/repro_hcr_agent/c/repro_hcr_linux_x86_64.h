@@ -38,6 +38,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "repro_hcr_mcr_bridge.h"
+
 /* ---------------------------------------------------------------------------
  * Refusal vocabulary. Every refusal cause is distinct and named; §4.3 forbids
  * silently applying a non-atomic or instruction-stealing patch.
@@ -57,7 +59,15 @@ enum {
   REPRO_HCR_LX_REFUSED_TEXT_PROTECTION_FAILED = 10,
   REPRO_HCR_LX_REFUSED_PATCH_MEMORY_PROTECTION_FAILED = 11,
   REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT = 12,
-  REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL = 13
+  REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL = 13,
+  /* HLX-M7, design §10.1: MCR's own patchers had already claimed bytes in the
+   * window this provider was about to publish into. Distinct from every
+   * refusal above because it is not a property of the target's code — the same
+   * function is patchable in the same process a moment earlier or later — and
+   * because §10.1 requires it be REPORTED to the client as
+   * `skippedFunctions[].reason == "claimed-by-recorder"` rather than folded
+   * into a whole-patch failure. */
+  REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER = 14
 };
 
 static const char *repro_hcr_lx_refusal_name(int code) {
@@ -90,6 +100,8 @@ static const char *repro_hcr_lx_refusal_name(int code) {
       return "invalid-argument";
     case REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL:
       return "site-table-full";
+    case REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER:
+      return "claimed-by-recorder";
     default:
       return "unknown-refusal";
   }
@@ -534,6 +546,12 @@ typedef struct repro_hcr_lx_site {
                             * previous generation (design §4.5) */
   uint64_t published_word;
   uint64_t generation;
+  /* HLX-M7 §10.1: the claim on this window is taken once, at the FIRST
+   * publication, and RETAINED across re-patch generations. Re-claiming on
+   * generation 2 would be refused by our own live claim, and releasing between
+   * generations would open a window in which MCR could take the bytes out from
+   * under a site this provider is still publishing into. */
+  int claimed;
 } repro_hcr_lx_site;
 
 static repro_hcr_lx_site repro_hcr_lx_sites[REPRO_HCR_LX_MAX_SITES];
@@ -653,6 +671,11 @@ typedef struct repro_hcr_lx_patch_report {
   uint64_t generation;
   long membarrier_result;
   int text_left_writable;
+  /* HLX-M7 §10.1: which patcher held the contested bytes when a claim was
+   * refused. Carried so the `skippedFunctions` entry can name the holder
+   * instead of saying only that something else got there first. */
+  unsigned claim_holder;
+  int claim_held;   /* 1 once this provider owns the window's claim */
 } repro_hcr_lx_patch_report;
 
 static repro_hcr_lx_patch_report repro_hcr_lx_last_report;
@@ -692,6 +715,7 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   uint64_t span_start;
   uint64_t span_end;
   int encode_rc;
+  int claimed_here;
 
   memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
 
@@ -760,6 +784,51 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   repro_hcr_lx_last_report.window_offset = plan.window_offset;
   repro_hcr_lx_last_report.original_word = original_word;
 
+  /* -------------------------------------------------------------------------
+   * ARBITRATION (design §10.1). Claim the published window BEFORE anything
+   * that could write to it.
+   *
+   * MCR's patchers claim through the same map, so a `-2` here means the
+   * recorder already owns bytes this provider was about to store into — the
+   * one situation in which publishing anyway reproduces task #422 in reverse.
+   * The refusal is NAMED (`claimed-by-recorder`) and carries the holder out, so
+   * the agent reports it as a skipped function rather than a mystery.
+   *
+   * `ct_claimed_guest_text_claim` is weak: when `libct_interpose` is not in the
+   * process it is NULL, which means there is no other patcher of this text and
+   * therefore no claim to conflict with. That is not the "silent skip" the
+   * map's rule forbids — the rule is about refusing to write over bytes ANOTHER
+   * PATCHER holds, and with no other patcher present there are none.
+   *
+   * The claim is taken only for a FRESH site. A re-patch is publishing into a
+   * window this provider already owns; re-claiming would be refused by its own
+   * live claim (§4.5).
+   * ---------------------------------------------------------------------- */
+  claimed_here = 0;
+  if (fresh_site && ct_claimed_guest_text_claim != NULL) {
+    unsigned holder = 0;
+    int claim_rc = ct_claimed_guest_text_claim(
+        (uintptr_t)window_address, (size_t)REPRO_HCR_LX_WINDOW_BYTES,
+        REPRO_HCR_CGT_OWNER_REPRO_HCR, &holder);
+    if (claim_rc == -2) {
+      repro_hcr_lx_last_report.claim_holder = holder;
+      repro_hcr_lx_last_report.refusal =
+          REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER;
+      return NULL;
+    }
+    if (claim_rc != 0) {
+      /* -1 is a degenerate range, which cannot happen for an 8-byte window at
+       * a non-wrapping address; treat it as an argument error rather than
+       * proceeding unclaimed. */
+      repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+      return NULL;
+    }
+    claimed_here = 1;
+    repro_hcr_lx_last_report.claim_held = 1;
+  } else if (!fresh_site) {
+    repro_hcr_lx_last_report.claim_held = site->claimed;
+  }
+
   /* The patch body is provider-owned memory no other thread can reach until the
    * publishing store makes it reachable. */
   if (patch_len < sizeof(repro_hcr_lx_endbr64) ||
@@ -769,6 +838,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   }
   body_len = body_prefix + patch_len;
   if (body_len > page_size) {
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
     return NULL;
   }
@@ -776,6 +854,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   patch_page =
       (uint8_t *)repro_hcr_lx_map_patch_page_near(window_address, page_size);
   if (patch_page == NULL) {
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_NO_PATCH_MEMORY;
     return NULL;
   }
@@ -791,6 +878,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
                                 REPRO_HCR_LX_PROT_READ |
                                     REPRO_HCR_LX_PROT_EXEC) != 0) {
     repro_hcr_lx_unmap(patch_page, page_size);
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal =
         REPRO_HCR_LX_REFUSED_PATCH_MEMORY_PROTECTION_FAILED;
     return NULL;
@@ -801,6 +897,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
       repro_hcr_lx_encode_jmp_rel32(window_address, dispatch_address, jmp_bytes);
   if (encode_rc != REPRO_HCR_LX_OK) {
     repro_hcr_lx_unmap(patch_page, page_size);
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal = encode_rc;
     return NULL;
   }
@@ -810,6 +915,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
     site = repro_hcr_lx_claim_site(entry_address);
     if (site == NULL) {
       repro_hcr_lx_unmap(patch_page, page_size);
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
       repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL;
       return NULL;
     }
@@ -832,6 +946,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
     if (fresh_site) {
       site->used = 0;
     }
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal =
         REPRO_HCR_LX_REFUSED_TEXT_PROTECTION_FAILED;
     return NULL;
@@ -886,6 +1009,10 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
 
   site->published_word = published_word;
   site->generation += 1;
+  if (claimed_here) {
+    site->claimed = 1;
+  }
+  repro_hcr_lx_last_report.claim_held = site->claimed;
   repro_hcr_lx_last_report.published_word = published_word;
   repro_hcr_lx_last_report.dispatch_address = dispatch_address;
   repro_hcr_lx_last_report.generation = site->generation;

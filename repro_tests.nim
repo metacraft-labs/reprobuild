@@ -13752,6 +13752,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim",
+    binary: "build/test-bin/t_unit_hcr_linux_claim_conflict_with_recorder_refused",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim",
     binary: "build/test-bin/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions",
     defines: @[],

@@ -756,6 +756,15 @@ integration_hcr_linux_cf_protection_sled_layout:
         tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim \
         2>&1 | tee test-logs/integration_hcr_linux_cf_protection_sled_layout.log
 
+integration_hcr_linux_claim_conflict_with_recorder_refused:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_claim_conflict_with_recorder_refused \
+        --out:build/test-bin/integration_hcr_linux_claim_conflict_with_recorder_refused \
+        tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_claim_conflict_with_recorder_refused.log
+
 unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

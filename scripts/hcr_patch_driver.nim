@@ -261,6 +261,36 @@ when defined(linux) and defined(amd64):
         "sharedLibraryPositivePath": applied.sharedLibraryPositivePath,
         "symbolGeneration": applied.symbolGeneration
       }
+      # HLX-M7 — carry the agent's CodePatchEvent report through verbatim. It is
+      # the client's only way to learn whether the recording it is sitting
+      # inside got the code-version boundary, and it gives a gate a second,
+      # independently transported copy of the digests to check the trace's
+      # against.
+      if applied.codePatchEvent.present:
+        let cpe = applied.codePatchEvent
+        report["codePatchEvent"] = %*{
+          "recorded": cpe.recorded,
+          "bridgePresent": cpe.bridgePresent,
+          "bridgeResult": cpe.bridgeResult,
+          "hashSelfTest": cpe.hashSelfTest,
+          "publicationTier": cpe.publicationTier,
+          "codeHashBefore": cpe.codeHashBefore,
+          "codeHashAfter": cpe.codeHashAfter,
+          "patchBundle": cpe.patchBundle,
+          "claimHeld": cpe.claimHeld
+        }
+        stderr.writeLine("hcr_patch_driver: codePatchEvent recorded=" &
+          $cpe.recorded & " bridgePresent=" & $cpe.bridgePresent &
+          " bridgeResult=" & $cpe.bridgeResult &
+          " tier=" & $cpe.publicationTier &
+          " before=" & cpe.codeHashBefore & " after=" & cpe.codeHashAfter)
+      if applied.skippedFunctions.len > 0:
+        var skipped = newJArray()
+        for sf in applied.skippedFunctions:
+          skipped.add(%*{"function": sf.function, "reason": sf.reason,
+                         "holder": sf.holder,
+                         "windowAddress": sf.windowAddress})
+        report["skippedFunctions"] = skipped
       stderr.writeLine("hcr_patch_driver: APPLIED " & applied.patchId &
         " entry=" & applied.entryAddress &
         " dispatch=" & applied.dispatchAddress)
@@ -276,6 +306,18 @@ when defined(linux) and defined(amd64):
         "stage": failed.stage,
         "message": failed.message
       }
+      if failed.skippedFunctions.len > 0:
+        # §10.1 — a claim conflict is reported, not swallowed. Which function,
+        # which reason, which holder.
+        var skipped = newJArray()
+        for sf in failed.skippedFunctions:
+          skipped.add(%*{"function": sf.function, "reason": sf.reason,
+                         "holder": sf.holder,
+                         "windowAddress": sf.windowAddress})
+        report["skippedFunctions"] = skipped
+        for sf in failed.skippedFunctions:
+          stderr.writeLine("hcr_patch_driver: SKIPPED " & sf.function &
+            " reason=" & sf.reason & " holder=" & $sf.holder)
       stderr.writeLine("hcr_patch_driver: REFUSED at stage '" & failed.stage &
         "': " & failed.message)
       exitCode = 2

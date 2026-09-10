@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1532,
+    "nimTestBinaries": 1533,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 575,
+    "pureUnitTests": 576,
     "staticallyDetectedRuntimeCompilerFlowTests": 93,
-    "testEntries": 1540
+    "testEntries": 1541
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1083,7 +1083,7 @@
       "graph-fixture": 12,
       "integration": 682,
       "platform/destructive": 110,
-      "pure unit": 575,
+      "pure unit": 576,
       "unclassified": 161
     },
     "graphOwnedTestArtifacts": [
@@ -1208,9 +1208,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1532,
+    "nimTestBinaryCount": 1533,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1540
+    "testEntryCount": 1541
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30706,7 +30706,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_hcr_agent_protocol.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32672,6 +32672,21 @@
       "source": "tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 20,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_unit_hcr_linux_claim_conflict_with_recorder_refused",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
