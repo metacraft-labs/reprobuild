@@ -22711,9 +22711,6 @@ proc parsePositiveIntFlag(flagName, value: string): int =
   if result <= 0:
     raise newException(ValueError, flagName & " must be greater than zero")
 
-const CodetracerHcrSupportProfile =
-  "macos-arm64-direct-hcr-in-codetracer-v1"
-
 type
   HcrWatchConfig = object
     targetName: string
@@ -22799,6 +22796,22 @@ const HostDefaultHcrSupportProfile =
   else:
     HcrLinuxX86_64DirectSupportProfile
 
+const CodetracerHcrSupportProfile* = HostDefaultHcrSupportProfile
+  ## The profile `repro hcr coordinate` and the `repro watch --hcr-*` session
+  ## negotiate with the agent.
+  ##
+  ## This was pinned to the macOS string. An agent compiled for a Linux host
+  ## advertises `linux-x86_64-elf-direct-hcr-v1` in its hello
+  ## (`defaultDirectSupportProfile`), and the session rejects a mismatch — so on
+  ## Linux the shipped CLI could not complete a negotiation at all, which is why
+  ## the Linux HCR demo needed a separate patch driver rather than this command.
+  ##
+  ## It also made the watch path disagree with itself: `defaultObjectSymbol`
+  ## already picked the object symbol from `HostDefaultHcrSupportProfile`, so on
+  ## Linux the symbol was chosen ELF-style while `objectFunctionBytes` — which
+  ## defaults to this constant — still ran the Mach-O parser over an ELF object.
+  ## Both halves now answer from the same host-derived profile.
+
 proc hcrProfileIsElf(supportProfile: string): bool =
   ## HLX-M1 (design §7.4): whether a support profile names the Linux ELF
   ## provider. The two object formats disagree about symbol naming and about
@@ -22808,7 +22821,7 @@ proc hcrProfileIsElf(supportProfile: string): bool =
   supportProfile == HcrLinuxX86_64DirectSupportProfile or
     supportProfile.startsWith("linux-")
 
-proc hcrObjectSymbolFor(supportProfile, functionName: string): string =
+proc hcrObjectSymbolFor*(supportProfile, functionName: string): string =
   ## The name a function's code is filed under in a relocatable object.
   ##
   ## Mach-O prefixes C symbols with an underscore; ELF does not. Design §7.4
@@ -22824,11 +22837,12 @@ proc hcrObjectSymbolFor(supportProfile, functionName: string): string =
 proc objectFunctionBytes(objectPath, symbolName: string;
                          supportProfile = CodetracerHcrSupportProfile):
     seq[byte] =
-  ## The default is the Mach-O profile rather than the host-derived one,
-  ## because this proc previously ALWAYS parsed Mach-O regardless of host and
-  ## its unqualified caller is the macOS watch session. Changing the default
-  ## would repoint that caller at a different parser as a side effect; callers
-  ## on the ELF path pass their profile explicitly.
+  ## The default is host-derived. It used to be the Mach-O profile outright,
+  ## which meant the unqualified caller — the watch session — parsed its object
+  ## as Mach-O on every host, while `defaultObjectSymbol` had already been
+  ## host-derived since HLX-M1 and named the symbol ELF-style on Linux. Those
+  ## two halves have to agree or the lookup is guaranteed to miss, so the
+  ## parser now follows the same profile the symbol name does.
   let graph =
     if hcrProfileIsElf(supportProfile):
       parseElfX86_64Object(objectPath)
@@ -22840,6 +22854,48 @@ proc objectFunctionBytes(objectPath, symbolName: string;
     raise newException(ValueError,
       "could not extract function bytes for " & symbolName & " from " &
         objectPath)
+
+proc hcrUnwindMetadataFor*(supportProfile, objectPath: string): seq[byte] =
+  ## The `unwindMetadataPayload` bytes a coordinator sends with a direct patch.
+  ##
+  ## Profile-conditional for the same reason `hcrObjectSymbolFor` is. Both call
+  ## sites used to send `minimalAarch64EhFrameTemplate()` unconditionally: a
+  ## synthetic AArch64 CIE/FDE, whose register numbers and CFA rules describe
+  ## neither the architecture nor the function on an x86_64 ELF host. Sending it
+  ## there is worse than sending nothing, because it is unwind data that is
+  ## wrong rather than absent.
+  ##
+  ## The ELF branch sends the patch object's OWN `.eh_frame` — real x86_64
+  ## unwind information for the very function being patched, and exactly the
+  ## input HLX-M5's first deliverable relocates. It is deliberately NOT
+  ## relocated here: adjusting the FDE `initial_location` to the live patch
+  ## address, and the `__register_frame` call that would consume the result, are
+  ## HLX-M5 (`HCR/Linux-ELF-Provider.md` §8). The Linux profile lists
+  ## `unwind-and-debugger-registration` in its `missingComponents` and the agent
+  ## leaves `registerDebugUnwind` off there, so nothing reads these bytes yet.
+  ## What this buys today is that the payload the request carries — and the
+  ## digest recorded in `patch-bundle-metadata.json` — is honest about its
+  ## architecture.
+  ##
+  ## Note the milestone forbids the obvious shortcut: HLX-M5 specifies the
+  ## compiler-generated `.eh_frame`, "not a synthetic minimal template as the
+  ## macOS path uses", so a hand-written x86_64 twin of the AArch64 template
+  ## would be building the wrong thing.
+  if not hcrProfileIsElf(supportProfile):
+    return minimalAarch64EhFrameTemplate()
+  let graph = parseElfX86_64Object(objectPath)
+  for section in graph.sections:
+    if section.name == ".eh_frame" and section.data.len > 0:
+      return section.data
+  # Refuse rather than fall back to the AArch64 template. An empty payload is
+  # rejected downstream by `requirePayloadDigest` with a message that names the
+  # field and not the cause, and the AArch64 fallback would be silently wrong,
+  # so neither substitute is better than saying what is missing.
+  raise newException(ValueError,
+    "patch object carries no .eh_frame section to send as unwind metadata: " &
+      objectPath &
+      " (an x86_64 C toolchain emits one by default; check that the patch " &
+      "target is not built with -fno-asynchronous-unwind-tables)")
 
 proc hcrWatchEnabled(config: HcrWatchConfig): bool =
   config.socketPath.len > 0 or config.artifacts.len > 0 or
@@ -23261,7 +23317,8 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
     targetSymbols = [session.metadata.targetSymbol],
     directPatchBytes = patchBytes,
     debugObjectBytes = objectBytes,
-    unwindMetadataBytes = minimalAarch64EhFrameTemplate(),
+    unwindMetadataBytes = hcrUnwindMetadataFor(
+      CodetracerHcrSupportProfile, session.newObject),
     sourceGenerationMap = [sourceGeneration])
   # Named-Targets M4 §3.4: emit ``hcr/patchCompiling`` for the SSE
   # consumer before the patch is sent to the agent. ``target`` is the
@@ -27204,7 +27261,8 @@ proc runHcrCoordinateCommand(args: seq[string]): int =
     targetSymbols = [parsed.patchFunction],
     directPatchBytes = patchBytes,
     debugObjectBytes = objectBytes,
-    unwindMetadataBytes = minimalAarch64EhFrameTemplate(),
+    unwindMetadataBytes = hcrUnwindMetadataFor(
+      CodetracerHcrSupportProfile, newObject),
     sourceGenerationMap = [sourceGeneration])
   client.sendCoordinatorMessage(connection,
     client.coordinatorPatchRequestMessage(request))

@@ -846,6 +846,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim",
+    binary: "build/test-bin/t_hcr_support_profile_follows_the_host",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim",
     binary: "build/test-bin/t_infra_apply_profile_without_live_state",
     defines: @[],
