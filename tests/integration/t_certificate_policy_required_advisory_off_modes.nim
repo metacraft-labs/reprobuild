@@ -134,7 +134,7 @@ proc wire(gitBin: string; fx: ModeFixture; mode: CertificateGateMode) =
     gateMode: mode,
     requiredTargets: @["t-unit"],
     requiredPlatforms: @[currentPlatformTag()],
-    lockDigest: "blake3:irrelevant-no-cert-attached",
+    lockRecordsDir: "",   # no lock subtree here: the generic checks decide
     registeredKeysPath: "")  # empty registry: every cert would be untrusted
   let wired = wirePushGateway(gitBin, fx.clone, fx.gatewayBare,
     fileUrl(fx.upstreamBare), cfg)
@@ -172,15 +172,16 @@ proc attachUntrustedCert(gitBin: string; fx: ModeFixture; commit: string):
   ## own bytes. This test is about whether the gate looked, not about coverage.
   var cert = TestCertificate(
     schema: testCertificateSchemaV1,
+    framework: reprobuildFrameworkId,
     project: "modes",
-    repo: "clone",
-    commit: commit,
-    lock: "blake3:irrelevant-no-cert-attached",
     platform: currentPlatformTag(),
     targets: @["t-unit"],
     issuedAt: "2026-08-27T00:00:00Z",
     issuer: "w9-modes-fixture",
     keyId: modesUnregisteredKeyId,
+    vcs: TestCertificateVcs(repo: "clone", commit: commit,
+      clean: true, untracked: false),
+    commands: @[TestCertificateCommand(argv: @["repro", "test"])],
     signature: TestCertificateSignature(
       algorithm: "ed25519",
       # Not a real signature. It never gets that far: the key id is not in the

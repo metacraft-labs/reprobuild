@@ -138,7 +138,7 @@ proc seedAndWire(gitBin: string): Fixture =
     gateMode: cgmOff,
     requiredTargets: @[],
     requiredPlatforms: @[],
-    lockDigest: "",
+    lockRecordsDir: "",
     registeredKeysPath: "")
   let wired = wirePushGateway(gitBin, result.workPath, result.gatewayBare,
     fileUrl(result.upstreamBare), cfg)

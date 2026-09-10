@@ -164,28 +164,27 @@ proc readReport(fx: Fixture): JsonNode =
   check fileExists(reportPath)
   parseFile(reportPath)
 
-proc lockDigestOf(fx: Fixture): string =
-  ## The lock digest the gate binds certs to (so a hand-built cert matches the
-  ## coverage requirement on every field EXCEPT its signature).
-  let locksRoot = fx.workspaceRoot / ".repro" / "manifests" / "locks" /
-    "lib-a" / "lib-a"
-  var lockFile = ""
-  for f in walkFiles(locksRoot / "*.toml"): lockFile = f
-  check lockFile.len > 0
-  certificateLockDigest(lockFile)
-
 proc baseCert(fx: Fixture; keyId: string): TestCertificate =
-  ## A passed cert bound to the pushed commit + lock + host platform + t-unit,
-  ## i.e. one that WOULD cover the requirement — so only the signature decides
+  ## A passed cert bound to the pushed commit + host platform + t-unit, i.e.
+  ## one that WOULD cover the requirement — so only the signature decides
   ## acceptance. ``keyId`` is set so the cert can claim a (possibly wrong) id.
+  ##
+  ## TC-7: there is no lock DIGEST to match any more. The gate resolves the
+  ## lock at ``vcs.commit`` itself, and the fixture's committed lock record is
+  ## keyed by exactly this commit, so a hand-built cert naming it passes the
+  ## framework-specific step for free — leaving the signature as the only
+  ## thing under test here, which is the point.
   TestCertificate(
     schema: testCertificateSchemaV1,
-    project: "lib-a", repo: "lib-a",
-    commit: fx.libASha, lock: lockDigestOf(fx),
+    framework: reprobuildFrameworkId,
+    project: "lib-a",
     platform: currentPlatformTag(),
     targets: @["t-unit"], result: tcrPassed,
     issuedAt: "2026-06-25T00:00:00Z",
-    issuer: "tc5-test", keyId: keyId)
+    issuer: "tc5-test", keyId: keyId,
+    vcs: TestCertificateVcs(repo: "lib-a", commit: fx.libASha,
+      clean: true, untracked: false),
+    commands: @[TestCertificateCommand(argv: @["repro", "test"])])
 
 proc gateRefuses(fx: Fixture; cert: TestCertificate; gitBin: string): bool =
   ## Attach ``cert`` to the pushed commit and assert the `required` gate
