@@ -11442,9 +11442,12 @@ proc publicDevEnvMonitor(publicCliPath: string):
   ## monitor binary.
   (selfSpawnIoMonitorPath(publicCliPath), internalIoMonitorArgs)
 
-proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
-                               extraPools: openArray[BuildPool] = []):
+proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
+                                extraPools: openArray[BuildPool] = []):
     owned(Process)
+  ## Exported on the FORWARD declaration, which is where Nim wants the marker
+  ## when a proc is declared before it is defined. See the definition for why
+  ## it is public at all.
 proc releaseAutoRunQuotaProcess*(process: var owned(Process))
 proc runQuotaBypassedByEnv(): bool
 
@@ -16406,9 +16409,13 @@ proc assembleRunquotadPoolArgs*(extraPools: openArray[BuildPool]): seq[string] =
     result.add("--pool")
     result.add(name & "=" & $seen[name])
 
-proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
-                               extraPools: openArray[BuildPool] = []):
+proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
+                                extraPools: openArray[BuildPool] = []):
     owned(Process) =
+  ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim`, which
+  ## grades DA-2's PRODUCTION WIRING rather than its mechanism: this is the one
+  ## call site that registers a trusted daemon, and a suite that registers by
+  ## hand proves the mechanism and never the wire.
   if bypassRunQuota or not autoRunQuotaEnabled():
     return nil
   # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
@@ -16596,6 +16603,63 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   result = startProcess(runquotad, args = args, options = {poUsePath})
   for _ in 0 ..< 300:
     if isRunQuotaDaemonReachable():
+      # DA-2 — DERIVED class-3 IPC trust. We spawned this daemon, so its pid is
+      # a fact this process holds rather than a claim anyone made, and
+      # `trustDaemonWeSpawned` takes the live `Process` precisely so that stays
+      # true (Dependency-Observation-Attribution.md §"Derived beats declared").
+      #
+      # WHICH BRANCH OF §Class 3, and it is branch (a): `runquotad` CONTRIBUTES
+      # NO CONTENT to any action. Its protocol is Hello / Acquire / Grant /
+      # Release plus the stats-extension rows — lease decisions and telemetry.
+      # It opens no file on a client's behalf and returns no bytes that can
+      # reach an action's output, so a monitored process talking to it has
+      # consumed nothing the monitor failed to see. It is NOT branch (b): it
+      # serves no content at all, keyed or otherwise.
+      #
+      # Registered only on the arm that SPAWNED it. The two early returns above
+      # — `RUNQUOTA_SOCKET` already serviced, and a daemon a previous build left
+      # running — reuse a daemon this process did not start, and this milestone
+      # trusts nothing it did not spawn. Trusting a reachable daemon by name or
+      # by socket is DECLARED attribution and belongs to DA-4, which owes it a
+      # check.
+      #
+      # WHAT THAT COSTS, STATED HERE BECAUSE HERE IS WHERE AN OPERATOR MEETS
+      # IT. Spawn-only is a real constraint and not a formality; DA-2's reach
+      # on a given host is exactly the set of builds that take THIS branch:
+      #
+      #   * LINUX, unprovisioned host: every top-level `repro build` spawns,
+      #     because the socket is per-PID (`reprobuild-runquota-<pid>`) and
+      #     `releaseAutoRunQuotaProcess` terminates and reaps the daemon at end
+      #     of build. DA-2 is live on every such build — and this is the ONLY
+      #     topology on which it is.
+      #   * macOS: INERT, spawn arm or not. Reaching this line is not the same
+      #     as registering: `trustDaemonWeSpawned` refuses a peer it cannot
+      #     re-validate, and `processStartIdentity` is `when defined(linux)`
+      #     with `""` on every other host. So the call below runs and stores
+      #     nothing. That is the conservative direction — an unre-validatable
+      #     pid must not exempt anything (see `TrustedDaemonPeer.identity`) —
+      #     but it means "POSIX" is the wrong granularity for DA-2's reach and
+      #     macOS gets today's behaviour until it grows an identity source.
+      #   * POSIX, provisioned host: `runquota_ipc.defaultEndpoint` resolves to
+      #     the FIXED host-wide socket (`/run/runquota/runquotad.sock` on
+      #     Linux, `/var/run/...` on macOS), so a host running the shipped unit
+      #     is reachable before we get here, the second early return fires, and
+      #     DA-2 is ENTIRELY INERT — on precisely the topology a shared lease
+      #     coordinator exists for. So is a nested `repro` that inherited
+      #     `RUNQUOTA_SOCKET` from its parent.
+      #   * Windows: INERT AFTER THE FIRST BUILD. The daemon binds the per-user
+      #     default pipe and `releaseAutoRunQuotaProcess` deliberately does not
+      #     terminate it (a concurrent invocation may have adopted it), so
+      #     build #2 onward finds it reachable and registers nothing.
+      #
+      # None of that is a defect in this branch; adopting a daemon this process
+      # did not spawn is declared attribution, and the check it needs is DA-4.
+      # It is written down so nobody reads "reprobuild trusts runquotad" as a
+      # claim about every build on every host.
+      #
+      # `t_derived_daemon_ipc_trust.nim` grades both halves of this: that the
+      # spawn arm registers, and that the warm arm provably does not.
+      trustDaemonWeSpawned(result, "runquotad", tdcNoContent)
       return
     if not result.running:
       break

@@ -70,6 +70,19 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
+proc procBody(src, signaturePrefix: string): string =
+  ## The source text of the FIRST proc in ``src`` whose declaration starts with
+  ## ``signaturePrefix``, from the line after its signature up to the next
+  ## top-level ``proc``. Returns "" when there is no such proc, so a caller that
+  ## searches the result cannot mistake "the proc is gone" for "the proc is
+  ## there and does not contain X".
+  let start = src.find(signaturePrefix)
+  if start < 0:
+    return ""
+  let bodyStart = src.find('\n', start) + 1
+  let bodyEnd = src.find("\nproc ", bodyStart)
+  if bodyEnd < 0: src.substr(bodyStart) else: src.substr(bodyStart, bodyEnd - 1)
+
 # ---------------------------------------------------------------------------
 # Local copies of the two ``addUnique`` overloads. These mirror the engine's
 # definitions in ``libs/repro_build_engine/src/repro_build_engine.nim`` so the
@@ -168,14 +181,8 @@ suite "Deferred-D4: collectEvidence aggregation scales linearly":
     # same ``EvidenceSeenSets`` through it, so scan both bodies and assert
     # NONE of the calls of the form ``evidence.monitorReads.addUnique(path)``
     # (the legacy single-arg shape) remain.
-    let collectStart = src.find("proc collectEvidence(")
-    check collectStart >= 0
-    # Find the end of collectEvidence — first ``\nproc `` after the body.
-    let bodyStart = src.find('\n', collectStart) + 1
-    let collectEnd = src.find("\nproc ", bodyStart)
-    let collectBody =
-      if collectEnd < 0: src.substr(bodyStart)
-      else: src.substr(bodyStart, collectEnd - 1)
+    let collectBody = procBody(src, "proc collectEvidence(")
+    check collectBody.len > 0
     check "foldMonitorDepFileEvidence(action.monitorDepfile" in collectBody
     check "action.cwd, result.evidence, seen" in collectBody
 
@@ -187,25 +194,31 @@ suite "Deferred-D4: collectEvidence aggregation scales linearly":
     # this case is about is therefore the shared one, and the two delegations
     # are pinned below so a future edit cannot re-grow a second copy of the
     # rules with its own ``addUnique`` shape.
-    check "foldOneMonitorRecord(record, cwd, evidence, seen, result)" in src
-    let foldStart = src.find("proc foldOneMonitorRecord(")
-    check foldStart >= 0
-    let foldBodyStart = src.find('\n', foldStart) + 1
-    let foldEnd = src.find("\nproc ", foldBodyStart)
-    let foldBody =
-      if foldEnd < 0: src.substr(foldBodyStart)
-      else: src.substr(foldBodyStart, foldEnd - 1)
+    #
+    # PINNED AS THE PROPERTY, NOT AS AN ARGUMENT LIST. This audit used to
+    # assert the literal ``foldOneMonitorRecord(record, cwd, evidence, seen,
+    # result)``, and DA-2 reddened it by giving the fold a sixth parameter —
+    # an edit that left the subject (one shared implementation, both entry
+    # points delegating) entirely intact. The exact arity was never what this
+    # case is about, so what is asserted now is the delegation itself: each
+    # entry point calls the shared fold on its loop variable, and neither
+    # carries a copy of the rules. The fold's signature is free to grow.
+    const FoldDelegation = "foldOneMonitorRecord(record"
+    let foldBody = procBody(src, "proc foldOneMonitorRecord(")
+    check foldBody.len > 0
 
-    # The records-based entry point must DELEGATE rather than reimplement.
-    let recordsStart = src.find("proc foldMonitorRecordsEvidence*(")
-    check recordsStart >= 0
-    let recordsBodyStart = src.find('\n', recordsStart) + 1
-    let recordsEnd = src.find("\nproc ", recordsBodyStart)
-    let recordsBody =
-      if recordsEnd < 0: src.substr(recordsBodyStart)
-      else: src.substr(recordsBodyStart, recordsEnd - 1)
-    check "foldOneMonitorRecord(record, cwd, evidence, seen, result)" in
-      recordsBody
+    # BOTH entry points must DELEGATE rather than reimplement. Graded on both
+    # rather than on "somewhere in the file" because the file is where a second
+    # copy of the rules would be re-grown, and a whole-source search cannot
+    # tell one delegation from two.
+    let depfileBody = procBody(src, "proc foldMonitorDepFileEvidence*(")
+    check depfileBody.len > 0
+    check FoldDelegation in depfileBody
+    check not ("monitorReads.addUnique(path)" in depfileBody)
+
+    let recordsBody = procBody(src, "proc foldMonitorRecordsEvidence*(")
+    check recordsBody.len > 0
+    check FoldDelegation in recordsBody
     check not ("monitorReads.addUnique(path)" in recordsBody)
 
     # The legacy shape on the evidence fields would be e.g.

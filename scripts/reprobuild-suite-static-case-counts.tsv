@@ -979,6 +979,7 @@ tests/integration/t_declared_platforms_change_no_existing_resolution.nim	nim	1
 tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim	nim	3
 tests/integration/t_default_target_floor_is_conservative.nim	nim	7
 tests/integration/t_dependency_report_and_converter_paths.nim	nim	1
+tests/integration/t_derived_daemon_ipc_trust.nim	nim	10
 tests/integration/t_dev_env_allow.nim	nim	1
 tests/integration/t_dev_env_artifact.nim	nim	2
 tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	nim	4

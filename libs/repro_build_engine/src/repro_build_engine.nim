@@ -3658,6 +3658,249 @@ proc benignRawSyscallLoss*(detail: string): bool =
       return false
     return number in BenignRawSyscallNumbers
   false
+
+# ---------------------------------------------------------------------------
+# DA-2 — DERIVED IPC trust: the daemons THIS PROCESS spawned
+# (Dependency-Observation-Attribution.md §Class 3, §"Derived beats declared";
+#  Dependency-Attribution.milestones.org DA-2)
+# ---------------------------------------------------------------------------
+#
+# THE SYMPTOM. An action that opens an IPC channel to a process outside its own
+# monitored tree is graded `mcIncomplete`, so it never publishes a cache entry
+# and rebuilds forever. io-mon already has the mechanism —
+# `unmonitoredSubtreeLossDetails(records, trustedPeerPids)`, whose own comment
+# describes a trusted peer as "a daemon that accounted for its own"
+# contribution — and reprobuild passed an empty set, which is why the symptom
+# was total rather than occasional.
+#
+# WHAT MAY BE TRUSTED, AND ONLY THAT. §Class 3 admits exactly two branches, and
+# a daemon that satisfies NEITHER does not belong in the set however convenient:
+#
+#   (a) the peer contributes NO CONTENT to the action, or
+#   (b) the peer serves CLASS-1 content — content-addressed bytes whose
+#       identity is already in the action key by construction.
+#
+# WHY THE TRUST IS DERIVED AND NOT DECLARED. §"Derived beats declared": the
+# engine SPAWNED the daemon, so it knows the pid as a fact rather than as
+# someone's claim, and derived attribution cannot lie. That is why DA-2 lands
+# before DA-4's declared trust, and it is why THERE IS NO CONFIGURATION FIELD,
+# NO ALLOWLIST AND NO RECIPE SURFACE here: a `BuildEngineConfig` field naming a
+# pid would be a declaration, and a declaration needs a check (rule 5) that this
+# milestone deliberately does not build. The registry's only production writer
+# is `trustDaemonWeSpawned`, whose argument is an `osproc.Process` — a value a
+# caller can only hold by having spawned the process it names.
+#
+# SPAWN-ONLY IS A NARROW REACH, NOT A FORMALITY, and this file is the wrong
+# place to learn how narrow: the answer depends on how the host is provisioned,
+# so it is written at the ONE production registration site, in
+# `repro_cli_support.startAutoRunQuotaIfNeeded`. Read it there before treating
+# "reprobuild trusts runquotad" as a statement about any given build.
+#
+# AND THE PID IS RE-VALIDATED, so a RECYCLED pid cannot inherit trust. A bare
+# pid is not an identity: a daemon that dies frees its number for the next
+# process on the host, and on Linux the shim stamps NO `peerstart` token on
+# `mrIpcConnect` (only macOS does), so io-mon's own (pid, start-time) test
+# degrades to the bare pid for this record kind and cannot make the distinction
+# for us. `TrustedDaemonPeer.identity` therefore carries the kernel's own answer
+# — field 22 (`starttime`) of `/proc/<pid>/stat`, read AT REGISTRATION — and
+# `revalidatedTrustedDaemons` re-reads it at grading time, on the way into the
+# per-action attribution. A pid whose identity has changed, or whose process is
+# gone, is dropped before it can exempt anything.
+
+type
+  TrustedDaemonContribution* = enum
+    ## Which branch of §Class 3 a trusted daemon satisfies. Stated per daemon,
+    ## at the spawn site, so the justification travels with the pid instead of
+    ## living in a comment somewhere else.
+    tdcNoContent
+      ## Branch (a) — the peer contributes NO CONTENT to the action. Its side of
+      ## the conversation is a decision or a measurement, never bytes that reach
+      ## the action's output. `runquotad` is this case: it grants, queues and
+      ## releases leases and accepts telemetry rows, and it never serves file
+      ## content to a client (`runquota` protocol: Hello/Acquire/Grant/Release +
+      ## the stats extension rows).
+    tdcContentAlreadyKeyed
+      ## Branch (b) — the peer serves CLASS-1 content: content-addressed blobs
+      ## whose identity is already in the action key by construction, so
+      ## monitoring the transfer re-derives what the key structurally
+      ## guarantees. The repro store daemon is this case.
+
+  TrustedDaemonPeer* = object
+    ## One derived trust fact. Public fields so a test can drive
+    ## `revalidatedTrustedDaemons` with a hand-built value (which is how the
+    ## recycled-pid rejection is graded); the REGISTRY that production reads is
+    ## writable only through `trustDaemonWeSpawned`.
+    pid*: int
+    identity*: string
+      ## `/proc/<pid>/stat` field 22 at registration time, or "" where the host
+      ## cannot supply one. An empty identity means "no re-validation is
+      ## possible", which is treated as NOT trustworthy — the conservative
+      ## direction, and the one that keeps a non-Linux host at today's
+      ## behaviour instead of silently widening trust there.
+    name*: string
+    contribution*: TrustedDaemonContribution
+
+proc processStartIdentity*(pid: int): string =
+  ## The kernel's identity for a live pid: field 22 (`starttime`) of
+  ## `/proc/<pid>/stat`, in clock ticks since boot. Empty when the process does
+  ## not exist or the host does not publish it.
+  ##
+  ## Field 22 is read by counting from the END of the line, not from the start:
+  ## field 2 is `comm` in parentheses and may itself contain spaces and
+  ## parentheses (`(sh -c "a b")`), so a left-to-right split miscounts for a
+  ## process whose name is adversarial. Everything after the closing `)` is
+  ## whitespace-separated and fixed-arity, and `starttime` is the 20th of those,
+  ## so the parse is anchored on `rfind(')')`.
+  if pid <= 0:
+    return ""
+  when defined(linux):
+    let statPath = "/proc/" & $pid & "/stat"
+    var raw = ""
+    try:
+      if not fileExists(statPath):
+        return ""
+      raw = readFile(statPath)
+    except CatchableError:
+      return ""
+    let close = raw.rfind(')')
+    if close < 0:
+      return ""
+    let fields = raw[close + 1 .. ^1].splitWhitespace()
+    # After `)` the fields are state(3) .. starttime(22): index 19 zero-based.
+    if fields.len <= 19:
+      return ""
+    fields[19]
+  else:
+    ""
+
+var derivedTrustedDaemons: seq[TrustedDaemonPeer]
+  ## The daemons THIS PROCESS spawned. A process-global rather than a
+  ## `BuildEngineConfig` field on purpose — see the header above: config is a
+  ## declaration surface and this milestone has none. It is written before a
+  ## build starts and read on the scheduler thread; the worker pool never
+  ## touches it.
+
+proc trustDaemonWeSpawned*(process: Process; name: string;
+                           contribution: TrustedDaemonContribution) =
+  ## Register a daemon THIS PROCESS SPAWNED as a class-3 trusted IPC peer.
+  ##
+  ## The parameter is the live `Process` and not a bare pid, because that is the
+  ## whole soundness argument in one type: a caller can only hold this value by
+  ## having started the process, so "trust a daemon of the right name that
+  ## someone else started" is not a call that can be written. Holding it also
+  ## means the child has not been reaped, so the kernel will not hand its pid to
+  ## anyone else while the registration is live — and `revalidatedTrustedDaemons`
+  ## re-checks the identity anyway for the case where it has been.
+  let pid = processID(process)
+  if pid <= 0:
+    return
+  let identity = processStartIdentity(pid)
+  if identity.len == 0:
+    # No re-validatable identity ⇒ no trust. See `TrustedDaemonPeer.identity`.
+    return
+  for existing in derivedTrustedDaemons:
+    if existing.pid == pid and existing.identity == identity:
+      return
+  derivedTrustedDaemons.add(TrustedDaemonPeer(pid: pid, identity: identity,
+    name: name, contribution: contribution))
+
+proc forgetDerivedTrustedDaemons*() =
+  ## Drop every registration. For test isolation, and for a caller that has
+  ## torn its daemons down.
+  derivedTrustedDaemons.setLen(0)
+
+proc derivedTrustedDaemonRegistry*(): seq[TrustedDaemonPeer] =
+  derivedTrustedDaemons
+
+proc revalidatedTrustedDaemons*(peers: openArray[TrustedDaemonPeer]):
+    seq[TrustedDaemonPeer] =
+  ## The subset of `peers` the kernel still agrees with — asked RIGHT NOW,
+  ## not at registration. A registration whose process has exited, or whose pid
+  ## has been recycled onto a different process, contributes nothing.
+  ##
+  ## Returns the FACTS and not just the pids because rule 3 needs the `name`
+  ## and the `contribution` at the point an exemption is granted: a diagnostic
+  ## that cannot name the daemon it forgave, and cannot say which §Class 3
+  ## branch let it, has counted the exemption without naming it.
+  result = @[]
+  for peer in peers:
+    if peer.pid <= 0 or peer.identity.len == 0:
+      continue
+    if processStartIdentity(peer.pid) != peer.identity:
+      continue
+    result.add(peer)
+
+const
+  UnmonitoredSubtreeLossDetailPrefix* =
+    "unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a " &
+    "hardened image, or IPC connect to an out-of-tree breakaway daemon): "
+      ## The EXACT text io-mon's `mergeFragments` prepends to each entry
+      ## `unmonitoredSubtreeLossDetails` returned (io-mon writer.nim). Matched
+      ## exactly, not by a `find(": ")`: a shape this code has not reasoned
+      ## about must fall through to the unchanged Level-2 classification rather
+      ## than be parsed on a guess.
+  IpcPeerLossDetailPrefix* = "ipc peer outside monitored tree "
+      ## The (c) arm's own prefix, inside the wrapper above. The (a) spawn arm
+      ## and the (b) exec arm are NOT attributable by a peer pid and are never
+      ## considered here.
+
+type
+  MonitorPeerAttribution* = object
+    ## The per-action state DA-2's attribution needs, carried through the fold.
+    ##
+    ## WHY THE FOLD CANNOT ANSWER PER RECORD. io-mon's exemption is
+    ## `peer != 0 and not duplicatePeerStart and (childIsMonitored(…) or
+    ## peer in trustedPeerPids)` — quoted whole because the `childIsMonitored`
+    ## disjunct is what makes the recomputation below CONSERVATIVE rather than
+    ## merely different: it needs `mrProcessStart` records the buffer does not
+    ## carry, so the recomputation exempts strictly LESS than io-mon did, and
+    ## `duplicatePeerStart` — a shim identity token appearing twice, which io-mon
+    ## treats as attacker-controlled evidence that must fail CLOSED — is NOT
+    ## recoverable from the loss text: `trustedDetailToken` returns "" for a
+    ## duplicated token, which is also what a Linux record with no token at all
+    ## produces. So the decision is deferred to the end of the fold and taken by
+    ## re-running io-mon's OWN function over the `mrIpcConnect` records that
+    ## produced the losses — twice, with and without the trust set, because the
+    ## recomputation is not exact and only the DIFFERENCE between those two
+    ## answers is attributable to the trust. See `resolvePeerAttribution`, which
+    ## states both divergences. There is exactly one implementation of the
+    ## exemption rule and it is io-mon's.
+    trusted: HashSet[uint64]
+    peers: Table[uint64, TrustedDaemonPeer]
+      ## The same trust facts keyed by pid, so an exemption can be NAMED and
+      ## not merely counted (rule 3). io-mon's loss text identifies the peer by
+      ## a bare pid — on Linux `recordIpcConnect` never sets `record.path` for
+      ## an AF_UNIX connect, so the pid is the ONLY identifier in it — and a
+      ## build log saying "peer 21894 was forgiven" tells an operator neither
+      ## which daemon that was nor why it was allowed to be.
+    ipcRecords: seq[MonitorRecord]
+      ## The `mrIpcConnect` records, and nothing else. Buffering the whole
+      ## record stream would defeat `foldMonitorDepFileEvidence`'s streaming
+      ## read (a real `nim c` capture is 124k records); these are a handful per
+      ## action. The (a)/(b) arms need spawn/exec records this deliberately does
+      ## NOT collect, which is exactly why the comparison below is scoped to the
+      ## (c) arm — an entry from either other arm is not in the recomputation
+      ## and must never be treated as attributed.
+    pendingIpcLosses: seq[string]
+    attributed*: int
+      ## Rule 3 — every exemption is counted, so a daemon that turns out not to
+      ## deserve trust leaves a number behind rather than nothing.
+
+proc initMonitorPeerAttribution*(peers: openArray[TrustedDaemonPeer]):
+    MonitorPeerAttribution =
+  ## Build one action's attribution state from trust FACTS, re-validating each
+  ## against the kernel on the way in. Takes the facts rather than a bare pid
+  ## set because both consumers need them: io-mon's parameter wants the pids,
+  ## and the rule-3 diagnostic wants the name and the §Class 3 branch.
+  result.trusted = initHashSet[uint64]()
+  result.peers = initTable[uint64, TrustedDaemonPeer]()
+  for peer in revalidatedTrustedDaemons(peers):
+    result.trusted.incl(uint64(peer.pid))
+    result.peers[uint64(peer.pid)] = peer
+
+proc trustsAnyPeer(attribution: MonitorPeerAttribution): bool =
+  attribution.trusted.len > 0
+
 proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
   ##
@@ -3778,10 +4021,185 @@ const FailedExecDetailToken = "execstatus=failed"
   ## site; a rename there silently turns absent paths into cache inputs here,
   ## which `t_executed_binary_is_a_recorded_input.nim` pins.
 
+proc ipcPeerLossText(detail: string): string =
+  ## The io-mon (c)-arm loss text inside an injected `mrEventLoss` detail, or ""
+  ## when this record is not one. Exact prefixes only — see their declarations.
+  if not detail.startsWith(UnmonitoredSubtreeLossDetailPrefix):
+    return ""
+  let inner = detail[UnmonitoredSubtreeLossDetailPrefix.len .. ^1]
+  if not inner.startsWith(IpcPeerLossDetailPrefix):
+    return ""
+  inner
+
+type
+  IpcPeerLossIdentity = object
+    ## What a (c)-arm loss text identifies, parsed back out of it.
+    key: string
+      ## io-mon's OWN dedup key for the record that produced the text, or ""
+      ## when the text does not parse. See `ipcPeerLossIdentity`.
+    peer: uint64
+      ## The peer pid the text names, 0 for an unknown (INET) peer.
+
+proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
+  ## Recover io-mon's dedup key, and the peer pid, from a (c)-arm loss text.
+  ##
+  ## WHY THE KEY AND NOT THE TEXT. `unmonitoredSubtreeLossDetails` keys each
+  ## (c) entry on `"pid:" & $peer & "@" & peerStart` when the peer pid is known
+  ## and on `"dest:" & r.path` when it is not, and emits the text of the FIRST
+  ## NON-EXEMPT record per key. Two records that share a key are therefore
+  ## INTERCHANGEABLE in the output: which one's text appears depends on which
+  ## of them was exempt, which differs between io-mon's run and the engine's
+  ## recomputation. The key is the part that is stable across both, so the key
+  ## is what may be compared. Everything else in the text — the CLIENT pid, the
+  ## socket path — belongs to whichever record happened to be first.
+  ##
+  ## io-mon emits `"ipc peer outside monitored tree pid=<osPid> peer=<peer> " &
+  ## "peerstart=<peerStart> path=<path>"`. `pid`, `peer` and `peerstart` are
+  ## whitespace-free decimal tokens, so the first occurrence of each separator
+  ## is the real one; `path` is last and may contain anything.
+  result = IpcPeerLossIdentity(key: "", peer: 0)
+  if not loss.startsWith(IpcPeerLossDetailPrefix):
+    return
+  let rest = loss[IpcPeerLossDetailPrefix.len .. ^1]
+  const
+    PeerSep = " peer="
+    PeerStartSep = " peerstart="
+    PathSep = " path="
+  let peerAt = rest.find(PeerSep)
+  let startAt = rest.find(PeerStartSep)
+  let pathAt = rest.find(PathSep)
+  if peerAt < 0 or startAt < 0 or pathAt < 0:
+    return
+  if not (peerAt < startAt and startAt < pathAt):
+    return
+  let peerText = rest[peerAt + PeerSep.len ..< startAt]
+  let peerStart = rest[startAt + PeerStartSep.len ..< pathAt]
+  let path = rest[pathAt + PathSep.len .. ^1]
+  if peerText.len == 0:
+    return
+  var peer: uint64 = 0
+  for ch in peerText:
+    if ch notin {'0' .. '9'}:
+      return
+    peer = peer * 10 + uint64(ord(ch) - ord('0'))
+  result.peer = peer
+  result.key =
+    if peer != 0: "pid:" & peerText & "@" & peerStart
+    else: "dest:" & path
+
+proc class3BranchText(contribution: TrustedDaemonContribution): string =
+  ## The §Class 3 branch a trusted daemon satisfies, in the words the operator
+  ## reading a build log needs — "why was this allowed to be forgiven".
+  case contribution
+  of tdcNoContent:
+    "branch (a), contributes no content to the action"
+  of tdcContentAlreadyKeyed:
+    "branch (b), serves class-1 content already in the action key"
+
+proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
+                            evidence: var PathSetEvidence;
+                            status: var MonitorEvidenceStatus) =
+  ## DA-2 — decide each deferred IPC-peer loss, by asking io-mon TWICE.
+  ##
+  ## THE RECOMPUTATION IS NOT EXACT, which is what this shape is built around.
+  ## It sees only the buffered `mrIpcConnect` records, so it differs from the
+  ## run that produced the losses in two MEASURED ways, both of them
+  ## fail-OPEN under a "was this text still returned?" test:
+  ##
+  ##   1. THE RECORDS MAY NOT BE THERE AT ALL. `unmonitoredSubtreeLossDetails`
+  ##      over an empty record set returns an empty seq, so an absent-text test
+  ##      forgives EVERYTHING. Unreachable while `monitorInterest` returns
+  ##      `FullInterest` unconditionally — but `DependencyGatheringPolicy`
+  ##      already carries a `captureIpc` switch, and narrowing it would silently
+  ##      turn this into a blanket exemption.
+  ##   2. THE DEDUP KEY CAN BE CLAIMED BY A DIFFERENT RECORD. io-mon emits the
+  ##      text of the first NON-EXEMPT record per key. Without `mrProcessStart`
+  ##      records nothing looks in-tree here, so a record io-mon exempted as
+  ##      in-tree is flagged by the recomputation and can claim the key FIRST,
+  ##      with its own (different) text — and the loss that io-mon actually
+  ##      emitted for that key then reads as "no longer returned". The earlier
+  ##      claim that "a trusted peer's key is `pid:<peer>@…` and the entries it
+  ##      could suppress are its own" does not cover this: the colliding record
+  ##      need not belong to a trusted peer, and the trust set need not be
+  ##      involved at all.
+  ##
+  ## SO THE QUESTION IS ASKED AS A DIFFERENCE, NOT AS AN ABSENCE. io-mon's own
+  ## function is run over the SAME buffered records twice — once with NO trust
+  ## and once with this action's trust set — and a deferred loss is forgiven
+  ## only when its dedup key is in the FIRST answer and not in the second. That
+  ## reads as: *these records account for this loss, and the trust set is what
+  ## removed it.* Both divergences fall closed under it. An absent record is in
+  ## neither answer, so the key is not in the difference and the loss
+  ## downgrades. A collided key is in BOTH answers — the colliding record is
+  ## still flagged in the second — so it is not in the difference either.
+  ## Comparing keys is also strictly more conservative than comparing texts:
+  ## a text present in the second answer implies its key is, so nothing that
+  ## the old test downgraded is forgiven by this one.
+  ##
+  ## The no-trust run is not a guess at what io-mon did: with no
+  ## `mrProcessStart` records and an empty trust set NOTHING is exempt, so it
+  ## enumerates exactly the dedup keys the buffered records can account for,
+  ## computed by io-mon's dedup rather than by a reimplementation of it here.
+  ##
+  ## AN EXEMPTION THAT CANNOT BE NAMED IS NOT GRANTED (rule 3). The diagnostic
+  ## carries the daemon's name and the §Class 3 branch it satisfies, and the
+  ## lookup that supplies them is on the FORGIVING path: a key whose peer pid is
+  ## not a registered daemon downgrades instead of being forgiven anonymously.
+  ## In practice the lookup cannot fail — the key was removed by the trust set,
+  ## so its peer is in that set — which is what makes failing closed there free.
+  ##
+  ## AND CLASS 4 IS NOT REACHABLE FROM HERE. `SO_PEERCRED` yields a pid for
+  ## AF_UNIX and 0 for INET (io-mon `recordIpcConnect`), and io-mon's exemption
+  ## requires `peer != 0`. A network peer is therefore unattributable and stays
+  ## unattributable no matter what this set contains — rule 4, held by io-mon's
+  ## code rather than restated here. Its `dest:<path>` key is in both answers.
+  ##
+  ## ONE CAPTURE PER CALL. `collectEvidence` reuses a single
+  ## `MonitorPeerAttribution` across the recognized-`.iomon`-report loop (one
+  ## fold per resolved report path) and the wrapped/hosted monitor fold, so the
+  ## buffers are cleared here. Each capture is a separate monitored run and must
+  ## be resolved against its OWN `mrIpcConnect` records; carrying them forward
+  ## would let one capture's peers forgive another's losses, and would re-grade
+  ## losses already decided. `attributed` deliberately does NOT reset — it is
+  ## the per-action count.
+  if attribution.pendingIpcLosses.len == 0:
+    attribution.ipcRecords.setLen(0)
+    return
+  var accountedKeys = initHashSet[string]()
+  for loss in unmonitoredSubtreeLossDetails(attribution.ipcRecords,
+      initHashSet[uint64]()):
+    let identity = ipcPeerLossIdentity(loss)
+    if identity.key.len > 0:
+      accountedKeys.incl(identity.key)
+  var remainingKeys = initHashSet[string]()
+  for loss in unmonitoredSubtreeLossDetails(attribution.ipcRecords,
+      attribution.trusted):
+    let identity = ipcPeerLossIdentity(loss)
+    if identity.key.len > 0:
+      remainingKeys.incl(identity.key)
+  for loss in attribution.pendingIpcLosses:
+    let identity = ipcPeerLossIdentity(loss)
+    let removedByTrust = identity.key.len > 0 and
+      identity.key in accountedKeys and identity.key notin remainingKeys
+    if not removedByTrust or identity.peer notin attribution.peers:
+      status = worseMonitorStatus(status, mesUnknownScopeLoss)
+    else:
+      let peer = attribution.peers[identity.peer]
+      inc attribution.attributed
+      evidence.diagnostics.add(
+        "ipc peer attributed to daemon '" & peer.name & "' (pid " &
+        $peer.pid & "), spawned by this process — " &
+        "Dependency-Observation-Attribution.md §Class 3 " &
+        class3BranchText(peer.contribution) &
+        " (DA-2); forgave: " & loss)
+  attribution.pendingIpcLosses.setLen(0)
+  attribution.ipcRecords.setLen(0)
+
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
                           seen: var EvidenceSeenSets;
-                          status: var MonitorEvidenceStatus) =
+                          status: var MonitorEvidenceStatus;
+                          attribution: var MonitorPeerAttribution) =
   ## Fold ONE decoded iomon record into the engine's path-set evidence.
   ##
   ## THE ONE IMPLEMENTATION OF THE FOLDING RULES, deliberately. Since HM-5
@@ -3793,14 +4211,35 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   ## means, silently, in the dependency set. So the decode and the fold are
   ## separated here and the fold is shared.
 
+  # DA-2 — the `mrIpcConnect` records are what io-mon's (c)-arm loss text is
+  # DERIVED FROM, so they are what `resolvePeerAttribution` re-asks io-mon
+  # about. Collected only when this action has a trusted peer at all, so an
+  # ordinary build buffers nothing.
+  if record.kind == mrIpcConnect and attribution.trustsAnyPeer():
+    attribution.ipcRecords.add(record)
+
   if record.kind == mrEventLoss or record.observationKind == moEventLoss:
     # M9.R.72.3 — classify the loss instead of collapsing to a bool.
     # ``classifyEventLossDetail`` maps io-mon's detail strings to Level
     # 1 (known scope) or Level 2 (unknown scope); ``worseMonitorStatus``
     # keeps the worst observed level across the whole depfile so the
     # caller can decide session cache-skip vs hard-fail conservatively.
-    let recordStatus = classifyEventLossDetail(record.detail)
-    status = worseMonitorStatus(status, recordStatus)
+    #
+    # DA-2 — one shape is DEFERRED rather than classified here: an IPC-peer
+    # loss, when this action has a derived trusted peer. The decision needs the
+    # `mrIpcConnect` records, which are still arriving, so it is taken in
+    # `resolvePeerAttribution` at the end of the fold. Nothing is suppressed:
+    # the record stays in the `.iomon` on disk and its loss text is carried
+    # here, so a peer that turns out NOT to be trusted downgrades exactly as it
+    # does today (attribution, not suppression —
+    # Dependency-Observation-Attribution.md §"Attribution, not suppression").
+    let ipcLoss =
+      if attribution.trustsAnyPeer(): ipcPeerLossText(record.detail) else: ""
+    if ipcLoss.len > 0:
+      attribution.pendingIpcLosses.add(ipcLoss)
+    else:
+      let recordStatus = classifyEventLossDetail(record.detail)
+      status = worseMonitorStatus(status, recordStatus)
   elif record.kind == mrBackendProfile and
       not monitorProfileEvidenceComplete(record.detail):
     status = worseMonitorStatus(status, mesUnknownScopeLoss)
@@ -4002,7 +4441,8 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
 
 proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
-                                 seen: var EvidenceSeenSets):
+                                 seen: var EvidenceSeenSets;
+                                 attribution: var MonitorPeerAttribution):
                                  MonitorEvidenceStatus =
   ## Fold depfile records directly into build-engine evidence.
   ##
@@ -4029,15 +4469,44 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   ## from Level 2 (unknown-scope, disable cache hits) from Level 0 (complete).
   ## Level 3 (monitor entirely unavailable) is asserted at ``collectEvidence``
   ## when the ``monitorDepfile`` path itself is empty.
+  ##
+  ## DA-2 — `attribution` carries the derived trusted-daemon pid set (empty for
+  ## every pre-existing caller, which is exactly today's behaviour) and comes
+  ## back carrying how many IPC-peer losses it attributed.
+  ##
+  ## A READ THAT RAISES MUST NOT LEAVE ITS BUFFERS FOR THE NEXT CAPTURE.
+  ## `collectEvidence` reuses ONE `MonitorPeerAttribution` across the
+  ## recognized-report loop and catches `MonitorDepFileReaderError` PER RESOLVED
+  ## PATH, so a truncated capture would otherwise hand its undecided losses to
+  ## the next capture's records — the exact carry-forward `resolvePeerAttribution`
+  ## says must not happen, reached by the one path that skips it. Dropping them
+  ## is the conservative direction and not a lost downgrade: the caller grades a
+  ## read failure as `mesMonitorUnavailable` and refuses the publish, which is
+  ## strictly worse than the `mesUnknownScopeLoss` the deferred losses carried.
   result = mesComplete
-  for record in streamMonitorDepFileRecords(path,
-      defaultMonitorDepFileReaderOptions()):
-    foldOneMonitorRecord(record, cwd, evidence, seen, result)
+  try:
+    for record in streamMonitorDepFileRecords(path,
+        defaultMonitorDepFileReaderOptions()):
+      foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
+  except CatchableError:
+    attribution.pendingIpcLosses.setLen(0)
+    attribution.ipcRecords.setLen(0)
+    raise
+  resolvePeerAttribution(attribution, evidence, result)
+
+proc foldMonitorDepFileEvidence*(path, cwd: string;
+                                 evidence: var PathSetEvidence;
+                                 seen: var EvidenceSeenSets):
+                                 MonitorEvidenceStatus =
+  ## Trust nothing — the four-argument form every caller predating DA-2 uses.
+  var attribution = initMonitorPeerAttribution([])
+  foldMonitorDepFileEvidence(path, cwd, evidence, seen, attribution)
 
 proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
                                  cwd: string;
                                  evidence: var PathSetEvidence;
-                                 seen: var EvidenceSeenSets):
+                                 seen: var EvidenceSeenSets;
+                                 attribution: var MonitorPeerAttribution):
                                  MonitorEvidenceStatus =
   ## In-Process-Monitor-Hosting HM-5 — the same fold, over records the engine
   ## ALREADY HAS instead of over a file it has to read back.
@@ -4067,7 +4536,17 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   ## depfile" rule is unchanged.
   result = mesComplete
   for record in records:
-    foldOneMonitorRecord(record, cwd, evidence, seen, result)
+    foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
+  resolvePeerAttribution(attribution, evidence, result)
+
+proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
+                                 cwd: string;
+                                 evidence: var PathSetEvidence;
+                                 seen: var EvidenceSeenSets):
+                                 MonitorEvidenceStatus =
+  ## Trust nothing — the four-argument form every caller predating DA-2 uses.
+  var attribution = initMonitorPeerAttribution([])
+  foldMonitorRecordsEvidence(records, cwd, evidence, seen, attribution)
 
 proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
                 pathSet: DependencyPathSet; recognized: bool) =
@@ -4585,6 +5064,14 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # legacy linear ``find`` made the per-action wrap-up the dominant
   # term on the 14-app / ~1044-action collections from B1/B3/B5.
   var seen: EvidenceSeenSets
+  # DA-2 — the class-3 trust this action's evidence is graded against, derived
+  # (never declared) from the daemons THIS PROCESS spawned and re-validated
+  # against the kernel on the way in, so a dead or recycled pid exempts nothing.
+  # Shared by BOTH fold sites below — the recognized-`.iomon`-report arm and the
+  # wrapped/hosted monitor arm — because an edge that produces its own capture
+  # talks to the same daemons as one the engine monitors, and a guard wired at
+  # one of two sites is a guard half of production does not execute.
+  var attribution = initMonitorPeerAttribution(derivedTrustedDaemonRegistry())
   # The action's own root image is contributed by `foldLauncherRootImage` at
   # the END of this proc, NOT here. It is a launcher-side reconstruction rather
   # than an observation, and the zero-evidence guard in
@@ -4627,7 +5114,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
         for resolved in resolvedPaths:
           try:
             let status = foldMonitorDepFileEvidence(resolved, action.cwd,
-              result.evidence, seen)
+              result.evidence, seen, attribution)
             applyMonitorEvidenceStatus(action, status, result)
           except MonitorDepFileReaderError as err:
             result.evidence.diagnostics.add(
@@ -4752,10 +5239,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
       let status =
         if hostedRecords != nil:
           foldMonitorRecordsEvidence(hostedRecords[], action.cwd,
-            result.evidence, seen)
+            result.evidence, seen, attribution)
         else:
           foldMonitorDepFileEvidence(action.monitorDepfile,
-            action.cwd, result.evidence, seen)
+            action.cwd, result.evidence, seen, attribution)
       applyMonitorEvidenceStatus(action, status, result)
       applyEntropyBlessingPolicy(action, result)
     except MonitorDepFileReaderError as err:
