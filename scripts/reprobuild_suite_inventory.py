@@ -338,6 +338,30 @@ INTEGRATION_CONTENT_PATTERNS = [
 # Refusal is a real outcome here: `unclassified` means "this scan cannot show
 # the test is safe to share a process", which is the honest answer and keeps
 # the entry out of every consolidation group.
+#
+# The predicate is CLOSED over the test's repository-local file imports, and
+# that closure is load-bearing rather than defensive. Until it existed, the
+# allowlist only saw the test's own import clause, so a test that reached a
+# forbidden primitive through a helper module sitting next to it declared
+# nothing and was waved through. Measured on the tree that introduced this
+# closure: 31 of 619 `pure unit` sources reach a disqualifier one or more hops
+# away, and 20 of them are `libs/repro_lock_gen/tests/`, whose shared fixture
+# starts a REAL loopback TCP listener on a background thread. That group was
+# a compatible consolidation candidate — same owner, same dependency shape,
+# eleven members — and consolidating it would have put eleven independent HTTP
+# servers and their threads in one process. This is the same defect shape the
+# `requiresReproBinary` scan had before it was replaced by taint propagation
+# over the import graph (`scripts/repro_binary_reachability.nim`): a property
+# of the whole reachable closure, decided by reading one file.
+#
+# What the closure does NOT follow, deliberately: a bare library import such
+# as `import repro_lock_gen`. Those are the modules under test; following them
+# would refuse essentially every test in the repository, because some module
+# of almost every library reaches `osproc` or `net` somewhere. The boundary
+# this closure draws is "code the test itself pulls in by PATH" — a sibling
+# fixture, an `apps/` entry point, another library's `src/` reached
+# relatively — which is exactly the code that runs in the test's process at
+# module initialization without any library API being called.
 
 PURE_UNIT_FORBIDDEN_MODULES = {
     # Subprocesses.
@@ -470,6 +494,177 @@ def project_module_prefixes(root: Path) -> set[str]:
     return owned
 
 
+def nim_code_only(text: str) -> str:
+    """Blank Nim comments and string literals, preserving offsets.
+
+    Adapted from `scripts/ct_test_surface_addressability.py:nim_code_only`,
+    which is the reference implementation and carries the full rationale. The
+    short version: this repository writes Nim inside Nim — whole fixture
+    modules live in triple-quoted strings — so a scan of the raw bytes answers
+    "what does this file MENTION" rather than "what does this file DO".
+
+    Used here for the disqualifying-SYMBOL scan only. The import scan below
+    deliberately still reads the raw text, because blanking string literals
+    also blanks a quoted import path (`import "../../libs/x"`), and losing
+    those would silently narrow the very closure this predicate walks.
+    Measured at review over the 1,528 `origin/dev` (16a992fd5) test sources,
+    with the population stated because an unqualified count here was wrong
+    once already (it read "7"). Two readings, both small and both in the same
+    direction: the code-only switch changes which disqualifying SYMBOL matches
+    in a source's OWN text for 4 sources, and changes the pure-unit VERDICT —
+    own file plus closure — for 1. Every one of them is already classified
+    `integration` before the purity predicate is reached, so no verdict moves.
+    That is not an argument, it is the both-ways set difference: running the
+    `origin/dev` and closed predicates over the identical entry list moves 31
+    entries `pure unit` -> `unclassified` and ZERO the other way. The gain is
+    entirely in the closure arm, where doc comments describe primitives far
+    more often.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "#":
+            if text.startswith("#[", i):  # block comment, nestable in Nim
+                depth, j = 1, i + 2
+                while j < n and depth > 0:
+                    if text.startswith("#[", j):
+                        depth += 1
+                        j += 2
+                    elif text.startswith("]#", j):
+                        depth -= 1
+                        j += 2
+                    else:
+                        j += 1
+                out.append("".join(c if c == "\n" else " " for c in text[i:j]))
+                i = j
+                continue
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if text.startswith('"""', i):
+            j = text.find('"""', i + 3)
+            j = n if j < 0 else j + 3
+            out.append("".join(c if c == "\n" else " " for c in text[i:j]))
+            i = j
+            continue
+        if ch == "'" and not (i > 0 and (text[i - 1].isalnum() or text[i - 1] == "_")):
+            match = re.match(r"'(\\.[0-9]*|[^'\\])'", text[i:])
+            if match:
+                out.append(" " * match.end())
+                i += match.end()
+                continue
+        if ch == '"':
+            is_raw = i > 0 and (text[i - 1].isalnum() or text[i - 1] == "_")
+            j = i + 1
+            while j < n and text[j] != "\n":
+                if text[j] == '"':
+                    if is_raw and text.startswith('""', j):
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                if not is_raw and text[j] == "\\":
+                    j += 2
+                    continue
+                j += 1
+            out.append(" " * (j - i))
+            i = j
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+_NIM_SOURCE_CACHE: dict[Path, tuple[str, str]] = {}
+
+
+def _nim_source(path: Path) -> tuple[str, str]:
+    """`(raw, code_only)` for a Nim file, memoized.
+
+    Memoized because the closure walk revisits shared fixtures — one
+    `loopback_metadata_server.nim` is on the closure of twenty tests — and
+    `nim_code_only` is a character-at-a-time scan.
+    """
+    cached = _NIM_SOURCE_CACHE.get(path)
+    if cached is None:
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raw = ""
+        cached = (raw, nim_code_only(raw))
+        _NIM_SOURCE_CACHE[path] = cached
+    return cached
+
+
+def repo_local_import_edges(root: Path, importer: Path, raw: str) -> list[Path]:
+    """In-repository files `importer` pulls in by PATH, one hop.
+
+    Only path-ish clauses resolve here: `./sibling`, `../../other/lib/src/mod`,
+    `"../../libs/x/tests/y"`. A bare `import repro_lock_gen` is NOT an edge —
+    see the module-level note on where this closure's boundary is drawn and
+    why.
+    """
+    out: list[Path] = []
+    seen: set[Path] = set()
+    root = root.resolve()
+    for name in imported_module_roots(raw):
+        candidate = name.strip().strip('"').replace("\\", "/")
+        if candidate.startswith(("std/", "pure/", "system/")):
+            continue
+        if not (candidate.startswith(".") or "/" in candidate):
+            continue
+        base = importer.parent / candidate
+        for form in (base.with_suffix(".nim"), base / (base.name + ".nim")):
+            try:
+                resolved = form.resolve()
+            except OSError:
+                continue
+            if not resolved.is_file():
+                continue
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                # Outside the repository: a vendored or sibling checkout. Not
+                # ours to read, and not something a consolidation decision in
+                # this repository can act on.
+                continue
+            if resolved not in seen:
+                seen.add(resolved)
+                out.append(resolved)
+            break
+    return out
+
+
+_IMPORT_CLOSURE_CACHE: dict[Path, tuple[Path, ...]] = {}
+
+
+def repo_local_import_closure(root: Path, source: Path) -> tuple[Path, ...]:
+    """Every in-repository file `source` reaches transitively by path import.
+
+    Excludes `source` itself. Sorted, so a refusal reason names the same file
+    on every run and the artifact stays byte-stable.
+    """
+    source = source.resolve()
+    cached = _IMPORT_CLOSURE_CACHE.get(source)
+    if cached is not None:
+        return cached
+    seen: set[Path] = set()
+    stack = [source]
+    while stack:
+        current = stack.pop()
+        raw, _code = _nim_source(current)
+        for nxt in repo_local_import_edges(root, current, raw):
+            if nxt != source and nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    result = tuple(sorted(seen))
+    _IMPORT_CLOSURE_CACHE[source] = result
+    return result
+
+
 def pure_unit_verdict(
     root: Path, spec: TestSpec, text: str
 ) -> tuple[bool, str]:
@@ -479,34 +674,61 @@ def pure_unit_verdict(
     both for a test shown to be impure AND for one this scan cannot judge; the
     caller must treat the two the same way, because "unknown" and "unsafe" have
     the same consequence for consolidation.
-    """
-    for pattern, why in PURE_UNIT_DISQUALIFYING_SYMBOLS:
-        if pattern.search(text):
-            return False, why
 
+    The scan covers the test's own source AND every in-repository file it
+    reaches by path import. A refusal earned in the closure NAMES the file that
+    earned it, so the reason is actionable rather than an unexplained
+    downgrade.
+    """
     owned = project_module_prefixes(root)
-    for name in imported_module_roots(text):
-        if name.startswith(".") or "/" in name and name.split("/")[0] in owned:
-            continue
-        head = name.split("/")[0]
-        if head in owned:
-            continue
-        leaf = module_leaf(name)
-        if head == "std" or head == "pure" or head == "system":
-            candidate = leaf
+    source_path = (root / spec.source).resolve()
+    # The caller already has the test's own text; reuse it rather than re-read,
+    # so a caller that passes doctored text (a mutation test, for instance)
+    # still gets the verdict for the text it passed.
+    own_code = nim_code_only(text)
+    scan: list[tuple[Path | None, str, str]] = [(None, text, own_code)]
+    for member in repo_local_import_closure(root, source_path):
+        raw, code = _nim_source(member)
+        scan.append((member, raw, code))
+
+    for member, raw, code in scan:
+        if member is None:
+            through = ""
         else:
-            candidate = head
-        if candidate in PURE_UNIT_FORBIDDEN_MODULES:
-            return False, f"imports `{candidate}`, which grants out-of-process reach"
-        if candidate in PURE_UNIT_ALLOWED_STDLIB:
-            continue
-        # Relative or vendored path we cannot resolve to a known module.
-        if "/" in name or ".." in name:
-            continue
-        return False, (
-            f"imports `{candidate}`, which this scan does not recognize; "
-            "refusing to call it pure rather than assuming it is"
-        )
+            try:
+                through = f" (through `{member.relative_to(root)}`)"
+            except ValueError:
+                through = f" (through `{member}`)"
+
+        for pattern, why in PURE_UNIT_DISQUALIFYING_SYMBOLS:
+            if pattern.search(code):
+                return False, why + through
+
+        for name in imported_module_roots(raw):
+            if name.startswith(".") or "/" in name and name.split("/")[0] in owned:
+                continue
+            head = name.split("/")[0]
+            if head in owned:
+                continue
+            leaf = module_leaf(name)
+            if head == "std" or head == "pure" or head == "system":
+                candidate = leaf
+            else:
+                candidate = head
+            if candidate in PURE_UNIT_FORBIDDEN_MODULES:
+                return False, (
+                    f"imports `{candidate}`, which grants out-of-process reach"
+                    + through
+                )
+            if candidate in PURE_UNIT_ALLOWED_STDLIB:
+                continue
+            # Relative or vendored path we cannot resolve to a known module.
+            if "/" in name or ".." in name:
+                continue
+            return False, (
+                f"imports `{candidate}`, which this scan does not recognize; "
+                "refusing to call it pure rather than assuming it is" + through
+            )
     return True, "no subprocess, network, process-global mutation or unrecognized import"
 
 

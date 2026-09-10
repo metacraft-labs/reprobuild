@@ -179,6 +179,11 @@ const
     path: ctShimFixtureRoot & "/fixture_baseline_std_unittest",
     actionId: "reprobuild.test_fixtures.ct_shim_fixture_baseline")
 
+  M4ConsolidationVerificationTest* =
+    "tests/integration/t_m4_pure_unit_consolidation.nim"
+    ## Suite-Modernization M4. The one test whose execute edge takes EVERY
+    ## shared pure-unit binary as a typed input; see the loop below.
+
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
     # SHARED, and deliberately so. ``fixture_protocol_three_tests`` is one
     # artifact behind two tests (six cases); before M3 each case compiled a
@@ -1077,6 +1082,24 @@ package reprobuild:
           sourceOnlyEnv.add(entry)
     let testNimPaths = ioMonNimPaths & sourceOnlyNimPaths
 
+    # Suite-Modernization M4: the shared pure-unit binaries, as (path, action
+    # id) pairs, filled in as this loop passes over them.
+    #
+    # The M4 verification test reads those binaries — it asks each one for its
+    # `--list-json` catalog and then runs every case through `--run` — so it
+    # has to declare them, for both halves of the same reason the
+    # `testFixtureArtifacts` note below gives: the PATH so a rebuilt bundle
+    # re-runs the check instead of serving a cached pass against a stale
+    # binary, and the ACTION ID so a focused build materialises the bundles
+    # first instead of failing on a missing file.
+    #
+    # Collected rather than spelled in a table because a bundle's build-edge id
+    # is content-derived (`nim-c-<hash>`) and cannot be written down. The order
+    # is safe by construction: `generate_test_edges.nim` sorts its specs by
+    # source path, `tests/bundles/` sorts before `tests/integration/`, and
+    # `checkBundleLimits` refuses a bundle that lives anywhere else.
+    var pureUnitBundleArtifacts: seq[TestGraphArtifact] = @[]
+
     for spec in reprobuildTestSpecs:
       when defined(windows):
         if spec.source.contains("shm_index") or
@@ -1098,6 +1121,12 @@ package reprobuild:
         extraEnv = sourceOnlyEnv,
         )
       reprobuildTestBuildActions.add(edge.action)
+      if spec.source.startsWith("tests/bundles/"):
+        pureUnitBundleArtifacts.add(TestGraphArtifact(
+          path:
+            when defined(windows): spec.binary & ".exe"
+            else: spec.binary,
+          actionId: edge.action.id))
       # THE C BACKEND, DECLARED ON THE TEST-BUILD EDGES TOO.
       #
       # ``nim c`` emits C and shells out to a BARE ``gcc``. ``nim.c(...)``
@@ -1141,6 +1170,17 @@ package reprobuild:
       var executeDeps: seq[string] = @[]
       if spec.requiresReproBinary:
         requiredBinaries.add(reproBinaryPath)
+      if spec.source == M4ConsolidationVerificationTest:
+        # Suite-Modernization M4: this one test consumes EVERY shared pure-unit
+        # binary — it asks each for its ``--list-json`` catalog and then runs
+        # every case through ``--run`` — so its inputs are the collected list
+        # rather than a row in ``testFixtureArtifacts``. Adding a bundle
+        # therefore extends this edge automatically, which is the property
+        # that matters: a bundle whose cases nobody checks is exactly the
+        # shape M4 must not ship.
+        for artifact in pureUnitBundleArtifacts:
+          requiredBinaries.add(artifact.path)
+          executeDeps.add(artifact.actionId)
       # Graph-Owned-Test-Artifacts M3: typed fixture inputs on the EXECUTE
       # edge, read from ONE table instead of a chain of source-path ``if``s.
       #
