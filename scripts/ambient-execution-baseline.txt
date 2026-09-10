@@ -37,7 +37,6 @@ libs/repro_homebrew_adapter/src/repro_homebrew_adapter/cask.nim
 libs/repro_homebrew_adapter/src/repro_homebrew_adapter/common.nim
 libs/repro_homebrew_adapter/src/repro_homebrew_adapter/formula.nim
 libs/repro_interface_artifacts/src/repro_interface_artifacts.nim
-libs/repro_local_store/src/repro_local_store.nim
 libs/repro_lock_store/src/repro_lock_store.nim
 libs/repro_platform/src/repro_platform.nim
 libs/repro_profile/src/repro_profile/disk_apply.nim

@@ -21,7 +21,6 @@ repro_dev_env_engine
 repro_tool_profiles
 repro_fs_facts
 repro_local_store
-repro_shm_index
 repro_runquota
 repro_build_engine
 repro_provider_runtime

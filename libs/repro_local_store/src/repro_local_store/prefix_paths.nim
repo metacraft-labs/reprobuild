@@ -11,9 +11,9 @@
 ## install-mirror paths while emitting build actions, and that module is
 ## in the import closure of every *profile* compile
 ## (`repro_profile_compile`). Importing all of `repro_local_store` from
-## there would drag `sqlite3_binding` and `repro_shm_index` — and through
-## the latter the external `shm_queue` sibling — into the profile
-## compile's `--path` closure, which is not available to a profile.
+## there would drag `sqlite3_binding` and the external `shm_gset` sibling
+## (the action cache's Tier-2 index) into the profile compile's `--path`
+## closure, which is not available to a profile.
 ##
 ## `store.nim` imports and re-exports this module, so every existing
 ## `repro_local_store` consumer keeps seeing the same symbols.

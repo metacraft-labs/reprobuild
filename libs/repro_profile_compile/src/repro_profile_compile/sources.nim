@@ -60,8 +60,8 @@ proc profileNimPaths*(repoRoot: string): seq[string] =
   ## legitimately import". That premise does not survive contact with a
   ## transitive import graph: a profile's `import repro_profile` reaches
   ## `repro_profile/build_actions` -> `repro_project_dsl` ->
-  ## `repro_project_dsl/install_mirror_resolver` -> `repro_local_store` ->
-  ## `repro_shm_index`, and further into `repro_peer_cache`,
+  ## `repro_project_dsl/install_mirror_resolver` -> `repro_local_store`,
+  ## and further into `repro_peer_cache`,
   ## `repro_provider_runtime`, `repro_solver` and `repro_system_apply`. Any
   ## commit that adds an `import` anywhere in that closure silently widened
   ## the requirement without touching this file, so the list drifted; the

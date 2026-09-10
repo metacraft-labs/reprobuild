@@ -903,9 +903,13 @@ tests/integration/t_a_sibling_override_excludes_gitignored_build_output.nim	nim	
 tests/integration/t_a_worktree_sibling_is_not_invisible_to_the_refresh.nim	nim	1
 tests/integration/t_action_cache_concurrent_same_edge_converges_atomically.nim	nim	1
 tests/integration/t_action_cache_fingerprint_policies.nim	nim	1
+tests/integration/t_action_cache_index_first_lookup_decision_identical.nim	nim	4
+tests/integration/t_action_cache_oversized_record_is_indexed.nim	nim	2
 tests/integration/t_action_cache_per_edge_multifile_preserves_concurrent_path_sets.nim	nim	1
 tests/integration/t_action_cache_per_edge_no_global_log_no_growth.nim	nim	2
 tests/integration/t_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing.nim	nim	3
+tests/integration/t_action_index_backpressure_and_tombstones.nim	nim	3
+tests/integration/t_action_index_flatten_retire_preserves_completeness.nim	nim	3
 tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	nim	6
 tests/integration/t_amend_and_rebase_are_idempotent.nim	nim	1
 tests/integration/t_an_unobservable_sibling_is_not_substituted.nim	nim	1
@@ -944,8 +948,6 @@ tests/integration/t_build_machine_and_host_target_are_distinct.nim	nim	9
 tests/integration/t_build_progress_modes.nim	nim	1
 tests/integration/t_buildtype_drives_compile_flags.nim	nim	7
 tests/integration/t_buildtype_drives_output_dir.nim	nim	4
-tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim	nim	39
-tests/integration/t_cache_daemon_grows_via_cas_resize_and_survives_crash.nim	nim	2
 tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim	nim	1
 tests/integration/t_cache_push_cannot_publish_a_branch.nim	nim	1
 tests/integration/t_cache_refuses_to_serve_an_unsatisfiable_floor.nim	nim	1
@@ -1287,11 +1289,6 @@ tests/integration/t_selectors_narrow_the_override_state_report.nim	nim	1
 tests/integration/t_shared_clone_alternates_skip_redownload.nim	nim	1
 tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim	nim	2
 tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim	nim	1
-tests/integration/t_shm_index_boot_id_unavailable_fails_closed.nim	nim	1
-tests/integration/t_shm_index_mpsc_ring_multiproducer_single_consumer.nim	nim	3
-tests/integration/t_shm_index_seqlock_reads_consistent_across_resize.nim	nim	1
-tests/integration/t_shm_oversized_submit_is_reported.nim	nim	1
-tests/integration/t_shm_submit_refuses_an_impossible_record_without_encoding_it.nim	nim	4
 tests/integration/t_single_platform_entries_declare_platforms.nim	nim	8
 tests/integration/t_solved_packages_are_first_class_locked_deps.nim	nim	1
 tests/integration/t_source_producer_revalidation.nim	nim	2

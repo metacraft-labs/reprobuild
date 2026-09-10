@@ -86,16 +86,25 @@ proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
 
 suite "Bootstrap-And-Self-Build B1: repro build apps collection":
 
-  test "action-cache daemon is a typed member of the apps collection":
+  test "peer-cache tier-2 server is a typed member of the apps collection":
+    # This case used to name `repro-cache-daemon`. That binary is gone: the
+    # action cache's Tier-2 tier is now a shared-memory grow-only set every
+    # engine inserts into directly, so there is no process to own it and
+    # nothing to spawn. What the case is FOR — that an app declared in
+    # `apps/entrypoints.txt` is also a typed member of the `apps` collection
+    # with a graph-owned `nim.c` edge — is unchanged, so it moved to another
+    # app rather than being deleted.
     let repoRoot = findRepoRoot()
     let names = readEntrypointNames(repoRoot)
-    check "repro-cache-daemon" in names
+    check "repro-peer-cache-tier2" in names
+    check "repro-cache-daemon" notin names
 
     # Keep this assertion tied to the collection body, rather than accepting
     # matching literals elsewhere in the project file. The dynamic test below
     # then drives that collection and verifies every declared output.
     let projectText = readFile(repoRoot / "repro.nim")
-    check "executable reproCacheDaemon:" in projectText
+    check "executable reproPeerCacheTier2:" in projectText
+    check "executable reproCacheDaemon:" notin projectText
     let appsStart = projectText.find(
       "var reprobuildAppsActions: seq[BuildActionDef] = @[]")
     let appsEnd = projectText.find(
@@ -104,11 +113,11 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
     check appsEnd > appsStart
     if appsStart >= 0 and appsEnd > appsStart:
       let appsBlock = projectText[appsStart ..< appsEnd]
-      check "source = \"apps/repro-cache-daemon/repro_cache_daemon.nim\"" in
+      check "source = \"apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim\"" in
         appsBlock
-      check "binary = \"build/bin/repro-cache-daemon\"" in appsBlock
-      check "cacheable = false" in appsBlock
-      check "actionId = \"reprobuild.apps.repro-cache-daemon\"" in appsBlock
+      check "binary = \"build/bin/repro-peer-cache-tier2\"" in appsBlock
+      check "actionId = \"reprobuild.apps.repro-peer-cache-tier2\"" in appsBlock
+      check "apps/repro-cache-daemon/" notin appsBlock
 
   test "standalone bootstrap stages the Nix provisioning daemon":
     let repoRoot = findRepoRoot()

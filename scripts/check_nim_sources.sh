@@ -5,7 +5,7 @@ mkdir -p build/nimcache
 
 # Keep standalone ``nim check`` invocations on the same source-path resolver
 # as the app build and test-suite entry points.  In particular,
-# ``repro_shm_index`` imports the extracted ``shm_queue`` package even when a
+# ``io_mon`` imports the extracted ``shm_queue`` package even when a
 # sibling checkout is absent and the dev shell supplies it from the Nix store.
 # shellcheck source=scripts/source_paths.sh
 source scripts/source_paths.sh
