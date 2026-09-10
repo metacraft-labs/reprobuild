@@ -886,7 +886,25 @@ when defined(windows):
 
 proc fingerprintMetadata(path: string): FileMetadata =
   let fsPath = extendedPath(path)
-  when defined(linux):
+  when defined(posix):
+    # ONE `lstat(2)` answers kind, size and mtime together.
+    #
+    # This branch used to be `when defined(linux)`, and every other POSIX host
+    # -- macOS above all -- fell through to the generic branch below, which
+    # asks the same kernel the same question three times: `fileExists`, then
+    # `dirExists`, then `getFileInfo`. Measured on a warm no-op of the zlib
+    # CMake project, 4,359 calls cost 37.3 ms, of which the two existence
+    # probes were 36.4 ms and the `getFileInfo` that actually produces the
+    # answer was 0.67 ms. The probes dominate because 3,928 of the 4,363
+    # recorded inputs DO NOT EXIST -- they are linker and CMake library-search
+    # paths -- so the common case paid a failed `stat` for `fileExists` AND a
+    # failed `stat` for `dirExists` before concluding nothing, and a negative
+    # path lookup costs roughly twice a positive one.
+    #
+    # The two branches did not agree on every entity, and widening this one
+    # settles the disagreement in its favour. Both divergences are argued at
+    # the arm that causes them and pinned by
+    # `t_fingerprint_metadata_classifies_every_posix_entity`.
     var stat: Stat
     if lstat(fsPath.cstring, stat) != 0:
       return FileMetadata(kind: ffkMissing)
@@ -896,6 +914,33 @@ proc fingerprintMetadata(path: string): FileMetadata =
       elif S_ISDIR(stat.st_mode):
         ffkDirectory
       elif S_ISLNK(stat.st_mode):
+        # A symlink is classified by what it points AT while carrying the
+        # LINK's own size and mtime -- Incremental-Invalidation.md §"Symlink
+        # outputs": "A symlink to a file is classified as a regular file
+        # carrying the *link's own* size and mtime". A DANGLING symlink has no
+        # target to classify by and lands on `ffkRegular`, which is the only
+        # honest answer a four-kind format has for it: the entity exists,
+        # `lstat` describes it, and its own size (the length of the target
+        # string) and mtime are recorded facts that MOVE when the link is
+        # retargeted.
+        #
+        # The generic branch answered `ffkMissing` here, because `fileExists`
+        # follows the link and fails. That is not a cheaper spelling of this
+        # rule, it is a different rule, and the two have opposite holes.
+        # `ffkMissing` records 0/0, so retargeting a dangling link at another
+        # absent target is invisible to it; and on the OUTPUT side
+        # `outputStateMismatchImpl` SKIPS EVERY CHECK for an output recorded
+        # `ffkMissing`, so a dangling symlink output was recorded as
+        # unverifiable and then never verified. `ffkRegular` keeps the retarget
+        # signal and the whole output check set, `linkTarget` witness included.
+        #
+        # What `ffkRegular` cannot see, and `ffkMissing` could: the link's
+        # target APPEARING. `lstat` of the link is byte-identical before and
+        # after, so that transition stops invalidating. It never invalidated on
+        # Linux either. Closing it needs a recorded link target for INPUTS --
+        # Incremental-Invalidation.md already requires one for outputs
+        # (`OutputWitness.linkTarget`) and `FileFingerprint` has no equivalent
+        # field -- so it is a record-format question, not a syscall-count one.
         try:
           let info = getFileInfo(fsPath, followSymlink = false)
           case info.kind
@@ -906,6 +951,12 @@ proc fingerprintMetadata(path: string): FileMetadata =
         except OSError:
           ffkMissing
       else:
+        # FIFOs, sockets, devices. `isRecordableInput` drops `ffkOther`
+        # entirely, which is the point: a socket has no meaningful size or
+        # mtime, so recording one as a comparable input asserts something that
+        # is not true. The generic branch called these `ffkMissing` --
+        # `fileExists` is false for a FIFO -- and so recorded a path that
+        # exists as an absent-path probe.
         ffkOther
     result.sizeBytes =
       if stat.st_size < 0: 0'u64 else: uint64(stat.st_size)
@@ -930,6 +981,11 @@ proc fingerprintMetadata(path: string): FileMetadata =
       if unixNs100 > 0:
         result.mtimeNs = uint64(unixNs100) * 100'u64
   else:
+    # Stdlib-only fallback for a host that is neither POSIX nor Windows. No
+    # such host is supported today; this exists so the module still compiles
+    # for one. Three syscalls where the branches above need one, and it cannot
+    # tell a dangling symlink or a FIFO apart from an absent path -- see the
+    # POSIX branch for why that matters. Do not route a platform back onto it.
     if not fileExists(fsPath) and not dirExists(fsPath):
       return FileMetadata(kind: ffkMissing)
     let info = getFileInfo(fsPath, followSymlink = false)
@@ -978,6 +1034,8 @@ var
   actionRecordDecodeBytes = 0'i64
   perEdgeContainerReads = 0
   perEdgeSidecarReads = 0
+  shmOversizedSubmitCount = 0
+  shmOversizedSubmitFloorBytes = 0'i64
 
 proc noteActionRecordDecode(frameBytes: int) =
   ## Count ONE decoded `RBAR` record frame and the bytes it spanned.
@@ -1793,6 +1851,27 @@ proc resetOutputStateCheckStats*() =
   actionRecordDecodeBytes = 0'i64
   perEdgeContainerReads = 0
   perEdgeSidecarReads = 0
+  shmOversizedSubmitCount = 0
+  shmOversizedSubmitFloorBytes = 0'i64
+
+proc shmSubmitStats*(): tuple[oversized: int; oversizedFloorBytes: int64] =
+  ## How many records this build refused to hand to the shared-memory tier
+  ## because they cannot fit an inline slot, and the summed size those records
+  ## were known to be at least.
+  ##
+  ## `ShmTier.oversizedSubmits` counts the same event per attached tier; this
+  ## is the BUILD-WIDE total, which is the number `--show=timing` wants and the
+  ## only one a reader can compare against the build's other counters.
+  ##
+  ## Worth a permanent row for the reason `observationsContradictory` is: a
+  ## build whose records are all over the cap bypasses the shm tier 100% of the
+  ## time and, from outside, looks IDENTICAL to a healthy one -- the ring stays
+  ## empty, no daemon is ever asked to publish, every lookup falls through to
+  ## Tier-1 disk, and nothing anywhere says so. That state was worth 8.4 ms of a
+  ## 61 ms warm no-op here and took a profiler to find. It should have taken
+  ## reading one row.
+  (oversized: shmOversizedSubmitCount,
+   oversizedFloorBytes: shmOversizedSubmitFloorBytes)
 
 proc actionRecordDecodeStats*(): tuple[records: int; bytes: int64;
                                        containerReads: int;
@@ -3072,7 +3151,85 @@ proc ensureCacheDaemon*(root: string; idx: ShmIndex;
     afterLeaseReserved: CacheDaemonLaunchHook = nil;
     afterAuthorizationBeforeSpawn: CacheDaemonLaunchHook = nil): bool
 
-proc noteOversizedShmSubmit(cache: ActionCache; encodedBytes: int) =
+const
+  # The floor cost of an `RBAR` frame, in the shapes `encodeRecord` writes.
+  # Every term below is a field that is ALWAYS written, so the sum is a sound
+  # lower bound and never an estimate that could come in over the truth.
+  RecordFrameFloorBytes =
+    4 +   # magic "RBAR"
+    2 +   # version u16
+    34 +  # weak fingerprint: algorithm + domain + 32 digest bytes
+    1 +   # policy
+    4 +   # path-table entry count u32 (the entries themselves counted as 0)
+    4 +   # input count u32
+    4 +   # env count u32
+    34 +  # strong fingerprint
+    1 +   # output payload kind
+    4     # output count u32
+  RecordInputFloorBytes =
+    4 +   # interned prefix index u32
+    4 +   # name length u32 (the name itself counted as 0)
+    1 +   # per-input policy
+    17 +  # metadata: kind + size u64 + mtime u64
+    1     # has-local-hash flag
+  RecordEnvFloorBytes =
+    4 + 1 + 4  # name length + present flag + value length
+  RecordOutputFloorBytes =
+    4 + 4 +  # interned prefix index + name length
+    17 +     # metadata
+    2        # permission mask u16
+  RecordCasBlobBytes =
+    34 + 8   # blob digest + blob size u64
+
+proc encodedRecordSizeFloor*(record: ActionResultRecord): int =
+  ## A LOWER BOUND on `encodeActionResultRecord(record).len`, computed without
+  ## encoding anything.
+  ##
+  ## Why this exists: `submitToShm` used to encode every record and only then
+  ## compare the result against `SlotInlineCap`. When a build's records are all
+  ## far over the cap that is pure waste, and it is waste paid on EVERY build,
+  ## because a submit that always fails means the shm slot is never populated,
+  ## so `readHotRecord`'s warm-on-miss path re-submits the same doomed record
+  ## next time. Measured on a warm no-op of the zlib CMake project: 38 submits,
+  ## 38 rejections, 900,252 bytes encoded and immediately discarded, 8.39 ms
+  ## (13.8% of the `cache lookup` total) -- identically every run. The loop
+  ## cannot converge by construction for any record over the cap.
+  ##
+  ## Soundness. Each term is a field `encodeRecord` writes unconditionally,
+  ## with every variable-length payload counted as ZERO bytes, so the bound can
+  ## only sit below the real encoding. The one non-constant term is
+  ## `maxPathLen`: the longest path in the record contributes its directory
+  ## prefix (which is IN the path table, counted nowhere above) plus its file
+  ## name (counted as zero above), and prefix + name is the whole path by
+  ## `splitPathPrefix`'s construction. Adding it therefore double-counts
+  ## nothing.
+  ##
+  ## Tightness is not the point and is not claimed: a record that clears the
+  ## floor is still encoded and still measured exactly. The bound only has to
+  ## be cheap and never wrong, and it is `O(inputs + outputs)` length reads
+  ## with no allocation, against an encode that copies every path byte and
+  ## builds a hash table.
+  ##
+  ## EXPORTED so the bound can be checked against the real encoder rather than
+  ## argued about. A floor that ever exceeded the true encoded size would make
+  ## a record that FITS get refused, and the only way to know it does not is to
+  ## compare the two over records of every shape -- which is what
+  ## `t_shm_submit_refuses_an_impossible_record_without_encoding_it` does.
+  result = RecordFrameFloorBytes +
+    record.inputs.len * RecordInputFloorBytes +
+    record.envInputs.len * RecordEnvFloorBytes +
+    record.outputs.len * RecordOutputFloorBytes
+  if record.outputPayloadKind == opkCasBlobs:
+    result += record.outputs.len * RecordCasBlobBytes
+  var maxPathLen = 0
+  for input in record.inputs:
+    if input.path.len > maxPathLen: maxPathLen = input.path.len
+  for output in record.outputs:
+    if output.path.len > maxPathLen: maxPathLen = output.path.len
+  result += maxPathLen
+
+proc noteOversizedShmSubmit(cache: ActionCache; encodedBytes: int;
+                            exact = true) =
   ## SIGNAL a record the shared-memory tier will not carry.
   ##
   ## Before this existed the drop was completely silent, and the drop is
@@ -3091,14 +3248,26 @@ proc noteOversizedShmSubmit(cache: ActionCache; encodedBytes: int) =
   ## already happened here.
   ##
   ## Printed once per process per cache root; the rest are counted in
-  ## `ShmTier.oversizedSubmits`.
+  ## `ShmTier.oversizedSubmits` and reported by `--show=timing` as
+  ## `repro shm oversized submit`.
+  ##
+  ## `exact = false` means the record was refused on `encodedRecordSizeFloor`, so
+  ## `encodedBytes` is a lower bound on a size nobody paid to compute. The
+  ## message says which, because "encoded 24,243 B" and "encodes to at least
+  ## 8,721 B" are different claims and a reader chasing the slot cap needs to
+  ## know that the second one is not the real width.
   if cache.shm == nil: return
   inc cache.shm.oversizedSubmits
+  inc shmOversizedSubmitCount
+  shmOversizedSubmitFloorBytes += int64(encodedBytes)
   if cache.shm.oversizedReported: return
   cache.shm.oversizedReported = true
   when shmIndexSupported:
     stderr.writeLine("repro: warning: shared-memory cache tier: record not " &
-      "submitted, encoded " & $encodedBytes & " B exceeds the " &
+      "submitted, " &
+      (if exact: "encoded " & $encodedBytes & " B"
+       else: "encodes to at least " & $encodedBytes & " B") &
+      " exceeds the " &
       $SlotInlineCap & " B inline slot cap. This edge is served from the " &
       "on-disk cache tier only; live cross-build sharing is off for it. " &
       "Encoded size is dominated by absolute paths, so a deeper checkout " &
@@ -3130,7 +3299,18 @@ proc submitToShm(cache: ActionCache; record: ActionResultRecord) =
   ## disk read would — the decision is unchanged. Records whose full encoding
   ## exceeds the inline slot cap are not shm-cached (Tier-1-only) — and that
   ## rejection is REPORTED, see `noteOversizedShmSubmit`.
+  ##
+  ## The cap is checked BEFORE the encode whenever `encodedRecordSizeFloor` can prove
+  ## the record cannot fit. Encoding a record to discover it is 93× over the cap
+  ## is work with no possible consumer, and it was being repeated every build
+  ## for every edge: see `encodedRecordSizeFloor` for the measurement and for why the
+  ## warm-on-miss loop cannot converge on such a record.
   if cache.shm == nil or not cache.shm.enabled: return
+  when shmIndexSupported:
+    let floor = encodedRecordSizeFloor(record)
+    if floor > SlotInlineCap:
+      cache.noteOversizedShmSubmit(floor, exact = false)
+      return
   let enc = encodeActionResultRecord(record)
   when shmIndexSupported:
     if enc.len > SlotInlineCap:

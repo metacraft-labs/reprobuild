@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1516,
+    "nimTestBinaries": 1518,
     "pureUnitConsolidationGroups": 55,
     "pureUnitTests": 611,
     "staticallyDetectedRuntimeCompilerFlowTests": 93,
-    "testEntries": 1524
+    "testEntries": 1526
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1196,10 +1196,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 667,
+      "integration": 668,
       "platform/destructive": 107,
       "pure unit": 611,
-      "unclassified": 127
+      "unclassified": 128
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1335,9 +1335,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1516,
+    "nimTestBinaryCount": 1518,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1524
+    "testEntryCount": 1526
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10065,6 +10065,24 @@
       "source": "libs/repro_local_store/tests/t_c3_sandbox_manifest.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_fingerprint_metadata_classifies_every_posix_entity",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28226,6 +28244,26 @@
       "source": "tests/integration/t_shm_oversized_submit_is_reported.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_shm_submit_refuses_an_impossible_record_without_encoding_it",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store",
+        "repro_shm_index"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_shm_submit_refuses_an_impossible_record_without_encoding_it.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
