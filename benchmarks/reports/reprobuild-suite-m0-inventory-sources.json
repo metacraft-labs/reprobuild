@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1539,
+    "nimTestBinaries": 1544,
     "pureUnitConsolidationGroups": 46,
     "pureUnitTests": 560,
     "staticallyDetectedRuntimeCompilerFlowTests": 95,
-    "testEntries": 1547
+    "testEntries": 1552
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1042,7 +1042,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 700,
+      "integration": 705,
       "platform/destructive": 113,
       "pure unit": 560,
       "unclassified": 162
@@ -1169,9 +1169,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1539,
+    "nimTestBinaryCount": 1544,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1547
+    "testEntryCount": 1552
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -21036,6 +21036,36 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_behind_pin_skip_names_the_sibling_distance_and_remedy",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_behind_pin_skip_names_the_sibling_distance_and_remedy.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_clean_workspace_pushes_without_a_diagnostic",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -21111,6 +21141,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_mixed_workspace_records_only_the_ahead_inputs",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_mixed_workspace_records_only_the_ahead_inputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_repo_not_in_develop_mode_is_not_substituted",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -21152,6 +21197,21 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_sibling_override_excludes_gitignored_build_output.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_sibling_whose_pin_is_not_fetched_is_not_recorded",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_sibling_whose_pin_is_not_fetched_is_not_recorded.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -21478,6 +21538,21 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_amend_and_rebase_are_idempotent.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_an_ahead_sibling_is_still_recorded",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_an_ahead_sibling_is_still_recorded.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

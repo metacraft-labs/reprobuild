@@ -165,7 +165,7 @@ proc seedOrigin(fx: Nf2Fixture; name: string): string =
 proc originUrl*(fx: Nf2Fixture; name: string): string =
   "file://" & (fx.scratch / ("origin-" & name & ".git"))
 
-proc lockedNode(name, url, rev, narHash: string; indent: string): string =
+proc lockedNode*(name, url, rev, narHash: string; indent: string): string =
   ## One `flake.lock` node in nix's own on-disk shape. `lastModified`,
   ## `narHash` and `revCount` are present because a real lock carries them —
   ## they are exactly the fields a revision move has to DROP, so a fixture
