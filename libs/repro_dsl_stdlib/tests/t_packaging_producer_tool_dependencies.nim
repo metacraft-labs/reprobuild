@@ -147,7 +147,7 @@ suite "packaging: producers declare a real dependency on their tool":
     let text = readFile(fixture)
     for selector in [DpkgDebSelector, TarSelector, GzipSelector,
                      CandleSelector, LightSelector, PatchelfSelector,
-                     InstallSelector]:
+                     InstallSelector, ShSelector]:
       check text.contains("\"" & selector & "\"")
 
   test "no producer edge is marked uncacheable":

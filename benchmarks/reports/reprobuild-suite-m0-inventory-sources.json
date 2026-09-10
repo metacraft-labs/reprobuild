@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1531,
+    "nimTestBinaries": 1532,
     "pureUnitConsolidationGroups": 56,
-    "pureUnitTests": 619,
+    "pureUnitTests": 620,
     "staticallyDetectedRuntimeCompilerFlowTests": 93,
-    "testEntries": 1539
+    "testEntries": 1540
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -224,7 +224,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 21,
+      "count": 22,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -250,6 +250,7 @@
         "libs/repro_dsl_stdlib/tests/t_packaging_deb_authoring.nim",
         "libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim",
         "libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim",
+        "libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim",
         "libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim",
         "libs/repro_dsl_stdlib/tests/t_prefix_layout.nim",
         "libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim"
@@ -1215,7 +1216,7 @@
       "graph-fixture": 12,
       "integration": 670,
       "platform/destructive": 108,
-      "pure unit": 619,
+      "pure unit": 620,
       "unclassified": 130
     },
     "graphOwnedTestArtifacts": [
@@ -1352,9 +1353,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1531,
+    "nimTestBinaryCount": 1532,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1539
+    "testEntryCount": 1540
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8911,6 +8912,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_runtime_closure",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

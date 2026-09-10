@@ -190,6 +190,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_deb_authoring.nim	nim	17
 libs/repro_dsl_stdlib/tests/t_packaging_engine_has_no_format_knowledge.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim	nim	9
+libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim	nim	4

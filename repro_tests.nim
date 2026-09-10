@@ -1656,6 +1656,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim",
+    binary: "build/test-bin/t_packaging_runtime_closure",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim",
     binary: "build/test-bin/t_packaging_runtime_contract_once",
     defines: @[],

@@ -134,7 +134,12 @@ proc debPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
     format: "deb",
     path: outPath,
     edge: edge,
-    toolSelectors: @[DpkgDebSelector, PatchelfSelector, InstallSelector],
+    # The staging half of the list is READ OFF the tree rather than
+    # transcribed. A staging step that grows a tool -- the runtime-
+    # closure walk's ``sh`` did -- would otherwise have to be copied
+    # into every producer, which is the per-producer hand-writing the
+    # layer exists to prevent.
+    toolSelectors: @[DpkgDebSelector] & tree.stagingSelectors,
     tree: tree)
 
 proc debProducer(dist: Distribution;
