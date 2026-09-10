@@ -285,6 +285,12 @@ for libName in [
   # Shared by the image build that emits the document and the verifier
   # that consumes it, so it belongs to neither.
   "repro_attest",
+  # The daemon over that library: the HTTP surface an attested instance
+  # answers a challenge on, its bounds, and the service unit it renders
+  # for itself. Kept apart from ``repro_attest`` because it reaches for
+  # ``std/net`` and the library above it must stay usable by a verifier
+  # that listens on nothing.
+  "repro_attest_agent",
   "cbor",
   "repro_domain_types",
   "repro_depfile",

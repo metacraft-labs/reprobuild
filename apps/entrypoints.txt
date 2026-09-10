@@ -53,3 +53,13 @@ repro-standard-provider apps/repro-standard-provider/repro_standard_provider.nim
 # ``recipes/catalog/foreign/apt/``. SSL-enabled because
 # snapshot.debian.org is HTTPS-only.
 repro-harvest-apt apps/repro-harvest-apt/repro_harvest_apt.nim --define:ssl --path:apps/repro-harvest-apt/src
+# The attestation agent: the daemon an attested instance answers a challenge
+# on. Its own binary rather than a `repro` subcommand, and deliberately: it
+# sits inside every attested TCB, so what a verifier's trust extends over is
+# its dependency closure, and the engine's is two orders of magnitude larger.
+# No --define:ssl -- the API is loopback by default and a deployment that
+# exposes it fronts it with its own authenticated channel, so linking TLS
+# here would add an OpenSSL closure to every attested image to serve a
+# transport nobody is meant to rely on (the binding, not the transport, is
+# what makes the evidence trustworthy).
+attestation-agent apps/attestation-agent/attestation_agent.nim
