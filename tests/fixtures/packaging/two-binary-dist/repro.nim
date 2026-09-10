@@ -69,6 +69,30 @@ proc sampleDistribution(targetOs: TargetOs;
     ("SAMPLETOOL_MODE", "packaged")
   ]
   result.runtime.privateLibSubdir = "lib/sampletool"
+  # EMPTY, and examined rather than defaulted.
+  #
+  # ``dlopenLeafNames`` exists because ``DT_NEEDED`` cannot see a
+  # ``dlopen``: the closure walk reads an ELF's declared dependencies,
+  # and a library opened by name at run time appears in no ELF. The
+  # field is the recipe's chance to say what the walk cannot discover,
+  # and the layer treats it as a CHECKED POST-CONDITION -- every name in
+  # it must resolve into the private libdir or the build fails.
+  #
+  # These two binaries open nothing. ``hello.nim`` and ``adder.nim``
+  # import ``std/os`` and ``std/strutils`` and call neither
+  # ``std/dynlib`` nor any FFI that would; their whole library closure
+  # is what the linker recorded, which is what the walk finds by itself.
+  # So an empty list here is a true statement about this sample, not an
+  # unexamined default -- reprobuild's own distribution will have
+  # entries (zstd and clingo, per Distribution-And-Packaging.md
+  # section 5) and M1 is what supplies them.
+  #
+  # The cost of the honest answer is worth recording: with nothing
+  # declared, the dlopen ARM of the walk is exercised by unit cases
+  # rather than by this end-to-end fixture. Making it real would mean
+  # giving the sample a shared library of its own to open by leaf name;
+  # that is a bigger fixture than "a trivial two-binary sample project",
+  # which is what the gate asks for.
   result.runtime.dlopenLeafNames = @[]
   result.runtime.wrapExecutables = true
 
@@ -158,6 +182,12 @@ package sampletool:
     "dpkg-deb"
     "patchelf"
     "install-file"
+    # The runtime-closure walk runs as a shell program: the DT_NEEDED
+    # closure of a binary is not knowable until the binary exists, so it
+    # cannot be computed while the graph is being built. ``sh`` is that
+    # program's interpreter and, like every other tool here, a real
+    # reprobuild package (``packaging/runtime_contract.ShSelector``).
+    "sh"
     "wix-candle"
     "wix-light"
 

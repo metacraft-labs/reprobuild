@@ -190,6 +190,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_deb_authoring.nim	nim	17
 libs/repro_dsl_stdlib/tests/t_packaging_engine_has_no_format_knowledge.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim	nim	9
+libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim	nim	4
@@ -434,6 +435,7 @@ libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim	nim	4
 libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emission.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	3
+libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim	nim	3
 libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim	nim	5
 libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
@@ -1149,6 +1151,7 @@ tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim	nim	3
 tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim	nim	3
 tests/integration/t_monitored_zero_output_edge_input_completeness.nim	nim	5
 tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim	nim	2
+tests/integration/t_nested_bootstrap_runtime_closure.nim	nim	1
 tests/integration/t_nested_lock_push_capability_security.nim	nim	10
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
 tests/integration/t_nf4_foreign_env_contract.nim	nim	10
@@ -1273,6 +1276,8 @@ tests/integration/t_shm_oversized_submit_is_reported.nim	nim	1
 tests/integration/t_shm_submit_refuses_an_impossible_record_without_encoding_it.nim	nim	4
 tests/integration/t_single_platform_entries_declare_platforms.nim	nim	8
 tests/integration/t_solved_packages_are_first_class_locked_deps.nim	nim	1
+tests/integration/t_source_producer_revalidation.nim	nim	2
+tests/integration/t_source_revalidation_invocation_scope.nim	nim	1
 tests/integration/t_spec_example_fixtures_compile.nim	nim	2
 tests/integration/t_spec_example_fixtures_present.nim	nim	16
 tests/integration/t_ssl_edges_carry_openssl_link_path.nim	nim	2
@@ -1410,7 +1415,7 @@ tests/unit/t_host_system_tools.nim	nim	4
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_install_mirror_optional_version.nim	nim	3
 tests/unit/t_install_mirror_shell_tools.nim	nim	2
-tests/unit/t_install_mirror_tool_metadata.nim	nim	7
+tests/unit/t_install_mirror_tool_metadata.nim	nim	8
 tests/unit/t_library_stage_alias.nim	nim	3
 tests/unit/t_m21_history_fed_scheduling.nim	nim	22
 tests/unit/t_m9q_from_source_provisioning.nim	nim	9
@@ -1491,7 +1496,7 @@ tests/unit/t_m9r79_constructors_compile.nim	nim	4
 tests/unit/t_m9r7_target_triple_cache_namespacing.nim	nim	14
 tests/unit/t_m9r81_dep_root_env_vars.nim	nim	5
 tests/unit/t_m9r82_action_cache_cas_migration.nim	nim	8
-tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	3
+tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	6
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	19

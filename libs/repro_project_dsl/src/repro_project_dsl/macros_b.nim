@@ -273,7 +273,7 @@ proc foreachDispatchCode(pkg: PackageDef; dispatchName: string;
   code.add("    raise newException(ValueError, \"unknown foreach provider entry point: \" & request.entryPointId)\n")
   parseStmt(code)
 
-proc usesInstallMirrorConstructor(body: NimNode): bool =
+proc usesInstallMirrorBuildCall(body: NimNode): bool =
   # Declaration-time metadata for explicit direct/qualified calls only. Do not
   # evaluate build code or attempt to expand arbitrary helper procedures.
   if body.kind in {nnkCall, nnkCommand} and body.len > 0:
@@ -282,10 +282,10 @@ proc usesInstallMirrorConstructor(body: NimNode): bool =
       callee = callee[^1]
     if callee.kind in {nnkIdent, nnkSym} and
         (callee.eqIdent("cmake_package") or callee.eqIdent("meson_package") or
-         callee.eqIdent("autotools_package")):
+         callee.eqIdent("autotools_package") or callee.eqIdent("shell")):
       return true
   for child in body:
-    if usesInstallMirrorConstructor(child):
+    if usesInstallMirrorBuildCall(child):
       return true
 
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
@@ -4158,7 +4158,7 @@ macro packageImpl*(name: untyped;
     result.add(quote do:
       registerSourceFetchTools(`fetchPackageName`, `fetchSourceFile`,
         `fetchSourceLine`))
-  if usesInstallMirrorConstructor(collectBuildStatements(bodyForBuild, packageName)):
+  if usesInstallMirrorBuildCall(collectBuildStatements(bodyForBuild, packageName)):
     let mirrorPackageName = newLit(packageName)
     let mirrorSourceFile = newLit(pkg.sourceFile)
     let mirrorSourceLine = newLit(pkg.sourceLine)

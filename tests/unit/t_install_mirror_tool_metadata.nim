@@ -69,7 +69,27 @@ package explicitNoMirror:
   build:
     discard
 
+package customShellMirrorTools:
+  nativeBuildDeps:
+    "sed"
+  build:
+    shell "mkdir -p $out/lib"
+
 suite "install mirror tool metadata":
+  test "custom shell mirrors declare normalization tools without executing build bodies":
+    let packages = registeredPackages().filterIt(
+      it.packageName == "customShellMirrorTools")
+    require packages.len == 1
+    check registeredShellActions("customShellMirrorTools").len == 0
+    let iface = toProjectInterface(packages[0], registeredPackages())
+    for name in typedInstallMirrorShellTools("customShellMirrorTools"):
+      let uses = iface.toolUses.filterIt(it.executableName == name)
+      check uses.len == 1
+      if uses.len == 1:
+        check uses[0].nixProvisioning.len > 0
+    let sedDeps = packages[0].nativeBuildDeps.filterIt(it.executableName == "sed")
+    require sedDeps.len == 1
+    check sedDeps[0].rawConstraint == "sed"
   test "constructor tools belong to the recipe rather than its same-name stub":
     let packages = registeredPackages()
     let recipes = packages.filterIt(it.packageName == "sed" and

@@ -5,6 +5,10 @@ import repro_build_engine
 import repro_interface_artifacts
 import repro_tool_profiles
 
+const closureADependencies = "  buildDeps:\n    \"closure_b\"\n" &
+  "  nativeBuildDeps:\n    \"closure_native\"\n" &
+  "  runtimeDeps:\n    \"closure_runtime\"\n"
+
 proc executable(path, body: string) =
   createDir(parentDir(path))
   writeFile(path, body)
@@ -38,13 +42,15 @@ proc writeFixture(root, identityLiteral: string) =
     writeFile(root / "stubs" / (name & ".nim"),
       "import repro_project_dsl\npackage " & name & ":\n  discard\n")
     createDir(root / "catalog" / name)
-  let aDeps = "  buildDeps:\n    \"closure_b\"\n" &
-    "  nativeBuildDeps:\n    \"closure_native\"\n" &
-    "  runtimeDeps:\n    \"closure_runtime\"\n"
   writeFile(root / "catalog/closure_a/repro.nim",
-    manifest(root, "closure_a", aDeps, "exit 95",
+    manifest(root, "closure_a", closureADependencies,
+      quoteShell(findExe("mkdir", followSymlinks = false)) &
+        " -p .repro/output/install/usr/bin; " &
+        "printf '#!/bin/sh\\nexit 0\\n' > .repro/output/install/usr/bin/closure_a; " &
+        quoteShell(findExe("chmod", followSymlinks = false)) &
+        " +x .repro/output/install/usr/bin/closure_a",
       ", publishToBinaryCache = true, cacheEntryIdentity = some(" & identityLiteral & ")"))
-  for name in ["closure_b", "closure_c", "closure_runtime"]:
+  for name in ["closure_b", "closure_c", "closure_runtime", "closure_native"]:
     let deps = if name == "closure_b": "  buildDeps:\n    \"closure_c\"\n" else: ""
     let script = quoteShell(findExe("mkdir", followSymlinks = false)) &
       " -p .repro/output/install/usr/bin .repro/output/install/usr/lib; " &
@@ -52,7 +58,8 @@ proc writeFixture(root, identityLiteral: string) =
       "; " & quoteShell(findExe("chmod", followSymlinks = false)) &
       " +x .repro/output/install/usr/bin/" & name
     writeFile(root / "catalog" / name / "repro.nim", manifest(root, name, deps, script))
-  # An unavailable native provider must not be resolved for a ready artifact.
+  # The native provider is needed to revalidate a local producer, but must not
+  # propagate into the consumer's runtime identity.
   createDir(root / "consumer")
   createDir(root / "consumer/build")
   writeFile(root / "consumer/repro.nim",
@@ -76,6 +83,7 @@ proc runCli(binary, root: string; args: seq[string];
       ("REPROBUILD_NO_RUNQUOTA", "1"),
       ("REPRO_CACHES_CONFIG", root / "no-global-caches.conf"),
       ("REPRO_BINARY_CACHE_URL", ""),
+      ("REPRO_CACHE_DISABLE", "0"),
       ("REPROBUILD_WORK_ROOT", ""),
       ("REPRO_LOCAL_STORE", root / "local-store")]:
     env[key] = value
@@ -158,7 +166,7 @@ template verifyClosure(label: string; overrideWorkRoot: bool) =
         "providerRevision = \"closure-fixture-v1\")"
       writeFixture(root, identityLiteral)
       let aBinary = prefix(root, "closure_a") / "usr/bin/closure_a"
-      executable(aBinary, "#!/bin/sh\nexit 0\n")
+      executable(aBinary, "#!/bin/sh\nexit 97\n")
       let buildArgs = @["build", "--daemon=off", "--tool-provisioning=from-source",
         "--progress=quiet", "--log=actions", "--measure=none",
         "--action-cache-root=" & root / "action-cache"]
@@ -167,6 +175,7 @@ template verifyClosure(label: string; overrideWorkRoot: bool) =
       let ready = runCli(binary, root, buildArgs, workEnv)
       checkpoint(ready.output)
       require ready.exitCode == 0
+      check readFile(aBinary) == "#!/bin/sh\nexit 0\n"
       checkPrepared(root, label & " ready", workRoot)
 
       let listener = newSocket()
@@ -212,6 +221,16 @@ template verifyClosure(label: string; overrideWorkRoot: bool) =
         @["cache", "publish", key, prefix(root, "closure_a")] & flags, cacheEnv)
       checkpoint(published.output)
       require published.exitCode == 0
+      # A trusted substitute must not execute the source build or resolve its
+      # native tools. The fixture declares an explicit, fixed cache identity.
+      let aRecipe = root / "catalog/closure_a/repro.nim"
+      let aText = readFile(aRecipe)
+      let failingRecipe = manifest(root, "closure_a", closureADependencies,
+        "exit 95", ", publishToBinaryCache = true, cacheEntryIdentity = some(" &
+          identityLiteral & ")")
+      require failingRecipe != aText
+      writeFile(aRecipe, failingRecipe)
+      removeDir(root / "catalog/closure_native")
       for name in ["closure_a", "closure_b", "closure_c", "closure_runtime"]:
         removeDir(root / "catalog" / name / ".repro")
         removeFile(root / (name & ".extractions"))

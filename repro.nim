@@ -36,6 +36,8 @@
 ## those before invoking ``just build``; an interactive developer gets
 ## them out of the ``nix develop`` shell.
 
+{.experimental: "callOperator".}
+
 import std/[os, osproc, strutils]
 # Ambient-execution hatches. Every call below is bootstrap tier: the recipe has
 # to locate a host tool BEFORE any engine-provisioned prefix exists, so a typed
@@ -48,6 +50,7 @@ import repro_core/ambient_execution
               # test-fixtures monitor-shim build edge below.
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
+import repro_dsl_stdlib/packages/gcc as gcc_module
 import repro_dsl_stdlib/fs as dslfs
 import repro_dsl_stdlib/types
               # Windows-Cacheable-Builds-Session-Residuals S1: the four
@@ -168,6 +171,7 @@ type
 
 const
   ctShimFixtureRoot = "build/test-fixtures/ct-test-unittest-parallel"
+  installMirrorFixtureRoot = "build/test-fixtures/install-mirror-runtime"
 
   ctShimProtocolThreeTests = TestGraphArtifact(
     path: ctShimFixtureRoot & "/fixture_protocol_three_tests",
@@ -1218,6 +1222,13 @@ package reprobuild:
             else: artifact.path
           requiredBinaries.add(artifactPath)
           executeDeps.add(artifact.actionId)
+      when defined(linux):
+        if spec.source == "tests/unit/t_m9r83_install_mirror_action_shapes.nim":
+          # ELF fixtures have no Windows/macOS producer or execution cases.
+          requiredBinaries.add(installMirrorFixtureRoot & "/probe")
+          requiredBinaries.add(installMirrorFixtureRoot & "/librepro_mirror_fixture.so")
+          executeDeps.add("reprobuild.test_fixtures.install_mirror_library")
+          executeDeps.add("reprobuild.test_fixtures.install_mirror_probe")
       when not defined(windows):
         if spec.source ==
             "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim":
@@ -2081,6 +2092,22 @@ package reprobuild:
     # the two agree instead. See
     # ``tests/unit/test_graph_owned_test_artifacts.py``.
     let ctShimFixtureDir = ctShimFixtureRoot
+    when defined(linux):
+      let mirrorFixtureDir = dslfs.ensureDir(installMirrorFixtureRoot,
+        actionId = "reprobuild.test_fixtures.install_mirror_dir")
+      reprobuildTestFixturesActions.add(mirrorFixtureDir)
+      let mirrorLibrary = gcc(
+        source = "tests/fixtures/install-mirror-runtime/library.c",
+        output = installMirrorFixtureRoot & "/librepro_mirror_fixture.so",
+        shared = true, pic = true, after = @[mirrorFixtureDir],
+        actionId = "reprobuild.test_fixtures.install_mirror_library")
+      reprobuildTestFixturesActions.add(mirrorLibrary)
+      reprobuildTestFixturesActions.add(gcc(
+        source = "tests/fixtures/install-mirror-runtime/main.c",
+        output = installMirrorFixtureRoot & "/probe",
+        libDirs = @[installMirrorFixtureRoot], libs = @["repro_mirror_fixture"],
+        deps = @[mirrorLibrary.id], extraInputs = mirrorLibrary.outputs,
+        actionId = "reprobuild.test_fixtures.install_mirror_probe"))
     reprobuildTestFixturesActions.add(nim.c(
       source = "libs/ct_test_unittest_parallel/tests/fixtures/" &
         "fixture_baseline_std_unittest.nim",

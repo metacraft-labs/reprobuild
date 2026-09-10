@@ -94,8 +94,9 @@ proc tarballPackage*(dist: Distribution;
     format: "tar.gz",
     path: outPath,
     edge: edge,
-    toolSelectors: @[TarSelector, GzipSelector, PatchelfSelector,
-                     InstallSelector],
+    # See the note in ``deb.nim``: the staging tools are read off the
+    # tree, only this producer's own two are named here.
+    toolSelectors: @[TarSelector, GzipSelector] & tree.stagingSelectors,
     tree: tree)
 
 proc tarballProducer(dist: Distribution;

@@ -33,6 +33,37 @@ an existing immutable cache entry to work around this guard. None of these
 operations binds the missing inputs. Existing signed entries authenticate
 their publisher and payload, not the completeness of their lookup identity.
 
+## Local Source Producer Validation
+
+An existing install prefix is a location probe, not proof that its producer is
+current. Source provisioning validates the producer through the normal build
+engine even when the requested artifact is present. Unchanged producer actions
+can use their local action-cache hits; recipe imports and action-input changes
+must be observed, and a failed producer cannot be hidden by old output files.
+
+A successful trusted substitution under the current package identity can
+satisfy this validation without executing the source build or provisioning its
+native build tools. Automatic incomplete identities cannot take that path.
+The producer's build/runtime dependency closure is still prepared for consumers.
+
+Deduplication lasts for one outer build invocation, including nested producer
+builds. Later invocations in the same process revalidate. A producer already
+active in a self-hosting cycle may use its existing artifact as a bootstrap
+seed; that seed does not mark the active producer as successfully validated.
+
+## Install Mirror Runtime Closure
+
+Custom shell and typed source builds use the same install-mirror runtime
+normalization. On Linux, this includes ELF subprograms under `usr/libexec`,
+declared dependency library directories and propagated runtime manifests.
+Generated mirror tools are declared during interface extraction, before the
+build body runs. `REPRO_M9R30_NEEDED_CHECK=1` additionally refuses a mirror
+whose ELF dependencies cannot be resolved.
+
+These are local runtime-closure checks, not certification that an archive can
+be restored on another machine. Dynamic interpreter paths still require
+independent relocation validation; the incomplete-identity guard remains.
+
 ## Re-enabling Automatic Source Substitution
 
 The resolver must bind the complete source/provider inputs, solved options,

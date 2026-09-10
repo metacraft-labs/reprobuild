@@ -54,6 +54,7 @@ import ./types
 
 import ../packages/patchelf as patchelf_module
 import ../packages/coreutils_install as install_module
+import ../packages/sh as sh_module
 
 {.experimental: "callOperator".}
 
@@ -64,6 +65,29 @@ const
 const
   PatchelfSelector* = "patchelf"
   InstallSelector* = "install-file"
+  ShSelector* = "sh"
+    ## The runtime-closure walk's interpreter.
+    ##
+    ## The walk cannot be Nim code in this module, and the reason is a
+    ## fact about WHEN things exist rather than a preference. A
+    ## component's ``DT_NEEDED`` list is a property of a file that no
+    ## edge has produced yet at the moment the graph is built -- on a
+    ## clean tree the compiler has not run -- so the closure is only
+    ## knowable at BUILD time, inside an action. What that action needs
+    ## is exactly two things the layer already packages: ``patchelf``'s
+    ## ``--print-needed`` / ``--print-rpath`` to read an object, and a
+    ## POSIX shell to drive the fixed-point. ``sh`` is a reprobuild
+    ## package like every other tool here (§6 rule 1), so this is one
+    ## more real build-graph dependency, not a host assumption.
+    ##
+    ## ``install-file`` is named on the same edge, and not because
+    ## anything runs ``install``: the resolver puts the whole
+    ## ``bin`` DIRECTORY of the package that provides an executable on
+    ## the action's PATH, and ``install`` comes from coreutils -- which
+    ## is where ``cp``, ``mkdir``, ``touch``, ``ls``, ``rm``, ``sort``
+    ## and ``dirname`` come from too. Naming it is how the walk gets
+    ## them; the tar/gzip finding of the first Linux build is the same
+    ## lesson, one tool further out.
 
 type
   StagedFile* = object
@@ -113,6 +137,24 @@ type
       ## this as ``after =`` and the staged paths as ``extraInputs``,
       ## which is what makes the artifact edge depend on the tree's
       ## contents rather than merely on its directory name.
+    stagingSelectors*: seq[string]
+      ## The tool packages the STAGING step made the calling project
+      ## depend on, in the order it declared them.
+      ##
+      ## Derived rather than transcribed. Each producer used to repeat
+      ## ``@[PatchelfSelector, InstallSelector]`` in its returned
+      ## ``toolSelectors``, which meant the Windows producer had to
+      ## remember NOT to, and a staging step that grew a tool (the
+      ## closure walk's ``sh``) would have had to be copied into every
+      ## producer -- the per-producer hand-writing §5 exists to forbid,
+      ## in the one place it had quietly survived.
+    producerExtraInputs*: seq[string]
+      ## Files outside the tree that a producer must nonetheless depend
+      ## on. Today this is the runtime-closure MANIFEST: the vendored
+      ## libraries are written into the tree by an action rather than
+      ## being per-file edge outputs, so there is no staged path for the
+      ## producer to name, and without the manifest the artifact edge
+      ## would not be re-run when the closure changed.
 
   ToolDependencySite* = object
     ## Where the recipe's ``package`` declaration is, so a producer can
@@ -428,6 +470,339 @@ proc realFileName*(dist: Distribution; publicName: string): string =
   else:
     publicName & ".real"
 
+const
+  ClosureScriptPreamble = """
+fail() {
+  printf 'runtime-closure: %s\n' "$1" >&2
+  exit 1
+}
+
+# Membership in a newline-separated list. Written with `case` rather than
+# with grep so the walk needs nothing beyond patchelf, coreutils and the
+# shell itself.
+contains() {
+  case "$NL$1$NL" in
+    *"$NL$2$NL"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+search=''
+seen=''
+vendored=''
+pending=''
+manifest=''
+
+add_search() {
+  if [ -d "$1" ]; then
+    if contains "$search" "$1"; then
+      :
+    elif [ -z "$search" ]; then
+      search=$1
+    else
+      search=$search$NL$1
+    fi
+  fi
+  return 0
+}
+
+ORIGIN_BARE='$ORIGIN'
+ORIGIN_BRACED='${ORIGIN}'
+
+# Every directory THIS object was linked to look in -- the only place the
+# walk can learn where a build-toolchain library actually lives.
+scan_rpath() {
+  scan_origin=$(dirname -- "$1")
+  scan_rp=$(patchelf --print-rpath "$1" 2>/dev/null || printf '')
+  if [ -n "$scan_rp" ]; then
+    scan_ifs=$IFS
+    IFS=':'
+    for scan_dir in $scan_rp; do
+      case $scan_dir in
+        "$ORIGIN_BRACED"*) scan_dir=$scan_origin${scan_dir#"$ORIGIN_BRACED"} ;;
+        "$ORIGIN_BARE"*) scan_dir=$scan_origin${scan_dir#"$ORIGIN_BARE"} ;;
+      esac
+      if [ -n "$scan_dir" ]; then
+        add_search "$scan_dir"
+      fi
+    done
+    IFS=$scan_ifs
+  fi
+  return 0
+}
+
+resolve() {
+  res_ifs=$IFS
+  IFS=$NL
+  for res_dir in $search; do
+    if [ -e "$res_dir/$1" ]; then
+      IFS=$res_ifs
+      printf '%s' "$res_dir/$1"
+      return 0
+    fi
+  done
+  IFS=$res_ifs
+  return 1
+}
+
+push() {
+  if contains "$seen" "$1"; then
+    return 0
+  fi
+  if contains "$pending" "$1"; then
+    return 0
+  fi
+  if [ -z "$pending" ]; then
+    pending=$1
+  else
+    pending=$pending$NL$1
+  fi
+  return 0
+}
+
+vendor() {
+  if contains "$vendored" "$1"; then
+    return 0
+  fi
+  cp -L -- "$2" "$LIBDIR/$1"
+  chmod 0755 "$LIBDIR/$1"
+  # Step 4 in runtimeClosureScript's doc comment: without this the
+  # vendored library keeps the RUNPATH the build toolchain gave it, and
+  # glibc then refuses to consult the executable's RPATH on its behalf.
+  patchelf --force-rpath --set-rpath '$ORIGIN' "$LIBDIR/$1"
+  # patchelf rewrites the file, so its mtime becomes "now". Pinning it
+  # keeps the staged tree -- and the archive built from it -- a pure
+  # function of its inputs rather than of when the build ran.
+  touch -d @1 -- "$LIBDIR/$1"
+  if [ -z "$vendored" ]; then
+    vendored=$1
+  else
+    vendored=$vendored$NL$1
+  fi
+  manifest=$manifest$1$NL
+  printf 'runtime-closure: vendored %s <- %s\n' "$1" "$2"
+  return 0
+}
+
+seed() {
+  if [ ! -e "$1" ]; then
+    fail "component '$1' does not exist"
+  fi
+  scan_rpath "$1"
+  push "$1"
+  return 0
+}
+
+require_dlopen() {
+  if contains "$vendored" "$1"; then
+    return 0
+  fi
+  dl_path=$(resolve "$1" || printf '')
+  if [ -z "$dl_path" ]; then
+    fail "dlopen leaf name '$1' is declared by runtime.dlopenLeafNames but no search path contains it; add its directory to runtime.extraLibrarySearchDirs"
+  fi
+  vendor "$1" "$dl_path"
+  push "$dl_path"
+  return 0
+}
+
+"""
+    ## The fixed half of the walk: list primitives, the search-path
+    ## accumulator, the resolver and the vendoring step. Kept as one
+    ## literal rather than assembled line by line so it reads as the
+    ## shell program it is.
+  ClosureScriptFixedPoint = """
+while [ -n "$pending" ]; do
+  cur=${pending%%"$NL"*}
+  if [ "$cur" = "$pending" ]; then
+    pending=''
+  else
+    pending=${pending#*"$NL"}
+  fi
+  if contains "$seen" "$cur"; then
+    continue
+  fi
+  if [ -z "$seen" ]; then
+    seen=$cur
+  else
+    seen=$seen$NL$cur
+  fi
+  scan_rpath "$cur"
+  needed=$(patchelf --print-needed "$cur" 2>/dev/null || printf '')
+  if [ -n "$needed" ]; then
+    need_ifs=$IFS
+    IFS=$NL
+    for need in $needed; do
+      IFS=$need_ifs
+      if [ -n "$need" ]; then
+        if is_system "$need"; then
+          printf 'runtime-closure: system %s (left to the target)\n' "$need"
+        else
+          found=$(resolve "$need" || printf '')
+          if [ -z "$found" ]; then
+            fail "cannot resolve '$need' needed by '$cur'; add its directory to runtime.extraLibrarySearchDirs, or its leaf name to runtime.extraSystemLibraryLeafNames if the TARGET provides it"
+          fi
+          vendor "$need" "$found"
+          push "$found"
+        fi
+      fi
+      IFS=$NL
+    done
+    IFS=$need_ifs
+  fi
+done
+
+"""
+    ## The transitive ``DT_NEEDED`` fixed point itself.
+  ClosureScriptEpilogue = """
+stale_ifs=$IFS
+IFS=$NL
+for stale in $(ls -1 -- "$LIBDIR" 2>/dev/null || printf ''); do
+  IFS=$stale_ifs
+  if contains "$vendored" "$stale"; then
+    IFS=$NL
+    continue
+  fi
+  case "$NL$keep" in
+    *"$NL$stale$NL"*) IFS=$NL; continue ;;
+  esac
+  printf 'runtime-closure: pruning stale %s\n' "$stale"
+  rm -f -- "$LIBDIR/$stale"
+  IFS=$NL
+done
+IFS=$stale_ifs
+
+printf '%s' "$manifest" | LC_ALL=C sort > "$MANIFEST"
+"""
+    ## Stale-prune plus the manifest write. The manifest carries LEAF
+    ## NAMES only, sorted: it is an input of the artifact edge, so
+    ## putting the resolved build-host paths in it would make two hosts
+    ## that produced the same package disagree about its cache key.
+
+# ---------------------------------------------------------------------------
+# The runtime-library closure walk.
+# ---------------------------------------------------------------------------
+
+proc shellSingleQuote(value: string): string =
+  ## Same escaping as ``posixSingleQuote``; kept separate because that
+  ## one is part of the WRAPPER's text, which ships, and this one is
+  ## part of a BUILD-TIME script, which does not — the two must be free
+  ## to diverge.
+  result = "'"
+  for ch in value:
+    if ch == '\'': result.add("'\\''")
+    else: result.add(ch)
+  result.add("'")
+
+proc runtimeClosureScript*(dist: Distribution;
+                           componentSources: openArray[string];
+                           libDir, manifestPath: string;
+                           keepLeafNames: openArray[string]): string =
+  ## The POSIX-shell program that walks the runtime closure and fills
+  ## the private libdir the §5 RPATH points at.
+  ##
+  ## ## Why this is a build-time SCRIPT and not Nim code in this module
+  ##
+  ## A component's ``DT_NEEDED`` list is a property of a file that no
+  ## edge has produced yet at the moment the graph is built: on a clean
+  ## tree the compiler has not run. The closure is therefore only
+  ## knowable inside an ACTION, and an action's vocabulary is the tools
+  ## its edge named. Two of them suffice — ``patchelf --print-needed`` /
+  ## ``--print-rpath`` to read an object, and a shell to drive the
+  ## fixed-point — and both are already reprobuild packages, so nothing
+  ## here assumes anything about the host.
+  ##
+  ## ## What it does, and why each step is there
+  ##
+  ## 1. **Seed** with the component binaries AS BUILT — never with the
+  ##    patched copies. ``stageInstallTree`` replaces their RPATH with an
+  ##    ``$ORIGIN`` one, which destroys the only record of where their
+  ##    libraries actually live; the pre-patch object is the sole source
+  ##    of that information.
+  ## 2. **Fixed point over ``DT_NEEDED``**, resolving each name against
+  ##    the ``DT_RPATH``/``DT_RUNPATH`` of every object visited so far
+  ##    (``$ORIGIN`` expanded against that object's own directory) plus
+  ##    any ``extraLibrarySearchDirs``. Transitive, because a vendored
+  ##    library's own dependencies are just as absent from the target as
+  ##    it is — ``libblake3`` pulls ``libtbb``, which pulls
+  ##    ``libstdc++`` and ``libgcc_s``.
+  ## 3. **Classify** each name with the system/private rule
+  ##    (``types.isSystemLibraryLeafName``, emitted here as a ``case`` so
+  ##    the shell applies exactly the rule the Nim predicate states). A
+  ##    system name is left to the target; anything else is vendored.
+  ## 4. **Rewrite each vendored library's own RPATH to ``$ORIGIN``.**
+  ##    Not optional, and easy to miss. glibc consults the RPATH CHAIN of
+  ##    an object's loaders only when the object itself has no
+  ##    ``DT_RUNPATH``; a nixpkgs build always has one, pointing into the
+  ##    store. So a vendored ``libblake3`` that kept its own RUNPATH
+  ##    would be found through the executable's RPATH and would then fail
+  ##    to find ``libtbb`` sitting right next to it.
+  ## 5. **Check the ``dlopen`` post-condition** (see
+  ##    ``RuntimeContract.dlopenLeafNames``) and **prune** anything an
+  ##    earlier build left in the directory that this walk did not
+  ##    produce and no component declares — so a rebuild that dropped a
+  ##    dependency gives the same tree as a clean build.
+  ##
+  ## Every unresolvable name is a loud, named failure. Carrying on and
+  ## shipping a package that is missing one library is precisely the
+  ## defect this proc exists to close, and it is invisible until the
+  ## package is installed on a machine that is not the builder.
+  var systemCases: seq[string] = @[]
+  for name in dist.runtime.extraSystemLibraryLeafNames:
+    if name.len > 0:
+      systemCases.add(name)
+      let stem = libraryStem(name)
+      if stem != name: systemCases.add(stem)
+  result = ""
+  result.add("set -euf\n")
+  result.add("# Generated by the reprobuild DSL packaging layer\n")
+  result.add("# (Distribution-And-Packaging.md " & "SECT" & "5). Do not edit.\n")
+  result.add("NL='\n'\n")
+  result.add("LIBDIR=" & shellSingleQuote(libDir) & "\n")
+  result.add("MANIFEST=" & shellSingleQuote(manifestPath) & "\n")
+  result.add(ClosureScriptPreamble)
+  # The system/private rule, emitted so the shell applies exactly the
+  # rule ``types.isSystemLibraryLeafName`` states.
+  result.add("is_system() {\n")
+  result.add("  stem=${1%%.so*}\n")
+  result.add("  case $stem in\n")
+  result.add("    ld-linux*|ld|ld64*|linux-vdso*|linux-gate*|libnss_*)" &
+    " return 0 ;;\n")
+  var stems: seq[string] = @[]
+  for stem in SystemLibraryStems:
+    stems.add(stem)
+  result.add("    " & stems.join("|") & ") return 0 ;;\n")
+  if systemCases.len > 0:
+    result.add("    " & systemCases.join("|") & ") return 0 ;;\n")
+  result.add("  esac\n")
+  result.add("  return 1\n")
+  result.add("}\n\n")
+
+  result.add("mkdir -p -- \"$LIBDIR\"\n")
+  result.add("mkdir -p -- \"$(dirname -- \"$MANIFEST\")\"\n\n")
+  for dir in dist.runtime.extraLibrarySearchDirs:
+    if dir.len > 0:
+      result.add("add_search " & shellSingleQuote(dir) & "\n")
+  for source in componentSources:
+    result.add("seed " & shellSingleQuote(source) & "\n")
+  result.add("\n")
+  # The dlopen leaf names are seeded BEFORE the fixed point, so their own
+  # dependencies are walked too: a library opened by name still needs
+  # everything IT needs.
+  for leaf in dist.runtime.dlopenLeafNames:
+    if leaf.len > 0:
+      result.add("require_dlopen " & shellSingleQuote(leaf) & "\n")
+  result.add(ClosureScriptFixedPoint)
+  # The stale-prune keep list is the leaf names of the components the
+  # DISTRIBUTION itself declares into this directory: those are staged by
+  # ordinary install edges, not by this walk, and deleting one would be
+  # this action eating another edge's output.
+  result.add("keep=''\n")
+  for leaf in keepLeafNames:
+    if leaf.len > 0:
+      result.add("keep=$keep" & shellSingleQuote(leaf) & "$NL\n")
+  result.add(ClosureScriptEpilogue)
+
 # ---------------------------------------------------------------------------
 # Staging.
 # ---------------------------------------------------------------------------
@@ -455,6 +830,13 @@ proc stageInstallTree*(dist: Distribution; variant: string;
   let genRoot = dist.stagingRoot & "/gen-" & variant
   result = StagedTree(dist: dist, root: treeRoot, genRoot: genRoot,
     idPrefix: "pkg-" & sanitizeIdPart(variant) & "-")
+
+  var selectors: seq[string] = @[]
+  proc noteSelector(selector: string) =
+    ## Record a tool the staging step actually used, so a producer can
+    ## report it without transcribing a list that only staging knows.
+    if selector.len > 0 and selector notin selectors:
+      selectors.add(selector)
 
   # For a deb/rpm the payload is rooted at ``/`` and the prefix is a
   # directory inside the tree; for a tarball or an MSI the tree root IS
@@ -489,6 +871,15 @@ proc stageInstallTree*(dist: Distribution; variant: string;
 
   let idPrefix = "pkg-" & sanitizeIdPart(variant) & "-"
 
+  # The objects the runtime-closure walk starts from, AS BUILT. Not the
+  # patched copies: patching replaces the RPATH, which is the only record
+  # of where their libraries live. See ``runtimeClosureScript``.
+  var closureSources: seq[string] = @[]
+  var closureAfter: seq[BuildActionDef] = @[]
+  # Leaf names the DISTRIBUTION itself stages into the private libdir.
+  # The walk must not prune these -- they are another edge's output.
+  var declaredLibLeafNames: seq[string] = @[]
+
   proc emitInstall(source, target: string; mode: int;
                    after: openArray[BuildActionDef];
                    idHint: string): BuildActionDef =
@@ -507,6 +898,7 @@ proc stageInstallTree*(dist: Distribution; variant: string;
         actionId = idPrefix & "install-" & sanitizeIdPart(idHint),
         after = after)
       declareProducerTool(site, edge.id, InstallSelector)
+      noteSelector(InstallSelector)
       edge
     else:
       dslfs.copyFile(source, target,
@@ -529,6 +921,9 @@ proc stageInstallTree*(dist: Distribution; variant: string;
       dist.targetOs == toLinux and
       component.role in {crExecutable, crHelperExecutable, crRuntimeLibrary}
     if needsRpath:
+      closureSources.add(component.buildPath)
+      for edge in component.producedBy:
+        closureAfter.add(edge)
       # The generated intermediate's FILE NAME carries the variant too,
       # not just its directory. Named-Targets derives an implicit target
       # name from an output's BASENAME, so ``gen-deb/bin-hello.patched``
@@ -541,13 +936,30 @@ proc stageInstallTree*(dist: Distribution; variant: string;
       let edge = patchelfTool(
         setRpath = rpathFor(dist, prefixRelDir),
         forceRpath = true,
+        # The ELF interpreter, on the SAME edge as the RPATH and for the
+        # same reason: a binary built under a foreign toolchain names
+        # that toolchain's loader in ``PT_INTERP``, and a target with no
+        # such path cannot start it. ``execve`` answers ``ENOENT`` for a
+        # missing INTERPRETER exactly as it does for a missing image, so
+        # the symptom is ``not found`` for a file that is plainly there.
+        #
+        # Only executables get one. A shared library has no ``PT_INTERP``
+        # and patchelf refuses ``--set-interpreter`` on one, so asking
+        # would turn a vendored library into a build failure.
+        setInterpreter =
+          (if component.role == crRuntimeLibrary: ""
+           else: interpreterPathFor(dist)),
         output = patched,
         file = component.buildPath,
         actionId = idPrefix & "rpath-" & sanitizeIdPart(prefixRel),
         after = component.producedBy)
       declareProducerTool(site, edge.id, PatchelfSelector)
+      noteSelector(PatchelfSelector)
       payloadSource = patched
       payloadAfter = @[edge]
+
+    if component.role == crRuntimeLibrary:
+      declaredLibLeafNames.add(defaultInstallName(component))
 
     let realPrefixRel =
       if wrapThis:
@@ -591,6 +1003,56 @@ proc stageInstallTree*(dist: Distribution; variant: string;
         role: crExecutable,
         isPublicEntryPoint: true))
       result.terminal.add(installEdge)
+
+  # ---- 3. the vendored runtime-library closure ---------------------
+  #
+  # LAST, and ordered after every other staging edge, for one reason
+  # that is easy to get wrong: this edge OWNS a directory rather than a
+  # file set, and it prunes what it does not recognise. Running it
+  # before the install edges that stage a declared ``crRuntimeLibrary``
+  # would let it delete another edge's output.
+  if dist.targetOs == toLinux and dist.runtime.vendorRuntimeClosure and
+      closureSources.len > 0:
+    let libPrefixRel = privateLibPrefixRelDir(dist)
+    let libRootRel = rootRelFor(libPrefixRel, crRuntimeLibrary)
+    let libDir = treeRoot & "/" & libRootRel
+    let manifestPath = genRoot & "/" & sanitizeIdPart(variant) &
+      "-runtime-closure.manifest"
+    let script = runtimeClosureScript(dist, closureSources, libDir,
+      manifestPath, declaredLibLeafNames)
+    var after = closureAfter
+    for edge in result.terminal:
+      after.add(edge)
+    let edge = sh_module.shell(script,
+      actionId = idPrefix & "runtime-closure",
+      after = after,
+      # The objects the walk reads. Declared so a rebuilt binary
+      # re-runs the walk -- a new dependency in a component is exactly
+      # the change that must reach the shipped library set.
+      extraInputs = closureSources,
+      extraOutputs = @[manifestPath],
+      # The walk reads back what it just wrote (patchelf re-reads the
+      # copy it is about to rewrite, and the prune lists the
+      # directory). Those are its own writes, not inputs, and treating
+      # them as inputs would make the edge depend on its previous run.
+      ignoredInputPrefixes = @[libDir])
+    # The write ROOT, not a file list: the vendored set is discovered at
+    # build time, so there are no per-file outputs to declare. Same
+    # shape ``cmake_package``'s install edge uses for a DESTDIR, and the
+    # same mechanism (M9.R.75's R7 pairwise write-root check) grades it.
+    setRegisteredActionDeclaredOutputs(edge.id, @[libDir])
+    declareProducerTool(site, edge.id, ShSelector)
+    noteSelector(ShSelector)
+    declareProducerTool(site, edge.id, PatchelfSelector)
+    noteSelector(PatchelfSelector)
+    # coreutils, reached through the ``install`` executable's package --
+    # see the note on ``ShSelector``.
+    declareProducerTool(site, edge.id, InstallSelector)
+    noteSelector(InstallSelector)
+    result.terminal.add(edge)
+    result.producerExtraInputs.add(manifestPath)
+
+  result.stagingSelectors = selectors
 
 proc addGeneratedFile*(tree: var StagedTree; rootRelPath, text: string;
                        mode = 0o644; site = noSite()): BuildActionDef
@@ -642,6 +1104,14 @@ proc stagedPaths*(tree: StagedTree): seq[string] =
   ## addressed over the wrong thing.
   for f in tree.files:
     result.add(tree.root & "/" & f.rootRelPath)
+  # The runtime-closure manifest is NOT in the tree (it sits beside the
+  # other generated intermediates, so a producer that archives the whole
+  # tree never picks it up), but it IS what tells the artifact edge that
+  # the vendored library set changed. Appending it here rather than
+  # asking every producer to remember it keeps the "a producer only
+  # translates" property true.
+  for path in tree.producerExtraInputs:
+    result.add(path)
 
 proc publicEntryPoints*(tree: StagedTree): seq[StagedFile] =
   for f in tree.files:

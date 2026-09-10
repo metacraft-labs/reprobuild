@@ -3516,7 +3516,7 @@ proc shouldTryFromSourceCacheSubstitution*(
   ## Cached source artifacts remain valid for bootstrap-floor tools. The floor
   ## prevents recursive self-hosting builds; it must not prevent restoring an
   ## artifact that was already built from source under the same identity.
-  outcome.kind == rrNeedsBuild and cacheConfigured and
+  outcome.kind in {rrResolved, rrNeedsBuild} and cacheConfigured and
     not prepareOnly and not dryRun and not forceRebuild
 
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
@@ -4060,12 +4060,9 @@ var fromSourceBuildStack*: seq[string] = @[]
   ## already present in the stack. Exported for test introspection +
   ## ``repro why`` diagnostics; not intended for external mutation.
 var fromSourceResolvedRecipes*: HashSet[string] = initHashSet[string]()
-  ## DSL-port M9.R.9 — per-process cache. Once a sibling recipe has
-  ## been successfully built once in a session, repeat probes return
-  ## immediately (the artefact is now on disk so
-  ## ``tryResolveFromSourceTool`` would resolve, but the dedup avoids
-  ## even re-walking the candidate list). Exported for test
-  ## introspection + ``repro why`` diagnostics.
+  ## Recipes validated during the current outer build invocation. Nested
+  ## producer builds share this set; subsequent builds must revalidate it.
+var fromSourceBuildInvocationDepth = 0
 
 # ---------------------------------------------------------------------------
 # Cross-Repo-Source-Consumption SC-2 — producer graph load + splice
@@ -8268,6 +8265,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # text-mode stat collection so the per-metric breakdown survives — CMake
   # never passes --show= to its child repro build invocations, so the dir
   # is the only handle we have on enabling them.
+  if fromSourceBuildInvocationDepth == 0:
+    fromSourceResolvedRecipes.clear()
+  inc fromSourceBuildInvocationDepth
+  defer:
+    dec fromSourceBuildInvocationDepth
+    if fromSourceBuildInvocationDepth == 0:
+      fromSourceResolvedRecipes.clear()
   let configureStatsDir = getEnv("REPRO_STATS_DIR")
   let statsEnabled = mcTiming in measureSet or configureStatsDir.len > 0 or
     benchmarkPath.len > 0 or statsGroupEnabled(scgTiming)
@@ -8995,15 +8999,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # DSL-port M9.R.9 — auto-recurse pass for from-source provisioning.
   # When the active mode is ``tpmFromSource`` we probe every tool use
   # against the sibling-recipe layout BEFORE the identity resolver runs.
-  # Any ``rrNeedsBuild`` outcome (sibling recipe present but artefact
-  # missing) triggers a recursive ``executeBuildTarget`` call for the
-  # sibling, threaded through the same provider-compile + lowered-graph
-  # + engine pipeline (NOT a ``repro build`` subprocess). After every
-  # sibling resolves the outer build proceeds with the resolver pass,
-  # which now finds the artefacts on disk.
+  # Existing artifacts need the same producer validation as missing ones:
+  # presence is not evidence that current recipe/action inputs were built.
+  # Trusted substitution can satisfy the producer; otherwise recurse through
+  # the normal engine so unchanged actions can hit their local cache.
   #
   # Guards (in order of consultation):
-  #   1. ``fromSourceResolvedRecipes`` — per-process dedup, so a single
+  #   1. ``fromSourceResolvedRecipes`` — per-invocation dedup, so a single
   #      sibling shared across many tool uses is built once.
   #   2. ``fromSourceBuildStack`` — cycle detection: pushing a recipe
   #      dir that's already on the stack raises with the full cycle
@@ -9075,18 +9077,21 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     while nextSourceUse < pendingSourceUses.len:
       let useDef = pendingSourceUses[nextSourceUse]
       inc nextSourceUse
-      # A completed source mirror remains authoritative even for a
-      # bootstrap tool. The cycle-break set only suppresses recursive
-      # construction when that mirror is absent; this lets later
-      # consumers use bootstrap tools that an earlier build completed.
       let outcome = tryResolveFromSourceTool(useDef)
-      if outcome.kind == rrResolved:
-        enqueueSourceDependencies(outcome.profile.selectedStorePath, false)
+      if outcome.kind == rrSiblingMissing:
         continue
-      if outcome.kind != rrNeedsBuild:
-        continue
-      let siblingRecipeDir = absolutePath(outcome.recipeDir)
+      let siblingRecipeDir = absolutePath(
+        if outcome.kind == rrResolved: outcome.profile.selectedStorePath
+        else: outcome.recipeDir)
+      let toolName = useDef.executableName
       if siblingRecipeDir in fromSourceResolvedRecipes:
+        if outcome.kind == rrResolved:
+          enqueueSourceDependencies(siblingRecipeDir, false)
+        continue
+      if outcome.kind == rrResolved and siblingRecipeDir in fromSourceBuildStack:
+        # A self-hosting build can use its existing artifact as a bootstrap
+        # seed. This does not certify the producer, which is still active.
+        enqueueSourceDependencies(siblingRecipeDir, true)
         continue
       let siblingManifest = siblingRecipeDir / "repro.nim"
       if shouldTryFromSourceCacheSubstitution(outcome,
@@ -9118,13 +9123,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         if substituteOutcome.exitCode == 0 and
             tryResolveFromSourceTool(useDef).kind == rrResolved:
           logSummary("from-source cache substitute: restored \"" &
-            outcome.toolName & "\" at " & siblingRecipeDir)
+            toolName & "\" at " & siblingRecipeDir)
           fromSourceResolvedRecipes.incl(siblingRecipeDir)
           pendingSourceUses.add(useDef)
           continue
       # The bootstrap floor suppresses recursive construction only after a
       # configured source-artifact cache had a chance to restore the mirror.
-      if useDef.executableName.len > 0 and
+      if outcome.kind == rrNeedsBuild and useDef.executableName.len > 0 and
           useDef.executableName in fromSourceCycleBrokenTools:
         enqueueSourceDependencies(siblingRecipeDir, true)
         continue
@@ -9144,26 +9149,25 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # to build from source recursively.
         var cycle = fromSourceBuildStack
         cycle.add(siblingRecipeDir)
-        logSummary("from-source cycle break: routing \"" & outcome.toolName &
+        logSummary("from-source cycle break: routing \"" & toolName &
           "\" through stdlib provisioning to break cycle " &
           cycle.join(" -> "))
-        fromSourceCycleBrokenTools.incl(outcome.toolName)
-        # Mark the recipe as "already resolved" so the caller doesn't
-        # try to recurse again on the next probe pass — the closing-edge
-        # tool resolves via stdlib from here on.
-        fromSourceResolvedRecipes.incl(siblingRecipeDir)
+        fromSourceCycleBrokenTools.incl(toolName)
+        # A bootstrap choice is not a completed source producer. Nested
+        # consumers must still prepare its runtime closure; an ancestor's
+        # queued dependencies may be waiting behind that nested build.
         enqueueSourceDependencies(siblingRecipeDir, true)
         continue
       if fromSourceBuildStack.len >= FromSourceMaxRecursionDepth:
         raise newException(ValueError,
           "tool-resolution failed: from-source recursion depth bound " &
           "exceeded (" & $FromSourceMaxRecursionDepth & ") while resolving \"" &
-          outcome.toolName & "\" at " & siblingRecipeDir &
+          toolName & "\" at " & siblingRecipeDir &
           ". Active stack: " & fromSourceBuildStack.join(" -> ") &
           ". This is a sanity ceiling — production recipe chains should " &
           "stay well below it; investigate the call chain for an " &
           "accidental fan-out.")
-      logSummary("from-source auto-recurse: building \"" & outcome.toolName &
+      logSummary("from-source auto-recurse: validating \"" & toolName &
         "\" at " & siblingRecipeDir)
       fromSourceBuildStack.add(siblingRecipeDir)
       try:
@@ -9195,7 +9199,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         if siblingOutcome.exitCode != 0:
           raise newException(OSError,
             "tool-resolution failed: from-source auto-recurse sub-build of " &
-            siblingRecipeDir & " (tool \"" & outcome.toolName &
+            siblingRecipeDir & " (tool \"" & toolName &
             "\") exited with status " & $siblingOutcome.exitCode &
             ". See the sub-build's diagnostics for the underlying failure.")
         if dryRun:
@@ -64865,3 +64869,10 @@ proc runThinApp*(programName: string): int =
   ## stage what they would leave behind, and the real exit code decides.
   result = runThinAppDispatch(programName)
   flushStagedFailureReport(result)
+
+when defined(reproSourceRevalidationTest):
+  proc runSourceRevalidationBuildForTest*(args: openArray[string];
+                                         publicCliPath: string): int =
+    ## Exercise repeated dispatcher invocations without a subprocess resetting
+    ## the state that a long-lived build/watch worker retains.
+    runBuildCommand(args, publicCliPath)

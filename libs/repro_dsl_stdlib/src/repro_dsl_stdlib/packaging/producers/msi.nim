@@ -401,7 +401,12 @@ proc msiPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
     format: "msi",
     path: outPath,
     edge: lightEdge,
-    toolSelectors: @[CandleSelector, LightSelector],
+    # Windows staging uses the engine's own copy builtin and has no
+    # tool dependency at all, so ``stagingSelectors`` is empty here --
+    # which is the point of deriving it: the Windows producer no
+    # longer has to remember NOT to claim patchelf and install.
+    toolSelectors: @[CandleSelector, LightSelector] &
+      tree.stagingSelectors,
     tree: tree)
 
 proc msiProducer(dist: Distribution;
