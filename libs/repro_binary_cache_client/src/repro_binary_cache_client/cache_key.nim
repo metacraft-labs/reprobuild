@@ -84,6 +84,20 @@ type
 
   CacheKeyError* = object of CatchableError
 
+const
+  PendingCacheIdentityOptionKey* = "repro.identity.pending"
+    ## Reserved metadata, carried by the existing identity codecs. Presence
+    ## means that the tuple is not a resolved package instance and MUST NOT
+    ## authorize a substitute or a publication, even when its value is empty.
+
+proc cacheEntryIdentityError*(idy: CacheEntryIdentity): string =
+  if not idy.selectedOptions.isNil and
+      idy.selectedOptions.hasKey(PendingCacheIdentityOptionKey):
+    result = "incomplete binary-cache identity for " & idy.packageName
+    let detail = idy.selectedOptions[PendingCacheIdentityOptionKey]
+    if detail.len > 0:
+      result.add(": " & detail)
+
 # ---------------------------------------------------------------------------
 # Identity constructor helpers
 # ---------------------------------------------------------------------------
@@ -226,6 +240,9 @@ proc deriveCacheEntryKey*(idy: CacheEntryIdentity): CacheEntryKey =
   ## ``encodeCacheEntryKey`` (re-exported from this module) to obtain
   ## the canonical bytes, and ``cacheEntryKeyDigest`` returns the
   ## 32-byte BLAKE3-256 digest used as the on-wire entry key.
+  let identityError = cacheEntryIdentityError(idy)
+  if identityError.len > 0:
+    raise newException(CacheKeyError, identityError)
   result.packageName = idy.packageName
   result.packageVersion = idy.packageVersion
   # Options: extract + sort lexicographically by key.

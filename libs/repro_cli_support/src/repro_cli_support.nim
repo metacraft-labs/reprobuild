@@ -3452,7 +3452,7 @@ proc removeMaterializedPath(path: string) =
   elif fileExists(path) or symlinkExists(path):
     removeFile(path)
 
-proc substituteMaterializedBinaryCacheEntries(g: BuildGraph):
+proc substituteMaterializedBinaryCacheEntries*(g: BuildGraph):
     BuildRunResult =
   ## Restore tagged public-interface roots before source auto-recurse builds
   ## their tool dependencies. A miss is represented as a failed action so the
@@ -3460,13 +3460,20 @@ proc substituteMaterializedBinaryCacheEntries(g: BuildGraph):
   for action in g.actions:
     if not action.publishToBinaryCache or action.cacheEntryIdentity.isNone:
       continue
-    let key = deriveActionCacheKeyHex(action)
-    let prefix = materializedCachePrefix(action)
     var item = ActionResult(
       id: action.id,
       status: asFailed,
       cacheDecision: cdMiss,
-      reason: "materialized-binary-cache-substitute key=" & key)
+      reason: "materialized-binary-cache-identity-incomplete")
+    let identityError = actionCacheIdentityError(action)
+    if identityError.len > 0:
+      item.exitCode = 1
+      item.stderr = identityError
+      result.results.add(item)
+      continue
+    let key = deriveActionCacheKeyHex(action)
+    let prefix = materializedCachePrefix(action)
+    item.reason = "materialized-binary-cache-substitute key=" & key
     if prefix.len == 0:
       item.stderr = "materialized binary-cache prefix is empty"
       result.results.add(item)
@@ -19805,6 +19812,10 @@ proc buildPoolsJson(pools: openArray[BuildPool]): JsonNode =
     result.add(buildPoolJson(pool))
 
 proc buildActionJson(action: BuildAction): JsonNode =
+  let identityError = actionCacheIdentityError(action)
+  let binaryCacheKey =
+    if identityError.len == 0: deriveActionCacheKeyHex(action)
+    else: ""
   %*{
     "id": action.id,
     "kind": $action.kind,
@@ -19823,7 +19834,8 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "cacheable": action.cacheable,
     "weakFingerprint": digestHex(action.weakFingerprint),
     "publishToBinaryCache": action.publishToBinaryCache,
-    "binaryCacheKey": deriveActionCacheKeyHex(action),
+    "binaryCacheKey": binaryCacheKey,
+    "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,
     "depfile": action.depfile,
     "dynamicDepsFile": action.dynamicDepsFile,
@@ -19835,6 +19847,10 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "builtinText": action.builtinText,
     "builtinEntries": jsonStringSeq(action.builtinEntries)
   }
+
+when defined(reproMaterializedCacheTest):
+  proc materializedCacheActionJsonForTest*(action: BuildAction): JsonNode =
+    buildActionJson(action)
 
 proc buildActionsJson(actions: openArray[BuildAction]): JsonNode =
   result = newJArray()

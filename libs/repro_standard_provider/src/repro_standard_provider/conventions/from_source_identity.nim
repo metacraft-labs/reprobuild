@@ -25,6 +25,10 @@
 ##
 ## ## Cache-key composition (v1 — partial identity)
 ##
+## Partial identities now carry a pending marker: they are diagnostic metadata,
+## not usable substitute/publication keys. See docs/package-cache-identity.md.
+## Ordinary source builds and their local action cache remain available.
+##
 ## ``computeCacheEntryIdentity`` populates a
 ## ``CacheEntryIdentity`` whose fields are:
 ##
@@ -70,9 +74,8 @@ import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcs_types
 proc providerRevisionHex*(projectRoot: string): string =
   ## BLAKE3 of the recipe file bytes, truncated to 32 hex chars. Empty
-  ## when the recipe file can't be read (the publish key still derives
-  ## via the rest of the identity tuple — the empty string round-trips
-  ## through the canonical encoder).
+  ## when the recipe file can't be read. This is diagnostic metadata,
+  ## not a complete source/provider identity for publication.
   sourceProviderRevisionHex(projectRoot)
 
 proc m9L4PlatformTriple*(): bcs_types.PlatformTriple =
@@ -102,11 +105,9 @@ proc m9L4ToolchainIdentity*(name: string): bcs_types.ToolchainIdentity =
   publicInterfaceToolchain(name)
 
 proc deriveCacheKeyHex*(projectRoot, packageName, toolchainName: string): string =
-  ## Compose the M9.L.4 v1 ``CacheEntryIdentity`` and derive its
-  ## 64-char hex key. The deferrals (empty options / empty dep-closure
-  ## / hardcoded platform / partial toolchain) are documented in the
-  ## module docstring. Kept public for tests that pin the key shape
-  ## without round-tripping through the engine hook.
+  ## Compatibility entry point. Raises CacheKeyError while automatic source
+  ## identities lack the complete solved source/dependency/toolchain context.
+  ## Entry-file-only keys must not authorize package-cache reuse.
   let versionStr = block:
     var v = ""
     let vs = registeredVersions(packageName)
@@ -119,12 +120,12 @@ proc deriveCacheKeyHex*(projectRoot, packageName, toolchainName: string): string
 proc computeCacheEntryIdentity*(projectRoot, packageName,
                                 conventionTag: string):
     CacheEntryIdentity =
-  ## Step B's single-call entry point: returns the populated
+  ## Step B's single-call entry point: returns the pending
   ## ``CacheEntryIdentity`` tuple the convention stamps on the install
   ## + stage-copy ``BuildActionDef`` via the new
   ## ``cacheEntryIdentity = some(...)`` argument on ``buildAction``.
-  ## The engine's ``BinaryCachePublisher`` hook re-derives the entry-key
-  ## hex from the same tuple (drift-guard) and signs the manifest.
+  ## The engine refuses substitution/publication until the complete resolved
+  ## package identity is bound; entry-file bytes alone cannot authorize it.
   ##
   ## Inputs:
   ##   * ``projectRoot`` — path to the recipe directory; used to read

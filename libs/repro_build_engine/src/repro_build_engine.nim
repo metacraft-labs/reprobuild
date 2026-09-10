@@ -1423,6 +1423,12 @@ proc applyCachePlatformTag*(idy: CacheEntryIdentity; tag: string):
   let foldedTag = if tag.len == 0: NativeTriple else: tag
   result.addOption(CachePlatformTagOptionKey, foldedTag)
 
+proc actionCacheIdentityError*(action: BuildAction): string =
+  if action.cacheEntryIdentity.isSome:
+    cacheEntryIdentityError(action.cacheEntryIdentity.get())
+  else:
+    ""
+
 proc deriveActionCacheKeyHex*(action: BuildAction): string =
   ## DSL-port M9.R.7. Helper that mirrors the publisher hook's
   ## fold-in: takes the action's ``cacheEntryIdentity`` + folds in
@@ -8912,8 +8918,15 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       id: action.id,
       status: asFailed,
       cacheDecision: cdNotCacheable,
-      reason: "materialized-binary-cache-publish key=" &
-        deriveActionCacheKeyHex(action))
+      reason: "materialized-binary-cache-identity-incomplete")
+    let identityError = actionCacheIdentityError(action)
+    if identityError.len > 0:
+      item.exitCode = 1
+      item.stderr = identityError
+      result.results.add(item)
+      continue
+    item.reason = "materialized-binary-cache-publish key=" &
+      deriveActionCacheKeyHex(action)
     let prefix =
       if action.declaredOutputs.len == 1:
         action.declaredOutputs[0]
@@ -9358,6 +9371,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       action.publishToBinaryCache and action.cacheEntryIdentity.isSome
     if not isPublicInterface and not config.binaryCacheIntermediateScope:
       return
+    if isPublicInterface:
+      let identityError = actionCacheIdentityError(action)
+      if identityError.len > 0:
+        stats.addCounterMetric("repro binary-cache incomplete identities", 1)
+        runResult.trace(action.id, "binary-cache-identity-incomplete",
+          identityError)
+        return
     if record.outputPayloadKind != opkCasBlobs and
         not allowMaterializedOutputs:
       return

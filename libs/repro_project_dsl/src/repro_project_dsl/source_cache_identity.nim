@@ -1,4 +1,4 @@
-## Canonical binary-cache identity composition for source-built packages.
+## Pending binary-cache identity composition for source-built packages.
 ##
 ## This module deliberately accepts the selected package version as an
 ## argument. Provider/runtime layers own version selection; keeping that
@@ -35,12 +35,15 @@ proc sourceProviderRevisionHex*(projectRoot: string): string =
 
 proc sourceCacheEntryIdentity*(projectRoot, packageName, packageVersion,
                                conventionTag: string): CacheEntryIdentity =
-  ## Compose the public-interface identity shared by every source-package
-  ## construction path. Dependency and user-option channels intentionally
-  ## remain empty until those identities are resolved canonically.
-  newCacheEntryIdentity(
+  ## This entry-file digest is diagnostic, not the source closure: imported
+  ## recipes, SDK generators, selected dependencies/options and the actual
+  ## toolchain are not yet bound here. Refuse package-cache reuse until the
+  ## complete solved instance is available. Ordinary action caching is separate.
+  result = newCacheEntryIdentity(
     packageName = packageName,
     packageVersion = packageVersion,
     platform = publicInterfaceTriple(),
     toolchain = publicInterfaceToolchain(conventionTag),
     providerRevision = sourceProviderRevisionHex(projectRoot))
+  result.addOption(PendingCacheIdentityOptionKey,
+    "source closure, resolved dependencies/options and toolchain are unbound")

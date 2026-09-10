@@ -116,6 +116,51 @@ proc producerCfg(cacheRoot: string; recorder: Recorder): BuildEngineConfig =
 
 suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
 
+  test "an incomplete package identity preserves local builds but never publishes":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-incomplete-identity"
+    let outputPath = absolutePath(TmpDir / "incomplete-identity" / "hello.txt")
+    createDir(parentDir(outputPath))
+    var identity = stubIdentity("pending", "1", "entry-only-revision")
+    identity.addOption("repro.identity.pending", "source package identity")
+    let recorder = newRecorder()
+    let g = oneAction(outputPath, "local payload\n", true, some(identity))
+    var config = producerCfg(cacheRoot, recorder)
+    config.publishCachedResults = true
+    # A tagged but incomplete package must not fall through to the
+    # intermediate publisher either, on a cold build or a warm backfill.
+    config.binaryCacheIntermediateScope = true
+    for warm in [false, true]:
+      let built = runBuild(g, config)
+      require built.results.len == 1
+      check built.results[0].status in {asSucceeded, asUpToDate, asCacheHit}
+      check built.results[0].launched == not warm
+      check readFile(outputPath) == "local payload\n"
+      check recorder.invocations.len == 0
+      var refused = false
+      for event in built.trace:
+        if event.event == "binary-cache-identity-incomplete":
+          refused = true
+      check refused
+
+  test "explicit materialized publication refuses an incomplete identity":
+    resetTmp()
+    let outputPath = absolutePath(TmpDir / "pending-prefix" / "hello.txt")
+    createDir(parentDir(outputPath))
+    writeFile(outputPath, "existing payload\n")
+    var identity = stubIdentity("pending", "1", "entry-only-revision")
+    identity.addOption("repro.identity.pending", "source package identity")
+    let recorder = newRecorder()
+    let g = oneAction(outputPath, "not run\n", true, some(identity))
+    let published = publishMaterializedBinaryCacheEntries(g,
+      makePublisher(recorder))
+    require published.results.len == 1
+    check published.results[0].status == asFailed
+    check not published.results[0].launched
+    check "incomplete binary-cache identity" in published.results[0].stderr
+    check recorder.invocations.len == 0
+    check readFile(outputPath) == "existing payload\n"
+
   test "publisher fires on success when flag + identity + closure are all set":
     resetTmp()
     let cacheRoot = TmpDir / "cache-fires"

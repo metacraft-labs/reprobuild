@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1527,
+    "nimTestBinaries": 1528,
     "pureUnitConsolidationGroups": 56,
-    "pureUnitTests": 618,
+    "pureUnitTests": 619,
     "staticallyDetectedRuntimeCompilerFlowTests": 93,
-    "testEntries": 1535
+    "testEntries": 1536
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1215,7 +1215,7 @@
       "graph-fixture": 12,
       "integration": 668,
       "platform/destructive": 108,
-      "pure unit": 618,
+      "pure unit": 619,
       "unclassified": 129
     },
     "graphOwnedTestArtifacts": [
@@ -1352,9 +1352,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1527,
+    "nimTestBinaryCount": 1528,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1535
+    "testEntryCount": 1536
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6047,7 +6047,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_binary_cache_client/tests/t_a3_p1_cache_key.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -6676,7 +6676,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -7461,7 +7461,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -7659,7 +7659,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13721,6 +13721,24 @@
       "source": "libs/repro_project_dsl/tests/t_multi_package_macro.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_source_cache_identity",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_source_cache_identity.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

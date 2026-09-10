@@ -4086,6 +4086,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_source_cache_identity.nim",
+    binary: "build/test-bin/t_source_cache_identity",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim",
     binary: "build/test-bin/t_tool_identity_ref_kind_codec",
     defines: @[],

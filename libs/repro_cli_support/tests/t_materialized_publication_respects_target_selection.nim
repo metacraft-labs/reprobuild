@@ -2,7 +2,9 @@
 ## The operation may omit untagged dependencies because it never launches an
 ## action, but it must not publish tagged actions outside the selected closure.
 
-import std/[options, unittest]
+{.define: reproMaterializedCacheTest.}
+
+import std/[json, options, os, strutils, tempfiles, unittest]
 
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
@@ -73,6 +75,36 @@ proc actionIds(actions: openArray[BuildAction]): seq[string] =
     result.add(action.id)
 
 suite "materialized publication target selection":
+
+  test "incomplete substitution is a miss without touching the existing prefix":
+    let root = createTempDir("pending-substitute-", "")
+    defer: removeDir(root)
+    let prefix = root / "prefix"
+    createDir(prefix)
+    writeFile(prefix / "retained.txt", "existing payload\n")
+    var identity = cacheIdentity("pending")
+    identity.addOption(PendingCacheIdentityOptionKey, "unbound source closure")
+    let action = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      kind: bakStamp,
+      id: "pending",
+      cwd: root,
+      declaredOutputs: @[prefix],
+      publishToBinaryCache: true,
+      cacheEntryIdentity: some(identity))
+    let substituted = substituteMaterializedBinaryCacheEntries(graph(@[action]))
+    require substituted.results.len == 1
+    check substituted.results[0].status == asFailed
+    check substituted.results[0].cacheDecision == cdMiss
+    check not substituted.results[0].launched
+    check "incomplete binary-cache identity" in substituted.results[0].stderr
+    check readFile(prefix / "retained.txt") == "existing payload\n"
+    check not dirExists(prefix & ".repro-cache-substitute-" &
+      $getCurrentProcessId())
+    let inspected = materializedCacheActionJsonForTest(action)
+    check inspected["binaryCacheKey"].getStr() == ""
+    check "incomplete binary-cache identity" in
+      inspected["binaryCacheIdentityError"].getStr()
 
   test "selected aggregate excludes unrelated tagged actions":
     let lowered = lowerMaterializedProviderSnapshot(

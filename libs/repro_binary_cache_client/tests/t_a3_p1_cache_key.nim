@@ -45,6 +45,18 @@ proc fakeDepHex(seed: int): string =
 
 suite "A3 P1 — cache-key derivation":
 
+  test "pending identity metadata cannot be encoded as a usable key":
+    for detail in ["", "source closure is unbound"]:
+      var identity = newCacheEntryIdentity("pending", "1", linuxGnu(),
+        hostGcc11(), "entry-only-revision")
+      identity.addOption(PendingCacheIdentityOptionKey, detail)
+      check "incomplete binary-cache identity" in
+        cacheEntryIdentityError(identity)
+      expect CacheKeyError:
+        discard deriveCacheEntryKey(identity)
+      expect CacheKeyError:
+        discard deriveCacheEntryKeyHex(identity)
+
   test "deriveCacheEntryKey round-trip via encodeCacheEntryKey":
     var idy = newCacheEntryIdentity(
       packageName = "hex0",

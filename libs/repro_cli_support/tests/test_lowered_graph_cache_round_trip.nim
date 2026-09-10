@@ -14,6 +14,22 @@ proc testFingerprint(): ContentDigest =
   weakFingerprintFromText("lowered-graph-round-trip")
 
 suite "lowered graph cache action round trip":
+  test "an incomplete identity remains unusable after graph cache restore":
+    var identity = publicInterfaceIdentity("pending", "1", "cmake", "entry")
+    identity.addOption(PendingCacheIdentityOptionKey, "unbound source closure")
+    let action = BuildAction(
+      governingLockIdentity: emptySolvedGraphIdentity("pending-codec"),
+      kind: bakStamp,
+      id: "pending",
+      publishToBinaryCache: true,
+      cacheEntryIdentity: some(identity))
+    let decoded = loweredGraphActionRoundTripForTest(@[action])
+    require decoded.len == 1
+    check "incomplete binary-cache identity" in
+      actionCacheIdentityError(decoded[0])
+    expect CacheKeyError:
+      discard deriveActionCacheKeyHex(decoded[0])
+
   test "preserves execution, type, cache, and policy metadata":
     var identity = publicInterfaceIdentity(
       packageName = "zlib",

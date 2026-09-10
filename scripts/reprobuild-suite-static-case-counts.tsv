@@ -33,7 +33,7 @@ libs/repro_binary_cache_client/tests/t_a2_5_p6_daemon_substitute.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a2_5_p6_daemon_substitute_ipc.nim	nim	2
 libs/repro_binary_cache_client/tests/t_a2_5_p7_in_process_substitute.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a2_5_p8_throughput_bench.nim	nim	1
-libs/repro_binary_cache_client/tests/t_a3_p1_cache_key.nim	nim	9
+libs/repro_binary_cache_client/tests/t_a3_p1_cache_key.nim	nim	10
 libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim	nim	3
 libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim	nim	2
@@ -66,7 +66,7 @@ libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim	nim	6
 libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	6
 libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
 libs/repro_build_engine/tests/test_action_cache_restore_narrow_payloads.nim	nim	5
-libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	10
+libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	12
 libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	2
 libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim	nim	2
 libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim	nim	1
@@ -108,7 +108,7 @@ libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.ni
 libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	2
 libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim	nim	19
 libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim	nim	11
-libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim	nim	3
+libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim	nim	4
 libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim	nim	3
 libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim	nim	1
 libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim	nim	1
@@ -119,7 +119,7 @@ libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	n
 libs/repro_cli_support/tests/t_w2_dev_env_producer_pin_binding.nim	nim	9
 libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim	nim	3
 libs/repro_cli_support/tests/test_engine_publisher_wiring.nim	nim	5
-libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim	nim	3
+libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim	nim	4
 libs/repro_cli_support/tests/test_m10_home_gc_cli.nim	nim	7
 libs/repro_cli_support/tests/test_m2_env_ps1_migration_clean.nim	nim	8
 libs/repro_cli_support/tests/test_m69_home_add_versioned.nim	nim	5
@@ -460,6 +460,7 @@ libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6
 libs/repro_project_dsl/tests/t_multi_package_macro.nim	nim	5
+libs/repro_project_dsl/tests/t_source_cache_identity.nim	nim	2
 libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim	nim	2
 libs/repro_project_dsl/tests/test_depends_on_macro.nim	nim	3
 libs/repro_project_dsl/tests/test_library_macro.nim	nim	12

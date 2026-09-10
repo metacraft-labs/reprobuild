@@ -10,3 +10,4 @@ Reprobuild repository.
 - [Dependency Collection](dependency-collection.md)
 - [Build Stats](stats.md)
 - [Nix Provisioning Catalog](nix-provisioning.md)
+- [Package Cache Identity Safety](package-cache-identity.md)
