@@ -2556,6 +2556,29 @@ proc patchableFunctionEntryFlag*(tool: ReproHcr; entryBytes = 16;
   discard tool
   "-fpatchable-function-entry=" & $entryBytes & "," & $entryOffset
 
+proc buildIdLinkFlag*(tool: ReproHcr; style = "sha1"): string {.dynOrStatic.} =
+  ## HLX-M1. ``HCR/Linux-ELF-Provider.md`` §7.3 makes build-id verification
+  ## mandatory: the provider reads symbols from the object's file on disk and
+  ## must prove that file still describes the bytes in memory, because in a
+  ## hot-reload workflow a rebuild is exactly what just happened. Without a
+  ## ``.note.gnu.build-id`` there is nothing to compare and the object is
+  ## refused with ``elf-build-id-absent``.
+  ##
+  ## The design calls ``--build-id`` "the default on all mainstream Linux
+  ## toolchains". MEASURED, IT IS NOT: the GCC/binutils in this repo's dev
+  ## shell emits no build-id unless asked, and the real Godot engine build this
+  ## campaign targets has none either. So the flag is asserted here rather than
+  ## assumed — it is the difference between a patchable target and one the
+  ## provider must decline.
+  ##
+  ## Mach-O has its own UUID load command and needs no equivalent flag, so this
+  ## is empty off Linux.
+  discard tool
+  when defined(linux):
+    "-Wl,--build-id=" & style
+  else:
+    ""
+
 proc functionAlignmentFlag*(tool: ReproHcr;
                             alignment = 16): string {.dynOrStatic.} =
   ## HLX-M0. Alignment is a PRECONDITION of atomic publication, not an
@@ -2592,6 +2615,26 @@ proc patchableCompileFlags*(tool: ReproHcr; entryBytes = 0;
     patchableFunctionEntryFlag(tool, nopCount, entryOffset),
     functionAlignmentFlag(tool, alignment)
   ]
+
+proc patchableLinkFlags*(tool: ReproHcr; segmentName = "__HCR";
+                         buildIdStyle = "sha1"): seq[string] {.dynOrStatic.} =
+  ## The patchable-TU LINK profile, as distinct from the compile profile.
+  ##
+  ## HLX-M1 adds ``--build-id`` here, because design §7.3's verification is a
+  ## link-time requirement and not a compile-time one: the note is produced by
+  ## the linker. Without it every object this provider is pointed at is refused
+  ## with ``elf-build-id-absent`` — correctly, but uselessly.
+  ##
+  ## The macOS segment-protection flag is carried alongside so that a target
+  ## has one place to ask for "the flags the HCR provider needs at link time"
+  ## on either platform.
+  result = @[]
+  let segment = machoSegmentLinkFlags(tool, segmentName)
+  if segment.len > 0:
+    result.add segment
+  let buildId = buildIdLinkFlag(tool, buildIdStyle)
+  if buildId.len > 0:
+    result.add buildId
 
 proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
                deps: openArray[string] = [];

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1520,
+    "nimTestBinaries": 1526,
     "pureUnitConsolidationGroups": 56,
     "pureUnitTests": 618,
-    "staticallyDetectedRuntimeCompilerFlowTests": 89,
-    "testEntries": 1528
+    "staticallyDetectedRuntimeCompilerFlowTests": 93,
+    "testEntries": 1534
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1213,10 +1213,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 663,
+      "integration": 668,
       "platform/destructive": 108,
       "pure unit": 618,
-      "unclassified": 127
+      "unclassified": 128
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1352,9 +1352,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1520,
+    "nimTestBinaryCount": 1526,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1528
+    "testEntryCount": 1534
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3388,6 +3388,147 @@
       "class": "integration",
       "matches": [
         {
+          "assignedCommandVariable": "args",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "agentInclude",
+            "args",
+            "decoyPath",
+            "fixtureDir",
+            "libNextPath",
+            "libPath",
+            "libV2",
+            "noIdLibPath",
+            "noIdProbePath",
+            "noteWorkDir",
+            "probePath",
+            "probeSource",
+            "repoRoot",
+            "workDir"
+          ],
+          "line": 129,
+          "path": "tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "var args = @[\"gcc\", \"-O2\", \"-g\", \"-fPIC\", \"-shared\"]"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentInclude",
+            "args",
+            "decoyPath",
+            "fixtureDir",
+            "libNextPath",
+            "libPath",
+            "libV2",
+            "noIdLibPath",
+            "noIdProbePath",
+            "noteWorkDir",
+            "probePath",
+            "probeSource",
+            "repoRoot",
+            "workDir"
+          ],
+          "line": 140,
+          "path": "tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "discard runSuccess(shellCommand([\"gcc\", \"-O2\", \"-g\","
+        },
+        {
+          "assignedCommandVariable": "rebuildCommand",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentInclude",
+            "args",
+            "decoyPath",
+            "fixtureDir",
+            "libNextPath",
+            "libPath",
+            "libV2",
+            "noIdLibPath",
+            "noIdProbePath",
+            "noteWorkDir",
+            "probePath",
+            "probeSource",
+            "repoRoot",
+            "workDir"
+          ],
+          "line": 157,
+          "path": "tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "let rebuildCommand = shellCommand([\"gcc\", \"-O2\", \"-g\", \"-fPIC\", \"-shared\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentInclude",
+            "args",
+            "decoyPath",
+            "fixtureDir",
+            "libNextPath",
+            "libPath",
+            "libV2",
+            "noIdLibPath",
+            "noIdProbePath",
+            "noteWorkDir",
+            "probePath",
+            "probeSource",
+            "repoRoot",
+            "workDir"
+          ],
+          "line": 316,
+          "path": "tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "discard runSuccess(shellCommand([\"gcc\", \"-O2\", \"-g\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentInclude",
+            "args",
+            "decoyPath",
+            "fixtureDir",
+            "libNextPath",
+            "libPath",
+            "libV2",
+            "noIdLibPath",
+            "noIdProbePath",
+            "noteWorkDir",
+            "probePath",
+            "probeSource",
+            "repoRoot",
+            "workDir"
+          ],
+          "line": 348,
+          "path": "tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "newJString(runSuccess(\"gcc --version\", repoRoot).splitLines()[0])"
+        }
+      ],
+      "source": "tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
           "assignedCommandVariable": "",
           "commandVariableExecuted": false,
           "directExecutionLine": true,
@@ -3425,6 +3566,255 @@
         }
       ],
       "source": "tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "comdatObject",
+            "comdatSource",
+            "patchableArgs",
+            "repoRoot",
+            "xindexObject",
+            "xindexSource"
+          ],
+          "line": 137,
+          "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "discard runSuccess(shellCommand([\"gcc\", \"-O2\", \"-g\", \"-fPIC\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "comdatObject",
+            "comdatSource",
+            "patchableArgs",
+            "repoRoot",
+            "xindexObject",
+            "xindexSource"
+          ],
+          "line": 327,
+          "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
+          "patterns": [
+            "g++"
+          ],
+          "snippet": "discard runSuccess(shellCommand([\"g++\", \"-O2\", \"-std=c++17\", \"-fPIC\","
+        },
+        {
+          "assignedCommandVariable": "patchableArgs",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "comdatObject",
+            "comdatSource",
+            "patchableArgs",
+            "repoRoot",
+            "xindexObject",
+            "xindexSource"
+          ],
+          "line": 356,
+          "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "var patchableArgs = @[\"gcc\", \"-O2\", \"-fPIC\", \"-ffunction-sections\"]"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "comdatObject",
+            "comdatSource",
+            "patchableArgs",
+            "repoRoot",
+            "xindexObject",
+            "xindexSource"
+          ],
+          "line": 384,
+          "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "discard runSuccess(shellCommand([\"gcc\", \"-O0\", \"-ffunction-sections\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "comdatObject",
+            "comdatSource",
+            "patchableArgs",
+            "repoRoot",
+            "xindexObject",
+            "xindexSource"
+          ],
+          "line": 452,
+          "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "newJString(runSuccess(\"gcc --version\", repoRoot).splitLines()[0])"
+        }
+      ],
+      "source": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "args",
+            "barePath",
+            "command",
+            "fixtureDir",
+            "inFileCommand",
+            "libPath",
+            "libSource",
+            "libcPath",
+            "piePath",
+            "repoRoot",
+            "strippedPath"
+          ],
+          "line": 185,
+          "path": "tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "discard runSuccess(shellCommand([\"gcc\", \"-O2\", \"-g\", \"-fPIC\", \"-shared\","
+        },
+        {
+          "assignedCommandVariable": "args",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "args",
+            "barePath",
+            "command",
+            "fixtureDir",
+            "inFileCommand",
+            "libPath",
+            "libSource",
+            "libcPath",
+            "piePath",
+            "repoRoot",
+            "strippedPath"
+          ],
+          "line": 191,
+          "path": "tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "var args = @[\"gcc\", \"-O2\", \"-g\", \"-Wl,--build-id=sha1\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "args",
+            "barePath",
+            "command",
+            "fixtureDir",
+            "inFileCommand",
+            "libPath",
+            "libSource",
+            "libcPath",
+            "piePath",
+            "repoRoot",
+            "strippedPath"
+          ],
+          "line": 644,
+          "path": "tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "discard runSuccess(shellCommand([\"gcc\", \"-O2\", \"-fPIC\", \"-c\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "args",
+            "barePath",
+            "command",
+            "fixtureDir",
+            "inFileCommand",
+            "libPath",
+            "libSource",
+            "libcPath",
+            "piePath",
+            "repoRoot",
+            "strippedPath"
+          ],
+          "line": 729,
+          "path": "tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "newJString(runSuccess(\"gcc --version\", repoRoot).splitLines()[0])"
+        }
+      ],
+      "source": "tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentInclude",
+            "alphaSource",
+            "betaSource",
+            "fixtureDir",
+            "probePath",
+            "probeSource",
+            "repoRoot"
+          ],
+          "line": 105,
+          "path": "tests/integration/t_integration_hcr_linux_static_local_symbol_ambiguity_refused.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "discard runSuccess(shellCommand([\"gcc\", \"-O2\", \"-g\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentInclude",
+            "alphaSource",
+            "betaSource",
+            "fixtureDir",
+            "probePath",
+            "probeSource",
+            "repoRoot"
+          ],
+          "line": 224,
+          "path": "tests/integration/t_integration_hcr_linux_static_local_symbol_ambiguity_refused.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "newJString(runSuccess(\"gcc --version\", repoRoot).splitLines()[0])"
+        }
+      ],
+      "source": "tests/integration/t_integration_hcr_linux_static_local_symbol_ambiguity_refused.nim"
     },
     {
       "class": "integration",
@@ -9832,6 +10222,24 @@
       "source": "libs/repro_local_store/tests/t_c3_sandbox_manifest.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_fingerprint_metadata_classifies_every_posix_entity",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24078,6 +24486,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_integration_hcr_linux_build_id_mismatch_refused",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_integration_hcr_linux_cf_protection_sled_layout",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -24089,6 +24512,54 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_elf_object_parsing_and_patch_plan",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_linkgraph",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_elf_symbol_resolution",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_static_local_symbol_ambiguity_refused",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_integration_hcr_linux_static_local_symbol_ambiguity_refused.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,
@@ -27930,6 +28401,26 @@
       "source": "tests/integration/t_shm_oversized_submit_is_reported.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_shm_submit_refuses_an_impossible_record_without_encoding_it",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store",
+        "repro_shm_index"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_shm_submit_refuses_an_impossible_record_without_encoding_it.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

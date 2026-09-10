@@ -1,3 +1,17 @@
+/*
+ * `dl_iterate_phdr` (design §7.2, HLX-M1's ELF symbol resolution) is declared
+ * behind `__USE_GNU` in glibc's <link.h>, and glibc latches its feature macros
+ * on the FIRST libc header a translation unit includes — so this must come
+ * before every include, including "repro_hcr_agent.h".
+ *
+ * Guarded on __linux__ so the Apple arm is byte-for-byte the translation unit
+ * it was before HLX-M1: on Darwin the macro is never defined and nothing below
+ * this line changes.
+ */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
+
 #include "repro_hcr_agent.h"
 
 #include <ctype.h>
@@ -41,6 +55,7 @@
 #include <mach-o/reloc.h>
 #elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
 #include "repro_hcr_linux_x86_64.h"
+#include "repro_hcr_linux_elf_symbols.h"
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
 #endif
@@ -448,14 +463,49 @@ static void *repro_hcr_find_symbol(repro_hcr_agent_thread_args *args,
     }
   }
 #elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
-  /* Deliberately no `dlsym` fallback on Linux. Design §7.1: `dlsym` cannot see
-   * `static` or hidden functions, which are most of the interesting ones, and a
-   * partial resolver that silently succeeds for exported symbols only would
-   * hide that. HLX-M1 lands the real pipeline (`dl_iterate_phdr` load bias plus
-   * on-disk `.symtab`/`.strtab`, build-id verified). Until then the Linux arm
-   * resolves only symbols the target registered explicitly. */
-  (void)target_symbol;
-  (void)changed_function;
+  /*
+   * HLX-M1: the real ELF pipeline (design §7.2) — `dl_iterate_phdr` load bias
+   * plus the object's on-disk `.symtab`/`.strtab`, falling back to
+   * `.dynsym`/`.dynstr`, build-id verified before a single symbol byte is
+   * trusted, `SHN_XINDEX` expanded, symbol versions resolved, `STT_GNU_IFUNC`
+   * refused, and `STB_LOCAL` collisions refused rather than guessed.
+   *
+   * There is still deliberately NO `dlsym` fallback (design §7.1): `dlsym` sees
+   * only `.dynsym`, so it cannot see the `static` and hidden functions this
+   * resolver exists to reach, and adding it would silently mask a failure of
+   * the real path with a partial answer for exported symbols only.
+   *
+   * The refusal is recorded rather than collapsed into NULL so the coordinator
+   * receives the named cause on the wire instead of a generic "not found".
+   */
+  {
+    uint64_t resolved;
+    int refusal = REPRO_HCR_ELF_OK;
+    /* Cleared here, not only on success: otherwise a refusal recorded by an
+     * earlier request would still be sitting in the global when a later
+     * request failed for a different reason, and the wire would carry the
+     * wrong named cause. */
+    repro_hcr_elf_last_symbol_refusal = REPRO_HCR_ELF_OK;
+    if (target_symbol != NULL && target_symbol[0] != '\0') {
+      resolved = repro_hcr_elf_resolve_function_address(target_symbol,
+                                                        &refusal);
+      if (resolved != 0) {
+        repro_hcr_elf_last_symbol_refusal = REPRO_HCR_ELF_OK;
+        return (void *)(uintptr_t)resolved;
+      }
+      repro_hcr_elf_last_symbol_refusal = refusal;
+    }
+    if (changed_function != NULL && changed_function[0] != '\0' &&
+        (target_symbol == NULL || strcmp(target_symbol, changed_function) != 0)) {
+      resolved = repro_hcr_elf_resolve_function_address(changed_function,
+                                                        &refusal);
+      if (resolved != 0) {
+        repro_hcr_elf_last_symbol_refusal = REPRO_HCR_ELF_OK;
+        return (void *)(uintptr_t)resolved;
+      }
+      repro_hcr_elf_last_symbol_refusal = refusal;
+    }
+  }
 #endif
   return NULL;
 }
@@ -1198,6 +1248,18 @@ static const char *repro_hcr_capabilities_json_array(void) {
 static const char *repro_hcr_direct_patch_failure_detail(void) {
   return repro_hcr_lx_refusal_name(repro_hcr_lx_last_report.refusal);
 }
+
+/*
+ * HLX-M1: the NAMED cause of a symbol-resolution failure. Design §7 makes four
+ * distinct things possible — the object's build-id no longer matches the
+ * mapped image, the name is an ambiguous `static`, the symbol is an IFUNC
+ * whose `st_value` is a resolver, or the function genuinely is not there — and
+ * reporting all four as "target symbol was not found in process" would be a
+ * wrong answer with no diagnostic attached to it.
+ */
+static const char *repro_hcr_symbol_failure_detail(void) {
+  return repro_hcr_elf_last_symbol_refusal_name();
+}
 #else
 static const char *repro_hcr_capabilities_json_array(void) {
   return "\"hcr-agent-protocol\",\"direct-patch-injection\","
@@ -1206,6 +1268,13 @@ static const char *repro_hcr_capabilities_json_array(void) {
 }
 
 static const char *repro_hcr_direct_patch_failure_detail(void) {
+  return "";
+}
+
+/* Apple arm64 and the generic fallback keep their previous behaviour: symbol
+ * resolution there is the registered table plus `dlsym`, which has no named
+ * refusal vocabulary, so the message is unchanged from before HLX-M1. */
+static const char *repro_hcr_symbol_failure_detail(void) {
   return "";
 }
 #endif
@@ -1381,7 +1450,15 @@ static void *repro_hcr_agent_thread(void *raw_args) {
   } else if (patch_hex == NULL) {
     failure_message = "patch request is missing direct patch bytes";
   } else if (entry == NULL) {
-    failure_message = "target symbol was not found in process";
+    const char *symbol_detail = repro_hcr_symbol_failure_detail();
+    if (symbol_detail != NULL && symbol_detail[0] != '\0' &&
+        strcmp(symbol_detail, "ok") != 0) {
+      snprintf(failure_detail, sizeof(failure_detail),
+               "symbol resolution refused: %s", symbol_detail);
+      failure_message = failure_detail;
+    } else {
+      failure_message = "target symbol was not found in process";
+    }
   }
   if (patch_id != NULL && changed_function != NULL && patch_hex != NULL &&
       entry != NULL) {

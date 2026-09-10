@@ -17,7 +17,15 @@ proc bytesHex*(bytes: openArray[byte]): string =
     result.add hexByte(value)
 
 proc sectionFullName*(section: SectionFact): string =
-  section.segmentName & "," & section.name
+  ## Mach-O names a section by (segment, section), so both halves are needed.
+  ## ELF has no segment concept in a relocatable object and leaves
+  ## `segmentName` empty; emitting ",.text" there would put a leading comma in
+  ## every diagnostic. Mach-O sections always carry a segment name, so this is
+  ## unchanged for them.
+  if section.segmentName.len == 0:
+    section.name
+  else:
+    section.segmentName & "," & section.name
 
 proc findSymbolIndex*(graph: LinkGraph; name: string): int =
   for i, symbol in graph.symbols:

@@ -22764,8 +22764,56 @@ proc writeJsonFile(path: string; node: JsonNode) =
 proc hcrSourceDigest(path: string): string =
   byteDigest(readFile(extendedPath(path)).bytesOf())
 
-proc objectFunctionBytes(objectPath, symbolName: string): seq[byte] =
-  let graph = parseMachOArm64Object(objectPath)
+# The support profile a coordinator assumes when the caller names none.
+#
+# HLX-M1 keeps this HOST-derived on purpose. Making it profile-derived is the
+# right change for a request that carries a profile, but the default feeds
+# `defaultObjectSymbol`, whose previous behaviour was literally
+# `when defined(macosx)`. Defaulting that to the macOS profile would silently
+# start prefixing an underscore on Linux hosts — a change of behaviour dressed
+# up as a refactor. This preserves the old answer exactly on both platforms
+# while making the assumption explicit and overridable.
+const HostDefaultHcrSupportProfile =
+  when defined(macosx):
+    HcrMacosArm64DirectSupportProfile
+  else:
+    HcrLinuxX86_64DirectSupportProfile
+
+proc hcrProfileIsElf(supportProfile: string): bool =
+  ## HLX-M1 (design §7.4): whether a support profile names the Linux ELF
+  ## provider. The two object formats disagree about symbol naming and about
+  ## how an object is parsed, and both differences used to be decided by the
+  ## HOST the coordinator was compiled on rather than by the profile the
+  ## session negotiated.
+  supportProfile == HcrLinuxX86_64DirectSupportProfile or
+    supportProfile.startsWith("linux-")
+
+proc hcrObjectSymbolFor(supportProfile, functionName: string): string =
+  ## The name a function's code is filed under in a relocatable object.
+  ##
+  ## Mach-O prefixes C symbols with an underscore; ELF does not. Design §7.4
+  ## calls the coordinator's unconditional `"_" & patchFunction` "actively
+  ## wrong for ELF", and it is: it turns every Linux patch request into a
+  ## lookup for a symbol that cannot exist. This makes the choice follow the
+  ## negotiated profile instead.
+  if hcrProfileIsElf(supportProfile):
+    functionName
+  else:
+    "_" & functionName
+
+proc objectFunctionBytes(objectPath, symbolName: string;
+                         supportProfile = CodetracerHcrSupportProfile):
+    seq[byte] =
+  ## The default is the Mach-O profile rather than the host-derived one,
+  ## because this proc previously ALWAYS parsed Mach-O regardless of host and
+  ## its unqualified caller is the macOS watch session. Changing the default
+  ## would repoint that caller at a different parser as a side effect; callers
+  ## on the ELF path pass their profile explicitly.
+  let graph =
+    if hcrProfileIsElf(supportProfile):
+      parseElfX86_64Object(objectPath)
+    else:
+      parseMachOArm64Object(objectPath)
   let symbol = graph.findSymbol(symbolName)
   result = graph.functionBytes(symbol)
   if result.len == 0:
@@ -22834,11 +22882,13 @@ proc optionalJsonString(node: JsonNode; key: string): string =
   if node.kind == JObject and node.hasKey(key):
     result = node[key].getStr()
 
-proc defaultObjectSymbol(functionName: string): string =
-  when defined(macosx):
-    "_" & functionName
-  else:
-    functionName
+proc defaultObjectSymbol(functionName: string;
+                         supportProfile = HostDefaultHcrSupportProfile): string =
+  ## HLX-M1: keyed on a support profile rather than on `when defined(macosx)`,
+  ## so a caller that knows which profile the session negotiated can say so.
+  ## The DEFAULT is host-derived, which reproduces the previous behaviour
+  ## exactly on both platforms; only an explicit argument changes anything.
+  hcrObjectSymbolFor(supportProfile, functionName)
 
 proc readHcrWatchPatchMetadata(projectRoot, metadataPath: string):
     HcrWatchPatchMetadata =
@@ -27110,8 +27160,13 @@ proc runHcrCoordinateCommand(args: seq[string]): int =
   let newObject = parsed.artifacts / "patchable-generation1.o"
   copyFile(extendedPath(patchObject), extendedPath(newObject))
 
-  let symbolName = "_" & parsed.patchFunction
-  let patchBytes = objectFunctionBytes(newObject, symbolName)
+  # HLX-M1, design §7.4: profile-conditional. Mach-O prefixes C symbols with
+  # an underscore and ELF does not, so an unconditional prefix here is a
+  # guaranteed lookup failure on Linux.
+  let symbolName = hcrObjectSymbolFor(CodetracerHcrSupportProfile,
+                                      parsed.patchFunction)
+  let patchBytes = objectFunctionBytes(newObject, symbolName,
+                                       CodetracerHcrSupportProfile)
   let sourcePath = parsed.project / "src" / "patchable.c"
   let sourceGeneration = HcrSourceGenerationEntry(
     sourcePath: sourcePath,
