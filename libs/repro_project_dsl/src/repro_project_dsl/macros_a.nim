@@ -3782,10 +3782,12 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       if modules.find(modulePath) < 0 and
           dependencyModules.find(modulePath) < 0:
         dependencyModules.add(modulePath)
+  var hasExplicitImports = false
   for base in pkg.usesImportPaths:
     let normalizedBase = normalizedImportBase(base)
     if normalizedBase.len == 0:
       continue
+    hasExplicitImports = true
     for useDef in pkg.toolUses:
       let modulePath = normalizedBase & "/" &
         selectorModuleName(useDef.packageSelector)
@@ -3854,7 +3856,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   var resourceProducerSelectors: seq[string] = @[]
   for useDef in pkg.toolUses:
     let selector = useDef.packageSelector
-    if isBundledStdlibSelector(selector):
+    if isBundledStdlibSelector(selector) or hasExplicitImports:
       continue
     let producerModule = workspaceProducerModule(selector, consumerSourceFile)
     if producerModule.len == 0:

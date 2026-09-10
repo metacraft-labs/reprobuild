@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1528,
+    "nimTestBinaries": 1529,
     "pureUnitConsolidationGroups": 56,
-    "pureUnitTests": 619,
+    "pureUnitTests": 620,
     "staticallyDetectedRuntimeCompilerFlowTests": 93,
-    "testEntries": 1536
+    "testEntries": 1537
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -554,7 +554,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 38,
+      "count": 39,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -594,6 +594,7 @@
         "libs/repro_project_dsl/tests/t_dsl_outputs_unknown_flag_error.nim",
         "libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim",
         "libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim",
+        "libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim",
         "libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim",
         "libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim",
         "libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim",
@@ -1215,7 +1216,7 @@
       "graph-fixture": 12,
       "integration": 668,
       "platform/destructive": 108,
-      "pure unit": 619,
+      "pure unit": 620,
       "unclassified": 129
     },
     "graphOwnedTestArtifacts": [
@@ -1352,9 +1353,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1528,
+    "nimTestBinaryCount": 1529,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1536
+    "testEntryCount": 1537
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13633,6 +13634,23 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_explicit_contract_import_precedence",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,

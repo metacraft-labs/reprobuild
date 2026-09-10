@@ -4041,6 +4041,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim",
+    binary: "build/test-bin/t_explicit_contract_import_precedence",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim",
     binary: "build/test-bin/t_m6_non_determinism_codec",
     defines: @[],
