@@ -619,6 +619,15 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
       prepareOnly = false,
       dryRun = true,
       forceRebuild = false)
+    discard makeRecipeArtefact(scratch, "python3", "python3")
+    let present = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
+    require present.kind == rrResolved
+    check shouldTryFromSourceCacheSubstitution(present,
+      cacheConfigured = true, prepareOnly = false,
+      dryRun = false, forceRebuild = false)
+    check not shouldTryFromSourceCacheSubstitution(present,
+      cacheConfigured = true, prepareOnly = false,
+      dryRun = false, forceRebuild = true)
 
   test "test_m9r9_lock_fold_keeps_missing_bootstrap_provider_metadata":
     let scratch = createTempDir("repro-m9r9-bootstrap-lock-fold-", "")

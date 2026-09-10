@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1529,
+    "nimTestBinaries": 1531,
     "pureUnitConsolidationGroups": 56,
     "pureUnitTests": 620,
     "staticallyDetectedRuntimeCompilerFlowTests": 93,
-    "testEntries": 1537
+    "testEntries": 1539
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1214,7 +1214,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 668,
+      "integration": 670,
       "platform/destructive": 108,
       "pure unit": 620,
       "unclassified": 129
@@ -1353,9 +1353,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1529,
+    "nimTestBinaryCount": 1531,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1537
+    "testEntryCount": 1539
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -28490,6 +28490,40 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_solved_packages_are_first_class_locked_deps.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_source_producer_revalidation",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_source_producer_revalidation.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_source_revalidation_invocation_scope",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_source_revalidation_invocation_scope.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
