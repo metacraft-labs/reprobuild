@@ -13,7 +13,7 @@ Reprobuild models the workspace as a directed acyclic graph (DAG) of type-checke
 | **Starlark / BUILD files** (Bazel/Buck2) | Project DSL (`repro.nim`) | Declarative, statically type-checked rules written in standard Nim. |
 | **Sandboxed Execution** (Bazel) | Environment Activation | Merges locked, isolated tool paths into active subprocess execution blocks. |
 | **OS-Level Interception / Sandbox** (BuildXL/Tup) | Filesystem Shim | Preloads `librepro_monitor_shim` in user-space to snoop read/write syscalls without kernel drivers. Mismatched/undeclared inputs trigger build errors. |
-| **Action Cache** (Buck2) | Shared Memory Cache Daemon | `repro-cache-daemon` provides sub-millisecond local caching. |
+| **Action Cache** (Buck2) | Shared-memory index over a per-edge disk store | A host-wide grow-only set of record references, mapped by every engine, answers "this edge has no record" without a syscall. No daemon. |
 | **Remote Build Execution** (Bazel RBE) | Binary Caches | Secure HTTP/TLS publishing and substitution via `repro-binary-cache`. |
 
 ## Key Commands

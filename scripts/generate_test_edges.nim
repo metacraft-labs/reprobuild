@@ -73,9 +73,6 @@ const
   HcrExtraPassC = "-fpatchable-function-entry=16,0"
   HcrExtraPassL = "-Wl,-segprot,__HCR,rwx,rwx"
 
-  BootIdUnavailableTest =
-    "tests/integration/t_shm_index_boot_id_unavailable_fails_closed.nim"
-
   BundleRoot = "tests/bundles"
     ## Where generated shared-binary sources live. Deliberately not under a
     ## directory the walkers accept, and deliberately named ``bundle_*`` rather
@@ -658,8 +655,6 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     if edge.source in ["tests/unit/t_source_fetch_tool_metadata.nim",
                        "tests/unit/t_install_mirror_tool_metadata.nim"]:
       definesList.add("reproInterfaceMode")
-    if edge.source == BootIdUnavailableTest:
-      definesList.add("reproShmIndexTestBootIdUnavailable")
     let definesLit = seqLiteral(definesList)
     let reqLit = if edge.requiresReproBinary: "true" else: "false"
     let targetOsLit = case edge.targetOs
