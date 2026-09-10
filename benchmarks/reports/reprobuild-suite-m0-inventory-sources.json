@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 22,
     "nimTestBinaries": 1531,
     "pureUnitConsolidationGroups": 56,
-    "pureUnitTests": 620,
+    "pureUnitTests": 619,
     "staticallyDetectedRuntimeCompilerFlowTests": 93,
     "testEntries": 1539
   },
@@ -973,7 +973,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 3,
       "defines": [
         "reproProviderMode"
       ],
@@ -986,8 +986,7 @@
       "sources": [
         "tests/unit/t_configure_build_tree_cleanup.nim",
         "tests/unit/t_constructor_fetch_tool_refs.nim",
-        "tests/unit/t_library_stage_alias.nim",
-        "tests/unit/t_m9r83_install_mirror_action_shapes.nim"
+        "tests/unit/t_library_stage_alias.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1216,8 +1215,8 @@
       "graph-fixture": 12,
       "integration": 670,
       "platform/destructive": 108,
-      "pure unit": 620,
-      "unclassified": 129
+      "pure unit": 619,
+      "unclassified": 130
     },
     "graphOwnedTestArtifacts": [
       {
@@ -30947,7 +30946,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_install_mirror_tool_metadata.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32374,8 +32373,8 @@
     },
     {
       "binary": "build/test-bin/t_m9r83_install_mirror_action_shapes",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
       "defines": [
         "reproProviderMode"
       ],
@@ -32383,13 +32382,14 @@
       "localDependencyShape": [
         "repro_core",
         "repro_dsl_stdlib",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

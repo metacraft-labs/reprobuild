@@ -51,6 +51,19 @@ builds. Later invocations in the same process revalidate. A producer already
 active in a self-hosting cycle may use its existing artifact as a bootstrap
 seed; that seed does not mark the active producer as successfully validated.
 
+## Install Mirror Runtime Closure
+
+Custom shell and typed source builds use the same install-mirror runtime
+normalization. On Linux, this includes ELF subprograms under `usr/libexec`,
+declared dependency library directories and propagated runtime manifests.
+Generated mirror tools are declared during interface extraction, before the
+build body runs. `REPRO_M9R30_NEEDED_CHECK=1` additionally refuses a mirror
+whose ELF dependencies cannot be resolved.
+
+These are local runtime-closure checks, not certification that an archive can
+be restored on another machine. Dynamic interpreter paths still require
+independent relocation validation; the incomplete-identity guard remains.
+
 ## Re-enabling Automatic Source Substitution
 
 The resolver must bind the complete source/provider inputs, solved options,

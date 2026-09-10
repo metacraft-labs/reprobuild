@@ -1,9 +1,11 @@
 ## M9.R.83 provider-mode action-shape coverage for install mirror
 ## publication. This pins the emitted BuildActionDef, not source text.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_core
+import repro_core/ambient_execution
+import repro_test_support
 import repro_project_dsl
 import repro_dsl_stdlib/types/package_result
 
@@ -37,6 +39,114 @@ when defined(reproProviderMode):
         if argv.len >= 3:
           return argv[2]
     ""
+
+when defined(linux) and defined(reproProviderMode):
+  proc verifyLibexecMirror(custom, propagated: bool) =
+    let scratch = createTempDir("repro-libexec-mirror-", "")
+    defer: removeDir(scratch)
+    let patchelf = findExe("patchelf", followSymlinks = false)
+    require patchelf.len > 0
+    let fixtures = graphArtifactPath("build/test-fixtures/install-mirror-runtime")
+    requireBinary(fixtures / "probe", "reprobuild.test_fixtures.install_mirror_probe")
+    requireBinary(fixtures / "librepro_mirror_fixture.so",
+      "reprobuild.test_fixtures.install_mirror_library")
+    let packageName = if custom: "customLibexecRuntime" & $propagated
+      else: "typedLibexecRuntime"
+    let projectRoot = scratch / packageName
+    let staging = projectRoot / ".repro/build/from-source-custom" / packageName
+    let installedUsr = staging / "install/usr"
+    let inputBinary = installedUsr / "libexec/compiler/cc1-probe"
+    let directMirror = scratch / "direct" / ".repro/output/install"
+    let transitiveLib = scratch / "transitive" / ".repro/output/install/usr/lib"
+    let library = transitiveLib / "librepro_mirror_fixture.so"
+    createDir(inputBinary.parentDir)
+    createDir(directMirror / "usr/lib")
+    createDir(transitiveLib)
+    if propagated:
+      writeFile(directMirror / m9r30PropagatedManifestName,
+        transitiveLib & "\n" & transitiveLib & "\n")
+    copyFileWithPermissions(fixtures / "librepro_mirror_fixture.so", library)
+    copyFileWithPermissions(fixtures / "probe", inputBinary)
+    require fpUserExec in getFilePermissions(inputBinary)
+
+    proc run(argv: seq[string]; cwd = ""): tuple[output: string, exitCode: int] =
+      uncontrolledExecCmdEx(quoteShellCommand(argv), workingDir = cwd)
+
+    require run(@[patchelf, "--remove-rpath", inputBinary]).exitCode == 0
+    let interpreter = run(@[patchelf, "--print-interpreter", inputBinary])
+    require interpreter.exitCode == 0
+
+    let priorLd = getEnv("LD_LIBRARY_PATH")
+    let priorLink = getEnv("LIBRARY_PATH")
+    let priorCheck = getEnv("REPRO_M9R30_NEEDED_CHECK")
+    let priorMode = getEnv(InstallMirrorModeEnvVar)
+    defer:
+      putEnv("LD_LIBRARY_PATH", priorLd)
+      putEnv("LIBRARY_PATH", priorLink)
+      putEnv("REPRO_M9R30_NEEDED_CHECK", priorCheck)
+      putEnv(InstallMirrorModeEnvVar, priorMode)
+    putEnv("LD_LIBRARY_PATH", "")
+    putEnv("LIBRARY_PATH", interpreter.output.strip().parentDir)
+    putEnv("REPRO_M9R30_NEEDED_CHECK", "1")
+    putEnv(InstallMirrorModeEnvVar, "legacy")
+    let unpatched = run(@[inputBinary])
+    checkpoint unpatched.output
+    require unpatched.exitCode != 0
+    require "librepro_mirror_fixture.so" in unpatched.output
+    putEnv("LD_LIBRARY_PATH", "")
+
+    let pkg = PackageDef(packageName: packageName,
+      sourceFile: projectRoot / "repro.nim")
+    let fragment = buildPackageFragment(pkg, dummyRequest(projectRoot),
+      proc() =
+        registerVersion(packageName, DslVersionInfo(version: "1.0.0"))
+        registerPackageDep(packageName, "runtime", "direct >=1")
+        if custom:
+          resetDslPortShellStateForPackage(packageName)
+          let state = beginBuildBlock(packageName, "executable", "probe")
+          try:
+            shell "true"
+          finally:
+            endBuildBlock(state)
+          synthesizeCustomShellBuildActions(packageName)
+        else:
+          let installEdge = buildAction(id = "fixture-install",
+            call = inlineExecCall(@["sh", "-c", "true"], projectRoot),
+            outputs = @[staging / "install.stamp"])
+          emitInstallTreeMirror(installEdge, relativePath(staging, projectRoot),
+            "install", packageName, "autotools"),
+      includeDefault = false)
+    let mirrorId = (if custom: "from-source-custom-mirror-" else: "install-mirror-") & packageName
+    let mirror = findById(extractActions(fragment), mirrorId)
+    let scriptPath = scratch / "mirror.sh"
+    writeFile(scriptPath, inlineScriptOf(mirror))
+    if not propagated:
+      putEnv("LD_LIBRARY_PATH", transitiveLib)
+    let mirrored = run(@["sh", scriptPath], projectRoot)
+    checkpoint mirrored.output
+    require mirrored.exitCode == 0
+    let mirrorRoot = projectRoot / ".repro/output/install"
+    let binary = mirrorRoot / "usr/libexec/compiler/cc1-probe"
+    require fileExists(binary)
+    putEnv("LD_LIBRARY_PATH", "")
+    let executed = run(@[binary])
+    checkpoint executed.output
+    check executed.exitCode == 0
+    let manifest = mirrorRoot / m9r30PropagatedManifestName
+    require fileExists(manifest)
+    check readFile(manifest).splitLines().count(transitiveLib) == 1
+    check transitiveLib in run(@[patchelf, "--print-rpath", binary]).output.strip().split(':')
+
+    removeFile(library)
+    for output in mirror.outputs:
+      if fileExists(output): removeFile(output)
+    let rejected = run(@["sh", scriptPath], projectRoot)
+    checkpoint rejected.output
+    check rejected.exitCode == 75
+    check "UNRESOLVED NEEDED" in rejected.output
+    check "librepro_mirror_fixture.so" in rejected.output
+    for output in mirror.outputs:
+      check not fileExists(output)
 
 suite "M9.R.83 install mirror emitted action shape":
 
@@ -135,6 +245,9 @@ suite "M9.R.83 install mirror emitted action shape":
         proc() =
           resetDslPortShellStateForPackage(PackageName)
           registerVersion(PackageName, DslVersionInfo(version: "8.3.0"))
+          registerPackageDep(PackageName, "native", "nativeMirrorDep >=1")
+          registerPackageDep(PackageName, "build", "buildMirrorDep >=2")
+          registerPackageDep(PackageName, "runtime", "runtimeMirrorDep >=3")
           let state = beginBuildBlock(PackageName, "library", "libM9r83")
           try:
             shell "mkdir -p $out/lib"
@@ -160,6 +273,15 @@ suite "M9.R.83 install mirror emitted action shape":
         check toolName in mirror.toolIdentityRefs
       check "sed" in mirror.toolIdentityRefs
       check InstallMirrorPublishToolName in mirror.toolIdentityRefs
+      for toolName in typedInstallMirrorShellTools(PackageName):
+        check toolName in mirror.toolIdentityRefs
+      for dep in ["nativeMirrorDep", "buildMirrorDep", "runtimeMirrorDep"]:
+        check dep in mirror.toolIdentityRefs
+        check (scratch / dep / ".repro/output/install/usr/lib").replace("\\", "/") in script
+        check (scratch / dep / ".repro/output/install" /
+          m9r30PropagatedManifestName).replace("\\", "/") in script
+      check (projectRoot / ".repro/output/install" /
+        m9r30PropagatedManifestName).replace("\\", "/") in script
       check sidecar in mirror.outputs
       check InstallMirrorPublishToolName in script
       check InstallMirrorModeEnvVar in script
@@ -173,6 +295,16 @@ suite "M9.R.83 install mirror emitted action shape":
         "' > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
     else:
       check true
+
+  when defined(linux) and defined(reproProviderMode):
+    test "typed libexec closure executes and rejects missing libraries":
+      verifyLibexecMirror(custom = false, propagated = true)
+
+    test "custom libexec closure executes and rejects missing libraries":
+      verifyLibexecMirror(custom = true, propagated = true)
+
+    test "custom libexec resolves provisioned runtime libraries":
+      verifyLibexecMirror(custom = true, propagated = false)
 
   test "distinct packages each get their own mirror gate":
     # The mirror gate is keyed per PACKAGE, not per process: two packages

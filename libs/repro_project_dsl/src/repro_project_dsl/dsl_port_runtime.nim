@@ -4267,6 +4267,14 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     script.add("; s|^datadir=/usr/share|datadir=" & escapedMirrorUsr & "/share| ")
     script.add("; s|^datarootdir=/usr/share|datarootdir=" & escapedMirrorUsr & "/share|' ")
     script.add("\"$pc\"; fi; done; fi; done; ")
+    let mirrorDeps = registeredNativeBuildDeps(packageName) &
+      registeredBuildDeps(packageName) & registeredRuntimeDeps(packageName)
+    script.add(m9r14fEmitRpathPatchScript(escapedMirrorUsr,
+      installMirrorDepLibDirs(projectRoot, mirrorDeps),
+      depManifestPaths = installMirrorDepManifestPaths(projectRoot, mirrorDeps),
+      ownManifestPath = (mirrorRoot / m9r30PropagatedManifestName).replace("\\", "/"),
+      packageName = packageName,
+      recipesRoot = recipesRoot))
     script.add("touch \"" & escapedMirrorStamp & "\"; ")
     script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
       publishVersion, mirrorRoot))
@@ -4291,8 +4299,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       commandStatsId = "from-source-custom.mirror",
       publishToBinaryCache = true,
       cacheEntryIdentity = some(cacheIdentity),
-      toolIdentityRefs = @InstallMirrorCoreToolNames &
-        @["sed", InstallMirrorPublishToolName],
+      toolIdentityRefs = installMirrorToolIdentityRefs(packageName, mirrorDeps),
       declaredOutputs = @[mirrorRoot])
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,7 @@ import nimcrypto/sha2 as ncSha2
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
 import repro_project_dsl/install_mirror_resolver
+import repro_project_dsl/install_mirror_runtime
 import repro_project_dsl/shell_fetch
 import repro_project_dsl/source_cache_identity
 # How a macro shells out at compile time. A `std`-only leaf, deliberately

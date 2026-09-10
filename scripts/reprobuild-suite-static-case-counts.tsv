@@ -1431,7 +1431,7 @@ tests/unit/t_host_system_tools.nim	nim	4
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_install_mirror_optional_version.nim	nim	3
 tests/unit/t_install_mirror_shell_tools.nim	nim	2
-tests/unit/t_install_mirror_tool_metadata.nim	nim	7
+tests/unit/t_install_mirror_tool_metadata.nim	nim	8
 tests/unit/t_library_stage_alias.nim	nim	3
 tests/unit/t_m21_history_fed_scheduling.nim	nim	22
 tests/unit/t_m9q_from_source_provisioning.nim	nim	9
@@ -1512,7 +1512,7 @@ tests/unit/t_m9r79_constructors_compile.nim	nim	4
 tests/unit/t_m9r7_target_triple_cache_namespacing.nim	nim	14
 tests/unit/t_m9r81_dep_root_env_vars.nim	nim	5
 tests/unit/t_m9r82_action_cache_cas_migration.nim	nim	8
-tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	3
+tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	6
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	19
