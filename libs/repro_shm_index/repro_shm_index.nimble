@@ -1,6 +1,0 @@
-version = "0.1.0"
-author = "Metacraft Labs"
-description = "Shared-memory action-cache hot-tier data structures (control region, generation segments, seqlock table, MPSC ring)"
-license = "MIT"
-srcDir = "src"
-requires "nim >= 2.2.0"

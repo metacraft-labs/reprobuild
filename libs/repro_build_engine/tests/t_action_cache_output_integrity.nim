@@ -40,7 +40,6 @@ import std/[monotimes, options, os, osproc, posix, strutils, tempfiles,
 import repro_build_engine
 import repro_hash
 import repro_local_store
-import repro_shm_index
 
 proc weak(name: string): ContentDigest =
   weakFingerprintFromText("action-cache-output-integrity." & name)
@@ -582,34 +581,33 @@ suite "action cache non-regular output integrity":
       check recovered.cacheDecision == cdHit
       check not recovered.launched
 
-suite "action cache output integrity under the real cache daemon":
-  ## NO MOCKS, and specifically no hand-driven stand-in for the daemon: these
-  ## spawn the PRODUCTION `repro-cache-daemon` binary via
-  ## `REPRO_CACHE_DAEMON_BIN`, exactly as `repro build` does, and set
-  ## `config.actionCacheRoot` so the engine attaches the shared-memory tier
-  ## (`attachActionCacheShm = config.actionCacheRoot.len > 0`,
-  ## repro_build_engine.nim). The suites above left `actionCacheRoot` empty,
-  ## which is why they never attached shm, never spawned a daemon, and missed
-  ## the defect this suite covers.
+suite "action cache output integrity across a witness-free republish":
+  ## THIS SUITE WAS REWRITTEN, AND THE SUBJECT MOVED RATHER THAN SHRANK.
   ##
-  ## The daemon decodes each record from its shm slot -- a plain record frame,
-  ## carrying no output witness by construction -- and republishes it through
-  ## `writePerEdgeRecords`. If that republish is allowed to overwrite the
-  ## witness sidecar, every witness for an shm-eligible edge is destroyed
-  ## shortly after it is written, and the corruption check silently reverts to
-  ## the size+mtime comparison it was introduced to replace.
-
-  proc daemonBinary(): string =
-    for candidate in [getCurrentDir() / "build" / "bin" / "repro-cache-daemon",
-                      getAppDir() / ".." / "bin" / "repro-cache-daemon"]:
-      if fileExists(candidate):
-        return candidate
-    ""
-
-  proc recFiles(actionCacheRoot: string): seq[string] =
-    for path in walkDirRec(actionCacheRoot):
-      if path.endsWith(".rec"):
-        result.add(path)
+  ## It used to spawn the production `repro-cache-daemon`, because the daemon
+  ## decoded each record out of its shared-memory slot — a plain record frame,
+  ## carrying no output witness by construction — and republished it through
+  ## `writePerEdgeRecords`. Letting that republish overwrite the `.octime`
+  ## sidecar destroyed every witness for a shm-eligible edge seconds after it
+  ## was written, silently reverting the corruption check to the size+mtime
+  ## comparison it exists to replace.
+  ##
+  ## There is no daemon now: Tier 2 is a shared-memory grow-only set of
+  ## REFERENCES that every engine inserts into directly, and it never carries a
+  ## record, so it can never republish one. What has NOT gone away is the
+  ## witness-free republish itself — the peer-cache installer
+  ## (`appendActionResultRecord`) does exactly that, writing a remote record
+  ## whose frame carries no witness over an edge whose local outputs are
+  ## already witnessed. That is the same clobber with a different caller, so
+  ## the case now drives it through the caller that still exists.
+  ##
+  ## This is also STRONGER than what it replaces, in one specific way: the old
+  ## version could not run at all when the record exceeded the 256-byte inline
+  ## submission slot, and skipped itself with a diagnostic when it did. Since
+  ## the encoded size is dominated by absolute path strings, whether the test
+  ## exercised anything was a function of how long `$TMPDIR` happened to be —
+  ## which is why it pinned a short root under `/tmp`. No size threshold is
+  ## involved any more, so it runs everywhere and needs no such pin.
 
   proc witnessBytes(actionCacheRoot: string):
       tuple[files: int; nonZero: int; total: int] =
@@ -622,147 +620,60 @@ suite "action cache output integrity under the real cache daemon":
           if c != '\0':
             inc result.nonZero
 
-  proc daemonConfig(cacheRoot, actionCacheRoot: string): BuildEngineConfig =
-    result = warmConfig(cacheRoot)
-    result.actionCacheRoot = actionCacheRoot
+  test "a witness-free republish must not destroy an existing witness":
+    let tempRoot = createTempDir("repro-ac-republish", "")
+    defer: removeDir(tempRoot)
+    let workRoot = tempRoot / "work"
+    let cacheRoot = tempRoot / "cache"
+    let actionCacheRoot = tempRoot / "acr"
+    createDir(actionCacheRoot)
+    createDir(workRoot / "src")
+    writeFile(workRoot / "src" / "i.txt", "payload\n")
 
-  proc waitForDaemonRepublish(actionCacheRoot: string;
-                              before: seq[(string, times.Time)];
-                              timeoutMs = 30_000): bool =
-    ## Poll until the daemon rewrites at least one `.rec` it did not write
-    ## itself. Returns false on timeout so the caller can FAIL rather than
-    ## quietly pass a test the daemon never participated in.
-    let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
-    while getMonoTime() < deadline:
-      for path in recFiles(actionCacheRoot):
-        var wasSeen = false
-        for (p, t) in before:
-          if p == path:
-            wasSeen = true
-            if getLastModificationTime(path) != t:
-              return true
-        if not wasSeen:
-          return true
-      sleep(100)
-    false
+    let copy = builtinAction(bakCopyFile, "republish/copy",
+      cwd = workRoot,
+      inputs = ["src/i.txt"],
+      outputs = ["out/c.txt"],
+      cacheable = true,
+      weakFingerprint = weak("republish/copy"),
+      actionCachePolicy = ffpTimestamp,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    let g = graph([copy])
+    var config = warmConfig(cacheRoot)
+    config.actionCacheRoot = actionCacheRoot
 
-  test "the cache daemon republishing a record must not destroy its witness":
-    let daemon = daemonBinary()
-    if daemon.len == 0:
-      # Non-vacuous by construction: without the real daemon this test cannot
-      # say anything, and saying so is better than passing.
-      checkpoint("repro-cache-daemon not built; run `just build` first")
-      fail()
-    else:
-      putEnv("REPRO_CACHE_DAEMON_BIN", daemon)
-      # The daemon is a SEPARATE binary, so this test silently depends on it
-      # having been rebuilt from the current source. A daemon older than
-      # `repro_local_store.nim` still carries the old republish behaviour and
-      # fails the assertions below for a reason that has nothing to do with
-      # the code under test. Say so rather than let it look like a real
-      # regression.
-      let storeSource = getCurrentDir() / "libs" / "repro_local_store" /
-        "src" / "repro_local_store.nim"
-      if fileExists(storeSource) and
-          getLastModificationTime(daemon) < getLastModificationTime(storeSource):
-        checkpoint("WARNING: " & daemon & " is OLDER than " & storeSource &
-          " -- rebuild it (`just build`, or nim c the " &
-          "apps/repro-cache-daemon entrypoint) before trusting this result.")
-      # NOT `createTempDir`, deliberately. `submitToShm` drops any record
-      # whose ENCODED size exceeds `SlotInlineCap` (256 B), and that encoding
-      # is dominated by absolute path strings -- so whether the shared-memory
-      # tier engages at all is a function of how long the temp path is.
-      # Measured on this graph: a 19-character root encodes to 173 B and the
-      # daemon republishes; a 104-character root encodes to 258 B, the submit
-      # is silently dropped, and no daemon work ever happens. Inheriting
-      # TMPDIR therefore makes this test pass or fail on path length, which
-      # is exactly the kind of environment-dependence that makes a suite
-      # untrustworthy. Pin a short root instead.
-      let shortRoot = "/tmp/rbclob-" & $getCurrentProcessId()
-      removeDir(shortRoot)
-      createDir(shortRoot)
-      let tempRoot = shortRoot
-      defer:
-        delEnv("REPRO_CACHE_DAEMON_BIN")
-        # The daemon is a live process still writing into this tree; a single
-        # removeDir races it. Teardown is not the property under test, so
-        # retry briefly and give up quietly rather than fail the assertions
-        # that already ran.
-        for _ in 0 .. 20:
-          try:
-            removeDir(tempRoot)
-            break
-          except OSError:
-            sleep(200)
-      let workRoot = tempRoot / "work"
-      let cacheRoot = tempRoot / "cache"
-      let actionCacheRoot = tempRoot / "acr"
-      createDir(actionCacheRoot)
-      createDir(workRoot / "src")
-      writeFile(workRoot / "src" / "i.txt", "payload\n")
+    check runBuild(g, config).byId("republish/copy").status == asSucceeded
+    let witnessedBefore = witnessBytes(actionCacheRoot)
+    check witnessedBefore.files > 0
+    check witnessedBefore.nonZero > 0
 
-      let copy = builtinAction(bakCopyFile, "daemon/copy",
-        cwd = workRoot,
-        inputs = ["src/i.txt"],
-        outputs = ["out/c.txt"],
-        cacheable = true,
-        weakFingerprint = weak("daemon/copy"),
-        actionCachePolicy = ffpTimestamp,
-        governingLockIdentity = lockIdentityOutsideSolvedGraph())
-      let g = graph([copy])
-      let config = daemonConfig(cacheRoot, actionCacheRoot)
+    # Re-publish the edge's record through the SAME entry point the peer-cache
+    # installer uses, from a record frame that carries no witness — the exact
+    # shape a remote bundle decodes to.
+    var store = openActionCache(actionCacheRoot / "action-cache")
+    var republished = 0
+    for record in store.loadPerEdgeRecords(copy.weakFingerprint):
+      let frame = decodeActionResultRecord(encodeActionResultRecord(record))
+      store.appendActionResultRecord(frame)
+      inc republished
+    store.closeShmTier()
+    check republished > 0
 
-      check runBuild(g, config).byId("daemon/copy").status == asSucceeded
-      let witnessedBefore = witnessBytes(actionCacheRoot)
-      check witnessedBefore.files > 0
-      check witnessedBefore.nonZero > 0
+    let witnessedAfter = witnessBytes(actionCacheRoot)
+    check witnessedAfter.files == witnessedBefore.files
+    # The witness must survive the republish byte for byte. Pre-fix this is
+    # where it was zeroed.
+    check witnessedAfter.nonZero == witnessedBefore.nonZero
 
-      var stamps: seq[(string, times.Time)] = @[]
-      for path in recFiles(actionCacheRoot):
-        stamps.add((path, getLastModificationTime(path)))
-      check stamps.len > 0
-
-      # The daemon can only republish a record the engine actually submitted,
-      # and the engine only submits records that fit the inline slot. Measure
-      # it rather than assume it, so a too-large record reports THAT instead
-      # of masquerading as "the daemon never ran".
-      var encodedBytes = 0
-      var probe = openActionCache(actionCacheRoot / "action-cache",
-        attachShm = false)
-      for record in probe.loadPerEdgeRecords(copy.weakFingerprint):
-        encodedBytes = max(encodedBytes, encodeActionResultRecord(record).len)
-      checkpoint("encoded record = " & $encodedBytes &
-        " B, inline slot cap = " & $SlotInlineCap & " B")
-      if encodedBytes == 0 or encodedBytes > SlotInlineCap:
-        # Never a silent pass: say why the property could not be exercised.
-        checkpoint("SKIPPED: record does not fit the shared-memory slot, so " &
-          "the engine never submits it and the daemon has nothing to " &
-          "republish. This test cannot exercise the clobber here.")
-        skip()
-      else:
-        # Let the production daemon drain its ring and republish.
-        let republished = waitForDaemonRepublish(actionCacheRoot, stamps)
-        checkpoint("daemon republished the record: " & $republished)
-        check republished
-
-        let witnessedAfter = witnessBytes(actionCacheRoot)
-        check witnessedAfter.files == witnessedBefore.files
-        # The witness must survive the republish byte for byte. Pre-fix this
-        # is where it was zeroed.
-        check witnessedAfter.nonZero == witnessedBefore.nonZero
-
-        # And the property the witness exists for must still hold end to end.
-        let outPath = workRoot / "out" / "c.txt"
-        let good = readFile(outPath)
-        corruptInPlacePreservingSizeAndMtime(outPath, 1, good.len - 2)
-        let corrupted = readFile(outPath) != good
-        check corrupted
-
-        let after = runBuild(g, config).byId("daemon/copy")
-        check after.cacheDecision != cdHit
-        check after.launched
-        let restored = readFile(outPath) == good
-        check restored
+    # And the property the witness exists for must still hold end to end.
+    let outPath = workRoot / "out" / "c.txt"
+    let good = readFile(outPath)
+    corruptInPlacePreservingSizeAndMtime(outPath, 1, good.len - 2)
+    check readFile(outPath) != good
+    let after = runBuild(g, config).byId("republish/copy")
+    check after.cacheDecision != cdHit
+    check after.launched
+    check readFile(outPath) == good
 
   test "a symlink to a directory is checked as a directory too":
     ## `fingerprintMetadata` classifies a symlink-to-directory as
