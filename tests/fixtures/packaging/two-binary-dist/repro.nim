@@ -147,6 +147,14 @@ package sampletool:
     # producers (``DpkgDebSelector``, ``TarSelector``, ``CandleSelector``,
     # …) and a test asserts these entries against them.
     "tar"
+    # gzip is not a typo for tar. ``tar -z`` forks a program CALLED
+    # ``gzip``, and an action's PATH holds only what its edge named, so
+    # the tarball producer declares it too, on the tar edge itself
+    # (``producers/tarball.nim``'s ``GzipSelector``, which the same
+    # pinning test below reads). Left out, the tar action exits 2 with
+    # "gzip: command not found" -- which is exactly how the first real
+    # Linux build of this fixture failed.
+    "gzip"
     "dpkg-deb"
     "patchelf"
     "install-file"

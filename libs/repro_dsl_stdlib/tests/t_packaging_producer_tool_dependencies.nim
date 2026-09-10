@@ -62,6 +62,34 @@ suite "packaging: producers declare a real dependency on their tool":
     let artifact = tarballPackage(sampleDistribution(toLinux))
     check "tar" in toolRefsFor(artifact.edge.id)
 
+  test "the tarball producer's artifact edge also names gzip":
+    # The tool a producer TYPES is not the whole dependency. ``tar -z``
+    # forks a separate program called ``gzip``, and an action's PATH
+    # holds only the tools its own edge named -- so an edge that names
+    # tar alone gets gnutar's bin directory and nothing else, and the
+    # action dies with ``gzip: command not found`` / ``Child returned
+    # status 127``. That is how the first real Linux build of the
+    # fixture failed, after every unit case here passed.
+    #
+    # It must be on the TAR edge. gzip is exec'd by tar, so a separate
+    # edge naming it would put it on the PATH of an action that never
+    # runs it.
+    resetBuildActionRegistry()
+    let artifact = tarballPackage(sampleDistribution(toLinux))
+    check GzipSelector in toolRefsFor(artifact.edge.id)
+    check GzipSelector in artifact.toolSelectors
+
+  test "no other producer drags gzip in":
+    # Over-declaring costs a project a fetch of a tool it never runs.
+    # dpkg-deb compresses the payload itself (``-Z gzip`` is dpkg's own
+    # flag, not a fork of /usr/bin/gzip), and the MSI path is Windows.
+    resetBuildActionRegistry()
+    let deb = debPackage(sampleDistribution(toLinux))
+    check GzipSelector notin deb.toolSelectors
+    resetBuildActionRegistry()
+    let msi = msiPackage(sampleDistribution(toWindows))
+    check GzipSelector notin msi.toolSelectors
+
   test "the MSI producer names both WiX tools, on their own edges":
     # candle and light are separate programs from one distribution, and
     # each runs in its own action. Naming both on the light edge would
@@ -117,8 +145,9 @@ suite "packaging: producers declare a real dependency on their tool":
     let fixture = repoRootFromTest() &
       "/tests/fixtures/packaging/two-binary-dist/repro.nim"
     let text = readFile(fixture)
-    for selector in [DpkgDebSelector, TarSelector, CandleSelector,
-                     LightSelector, PatchelfSelector, InstallSelector]:
+    for selector in [DpkgDebSelector, TarSelector, GzipSelector,
+                     CandleSelector, LightSelector, PatchelfSelector,
+                     InstallSelector]:
       check text.contains("\"" & selector & "\"")
 
   test "no producer edge is marked uncacheable":

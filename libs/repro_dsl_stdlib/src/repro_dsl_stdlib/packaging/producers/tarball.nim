@@ -19,12 +19,28 @@ import ../types
 import ../runtime_contract
 import ../producer
 import ../../packages/tar as tar_module
+# Imported for its REGISTRATION side effect only. gzip is never CALLED
+# from here -- ``tar -z`` execs it behind our back -- so there is no
+# typed wrapper to reference and the compiler's unused-import heuristic
+# does not apply. Same pattern as
+# ``tests/t_openssl_windows_link_channel.nim``. See the header of
+# ``packages/gzip.nim`` for why a tool nobody types is still a real
+# build-graph dependency.
+{.push warning[UnusedImport]: off.}
+import ../../packages/gzip
+{.pop.}
 
 {.experimental: "callOperator".}
 
 const tarTool = tar_module.tar
 
 const TarSelector* = "tar"
+const GzipSelector* = "gzip"
+  ## The compressor ``tar -z`` forks. An action's PATH holds only the
+  ## tools its edge named, so without this the tar action gets gnutar
+  ## and no gzip and exits 2 with ``gzip: command not found``. This is
+  ## the one tool dependency in the layer that cannot be read off a
+  ## producer's argv.
 
 proc tarballArtifactName*(dist: Distribution): string =
   let osTag =
@@ -70,11 +86,16 @@ proc tarballPackage*(dist: Distribution;
     after = tree.terminal,
     extraInputs = tree.stagedPaths())
   declareProducerTool(site, edge.id, TarSelector)
+  # Same edge, second tool: gzip has to be on the PATH of the action that
+  # runs tar, not of some action of its own, because it is tar that execs
+  # it. Declaring it on a separate edge would put it in the wrong place.
+  declareProducerTool(site, edge.id, GzipSelector)
   PackagedArtifact(
     format: "tar.gz",
     path: outPath,
     edge: edge,
-    toolSelectors: @[TarSelector, PatchelfSelector, InstallSelector],
+    toolSelectors: @[TarSelector, GzipSelector, PatchelfSelector,
+                     InstallSelector],
     tree: tree)
 
 proc tarballProducer(dist: Distribution;

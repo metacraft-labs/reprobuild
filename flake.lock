@@ -5112,7 +5112,7 @@
       },
       "locked": {
         "lastModified": 1788976244,
-        "narHash": "sha256-7wTdJkutu2VDQFuKIzZgAzJ7X8J3pHXbr3dEcqcVH2Q=",
+        "narHash": "sha256-QO3bW7C6NsqVyEFUqjiySF5jt8Bcaq3oNfZgrUTa1x4=",
         "owner": "metacraft-labs",
         "repo": "runquota",
         "rev": "7a79877992908f64d3c8318bb7b20078ff5d1bf4",
