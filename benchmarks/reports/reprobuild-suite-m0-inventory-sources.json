@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1524,
+    "nimTestBinaries": 1528,
     "pureUnitConsolidationGroups": 46,
     "pureUnitTests": 560,
     "staticallyDetectedRuntimeCompilerFlowTests": 94,
-    "testEntries": 1532
+    "testEntries": 1536
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1041,7 +1041,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 688,
+      "integration": 692,
       "platform/destructive": 111,
       "pure unit": 560,
       "unclassified": 161
@@ -1168,9 +1168,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1524,
+    "nimTestBinaryCount": 1528,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1532
+    "testEntryCount": 1536
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -25907,6 +25907,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_mock_refused_by_prod_policy",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_mock_refused_by_prod_policy.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_monitor_depfile_reader",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -26237,6 +26255,24 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_policy_fail_closed",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_policy_fail_closed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -28957,6 +28993,44 @@
       "source": "tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_verdict_enumerates_checks",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_verdict_enumerates_checks.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 29,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_verify_e2e_mock",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_agent",
+        "repro_attest_verify",
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_verify_e2e_mock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

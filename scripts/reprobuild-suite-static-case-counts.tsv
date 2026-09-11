@@ -1155,6 +1155,7 @@ tests/integration/t_migrated_repo_workspace_real_pre_push.nim	nim	1
 tests/integration/t_missing_features_are_named_in_the_diagnostic.nim	nim	1
 tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim	nim	1
 tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim	nim	1
+tests/integration/t_mock_refused_by_prod_policy.nim	nim	6
 tests/integration/t_monitor_depfile_reader.nim	nim	2
 tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim	nim	3
 tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim	nim	3
@@ -1174,6 +1175,7 @@ tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_loc
 tests/integration/t_pkgconf_bootstrap_provisioning.nim	nim	1
 tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim	nim	1
 tests/integration/t_platforms_form_diagnostics.nim	nim	1
+tests/integration/t_policy_fail_closed.nim	nim	5
 tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim	nim	1
 tests/integration/t_post_commit_cache_push_runs_opportunistic_gc.nim	nim	1
 tests/integration/t_post_commit_dispatch_returns_and_detached_push_lands.nim	nim	2
@@ -1327,6 +1329,8 @@ tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim	nim	1
 tests/integration/t_v2_artifact_resolves_on_a_v3_host.nim	nim	1
 tests/integration/t_v3_artifact_refused_on_a_v2_host.nim	nim	1
 tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim	nim	1
+tests/integration/t_verdict_enumerates_checks.nim	nim	29
+tests/integration/t_verify_e2e_mock.nim	nim	15
 tests/integration/t_workspace_bootstrap_provisions_toolchain_on_windows.nim	nim	6
 tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults.nim	nim	1
 tests/integration/t_workspace_bootstrap_scaffolds_host_files.nim	nim	3
