@@ -11292,11 +11292,42 @@ proc runQuotaBypassedByEnv(): bool
 
 proc computePublicDevEnv(selection: DevEnvCliSelection;
                          publicCliPath: string;
-                         renderShell = false): DevEnvEdgeResult =
+                         renderShell = false;
+                         announce = false): DevEnvEdgeResult =
+  ## ``announce`` implements Interactive-UX-And-Progress.md Principle 1 for
+  ## this edge: say what is about to happen, show live per-action progress
+  ## while it happens, and end with what it did and how long it took.
+  ##
+  ## It is a parameter rather than the default because the two audiences are
+  ## genuinely different. Every INTERACTIVE surface — the shell hook's
+  ## ``dev-env export``, ``shell``, ``exec``, ``run``, ``tasks`` — has a human
+  ## waiting at a prompt, and for them silence is the defect this flag exists
+  ## to remove: a cold activation compiles the project provider and re-derives
+  ## the environment, which is tens of seconds. The remaining callers are
+  ## machine-facing (a test harness, a JSON surface a tool parses), and for
+  ## them the same lines are noise on a stream somebody is diffing. Note what
+  ## this is NOT gated on: a TTY. An agent reading a log is as entitled to
+  ## know what the tool is doing as a human is.
+  ##
+  ## Everything it writes goes to stderr. The hook `eval`s this command's
+  ## stdout, so one byte of progress there would be executed as shell code.
+  var progress = newBuildProgressRenderer(
+    if announce: configuredBuildProgressMode() else: bpmQuiet,
+    configuredBuildProgressBarStyle())
+  let activationStart = epochTime()
+  if progress.enabled:
+    stderr.writeLine("repro dev-env: preparing the environment for " &
+      selection.projectRoot)
+    stderr.flushFile()
+  var progressCallback: BuildProgressCallback = nil
+  if progress.enabled:
+    progressCallback = proc(event: BuildProgressEvent) =
+      progress.renderProgress(event)
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
   let monitor = publicDevEnvMonitor(publicCliPath)
-  computeDevEnvEdge(DevEnvEdgeConfig(
+  let config = DevEnvEdgeConfig(
+    progressCallback: progressCallback,
     modulePath: selection.modulePath,
     projectRoot: selection.projectRoot,
     outDir: selection.outDir,
@@ -11310,7 +11341,33 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     developOverridesPath: selection.developOverridesPath,
     toolProvisioning: resolveToolProvisioningWithEnv(tpmUnspecified),
     renderShell: renderShell,
-    statsEnabled: selection.statsPath.len > 0))
+    statsEnabled: selection.statsPath.len > 0)
+  try:
+    result = computeDevEnvEdge(config)
+  except CatchableError:
+    # The caller turns this into its own diagnostic; close the progress line
+    # first so that diagnostic starts on a line of its own instead of being
+    # appended to a half-drawn one.
+    if progress.enabled:
+      progress.finishProgress()
+    raise
+  if progress.enabled:
+    progress.finishProgress()
+    # What it did, not merely that it finished. `provider compiled` versus
+    # `provider reused` is the twenty-second difference on a macOS host whose
+    # provider compile cannot be cached, and this line is where a reader first
+    # learns that the difference exists.
+    let providerWord =
+      if result.stats.providerBuildCacheHit or
+          result.stats.providerBuildSkippedFresh: "provider reused"
+      else: "provider compiled"
+    let envWord =
+      if result.stats.providerIntrospectionCacheHit: "environment reused"
+      else: "environment re-derived"
+    stderr.writeLine("repro dev-env: ready in " &
+      formatDuration(epochTime() - activationStart) & " (" & providerWord &
+      ", " & envWord & ")")
+    stderr.flushFile()
 
 proc devEnvPerformanceEvidenceJson(edge: DevEnvEdgeResult): JsonNode =
   let devStats = edge.devEnvResult.stats
@@ -12274,7 +12331,8 @@ proc runReproRunCommand(args: openArray[string];
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
   if parsed.selection.statsPath.len > 0:
-    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
     writeDevEnvStats(parsed.selection.statsPath, edge, "run")
     let artifact = readDevEnvArtifact(edge.artifactPath)
     if emitDevEnvDiagnostics(artifact):
@@ -12311,7 +12369,8 @@ proc runReproRunCommand(args: openArray[string];
           "' names both a dev-env task and a run-edge; running the task. " &
           "Use 'task:" & parsed.target & "' or '<package>:" & parsed.target &
           "' to disambiguate.")
-    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
     writeDevEnvStats(parsed.selection.statsPath, edge, "run")
     let artifact = readDevEnvArtifact(edge.artifactPath)
     if emitDevEnvDiagnostics(artifact):
@@ -12438,7 +12497,8 @@ proc runReproTasksCommand(args: openArray[string];
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
   if parsed.selection.statsPath.len > 0:
-    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
     writeDevEnvStats(parsed.selection.statsPath, edge, "tasks")
     let artifact = readDevEnvArtifact(edge.artifactPath)
     if emitDevEnvDiagnostics(artifact):
@@ -12453,7 +12513,8 @@ proc runReproTasksCommand(args: openArray[string];
 proc runReproExecCommand(args: openArray[string];
                          publicCliPath: string): int =
   let parsed = parseDevEnvExecArgs(args)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
   writeDevEnvStats(parsed.selection.statsPath, edge, "exec")
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
@@ -12478,7 +12539,8 @@ proc defaultInteractiveShell(): string =
 proc runReproShellCommand(args: openArray[string];
                           publicCliPath: string): int =
   let parsed = parseDevEnvShellArgs(args)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
   writeDevEnvStats(parsed.selection.statsPath, edge, "shell")
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
@@ -12724,6 +12786,14 @@ proc runDevEnvExportCommand(args: openArray[string];
     stdout.write(emitFastPathNoOpScript(parsed.shell))
     return 0
 
+  # Everything above this line is the fast path: it answers in ~70 ms and MUST
+  # stay silent, because the shell hook runs it on every prompt. Reaching this
+  # line means the opposite — the provider has to be compiled and the
+  # environment re-derived, tens of seconds on a cold workspace — so from here
+  # on the run announces itself (`announce = true` below, and
+  # Interactive-UX-And-Progress.md Principle 1 for why). This is the one
+  # engine invocation nobody typed: `cd` starts it, and before it spoke, a
+  # cold activation was 31.9 s of a shell that looked hung.
   let resolved = resolveProjectFile(parsed.projectRoot)
   if resolved.path.len == 0:
     stderr.writeLine("repro dev-env export: " & parsed.projectRoot &
@@ -12745,7 +12815,7 @@ proc runDevEnvExportCommand(args: openArray[string];
 
   let edge =
     try:
-      computePublicDevEnv(selection, publicCliPath)
+      computePublicDevEnv(selection, publicCliPath, announce = true)
     except CatchableError as err:
       stderr.writeLine("repro dev-env export: " & err.msg)
       return 1
@@ -13088,7 +13158,8 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
                        mode: DevSessionMode): int =
   let commandName = if mode == dsmDev: "dev" else: "up"
   var parsed = parseDevSessionArgs(args, commandName)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
   let config = supervisorConfig(parsed, edge, publicCliPath, mode)
   if parsed.foreground:
     # W2 — the SAME resolver the detached arm re-creates in
@@ -15404,7 +15475,8 @@ proc runReproNativeShellActivationHelper(args: openArray[string];
     activity: "default",
     statsPath: request.statsPath)
   selection.resolveDevEnvSelection()
-  let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true)
+  let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true,
+    announce = true)
   writeDevEnvStats(selection.statsPath, edge, "hooks shell-native")
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
@@ -15437,7 +15509,8 @@ proc runReproDirenvActivationHelper(args: openArray[string];
         "unexpected direnv activation argument: " & arg)
     inc i
   selection.resolveDevEnvSelection()
-  let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true)
+  let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true,
+    announce = true)
   writeDevEnvStats(selection.statsPath, edge, "hooks shell-direnv")
   stdout.write(readFile(extendedPath(edge.shellFragmentPath)))
   # W2 — REPORT the workspace's declared ``uses:`` producer pins, exactly as

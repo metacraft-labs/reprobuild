@@ -42,6 +42,16 @@ type
     toolProvisioning*: ToolProvisioningMode
     renderShell*: bool
     statsEnabled*: bool
+    progressCallback*: BuildProgressCallback
+      ## Interactive-UX-And-Progress.md Principle 1 ("Live progress, never
+      ## silence"). The dev-env edge is the one engine invocation a user does
+      ## not type: the shell hook runs it on `cd`, and before this field
+      ## existed it had no way to say anything at all, so a cold activation
+      ## was tens of seconds of a shell that looked hung. The engine already
+      ## reports per-action state through this callback for `repro build`;
+      ## the dev-env path was simply never given one. ``nil`` keeps the old
+      ## silent behaviour, which is what every non-interactive caller
+      ## (tests, `repro shell --print-env=json`) wants.
 
   DevEnvEdgeResult* = object
     artifactPath*: string
@@ -193,6 +203,7 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
     suppressTrace: false,
     skipCacheHitEvidence: false)
   result.statsEnabled = config.statsEnabled
+  result.progressCallback = config.progressCallback
 
 proc commonMonitorEnv(config: DevEnvEdgeConfig): seq[string] =
   const inherited = [

@@ -6471,6 +6471,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim",
+    binary: "build/test-bin/t_e2e_dev_env_announces_before_working",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_export_bash.nim",
     binary: "build/test-bin/t_e2e_dev_env_export_bash",
     defines: @[],
