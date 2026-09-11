@@ -446,6 +446,11 @@ static int repro_hcr_symbol_matches(const char *registered_name,
   return 0;
 }
 
+/* HLX-M4 §6.2 step 5: the extent of the function the current request targets,
+ * filled in by ELF resolution. 0 means unknown — a registered-table symbol
+ * carries no size, and neither does a hand-written asm symbol. */
+static uint64_t repro_hcr_lx_target_function_size = 0;
+
 static void *repro_hcr_find_symbol(repro_hcr_agent_thread_args *args,
                                    const char *target_symbol,
                                    const char *changed_function) {
@@ -492,6 +497,11 @@ static void *repro_hcr_find_symbol(repro_hcr_agent_thread_args *args,
      * request failed for a different reason, and the wire would carry the
      * wrong named cause. */
     repro_hcr_elf_last_symbol_refusal = REPRO_HCR_ELF_OK;
+    /* HLX-M4: capture the resolved function's extent for on-stack detection
+     * (§6.2 step 5). 0 means "unknown", which the detector must not read as
+     * "nothing is on stack". */
+    repro_hcr_lx_target_function_size = 0;
+    repro_hcr_elf_last_resolved_size = &repro_hcr_lx_target_function_size;
     if (target_symbol != NULL && target_symbol[0] != '\0') {
       resolved = repro_hcr_elf_resolve_function_address(target_symbol,
                                                         &refusal);
@@ -1193,13 +1203,44 @@ static int repro_hcr_lx_unmap(void *address, size_t length) {
  * `__patchable_function_entries` section (design §4.2 — never derived from the
  * symbol address) and hand off to the shared implementation in
  * `repro_hcr_linux_x86_64.h`.
+ *
+ * HLX-M4 added the tier selection around that hand-off, and it is a POLICY, not
+ * an optimisation. `HLX-OQ-2` is resolved by requiring tier 2 whenever the
+ * target has more than one thread:
+ *
+ *   - design §6.1 point 4 is a real hazard, not a hypothetical one. The
+ *     patchable sled is executable instructions, so an interrupt can leave a
+ *     thread's PC at window byte 1..7, and on resume that thread decodes the
+ *     tail of our freshly written `E9 rel32` as an instruction. Neither the
+ *     aligned store nor `SYNC_CORE` addresses it.
+ *   - the ONLY in-process remedy is to read the parked PC out of a
+ *     `ucontext_t` and move it, which is tier 2 (§6.2 step 6). `/proc` cannot
+ *     supply that PC, measured.
+ *
+ * So: one thread means no other PC to be caught, and tier 1 is sound. More than
+ * one thread means quiesce or refuse. The thread count is read at patch time,
+ * not at agent start, because a target can spawn its threads long after the
+ * agent's handshake — Godot does exactly that.
  */
+/* 0 until the first publication, so a gate can tell "tier 1 was chosen" from
+ * "no publication happened". Every path through `repro_hcr_apply_direct_patch`
+ * assigns it before the store, so 0 never reaches the `CodePatchEvent`. */
+static uint32_t repro_hcr_lx_last_publication_tier = 0;
+
+/* §6.2 step 5: how many parked threads had the target function on their stack
+ * at the last publication. -1 means NOT DETERMINED — either the publication was
+ * tier 1 (no parked PCs to read) or the symbol carried no extent. It is a
+ * distinct value from 0 on purpose. */
+static int32_t repro_hcr_lx_on_stack_threads = -1;
+
 static void *repro_hcr_apply_direct_patch(void *entry,
                                           const uint8_t *patch_bytes,
                                           size_t patch_len) {
   uint64_t entry_address;
   uint64_t sled_address;
   void *patch_page;
+  int32_t thread_count;
+  int quiesced = 0;
 
   if (entry == NULL) {
     memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
@@ -1208,8 +1249,56 @@ static void *repro_hcr_apply_direct_patch(void *entry,
   }
   entry_address = (uint64_t)(uintptr_t)entry;
   sled_address = repro_hcr_lx_sled_address_for_entry(entry_address);
+
+  thread_count = repro_hcr_lx_enumerate_tids(
+      repro_hcr_lx_quiesce_scratch_a, REPRO_HCR_LX_MAX_QUIESCE_THREADS);
+  repro_hcr_lx_last_publication_tier =
+      REPRO_HCR_PUBLICATION_TIER_NO_QUIESCENCE;
+
+  /* A failed enumeration is treated as "multithreaded", never as "probably
+   * fine": the whole point of the rule is that an unobserved thread is the
+   * dangerous case. */
+  if (thread_count != 1) {
+    int status = repro_hcr_lx_quiesce_begin(0);
+    if (status != REPRO_HCR_LX_QUIESCE_OK) {
+      /* §6.3: bounded wait, then release all parked threads, write nothing,
+       * and report. Nothing has touched target text at this point, so the
+       * abort is safe by construction rather than by cleanup. */
+      memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
+      repro_hcr_lx_last_report.refusal =
+          REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED;
+      return NULL;
+    }
+    quiesced = 1;
+    repro_hcr_lx_last_publication_tier = REPRO_HCR_PUBLICATION_TIER_QUIESCED;
+
+    /*
+     * §6.2 step 5 — on-stack detection, which is only possible with every
+     * thread parked and its PC and frames captured. Recorded BEFORE the
+     * publication because the answer is about the pre-publication state.
+     *
+     * `repro_hcr_lx_target_function_size == 0` means the resolver could not
+     * give an extent. That is reported as "unknown", not as "nothing on
+     * stack": a detector that answers "clear" when it cannot see is exactly
+     * the silent self-pass this campaign keeps finding.
+     */
+    if (repro_hcr_lx_target_function_size > 0) {
+      repro_hcr_lx_on_stack_threads = repro_hcr_lx_quiesce_threads_on_stack_in(
+          entry_address, entry_address + repro_hcr_lx_target_function_size);
+    } else {
+      repro_hcr_lx_on_stack_threads = -1;
+    }
+  } else {
+    repro_hcr_lx_on_stack_threads = -1;
+  }
+
   patch_page = repro_hcr_lx_apply_direct_patch_at(entry_address, sled_address,
                                                   patch_bytes, patch_len);
+
+  if (quiesced) {
+    (void)repro_hcr_lx_quiesce_release();
+  }
+
   if (patch_page != NULL) {
     repro_hcr_notify_did_patch(entry, patch_page, patch_len);
   }
@@ -1329,7 +1418,17 @@ static void repro_hcr_notify_code_patch(const char *patch_id,
 
   memset(&repro_hcr_last_code_patch, 0, sizeof(repro_hcr_last_code_patch));
   repro_hcr_last_code_patch.attempted = 1;
-  repro_hcr_last_code_patch.tier = REPRO_HCR_PUBLICATION_TIER_NO_QUIESCENCE;
+  /* HLX-M4: the OBSERVED tier, not a literal.
+   *
+   * This line read `= REPRO_HCR_PUBLICATION_TIER_NO_QUIESCENCE` until
+   * 2026-09-11 and it was the SECOND unconditional constant found in this one
+   * reporting path — HLX-M7's review already caught `symbolGeneration` and
+   * `oldCodeRetained` here. It was caught the same way both of those were: by
+   * a real run reporting `publicationTier: 1` for a 33-thread Godot engine
+   * that the agent had in fact quiesced. A field that is a constant looks
+   * exactly like a field that is measured, right up until the measurement
+   * disagrees with it. */
+  repro_hcr_last_code_patch.tier = repro_hcr_lx_last_publication_tier;
   repro_hcr_last_code_patch.symbol_generation =
       (unsigned long long)repro_hcr_lx_last_report.generation;
 
@@ -1386,7 +1485,11 @@ static void repro_hcr_notify_code_patch(const char *patch_id,
   memset(&note, 0, sizeof(note));
   note.structSize = (uint32_t)sizeof(note);
   note.noteVersion = 1u;
-  note.publicationTier = REPRO_HCR_PUBLICATION_TIER_NO_QUIESCENCE;
+  /* HLX-M4: the tier is now an OBSERVATION of how this publication was made,
+   * not a constant. Under tier 2 the geid boundary is exact — no thread was
+   * running when the store landed — which is precisely the distinction §10.3
+   * requires the event to carry and which `HLX-OQ-9` will need per trace. */
+  note.publicationTier = repro_hcr_lx_last_publication_tier;
   note.siteCount = 1u;
   note.patchId = patch_id;
   note.patchedSymbols = symbol_blob;
@@ -1461,8 +1564,52 @@ static const char *repro_hcr_capabilities_json_array(void) {
   return buffer;
 }
 
+static char repro_hcr_lx_failure_detail_buffer[160];
+
+/*
+ * The named cause, and — for `quiescence-failed` — the tids that caused it.
+ *
+ * Design §6.3 does not merely require a failure; it requires "a diagnostic
+ * naming the unresponsive `tid`s". A bare `quiescence-failed` would tell an
+ * operator that a patch did not apply and nothing about which thread to look
+ * at, which is the shape of report this campaign has repeatedly called a wrong
+ * answer with no diagnostic attached to it.
+ */
 static const char *repro_hcr_direct_patch_failure_detail(void) {
-  return repro_hcr_lx_refusal_name(repro_hcr_lx_last_report.refusal);
+  const char *name = repro_hcr_lx_refusal_name(repro_hcr_lx_last_report.refusal);
+  if (repro_hcr_lx_last_report.refusal != REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED) {
+    return name;
+  }
+  {
+    int written = snprintf(repro_hcr_lx_failure_detail_buffer,
+                           sizeof(repro_hcr_lx_failure_detail_buffer),
+                           "%s (%s; unresponsive tids:", name,
+                           repro_hcr_lx_quiesce_status_name(
+                               repro_hcr_lx_quiesce.last_status));
+    int i;
+    for (i = 0; i < repro_hcr_lx_quiesce.unresponsive_count &&
+                written > 0 &&
+                (size_t)written < sizeof(repro_hcr_lx_failure_detail_buffer) - 16;
+         ++i) {
+      written += snprintf(repro_hcr_lx_failure_detail_buffer + written,
+                          sizeof(repro_hcr_lx_failure_detail_buffer) -
+                              (size_t)written,
+                          " %d", (int)repro_hcr_lx_quiesce.unresponsive_tids[i]);
+    }
+    if (repro_hcr_lx_quiesce.unresponsive_count == 0 && written > 0 &&
+        (size_t)written < sizeof(repro_hcr_lx_failure_detail_buffer) - 8) {
+      written += snprintf(repro_hcr_lx_failure_detail_buffer + written,
+                          sizeof(repro_hcr_lx_failure_detail_buffer) -
+                              (size_t)written,
+                          " none");
+    }
+    if (written > 0 &&
+        (size_t)written < sizeof(repro_hcr_lx_failure_detail_buffer) - 2) {
+      repro_hcr_lx_failure_detail_buffer[written] = ')';
+      repro_hcr_lx_failure_detail_buffer[written + 1] = '\0';
+    }
+  }
+  return repro_hcr_lx_failure_detail_buffer;
 }
 
 /*
@@ -1611,7 +1758,28 @@ static char *repro_hcr_patch_applied_json(const char *patch_id,
            "\"kind\":\"patchApplied\",\"patchApplied\":{\"patchId\":\"%s\","
            "\"changedFunctions\":[\"%s\"],\"symbolGeneration\":%llu,"
            "\"debugObjectDigest\":\"%s\",\"unwindMetadataDigest\":\"%s\","
-           "\"sourceGenerationMapDigest\":\"blake3-256:c-agent-source-generation-map\","
+           /*
+            * NOT A DIGEST, and it must not look like one.
+            *
+            * This field read `"blake3-256:c-agent-source-generation-map"` — a
+            * fixed string wearing a hash algorithm's prefix, over a
+            * `sourceGenerationMap` the C agent never parses. It is the FOURTH
+            * constant found masquerading as an observation in this one
+            * reporting path, after `symbolGeneration`, `oldCodeRetained` and
+            * `publicationTier`, and it was the worst of them: a digest's
+            * entire purpose is to be recomputable by the reader, so a forged
+            * one is not merely uninformative, it invites a check that will
+            * silently agree with nothing. The Nim reference agent computes
+            * this honestly (`runtime.nim` `digestSourceGenerationMap`); the C
+            * agent cannot, because it never reads the map.
+            *
+            * Until it does, it says so. The decoder requires a non-empty
+            * string and nothing asserts the old value, so this is the honest
+            * shape of the same field. Whichever milestone gives the C agent
+            * source-generation metadata owns replacing it with a real digest.
+            */
+           "\"sourceGenerationMapDigest\":\"unavailable:"
+           "c-agent-does-not-parse-source-generation-map\","
            "\"entryAddress\":\"0x%llx\","
            "\"dispatchAddress\":\"0x%llx\","
            "\"oldCodeRetained\":true,\"sharedLibraryPositivePath\":false%s}}",
@@ -1876,6 +2044,22 @@ static void *repro_hcr_agent_thread(void *raw_args) {
 static void repro_hcr_agent_probe_host_once(void) {
 #if defined(REPRO_HCR_TARGET_LINUX_X86_64)
   (void)repro_hcr_lx_capability_report();
+  /* HLX-M4, design §6.2 step 1: register the quiescence handler at AGENT START,
+   * not at patch time. Two reasons, both load-bearing. Installing a handler is
+   * a process-wide disposition change; doing it while other threads are already
+   * being signalled is a race. And `sigaction` is not on the allocation-free
+   * path the protocol requires between signalling and release, so it has to
+   * happen before the first `tgkill` can ever be issued. */
+  (void)repro_hcr_lx_quiesce_install(0);
+#endif
+}
+
+int repro_hcr_agent_host_quiescence_signal(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  repro_hcr_agent_probe_host_once();
+  return repro_hcr_lx_quiesce.installed ? repro_hcr_lx_quiesce.signo : 0;
+#else
+  return 0;
 #endif
 }
 
@@ -1894,6 +2078,22 @@ int repro_hcr_agent_host_membarrier_sync_core(void) {
   return repro_hcr_lx_capability_report()->membarrier_sync_core;
 #else
   return 0;
+#endif
+}
+
+int repro_hcr_agent_last_publication_tier(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return (int)repro_hcr_lx_last_publication_tier;
+#else
+  return 0;
+#endif
+}
+
+int repro_hcr_agent_last_on_stack_threads(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return (int)repro_hcr_lx_on_stack_threads;
+#else
+  return -1;
 #endif
 }
 

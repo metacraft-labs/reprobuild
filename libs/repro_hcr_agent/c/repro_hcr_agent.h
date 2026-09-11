@@ -42,6 +42,26 @@ const char *repro_hcr_agent_default_support_profile(void);
 int repro_hcr_agent_host_supports_direct_patch(void);
 int repro_hcr_agent_host_membarrier_sync_core(void);
 
+/* HLX-M4: the real-time signal number the tier-2 quiescence handshake uses
+ * (design §6.2 step 1), or 0 when this platform has no quiescence arm. An
+ * embedding application needs it so it does not install its own disposition on
+ * the same signal, and a gate needs it to prove the handler is installed rather
+ * than assumed. */
+int repro_hcr_agent_host_quiescence_signal(void);
+
+/* HLX-M4: how the LAST publication this agent made was performed.
+ * 1 = tier 1 (no quiescence; only taken when the process had exactly one
+ * thread), 2 = tier 2 (every thread parked across the store). Exposed so a gate
+ * can prove the agent actually took the tier its thread count demands, rather
+ * than trusting that the branch exists. Returns 0 before any publication. */
+int repro_hcr_agent_last_publication_tier(void);
+
+/* HLX-M4 §6.2 step 5: how many parked threads had the last patched function on
+ * their stack. -1 means NOT DETERMINED — a tier-1 publication has no parked PCs
+ * to read, and a symbol with no `st_size` has no extent to test against. It is
+ * deliberately distinct from 0. */
+int repro_hcr_agent_last_on_stack_threads(void);
+
 #ifdef __cplusplus
 }
 #endif

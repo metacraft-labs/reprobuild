@@ -10,6 +10,14 @@
  * No mocks: every function below forwards to the production implementation.
  */
 
+/* Must precede every libc header: glibc latches its feature macros on the
+ * FIRST one it sees, and `ucontext_t`'s `gregs`/`REG_RIP` — which tier-2
+ * quiescence reads a parked thread's PC out of — are behind `__USE_GNU`.
+ * `repro_hcr_agent.c` does the same, for the same reason. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #if defined(__linux__) && defined(__x86_64__)
 
 #include <stddef.h>
@@ -223,6 +231,223 @@ void repro_hcr_lx_probe_reset_sites(void) {
     repro_hcr_lx_sites[i].used = 0;
     repro_hcr_lx_sites[i].claimed = 0;
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * HLX-M4 surface: the publication's second half, and tier-2 quiescence.
+ * Every one of these forwards to the production implementation.
+ * ------------------------------------------------------------------------- */
+
+int repro_hcr_lx_probe_text_rwx_transition(void) {
+  return repro_hcr_lx_capability_report()->text_rwx_transition;
+}
+
+long long repro_hcr_lx_probe_protection_probe_rwx_result(void) {
+  return (long long)repro_hcr_lx_capability_report()->protection_probe_rwx_result;
+}
+
+int repro_hcr_lx_probe_last_transient_kept_exec(void) {
+  return repro_hcr_lx_last_report.transient_kept_exec;
+}
+
+int repro_hcr_lx_probe_last_quiesced(void) {
+  return repro_hcr_lx_last_report.quiesced;
+}
+
+int repro_hcr_lx_probe_last_ip_adjustments(void) {
+  return (int)repro_hcr_lx_last_report.ip_adjustments;
+}
+
+unsigned long long repro_hcr_lx_probe_last_resume_target(void) {
+  return (unsigned long long)repro_hcr_lx_last_report.resume_target;
+}
+
+unsigned long long repro_hcr_lx_probe_membarrier_issued_count(void) {
+  return (unsigned long long)repro_hcr_lx_membarrier_issued_count;
+}
+
+unsigned long long repro_hcr_lx_probe_publication_count(void) {
+  return (unsigned long long)repro_hcr_lx_publication_count;
+}
+
+void repro_hcr_lx_probe_set_sync_core_suppressed(int value) {
+  repro_hcr_lx_sync_core_suppressed = value;
+}
+
+void repro_hcr_lx_probe_set_pretend_sync_core_unavailable(int value) {
+  repro_hcr_lx_pretend_sync_core_unavailable = value;
+}
+
+void repro_hcr_lx_probe_set_quiesce_suppress_adjust(int value) {
+  repro_hcr_lx_quiesce_suppress_adjust = value;
+}
+
+int repro_hcr_lx_probe_quiesce_install(int signo) {
+  return repro_hcr_lx_quiesce_install(signo);
+}
+
+int repro_hcr_lx_probe_quiesce_begin(unsigned long long timeout_ns) {
+  return repro_hcr_lx_quiesce_begin((uint64_t)timeout_ns);
+}
+
+int repro_hcr_lx_probe_quiesce_release(void) {
+  return repro_hcr_lx_quiesce_release();
+}
+
+int repro_hcr_lx_probe_quiesce_is_held(void) {
+  return repro_hcr_lx_quiesce_is_held();
+}
+
+const char *repro_hcr_lx_probe_quiesce_status_name(int code) {
+  return repro_hcr_lx_quiesce_status_name(code);
+}
+
+int repro_hcr_lx_probe_quiesce_slot_count(void) {
+  return (int)repro_hcr_lx_quiesce.slot_count;
+}
+
+int repro_hcr_lx_probe_quiesce_parked_count(void) {
+  return (int)repro_hcr_lx_quiesce.parked_count;
+}
+
+int repro_hcr_lx_probe_quiesce_resumed_count(void) {
+  return (int)repro_hcr_lx_quiesce.resumed_count;
+}
+
+int repro_hcr_lx_probe_quiesce_signalled_count(void) {
+  return (int)repro_hcr_lx_quiesce.signalled_count;
+}
+
+int repro_hcr_lx_probe_quiesce_stray_signals(void) {
+  return (int)repro_hcr_lx_quiesce.stray_signals;
+}
+
+int repro_hcr_lx_probe_quiesce_enumeration_rounds(void) {
+  return (int)repro_hcr_lx_quiesce.enumeration_rounds;
+}
+
+int repro_hcr_lx_probe_quiesce_unresponsive_count(void) {
+  return (int)repro_hcr_lx_quiesce.unresponsive_count;
+}
+
+int repro_hcr_lx_probe_quiesce_unresponsive_tid(int index) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.unresponsive_count) {
+    return -1;
+  }
+  return (int)repro_hcr_lx_quiesce.unresponsive_tids[index];
+}
+
+int repro_hcr_lx_probe_quiesce_slot_tid(int index) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.slot_count) {
+    return -1;
+  }
+  return (int)repro_hcr_lx_quiesce.slots[index].tid;
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_slot_pc(int index) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.slot_count) {
+    return 0;
+  }
+  return (unsigned long long)repro_hcr_lx_quiesce.slots[index].pc;
+}
+
+int repro_hcr_lx_probe_quiesce_slot_parked(int index) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.slot_count) {
+    return -2;
+  }
+  return (int)repro_hcr_lx_quiesce.slots[index].parked;
+}
+
+int repro_hcr_lx_probe_quiesce_slot_frame_count(int index) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.slot_count) {
+    return -1;
+  }
+  return (int)repro_hcr_lx_quiesce.slots[index].frame_count;
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_slot_frame(int index,
+                                                         int frame) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.slot_count) {
+    return 0;
+  }
+  if (frame < 0 ||
+      frame >= (int)repro_hcr_lx_quiesce.slots[index].frame_count) {
+    return 0;
+  }
+  return (unsigned long long)repro_hcr_lx_quiesce.slots[index].frames[frame];
+}
+
+int repro_hcr_lx_probe_quiesce_threads_on_stack_in(unsigned long long low,
+                                                   unsigned long long high) {
+  return (int)repro_hcr_lx_quiesce_threads_on_stack_in((uint64_t)low,
+                                                       (uint64_t)high);
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_park_ns(void) {
+  return (unsigned long long)repro_hcr_lx_quiesce.last_park_ns;
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_release_ns(void) {
+  return (unsigned long long)repro_hcr_lx_quiesce.last_release_ns;
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_nested_adjust_count(void) {
+  return (unsigned long long)repro_hcr_lx_quiesce.nested_adjust_count;
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_nested_frames_seen(void) {
+  return (unsigned long long)repro_hcr_lx_quiesce.nested_frames_seen;
+}
+
+int repro_hcr_lx_probe_quiesce_handler_stage(void) {
+  return repro_hcr_lx_quiesce_handler_stage;
+}
+
+void repro_hcr_lx_probe_set_nested_scan_enabled(int value) {
+  repro_hcr_lx_nested_scan_enabled = value;
+}
+
+int repro_hcr_lx_probe_quiesce_readable_ranges(void) {
+  return (int)repro_hcr_lx_quiesce.readable_ranges;
+}
+
+int repro_hcr_lx_probe_quiesce_trampoline_verified(void) {
+  return repro_hcr_lx_trampoline_verified;
+}
+
+int repro_hcr_lx_probe_quiesce_trampoline_mismatch(void) {
+  return repro_hcr_lx_trampoline_mismatch;
+}
+
+int repro_hcr_lx_probe_quiesce_slot_nested_count(int index) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.slot_count) {
+    return -1;
+  }
+  return (int)repro_hcr_lx_quiesce.slots[index].nested_count;
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_slot_nested_pc(int index,
+                                                             int frame) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.slot_count) {
+    return 0;
+  }
+  if (frame < 0 ||
+      frame >= (int)repro_hcr_lx_quiesce.slots[index].nested_count) {
+    return 0;
+  }
+  return (unsigned long long)repro_hcr_lx_quiesce.slots[index].nested_pc[frame];
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_adjust_count(void) {
+  return (unsigned long long)repro_hcr_lx_quiesce.adjust_count;
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_timeout_count(void) {
+  return (unsigned long long)repro_hcr_lx_quiesce.timeout_count;
+}
+
+int repro_hcr_lx_probe_quiesce_signo(void) {
+  return repro_hcr_lx_quiesce.signo;
 }
 
 void *repro_hcr_lx_probe_map(size_t length, int protection) {

@@ -6081,10 +6081,42 @@ proc compileFixture() =
   discard {executor}("cd /tmp && " & cmd)
 """
         matches = inventory.compiler_invocations("tests/integration/example.nim", source)
-        self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]["patterns"], ["nim-compile-verb"])
-        self.assertEqual(matches[0]["assignedCommandVariable"], "compileVerb")
-        self.assertTrue(matches[0]["commandVariableExecuted"])
+        # BOTH arms of the branch are compile-verb fragments, and both are
+        # expected. This assertion used to read `len(matches) == 1`, from a
+        # time when `check` was not a nim compile verb and the `if false:` arm
+        # was inert filler. It is a verb now, by an accepted spec clause:
+        # CodeTracer-Test-Runner-And-Reprobuild-Suite-Modernization.milestones.org,
+        # M3 / "The detector's blind spots as they now stand" —
+        #
+        #   "Closed — and the reason to expect more rather than fewer: three
+        #    spellings that were never declared at all. `nim check` matched no
+        #    pattern; ... Ten declared test sources spawned a real compiler
+        #    through those three and appeared in neither the detected set nor
+        #    the baseline."
+        #
+        # `nim check` runs the whole front end, so a body that shells out to it
+        # pays the undeclared-input and uncached-rebuild costs this ratchet
+        # exists to refuse. The detector is a STATIC scan and does not evaluate
+        # `if false:`; pruning an unreachable arm is not in its remit, and the
+        # arm here carries `--hints`, which is in nim's own switch vocabulary
+        # rather than the product's (`repro check --mode=...` still must not
+        # match — that arm is pinned in TheRatchetHasNoWalkableBypass).
+        #
+        # The contract this case is NAMED for is the dataflow one, and it is
+        # asserted below for BOTH fragments rather than only the first: each is
+        # attributed to the `compileVerb` binding, and that binding is tracked
+        # through `cmd` into the executor.
+        self.assertEqual(len(matches), 2)
+        self.assertEqual(
+            [match["snippet"] for match in matches],
+            ['"check --hints:off"', f'"{compile_fragment}"'],
+        )
+        for match in matches:
+            with self.subTest(snippet=match["snippet"]):
+                self.assertEqual(match["patterns"], ["nim-compile-verb"])
+                self.assertEqual(match["assignedCommandVariable"], "compileVerb")
+                self.assertTrue(match["commandVariableExecuted"])
+                self.assertEqual(match["executedVariables"], ["cmd"])
         self.assert_runtime_compiler_api_detection_resolves_imports_and_wrappers()
         self.assert_runtime_compiler_api_detection_rejects_non_runtime_text()
 
