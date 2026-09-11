@@ -71,11 +71,12 @@ import ./packaging/reprobuild_dist
 import ./packaging/producers/tarball
 import ./packaging/producers/deb
 import ./packaging/producers/rpm
+import ./packaging/producers/arch
 import ./packaging/producers/msi
 import ./packaging/producers/scoop
 
 export types, runtime_contract, services, producer, reprobuild_dist
-export tarball, deb, rpm, msi
+export tarball, deb, rpm, arch, msi
 # Scoop is exported but NOT registered with ``registerProducer``, and
 # the asymmetry is the producer's shape rather than an oversight: every
 # registered producer has the signature ``(Distribution,

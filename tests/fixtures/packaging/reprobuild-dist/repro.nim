@@ -274,6 +274,12 @@ package `reprobuild-packages`:
     # distribution.
     dist.metadata.debDepends = @["gcc", "libc6-dev"]
     dist.metadata.rpmRequires = @["gcc", "glibc-devel"]
+    # The same fact in pacman's vocabulary. Arch's C toolchain is `gcc`
+    # and its headers are in `glibc` itself rather than in a separate
+    # `-dev` package, so the pair is `gcc` + `glibc` and not a
+    # transliteration of the two above -- which is exactly why the layer
+    # keeps three named lists instead of one abstract one.
+    dist.metadata.archDepends = @["gcc", "glibc"]
 
     # §4: "reprobuild ships /etc/repro/caches.conf (client trust:
     # per-cache trusted-public-keys, priority)". Generated rather than
@@ -323,6 +329,14 @@ package `reprobuild-packages`:
     else:
       discard debPackage(dist, site)
       discard rpmPackage(dist, site)
+      # ARCH, alongside deb and rpm rather than instead of either. It
+      # is the third native Linux format and the first one whose
+      # metadata is an ordinary archive MEMBER rather than a control
+      # area or a spec file, which is what makes it worth having: a
+      # producer that works for it is evidence the staged tree is
+      # format-neutral, and not merely dpkg-and-rpm-neutral.
+      discard archPackage(dist, site)
       discard tarballPackage(dist, site)
       discard debPackage(cacheDist, site)
       discard rpmPackage(cacheDist, site)
+      discard archPackage(cacheDist, site)

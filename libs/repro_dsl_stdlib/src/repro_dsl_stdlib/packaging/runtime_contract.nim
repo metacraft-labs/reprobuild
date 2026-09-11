@@ -369,6 +369,17 @@ proc rpathFor*(dist: Distribution; fromPrefixRelDir: string): string =
 # ---------------------------------------------------------------------------
 
 const
+  PosixPrefixExpr* = "\"$__repro_prefix\""
+    ## How the POSIX wrapper spells "the prefix this package was
+    ## installed under" inside a value. Named once so the emitter and
+    ## ``wrapperExportedValues`` — the reader that checks the emitter —
+    ## cannot drift into two spellings, which is the failure mode that
+    ## made M1's docker gate parse zero lines out of a wrapper it was
+    ## asserting about.
+
+  WindowsPrefixExpr* = "%REPRO_PACKAGE_PREFIX%"
+    ## The ``cmd`` wrapper's spelling of the same thing.
+
   PrefixToken* = "@PREFIX@"
     ## Placeholder a recipe may use inside ``RuntimeContract.envDefaults``
     ## values. It expands, AT RUN TIME inside the wrapper, to the
@@ -440,7 +451,7 @@ proc posixWrapperText*(dist: Distribution; realName: string;
         if rest.len > 0: expr.add(posixSingleQuote(rest))
         break
       if idx > 0: expr.add(posixSingleQuote(rest[0 ..< idx]))
-      expr.add("\"$__repro_prefix\"")
+      expr.add(PosixPrefixExpr)
       rest = rest[idx + PrefixToken.len .. rest.high]
     if expr.len == 0: expr = "''"
     # Written as an explicit test rather than as ``${NAME:=value}``.
@@ -498,12 +509,152 @@ proc windowsWrapperText*(dist: Distribution; realName: string;
       # separators into Windows ones here is the layer honouring the
       # single-definition promise. Values with NO token are left exactly
       # as authored, because nothing says they are paths.
-      value = value.replace(PrefixToken, "%REPRO_PACKAGE_PREFIX%")
+      value = value.replace(PrefixToken, WindowsPrefixExpr)
       value = value.replace("/", "\\")
     result.add("if not defined " & name & " set \"" & name & "=" & value &
       "\"\r\n")
   result.add("\"%~dp0" & realName & "\" %*\r\n")
   result.add("exit /b %ERRORLEVEL%\r\n")
+
+proc unquotePosixConcat(expr: string; ok: var bool): string =
+  ## Turn a ``'a'"$__repro_prefix"'b'`` concatenation back into the
+  ## string the shell would build, with the prefix token standing in
+  ## for the run-time prefix. ``ok`` is set false for anything this
+  ## does not understand, so a caller can refuse rather than guess.
+  const
+    Quote = '\x27'
+    Backslash = '\x5C'
+  ok = true
+  var i = 0
+  while i < expr.len:
+    if expr[i] == Quote:
+      inc i
+      while true:
+        if i >= expr.len:
+          ok = false
+          return
+        if expr[i] == Quote:
+          # ``posixSingleQuote`` writes an embedded quote as the four
+          # characters close-quote, backslash, quote, open-quote. Read
+          # that back rather than treating the first of them as the end
+          # of the literal.
+          if i + 3 < expr.len and expr[i + 1] == Backslash and
+              expr[i + 2] == Quote and expr[i + 3] == Quote:
+            result.add(Quote)
+            i += 4
+            continue
+          inc i
+          break
+        result.add(expr[i])
+        inc i
+    elif expr.continuesWith(PosixPrefixExpr, i):
+      result.add(PrefixToken)
+      i += PosixPrefixExpr.len
+    else:
+      ok = false
+      return
+
+proc wrapperExportedValues*(dist: Distribution; text: string):
+    seq[(string, string)] =
+  ## Read the emitted wrapper BACK: the (name, value) pairs the script
+  ## actually assigns, parsed out of its own text.
+  ##
+  ## This exists so an assertion about "what the wrapper names" can be
+  ## made against the artifact rather than against the list the artifact
+  ## was generated from. Two derivations of one list agree by
+  ## construction and can therefore assert nothing about each other,
+  ## which is exactly how M1's totality case came to measure nothing.
+  ##
+  ## It REFUSES rather than returning a short list: a parser that
+  ## silently matches fewer lines than the wrapper has variables is the
+  ## specific failure that made M1's docker gate print
+  ## ``ALL WRAPPER PATHS EXIST`` over an empty loop. The count it
+  ## recovers must equal ``envDefaults.len`` or this raises.
+  var seen = 0
+  for rawLine in text.splitLines():
+    if dist.targetOs == toWindows:
+      let line = rawLine.strip()
+      if not line.startsWith("if not defined "):
+        continue
+      let cut = line.find(" set \"")
+      if cut < 0:
+        continue
+      var assign = line[cut + " set \"".len .. ^1]
+      if assign.endsWith("\""):
+        assign = assign[0 ..< assign.len - 1]
+      let eq = assign.find('=')
+      if eq <= 0:
+        continue
+      var value = assign[eq + 1 .. ^1]
+      if value.startsWith(WindowsPrefixExpr):
+        value = PrefixToken & value[WindowsPrefixExpr.len .. ^1].replace("\\", "/")
+      result.add((assign[0 ..< eq], value))
+      inc seen
+    else:
+      if not rawLine.startsWith("  ") or rawLine.len < 3:
+        continue
+      let body = rawLine[2 .. ^1]
+      let eq = body.find('=')
+      if eq <= 0:
+        continue
+      let name = body[0 ..< eq]
+      var isName = true
+      for ch in name:
+        if ch notin {'A' .. 'Z', '0' .. '9', '_'}: isName = false
+      if not isName:
+        continue
+      var ok = false
+      let value = unquotePosixConcat(body[eq + 1 .. ^1], ok)
+      if not ok:
+        raise newException(ValueError,
+          "distribution '" & dist.name & "': the wrapper line '" &
+          rawLine.strip() & "' is not in a form the layer can read back")
+      result.add((name, value))
+      inc seen
+  if seen != dist.runtime.envDefaults.len:
+    raise newException(ValueError,
+      "distribution '" & dist.name & "': read " & $seen &
+      " assignments back out of the generated wrapper but it was " &
+      "generated from " & $dist.runtime.envDefaults.len &
+      " env defaults; refusing a check that would pass over the " &
+      "lines it failed to parse")
+
+proc envDefaultPayloadGaps*(dist: Distribution; wrapperText: string;
+                            stagedRootRelPaths: openArray[string];
+                            rootedAtPrefix: bool): seq[string] =
+  ## Every prefix-relative path the EMITTED wrapper names that nothing
+  ## in the STAGED TREE puts there, as human-readable lines.
+  ##
+  ## The two sides are independent on purpose — see
+  ## ``RuntimeContract.requireEnvDefaultPayload``. The staged side is
+  ## the file list ``stageInstallTree`` built by enumerating the build
+  ## tree on disk; the wrapper side is text.
+  ##
+  ## The private libdir is the one exemption, and it is not a hole: on
+  ## Linux the runtime-closure walk fills it at BUILD time from a set
+  ## discovered by reading ``DT_NEEDED``, so there are no per-file
+  ## staged paths to match against — and that walk is itself a checked
+  ## post-condition (``dlopenLeafNames``) that fails the build when a
+  ## name will not resolve into it.
+  let closureFills =
+    dist.targetOs == toLinux and dist.runtime.vendorRuntimeClosure
+  let privateLib = privateLibPrefixRelDir(dist)
+  for (name, value) in wrapperExportedValues(dist, wrapperText):
+    if not value.startsWith(PrefixToken & "/"):
+      continue
+    let rel = value[PrefixToken.len + 1 .. ^1]
+    if closureFills and privateLib.len > 0 and
+        (rel == privateLib or rel.startsWith(privateLib & "/")):
+      continue
+    let want =
+      if rootedAtPrefix: rel else: prefixRelToRoot(dist, rel)
+    var covered = false
+    for staged in stagedRootRelPaths:
+      if staged == want or staged.startsWith(want & "/"):
+        covered = true
+        break
+    if not covered:
+      result.add(name & " -> <prefix>/" & rel)
 
 proc wrapperFileName*(dist: Distribution; publicName: string): string =
   ## What the user-invoked file is called.
@@ -868,11 +1019,17 @@ printf '%s' "$manifest" | LC_ALL=C sort > "$MANIFEST"
 # The runtime-library closure walk.
 # ---------------------------------------------------------------------------
 
-proc shellSingleQuote(value: string): string =
+proc shellSingleQuote*(value: string): string =
   ## Same escaping as ``posixSingleQuote``; kept separate because that
   ## one is part of the WRAPPER's text, which ships, and this one is
   ## part of a BUILD-TIME script, which does not — the two must be free
   ## to diverge.
+  ##
+  ## Exported for producers that generate a build-time script of their
+  ## own (the Arch producer's installed-size measurement). Exporting the
+  ## build-time one rather than the shipping one is the whole point: a
+  ## third hand-written copy of shell quoting is how a package ends up
+  ## with a path it cannot handle.
   result = "'"
   for ch in value:
     if ch == '\'': result.add("'\\''")
@@ -1082,6 +1239,31 @@ proc stageInstallTree*(dist: Distribution; variant: string;
   result = StagedTree(dist: dist, root: treeRoot, genRoot: genRoot,
     idPrefix: stagedIdPrefix(dist, variant))
 
+  # THE GENERATED-INTERMEDIATE DIRECTORY, created by an edge of its own.
+  #
+  # ``patchelf --output <path>`` does not create ``<path>``'s parent: it
+  # answers ``patchelf: open: No such file or directory``, which names
+  # neither the file nor the directory. Until now nothing noticed,
+  # because every tree also had a ``writeText`` into the same genRoot
+  # (the §5 wrapper, or a producer's control file) and ``fs.writeText``
+  # DOES create parents — so the directory existed by the time patchelf
+  # ran, whenever the scheduler happened to run that edge first.
+  #
+  # That is a race, and it was won by luck rather than by ordering. It
+  # lost the moment a distribution with ``wrapExecutables = false``
+  # staged a tree whose only genRoot writer was patchelf itself: the
+  # ``reprobuild-binary-cache`` package's Arch tree, which stopped the
+  # build with that message while its deb and rpm trees — identical in
+  # every other way — passed.
+  let genRootEdge = dslfs.ensureDir(genRoot,
+    actionId = stagedIdPrefix(dist, variant) & "gen-root")
+
+  var emittedWrapperTexts: seq[string] = @[]
+    ## Every wrapper this staging actually WROTE, kept so the
+    ## ``requireEnvDefaultPayload`` post-condition below can be made
+    ## against the emitted text rather than against the list it was
+    ## generated from.
+
   var selectors: seq[string] = @[]
   proc noteSelector(selector: string) =
     ## Record a tool the staging step actually used, so a producer can
@@ -1249,7 +1431,10 @@ proc stageInstallTree*(dist: Distribution; variant: string;
         output = patched,
         file = component.buildPath,
         actionId = idPrefix & "rpath-" & sanitizeIdPart(prefixRel),
-        after = component.producedBy)
+        # ...and the directory the ``--output`` lands in. See
+        # ``genRootEdge``: patchelf will not create it, and the failure
+        # it reports names neither the file nor the directory.
+        after = component.producedBy & @[genRootEdge])
       declareProducerTool(site, edge.id, PatchelfSelector)
       noteSelector(PatchelfSelector)
       payloadSource = patched
@@ -1283,6 +1468,7 @@ proc stageInstallTree*(dist: Distribution; variant: string;
           windowsWrapperText(dist, realName, prefixRelDir)
         else:
           posixWrapperText(dist, realName, prefixRelDir)
+      emittedWrapperTexts.add(text)
       let wrapperPublic =
         (if prefixRelDir.len > 0: prefixRelDir & "/" else: "") &
           wrapperFileName(dist, publicName)
@@ -1372,6 +1558,44 @@ proc stageInstallTree*(dist: Distribution; variant: string;
     # depends on it transitively through the staged control file. Naming
     # it in both places would be true and redundant.
     result.glibcFloorPath = floorPath
+
+  # ---- 4. the env-default payload post-condition -------------------
+  #
+  # See ``RuntimeContract.requireEnvDefaultPayload``. Deliberately the
+  # LAST thing staging does, and deliberately reading ``result.files``:
+  # by this point that list is every path this tree will contain, and
+  # the source-tree entries in it were enumerated from the build tree on
+  # disk rather than derived from anything the wrapper was built from.
+  #
+  # A distribution that turns this on and emits no wrapper at all is a
+  # contradiction rather than a vacuous pass, so it is refused too: the
+  # check is about what the wrapper names, and there being no wrapper
+  # means nothing was checked.
+  if dist.runtime.requireEnvDefaultPayload:
+    if dist.runtime.envDefaults.len > 0 and emittedWrapperTexts.len == 0:
+      raise newException(ValueError,
+        "distribution '" & dist.name & "': requireEnvDefaultPayload is set " &
+        "and " & $dist.runtime.envDefaults.len & " env defaults are " &
+        "declared, but this tree emitted no wrapper to check them against")
+    var stagedRootRelPaths: seq[string] = @[]
+    for f in result.files:
+      stagedRootRelPaths.add(f.rootRelPath)
+    var gaps: seq[string] = @[]
+    for text in emittedWrapperTexts:
+      for gap in envDefaultPayloadGaps(dist, text, stagedRootRelPaths,
+          rootedAtPrefix):
+        if gap notin gaps:
+          gaps.add(gap)
+    if gaps.len > 0:
+      raise newException(ValueError,
+        "distribution '" & dist.name & "' (" & variant & "): the wrapper " &
+        "it emits names " & $gaps.len & " prefix-relative path(s) that " &
+        "nothing in this package installs:" & "\n" & "  " &
+        gaps.join("\n" & "  ") & "\n" &
+        "A package whose wrapper points at nothing installs cleanly, " &
+        "runs --version, and fails on the first thing that opens one of " &
+        "these. Ship the payload, drop the variable, or turn " &
+        "requireEnvDefaultPayload off and say why.")
 
   result.stagingSelectors = selectors
 

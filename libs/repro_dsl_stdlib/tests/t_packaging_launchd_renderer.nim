@@ -16,7 +16,9 @@
 
 import std/[strutils, unittest]
 
+import repro_project_dsl
 import repro_dsl_stdlib/packaging
+import ./packaging_test_support
 
 proc sample(): Distribution =
   result = newDistribution("reprobuild", "0.1.3", toDarwin, prefix = "/usr")
@@ -63,6 +65,60 @@ suite "packaging: the launchd renderer (text only, no Darwin host)":
     check launchdPlistPath(sample(), userSvc()) ==
       "Library/LaunchAgents/reprobuild.repro-daemon.plist"
     check darwinUnsupportedServices(sample()).len == 0
+
+  test "NO PRODUCER CONSUMES THIS RENDERER, and that is the state of it":
+    # THE HONEST STATEMENT, MADE CHECKABLE. Every case in this suite
+    # pins the plist's TEXT; not one of them puts a plist into a
+    # package, because there is no producer that would. macOS's native
+    # format is `.pkg`, `pkgbuild` runs on Darwin only, and there is no
+    # Darwin host here -- so this renderer is DEAD CODE until a `.pkg`
+    # producer exists, and saying so in a comment is a claim that goes
+    # stale silently.
+    #
+    # So it is asserted instead: no registered producer stages a
+    # LaunchDaemons or LaunchAgents path. The day one does, this case
+    # fails and whoever wrote it has to move the statement rather than
+    # discover later that the milestone still says "no consumer".
+    #
+    # It is NOT an argument for deleting the renderer. What it replaced
+    # was worse: a Darwin `Distribution` carrying `services` rendered to
+    # nothing at all -- a package with a daemon in its data model and no
+    # daemon in its payload, which looks like success.
+    resetBuildActionRegistry()
+    var found: seq[string] = @[]
+    for reg in registeredProducers():
+      var dist = sampleDistribution(
+        if reg.format == "msi": toWindows else: toLinux)
+      dist.runtime.requireEnvDefaultPayload = false
+      dist.outputDir = "build/dist"
+      dist.stagingRoot = "build/dist/sampletool-0.2.0"
+      resetBuildActionRegistry()
+      let artifact =
+        try: produce(reg.format, dist, noSite())
+        except CatchableError: continue
+      for f in artifact.tree.files:
+        if f.rootRelPath.contains("LaunchDaemons") or
+            f.rootRelPath.contains("LaunchAgents"):
+          found.add(reg.format & ": " & f.rootRelPath)
+    doAssert found.len == 0,
+      "a producer now stages a launchd plist (" & found.join(", ") &
+      "); this renderer is no longer dead code and the milestone's " &
+      "residual has to move"
+    # Non-vacuity: the loop really did drive producers, and they really
+    # did stage the SERVICE this distribution declares -- in systemd's
+    # spelling, which is the point.
+    resetBuildActionRegistry()
+    let deb = debPackage(sampleDistribution(toLinux))
+    var sawUnit = false
+    for f in deb.tree.files:
+      if f.rootRelPath.endsWith("sampletool-daemon.service"): sawUnit = true
+    check sawUnit
+    check registeredProducers().len >= 4
+    # ...and the renderer itself still produces a plist when called
+    # directly, so "no consumer" is a fact about the callers and not
+    # about the code.
+    let dist = sampleDistribution(toDarwin)
+    check launchdPlistText(dist, dist.services[0]).contains("<plist")
 
   test "the plist path is ROOT-relative, not prefix-relative":
     # launchd reads four fixed absolute directories and nothing else, so

@@ -1629,6 +1629,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_packaging_arch_authoring.nim",
+    binary: "build/test-bin/t_packaging_arch_authoring",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim",
     binary: "build/test-bin/t_packaging_content_addressed",
     defines: @[],

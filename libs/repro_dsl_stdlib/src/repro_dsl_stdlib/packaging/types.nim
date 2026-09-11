@@ -75,11 +75,19 @@ type
       ## mode 0755, and IS subject to the §5 wrapper / RPATH / env-
       ## default contract.
     crHelperExecutable
-      ## An internal helper the package's own binaries spawn (the
-      ## ``repro-cache-daemon`` / provider-helper shape of §3). Goes
+      ## An internal helper the package's own binaries spawn — §3's
+      ## ``reprobuild-nix-daemon`` and the provider helpers. Goes
       ## under ``libexec/<package>``, mode 0755, RPATH-patched but NOT
       ## wrapped — a wrapper on a helper would double-apply the env
       ## defaults its parent already exported.
+      ##
+      ## The example used to name ``repro-cache-daemon``, which no
+      ## build produces any more: ``apps/repro-cache-daemon`` was
+      ## deleted by Action-Cache-Per-Edge-Store along with the shared
+      ## control region it owned. Naming a component that does not
+      ## exist in the doc comment for the role that ships components is
+      ## exactly how the recipe came to package a stale binary under
+      ## that name (M1 :residuals: N2).
     crHelperScript
       ## An internal helper that is NOT an ELF image — a shell script,
       ## a Python entry point, anything the loader never sees.
@@ -310,6 +318,39 @@ type
       ## the right choice for a distribution with no env defaults, and
       ## the reason ``envDefaults`` being empty is not by itself taken
       ## as "no wrapper wanted".
+    requireEnvDefaultPayload*: bool
+      ## Make "every prefix-relative ``envDefaults`` value names
+      ## something this package actually installs" a CHECKED
+      ## POST-CONDITION of ``stageInstallTree``, in the same sense
+      ## ``dlopenLeafNames`` is one.
+      ##
+      ## The failure it closes is M1's, measured twice. The first
+      ## ``reprobuild`` .deb set twenty variables, every one of them
+      ## correct, prefix-relative and free of store paths, and thirteen
+      ## of them named directories the payload did not contain: the
+      ## package installed, answered ``--version``, ran its daemon, and
+      ## could not build anything. The second — ``reprobuild-binary-
+      ## cache`` — carried the SAME twenty and shipped fourteen files,
+      ## so installed alone it had twenty of twenty dangling.
+      ##
+      ## What makes this check different from the derivation that
+      ## produces the reprobuild package's tree components is that the
+      ## two sides are INDEPENDENT. The wrapper side is parsed back out
+      ## of the text ``posixWrapperText`` actually emits; the payload
+      ## side is the staged file list, which is enumerated from the
+      ## build tree ON DISK. A value that gained no payload therefore
+      ## fails here even when the same list produced both — which the
+      ## derivation-versus-derivation form of this assertion could not
+      ## do, and did not do (M1 :residuals:, the totality case that
+      ## measured nothing).
+      ##
+      ## Default FALSE, and that is not a hedge — it is what the field
+      ## is for. ``envDefaults`` may legitimately name a directory the
+      ## package does not create: M0's ``sampletool`` fixture sets
+      ## ``SAMPLETOOL_DATA_DIR`` to a prefix-relative data directory
+      ## that whoever deploys it is expected to fill. A distribution
+      ## whose variables are all "here is a payload I ship" says so by
+      ## turning this on, and then cannot ship one that is not there.
     computeDependencyFloor*: bool
       ## Compute the minimum C-library version the produced package
       ## needs and hand it to each format's native dependency syntax.
@@ -364,6 +405,10 @@ type
       ## dependency ontology — a much larger problem than packaging, and
       ## not one M0 is solving. Two named fields say that honestly; one
       ## abstract field would have hidden it.
+    archDepends*: seq[string]
+      ## The same fact in pacman's vocabulary: ``glibc>=2.38``, no
+      ## spaces, no parentheses. A third named field rather than a third
+      ## reader of one abstract list, for the reason the two above give.
     debControlExtraFields*: seq[(string, string)]
       ## Extra ``DEBIAN/control`` fields, VERBATIM, appended after the
       ## producer's own. For the fields the layer has no opinion about
@@ -482,6 +527,23 @@ const
     ## ``PrefixToken``, and deliberately a DIFFERENT token: ``@PREFIX@``
     ## is expanded by the shipped wrapper at RUN time and must survive
     ## into the package, this one must not survive past the build.
+
+  InstalledSizeToken* = "@INSTALLED_SIZE@"
+    ## Placeholder for the installed size, in bytes, of a staged tree.
+    ##
+    ## ``GlibcFloorToken``'s shape and its reason. ``.PKGINFO``'s
+    ## ``size`` field is what ``pacman -Si`` reports and what pacman
+    ## checks free space against before it unpacks, and it is a
+    ## measurement of files that no edge has produced when the
+    ## ``.PKGINFO`` text is authored -- the vendored runtime closure in
+    ## particular is DISCOVERED at build time. So the text carries this
+    ## token and the edge that walked the finished tree splices the
+    ## number in. Like the floor and the Scoop digest, it must not
+    ## survive into the artifact: a ``size`` field holding a literal
+    ## ``@INSTALLED_SIZE@`` is not a number, and pacman's parser would
+    ## read it as zero rather than refuse it -- which is the quiet
+    ## failure, so the producer asserts the substitution instead of
+    ## trusting it.
 
   ScoopHashToken* = "@SCOOP_SHA256@"
     ## Placeholder for the SHA-256 of the archive a Scoop manifest
@@ -721,6 +783,22 @@ proc rpmArchitecture*(dist: Distribution): string =
   case dist.architecture
   of "amd64": "x86_64"
   of "arm64": "aarch64"
+  else: dist.architecture
+
+proc archArchitecture*(dist: Distribution): string =
+  ## reprobuild's architecture vocabulary → Arch Linux's.
+  ##
+  ## Arch's spelling agrees with rpm's for the two that matter here and
+  ## disagrees for 32-bit ARM (``armv7h``, with the ``h`` for hard-float
+  ## — Arch has no soft-float ARM port and the suffix is part of the
+  ## name rather than a variant of it). Spelled out rather than
+  ## delegated to ``rpmArchitecture`` so the day a third architecture
+  ## disagrees, the disagreement has somewhere to live.
+  case dist.architecture
+  of "amd64", "x86_64": "x86_64"
+  of "arm64", "aarch64": "aarch64"
+  of "armv7l", "armv7h": "armv7h"
+  of "i386", "i686": "i686"
   else: dist.architecture
 
 proc msiArchitecture*(dist: Distribution): string =

@@ -8023,7 +8023,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
                           statsEnabled = false;
                           validateExistingOnly = false;
                           providerCompilerCommand: seq[string] = @[];
-                          cancelCheck: BuildCancelCallback = nil):
+                          cancelCheck: BuildCancelCallback = nil;
+                          observeRunResult: proc(r: BuildRunResult) {.closure.}
+                            = nil):
     ProjectInterfaceArtifact =
   ## Materialize a project interface through the build engine.
   ##
@@ -8179,6 +8181,16 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   try:
     let edgeResult = runBuild(graph([extractAction]), edgeConfig)
     stats.mergeStats(edgeResult.stats)
+    # M1 N11. This edge may run under the RunQuota bypass while the rest
+    # of the build does not (see ``interfaceEdgeRunQuotaBypass``), and
+    # the compensating control for a bypass is the warning that says one
+    # happened. It has to be raised HERE because the edge's result never
+    # leaves this proc: ``extractInterfaceEdge`` returns an artifact, and
+    # review measured zero warning lines in a flagless run precisely
+    # because every ``warnRunQuotaBypassIfUsed`` call site was on a
+    # result this one does not produce.
+    if observeRunResult != nil:
+      observeRunResult(edgeResult)
     if edgeResult.hasFailedActions():
       # The child's captured stdout/stderr carries the recipe's own compiler
       # diagnostics (file, line, message). Surfacing them verbatim is the whole
@@ -8416,31 +8428,43 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # entirely: every action goes through the bypass-spawn path with no lease
   # round-trip. Default is "use runquota when reachable, fall back if not".
   let bypassRunQuota = bypassRunQuotaExplicit
-  # ``tpmUnspecified`` sits with ``path``/``scoop`` rather than with
-  # ``from-source``, and that is the whole of M1's N8 fix.
+  # THE BYPASS IS SCOPED TO THE BOOTSTRAP EDGE, not to the build.
   #
-  # The mode is UNSPECIFIED for every invocation that does not pass
-  # ``--tool-provisioning`` and sets no ``REPRO_TOOL_PROVISIONING``: the
-  # project's own ``defaultToolProvisioning`` is not readable until the
-  # interface has been extracted, and it is re-resolved below (search for
-  # the second assignment to this variable) the moment it is. But
-  # extracting that interface IS a build, and it therefore hit the
-  # runquota gate while the mode was still unspecified — so a plain
-  # ``repro build``, on any machine with no ``runquotad``, died on its
-  # FIRST edge with ``runquota daemon unreachable and bypass is
-  # disabled``, remediating to ``cd ../runquota && just build``. That is
-  # advice a user who installed a PACKAGE cannot follow, and it made the
-  # shipped tool's primary verb depend on an undocumented environment
-  # variable (``REPROBUILD_NO_RUNQUOTA=1``) that every measurement in the
-  # packaging milestone had to set by hand.
+  # The problem M1's N8 found is real and is only about ONE edge. The
+  # mode is UNSPECIFIED for every invocation that passes no
+  # ``--tool-provisioning`` and sets no ``REPRO_TOOL_PROVISIONING``,
+  # because the project's own ``defaultToolProvisioning`` is not
+  # readable until its interface has been extracted — and extracting
+  # that interface IS a build. So a plain ``repro build`` on a machine
+  # with no ``runquotad`` died on its FIRST edge with ``runquota daemon
+  # unreachable and bypass is disabled``, remediating to ``cd
+  # ../runquota && just build``: advice a user who installed a PACKAGE
+  # cannot follow, and a primary verb made to depend on an undocumented
+  # environment variable (``REPROBUILD_NO_RUNQUOTA=1``).
   #
-  # Falling back is right here rather than merely convenient: refusing is
-  # only correct for a mode that DEMANDS a lease coordinator, and the one
-  # such mode is ``from-source``. Nothing is silently lost — the fallback
-  # path logs the same ``WARNING runquotad is not reachable`` line it logs
-  # for ``path``, and the re-resolution below still refuses when the
-  # project turns out to want ``from-source``.
-  var fallbackToRunQuotaBypass = mode in {tpmUnspecified, tpmPathOnly, tpmScoop}
+  # The FIRST fix widened this variable to include ``tpmUnspecified``,
+  # and review was right that it was under-scoped in three ways. (a) The
+  # variable governs EVERY edge of the build, so a project that declares
+  # no ``defaultToolProvisioning`` — for which the narrowing
+  # re-resolution below is guarded on ``defaultToolProvisioning.len >
+  # 0`` and therefore never runs — had its WHOLE GRAPH run unleased,
+  # not just its bootstrap. (b) The justification named ``from-source``
+  # as the one mode that demands a coordinator when ``nix`` and
+  # ``tarball`` refuse too, so "the one such mode" was simply false.
+  # (c) The compensating control it leaned on — the warning — did not
+  # fire at the interface-extraction edge at all.
+  #
+  # So: the variable keeps its old, narrow value, and the bootstrap edge
+  # gets its own. ``interfaceEdgeRunQuotaBypass`` covers exactly the
+  # extraction that has to happen before the mode can be known, and the
+  # warning is wired to THAT edge (see ``warnRunQuotaBypassIfUsed``'s
+  # ``enabled`` parameter and its call after ``extractInterfaceEdge``),
+  # which is where the bypass now actually fires. Every other edge of an
+  # unspecified-mode build is leased exactly as before, whether or not
+  # the project declares a default.
+  var fallbackToRunQuotaBypass = mode in {tpmPathOnly, tpmScoop}
+  let interfaceEdgeRunQuotaBypass =
+    fallbackToRunQuotaBypass or mode == tpmUnspecified
   var warnedRunQuotaBypass = false
 
   template logSummary(line: string) =
@@ -8504,14 +8528,22 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logSummary(environmentInheritanceHeaderLine(
       runResult.environmentInheritance))
 
-  proc warnRunQuotaBypassIfUsed(runResult: BuildRunResult) =
-    if warnedRunQuotaBypass or not fallbackToRunQuotaBypass:
+  proc warnRunQuotaBypassIfUsed(runResult: BuildRunResult;
+                                enabled = true; scope = "") =
+    ## ``enabled`` exists because the bypass is no longer one switch.
+    ## The bootstrap edge may fall back while the rest of the build may
+    ## not, so a caller says which of the two it is reporting on — and
+    ## the interface-extraction call site passes
+    ## ``interfaceEdgeRunQuotaBypass``, which is the one place review
+    ## measured ZERO warning lines for a bypass that was firing.
+    if warnedRunQuotaBypass or not enabled:
       return
     if not usesRunQuotaBypass(runResult):
       return
     warnedRunQuotaBypass = true
     logSummary("repro build: WARNING runquotad is not reachable; using " &
-      "RunQuota bypass for tool-provisioning=" & mode.modeName &
+      "RunQuota bypass for " &
+      (if scope.len > 0: scope else: "tool-provisioning=" & mode.modeName) &
       " (no quotas/leases enforced). Start `runquotad` and rerun to " &
       "use the real lease coordinator.")
 
@@ -8722,7 +8754,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     for item in buildResult.results:
       if item.launched:
         inc benchmarkExecutedActions
-    warnRunQuotaBypassIfUsed(buildResult)
+    warnRunQuotaBypassIfUsed(buildResult,
+      enabled = fallbackToRunQuotaBypass)
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
@@ -8845,7 +8878,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       buildStats.mergeStats(cmakeRegenerationResult.stats)
     finishStat(buildStats, statsEnabled, "repro cmake regeneration",
       cmakeRegenerationStart)
-    warnRunQuotaBypassIfUsed(cmakeRegenerationResult)
+    warnRunQuotaBypassIfUsed(cmakeRegenerationResult,
+      enabled = fallbackToRunQuotaBypass)
     for item in cmakeRegenerationResult.results:
       logAction("cmakeRegenerationAction: " & item.id & " status=" &
         $item.status & " launched=" & $item.launched & " cache=" &
@@ -8998,12 +9032,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     outDir / "build-engine-cache", buildStats,
     requireStub = false,
     bypassRunQuota = bypassRunQuota,
-    fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
+    # THE ONE EDGE the unspecified-mode fallback covers. Every other
+    # edge below reads ``fallbackToRunQuotaBypass``, which is unchanged
+    # by the mode being unknown.
+    fallbackToRunQuotaBypass = interfaceEdgeRunQuotaBypass,
     forceRebuild = forceRebuild,
     suppressTrace = mcTrace notin measureSet,
     skipCacheHitEvidence = mcCacheEvidence notin measureSet,
     statsEnabled = statsEnabled,
-    cancelCheck = cancelCheck)
+    cancelCheck = cancelCheck,
+    observeRunResult = proc(r: BuildRunResult) =
+      warnRunQuotaBypassIfUsed(r, enabled = interfaceEdgeRunQuotaBypass,
+        scope = "the project-interface extraction edge"))
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
@@ -9013,6 +9053,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       artifact.projectInterface.defaultToolProvisioning.len > 0:
     effectiveMode = parseToolProvisioning(
       artifact.projectInterface.defaultToolProvisioning)
+    # M1 N11: this assignment is a NARROWING for ``path``/``scoop`` and
+    # a no-op otherwise, because ``fallbackToRunQuotaBypass`` no longer
+    # starts true for an unspecified mode. That matters for the case
+    # review found: a project declaring NO ``defaultToolProvisioning``
+    # never reaches this branch at all, and used to have its whole graph
+    # run unleased as a result. It now runs leased, like every other
+    # project, and only the bootstrap edge above was ever exempt.
     fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
 
   var buildArtifact = artifact
@@ -9740,7 +9787,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       providerCompileResult = runBuild(graph([providerCompileAction]),
         providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
-      warnRunQuotaBypassIfUsed(providerCompileResult)
+      warnRunQuotaBypassIfUsed(providerCompileResult,
+        enabled = fallbackToRunQuotaBypass)
       noteProviderCompileConsultation(providerCompileResult)
       for item in providerCompileResult.results:
         # `status`/`launched`/`cache` describe THIS consultation only.
@@ -10145,7 +10193,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     for item in buildResult.results:
       if item.launched:
         inc benchmarkExecutedActions
-    warnRunQuotaBypassIfUsed(buildResult)
+    warnRunQuotaBypassIfUsed(buildResult,
+      enabled = fallbackToRunQuotaBypass)
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats

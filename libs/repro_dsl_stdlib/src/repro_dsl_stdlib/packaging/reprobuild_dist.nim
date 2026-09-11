@@ -256,7 +256,7 @@ const
     ## §3: the network cache server's default listen port, and the one
     ## M1's gate curls for ``/healthz``.
 
-proc reprobuildWrapperValues*(dist: Distribution): seq[(string, string)] =
+proc reprobuildToolWrapperValues*(dist: Distribution): seq[(string, string)] =
   ## The ``ReprobuildWrapperVariables``, with values, in the
   ## flake's declaration order.
   ##
@@ -308,6 +308,65 @@ proc reprobuildWrapperValues*(dist: Distribution): seq[(string, string)] =
      p & "/libexec/" & dist.name & "/" & ReprobuildNimToolchainSubdir &
        "/bin/nim" & (if dist.targetOs == toWindows: ".exe" else: ""))
   ]
+
+proc reprobuildCacheWrapperValues*(dist: Distribution):
+    seq[(string, string)] =
+  ## What ``reprobuild-binary-cache``'s wrapper sets: NOTHING, and the
+  ## empty list is a measurement rather than a shrug.
+  ##
+  ## M1 gave this package the CLI's twenty-one variables, because
+  ## ``reprobuildWrapperValues`` was keyed on the product and not on the
+  ## role. Installed alone on a stock ``debian:trixie-slim`` — which is
+  ## a SUPPORTED installation, its ``Depends:`` being ``libc6`` and
+  ## nothing else — twenty of the twenty prefix-relative values named a
+  ## path that was not there, because the package is a dozen-odd files
+  ## and a cache server compiles nothing. Installed BESIDE the CLI,
+  ## eighteen resolved into the SIBLING's prefix (``/usr/lib/repro``,
+  ## ``/usr/share/repro``) — a package free-riding on one it does not
+  ## depend on — and ``REPROBUILD_NIX_DAEMON_BIN`` and
+  ## ``REPRO_NIM_COMPILER`` dangled even then, being rooted at
+  ## ``<prefix>/libexec/reprobuild-binary-cache/``, which nothing
+  ## creates.
+  ##
+  ## Three fixes were available: ship the payload, declare a dependency
+  ## on ``reprobuild``, or drop the variables. The third is right, and
+  ## the reason is a measurement of the BINARY rather than a judgement
+  ## about cache servers in general. Not one of the twenty-one names
+  ## occurs as a string in ``repro-binary-cache`` — checked against the
+  ## staged payload, where ``repro`` carries thirteen of them and the
+  ## server carries none. Its whole runtime environment surface is
+  ## ``REPRO_BINARY_CACHE_ROOT``, ``..._ALLOWED_SIGNERS``,
+  ## ``..._PIN_LIST``, ``..._SOFT_CAP_BYTES``, ``..._HARD_CAP_BYTES``,
+  ## ``..._TLS_CERT``, ``..._TLS_KEY`` and OpenSSL's ``SSL_CERT_FILE`` /
+  ## ``SSL_CERT_DIR`` — every one of them an operator's choice, not a
+  ## path into its own prefix, and none of them something a package may
+  ## default on the operator's behalf. Shipping 38 MB of Nim sources and
+  ## a compiler to a machine that will never compile, or making the
+  ## cache server undeployable without the build tool, would both be
+  ## paying for a variable nothing reads.
+  ##
+  ## What the package still gets is the rest of the §5 contract, which
+  ## is the part it does need: its own private libdir, its own vendored
+  ## runtime closure, its own rewritten ``PT_INTERP`` and RPATH. Those
+  ## are what make it independently runnable; the wrapper never was.
+  discard dist
+  @[]
+
+proc reprobuildWrapperValues*(dist: Distribution): seq[(string, string)] =
+  ## The wrapper values for ``dist``, keyed on the ROLE it plays.
+  ##
+  ## Keyed on the role and not merely on the product, because M1 shipped
+  ## two packages out of one list and the second one's every path was a
+  ## lie — see ``reprobuildCacheWrapperValues``. The CLI's list is still
+  ## the one ``ReprobuildWrapperVariables`` mirrors and the one the
+  ## flake drift guard compares against, so making this a dispatcher
+  ## does not turn that one-list property into a two-list property: the
+  ## cache's answer is the empty list, and an empty list has no names to
+  ## drift.
+  if dist.name == ReprobuildCachePackageName:
+    reprobuildCacheWrapperValues(dist)
+  else:
+    reprobuildToolWrapperValues(dist)
 
 proc reprobuildNimToolchainPrefixRel*(dist: Distribution): string =
   ## Prefix-relative root of the bundled Nim toolchain.
@@ -376,12 +435,15 @@ proc reprobuildShippedTreeDirs*(dist: Distribution): seq[string] =
   ## * ``REPROBUILD_NIX_DAEMON_BIN`` is a FILE, and a component already.
   let p = PrefixToken
   var dirs: seq[string] = @[]
+  var bundlesNim = false
   for pair in reprobuildWrapperValues(dist):
     let name = pair[0]
     let value = pair[1]
     if not value.startsWith(p & "/"):
       continue
     let rel = value[p.len + 1 .. ^1]
+    if name == "REPRO_NIM_COMPILER":
+      bundlesNim = true
     let noted =
       if name.endsWith("_PREFIX"): ReprobuildPrivateIncludeSubdir
       elif name == "REPROBUILD_NIX_DAEMON_BIN": ""
@@ -395,11 +457,17 @@ proc reprobuildShippedTreeDirs*(dist: Distribution): seq[string] =
   # variable names these, but a compiler without its standard library
   # is as dangling as a variable pointing at nothing: ``nim c`` on a
   # toolchain missing ``lib/`` fails on the first ``import``.
-  let nimRoot = reprobuildNimToolchainPrefixRel(dist)
-  for leaf in ReprobuildNimToolchainTrees:
-    let rel = nimRoot & "/" & leaf
-    if rel notin dirs:
-      dirs.add(rel)
+  #
+  # Conditional on that variable being in THIS distribution's value
+  # list, because the list is now keyed on the role: the cache package
+  # bundles no compiler, and adding a Nim stdlib to it would be adding
+  # payload for a variable it does not set.
+  if bundlesNim:
+    let nimRoot = reprobuildNimToolchainPrefixRel(dist)
+    for leaf in ReprobuildNimToolchainTrees:
+      let rel = nimRoot & "/" & leaf
+      if rel notin dirs:
+        dirs.add(rel)
   result = dirs
 
 proc reprobuildShippedTreeComponents*(dist: Distribution;
@@ -532,6 +600,12 @@ proc newReprobuildDistribution*(version: string; targetOs: TargetOs;
     layout = (if targetOs == toWindows: plWindowsTree else: plUnix),
     stagingRoot = stagingRoot, outputDir = outputDir)
   result.runtime.envDefaults = reprobuildWrapperValues(result)
+  # Every one of those values is "here is a payload I ship", so the
+  # layer is told to CHECK that -- see
+  # ``RuntimeContract.requireEnvDefaultPayload``. This is the assertion
+  # M1's first package needed and did not have: it shipped thirteen
+  # paths to nowhere and the build was green.
+  result.runtime.requireEnvDefaultPayload = true
   result.runtime.privateLibSubdir = ReprobuildPrivateLibSubdir
   # THE POINT OF THE FIELD, finally used for real. ``DT_NEEDED`` cannot
   # see a dlopen, so the walk cannot DISCOVER these two -- and unlike
@@ -589,9 +663,22 @@ proc newReprobuildCacheDistribution*(version: string; targetOs: TargetOs;
     layout = (if targetOs == toWindows: plWindowsTree else: plUnix),
     stagingRoot = stagingRoot, outputDir = outputDir)
   result.runtime.envDefaults = reprobuildWrapperValues(result)
+  result.runtime.requireEnvDefaultPayload = true
   result.runtime.privateLibSubdir = "lib/repro-binary-cache"
   result.runtime.dlopenLeafNames = reprobuildDlopenLeafNames(targetOs)
-  result.runtime.wrapExecutables = true
+  # NO WRAPPER, which follows from the value list above being empty
+  # rather than being a second decision: ``wrapExecutables``' own
+  # contract says false is "the right choice for a distribution with no
+  # env defaults". A wrapper here would be a shell script that resolves
+  # a prefix, sets nothing, and execs -- an indirection whose only
+  # observable effect is an extra file and a ``.repro-binary-cache``
+  # payload name in ``dpkg -L``.
+  #
+  # What the server DOES need from the §5 contract it still gets, and
+  # gets independently of the CLI: its own private libdir, its own
+  # vendored closure, its own rewritten ELF interpreter and RPATH. A
+  # machine may install this package and no other.
+  result.runtime.wrapExecutables = false
   result.services = @[reprobuildCacheService(targetOs)]
   result.metadata = DistMetadata(
     summary: "Reprobuild network binary-cache server",

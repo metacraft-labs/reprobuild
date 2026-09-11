@@ -68,8 +68,9 @@ import ./runtime_contract
 proc systemdUnitFileName*(svc: ServiceDef): string =
   svc.name & ".service"
 
-proc systemdUnitPath*(dist: Distribution; svc: ServiceDef): string =
-  ## Root-relative path of the unit inside a deb/rpm payload.
+proc systemdUnitPath*(dist: Distribution; svc: ServiceDef;
+                      underUsr = false): string =
+  ## Root-relative path of the unit inside a deb/rpm/Arch payload.
   ##
   ## ``lib/systemd/{system,user}`` and not ``etc/systemd/…``: ``/etc``
   ## is the administrator's, and a unit a package ships there cannot be
@@ -79,10 +80,27 @@ proc systemdUnitPath*(dist: Distribution; svc: ServiceDef): string =
   ## unit is. Note this is ROOT-relative, not prefix-relative: systemd
   ## looks in fixed absolute locations, so a package installed under
   ## ``/opt`` still ships its unit here.
+  ##
+  ## ``underUsr`` SPELLS THE SAME LOCATION THE OTHER WAY, and it exists
+  ## because one distribution's package manager refuses the first
+  ## spelling outright. On Arch, ``/lib`` is a SYMLINK to ``usr/lib``
+  ## owned by the ``filesystem`` package, and an archive containing a
+  ## ``lib/`` DIRECTORY makes pacman stop the transaction with
+  ## ``/lib exists in filesystem (owned by filesystem)`` -- measured,
+  ## by installing this layer's first Arch package.
+  ##
+  ## Debian and Fedora are merged-usr too and accept either spelling
+  ## because their own base packages own the symlink in a way dpkg and
+  ## rpm tolerate; Arch does not, and "which of two identical paths a
+  ## package may name" is a fact about the package manager rather than
+  ## about systemd. So the producer that knows its package manager
+  ## passes the flag, and the default stays what deb and rpm have
+  ## shipped all along.
   discard dist
+  let root = if underUsr: "usr/lib/systemd/" else: "lib/systemd/"
   case svc.scope
-  of ssSystem: "lib/systemd/system/" & systemdUnitFileName(svc)
-  of ssUser: "lib/systemd/user/" & systemdUnitFileName(svc)
+  of ssSystem: root & "system/" & systemdUnitFileName(svc)
+  of ssUser: root & "user/" & systemdUnitFileName(svc)
 
 proc installedExecPath*(dist: Distribution; svc: ServiceDef): string =
   ## Absolute path the service's executable will have once installed.

@@ -20,10 +20,11 @@
 ## directory the package ships, a directory the closure walk fills, or a
 ## file a component installs. Nothing else is allowed to be true.
 
-import std/[strutils, unittest]
+import std/[os, strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/packaging
+import ./packaging_test_support
 
 proc reprobuildSample(targetOs = toLinux): Distribution =
   let sfx = (if targetOs == toWindows: ".exe" else: "")
@@ -44,77 +45,299 @@ proc reprobuildSample(targetOs = toLinux): Distribution =
   result.components.add(component(crHelperExecutable,
     "prebuilt/tree/" & reprobuildNimToolchainPrefixRel(result) & "/bin/nim",
     subdir = ReprobuildNimToolchainSubdir & "/bin"))
+  # ``REPROBUILD_NIX_DAEMON_BIN``'s target. The sample used to omit it
+  # and the old totality case exempted it by NAME -- which is exactly
+  # the shape of hole that made that case unable to fail. The staged
+  # guard has no such exemption: a file-valued variable is checked
+  # against the staged file list like every other value, so the sample
+  # has to carry the file the real recipe carries.
+  if targetOs != toWindows:
+    result.components.add(component(crHelperScript,
+      "prebuilt/bin/reprobuild-nix-daemon"))
   result.components.add(
     reprobuildShippedTreeComponents(result, "prebuilt/tree"))
 
+proc payloadRoot(name: string): string =
+  ## A real directory tree on disk, because that is what makes the
+  ## totality assertion below mean something: ``stageInstallTree``
+  ## ENUMERATES a ``crSourceTree`` component's files from the
+  ## filesystem, so the payload side of the comparison is not derived
+  ## from the value list the wrapper side comes from.
+  result = "build/test-tmp/" & name
+  removeDir(result)
+  createDir(result)
+
+proc fillPayload(dist: Distribution; root: string;
+                 skip: openArray[string] = []) =
+  ## Put one file into every directory this distribution's wrapper says
+  ## it ships, EXCEPT the ones named in ``skip``. Skipping is how a case
+  ## proves the guard can fail.
+  for rel in reprobuildShippedTreeDirs(dist):
+    if rel in skip: continue
+    createDir(root & "/" & rel)
+    writeFile(root & "/" & rel & "/payload.nim", "discard" & "\n")
+
+proc stagedRootRelPaths(tree: StagedTree): seq[string] =
+  for f in tree.files:
+    result.add(f.rootRelPath)
+
+proc wrapperTextOf(dist: Distribution): string =
+  posixWrapperText(dist, realFileName(dist, "repro"), "bin")
+
+proc withTreesFrom(dist: var Distribution; root: string;
+                   omit = ""): seq[DistComponent] =
+  ## Re-point the sample's source-tree components at ``root``, dropping
+  ## the one whose install path ends in ``omit``. Returns the full set
+  ## for the caller to inspect.
+  result = reprobuildShippedTreeComponents(dist, root)
+  var kept: seq[DistComponent] = @[]
+  for c in dist.components:
+    if c.role != crSourceTree: kept.add(c)
+  for c in result:
+    if omit.len == 0 or not installRelPath(dist, c).endsWith(omit):
+      kept.add(c)
+  dist.components = kept
+
 suite "packaging: the payload behind the wrapper variables":
 
-  test "every prefix-relative value is accounted for by a component":
-    # THE TOTALITY CASE, and the one that would have caught M1's gap on
-    # the build host. It walks the value list rather than a hand-written
-    # list of expectations, so a variable added later is covered without
-    # anyone remembering to cover it.
+  test "the wrapper can be read back, and the reader is not vacuous":
+    # THE PRECONDITION FOR EVERY CASE BELOW. M1's docker gate asserted
+    # "ALL WRAPPER PATHS EXIST" over a loop whose parser matched ZERO
+    # lines, so the interesting property here is not that the parser
+    # works -- it is that a parser which stopped working could not
+    # quietly report success.
     let dist = reprobuildSample()
-    var trees: seq[string] = @[]
-    for c in dist.components:
-      if c.role == crSourceTree:
-        trees.add(installRelPath(dist, c))
-    var files: seq[string] = @[]
-    for c in dist.components:
-      if c.role != crSourceTree:
-        files.add(installRelPath(dist, c))
-    for pair in reprobuildWrapperValues(dist):
-      let value = pair[1]
-      if not value.startsWith(PrefixToken & "/"):
-        # The one literal, ``REPROBUILD_USE_SYSTEM_HASH_LIBS=1``.
-        doAssert value == "1",
-          "unexpected non-prefix wrapper value " & pair[0] & "=" & value
+    let text = wrapperTextOf(dist)
+    let readBack = wrapperExportedValues(dist, text)
+    check readBack.len == dist.runtime.envDefaults.len
+    check readBack.len > 0
+    check readBack == dist.runtime.envDefaults
+    # ...and a wrapper whose lines it cannot read RAISES rather than
+    # returning the ones it could.
+    var truncated = ""
+    var dropped = false
+    for line in text.splitLines():
+      if not dropped and line.startsWith("  REPROBUILD_SOURCE_ROOT="):
+        dropped = true
         continue
-      let rel = value[PrefixToken.len + 1 .. ^1]
-      var covered = false
-      # A directory this package ships, or a directory INSIDE one (the
-      # ``*_SRC`` values that name a tree's ``src`` subdirectory).
-      for t in trees:
-        if rel == t or rel.startsWith(t & "/") or t.startsWith(rel & "/"):
-          covered = true
-      # The private libdir, which the runtime-closure walk fills rather
-      # than any component naming.
-      if rel == ReprobuildPrivateLibSubdir or
-          rel == ReprobuildPrivatePrefixSubdir:
-        covered = true
-      # A FILE some component installs (``REPROBUILD_NIX_DAEMON_BIN``
-      # is the only one, and only on POSIX).
-      for f in files:
-        if rel == f:
-          covered = true
-      if pair[0] == "REPROBUILD_NIX_DAEMON_BIN":
-        # The Linux sample above does not carry the nix-daemon helper,
-        # so assert its SHAPE rather than pretending it is staged here.
-        doAssert rel.startsWith("libexec/"), rel
-        covered = true
-      doAssert covered,
-        "wrapper variable " & pair[0] & " names '" & rel &
-        "' and no component of this distribution puts anything there"
+      truncated.add(line & "\n")
+    check dropped
+    var raised = false
+    try:
+      discard wrapperExportedValues(dist, truncated)
+    except ValueError as err:
+      raised = true
+      check err.msg.contains("refusing a check")
+    check raised
 
-  test "the shipped directory list is sixteen and is where the values say":
-    # Twelve ``*_SRC``, plus ``REPROBUILD_SOURCE_ROOT``, plus the private
-    # prefix's ``include``, plus the bundled compiler's ``lib`` and
-    # ``config``. The ``*_SRC`` count is asserted because the ORIGINAL
-    # residual said eleven: ``RUNQUOTA_SRC`` sits below two unrelated
-    # entries in the flake's wrapProgram loop and was missed by a human
-    # reading it, which is precisely why this list is derived now.
+  test "every prefix-relative value is backed by a STAGED file":
+    # THE TOTALITY CASE, rewritten. The version this replaces compared
+    # ``reprobuildWrapperValues`` against a component list DERIVED from
+    # ``reprobuildWrapperValues``, so the two sides agreed by
+    # construction: injecting a twenty-second ``*_SRC`` variable PASSED
+    # it, and only a hand-maintained ``dirs.len == 16`` noticed, at 17.
+    #
+    # Both sides are now independent. The wrapper side is parsed out of
+    # the text ``posixWrapperText`` emits; the payload side is
+    # ``StagedTree.files``, which staging built by walking the build
+    # tree ON DISK. A value with no payload has nothing to match.
+    resetBuildActionRegistry()
+    let root = payloadRoot("shipped-payload-full")
+    var dist = reprobuildSample()
+    dist.stagingRoot = "build/test-tmp/shipped-payload-full-stage"
+    discard withTreesFrom(dist, root)
+    fillPayload(dist, root)
+    let tree = stageInstallTree(dist, "deb")
+    let gaps = envDefaultPayloadGaps(dist, wrapperTextOf(dist),
+      stagedRootRelPaths(tree), rootedAtPrefix = false)
+    check gaps.len == 0
+    # Non-vacuity: the staged tree really does carry the source trees,
+    # and the check really did resolve prefix-relative values.
+    check tree.files.len > reprobuildShippedTreeDirs(dist).len
+    var prefixRelValues = 0
+    for pair in wrapperExportedValues(dist, wrapperTextOf(dist)):
+      if pair[1].startsWith(PrefixToken & "/"): inc prefixRelValues
+    check prefixRelValues == 20
+
+  test "a wrapper path with no staged tree FAILS the guard":
+    # THE PROOF THAT THE CASE ABOVE CAN FAIL, which is the whole reason
+    # it was rewritten. One tree is left unstaged and the SAME
+    # comparison must name the variable that pointed at it.
+    resetBuildActionRegistry()
+    let root = payloadRoot("shipped-payload-gap")
+    var dist = reprobuildSample()
+    dist.stagingRoot = "build/test-tmp/shipped-payload-gap-stage"
+    # The post-condition is switched OFF here so the gap can be
+    # INSPECTED rather than merely thrown; the case after this one is
+    # the one that asserts the build stops.
+    dist.runtime.requireEnvDefaultPayload = false
+    let orphan = "share/repro/src/io-mon/src"
+    check orphan in reprobuildShippedTreeDirs(dist)
+    discard withTreesFrom(dist, root, omit = orphan)
+    fillPayload(dist, root, skip = [orphan])
+    let tree = stageInstallTree(dist, "deb")
+    let gaps = envDefaultPayloadGaps(dist, wrapperTextOf(dist),
+      stagedRootRelPaths(tree), rootedAtPrefix = false)
+    check gaps.len == 1
+    check gaps[0].contains("IO_MON_SRC")
+    check gaps[0].contains(orphan)
+
+  test "requireEnvDefaultPayload makes that gap a BUILD failure":
+    # The same gap through the path a recipe actually takes. The guard
+    # is a checked post-condition of staging, in the sense
+    # ``dlopenLeafNames`` already was: the build stops, naming the
+    # variable, instead of producing a package that installs.
+    resetBuildActionRegistry()
+    let root = payloadRoot("shipped-payload-refuse")
+    var dist = reprobuildSample()
+    check dist.runtime.requireEnvDefaultPayload
+    dist.stagingRoot = "build/test-tmp/shipped-payload-refuse-stage"
+    let orphan = "share/repro/source"
+    discard withTreesFrom(dist, root, omit = orphan)
+    fillPayload(dist, root, skip = [orphan])
+    var raised = false
+    try:
+      discard stageInstallTree(dist, "deb")
+    except ValueError as err:
+      raised = true
+      check err.msg.contains("REPROBUILD_SOURCE_ROOT")
+      check err.msg.contains("nothing in this package installs")
+    check raised
+
+  test "the shipped directory list is exactly what the wrapper asks for":
+    # REPLACES ``check dirs.len == 16``. A hand-maintained count is the
+    # thing that goes stale -- and it was the ONLY part of the old suite
+    # that noticed an injected variable, which is an accident rather
+    # than a guard. The identity below is derived on both sides and
+    # cannot go stale: every prefix-relative value is either one of
+    # these directories, inside one, or one of the three shapes that is
+    # deliberately not a shipped tree.
     let dist = reprobuildSample()
     let dirs = reprobuildShippedTreeDirs(dist)
-    check dirs.len == 16
+    var treeBacked = 0
+    var notTrees: seq[string] = @[]
+    for pair in wrapperExportedValues(dist, wrapperTextOf(dist)):
+      if not pair[1].startsWith(PrefixToken & "/"):
+        check pair[1] == "1"
+        continue
+      let rel = pair[1][PrefixToken.len + 1 .. ^1]
+      var inside = false
+      for d in dirs:
+        if rel == d or rel.startsWith(d & "/") or d.startsWith(rel & "/"):
+          inside = true
+      if inside: inc treeBacked else: notTrees.add(pair[0])
+    # The three shapes that are deliberately NOT source trees, NAMED
+    # rather than counted, so a fourth one has to be argued for.
+    check notTrees == @["REPROBUILD_RUNTIME_LIBRARY_PATH",
+                        "REPROBUILD_NIX_DAEMON_BIN", "REPRO_NIM_COMPILER"]
+    # Every remaining directory is either backed by a variable or is one
+    # of the bundled compiler's two, which no variable names and which
+    # dangle in exactly the way a missing tree does (``nim c`` on a
+    # toolchain with no ``lib/`` fails on the first ``import``).
+    var literals = 0
+    for pair in wrapperExportedValues(dist, wrapperTextOf(dist)):
+      if not pair[1].startsWith(PrefixToken & "/"): inc literals
+    check treeBacked + notTrees.len + literals ==
+      dist.runtime.envDefaults.len
+    # THE OTHER DIRECTION, which is what a count was standing in for:
+    # no directory is shipped that nothing asks for. Every entry is
+    # either named by an exported value or is one of the bundled
+    # compiler's two -- which no variable names and which dangle in
+    # exactly the way a missing tree does (``nim c`` on a toolchain
+    # with no ``lib/`` fails on the first ``import``).
+    var nimTrees: seq[string] = @[]
+    for leaf in ReprobuildNimToolchainTrees:
+      nimTrees.add(reprobuildNimToolchainPrefixRel(dist) & "/" & leaf)
+      check nimTrees[^1] in dirs
+    var seenDirs: seq[string] = @[]
+    for d in dirs:
+      check d notin seenDirs
+      seenDirs.add(d)
+      if d in nimTrees: continue
+      var asked = false
+      for pair in wrapperExportedValues(dist, wrapperTextOf(dist)):
+        if not pair[1].startsWith(PrefixToken & "/"): continue
+        let rel = pair[1][PrefixToken.len + 1 .. ^1]
+        if rel == d or rel.startsWith(d & "/") or d.startsWith(rel & "/"):
+          asked = true
+      doAssert asked,
+        "the package ships '" & d & "' and no wrapper variable names it"
     check ReprobuildPrivateIncludeSubdir in dirs
     check ReprobuildSourceRootSubdir in dirs
-    var srcTrees = 0
-    for d in dirs:
-      if d.startsWith(ReprobuildSourceSubdir & "/"):
-        inc srcTrees
-    check srcTrees == 12
-    for leaf in ReprobuildNimToolchainTrees:
-      check reprobuildNimToolchainPrefixRel(dist) & "/" & leaf in dirs
+
+  test "the bundled compiler's PCRE dlopen name is pinned, per target":
+    # ``reprobuildNimDlopenLeafNames`` was pinned by NO test. It is the
+    # value that closed M1's fifth wall: the vendored Nim binds PCRE
+    # with ``{.dynlib: "libpcre.so(.3|.1|)".}`` and resolves it at
+    # MODULE-INIT time, so a shipped compiler whose private libdir has
+    # no PCRE does not fail on some regex-using compile -- it fails on
+    # ``nim --version``, before ``main``, with ``could not load``.
+    #
+    # A dlopen leaves no DT_NEEDED, so the closure walk cannot discover
+    # this: declaring the leaf name IS the fix, and an unpinned value
+    # that silently emptied would put the failure back on the target.
+    check reprobuildNimDlopenLeafNames(toLinux) == @["libpcre.so.1"]
+    check reprobuildNimDlopenLeafNames(toDarwin) == @["libpcre.1.dylib"]
+    # WINDOWS IS EMPTY AND THAT IS NOT AN OMISSION. No Windows Nim
+    # toolchain is staged yet, and ``dlopenLeafNames`` is a CHECKED
+    # post-condition -- naming a ``pcre*.dll`` for a compiler this
+    # package does not ship would fail the walk rather than document a
+    # gap.
+    check reprobuildNimDlopenLeafNames(toWindows).len == 0
+    # Loader names, not package names: same shape rule the reprobuild
+    # list is held to.
+    for targetOs in [toLinux, toDarwin]:
+      for leaf in reprobuildNimDlopenLeafNames(targetOs):
+        check leaf.contains(".")
+        check not leaf.contains("/")
+    # SEPARATE from reprobuild's own dlopen list, and the separation is
+    # the point rather than tidiness: that list is drift-guarded against
+    # the two modules that state reprobuild's dlopen strings, and PCRE
+    # is a property of a third-party toolchain this package happens to
+    # vendor. A package that stopped bundling the compiler would stop
+    # needing it, so the two must move independently -- and appending
+    # one to the other must not produce a duplicate.
+    for targetOs in [toLinux, toDarwin, toWindows]:
+      let own = reprobuildDlopenLeafNames(targetOs)
+      let nim = reprobuildNimDlopenLeafNames(targetOs)
+      for leaf in nim:
+        check leaf notin own
+      check (own & nim).len == own.len + nim.len
+
+  test "the pinned PCRE name is one the bundled compiler asks for":
+    # THE ANCHOR, when there is a payload to anchor against. The value
+    # above is a literal, and a literal is exactly what goes stale, so
+    # it is read back out of the staged compiler: Nim's dynlib pattern
+    # ``libpcre.so(.3|.1|)`` expands to three candidates and the
+    # declared name must be one of them.
+    #
+    # The payload is gitignored and staged per host, so this case is
+    # CONDITIONAL -- and it says which branch it took rather than
+    # passing silently, because a case that quietly checks nothing is
+    # the defect this whole suite was rewritten over.
+    let nimBin = repoRootFromTest() &
+      "/tests/fixtures/packaging/reprobuild-dist/prebuilt/tree/" &
+      "libexec/reprobuild/nim/bin/nim"
+    if not fileExists(nimBin):
+      echo "    (no staged Nim toolchain at ", nimBin,
+        "; the pattern anchor did not run)"
+      check not fileExists(nimBin)
+    else:
+      let image = readFile(nimBin)
+      const Pattern = "libpcre.so(.3|.1|)"
+      check image.contains(Pattern)
+      var candidates: seq[string] = @[]
+      for alt in ".3|.1|".split('|'):
+        candidates.add("libpcre.so" & alt)
+      check candidates == @["libpcre.so.3", "libpcre.so.1", "libpcre.so"]
+      for leaf in reprobuildNimDlopenLeafNames(toLinux):
+        doAssert leaf in candidates,
+          "the layer declares the bundled compiler dlopens '" & leaf &
+          "', but its dynlib pattern expands to " & $candidates
+        # ...and the one it names is the SONAME nixpkgs' pcre provides,
+        # which is why the second candidate rather than the first is
+        # the one that resolves.
+        check leaf == "libpcre.so.1"
 
   test "the bundled compiler is a PATCHED helper, not part of a tree":
     # The distinction is 9 MB of file that either runs on the target or

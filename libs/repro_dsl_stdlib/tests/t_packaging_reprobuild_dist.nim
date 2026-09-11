@@ -174,18 +174,72 @@ suite "packaging: reprobuild's own distribution":
       check trimmed.startsWith("#")
 
   test "the source root is keyed on the PRODUCT, not on the package":
-    # The same source tree serves both packages. A value keyed on
-    # ``dist.name`` would give reprobuild-binary-cache a source root
-    # nothing installs.
+    # The same source tree serves the packages that HAVE one. A value
+    # keyed on ``dist.name`` would give a second reprobuild-role package
+    # a source root nothing installs -- which is a different mistake
+    # from the cache package's, and still worth pinning: the constant
+    # says ``share/repro`` rather than ``share/<dist.name>``.
     var cliRoot = ""
-    var cacheRoot = ""
     for (name, value) in reprobuildSample().runtime.envDefaults:
       if name == "REPROBUILD_SOURCE_ROOT": cliRoot = value
-    for (name, value) in newReprobuildCacheDistribution("0.1.3", toLinux)
-        .runtime.envDefaults:
-      if name == "REPROBUILD_SOURCE_ROOT": cacheRoot = value
-    check cliRoot == cacheRoot
     check cliRoot == PrefixToken & "/share/repro/source"
+    check ReprobuildSourceRootSubdir == "share/repro/source"
+    check not ReprobuildSourceRootSubdir.contains(ReprobuildPackageName)
+
+  test "the cache package sets NO wrapper variables, and that is measured":
+    # M1's N9. The cache package carried the CLI's twenty-one values
+    # because ``reprobuildWrapperValues`` was keyed on the PRODUCT.
+    # Installed alone on a stock image -- a supported installation, its
+    # ``Depends:`` being ``libc6`` and nothing else -- twenty of twenty
+    # prefix-relative values named a path that was not there; installed
+    # beside the CLI, eighteen resolved into the SIBLING's prefix and
+    # two dangled anyway, being rooted at
+    # ``libexec/reprobuild-binary-cache/``, which nothing creates.
+    #
+    # The fix is the third of the three available (ship the payload,
+    # depend on ``reprobuild``, drop the variables) and it rests on a
+    # measurement of the BINARY: not one of the twenty-one names occurs
+    # as a string in ``repro-binary-cache``, while ``repro`` carries
+    # thirteen of them. The server's whole runtime environment surface
+    # is ``REPRO_BINARY_CACHE_*`` plus OpenSSL's ``SSL_CERT_*``, every
+    # one an operator's choice rather than a path into its own prefix.
+    let cache = newReprobuildCacheDistribution("0.1.3", toLinux)
+    check cache.runtime.envDefaults.len == 0
+    check reprobuildCacheWrapperValues(cache).len == 0
+    # ...and therefore no wrapper at all, which is what
+    # ``wrapExecutables``' own contract prescribes for a distribution
+    # with no env defaults. A wrapper here would resolve a prefix, set
+    # nothing and exec.
+    check not cache.runtime.wrapExecutables
+    # The dispatch is on the ROLE, not on a flag the caller passes: ask
+    # the same proc with the CLI's distribution and the full list comes
+    # back, so the flake drift guard's one-list property is untouched.
+    check reprobuildWrapperValues(reprobuildSample()).len ==
+      ReprobuildWrapperVariables.len
+    check reprobuildToolWrapperValues(cache).len ==
+      ReprobuildWrapperVariables.len
+
+  test "the cache package ships no source trees and no compiler":
+    # The other half of dropping the variables: the derived component
+    # list follows, so nobody has to remember not to add 38 MB of Nim
+    # sources and a compiler to a package that compiles nothing.
+    let cache = newReprobuildCacheDistribution("0.1.3", toLinux)
+    check reprobuildShippedTreeDirs(cache).len == 0
+    check reprobuildShippedTreeComponents(cache, "prebuilt/tree").len == 0
+    # ...while the CLI's list is unchanged by the same code path.
+    check reprobuildShippedTreeDirs(reprobuildSample()).len > 0
+
+  test "the cache package still gets the rest of the SECT5 contract":
+    # Dropping the wrapper is not dropping the contract. What makes the
+    # server independently runnable on a machine that installed no other
+    # reprobuild package is its own private libdir, its own vendored
+    # closure and its own rewritten interpreter -- none of which the
+    # wrapper ever carried.
+    let cache = newReprobuildCacheDistribution("0.1.3", toLinux)
+    check cache.runtime.privateLibSubdir == "lib/repro-binary-cache"
+    check cache.runtime.vendorRuntimeClosure
+    check cache.runtime.dlopenLeafNames == reprobuildDlopenLeafNames(toLinux)
+    check cache.runtime.requireEnvDefaultPayload
 
   test "the two packages have distinct private libdirs":
     # Each must be independently runnable: a machine may install the
@@ -194,7 +248,6 @@ suite "packaging: reprobuild's own distribution":
     let cli = reprobuildSample()
     let cache = newReprobuildCacheDistribution("0.1.3", toLinux)
     check cli.runtime.privateLibSubdir != cache.runtime.privateLibSubdir
-    check cache.runtime.envDefaults.len == ReprobuildWrapperVariables.len
 
   test "the two packages have distinct upgrade codes":
     # Sharing one would make installing the cache server an UPGRADE of
@@ -257,7 +310,14 @@ suite "packaging: reprobuild's own distribution":
     # ``stageInstallTree`` that made the M0 fixture makes this one, and
     # the same producers consume it.
     resetBuildActionRegistry()
-    let dist = reprobuildSample()
+    var dist = reprobuildSample()
+    # This sample carries a PLAUSIBLE component set, not the whole
+    # payload -- it exists so ``validate`` has services to check against
+    # -- so the env-default post-condition would (correctly) refuse it.
+    # Switched off HERE, named, rather than weakened where it lives:
+    # ``t_packaging_shipped_payload`` stages the real payload on disk
+    # and is where that property is asserted, in both directions.
+    dist.runtime.requireEnvDefaultPayload = false
     let deb = debPackage(dist)
     check deb.format == "deb"
     check deb.path.endsWith("reprobuild_0.1.3-1_amd64.deb")
