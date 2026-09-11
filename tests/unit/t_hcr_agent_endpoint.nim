@@ -124,3 +124,116 @@ suite "HCR agent endpoint":
     check responses[2].kind == hmkPatchFailed
     check responses[2].patchFailed.stage == "applyDirectPatchRequest"
     check target.callOriginalPointer(FunctionName) == 11
+
+  # -------------------------------------------------------------------------
+  # GDH-M4 — the endpoint half of design §4.4's capability negotiation.
+  #
+  # The C agent (`repro_hcr_agent.c`) is what the campaign's gates drive, and
+  # it enforces the same rule. This suite covers the Nim endpoint, which is the
+  # host shape a Nim embedding uses, so the rule cannot hold in one
+  # implementation and quietly not in the other.
+  # -------------------------------------------------------------------------
+
+  test "a sourceChanged to a host that did not advertise source-reload is REFUSED, not ignored":
+    var target = initFakeTarget(
+      FunctionName, aarch64PatchableReturnBytes(11, sledNops = 4))
+    var endpoint = initHcrAgentEndpoint(
+      SupportProfile, runtimeOps(target), agentPid = 1234)
+    discard endpoint.handleCoordinatorMessage(coordinatorHelloAck())
+
+    # Anti-vacuity, the same order the campaign's gate uses: the capability is
+    # ASSERTED ABSENT before the refusal means anything.
+    check not endpoint.advertisesSourceReload()
+
+    let content = bytesOfString("extends Node\n\nfunc tick() -> int:\n\treturn 2\n")
+    let changed = HcrSourceChanged(
+      reloadId: "r-0002",
+      language: "gdscript",
+      changedFiles: @[sourceChangedFile("res://probe.gd", 2'u32, content)])
+    let responses = endpoint.handleCoordinatorMessage(HcrAgentMessage(
+      schemaId: HcrAgentProtocolSchemaId,
+      transportScope: HcrAgentTransportScope,
+      protocolVersion: HcrAgentProtocolVersionSourceReload,
+      messageId: "coordinator-source-changed-1",
+      kind: hmkSourceChanged,
+      sourceChanged: changed))
+
+    # The host ANSWERED. An ignored notification would be an empty response
+    # sequence, and design §4.4 calls that worse than a refused session.
+    check responses.len == 1
+    check responses[0].kind == hmkSourceReloadResult
+    let res = responses[0].sourceReloadResult
+    check res.reloadId == "r-0002"
+    check res.outcome == hsroFailed
+    check res.reason == HcrReloadReasonCapabilityNotNegotiated
+    check res.appliedFiles.len == 0
+    check res.refusedFiles.len == 1
+    check res.refusedFiles[0].reason == HcrReloadReasonCapabilityNotNegotiated
+    # And it survives the wire, so the refusal is a message and not just an
+    # object this test built.
+    let restored = parseFramedAgentMessage(frameAgentMessage(responses[0]))
+    check restored.sourceReloadResult.reason ==
+      HcrReloadReasonCapabilityNotNegotiated
+
+  test "the control: the same message to a host that DID advertise is applied":
+    var target = initFakeTarget(
+      FunctionName, aarch64PatchableReturnBytes(11, sledNops = 4))
+    var endpoint = initHcrAgentEndpoint(
+      SupportProfile, runtimeOps(target), agentPid = 1234)
+
+    var appliedContent: seq[byte] = @[]
+    endpoint.withSourceReload(proc(changed: HcrSourceChanged):
+        HcrSourceReloadResult {.gcsafe, raises: [CatchableError].} =
+      # A handler that does something observable: it keeps the bytes and
+      # reports a digest it recomputed over them, not the one it was sent.
+      let file = changed.changedFiles[0]
+      {.cast(gcsafe).}:
+        appliedContent = file.content
+      HcrSourceReloadResult(
+        reloadId: changed.reloadId,
+        outcome: hsroApplied,
+        appliedFiles: @[
+          HcrSourceReloadAppliedFile(
+            sourcePath: file.sourcePath,
+            generation: file.generation,
+            pathIndex: 7'u64,
+            stepIndex: 481230'u64,
+            appliedDigest: sourceSnapshotDigest(file.content),
+            appliedLineCount: sourceLineCount(file.content))]))
+
+    check endpoint.advertisesSourceReload()
+    check endpoint.capabilities.contains(HcrSourceReloadCapability)
+    discard endpoint.handleCoordinatorMessage(coordinatorHelloAck())
+
+    let content = bytesOfString("extends Node\n\nfunc tick() -> int:\n\treturn 2\n")
+    let changed = HcrSourceChanged(
+      reloadId: "r-0002",
+      language: "gdscript",
+      changedFiles: @[sourceChangedFile("res://probe.gd", 2'u32, content)])
+    let responses = endpoint.handleCoordinatorMessage(HcrAgentMessage(
+      schemaId: HcrAgentProtocolSchemaId,
+      transportScope: HcrAgentTransportScope,
+      protocolVersion: HcrAgentProtocolVersionSourceReload,
+      messageId: "coordinator-source-changed-1",
+      kind: hmkSourceChanged,
+      sourceChanged: changed))
+
+    check responses.len == 1
+    let res = responses[0].sourceReloadResult
+    check res.outcome == hsroApplied
+    check res.reason == ""
+    check res.appliedFiles.len == 1
+    check res.appliedFiles[0].generation == 2'u32
+    check res.appliedFiles[0].appliedDigest == sourceSnapshotDigest(content)
+    # The handler really received the bytes — the acknowledgement is not the
+    # only witness.
+    check appliedContent == content
+
+  test "advertising source-reload without a handler is refused at registration":
+    var target = initFakeTarget(
+      FunctionName, aarch64PatchableReturnBytes(11, sledNops = 4))
+    var endpoint = initHcrAgentEndpoint(
+      SupportProfile, runtimeOps(target), agentPid = 1234)
+    expect ValueError:
+      endpoint.withSourceReload(nil)
+    check not endpoint.advertisesSourceReload()

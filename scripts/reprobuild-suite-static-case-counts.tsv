@@ -1413,10 +1413,10 @@ tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_fribidi_dev_stub.nim	nim	1
 tests/unit/t_from_source_realization_platform.nim	nim	2
 tests/unit/t_hcr_agent_coordinator.nim	nim	1
-tests/unit/t_hcr_agent_endpoint.nim	nim	3
+tests/unit/t_hcr_agent_endpoint.nim	nim	6
 tests/unit/t_hcr_agent_ipc.nim	nim	4
 tests/unit/t_hcr_agent_process_target.nim	nim	2
-tests/unit/t_hcr_agent_protocol.nim	nim	13
+tests/unit/t_hcr_agent_protocol.nim	nim	24
 tests/unit/t_hcr_agent_runtime.nim	nim	4
 tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_host_system_tools.nim	nim	4

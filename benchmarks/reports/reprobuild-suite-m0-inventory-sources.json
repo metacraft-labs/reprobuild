@@ -30481,7 +30481,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_hcr_agent_endpoint.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30532,8 +30532,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_hcr_agent_protocol.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
