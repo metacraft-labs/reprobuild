@@ -1,10 +1,16 @@
 ## NLF-STAT-4 — a workspace declaring nothing is unchanged.
 ##
 ## Named-Lock-Files NLF-M4. Corpus case **NLF-STAT-4**
-## (`Named-Lock-Files-Test-Corpus.md` §6): "An existing workspace with no
+## (`Named-Lock-Files-Test-Corpus.md` §7): "An existing workspace with no
 ## lock-file declarations, built before and after the feature lands. Expect:
-## byte-identical action fingerprints. Catches: a default-path regression —
-## the feature altering identity for every existing user."
+## byte-identical action fingerprints across the change. Catches: a
+## default-path regression — the feature altering identity for every existing
+## user."
+##
+## "Across the change" is quoted with the qualifier the corpus actually
+## carries, because the whole scope of the case hangs on it: NLF-STAT-4 pins
+## the delta of the Named-Lock-Files feature, not an unconditional promise
+## that no later campaign may ever key an action on anything.
 ##
 ## The corpus entry also says this is "the one case in the corpus that must run
 ## against **both** the pre-change and post-change implementation, so it needs
@@ -25,16 +31,41 @@
 ## else'."
 ##
 ## So this file is no longer the whole gate; it is one half of it. It holds the
-## post-M7 values and catches any FURTHER movement. The other half —
+## current values and catches any FURTHER movement. The other half —
 ## `t_workspace_declaring_nothing_unchanged` — holds the frozen M4 record and
-## checks that the one move was exactly the keying and nothing else, row by
-## row. Read them together: this one says "nothing has moved since M7", that
-## one says "what moved at M7 was only this".
+## checks that every move since is explained term by term, row by row. Read
+## them together: this one says "nothing has moved since the last recorded
+## move", that one says "what moved was only these".
 ##
 ## Failing this test is still not "the fixture is stale". It is the migration
 ## gate reporting that something has changed the fingerprint of an edge in a
 ## workspace that declares no lock files, which for existing users is a full
 ## rebuild.
+##
+## ## The one further move so far, and what regenerating this file requires
+##
+## `dev` `09896ec01`, "Key an action on the environment it is given" (#101),
+## put an action's environment DECLARATION into `weakFingerprint`. It moved
+## exactly one row here — `stat4/compile-main`, the only baseline edge that
+## declares an environment (`CC`, `LANG`); `keyedOnActionEnvironment` is the
+## identity on the empty declaration, so the other twelve are byte-identical
+## across it.
+##
+## That move is required by `Caching-Architecture.md` §"BuildXL-Inspired
+## Fingerprinting", which lists **relevant environment** in the weak
+## fingerprint beside tool identity and declared inputs, and by
+## `Hermetic-Builds-And-Path-Independence.md` §"Environment Normalization",
+## which makes the environment surface "part of the action identity" that
+## "must be explicit". Before it, two actions differing only in an environment
+## Reprobuild itself chose shared one cache entry.
+##
+## The precedent this sets is narrow on purpose. This fixture may be
+## regenerated only together with an entry above naming the commit that moved
+## it and the spec clause that required the move, and only when
+## `t_workspace_declaring_nothing_unchanged` has been extended to EXPLAIN the
+## new term against the frozen M4 record. A regenerated baseline nobody can
+## attribute is how a fingerprint defect becomes permanent and invisible: this
+## file would then simply agree with whatever the engine does.
 ##
 ## Test-double policy: NO mocks, doubles, or fakes. The corpus is built from
 ## the engine's real public constructors and the recorded digest is the real

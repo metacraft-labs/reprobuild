@@ -34,12 +34,61 @@
 ##   3. every `fingerprint` **differs** from M4's — the move actually happened,
 ##      so this file cannot pass vacuously against an implementation that
 ##      forgot to key;
-##   4. and each current fingerprint is **exactly** `keyedOnGoverningLock` of
-##      the M4 fingerprint under the corpus's governing lock identity. This is
-##      the "line by line" part: the change is the keying and nothing else. A
-##      fingerprint that moved for a second, unrelated reason — an id
-##      derivation change, an extra field mixed in, a different domain tag —
-##      satisfies (1), (2) and (3) and fails here.
+##   4. and each current fingerprint is **exactly** the composition of the two
+##      keyings that have landed since M4, applied to the M4 fingerprint in the
+##      order `action()` applies them — the edge's environment declaration
+##      first, the corpus's governing lock identity outside it. This is the
+##      "line by line" part: the change is those keyings and nothing else. A
+##      fingerprint that moved for a third, unrelated reason — an id derivation
+##      change, an extra field mixed in, a different domain tag — satisfies
+##      (1), (2) and (3) and fails here.
+##   5. and no baseline edge declares a passthrough variable. (4) reads each
+##      row's environment from the LIVE corpus, so every field it reads needs
+##      an anchor in the frozen record or the explanation absorbs a change
+##      instead of catching it. `env` has one — column 2 — and
+##      `envPassthrough` does not, because the material field list was frozen
+##      before that field existed. (5) is that missing anchor, stated as the
+##      fact it currently is. Without it, adding a passthrough to a corpus
+##      edge moves the fingerprint, moves the explanation with it, and passes.
+##
+## ## The SECOND keying, and why it is in the explanation rather than a failure
+##
+## Assertion (4) read `keyedOnGoverningLock` alone until reprobuild `dev`
+## `09896ec01`, "Key an action on the environment it is given" (#101), made an
+## action's environment DECLARATION part of its weak fingerprint. That is a
+## different campaign from Named-Lock-Files and it is required independently:
+## `Caching-Architecture.md` §"BuildXL-Inspired Fingerprinting" puts **relevant
+## environment** in the weak fingerprint's field list beside tool identity and
+## declared inputs, and `Hermetic-Builds-And-Path-Independence.md`
+## §"Environment Normalization" makes the environment surface "part of the
+## action identity" that "must be explicit". Without it two actions differing
+## only in an environment Reprobuild itself chose were one cache entry and the
+## second was served the first one's result.
+##
+## The SHAPE of the keying — a declared variable keyed by value, a passthrough
+## variable keyed by name only — is `keyedOnActionEnvironment`'s own contract,
+## pinned by `t_declared_env_is_in_the_cache_key`, not something the two
+## clauses above settle. `Hermetic-Builds-And-Path-Independence.md` argues that
+## split for `PATH` specifically in §"The action's `PATH`", which is on the
+## spec's feature branches and not yet on `latest`; do not read the citation
+## above as covering it.
+##
+## Exactly one corpus row moves for it — `stat4/compile-main`, the only
+## baseline edge that declares an environment (`CC`, `LANG`). That is the
+## signature of the change rather than a coincidence: `keyedOnActionEnvironment`
+## is the identity on an empty declaration, so the other twelve rows are
+## untouched and `fixtures/nlf_stat4_baseline_fingerprints.tsv` moved on one
+## line.
+##
+## NLF-STAT-4 is not violated by this, and the distinction is worth stating
+## because "the migration gate went red" is otherwise indistinguishable from
+## "the gate was edited until it was green". `Named-Lock-Files-Test-Corpus.md`
+## §7 scopes the case to "byte-identical action fingerprints **across the
+## change**" — the change being the Named-Lock-Files feature, whose delta this
+## file still pins exactly against the frozen M4 record. A later keying from
+## another spec is not an NLF default-path regression; it is a second
+## explainable term, and it is in the explanation here so that a *third*
+## unexplained one is still caught.
 ##
 ## ## The M4 fixture is now a frozen historical record
 ##
@@ -48,7 +97,8 @@
 ## comparison above has something to compare against. It must never be
 ## regenerated: the moment it is, assertion (4) becomes a tautology over two
 ## copies of the same file. `fixtures/nlf_stat4_baseline_fingerprints.tsv` is
-## the live gate and holds the post-M7 values.
+## the live gate and holds the current values — post-M7 and, since `09896ec01`,
+## post-environment-keying.
 ##
 ## ## Test-double policy: NO mocks, doubles, or fakes
 ##
@@ -140,22 +190,55 @@ suite "NLF-STAT-4 the post-M7 diff against the M4 baseline is explained":
     for i in 0 ..< recorded.len:
       check current[i].fingerprint != recorded[i].fingerprint
 
-  test "each fingerprint moved by EXACTLY the governing-lock keying":
-    # The line-by-line explanation, machine-checked. `current = H(m4, lock)`
-    # for every row, with one lock identity — the empty solved graph for the
+  test "no baseline row declares a passthrough variable":
+    # Assertion (4) explains each row's move using that row's OWN environment
+    # declaration. Reading `env` from the live corpus is safe because the
+    # `material` column above freezes it byte-for-byte against M4: an edge
+    # whose declared environment changed fails that test before reaching this
+    # one. `envPassthrough` has no such anchor — the material field list was
+    # frozen before the field existed — so a passthrough quietly added to a
+    # corpus edge would be ABSORBED by the explanation instead of caught by
+    # it, which is the one way (4) could be made to pass vacuously.
+    #
+    # Every baseline edge declares none, so pinning that here costs nothing
+    # and closes the hole. If a baseline edge ever must name a passthrough
+    # variable, the M4 record needs a column for it; relaxing this check
+    # instead would silently widen what (4) is willing to explain.
+    for a in baselineCorpusActions():
+      if a.envPassthrough.len > 0:
+        checkpoint("baseline edge " & a.id &
+          " acquired a passthrough set the M4 record cannot anchor: " &
+          a.envPassthrough.join(", "))
+      check a.envPassthrough.len == 0
+
+  test "each fingerprint moved by EXACTLY the two keyings that landed":
+    # The line-by-line explanation, machine-checked.
+    # `current = H(H(m4, env), lock)` for every row: the environment mix
+    # inside, the lock mix outside, which is the order `action()` composes
+    # them in and the only order that reproduces the bytes.
+    #
+    # One lock identity for every row — the empty solved graph for the
     # corpus's pinned platform, which is what "a workspace with no lock-file
-    # declarations" is governed by.
+    # declarations" is governed by. Per-row environment, because that is what
+    # an environment declaration IS; twelve of the thirteen rows declare none
+    # and `keyedOnActionEnvironment` is the identity on the empty declaration,
+    # so twelve rows still read `H(m4, lock)` exactly as they did before #101.
     let recorded = m4Rows()
     let current = currentRows()
+    let corpus = baselineCorpusActions()
     let governing = emptySolvedGraphIdentity(CorpusPlatform)
     require recorded.len == current.len
+    require recorded.len == corpus.len
     for i in 0 ..< recorded.len:
       let explained = hex(keyedOnGoverningLock(
-        parseDigest(recorded[i].fingerprint), governing))
+        keyedOnActionEnvironment(parseDigest(recorded[i].fingerprint),
+          corpus[i].env, corpus[i].envPassthrough),
+        governing))
       if current[i].fingerprint != explained:
         checkpoint("row " & $(i + 1) & " (" & recorded[i].id &
-          ") moved by something OTHER than the governing-lock keying" &
+          ") moved by something OTHER than the lock and environment keyings" &
           "\n  M4 baseline: " & recorded[i].fingerprint &
+          "\n  declared env: " & corpus[i].env.join(", ") &
           "\n  explained:   " & explained &
           "\n  current:     " & current[i].fingerprint)
       check current[i].fingerprint == explained
