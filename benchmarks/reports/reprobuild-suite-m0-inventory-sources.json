@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1538,
+    "nimTestBinaries": 1540,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 577,
     "staticallyDetectedRuntimeCompilerFlowTests": 94,
-    "testEntries": 1546
+    "testEntries": 1548
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1082,7 +1082,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 686,
+      "integration": 688,
       "platform/destructive": 110,
       "pure unit": 577,
       "unclassified": 161
@@ -1209,9 +1209,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1538,
+    "nimTestBinaryCount": 1540,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1546
+    "testEntryCount": 1548
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -23342,6 +23342,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_develop_per_repo_lock_contributes_only_its_self_record",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_develop_per_repo_lock_contributes_only_its_self_record.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_develop_public_only_unchanged",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -23453,6 +23471,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_develop_refuses_unreadable_backend_of_any_kind.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_develop_root_lock_outranks_a_per_repo_lock",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

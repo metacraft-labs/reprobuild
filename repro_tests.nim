@@ -9000,6 +9000,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_develop_per_repo_lock_contributes_only_its_self_record.nim",
+    binary: "build/test-bin/t_develop_per_repo_lock_contributes_only_its_self_record",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_develop_public_only_unchanged.nim",
     binary: "build/test-bin/t_develop_public_only_unchanged",
     defines: @[],
@@ -9056,6 +9065,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_develop_refuses_unreadable_backend_of_any_kind.nim",
     binary: "build/test-bin/t_develop_refuses_unreadable_backend_of_any_kind",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim",
+    binary: "build/test-bin/t_develop_root_lock_outranks_a_per_repo_lock",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
