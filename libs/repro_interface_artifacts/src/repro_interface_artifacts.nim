@@ -2507,6 +2507,28 @@ proc ensureExecutable(path: string) =
     setFilePermissions(extendedPath(path), {fpUserRead, fpUserWrite, fpUserExec,
       fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
+const SipProtectedPrefixes* = ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"]
+  ## The macOS System Integrity Protection prefixes, spelled the same way
+  ## ``stackable_hooks/propagation.nim`` spells them (``sipProtectedPrefixes``)
+  ## and for the same purpose: a binary under one of these does not receive
+  ## ``DYLD_INSERT_LIBRARIES``, so a monitored action that execs one loses the
+  ## subtree behind it. Duplicated rather than imported because this library
+  ## is in the interface-artifact layer and takes no dependency on the monitor
+  ## shim's framework; the list is four fixed paths that Apple has not moved.
+
+proc isSipProtectedCompilerPath*(path: string): bool =
+  ## Whether ``path`` names a binary the macOS monitor cannot inject into.
+  ## Exported so the SIP-awareness in ``hostCCompilerPath`` is assertable
+  ## without spawning a compiler.
+  when defined(macosx):
+    for prefix in SipProtectedPrefixes:
+      if path.startsWith(prefix):
+        return true
+    false
+  else:
+    discard path
+    false
+
 proc hostCCompilerPath(): string =
   # MR9 — `$REPRO_BOOTSTRAP_CC` is the bootstrap-resolved gcc absolute
   # path published by `ensureBootstrapToolchainEnv` (tool_profiles.nim)
@@ -2526,6 +2548,37 @@ proc hostCCompilerPath(): string =
   let ccEnv = getEnv("CC")
   if ccEnv.len > 0 and isAbsolute(ccEnv):
     return ccEnv
+  when defined(macosx):
+    # A SIP-protected compiler makes every provider compile uncacheable, so
+    # the PATH search prefers a non-SIP one before it accepts `/usr/bin/cc`.
+    #
+    # `/usr/bin/cc` is an Apple platform binary: `DYLD_INSERT_LIBRARIES` is
+    # stripped when it is exec'd, the io-mon shim never loads inside it, and
+    # the action's depfile records `exec without post-exec process-start`.
+    # That is a Level-2 `mesUnknownScopeLoss`, which disables the action-cache
+    # publish for the whole session (`repro_build_engine.foldMonitorDepFileEvidence`).
+    # The observable consequence is not subtle: on a workspace whose dev-env
+    # is activated by the shell hook, the provider is recompiled on EVERY new
+    # shell — measured at 20.5 s of a 26 s `cd`, against 5 s once a non-SIP
+    # compiler is used and the action publishes.
+    #
+    # The drop-in mechanism cannot rescue this one. `CT_SANDBOX_TOOLS_DIR`
+    # rewrites a SIP exec to a same-named non-SIP binary, and on macOS a
+    # byte-copy of a platform binary is not a candidate (AMFI SIGKILLs a
+    # relocated copy — MacOS-Interpose-Limitations-Under-Chained-Fixups.md
+    # §"the SIP drop-in must be a binary we build ourselves"). If there is no
+    # other `cc` on PATH there is nothing to point at, which is why the honest
+    # answer here is to look for one and to say so when there is none.
+    let nonSipCandidates = ["clang", "gcc", "cc"]
+    for candidate in nonSipCandidates:
+      let resolved = findExe(candidate)
+      if resolved.len == 0 or not isAbsolute(resolved):
+        continue
+      if not fileExists(extendedPath(resolved)):
+        continue
+      if isSipProtectedCompilerPath(resolved):
+        continue
+      return resolved
   when not defined(windows):
     let runtimeCC = findExe("cc")
     if runtimeCC.len > 0 and isAbsolute(runtimeCC) and
