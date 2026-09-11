@@ -31,11 +31,21 @@
 ##
 ## **3. A rejection is the default decision.** ``vdRejected`` is the zero
 ## value of ``VerdictDecision``, so a verdict nobody finished computing is
-## a rejection. And the successful decision is *two* values, not one:
-## ``vdAccepted`` and ``vdAcceptedNoRootOfTrust``. A report from the mock
-## tier can only ever reach the second, and a consumer that writes
-## ``== vdAccepted`` gets the safe answer without having read this
-## paragraph. A consumer that wants the other one has to type its name.
+## a rejection. And the successful decision is *three* values, not one:
+## ``vdAccepted``, ``vdAcceptedNoRootOfTrust`` and
+## ``vdAcceptedUnpinnedManifest``. A report from the mock tier can only
+## ever reach the second, and a verdict whose established identity comes
+## from a manifest no policy pinned can only ever reach the third — so a
+## consumer that writes ``== vdAccepted`` gets the safe answer without
+## having read this paragraph. A consumer that wants one of the other two
+## has to type its name.
+##
+## The unqualified ``vdAccepted`` is therefore the *narrow* value: it
+## means every clause was satisfied, the evidence came from a root of
+## trust, **and** the document the identity was read out of was one the
+## policy named in advance. A hollow acceptance has a name of its own in
+## each direction it can be hollow, and each name is derived here rather
+## than left for a caller to notice.
 ##
 ## ## What is deliberately NOT in here
 ##
@@ -133,6 +143,22 @@ type
       ## been established is that the documents are well formed and
       ## consistent with each other, and nothing about a machine.
     vdAccepted = "accepted"
+      ## Every check the policy required was satisfied, the evidence came
+      ## from a root of trust, and the measurement manifest this verdict
+      ## read its identity out of is one the policy pinned by digest.
+    vdAcceptedUnpinnedManifest =
+      "accepted-against-an-unauthenticated-manifest"
+      ## Every check the policy required was satisfied — and the identity
+      ## below was taken from a manifest the policy pinned *nothing*
+      ## about, so it is exactly as trustworthy as the document whoever
+      ## ran the verifier handed in. That is the reproduce-locally
+      ## posture when the document really was built here, and it is a
+      ## verdict about an attacker's file when it was not, and this
+      ## decision cannot tell the two apart — which is why it is its own
+      ## value rather than ``vdAccepted`` with a sentence attached.
+      ##
+      ## Appended to the enum rather than inserted, so no existing
+      ## ordinal moves.
 
   EstablishedIdentity* = object
     ## What §5.3 lets a verifier conclude about *which configuration*
@@ -190,16 +216,44 @@ proc outcome*(rec: CheckRecord): CheckOutcome =
   of fkViolated: coFailed
   of fkInapplicable: (if rec.required: coFailed else: coSkipped)
 
+proc identityRestsOnUnauthenticatedManifest*(
+    checks: array[VerifierCheck, CheckRecord]): bool =
+  ## The two rows that together say "this verdict read an identity out of
+  ## a document nothing vouched for".
+  ##
+  ## ``manifest-pinned`` is *skipped* on exactly one path — the policy
+  ## pins no digest, which its author had to spell — because a policy
+  ## that does pin one makes the check required, and a required check
+  ## that could not be performed is a failure rather than a skip.
+  ## ``measurement-match`` having *passed* is the same condition the
+  ## identity block itself is written under, and it implies a manifest
+  ## was supplied and was read: the satisfied branch is unreachable
+  ## without one.
+  ##
+  ## Written once, here, so the decision and the identity block cannot
+  ## come to disagree about which verdicts are hollow.
+  checks[vcManifestPinned].outcome == coSkipped and
+    checks[vcMeasurementMatch].outcome == coPassed
+
 proc decisionFor*(checks: array[VerifierCheck, CheckRecord];
                   tier: AttestationTier): VerdictDecision =
   ## The decision, derived from the outcome of every check and from the
   ## tier — and from nothing else. In particular it never sees the
   ## report's claims, which is why it takes an array rather than a
   ## verdict.
+  ##
+  ## The two qualified acceptances are ordered: a mock-tier report
+  ## establishes nothing about a machine at all, which is the larger
+  ## caveat, so it keeps its own decision (and its own exit code)
+  ## whatever its policy pins. The manifest qualification is what is left
+  ## to say about a report that *did* come from a root of trust.
   for chk in VerifierCheck:
     if checks[chk].outcome notin {coPassed, coSkipped}:
       return vdRejected
-  if tier == atMock: vdAcceptedNoRootOfTrust else: vdAccepted
+  if tier == atMock: return vdAcceptedNoRootOfTrust
+  if identityRestsOnUnauthenticatedManifest(checks):
+    return vdAcceptedUnpinnedManifest
+  vdAccepted
 
 # ---------------------------------------------------------------------
 # Building one
@@ -251,10 +305,11 @@ proc skippedChecks*(v: Verdict): seq[VerifierCheck] = v.checksWith(coSkipped)
 proc failedChecks*(v: Verdict): seq[VerifierCheck] = v.checksWith(coFailed)
 
 proc isAcceptance*(d: VerdictDecision): bool =
-  ## True for both acceptances. Spelled out here so a caller that means
-  ## "not rejected" writes something that says so, rather than a
-  ## comparison against one of the two acceptances that quietly rejects
-  ## the other.
+  ## True for every acceptance, qualified or not. Spelled out here so a
+  ## caller that means "not rejected" writes something that says so,
+  ## rather than a comparison against one of the acceptances that quietly
+  ## rejects the others — and so that adding a qualified acceptance does
+  ## not turn such a caller's verdict into a rejection behind its back.
   d != vdRejected
 
 # ---------------------------------------------------------------------

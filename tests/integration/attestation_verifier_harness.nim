@@ -212,6 +212,37 @@ proc verificationRequest(reportText: string; policy: AttestationPolicy;
     nowMs: nowMs)
 
 # ---------------------------------------------------------------------
+# The embedding seam
+#
+# A tier with a root of trust, verified through the reading a downstream
+# caller brought. This build carries no reader for tpm2 evidence, so this
+# is the only way the `measurement-match` and identity branches are
+# reachable at all — which is what that seam is for. Shared by every gate
+# that drives them, so two gates cannot come to disagree about what a
+# caller-supplied reading looks like.
+# ---------------------------------------------------------------------
+
+proc tpmReading(measurement: string; reportDataHex: string;
+                reader = "downstream tpm2 reader"): EvidenceReading =
+  ## What a caller that brought its own TPM reader would hand in.
+  var inputs: AuthoritativeInputs
+  inputs.readerName = reader
+  inputs.launchMeasurement = some(measurement)
+  inputs.reportDataInEvidence = some(reportDataHex)
+  EvidenceReading(
+    finding: satisfied("a quote over PCR 11 verified under an attestation " &
+      "key certified by the test's own root"),
+    inputs: inputs)
+
+proc tpmVerdict(measurement: string; manifestText: string;
+                policy: AttestationPolicy): Verdict =
+  let text = tpm2ReportText()
+  let report = parseAttestationReport(text, "<tpm report>")
+  var req = verificationRequest(text, policy, some(manifestText))
+  verifyWithReading(req, report,
+    tpmReading(measurement, report.reportData))
+
+# ---------------------------------------------------------------------
 # The module-closure walk
 #
 # Used by the enumeration gate to hold the package boundary this library

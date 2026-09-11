@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1531,
+    "nimTestBinaries": 1533,
     "pureUnitConsolidationGroups": 46,
     "pureUnitTests": 559,
     "staticallyDetectedRuntimeCompilerFlowTests": 94,
-    "testEntries": 1539
+    "testEntries": 1541
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1041,7 +1041,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 694,
+      "integration": 696,
       "platform/destructive": 112,
       "pure unit": 559,
       "unclassified": 162
@@ -1168,9 +1168,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1531,
+    "nimTestBinaryCount": 1533,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1539
+    "testEntryCount": 1541
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -23570,6 +23570,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_exit_codes_are_documented_and_stable",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest_verify",
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_exit_codes_are_documented_and_stable.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_ext_repro_action_rows",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -28922,6 +28940,25 @@
       "source": "tests/integration/t_unavailable_package_fails_with_platform_reason.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_unpinned_manifest_is_not_plain_accepted",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify",
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_unpinned_manifest_is_not_plain_accepted.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

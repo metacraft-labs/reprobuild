@@ -463,6 +463,13 @@ proc verifyWithReading*(req: VerificationRequest;
   # that was never answered; the comparison succeeded and the verdict is
   # still a rejection, and a rejected verdict that also printed an
   # established configuration would be read as a qualified yes.
+  #
+  # When the manifest it comes out of is one the policy pinned nothing
+  # about, the block is still written — it is the most useful thing the
+  # verdict has to say — but the decision itself says so, through
+  # `identityRestsOnUnauthenticatedManifest`, which reads the same two
+  # rows this condition does. The caveat below is then the third channel
+  # and not the only one.
   if result.decision.isAcceptance and haveManifest and
      result.checks[vcMeasurementMatch].outcome == coPassed:
     result.hasIdentity = true

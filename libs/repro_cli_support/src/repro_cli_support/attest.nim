@@ -106,16 +106,62 @@ type
     challengeBytes*: int
     hexOnly*: bool
 
+type
+  AttestExitCode* = enum
+    ## Every value `repro attest` can exit with, as one enumeration.
+    ##
+    ## An enumeration rather than loose integers for two reasons. The
+    ## mapping from a verdict to a code is a ``case`` over it below, so a
+    ## decision that gains a value and no code is a compile error rather
+    ## than a fall-through. And the set is *iterable*, which is what lets
+    ## a gate assert that every code this command can produce is written
+    ## down in the CLI reference — a promise nobody can keep against a
+    ## handful of constants, because there is no way to ask how many of
+    ## them there are.
+    ##
+    ## The ordinals are the contract. A caller scripting on one of them
+    ## must never find it meaning something else, so values are
+    ## **appended** and never reordered.
+    aecAccepted = 0
+    aecRejected = 1
+    aecUsage = 2
+    aecAcceptedNoRootOfTrust = 3
+      ## Its own code, and not ``0``. A mock-tier report can satisfy every
+      ## clause a policy that allowed the mock tier contains, and a shell
+      ## script that tested for success would then treat "the documents
+      ## agree with each other" as "the machine is what it says it is".
+      ## Every acceptance is a non-failure; only one of them is 0.
+    aecAcceptedUnauthenticatedManifest = 4
+      ## An acceptance whose established identity was read out of a
+      ## measurement manifest the policy pinned nothing about. The
+      ## verdict has said so in prose since this command shipped, in the
+      ## ``manifest-pinned`` row and again in its caveats — and prose is
+      ## not a channel ``$?`` can read, so a script could not tell this
+      ## apart from a verdict backed by a manifest its operators had
+      ## named in advance. Now it can.
+
 const
-  AttestExitAccepted* = 0
-  AttestExitRejected* = 1
-  AttestExitUsage* = 2
-  AttestExitAcceptedNoRootOfTrust* = 3
-    ## Its own code, and not ``0``. A mock-tier report can satisfy every
-    ## clause a policy that allowed the mock tier contains, and a shell
-    ## script that tested for success would then treat "the documents
-    ## agree with each other" as "the machine is what it says it is".
-    ## Both acceptances are non-failures; only one of them is 0.
+  AttestExitAccepted* = ord(aecAccepted)
+  AttestExitRejected* = ord(aecRejected)
+  AttestExitUsage* = ord(aecUsage)
+  AttestExitAcceptedNoRootOfTrust* = ord(aecAcceptedNoRootOfTrust)
+  AttestExitAcceptedUnauthenticatedManifest* =
+    ord(aecAcceptedUnauthenticatedManifest)
+
+proc attestExitCodeFor*(d: VerdictDecision): AttestExitCode =
+  ## The single place a verdict becomes an exit code.
+  ##
+  ## Written as a total function over ``VerdictDecision`` rather than as
+  ## an ``if`` at the point of exit, because the two channels a verdict
+  ## speaks through — its text and its exit status — came apart once
+  ## already: the decision distinguished a hollow acceptance and the exit
+  ## status did not. A ``case`` with no ``else`` is how that stays fixed;
+  ## a decision value added without a code here does not compile.
+  case d
+  of vdAccepted: aecAccepted
+  of vdAcceptedNoRootOfTrust: aecAcceptedNoRootOfTrust
+  of vdAcceptedUnpinnedManifest: aecAcceptedUnauthenticatedManifest
+  of vdRejected: aecRejected
 
 proc renderAttestUsage*(): string =
   result = """usage: repro attest <subcommand> [options]
@@ -162,9 +208,14 @@ repro attest verify --report-file PATH | --report-url URL [options]
       --json                        print the machine-readable verdict
       --out PATH                    write the verdict instead of printing it
 
-Exit codes: 0 success or an accepted verdict, 1 mismatch, a rejected verdict,
-or a runtime failure, 2 usage or refusal, 3 a verdict accepted against a tier
-with no root of trust.
+Exit codes:
+  0  success, or a verdict of `accepted`
+  1  a --check mismatch, a verdict of `rejected`, or a runtime failure
+  2  a usage error or a refusal
+  3  a verdict of `accepted-without-a-root-of-trust`
+  4  a verdict of `accepted-against-an-unauthenticated-manifest`: it
+     established an identity, out of a manifest your policy pins nothing
+     about
 """
 
 proc valueFor(args: openArray[string]; i: var int; flag: string): string =
@@ -475,10 +526,9 @@ proc runAttestVerify(opts: AttestCliOptions): int =
   else:
     stdout.write(text)
 
-  case verdict.decision
-  of vdAccepted: AttestExitAccepted
-  of vdAcceptedNoRootOfTrust: AttestExitAcceptedNoRootOfTrust
-  of vdRejected: AttestExitRejected
+  # Derived, never decided here: this call site cannot say anything
+  # about a verdict that `attestExitCodeFor` does not say.
+  ord(attestExitCodeFor(verdict.decision))
 
 proc runAttestCommand*(args: seq[string]): int =
   var opts: AttestCliOptions
@@ -487,11 +537,11 @@ proc runAttestCommand*(args: seq[string]): int =
   except ValueError as err:
     stderr.writeLine("repro attest: " & err.msg)
     stderr.write(renderAttestUsage())
-    return 2
+    return AttestExitUsage
   case opts.sub
   of ascExpect: runAttestExpect(opts)
   of ascVerify: runAttestVerify(opts)
   of ascChallenge: runAttestChallenge(opts)
   of ascNone:
     stderr.write(renderAttestUsage())
-    2
+    AttestExitUsage

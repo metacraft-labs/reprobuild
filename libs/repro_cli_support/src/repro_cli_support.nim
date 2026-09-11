@@ -221,7 +221,8 @@ export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
        cli_disk.DiskPlanOutcome, cli_disk.DiskPlanFailureKind
 export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
        cli_attest.renderAttestUsage, cli_attest.AttestCliOptions,
-       cli_attest.AttestSubcommand, cli_attest.ConventionalUkiName,
+       cli_attest.AttestSubcommand, cli_attest.AttestExitCode,
+       cli_attest.attestExitCodeFor, cli_attest.ConventionalUkiName,
        cli_attest.ConventionalVerityImageName,
        cli_attest.ConventionalVerityRootHashName,
        cli_attest.ConventionalManifestName

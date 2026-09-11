@@ -102,25 +102,10 @@ proc renderedRows(text: string): Table[string, string] =
           "the row an operator reads first"
       result[fields[0]] = fields[1]
 
-proc tpmReading(measurement: string; reportDataHex: string;
-                reader = "downstream tpm2 reader"): EvidenceReading =
-  ## What a caller that brought its own TPM reader would hand in.
-  var inputs: AuthoritativeInputs
-  inputs.readerName = reader
-  inputs.launchMeasurement = some(measurement)
-  inputs.reportDataInEvidence = some(reportDataHex)
-  EvidenceReading(
-    finding: satisfied("a quote over PCR 11 verified under an attestation " &
-      "key certified by the test's own root"),
-    inputs: inputs)
-
-proc tpmVerdict(measurement: string; manifestText: string;
-                policy: AttestationPolicy): Verdict =
-  let text = tpm2ReportText()
-  let report = parseAttestationReport(text, "<tpm report>")
-  var req = verificationRequest(text, policy, some(manifestText))
-  verifyWithReading(req, report,
-    tpmReading(measurement, report.reportData))
+# `tpmReading` and `tpmVerdict` — the embedding seam this gate drives —
+# live in the shared harness above, because a second gate drives the same
+# seam and two spellings of "what a caller-supplied reading looks like"
+# would be two opinions about it.
 
 suite "a verdict enumerates every check, and a skip is never a pass":
 
