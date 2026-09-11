@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1533,
+    "nimTestBinaries": 1536,
     "pureUnitConsolidationGroups": 46,
     "pureUnitTests": 559,
-    "staticallyDetectedRuntimeCompilerFlowTests": 94,
-    "testEntries": 1541
+    "staticallyDetectedRuntimeCompilerFlowTests": 95,
+    "testEntries": 1544
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1041,7 +1041,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 696,
+      "integration": 699,
       "platform/destructive": 112,
       "pure unit": 559,
       "unclassified": 162
@@ -1168,9 +1168,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1533,
+    "nimTestBinaryCount": 1536,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1541
+    "testEntryCount": 1544
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4918,6 +4918,27 @@
         }
       ],
       "source": "tests/integration/t_runner_progress_visibility.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd",
+            "tmp"
+          ],
+          "line": 318,
+          "path": "tests/integration/t_spec_6_2_matches_implementation.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "var cmd = quoteShell(nimExe) & \" c --hints:off --warnings:off\""
+        }
+      ],
+      "source": "tests/integration/t_spec_6_2_matches_implementation.nim"
     },
     {
       "class": "integration",
@@ -21299,6 +21320,42 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_activity_mock_tier_allowed_on_plain_layout",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_profile"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_activity_mock_tier_allowed_on_plain_layout.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_activity_validate_gate",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_profile"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_activity_validate_gate.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_add_respects_develop_mode_policy_and_overrides",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -28299,6 +28356,24 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_spec_6_2_matches_implementation",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_profile"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_spec_6_2_matches_implementation.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

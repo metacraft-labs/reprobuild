@@ -890,6 +890,8 @@ tests/integration/t_action_cache_per_edge_no_global_log_no_growth.nim	nim	2
 tests/integration/t_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing.nim	nim	3
 tests/integration/t_action_index_backpressure_and_tombstones.nim	nim	3
 tests/integration/t_action_index_flatten_retire_preserves_completeness.nim	nim	3
+tests/integration/t_activity_mock_tier_allowed_on_plain_layout.nim	nim	2
+tests/integration/t_activity_validate_gate.nim	nim	11
 tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	nim	6
 tests/integration/t_agent_abuse_bounds.nim	nim	14
 tests/integration/t_agent_mock_roundtrip.nim	nim	12
@@ -1289,6 +1291,7 @@ tests/integration/t_single_platform_entries_declare_platforms.nim	nim	8
 tests/integration/t_solved_packages_are_first_class_locked_deps.nim	nim	1
 tests/integration/t_source_producer_revalidation.nim	nim	2
 tests/integration/t_source_revalidation_invocation_scope.nim	nim	1
+tests/integration/t_spec_6_2_matches_implementation.nim	nim	14
 tests/integration/t_spec_example_fixtures_compile.nim	nim	2
 tests/integration/t_spec_example_fixtures_present.nim	nim	16
 tests/integration/t_ssl_edges_carry_openssl_link_path.nim	nim	2

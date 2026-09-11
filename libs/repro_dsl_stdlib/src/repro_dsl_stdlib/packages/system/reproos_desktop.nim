@@ -112,6 +112,7 @@ import ../de_foundation/kernel
 import ../desktop_environments/sway
 import ../desktop_environments/gnome
 import ../desktop_environments/plasma
+import ./config_violation
 
 # Re-export the symbols downstream consumers + tests need so a single
 # ``import .../system/reproos_desktop`` is sufficient. Mirror of the
@@ -154,13 +155,18 @@ const
 # ---------------------------------------------------------------------------
 # Custom error for the spec's `validate:` clause.
 # ---------------------------------------------------------------------------
-
-type
-  EConfigViolation* = object of CatchableError
-    ## Raised by ``validateDesktopConfig`` when the spec's
-    ## ``validate: activeAtBoot in desktopKind.value`` constraint is
-    ## violated. Per Configurable-System.md §"Variant Or Configurable"
-    ## worked example.
+#
+# ``EConfigViolation`` — raised by ``validateDesktopConfig`` when the
+# spec's ``validate: activeAtBoot in desktopKind.value`` constraint is
+# violated, per Configurable-System.md §"Variant Or Configurable" — is
+# DECLARED IN ``./config_violation`` and re-exported here, so importing
+# this module still brings it into scope. It moved because it is no
+# longer this package's alone: every system-scope package whose
+# specification carries a `validate:` rule the declaration DSL cannot
+# express raises it, and a caller that wants to catch "the package
+# refused this configuration" must not have to guess which module's
+# copy of the name it is holding.
+export config_violation
 
 # ---------------------------------------------------------------------------
 # DesktopKind enum + config / outputs shapes.
