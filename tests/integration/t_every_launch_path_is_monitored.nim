@@ -844,6 +844,15 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "close", "maxOfferBatchSize", "pollRunQuotaGrants",
                "cancelQueued", "defaultRunQuotaWindowsPipePath",
                "probeWindowsPipeOwner", "terminateStalePipeOwner",
+               # The two halves of the terminate PRECONDITION.
+               # ``terminateStalePipeOwner`` no longer takes a PID; it
+               # takes a ``StalePipeOwner``, which only
+               # ``stalePipeOwner`` can build and only from a probe that
+               # identified an owner AND proved it dead. ``ownerPid``
+               # reads the value back out. Neither starts anything —
+               # they are the gate in front of the one call in this
+               # repository that can end a process by PID.
+               "stalePipeOwner", "ownerPid",
                # The per-execution extension surface, which travels over the
                # session socket the engine is already holding and starts
                # nothing: four cell constructors, the schema declaration and

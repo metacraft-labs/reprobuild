@@ -16402,23 +16402,52 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   # M9.R.13c.1 — **deterministic stale-pipe recovery**. The wedge that
   # blocked every M9.R.13b iter past iter 11 (and forced the operator
   # to manually ``Stop-Process`` ``runquotad.exe`` between every build)
-  # is now closed at the client side: when the pipe exists in NPFS but
-  # ``probeWindowsPipeOwner`` reports its owner as dead / inaccessible
-  # / unknown, we terminate the dead owner so the kernel reclaims the
-  # NPFS object and then fall through to the fresh-spawn block below.
-  # The killer-of-last-resort path is conservative — we only terminate
-  # processes we can prove are the canonical pipe's server, never a
-  # generic Stop-Process equivalent.
+  # is closed at the client side: when the pipe exists in NPFS and
+  # ``probeWindowsPipeOwner`` has IDENTIFIED its owner and PROVED that
+  # owner dead, we drop it so the kernel reclaims the NPFS object and
+  # then fall through to the fresh-spawn block below.
+  #
+  # "Identified AND proved dead" is the whole of it, and it used to be
+  # neither. The probe folded every ``CreateFileW`` failure into
+  # ``wpsStale``, so a pipe this process merely lacked the rights to
+  # OPEN — the MSI-installed service's, whose DACL gives Everyone
+  # read-only and full access to SYSTEM and Administrators — was read as
+  # "nobody is home". This block then terminated the owner it had never
+  # identified (PID zero, a call that can only ever be a bug) and
+  # spawned a competing daemon onto a name a live service was serving.
+  # The classifier now separates present-and-unusable from absent, and
+  # ``terminateStalePipeOwner`` takes a value only the stale branch can
+  # construct, so an UNIDENTIFIED owner cannot reach the kill: a zero
+  # PID is refused by the type's only constructor and again by the proc
+  # itself, and ``doAssert`` -- unlike ``assert`` -- is not compiled out
+  # by ``-d:release``, ``-d:danger`` or ``--assertions:off`` (measured on
+  # all three, plus ``--panics:on``).
+  #
+  # What the type does NOT do is vouch for WHICH process is named.
+  # ``WindowsPipeProbe``'s fields are all exported, so ordinary safe Nim
+  # outside this module can hand ``stalePipeOwner`` a forged
+  # ``WindowsPipeProbe(status: wpsStale, serverPid: <any live pid>)``
+  # and terminate an unrelated process -- demonstrated against a
+  # sacrificial child. The guarantee is therefore "never an unidentified
+  # owner", not "never the wrong one"; the latter still rests on this
+  # being the only call site and on the probe it passes coming from
+  # ``probeWindowsPipeOwner``. Sealing it would mean un-exporting
+  # ``serverPid`` or giving the probe a type callers cannot spell.
   when defined(windows):
     let canonicalPipe = defaultRunQuotaWindowsPipePath()
     if canonicalPipe.len > 0:
       let probe = probeWindowsPipeOwner(canonicalPipe)
-      if probe.status == wpsStale:
-        # Owner is dead or inaccessible — drop it so NPFS releases the
-        # name. ``terminateStalePipeOwner`` is a no-op when the owner
-        # has already exited (the kernel may take milliseconds to reap
-        # the handle after process exit).
-        discard terminateStalePipeOwner(probe.serverPid)
+      case probe.status
+      of wpsStale:
+        # The ONLY branch that may act on the name. ``wpsStale`` means
+        # the kernel named an owner PID and that PID is proven gone, so
+        # dropping it is what lets NPFS release the name.
+        # ``terminateStalePipeOwner`` is a no-op when the owner has
+        # already exited (the kernel may take milliseconds to reap the
+        # handle after process exit), and it cannot be called at all
+        # without a ``stalePipeOwner``, which this status is what
+        # produces.
+        discard terminateStalePipeOwner(stalePipeOwner(probe))
         # Give NPFS a tick to clear the handle then re-probe so the
         # subsequent ``isRunQuotaDaemonReachable`` block in the spawn
         # loop sees a healthy daemon.
@@ -16426,6 +16455,32 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
           if probeWindowsPipeOwner(canonicalPipe).status == wpsAbsent:
             break
           sleep(50)
+      of wpsAccessDenied, wpsBusy, wpsIndeterminate:
+        # SOMETHING HOLDS THE NAME. Before this branch existed all three
+        # arrived here as ``wpsStale``, and the recovery above ran: a
+        # terminate against the PID the probe had failed to identify
+        # (zero), followed by a fresh ``runquotad`` spawned onto a pipe
+        # name a live service was already serving. The observed case was
+        # the MSI-installed service: its DACL grants Everyone read-only,
+        # a UAC-filtered token gets ERROR_ACCESS_DENIED, and the client
+        # concluded the daemon was dead.
+        #
+        # Returning nil is the "no daemon of ours" path the rest of this
+        # function already has for a missing binary: downstream
+        # ``tryEnsureInlineRunQuotaSession`` probes ``connectDefault``
+        # and either the bypass or the engine's diagnostic takes over.
+        # What is new is that the reason reaches the operator, because
+        # "runquota unreachable" and "runquota needs elevation" are
+        # different problems with different fixes.
+        stderr.writeLine("repro: not starting a runquota daemon: " &
+          probe.failureReason)
+        return nil
+      of wpsAbsent, wpsHealthy:
+        # Absent: nothing to recover, fall through to the fresh spawn.
+        # Healthy: an owner is alive but did not complete the handshake
+        # (``isRunQuotaDaemonReachable`` already returned false to get
+        # us here); unchanged from before this fix.
+        discard
   let runquotad = findRunQuotaDaemonBin()
   if runquotad.len == 0:
     # No daemon binary discovered. Return nil silently — downstream

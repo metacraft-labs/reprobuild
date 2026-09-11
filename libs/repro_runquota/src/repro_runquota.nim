@@ -727,19 +727,80 @@ when defined(windows):
     rqWinProcessTerminate = 0x0001'i32
     rqWinStillActive = 259'i32
     rqWinInvalidHandle = cast[Handle](-1)
+    # The Win32 error codes this classifier must tell APART. They used
+    # to be one code path -- "CreateFileW failed, call it stale" -- and
+    # folding them is what let a healthy, privileged daemon be reported
+    # as nobody-is-home. Each is a DIFFERENT fact about the pipe:
+    rqWinErrorFileNotFound = 2'i32
+      ## ``ERROR_FILE_NOT_FOUND`` -- the pipe is genuinely gone. THE
+      ## ONLY absence signal there is.
+    rqWinErrorPathNotFound = 3'i32
+      ## ``ERROR_PATH_NOT_FOUND`` -- same, for a malformed or missing
+      ## pipe namespace component.
+    rqWinErrorAccessDenied = 5'i32
+      ## ``ERROR_ACCESS_DENIED`` -- a server IS listening and its DACL
+      ## does not grant this token what the client asked for. The
+      ## OPPOSITE of absent.
+    rqWinErrorInvalidParameter = 87'i32
+      ## What ``OpenProcess`` returns for a PID that does not exist,
+      ## which is the one OpenProcess failure that proves the owner is
+      ## gone rather than merely out of reach.
+    rqWinErrorPipeBusy = 231'i32
+      ## ``ERROR_PIPE_BUSY`` -- every instance is connected. Present and
+      ## SERVING; the client's answer is to wait, never to kill.
 
   type
     WindowsPipeStatus* = enum
       ## Result of probing the canonical Windows runquota named pipe.
       ##
-      ## ``wpsAbsent`` — pipe does not exist in NPFS.
-      ## ``wpsHealthy`` — pipe exists AND owner process is alive (caller
-      ##   should attempt the Hello/HelloOk round-trip).
-      ## ``wpsStale`` — pipe exists but owner is unknown, dead, or
-      ##   inaccessible. Caller should attempt stale-pipe recovery.
+      ## The three-value version of this enum folded every
+      ## ``CreateFileW`` failure that was not "pipe absent" into
+      ## ``wpsStale``, and ``wpsStale`` is the one value that authorises
+      ## the caller to TERMINATE the owner and take the name. That made
+      ## "I am not allowed to talk to it" and "nobody is home"
+      ## indistinguishable, which they are not: the first is a live
+      ## service the caller must leave alone.
+      ##
+      ## Only ``wpsStale`` may lead to a terminate, and only
+      ## ``wpsAbsent`` may lead to a spawn on that name. Every other
+      ## value means SOMETHING HOLDS THE NAME — do neither.
       wpsAbsent
+        ## The pipe does not exist in NPFS. ``WaitNamedPipeW`` said so,
+        ## or ``CreateFileW`` returned ``ERROR_FILE_NOT_FOUND`` /
+        ## ``ERROR_PATH_NOT_FOUND``. Safe to spawn.
       wpsHealthy
+        ## Pipe exists, opened, and the kernel-reported owner process is
+        ## alive. Caller should attempt the Hello/HelloOk round-trip.
       wpsStale
+        ## Pipe exists, the kernel named an owner PID, and that PID is
+        ## PROVEN gone. This is the only value that authorises recovery,
+        ## and by construction it carries ``serverPid > 0`` — see
+        ## ``StalePipeOwner``.
+      wpsBusy
+        ## ``ERROR_PIPE_BUSY``: a server is there and every instance is
+        ## currently connected. Present and serving. Waiting is the
+        ## answer; terminating would kill a working daemon and spawning
+        ## would contend for a name somebody already holds.
+      wpsAccessDenied
+        ## ``ERROR_ACCESS_DENIED``: a server is there and this token may
+        ## not open it with the access the client needs. Measured
+        ## against the MSI-installed service pipe, whose DACL is
+        ## ``O:BA G:SY D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;WD)`` — SYSTEM
+        ## and Administrators get everything, everyone else gets
+        ## ``FILE_GENERIC_READ`` alone, so a UAC-filtered medium-
+        ## integrity token gets error 5 for the ``GENERIC_READ |
+        ## GENERIC_WRITE`` this probe asks for and the same call from an
+        ## elevated shell returns a handle. The actionable fact is
+        ## ELEVATION, and the caller must say so rather than declaring
+        ## the daemon dead.
+      wpsIndeterminate
+        ## The pipe is there and nothing about it could be established:
+        ## an unrecognised ``CreateFileW`` error, or the handle opened
+        ## but no owner PID came back, or the owner PID could not be
+        ## probed for liveness. NOT an authorisation to act. The
+        ## previous code called all of these ``wpsStale`` and the
+        ## no-owner-PID case in particular then reached
+        ## ``terminateStalePipeOwner(0)``.
 
     WindowsPipeProbe* = object
       ## Diagnostic record returned by ``probeWindowsPipeOwner``. The
@@ -748,10 +809,30 @@ when defined(windows):
       ## the process has since exited. ``ownerAlive`` is the freshly
       ## measured liveness; ``failureReason`` is human-readable
       ## diagnostic copy threaded into ``ReproRunQuotaError``.
+      ##
+      ## INVARIANT: ``status == wpsStale`` implies ``serverPid > 0``.
+      ## ``stalePipeOwner`` is where it is enforced and
+      ## ``terminateStalePipeOwner`` is why it matters.
       status*: WindowsPipeStatus
       serverPid*: int32
       ownerAlive*: bool
       failureReason*: string
+
+    StalePipeOwner* = object
+      ## A pipe owner the probe PROVED is gone, and the only thing
+      ## ``terminateStalePipeOwner`` accepts.
+      ##
+      ## The field is deliberately not exported. Outside this module the
+      ## only way to fill one is ``stalePipeOwner``, which refuses any
+      ## probe that is not ``wpsStale`` and any PID that is not
+      ## positive — so "terminate the owner of a pipe whose owner was
+      ## never identified" stops being an expressible call rather than
+      ## an unlikely one. It used to be expressible, and the
+      ## access-denied misclassification reached it: error 5 became
+      ## ``wpsStale`` with ``serverPid == 0`` and the recovery path
+      ## called ``terminateStalePipeOwner(0)`` before spawning a
+      ## competitor onto a name a live service was holding.
+      pidValue: int32
 
   proc probeWindowsPipeOwner*(pipePath: string): WindowsPipeProbe =
     ## **Stale-pipe detection** (M9.R.13c.1). Probes the canonical
@@ -789,21 +870,65 @@ when defined(windows):
       0
     )
     if handle == rqWinInvalidHandle:
-      # Pipe exists per WaitNamedPipeW but we can't open it — treat as
-      # stale (the caller will attempt recovery). The most common cause
-      # is ERROR_PIPE_BUSY with every instance already wedged on dead
-      # workers; the recovery path terminates the owner regardless.
-      result.status = wpsStale
-      result.failureReason = "CreateFileW probe failed: error " &
-        $osLastError().int32
+      # THE FAILURE THIS CLASSIFIER EXISTS FOR. ``CreateFileW`` on a
+      # pipe that exists fails for reasons that are not each other, and
+      # the previous version of this branch returned ``wpsStale`` for
+      # all of them -- i.e. told the caller "nobody is home, kill the
+      # owner and take the name" on the strength of an error code that
+      # in the measured case meant the exact opposite.
+      let err = osLastError().int32
+      case err
+      of rqWinErrorFileNotFound, rqWinErrorPathNotFound:
+        # WaitNamedPipeW saw it and CreateFileW did not: the owner shut
+        # down in between. Genuinely absent now.
+        result.status = wpsAbsent
+        result.failureReason =
+          "CreateFileW for " & pipePath & ": pipe went away between the " &
+          "WaitNamedPipeW probe and the open (Windows error " & $err & ")"
+      of rqWinErrorAccessDenied:
+        result.status = wpsAccessDenied
+        result.failureReason =
+          "CreateFileW failed for " & pipePath & ": Windows error 5 " &
+          "(ERROR_ACCESS_DENIED). A runquota daemon IS serving this pipe " &
+          "and this process may not open it for read+write: the pipe's " &
+          "DACL grants FILE_GENERIC_READ to Everyone and full access only " &
+          "to SYSTEM and Administrators, which is what the MSI-installed " &
+          "service creates. A UAC-filtered (medium-integrity) token gets " &
+          "this error; the same call from an ELEVATED process succeeds. " &
+          "Re-run from an elevated prompt, or stop the installed " &
+          "runquota service if this build should own the daemon. Nothing " &
+          "was terminated and no competing daemon was started: the name " &
+          "is held by a live service."
+      of rqWinErrorPipeBusy:
+        result.status = wpsBusy
+        result.failureReason =
+          "CreateFileW for " & pipePath & ": Windows error 231 " &
+          "(ERROR_PIPE_BUSY). Every instance of a LIVE server is " &
+          "connected; wait for one rather than treating the pipe as dead."
+      else:
+        result.status = wpsIndeterminate
+        result.failureReason =
+          "CreateFileW failed for " & pipePath & ": Windows error " & $err &
+          ". The pipe is present and its state could not be established, " &
+          "so no owner was identified and nothing will be terminated."
       return result
     var serverPid: int32 = 0
     let pidOk = getNamedPipeServerProcessIdW(handle, addr serverPid)
     discard closeHandleLocal(handle)
     if pidOk == 0 or serverPid == 0:
-      result.status = wpsStale
+      # NOT stale. We opened the pipe, so a server is there; we simply
+      # cannot name it. Calling this stale is what produced a
+      # terminate-with-PID-0 -- a call that can only ever be a bug,
+      # because there is no process 0 to terminate and the thing that
+      # actually holds the name is untouched by it. The honest answer
+      # is "present, unidentified", and the caller neither kills nor
+      # spawns on that.
+      result.status = wpsIndeterminate
       result.failureReason =
-        "GetNamedPipeServerProcessId returned no owner PID"
+        "GetNamedPipeServerProcessId returned no owner PID for " & pipePath &
+        " (Windows error " & $osLastError().int32 & "); the pipe opened, " &
+        "so a server holds it, but this probe cannot identify the owner " &
+        "and will not act on one it has not identified"
       return result
     result.serverPid = serverPid
     # Owner PID known — probe liveness via GetExitCodeProcess. If we
@@ -813,19 +938,42 @@ when defined(windows):
     let owner = openProcessHandle(
       rqWinProcessQueryLimitedInfo, WINBOOL(0), serverPid)
     if owner == 0:
-      result.status = wpsStale
-      result.failureReason =
-        "OpenProcess on owner PID " & $serverPid & " failed: error " &
-        $osLastError().int32
+      let err = osLastError().int32
+      if err == rqWinErrorInvalidParameter:
+        # ERROR_INVALID_PARAMETER from OpenProcess means the PID does
+        # not name a process. That is proof the owner is gone, and the
+        # only OpenProcess failure that is.
+        result.status = wpsStale
+        result.failureReason =
+          "owner PID " & $serverPid & " of " & pipePath &
+          " no longer exists (OpenProcess: Windows error 87) but the " &
+          "pipe persists in NPFS"
+      else:
+        # Anything else -- ERROR_ACCESS_DENIED above all -- says the
+        # process is there and out of this token's reach, which is the
+        # same mistake one level down: a daemon running as SYSTEM is
+        # alive, not stale, and must not be terminated or competed with.
+        result.status = wpsIndeterminate
+        result.failureReason =
+          "OpenProcess on owner PID " & $serverPid & " of " & pipePath &
+          " failed: Windows error " & $err &
+          (if err == rqWinErrorAccessDenied:
+             ". The owner is running under an account this process cannot " &
+             "open (a service running as SYSTEM, typically); it is ALIVE, " &
+             "not stale. Re-run elevated if this build must manage it."
+           else:
+             ". Liveness could not be measured, so the owner is not " &
+             "assumed dead.")
       return result
     var exitCode: int32 = 0
     let exitOk = getExitCodeProcessW(owner, addr exitCode)
     discard closeHandleLocal(owner)
     if exitOk == 0:
-      result.status = wpsStale
+      result.status = wpsIndeterminate
       result.failureReason =
-        "GetExitCodeProcess on owner PID " & $serverPid &
-        " failed: error " & $osLastError().int32
+        "GetExitCodeProcess on owner PID " & $serverPid & " of " & pipePath &
+        " failed: Windows error " & $osLastError().int32 &
+        "; liveness unmeasured, so the owner is not assumed dead"
       return result
     if exitCode != rqWinStillActive:
       result.status = wpsStale
@@ -837,14 +985,54 @@ when defined(windows):
     result.status = wpsHealthy
     result.ownerAlive = true
 
-  proc terminateStalePipeOwner*(pid: int32): bool =
-    ## Terminate the (possibly wedged) owner of a stale runquota pipe so
-    ## the kernel reclaims the NPFS object. Returns true on success or
-    ## when the owner is already dead. The caller's job is to then spawn
-    ## a fresh ``runquotad`` — the recovery path in
+  proc stalePipeOwner*(probe: WindowsPipeProbe): StalePipeOwner =
+    ## The only constructor for ``StalePipeOwner``, and therefore the
+    ## only door to ``terminateStalePipeOwner``.
+    ##
+    ## Both refusals are ``doAssert`` rather than a quiet fallback on
+    ## purpose. "Terminate the owner of a pipe whose owner I could not
+    ## identify" is not a degraded request to be serviced conservatively;
+    ## it is a statement that the caller's state machine reached a
+    ## decision it had no evidence for, and the useful behaviour is to
+    ## stop with the reason on screen. Every call site reaches this
+    ## through a ``case`` on ``WindowsPipeStatus``, so a new status that
+    ## forgets the distinction fails to compile before it can fire.
+    doAssert probe.status == wpsStale,
+      "stalePipeOwner: refusing to build a terminate target from a " &
+      $probe.status & " probe. Only wpsStale means the owner was " &
+      "identified AND proven dead; every other status means something " &
+      "holds the pipe. Reason recorded by the probe: " & probe.failureReason
+    doAssert probe.serverPid > 0,
+      "stalePipeOwner: wpsStale probe carries PID " & $probe.serverPid &
+      ", which breaks the WindowsPipeProbe invariant. A terminate with a " &
+      "non-positive PID is always a bug: there is no such process to kill " &
+      "and whatever really holds the pipe survives untouched."
+    StalePipeOwner(pidValue: probe.serverPid)
+
+  proc ownerPid*(owner: StalePipeOwner): int32 =
+    ## Read accessor; the field itself stays module-private so the type
+    ## cannot be filled in from outside.
+    owner.pidValue
+
+  proc terminateStalePipeOwner*(owner: StalePipeOwner): bool =
+    ## Terminate the owner of a stale runquota pipe so the kernel
+    ## reclaims the NPFS object. Returns true on success or when the
+    ## owner is already dead. The caller's job is to then spawn a fresh
+    ## ``runquotad`` — the recovery path in
     ## ``startAutoRunQuotaIfNeeded`` does both atomically.
-    if pid <= 0:
-      return true
+    ##
+    ## Takes a ``StalePipeOwner`` and not a PID. The argument type IS
+    ## the precondition: a caller cannot reach this with the PID of a
+    ## process it never identified, because it cannot produce the
+    ## argument. The assertion below covers the one remaining way to
+    ## make an empty one — Nim permits ``StalePipeOwner()`` even with a
+    ## private field — so a zero cannot reach ``OpenProcess`` by any
+    ## route.
+    let pid = owner.pidValue
+    doAssert pid > 0,
+      "terminateStalePipeOwner: PID " & $pid & ". A default-constructed " &
+      "StalePipeOwner reached the terminate path; the only legitimate " &
+      "source is stalePipeOwner(probe) on a wpsStale probe."
     let handle = openProcessHandle(
       rqWinProcessTerminate or rqWinProcessQueryLimitedInfo,
       WINBOOL(0), pid)
@@ -896,8 +1084,20 @@ proc isRunQuotaDaemonReachable*(): bool =
       let probe = probeWindowsPipeOwner(endpoint.path)
       case probe.status
       of wpsAbsent, wpsStale:
+        # Nothing to talk to, and the caller may act on the name.
         return false
-      of wpsHealthy:
+      of wpsAccessDenied:
+        # A daemon is there and this token may not use it. Reported as
+        # UNREACHABLE, because it is -- but ``startAutoRunQuotaIfNeeded``
+        # reads the same probe and refuses to terminate or spawn on the
+        # strength of it. Returning early also avoids a
+        # ``connectDefault`` that would fail with the same error 5 after
+        # a timeout, turning a millisecond answer into a wedge.
+        return false
+      of wpsHealthy, wpsBusy, wpsIndeterminate:
+        # Something is serving the name. Let the Hello/HelloOk
+        # round-trip below decide; the one thing none of these may do is
+        # authorise recovery.
         discard
   try:
     var client = connectDefault()
