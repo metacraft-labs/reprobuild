@@ -846,14 +846,32 @@ same family whose from-source recipe cousins failed merged at 24 and passed at
 16 in the crossover section above, and the accumulating per-module solve
 underneath it is an unresolved product question rather than a bundle-size one.
 The 13-member group this batch *did* take is the complement of exactly that
-distinction, and the distinction was checked rather than assumed: not one of its
-13 members declares a top-level `package` block, and neither does the single
-helper one of them reaches by path import
+distinction: not one of its 13 members declares a top-level `package` block,
+and neither does the single helper one of them reaches by path import
 (`libs/repro_dsl_stdlib/tests/packaging_test_support.nim`, which imports
-`repro_project_dsl` but declares only procs). Nothing in that bundle runs the
-`package` macro at module init; every member of the 22-member group does. That
-is why the two are separate rows in the candidate list, and it is the whole
-reason one of them is safe to take today.
+`repro_project_dsl` but declares only procs).
+
+**Corrected at review:** an earlier revision of this paragraph then said
+"nothing in that bundle runs the `package` macro at module init; every member
+of the 22-member group does". That is a stronger claim than the evidence
+supports, and it is false in both halves. Closing the scan over *library*
+imports as well as path imports — `repro_dsl_stdlib/packages/*` modules
+declare top-level `package` blocks and are pulled in directly and through
+`catalog_registry` — **5 of the 13 taken** reach one (`t_catalog_claude_code`,
+`t_m67_bulk_catalog`, `t_m8_bulk_catalog`,
+`t_packaging_wrapper_vars_match_flake`, `t_versioned_provisioning_schema`) and
+**21 of the 22 rejected** do (`t_isonim_ssg_render_edge` does not). The
+difference between the two groups is one of density, not of kind: 5/13 against
+21/22, and in the taken group the declarations arrive through catalog modules
+rather than through the recipe imports and `package`-declaring test bodies that
+characterise the rejected family.
+
+What actually licenses taking the 13 is therefore the measurement, not the
+taxonomy: all 13 were compiled and run standalone first, the bundle exits 0 run
+whole, and all 110 cases pass individually. The rejection of the 22 rests on
+the from-source recipe cousins failing merged at 24 and passing at 16, plus the
+absence of any measurement of the 22 merged — which is a reason to defer, and
+is how it should have been stated.
 
 ### What batch 2 ran, and what it did not
 
@@ -921,15 +939,21 @@ in the ledger under `executionScope`.
 Two things in it are worth correcting for the record, neither of which changes
 any of batch 1's measured figures:
 
-* Both of its bundles record `"dependencyShape": []`. For
-  `bundle_repro_lock_files_pure_unit` that is right — its eight members reach
-  `repro_lock_files` through `./nlf_m8_fixture`, and the shape function does not
-  follow path imports, so the group's recorded shape genuinely was `[]`. For
-  `bundle_repro_peer_cache_pure_unit` it is not: that group's shape was
-  `['repro_peer_cache']`. Either way the effect is the same — an empty list
-  makes `check bundle["dependencyShape"].len <= maxDeps` assert nothing. This
+* **ONE** of its bundles records `"dependencyShape": []`, not both.
+  (Corrected at review. An earlier revision of this bullet said both, and the
+  batch-2 ledger's `limits.enforcementPoints` repeated it; the file on disk at
+  the only commit that ever wrote it — `a7798b480` — records `[]` for
+  `bundle_repro_lock_files_pure_unit` and `['repro_peer_cache']` for
+  `bundle_repro_peer_cache_pure_unit`. So the peer-cache half of the original
+  claim was simply wrong, and the corrected form is narrower.)
+  For `bundle_repro_lock_files_pure_unit` the `[]` is what the shape function
+  returns — its eight members reach `repro_lock_files` through
+  `./nlf_m8_fixture`, and the shape function does not follow path imports, so
+  the group's recorded shape genuinely was `[]`. The effect on the gate is
+  real but confined to that one bundle: an empty list makes
+  `check bundle["dependencyShape"].len <= maxDeps` assert nothing for it. This
   batch records the real shapes (1, 1, 2, 1 roots against a limit of 4), so the
-  assertion has something to bite on.
+  assertion has something to bite on for every bundle it covers.
 * `local_dependency_shape` is **not** closed over repository-local path imports,
   although `pure_unit_verdict` now is. That asymmetry is why
   `libs/repro_lock_files` presented as two groups: the eight fixture-using

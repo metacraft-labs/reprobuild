@@ -16,7 +16,7 @@
   "maxBundleOwners": 1,
   "maxDependencyRoots": 4,
   "rationale": "See `MaxBundleMembers` in scripts/generate_test_edges.nim. 24 remains a ceiling on what may be ATTEMPTED, not a certificate that 24 is safe: the from-source recipe family failed merged at 24 and passed at 16. This batch's largest bundle is 13. Every bundle here shows per-case pass under --run plus whole-binary exit 0 on its own evidence.",
-  "enforcementPoints": "maxBundleMembers and maxBundleOwners are enforced in the generator by `checkBundleLimits`, which quits(1) rather than warns. maxDependencyRoots is asserted from this ledger ONLY; the generator has no corresponding constant. Batch 1's brief mis-stated this and its ledger recorded `dependencyShape: []` for both bundles, which made the ledger-side assertion vacuous \u2014 this batch records the real group shapes (1, 1, 2, 1 roots)."
+  "enforcementPoints": "maxBundleMembers and maxBundleOwners are enforced in the generator by `checkBundleLimits`, which quits(1) rather than warns. maxDependencyRoots is asserted from this ledger ONLY; the generator has no corresponding constant. Batch 1's brief mis-stated this and its ledger recorded `dependencyShape: []` for ONE of its two bundles (bundle_repro_lock_files_pure_unit; bundle_repro_peer_cache_pure_unit correctly records ['repro_peer_cache']), which made the ledger-side assertion vacuous for that one bundle \u2014 this batch records the real group shapes (1, 1, 2, 1 roots). CORRECTED AT REVIEW: this field previously said `[]` for BOTH batch-1 bundles, which the file at a7798b480 refutes."
  },
  "compatibilityAliases": {},
  "bundlesNotCoveredByThisLedger": {},

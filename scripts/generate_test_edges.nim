@@ -236,8 +236,12 @@ const PureUnitBundles: seq[PureUnitBundle] = @[
   #
   # Dependency shapes, recorded because the ledger asserts them against
   # `maxDependencyRoots` and an EMPTY list asserts nothing (batch 1's ledger
-  # recorded `[]` for both its bundles, including one whose group shape was
-  # `['repro_peer_cache']`, which made that assertion vacuous):
+  # records `[]` for ONE of its two bundles —
+  # `bundle_repro_lock_files_pure_unit`, whose eight members reach
+  # `repro_lock_files` only through `./nlf_m8_fixture` and whose shape the
+  # scan therefore reads as empty — which makes that assertion vacuous for
+  # that bundle; `bundle_repro_peer_cache_pure_unit` correctly records
+  # `['repro_peer_cache']`):
   # `['repro_lock_files']`, `['repro_core']`,
   # `['repro_core', 'repro_project_dsl']`, `['repro_dsl_stdlib']` — 1, 1, 2, 1
   # roots against a limit of 4.
@@ -254,13 +258,21 @@ const PureUnitBundles: seq[PureUnitBundle] = @[
   #     of `benchmarks/reports/reprobuild-suite-m4-consolidation.md`), and the
   #     accumulating per-module solve underneath it is an unresolved product
   #     question, not a bundle-size one. The 13-member group below is the
-  #     complement of exactly that, and the distinction was checked rather
-  #     than assumed: not one of its 13 members declares a top-level
-  #     `package` block, and neither does the single helper one of them
-  #     reaches by path import (`./packaging_test_support`, which imports
-  #     `repro_project_dsl` but declares only procs). Nothing in that bundle
-  #     runs the `package` macro at module init; every member of the
-  #     22-member group does.
+  #     complement of exactly that: not one of its 13 members declares a
+  #     top-level `package` block, and neither does the single helper one of
+  #     them reaches by path import (`./packaging_test_support`, which imports
+  #     `repro_project_dsl` but declares only procs).
+  #     CORRECTED AT REVIEW: an earlier revision of this comment went on to
+  #     say "nothing in that bundle runs the `package` macro at module init;
+  #     every member of the 22-member group does". Both halves are false once
+  #     the scan follows LIBRARY imports and not only path imports:
+  #     `repro_dsl_stdlib/packages/*` modules declare top-level `package`
+  #     blocks and arrive directly and through `catalog_registry`, so 5 of
+  #     the 13 taken reach one and 21 of the 22 rejected do. The groups
+  #     differ in density (5/13 vs 21/22), not in kind. What licenses taking
+  #     the 13 is the measurement — every member run standalone first, the
+  #     bundle exit 0 whole and 110/110 individually — not the taxonomy; the
+  #     22 are deferred because nobody has measured them merged.
   #   * `libs/repro_cas_store` (5 members, 100 cases). Its recorded dependency
   #     shape is `['repro_cas_store', 'repro_core']`, and that shape does not
   #     mention the library through which its members actually share
