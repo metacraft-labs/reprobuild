@@ -51338,7 +51338,14 @@ type
     baselineSource*: string
       ## Fork form only: ``source_head`` when the source checkout supplied the
       ## branch point, ``declared_checkout`` when the repo was absent there and
-      ## the target's normally-materialized checkout supplied it.
+      ## the target's normally-materialized checkout supplied it,
+      ## ``mainline_head`` under WV-7 ``--from-mainlines`` (the repo's declared
+      ## mainline tip supplied it, whichever of the two the repo is).
+    mainlineBranch*: string
+      ## WV-7 fork form only: the branch the ``mainline_head`` baseline was read
+      ## from — ``dev`` in one repo and ``latest`` in the next, since the
+      ## mainline is per repo. Empty when the baseline came from elsewhere, so a
+      ## report never asserts a mainline nothing consulted.
     publication*: string
       ## F0.3 fork form only: the source HEAD's publication verdict —
       ## ``published``, ``published_after_fetch``, ``unpublished`` or
@@ -51406,6 +51413,7 @@ proc toJsonNode*(report: BranchReport): JsonNode =
     obj["dirtyReason"] = %entry.dirtyReason
     obj["diagnostic"] = %entry.diagnostic
     obj["baselineSource"] = %entry.baselineSource
+    obj["mainlineBranch"] = %entry.mainlineBranch
     obj["publication"] = %entry.publication
     obj["sourceBranch"] = %entry.sourceBranch
     repos.add(obj)
@@ -51430,6 +51438,10 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
   # create form
   for entry in report.repos:
     var line = "workspace branch: " & entry.path & " " & entry.outcome
+    if entry.mainlineBranch.len > 0:
+      # WV-7 — the mainline is per repo, so which one THIS repo was cut from is
+      # the fact a reader of a 120-line digest cannot reconstruct otherwise.
+      line.add(" mainline=" & entry.mainlineBranch)
     if entry.headSha.len > 0:
       line.add(" head=" &
         entry.headSha[0 ..< min(8, entry.headSha.len)])
@@ -51473,6 +51485,7 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     for entry in report.repos:
       if entry.outcome in ["branched", "branched_with_changes",
                            "branched_from_declared_baseline",
+                           "branched_from_mainline",
                            branchOutcomeTag(broCreated)]:
         created.add(entry.path)
       elif entry.outcome != "ready" and
@@ -51534,10 +51547,23 @@ type
       ## inherited rather than re-derived. A non-empty value REPLACES the
       ## inherited set, which is how a developer forks a narrower (or wider)
       ## slice than they currently have checked out.
-    destinationRefusal: string
-      ## WV-6 — a destination guard that fired during parsing. Carried rather
-      ## than raised so the command reports it as an ordinary refusal (exit 2,
-      ## nothing created) instead of as a usage error.
+    fromMainlines: bool
+      ## WV-7 ``--from-mainlines`` — take the repo SET from this workspace and
+      ## every repo's STARTING COMMIT from that repo's manifest-declared
+      ## mainline, rather than from its source checkout's HEAD. The two are
+      ## separable, and a fork that wants "the repos I have, starting at trunk"
+      ## is asking for exactly that separation.
+    fetch: bool
+      ## WV-7 ``--fetch`` (the default) / ``--no-fetch`` — whether the declared
+      ## mainlines are refreshed before they are read. Default-on for the same
+      ## reason as on ``repro switch``: "branch off trunk" means the trunk that
+      ## exists now. Only consulted under ``--from-mainlines``; giving it
+      ## without that flag is a usage error rather than a silent no-op.
+    preflightRefusal: string
+      ## WV-6 / WV-7 — a guard that fired during parsing (an unusable
+      ## destination, or a pair of flags that contradict each other). Carried
+      ## rather than raised so the command reports it as an ordinary refusal
+      ## (exit 2, nothing created) instead of as a usage error.
     checkout: bool          ## M28: create AND switch every repo onto the branch.
     json: bool
     toolProvisioning: ToolProvisioningMode
@@ -51603,7 +51629,9 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   ## same class of surprise the verb split exists to remove.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
+  result.fetch = true
   var explicitBranch = ""
+  var fetchGiven = false
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -51617,6 +51645,14 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       explicitBranch = valueFromFlag(args, i, "--branch")
     elif arg == "--existing-branch":
       result.existingBranch = true
+    elif arg == "--from-mainlines":
+      result.fromMainlines = true
+    elif arg == "--fetch":
+      result.fetch = true
+      fetchGiven = true
+    elif arg == "--no-fetch":
+      result.fetch = false
+      fetchGiven = true
     elif arg == "--include-changes":
       result.includeChanges = true
     elif arg == "--unpublished" or arg.startsWith("--unpublished="):
@@ -51665,13 +51701,25 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
     # destination, so accepting them here would silently do nothing.
     if explicitBranch.len > 0 or result.existingBranch or
         result.includeChanges or result.projects.len > 0 or
-        result.unpublished != upRefuse:
+        result.unpublished != upRefuse or result.fromMainlines or fetchGiven:
       raise newException(ValueError,
         "`--branch` / `--existing-branch` / `--include-changes` / " &
-          "`--unpublished` / `--projects` require a " &
+          "`--unpublished` / `--projects` / `--from-mainlines` / " &
+          "`--fetch` require a " &
           "destination path (`" & verb & " <path>`); with no path " &
           "`repro branch` only reports the current workspace branch")
     return
+  # WV-7 — ``--fetch`` / ``--no-fetch`` only decide whether the MAINLINES are
+  # refreshed, so on their own they would be a flag that silently does nothing.
+  # The fork's other network step (the branch-collision probe) is not optional
+  # and is not what this flag governs.
+  if fetchGiven and not result.fromMainlines:
+    raise newException(ValueError,
+      "`" & (if result.fetch: "--fetch" else: "--no-fetch") &
+        "` needs `--from-mainlines`: it decides whether the declared " &
+        "mainlines are refreshed before the new branch is cut from them, " &
+        "and a fork that cuts from the source workspace's own HEADs fetches " &
+        "nothing to decide about")
   let destination = absolutePath(result.forkPath)
   # A destination INSIDE this workspace is refused. Nesting a workspace inside
   # a workspace is always wrong — the inner tree gets swept up by the outer
@@ -51679,8 +51727,18 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   # (`repro branch my-feature`) lands here, which is exactly the argument most
   # likely to be typed by accident. Failing loudly beats producing a nested
   # workspace that only misbehaves later.
-  if pathIsCwdOrAncestor(result.workspaceRoot, destination):
-    result.destinationRefusal =
+  # WV-7 — ``--existing-branch`` fixes the branch point at a branch that already
+  # exists, so there is no starting commit left for ``--from-mainlines`` to
+  # choose. This is a contradiction rather than a precedence question; letting
+  # either win silently would materialize a workspace somewhere the operator did
+  # not ask for.
+  if result.fromMainlines and result.existingBranch:
+    result.preflightRefusal =
+      "`--from-mainlines` and `--existing-branch` contradict each other: " &
+      "the first cuts a NEW branch from each repo's declared mainline, the " &
+      "second checks out a branch that ALREADY exists. Drop one of the two."
+  elif pathIsCwdOrAncestor(result.workspaceRoot, destination):
+    result.preflightRefusal =
       "'" & result.forkPath & "' is inside the current workspace (" &
       result.workspaceRoot & ").\n" &
       "  To create a branch and switch this workspace onto it:  " &
@@ -51692,7 +51750,7 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
     # source would collide with the source tree itself.  Compare through the
     # deepest existing ancestor so a not-yet-created spelling reached through
     # a symlink (notably macOS /var -> /private/var) cannot evade the guard.
-    result.destinationRefusal =
+    result.preflightRefusal =
       "'" & result.forkPath & "' contains the current workspace (" &
       result.workspaceRoot & "); the fork destination must be a separate " &
       "directory outside the source workspace"
@@ -52130,8 +52188,8 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo verb & " [<path>] [--branch=NAME] [--existing-branch] " &
       "[--include-changes] [--unpublished=refuse|carry|declared] " &
-      "[--projects=A,B] [--workspace-root=PATH] " &
-      "[--json] [--write-report[=PATH]]"
+      "[--projects=A,B] [--from-mainlines] [--fetch|--no-fetch] " &
+      "[--workspace-root=PATH] [--json] [--write-report[=PATH]]"
     echo "  (no argument)     print the current workspace branch"
     echo "  <path>            fork into a NEW workspace directory at <path>;"
     echo "                    the branch is named after the path's basename"
@@ -52144,6 +52202,11 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
     echo "                    (start that repo from its manifest revision)"
     echo "  --projects=A,B    give the new workspace THIS project set instead"
     echo "                    of inheriting the current one (repeatable)"
+    echo "  --from-mainlines  take the repo SET from this workspace but start"
+    echo "                    every repo from its declared mainline (dev /"
+    echo "                    latest / live / …) instead of from its HEAD"
+    echo "  --fetch           refresh those mainlines first (the default);"
+    echo "  --no-fetch        cut from the mainline refs already on disk"
     echo ""
     echo "  The new workspace inherits this workspace's enabled projects."
     echo "  To switch THIS workspace onto a branch, use `repro switch`."
@@ -52152,11 +52215,12 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
   # WV-6 — two forms only: a destination path forks, no argument shows. The
   # in-place create forms are `repro switch -b`, which reaches
   # ``executeBranchCreateAndCheckout`` on its own.
-  if parsed.destinationRefusal.len > 0:
+  if parsed.preflightRefusal.len > 0:
     # A guard that fired before anything was resolved. Reported as a refusal —
     # exit 2, nothing created — not as a usage error, because the operator's
-    # command was well-formed and the destination is the thing at fault.
-    stderr.writeLine(verb & ": " & parsed.destinationRefusal)
+    # command is well-formed and the destination (or the flag pair) is the thing
+    # at fault.
+    stderr.writeLine(verb & ": " & parsed.preflightRefusal)
     return 2
   let report =
     if parsed.forkPath.len > 0:
@@ -54615,6 +54679,14 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## enabled project set, so it holds the same repos. ``--projects=A,B``
   ## replaces that set outright for the new workspace only; the source's
   ## membership is never edited either way.
+  ##
+  ## WV-7 ``--from-mainlines`` separates the two things a fork takes from the
+  ## workspace it runs in: it keeps the repo SET and replaces every baseline
+  ## with that repo's manifest-declared mainline tip, so the new workspace is a
+  ## fresh deviation from trunk holding exactly the repos you have here.
+  ## ``--fetch`` (the default) refreshes those mainlines first; ``--no-fetch``
+  ## reads what is already on disk. Neither degrades silently — see the mainline
+  ## block below.
   result.branch = parsed.branchName
   result.form = "fork"
   result.sourceWorkspaceRoot = parsed.workspaceRoot
@@ -54735,6 +54807,19 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         ## F0.3 — the branch the SOURCE checkout is on. The name that gives a
         ## carried commit its meaning, and the thing the original defect threw
         ## away by naming every new branch after the destination directory.
+      mainlineBranch: string
+        ## WV-7 — the branch the MANIFEST declares this repo's mainline to be
+        ## (``declaredMainlineBranch``). Empty unless ``--from-mainlines``.
+      mainlineTip: string
+        ## WV-7 — the commit ``refs/remotes/<remote>/<mainlineBranch>`` resolves
+        ## to. This is the branch point under ``--from-mainlines``; for a repo
+        ## absent from the source it is resolved in the TARGET after
+        ## materialization, for the same reason the ``declared_checkout``
+        ## baseline is.
+      mainlineUndeclared: bool
+      mainlineUnresolved: bool
+      mainlineFetchFailed: bool
+      mainlineDiagnostic: string
 
   var states: seq[ForkSourceState]
   var anyProbeFailed = false
@@ -54748,16 +54833,41 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     state.repo = repo
     state.srcPath = parsed.workspaceRoot / repo.path
     state.isClean = true
+    # WV-7 — the mainline is READ from the manifest, never inferred. The
+    # fragment's ``branch``, else a branch-shaped ``revision``, else the
+    # project's ``trunk`` (``declaredMainlineBranch``, the same resolution
+    # ``switch --mainline`` and ``sync --mainline`` use, so one run legitimately
+    # cuts from `dev`, `latest`, `live` and `codetracer` at once). A repo that
+    # declares none of the three REFUSES rather than falling back to
+    # ``origin/HEAD``: that inference would cut a product repo from `main` in an
+    # org whose product mainline is `dev`, which is the mistake this flag exists
+    # to prevent.
+    if parsed.fromMainlines:
+      state.mainlineBranch = declaredMainlineBranch(resolved, repo.name)
+      if state.mainlineBranch.len == 0:
+        state.mainlineUndeclared = true
+        state.mainlineDiagnostic = "no mainline is declared for '" &
+          repo.path & "': its manifest fragment" &
+          (if repo.fragmentPath.len > 0: " (" & repo.fragmentPath & ")" else: "") &
+          " sets no `branch`, its `revision` is a pin rather than a branch, " &
+          "and the project declares no `trunk`. `--from-mainlines` reads the " &
+          "manifest — declare `branch` in the fragment, or drop the flag to " &
+          "branch from this workspace's own HEADs"
     if not dirExists(state.srcPath / ".git"):
       state.sourcePresent = false
       if not parsed.existingBranch:
-        state.baselineSource = "declared_checkout"
+        # The baseline comes from the TARGET checkout either way; under
+        # ``--from-mainlines`` it is that checkout's mainline ref rather than
+        # the revision the manifest/lock materialized.
+        state.baselineSource =
+          if parsed.fromMainlines: "mainline_head" else: "declared_checkout"
         state.useDeclaredBaseline = true
       states.add(state)
       continue
     state.sourcePresent = true
     if not parsed.existingBranch:
-      state.baselineSource = "source_head"
+      state.baselineSource =
+        if parsed.fromMainlines: "mainline_head" else: "source_head"
     let headRes = queryGitState(headShaQuery(state.srcPath), identity)
     if headRes.status != gqsOk:
       state.probeFailed = true
@@ -54783,8 +54893,12 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     #
     # Skipped under ``--existing-branch``: there the branch point comes from a
     # branch that already exists on a remote, so there is no source HEAD being
-    # propagated and nothing to judge.
-    if not parsed.existingBranch:
+    # propagated and nothing to judge. WV-7 ``--from-mainlines`` skips it for
+    # the same reason — the branch point is a mainline tip, which is a commit
+    # that is on a remote by construction. Leaving ``publicationAsked`` false
+    # keeps the report's ``publication`` field EMPTY rather than asserting a
+    # verdict nothing computed.
+    if not parsed.existingBranch and not parsed.fromMainlines:
       state.publication = headPublicationOf(identity, state.srcPath,
         gitRemoteNameFor(repo), allowFetch = false)
       state.publicationAsked = true
@@ -54829,6 +54943,155 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   defer:
     if dirExists(remoteProbeRoot):
       removeDir(remoteProbeRoot)
+
+  # ---- WV-7: refresh and read the declared mainlines ----------------------
+  # Part of the SAME network phase, and ahead of the collision probe, because
+  # the tips it reads are the branch points everything after this depends on.
+  #
+  # ``--fetch`` is the default (CLI/branch.md §"Fetching"): "branch off trunk"
+  # means the trunk that exists now, and a workspace cut from last week's trunk
+  # looks current and builds old code. The fetch updates REMOTE-TRACKING REFS
+  # ONLY — no branch, no HEAD, no working tree — so the promise that the source
+  # workspace is not modified still holds, and its receipts are written into the
+  # throwaway preflight root rather than into the source.
+  #
+  # Nothing here degrades silently. An unresolvable mainline names ``--fetch``;
+  # a failed fetch names ``--no-fetch``. Cutting from a stale ref after the
+  # operator explicitly asked for a refresh would report success for a workspace
+  # built on the trunk they were trying to leave behind.
+  var rootMainlineBranch = ""
+  var rootMainlineTip = ""
+  var rootMainlineRefusal = ""
+  if parsed.fromMainlines:
+    # The ROOT repo carries the membership manifests, so cutting it from a stale
+    # local state while every member repo starts at trunk would hand back a
+    # workspace whose bill of materials disagrees with its contents. Its
+    # mainline is a declaration too: the bootstrap config's
+    # ``[manifest] branch``, else the root repo's own ``origin/HEAD``.
+    let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
+    if bootstrapPath.len > 0:
+      try:
+        let cfg = readWorkspaceBootstrap(bootstrapPath)
+        if cfg.manifest.branch.isSome:
+          rootMainlineBranch = cfg.manifest.branch.get().strip()
+      except CatchableError:
+        # An unreadable bootstrap config is not this command's error to raise;
+        # fall through to ``origin/HEAD`` and, failing that, to the refusal
+        # below, which names the key to set.
+        discard
+    if rootMainlineBranch.len == 0:
+      let headRef = gitRunPlain(identity,
+        ["-C", parsed.workspaceRoot, "symbolic-ref", "--short", "-q",
+         "refs/remotes/origin/HEAD"])
+      if headRef.code == 0:
+        let value = headRef.output.strip()
+        rootMainlineBranch =
+          if value.startsWith("origin/"): value["origin/".len .. ^1]
+          else: value
+    if rootMainlineBranch.len == 0:
+      rootMainlineRefusal = "the workspace root '" & parsed.workspaceRoot &
+        "' declares no mainline: `.repro-workspace.toml` sets no " &
+        "`[manifest] branch` and the root repo has no `origin/HEAD` to read " &
+        "one from. Set `[manifest] branch`, or drop `--from-mainlines`"
+
+  if parsed.fromMainlines and parsed.fetch:
+    var fetchActions: seq[BuildAction]
+    var fetchRepoIdx = initTable[string, int]()
+    const RootFetchIndex = -1
+    for idx, state in states:
+      if not state.sourcePresent or state.mainlineUndeclared:
+        continue
+      let actionId = "workspace-branch-mainline-fetch-" &
+        safeRepoIdSegment(state.repo.name) & "-" & $idx
+      var fetch = gitFetchAction(actionId, identity,
+        remoteName = gitRemoteNameFor(state.repo),
+        repoPath = state.srcPath,
+        receiptPath = "mainline-fetch-" & $idx & ".receipt",
+        # A fetch that is asked for must actually reach the remote; a cache hit
+        # would answer "refreshed" without a round-trip.
+        cacheable = false)
+      fetch.cwd = remoteProbeRoot
+      fetch.pool = "vcs/fetch"
+      fetch.poolUnits = 1'u32
+      fetchActions.add(fetch)
+      fetchRepoIdx[actionId] = idx
+    if rootMainlineRefusal.len == 0:
+      let rootActionId = "workspace-branch-mainline-fetch-root"
+      var rootFetch = gitFetchAction(rootActionId, identity,
+        remoteName = "origin",
+        repoPath = parsed.workspaceRoot,
+        receiptPath = "mainline-fetch-root.receipt",
+        cacheable = false)
+      rootFetch.cwd = remoteProbeRoot
+      rootFetch.pool = "vcs/fetch"
+      rootFetch.poolUnits = 1'u32
+      fetchActions.add(rootFetch)
+      fetchRepoIdx[rootActionId] = RootFetchIndex
+    if fetchActions.len > 0:
+      stderr.writeLine("workspace branch: refreshing " &
+        $fetchActions.len & " declared mainline(s) (jobs-network=8; " &
+        "--no-fetch skips this) ...")
+      var config = defaultBuildEngineConfig(remoteProbeRoot / "mainline-cache")
+      config.suppressTrace = true
+      config.maxParallelism = 8'u32
+      config.fallbackToRunQuotaBypass = true
+      let fetchRun = runBuild(graph(fetchActions,
+        @[pool("vcs/fetch", 8'u32)]), config)
+      var fetchOutcomeById = initTable[string, ActionResult]()
+      for outcome in fetchRun.results:
+        fetchOutcomeById[outcome.id] = outcome
+      for action in fetchActions:
+        let outcome = fetchOutcomeById.getOrDefault(action.id)
+        if outcome.status in {asSucceeded, asCacheHit, asUpToDate}:
+          continue
+        let diag = "status=" & $outcome.status & " reason=" & outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
+        let idx = fetchRepoIdx.getOrDefault(action.id, RootFetchIndex)
+        if idx == RootFetchIndex:
+          rootMainlineRefusal = "could not refresh the workspace root's " &
+            "mainline '" & rootMainlineBranch & "' from `origin`: " & diag &
+            ". Re-run with `--no-fetch` to cut from the mainline refs " &
+            "already on disk"
+        else:
+          states[idx].mainlineFetchFailed = true
+          states[idx].mainlineDiagnostic = "could not refresh '" &
+            states[idx].repo.path & "' mainline '" &
+            states[idx].mainlineBranch & "' from remote '" &
+            gitRemoteNameFor(states[idx].repo) & "': " & diag &
+            ". Re-run with `--no-fetch` to cut from the mainline refs " &
+            "already on disk"
+
+  if parsed.fromMainlines:
+    # Read the tips. A repo ABSENT from the source has nothing to read yet — it
+    # is cloned by target init below, and its mainline is resolved there, the
+    # same way the ``declared_checkout`` baseline is.
+    for idx in 0 ..< states.len:
+      if not states[idx].sourcePresent or states[idx].mainlineUndeclared or
+          states[idx].mainlineFetchFailed:
+        continue
+      let remoteName = gitRemoteNameFor(states[idx].repo)
+      states[idx].mainlineTip = revParse(identity, states[idx].srcPath,
+        "refs/remotes/" & remoteName & "/" & states[idx].mainlineBranch)
+      if states[idx].mainlineTip.len == 0:
+        states[idx].mainlineUnresolved = true
+        states[idx].mainlineDiagnostic = "the declared mainline '" &
+          states[idx].mainlineBranch & "' of '" & states[idx].repo.path &
+          "' has no `refs/remotes/" & remoteName & "/" &
+          states[idx].mainlineBranch & "` to cut from" &
+          (if parsed.fetch: ""
+           else: "; this run was `--no-fetch` — re-run with `--fetch` if " &
+             "that branch has simply never been fetched here")
+      else:
+        states[idx].headSha = states[idx].mainlineTip
+    if rootMainlineRefusal.len == 0:
+      rootMainlineTip = revParse(identity, parsed.workspaceRoot,
+        "refs/remotes/origin/" & rootMainlineBranch)
+      if rootMainlineTip.len == 0:
+        rootMainlineRefusal = "the workspace root's declared mainline '" &
+          rootMainlineBranch & "' has no `refs/remotes/origin/" &
+          rootMainlineBranch & "` to cut from" &
+          (if parsed.fetch: ""
+           else: "; this run was `--no-fetch` — re-run with `--fetch`")
   var remoteProbeActions: seq[BuildAction]
   var remoteProbeRepoIdx = initTable[string, int]()
   for idx, state in states:
@@ -54969,14 +55232,34 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     elif state.remoteHasBranch:
       remoteCollisions.add(state.repo.path)
 
+  # WV-7 — a mainline that is undeclared, unresolvable or unfetchable is a
+  # pre-flight refusal like every other fork guard: decided here, before
+  # anything is created, and reported with the flag that answers it.
+  var mainlineBlocked = 0
+  for state in states:
+    if state.probeFailed: continue
+    if state.mainlineUndeclared or state.mainlineUnresolved or
+        state.mainlineFetchFailed:
+      inc mainlineBlocked
+
   if anyProbeFailed or remoteCollisions.len > 0 or missingBranch.len > 0 or
-      unpublishedPaths.len > 0 or unconfirmedPaths.len > 0:
+      unpublishedPaths.len > 0 or unconfirmedPaths.len > 0 or
+      mainlineBlocked > 0 or rootMainlineRefusal.len > 0:
+    if rootMainlineRefusal.len > 0:
+      result.repos.add(BranchRepoEntry(
+        name: "<workspace-root>", path: ".",
+        outcome:
+          (if rootMainlineBranch.len == 0: "mainline_undeclared"
+           else: "mainline_unresolved"),
+        mainlineBranch: rootMainlineBranch,
+        diagnostic: rootMainlineRefusal))
     for state in states:
       var entry = BranchRepoEntry(
         name: state.repo.name,
         path: state.repo.path,
         headSha: state.headSha,
         baselineSource: state.baselineSource,
+        mainlineBranch: state.mainlineBranch,
         publication:
           (if state.publicationAsked: $state.publication.status else: ""),
         sourceBranch: state.sourceBranch)
@@ -54988,6 +55271,13 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       if state.probeFailed:
         entry.outcome = "probe_failed"
         entry.diagnostic = state.probeReason
+      elif state.mainlineUndeclared or state.mainlineUnresolved or
+          state.mainlineFetchFailed:
+        entry.outcome =
+          if state.mainlineUndeclared: "mainline_undeclared"
+          elif state.mainlineFetchFailed: "mainline_fetch_failed"
+          else: "mainline_unresolved"
+        entry.diagnostic = state.mainlineDiagnostic
       elif state.repo.path in unpublishedPaths or
           state.repo.path in unconfirmedPaths:
         # F0.3 — name the repo, the branch and the commit. The original
@@ -55075,6 +55365,27 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       if not states[idx].useDeclaredBaseline:
         continue
       let targetPath = parsed.forkPath / states[idx].repo.path
+      if parsed.fromMainlines:
+        # WV-7 — the repo had no source checkout, so its mainline could not be
+        # read in pre-flight; the fresh clone carries the remote-tracking refs
+        # and is the authority now. A mainline that is missing HERE is a
+        # partial-advance failure (exit 1, tree left in place, resumable) rather
+        # than a pre-flight refusal — the clone has already happened, and
+        # claiming "nothing was created" would be a lie.
+        let remoteName = gitRemoteNameFor(states[idx].repo)
+        states[idx].mainlineTip = revParse(identity, targetPath,
+          "refs/remotes/" & remoteName & "/" & states[idx].mainlineBranch)
+        if states[idx].mainlineTip.len == 0:
+          states[idx].probeFailed = true
+          states[idx].probeReason = "the declared mainline '" &
+            states[idx].mainlineBranch & "' of '" & states[idx].repo.path &
+            "' has no `refs/remotes/" & remoteName & "/" &
+            states[idx].mainlineBranch & "` in the freshly cloned checkout " &
+            "at '" & targetPath & "'"
+          targetBaselineProbeFailed = true
+        else:
+          states[idx].headSha = states[idx].mainlineTip
+        continue
       let targetHead = queryGitState(headShaQuery(targetPath), identity)
       if targetHead.status != gqsOk:
         states[idx].probeFailed = true
@@ -55092,6 +55403,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         path: state.repo.path,
         headSha: state.headSha,
         baselineSource: state.baselineSource,
+        mainlineBranch: state.mainlineBranch,
         publication:
           (if state.publicationAsked: $state.publication.status else: ""),
         sourceBranch: state.sourceBranch)
@@ -55147,7 +55459,11 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         gitForkBranchAction(rootActionId, identity,
           branchName = parsed.branchName,
           sourceRepoPath = parsed.workspaceRoot,
-          targetSha = rootHead.headSha,
+          # WV-7 — under ``--from-mainlines`` the root repo is cut from its own
+          # declared mainline, so the membership manifests do not lag the
+          # members they declare.
+          targetSha =
+            (if parsed.fromMainlines: rootMainlineTip else: rootHead.headSha),
           repoPath = ".",
           receiptPath = ".repro" / "workspace" / "receipts" /
             "start-fork-root.receipt")
@@ -55203,24 +55519,34 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let ok = outcome.status in {asSucceeded, asCacheHit, asUpToDate}
     let idx = actionRepoIndex.getOrDefault(action.id, RootEntryIndex)
     if idx == RootEntryIndex:
+      let rootBaselineSha =
+        if parsed.fromMainlines: rootMainlineTip else: rootHead.headSha
+      let rootBaselineSource =
+        if parsed.existingBranch: ""
+        elif parsed.fromMainlines: "mainline_head"
+        else: "source_head"
       if not ok:
         rootFailed = true
         inc failures
         result.repos.add(BranchRepoEntry(
           name: "<workspace-root>", path: ".",
           outcome: "fork_failed",
-          headSha: rootHead.headSha,
-          baselineSource:
-          (if parsed.existingBranch: "" else: "source_head"),
+          headSha: rootBaselineSha,
+          baselineSource: rootBaselineSource,
+          mainlineBranch:
+            (if parsed.fromMainlines: rootMainlineBranch else: ""),
           diagnostic: "status=" & $outcome.status & " reason=" &
             outcome.reason & " " & outcome.stderr))
       else:
         result.repos.add(BranchRepoEntry(
           name: "<workspace-root>", path: ".",
-          headSha: rootHead.headSha,
-          baselineSource:
-          (if parsed.existingBranch: "" else: "source_head"),
-          outcome: "branched"))
+          headSha: rootBaselineSha,
+          baselineSource: rootBaselineSource,
+          mainlineBranch:
+            (if parsed.fromMainlines: rootMainlineBranch else: ""),
+          outcome:
+            (if parsed.fromMainlines: "branched_from_mainline"
+             else: "branched")))
       continue
     let state = states[idx]
     var entry = BranchRepoEntry(
@@ -55228,6 +55554,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       path: state.repo.path,
       headSha: state.headSha,
       baselineSource: state.baselineSource,
+      mainlineBranch: state.mainlineBranch,
       publication:
         (if state.publicationAsked: $state.publication.status else: ""),
       sourceBranch: state.sourceBranch)
@@ -55238,7 +55565,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         outcome.reason & " " & outcome.stderr
     else:
       entry.outcome =
-        if state.baselineSource == "declared_checkout":
+        if state.baselineSource == "mainline_head":
+          "branched_from_mainline"
+        elif state.baselineSource == "declared_checkout":
           "branched_from_declared_baseline"
         else:
           "branched"
