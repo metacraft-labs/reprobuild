@@ -183,7 +183,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_launchd_renderer.nim	nim	13
 libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim	nim	17
 libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim	nim	25
-libs/repro_dsl_stdlib/tests/t_packaging_rpm_authoring.nim	nim	23
+libs/repro_dsl_stdlib/tests/t_packaging_rpm_authoring.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	nim	27
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_packaging_scoop_manifest.nim	nim	9

@@ -201,6 +201,27 @@ type
       ## the deb need neither, and the MSI needs the per-file list it
       ## already gets from ``files``, so this is additive rather than a
       ## replacement.
+    privateLibDirRootRel*: string
+      ## Root-relative directory the vendored runtime closure lands in,
+      ## or EMPTY when this tree has no closure edge at all.
+      ##
+      ## The distinction the field exists to carry is "does anything in
+      ## this graph CREATE that directory", and it is not the same
+      ## question as ``dist.runtime.vendorRuntimeClosure``. The closure
+      ## edge is emitted only when the tree has at least one ELF
+      ## component to walk from; a distribution that vendors nothing
+      ## because it ships no ELF at all has the flag set and no edge, so
+      ## nothing ever ``mkdir``s the directory. A producer that derived
+      ## the directory from the FLAG would then name a path that is not
+      ## in the buildroot — which is how rpm's ``%files`` came to fail
+      ## the whole packaging graph on a tree that was otherwise correct.
+      ##
+      ## Set means the directory WILL exist in the staged tree (the walk
+      ## ``mkdir -p``s it before it walks, so it exists even when the
+      ## walk vendors nothing and it stays EMPTY). What is in it is only
+      ## knowable at build time; that it is there is knowable here, and
+      ## those are exactly the two different facts a ``%files`` section
+      ## needs to keep apart.
     glibcFloorPath*: string
       ## Build-tree path of the one-line file holding the C-library
       ## floor this tree needs (``2.38``), or empty when the tree
@@ -1674,6 +1695,12 @@ proc stageInstallTree*(dist: Distribution; variant: string;
       noteSelector(ReadelfSelector)
     result.terminal.add(edge)
     result.producerExtraInputs.add(manifestPath)
+    # Recorded HERE and nowhere else, i.e. on the one branch that emits
+    # the edge whose script begins ``mkdir -p -- "$LIBDIR"``. A producer
+    # asking "is this directory in the buildroot" is then asking the
+    # graph rather than re-deriving an answer from the recipe's flags,
+    # and the two cannot disagree.
+    result.privateLibDirRootRel = libRootRel
     # NOT added to ``producerExtraInputs``. The floor reaches a producer
     # through ``addGeneratedFile``'s ``substitutions``, which names it as
     # an input of the edge that splices it; the artifact edge then

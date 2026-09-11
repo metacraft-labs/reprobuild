@@ -159,21 +159,59 @@ proc rpmFilesSection*(dist: Distribution; tree: StagedTree): seq[string] =
   ## Every staged file is listed by name because every staged file is a
   ## build-edge output whose path is known when the graph is built. The
   ## VENDORED closure is not: it is discovered inside the closure action,
-  ## so there is no graph-time list of it. rpm expands shell globs in
-  ## ``%files`` against the buildroot at package time, which is exactly
-  ## the right moment — so the private libdir contributes one ``%dir``
-  ## entry (the package owns the directory, and must, or an uninstall
-  ## would leave it behind) plus one glob.
+  ## so there is no graph-time list of it — the private libdir is named
+  ## as a DIRECTORY instead, exactly as a shipped source tree is.
+  ##
+  ## ## Why a directory and not ``%dir`` plus ``<dir>/*``
+  ##
+  ## It used to be that pair, and the glob is what took every Linux
+  ## channel of the first out-of-tree consumer down. rpm expands a
+  ## ``%files`` glob against the buildroot at package time and a glob
+  ## that matches NOTHING is a hard error — ``File not found by glob``
+  ## — so a distribution whose ELF closure is legitimately empty (every
+  ## component imports only ``libc``/``libm``-class system libraries,
+  ## which the walk must never vendor) failed ``rpmbuild`` on a tree
+  ## that was in every respect correct. deb, arch and tarball build in
+  ## the same graph as rpm, so their already-written artifacts went down
+  ## with it.
+  ##
+  ## The emptiness is not knowable here. This proc runs while the GRAPH
+  ## is being built; the manifest it would have to consult is written by
+  ## the closure action, which has not run and on a clean tree cannot
+  ## have run — the binaries it reads ``DT_NEEDED`` from do not exist
+  ## yet. So the choice is between deferring the decision to something
+  ## that runs at package time and generating the ``%files`` fragment in
+  ## a build-time edge of its own.
+  ##
+  ## Naming the directory defers it to rpm, which already does exactly
+  ## this for the source trees below: a ``%files`` entry that names a
+  ## directory owns that directory AND everything under it recursively,
+  ## evaluated when rpm reads the buildroot. Populated, it lists the
+  ## directory plus every vendored library — byte-for-byte the listing
+  ## the ``%dir`` + glob pair produced. Empty, it lists the directory
+  ## alone. One entry, no build-time conditional, and the case that
+  ## failed is not a case any more rather than a case that is handled.
+  ##
+  ## ## Why the directory is still named when the closure is empty
+  ##
+  ## Because the package CREATES it: the walk's script opens with
+  ## ``mkdir -p -- "$LIBDIR"`` and the RPATH patched into every staged
+  ## binary points at it. Dropping the entry would leave a directory in
+  ## the buildroot that ``%files`` does not name, which is rpm's
+  ## unpackaged-file class of error, and — if it slipped past that — a
+  ## directory no package owns, which ``rpm -e`` leaves standing. An rpm
+  ## that declares a directory it does not create is its own defect and
+  ## ``rpm -V`` reports it as ``missing``; the answer to both is to name
+  ## the directory exactly when the graph contains the edge that makes
+  ## it, which is what ``StagedTree.privateLibDirRootRel`` records.
   ##
   ## A staged ``crRuntimeLibrary`` component lands in that same
   ## directory and would then be listed twice, which rpmbuild rejects
   ## outright; those are filtered rather than deduplicated at the end,
   ## so the reason is visible at the point it applies.
-  let hasPrivateLib = tree.dist.targetOs == toLinux and
-    dist.runtime.vendorRuntimeClosure
   let privateLibRoot =
-    if hasPrivateLib:
-      "/" & prefixRelToRoot(dist, privateLibPrefixRelDir(dist))
+    if tree.privateLibDirRootRel.len > 0:
+      "/" & tree.privateLibDirRootRel
     else:
       ""
   proc insideSourceTree(rootRel: string): bool =
@@ -206,7 +244,7 @@ proc rpmFilesSection*(dist: Distribution; tree: StagedTree): seq[string] =
     else:
       result.add(abs)
   if privateLibRoot.len > 0:
-    result.add(privateLibRoot & "/*")
+    result.add(privateLibRoot)
   for treeRoot in tree.sourceTreeRoots:
     result.add("/" & treeRoot)
   # EVERY directory the package creates and the target does not already
@@ -233,9 +271,22 @@ proc rpmFilesSection*(dist: Distribution; tree: StagedTree): seq[string] =
     staged.add(treeRoot & "/.")
   if privateLibRoot.len > 0:
     # The vendored files are not staged paths -- the walk writes them --
-    # so name the directory itself for the ancestor derivation.
+    # so name the directory itself for the ancestor derivation. What
+    # comes back is the libdir AND its non-system ancestors; the libdir
+    # itself is dropped below because the recursive entry above already
+    # owns it. How badly a duplicate hurts is DISTRIBUTION-DEPENDENT, so
+    # do not relax this on the strength of one host: measured, rpm 6.0.2
+    # dedups silently, rpm 4.20.1 emits ``warning: File listed twice``
+    # and still builds -- but both turn it into ``error: File listed
+    # twice`` with no package produced once
+    # ``%_duplicate_files_terminate_build`` is 1, which is a macro a
+    # distribution sets, not a property of the spec. Emitting one
+    # spelling per path is the only formulation that is correct on all
+    # of them.
     staged.add(privateLibRoot[1 .. ^1] & "/.")
   for dir in ownedDirectories(staged):
+    if privateLibRoot.len > 0 and "/" & dir == privateLibRoot:
+      continue
     result.add("%dir /" & dir)
 
 proc rpmSpecText*(dist: Distribution; tree: StagedTree;

@@ -243,17 +243,99 @@ suite "packaging: the rpm producer's authoring is rpmbuild-shaped":
 
   test "%files lists every staged file plus the private libdir":
     # The staged files are graph-time known; the VENDORED set is not, so
-    # it contributes a glob rpm expands against the buildroot at package
-    # time, plus a ``%dir`` so the package OWNS the directory and an
-    # uninstall takes it away.
+    # the private libdir is named as a DIRECTORY, which owns it and
+    # everything under it recursively — the package OWNS the directory
+    # and an uninstall takes it away, and rpm resolves its contents at
+    # package time, which is the only moment they are known.
     resetBuildActionRegistry()
     let artifact = rpmPackage(sampleDistribution(toLinux))
     let entries = rpmFilesSection(sampleDistribution(toLinux), artifact.tree)
     check "/usr/bin/hello" in entries
     check "/usr/bin/adder" in entries
-    check "%dir /usr/lib/sampletool" in entries
-    check "/usr/lib/sampletool/*" in entries
+    check "/usr/lib/sampletool" in entries
     check "/lib/systemd/system/sampletool-daemon.service" in entries
+    # NOT a glob, and NOT also a ``%dir``. The glob is the defect this
+    # case is the regression pin for: rpm fails a ``%files`` glob that
+    # matches nothing, so a distribution whose ELF closure is
+    # legitimately empty (every component needs only libc/libm-class
+    # system libraries, which the walk must never vendor) failed
+    # ``rpmbuild`` — and took the deb, arch and tarball artifacts of the
+    # same graph down with it. The ``%dir`` would be a duplicate of the
+    # recursive entry, which rpmbuild rejects outright.
+    check "/usr/lib/sampletool/*" notin entries
+    check "%dir /usr/lib/sampletool" notin entries
+    # One entry for that directory, not two under different spellings.
+    var libDirEntries = 0
+    for e in entries:
+      if e == "/usr/lib/sampletool" or e == "%dir /usr/lib/sampletool" or
+          e == "/usr/lib/sampletool/*":
+        inc libDirEntries
+    check libDirEntries == 1
+
+  test "a tree with no closure edge names no private libdir at all":
+    # The other half of the same defect, and the half a ``%dir`` would
+    # NOT have fixed. ``vendorRuntimeClosure`` is a recipe flag; the
+    # closure EDGE is emitted only when the tree has an ELF component to
+    # walk from. A distribution that ships no ELF at all therefore has
+    # the flag set and no edge, so nothing ever creates the directory —
+    # and an rpm that declares a directory it does not create fails the
+    # build, or ships and is reported ``missing`` by ``rpm -V``.
+    resetBuildActionRegistry()
+    var dist = newDistribution("scriptonly", "0.1.0", toLinux,
+      prefix = "/usr", layout = plUnix)
+    dist.runtime.privateLibSubdir = "lib/scriptonly"
+    dist.runtime.wrapExecutables = false
+    dist.runtime.computeDependencyFloor = false
+    dist.components = @[
+      helperScriptComponent("build/libexec/tool.sh", "/bin/sh")
+    ]
+    dist.metadata = DistMetadata(summary: "script-only", license: "MIT")
+    let artifact = rpmPackage(dist)
+    check artifact.tree.privateLibDirRootRel.len == 0
+    let entries = rpmFilesSection(dist, artifact.tree)
+    for e in entries:
+      check not e.contains("/usr/lib/scriptonly")
+
+  test "all four Linux formats build one graph for an empty-closure tree":
+    # THE GATE the ``%files`` glob failed. deb, rpm, arch and tarball
+    # are asked for over ONE ``Distribution`` and lowered into ONE
+    # graph, so rpm refusing a tree the other three packaged correctly
+    # does not fail rpm — it fails the build, and the three artifacts
+    # already on disk go with it. The distribution here is the shape
+    # that hit it: ELF components (so the closure edge is emitted and
+    # the private libdir is created) whose runtime library set is
+    # empty, because everything they need is libc/libm-class and the
+    # walk must never vendor those.
+    resetBuildActionRegistry()
+    var dist = newDistribution("emptyclosure", "1.0.0", toLinux,
+      prefix = "/usr", layout = plUnix)
+    dist.runtime.privateLibSubdir = "lib/emptyclosure"
+    dist.runtime.wrapExecutables = false
+    dist.runtime.computeDependencyFloor = false
+    dist.components = @[executableComponent("build/bin/ecmain")]
+    dist.metadata = DistMetadata(summary: "empty runtime closure",
+      description: "Every component needs only system libraries.",
+      license: "MIT")
+    var formats: seq[string] = @[]
+    for artifact in [debPackage(dist), rpmPackage(dist), archPackage(dist),
+                     tarballPackage(dist)]:
+      formats.add(artifact.format)
+      check artifact.path.len > 0
+    check formats == @["deb", "rpm", "pkg.tar.gz", "tar.gz"]
+    # And rpm's own contribution to that graph names the libdir once,
+    # as a directory, with no glob for rpm to fail at package time.
+    resetBuildActionRegistry()
+    let rpmArtifact = rpmPackage(dist)
+    let entries = rpmFilesSection(dist, rpmArtifact.tree)
+    check "/usr/lib/emptyclosure" in entries
+    check "/usr/lib/emptyclosure/*" notin entries
+
+  test "a tree WITH a closure edge records the libdir on the staged tree":
+    # The positive half of the same signal, so the case above cannot
+    # pass by the field simply never being set.
+    resetBuildActionRegistry()
+    let artifact = rpmPackage(sampleDistribution(toLinux))
+    check artifact.tree.privateLibDirRootRel == "usr/lib/sampletool"
 
   test "%files owns every directory the package creates, and no other":
     # dpkg removes the directories it made when they empty; rpm removes
@@ -267,7 +349,12 @@ suite "packaging: the rpm producer's authoring is rpmbuild-shaped":
     let artifact = rpmPackage(dist)
     let entries = rpmFilesSection(dist, artifact.tree)
     check "%dir /usr/libexec/sampletool" in entries
-    check "%dir /usr/lib/sampletool" in entries
+    # The private libdir is owned by the recursive entry rather than by
+    # a ``%dir`` line -- see the ``%files`` case above for why -- so it
+    # must NOT appear here as well; both spellings is a duplicate and
+    # rpmbuild rejects the spec outright.
+    check "/usr/lib/sampletool" in entries
+    check "%dir /usr/lib/sampletool" notin entries
     # ...and NOT the directories the target owns. Claiming /usr/bin would
     # apply this package's mode and ownership to it and ask rpm to remove
     # a directory every other package is using.
@@ -279,14 +366,14 @@ suite "packaging: the rpm producer's authoring is rpmbuild-shaped":
   test "nothing under the private libdir is also listed by name":
     # rpmbuild rejects a file listed twice outright, and a declared
     # ``crRuntimeLibrary`` component lands in exactly the directory the
-    # glob covers.
+    # recursive entry covers.
     resetBuildActionRegistry()
     var dist = sampleDistribution(toLinux)
     dist.components.add(runtimeLibraryComponent("build/lib/libsample.so"))
     let artifact = rpmPackage(dist)
     let entries = rpmFilesSection(dist, artifact.tree)
     check "/usr/lib/sampletool/libsample.so" notin entries
-    check "/usr/lib/sampletool/*" in entries
+    check "/usr/lib/sampletool" in entries
 
   test "a config file is %config(noreplace), not a plain file":
     # rpm's answer to dpkg's ``conffiles``. Without it an upgrade
