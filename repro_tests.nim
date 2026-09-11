@@ -477,6 +477,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim",
+    binary: "build/test-bin/t_nix_daemon_search_roots",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim",
     binary: "build/test-bin/t_nlf_stat4_baseline_fingerprints",
     defines: @[],
@@ -1784,6 +1793,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim",
     binary: "build/test-bin/t_packaging_third_party_producer",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim",
+    binary: "build/test-bin/t_packaging_windows_loader_closure",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

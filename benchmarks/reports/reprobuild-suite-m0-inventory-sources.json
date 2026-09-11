@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1543,
+    "nimTestBinaries": 1545,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 579,
     "staticallyDetectedRuntimeCompilerFlowTests": 94,
-    "testEntries": 1551
+    "testEntries": 1553
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1083,8 +1083,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 688,
-      "platform/destructive": 111,
+      "integration": 689,
+      "platform/destructive": 112,
       "pure unit": 579,
       "unclassified": 161
     },
@@ -1210,9 +1210,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1543,
+    "nimTestBinaryCount": 1545,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1551
+    "testEntryCount": 1553
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6407,6 +6407,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_nix_daemon_search_roots",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_nlf_stat4_baseline_fingerprints",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -7924,7 +7941,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_image_path.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9060,6 +9077,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_packaging_windows_loader_closure",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

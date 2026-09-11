@@ -8528,6 +8528,167 @@ proc parsePreserveTreeEntry(entry: string): PreserveTreeEntry =
       target: fields[2])
   PreserveTreeEntry(kind: ptekFile, relative: normalized)
 
+type
+  NixDaemonCandidate* = object
+    ## ONE PLACE ``bakForeignProvision`` WILL LOOK FOR
+    ## ``reprobuild-nix-daemon``, carrying the label its refusal prints.
+    path*: string
+    label*: string
+
+const NixDaemonRelativePaths*: array[4, string] = [
+  # The dev tree's CHECKED-IN helper, relative to the REPOSITORY ROOT.
+  "tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
+  # The dev tree's BUILT helper, relative to the REPOSITORY ROOT.
+  "build/reprobuild-nix-daemon",
+  # The flake's install layout: ``$out/libexec/reprobuild-nix-daemon``
+  # (flake.nix installs it there and also exports
+  # ``REPROBUILD_NIX_DAEMON_BIN``; this candidate is what answers when the
+  # wrapper's environment did not survive).
+  "libexec/reprobuild-nix-daemon",
+  # The PACKAGED layout: ``<prefix>/libexec/<distribution>/reprobuild-nix-daemon``
+  # -- see ``reprobuild_dist.nim``, which stages the helper under
+  # ``libexec/<dist.name>``. The reprobuild distribution's name is
+  # ``reprobuild``; a third distribution that renamed itself would need its
+  # own entry, which is why the wrapper variable stays the primary route.
+  "libexec/reprobuild/reprobuild-nix-daemon",
+]
+
+proc nixDaemonSearchRoots*(cwd, exePath, envSourceRoot: string): seq[
+    tuple[root: string; label: string]] =
+  ## THE ROOTS THE DAEMON SEARCH IS ANCHORED ON, AND WHY THERE ARE TWO
+  ## EXE-DERIVED ONES RATHER THAN ONE.
+  ##
+  ## This used to be a single expression -- ``getAppFilename().parentDir.parentDir``
+  ## -- justified as "the prefix for an installed ``<prefix>/bin/repro``".
+  ## It is that. It is ALSO ``<root>/build`` for the dev tree's
+  ## ``build/bin/repro``, and neither candidate built from ``<root>/build``
+  ## exists: the helper lives at ``<root>/tools/reprobuild-nix-daemon/`` and
+  ## the built one at ``<root>/build/reprobuild-nix-daemon``. So every dev-tree
+  ## build whose ``action.cwd`` is not the repository root -- the packaging
+  ## dogfood fixture, for one -- fell through the whole chain to a bare
+  ## ``reprobuild-nix-daemon`` on ``PATH``, and the engine then reported
+  ## ``No such file or directory / Additional info: reprobuild-nix-daemon``.
+  ## That cost this campaign a pass and a wrong diagnosis (M1's N24/N28).
+  ##
+  ## THE EXECUTABLE IS NOT A RELIABLE ANCHOR AT ALL, and that is the part
+  ## that took a measurement to learn rather than a reading. Almost every
+  ## build in a dev tree is DAEMON-HOSTED, and the user daemon does not run
+  ## the tree's binary: it runs a STAGED COPY of it under
+  ## ``~/.local/state/repro/daemon/dev-bin/dev-start-<generation>/repro-daemon``
+  ## (``repro daemon status`` prints both as ``source-image-path`` and
+  ## ``running-image-path``). So inside the engine ``getAppFilename()``
+  ## answers a path in the state directory, whose ancestors contain no
+  ## reprobuild checkout at all -- and an exe-anchored fix alone still
+  ## resolves nothing. Measured: with the exe anchors in place and no cwd
+  ## walk, the Linux dogfood build failed IDENTICALLY.
+  ##
+  ## So the primary anchor is ``action.cwd`` AND ITS ANCESTORS. The build's
+  ## own directory is inside the tree that owns the helper, whatever process
+  ## is hosting the engine and wherever that process's image was staged.
+  ## Eight levels, which is the same walk ``repro_cli_support`` already does
+  ## to find a sibling ``runquotad``.
+  ##
+  ## The executable's grandparent (an install prefix) and great-grandparent
+  ## (the repository root when the binary IS the tree's own
+  ## ``build/bin/repro``) are kept AFTER it: they are right for an installed
+  ## layout and for a direct non-daemon run, and every candidate has to EXIST
+  ## on disk, so an extra root adds reach and not risk.
+  ##
+  ## ``REPROBUILD_SOURCE_ROOT`` stays FIRST when it is set -- it is an
+  ## explicit statement of the source root, exported by codetracer's
+  ## build-once.sh and forwarded by the daemon -- but it no longer SUPPRESSES
+  ## everything else, because a wrong or stale value used to turn an explicit
+  ## hint into a silent dead end.
+  ##
+  ## Filesystem roots are dropped: ``/usr/bin/repro``'s great-grandparent is
+  ## ``/``, and ``/tools/...`` is not a layout, it is noise in the refusal.
+  var seen = initHashSet[string]()
+  # A TEMPLATE rather than a nested proc: `result` is a seq and Nim refuses
+  # to let a closure capture it.
+  template consider(rootExpr, labelExpr: string) =
+    block:
+      let root = rootExpr
+      # `parentDir` never leaves a trailing separator, so the raw string is
+      # already the dedupe key; normalising it here is what put a stray
+      # character literal in this file once.
+      if root.len > 0 and not isRootDir(root) and
+          not seen.containsOrIncl(root):
+        result.add((root: root, label: labelExpr))
+  consider(envSourceRoot, "REPROBUILD_SOURCE_ROOT")
+  if cwd.len > 0:
+    var dir = cwd
+    for _ in 0 .. 8:
+      consider(dir, "cwd-ancestor")
+      let parent = dir.parentDir
+      if parent.len == 0 or parent == dir:
+        break
+      dir = parent
+  if exePath.len > 0:
+    consider(exePath.parentDir.parentDir, "app-prefix")
+    consider(exePath.parentDir.parentDir.parentDir, "app-repo-root")
+
+proc nixDaemonCandidates*(cwd, exePath, envSourceRoot: string): seq[
+    NixDaemonCandidate] =
+  ## THE FULL, ORDERED CANDIDATE LIST -- pure, so it can be pinned by a test
+  ## without a daemon, a socket or a build.
+  ##
+  ## The first three entries are the historical ``action.cwd``-relative ones
+  ## and keep their historical labels and their historical ORDER; everything
+  ## after them is the root x relative-path product from
+  ## ``nixDaemonSearchRoots`` and ``NixDaemonRelativePaths``.
+  var seen = initHashSet[string]()
+  template consider(pathExpr, labelExpr: string) =
+    block:
+      let path = pathExpr
+      if path.len > 0 and not seen.containsOrIncl(path):
+        result.add(NixDaemonCandidate(path: path, label: labelExpr))
+  if cwd.len > 0:
+    consider(cwd / "build" / "reprobuild-nix-daemon",
+      "local reprobuild-nix-daemon")
+    consider(cwd / "tools" / "reprobuild-nix-daemon" /
+      "reprobuild-nix-daemon", "local tools reprobuild-nix-daemon")
+    consider(cwd.parentDir / "reprobuild-nix-daemon" / "build" /
+      "reprobuild-nix-daemon", "sibling reprobuild-nix-daemon")
+  for entry in nixDaemonSearchRoots(cwd, exePath, envSourceRoot):
+    for rel in NixDaemonRelativePaths:
+      consider(entry.root / rel, entry.label & " " & rel)
+
+proc nixDaemonExecutableFile*(path: string): bool =
+  ## Exists AND is executable. On Windows the executable bit is not a thing
+  ## the filesystem answers, so existence is the whole test.
+  if path.len == 0 or not fileExists(path):
+    return false
+  when defined(posix):
+    let perms = getFilePermissions(path)
+    result = fpUserExec in perms or fpGroupExec in perms or
+      fpOthersExec in perms
+  else:
+    result = true
+
+proc resolveNixDaemonExecutable*(cwd, exePath, envSourceRoot,
+    envBin: string): string =
+  ## RESOLVE ``reprobuild-nix-daemon``, or answer the bare name so that
+  ## ``poUsePath`` gets its turn.
+  ##
+  ## ``REPROBUILD_NIX_DAEMON_BIN`` is the documented override and is a HARD
+  ## error when it names something that is not there -- an override that
+  ## silently falls back is an override nobody can debug.
+  if envBin.len > 0:
+    if not fileExists(envBin):
+      raiseEngine("REPROBUILD_NIX_DAEMON_BIN does not exist: " & envBin)
+    if not nixDaemonExecutableFile(envBin):
+      raiseEngine("REPROBUILD_NIX_DAEMON_BIN exists but is not executable: " &
+        envBin)
+    return envBin
+  for candidate in nixDaemonCandidates(cwd, exePath, envSourceRoot):
+    if not fileExists(candidate.path):
+      continue
+    if not nixDaemonExecutableFile(candidate.path):
+      raiseEngine(candidate.label & " exists but is not executable: " &
+        candidate.path)
+    return candidate.path
+  "reprobuild-nix-daemon"
+
 proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -8801,72 +8962,23 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           sock.connectUnix(socketPath)
           connected = true
         except CatchableError:
-          # Spawn daemon process detached
-          let envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
-          let localBin = action.cwd / "build" / "reprobuild-nix-daemon"
-          let localTool = action.cwd / "tools" / "reprobuild-nix-daemon" /
-            "reprobuild-nix-daemon"
-          let localBin2 = action.cwd.parentDir / "reprobuild-nix-daemon" /
-            "build" / "reprobuild-nix-daemon"
-          # When repro builds a FOREIGN target (e.g. codetracer's `ct`),
-          # `action.cwd` is the foreign repo, so the candidates above never find
-          # the daemon that ships in reprobuild's own tree. Anchor on
-          # reprobuild's source root instead — mirrors how the monitor shim is
-          # resolved (see repro_cli_support.resolveMonitorShim). REPROBUILD_
-          # SOURCE_ROOT is exported by codetracer's build-once.sh and forwarded
-          # by the daemon; getAppFilename() covers direct (non-daemon) builds.
-          let sourceRoot = block:
-            let env = getEnv("REPROBUILD_SOURCE_ROOT")
-            if env.len > 0: env
-            else:
-              let exe = getAppFilename()
-              if exe.len > 0: exe.parentDir.parentDir else: ""
-          let rootTool =
-            if sourceRoot.len > 0:
-              sourceRoot / "tools" / "reprobuild-nix-daemon" /
-                "reprobuild-nix-daemon"
-            else: ""
-          let rootBuild =
-            if sourceRoot.len > 0:
-              sourceRoot / "build" / "reprobuild-nix-daemon"
-            else: ""
-          proc executableFile(path: string): bool =
-            if path.len == 0 or not fileExists(path):
-              return false
-            when defined(posix):
-              let perms = getFilePermissions(path)
-              result = fpUserExec in perms or fpGroupExec in perms or
-                fpOthersExec in perms
-            else:
-              result = true
-          proc requireExecutableCandidate(path, label: string): bool =
-            if path.len == 0 or not fileExists(path):
-              return false
-            if not executableFile(path):
-              raiseEngine(label & " exists but is not executable: " & path)
-            true
-          let daemonExe = if envBin.len > 0:
-                            if not requireExecutableCandidate(envBin,
-                                "REPROBUILD_NIX_DAEMON_BIN"):
-                              raiseEngine("REPROBUILD_NIX_DAEMON_BIN does not exist: " & envBin)
-                            envBin
-                          elif requireExecutableCandidate(localBin,
-                              "local reprobuild-nix-daemon"):
-                            localBin
-                          elif requireExecutableCandidate(localTool,
-                              "local tools reprobuild-nix-daemon"):
-                            localTool
-                          elif requireExecutableCandidate(localBin2,
-                              "sibling reprobuild-nix-daemon"):
-                            localBin2
-                          elif requireExecutableCandidate(rootTool,
-                              "source-root tools reprobuild-nix-daemon"):
-                            rootTool
-                          elif requireExecutableCandidate(rootBuild,
-                              "source-root build reprobuild-nix-daemon"):
-                            rootBuild
-                          else:
-                            "reprobuild-nix-daemon"
+          # Spawn daemon process detached.
+          #
+          # THE CANDIDATE LIST IS A PURE FUNCTION -- `nixDaemonCandidates` --
+          # so that the resolution order is pinned by a test rather than by
+          # this `elif` chain. It anchors on `action.cwd` (three historical
+          # candidates, for a build run from the reprobuild tree itself), on
+          # `REPROBUILD_SOURCE_ROOT` when set, and on BOTH the executable's
+          # grandparent (an install prefix) and its great-grandparent (a dev
+          # tree's repository root, where `repro` sits two levels down at
+          # `build/bin/repro`). The single grandparent anchor this replaces
+          # resolved NEITHER layout's real location and fell through to a
+          # bare name on PATH -- M1's N24/N28.
+          let daemonExe = resolveNixDaemonExecutable(
+            cwd = action.cwd,
+            exePath = getAppFilename(),
+            envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
+            envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
           discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
             options = {poDaemon, poUsePath})
           for i in 0 .. 40:

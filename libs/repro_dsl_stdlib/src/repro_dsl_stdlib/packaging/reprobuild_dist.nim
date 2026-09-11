@@ -551,6 +551,21 @@ proc reprobuildWindowsLoaderLibraries*(includeCli: bool): seq[string] =
     # loader before that DLL's first call. Found in the PE import table
     # rather than in any source string, which is why both scans are run.
     result.add("libgcc_s_seh-1.dll")
+    # ...AND ITS OWN STATIC IMPORT, which the first PE scan did not
+    # follow. `libgcc_s_seh-1.dll` imports `libwinpthread-1.dll`, so
+    # shipping the unwinder without it leaves
+    # `librepro_project_dsl_runtime.dll` -- the DSL runtime every
+    # `repro build` loads -- failing `LoadLibrary` with
+    # ERROR_MOD_NOT_FOUND (126) on any machine without MinGW on `%PATH%`.
+    #
+    # THIS IS THE SECOND TIME THE SAME MISTAKE WAS MADE, and it is the
+    # reason `scripts/check_windows_scrubbed_launch.ps1` exists: a
+    # CURATED list closes over the names somebody scanned for, and the
+    # imports OF the libraries in the list are exactly the names nobody
+    # scans for. The scrubbed check found this one on the shipped bytes
+    # of the package the previous pass declared verified; no reading of
+    # this list could have.
+    result.add("libwinpthread-1.dll")
 
 proc reprobuildNimDlopenLeafNames*(targetOs: TargetOs): seq[string] =
   ## What the BUNDLED COMPILER dlopens by leaf name, so the runtime

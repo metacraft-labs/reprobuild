@@ -714,7 +714,23 @@ proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
 proc generationFor(startedAt: Time): string =
   $getCurrentProcessId() & "-" & $startedAt.toUnix & "-" & $startedAt.nanosecond
 
-proc daemonImagePath*(appFilename, sourceExe, runningImage: string): string =
+proc daemonLaunchPath*(): string =
+  ## ``argv[0]``, when it is an absolute path.
+  ##
+  ## THIS IS THE CANDIDATE THAT ANSWERS INSIDE AN APPIMAGE, and it is
+  ## there because of what N27 turned out to be. See ``daemonImagePath``.
+  ## Relative and bare-name ``argv[0]``s are dropped rather than resolved:
+  ## resolving one means guessing a working directory or a ``PATH``, and a
+  ## guess is what this whole chain exists to stop reporting.
+  result =
+    try:
+      let launched = paramStr(0)
+      if launched.len > 0 and isAbsolute(launched): launched else: ""
+    except CatchableError, Defect:
+      ""
+
+proc daemonImagePath*(appFilename, sourceExe, runningImage: string;
+                      launchPath = ""): string =
   ## The path the daemon reports as its OWN image, VERIFIED TO EXIST.
   ##
   ## Distribution-And-Packaging M1's N21: inside an AppImage, ``repro
@@ -723,22 +739,29 @@ proc daemonImagePath*(appFilename, sourceExe, runningImage: string): string =
   ## ``source-image-path:`` and ``running-image-path:`` on the SAME
   ## report carried the true ``/tmp/.mount_<random>/usr/bin/repro.real``.
   ##
-  ## The field was ``getAppFilename()`` and nothing else, so whatever the
-  ## platform answered was printed. WHY that call answered a prefix-rooted
-  ## path under a FUSE-mounted AppDir is not established here, and this
-  ## proc deliberately does not depend on knowing: what it fixes is that a
-  ## STATUS FIELD NAMED A FILE THE DAEMON HAD NOT CHECKED. Every other
-  ## path on the report is either computed from a configured value or
-  ## checked before use; this one was neither.
+  ## WHY ``getAppFilename()`` ANSWERED THAT -- M1's N27, and it is no
+  ## longer open. Nim reads ``/proc/self/exe`` on Linux, and for a process
+  ## whose image lives on the AppImage's squashfuse mount the kernel
+  ## answers the path WITH THE MOUNT POINT STRIPPED: measured at this tip
+  ## in ``debian:trixie-slim`` + ``fuse3`` (``--device /dev/fuse
+  ## --cap-add SYS_ADMIN``), ``readlink /proc/<daemon-pid>/exe`` is
+  ## ``/usr/bin/repro.real`` while that same process's ``argv[0]`` is
+  ## ``/tmp/.mount_reprobNdBCIC/usr/bin/repro.real`` and
+  ## ``/usr/bin/repro.real`` does not exist on the host at all. So the
+  ## AppDir's own layout is what comes back, and ``argv[0]`` -- which
+  ## ``AppRun`` execs with the real mount path -- is the candidate that
+  ## can answer. Hence ``launchPath``.
   ##
-  ## The order is "what the OS says I am, then what I was launched as,
-  ## then what I am running" -- each used only if it is on disk. If none
-  ## is, the OS's answer is reported UNCHANGED rather than blanked: a
-  ## status line that says something wrong is worse than one that says
-  ## nothing, and a status line that says nothing when the daemon does
-  ## have an image would be worse still.
+  ## The order is "what the OS says I am, then what I was LAUNCHED as,
+  ## then what I was configured as, then what I am running" -- each used
+  ## only if it is on disk. If none is, the OS's answer is reported
+  ## UNCHANGED rather than blanked: a status line that says something
+  ## wrong is worse than one that says nothing, and a status line that
+  ## says nothing when the daemon does have an image would be worse still.
   if appFilename.len > 0 and fileExists(appFilename):
     return appFilename
+  if launchPath.len > 0 and fileExists(launchPath):
+    return absoluteNormalized(launchPath)
   if sourceExe.len > 0 and fileExists(sourceExe):
     return absoluteNormalized(sourceExe)
   if runningImage.len > 0 and fileExists(runningImage):
@@ -762,7 +785,8 @@ proc statusFor(config: UserDaemonConfig; startedAt: Time;
     protocolMinor: UserDaemonProtocolMinor,
     binary: binaryIdentity("repro-daemon",
       daemonImagePath(getAppFilename(), config.sourceExe,
-                      devRestart.runningImagePath),
+                      devRestart.runningImagePath,
+                      launchPath = daemonLaunchPath()),
       versionString()),
     featureFlags: UserDaemonFeatureFlags,
     generation: generation,
@@ -842,14 +866,30 @@ proc handleLeaseRenew(socket: IpcConn; config: UserDaemonConfig;
     $response.hadRecord)
 
 proc handleHello(socket: IpcConn; config: UserDaemonConfig; generation: string;
-                 frameBody: openArray[byte]): bool =
+                 frameBody: openArray[byte];
+                 devRestart = DevRestartState()): bool =
   let hello = parseHello(frameBody)
   if hello.major != UserDaemonProtocolMajor:
     socket.writeFrame(udkError, errorBody(
       "user daemon protocol mismatch: client major " & $hello.major &
       ", daemon major " & $UserDaemonProtocolMajor))
     return false
-  let daemon = binaryIdentity("repro-daemon", getAppFilename(), versionString())
+  # THROUGH `daemonImagePath`, WHICH IS WHERE N21 STOPPED SHORT AND WHY
+  # N27 LOOKED LIKE AN UNEXPLAINED PLATFORM QUIRK. N21 guarded the field
+  # in `statusFor` -- which is what the STATUS FILE is written from -- and
+  # left this handshake constructing the daemon's identity from a raw
+  # `getAppFilename()`. `repro daemon status` on a RUNNING daemon prints
+  # the HelloAck's identity, not the file's, so the two disagreed on one
+  # host and in one direction: measured inside a FUSE-mounted AppImage,
+  # the status file said `binary=/tmp/.mount_<rand>/usr/bin/repro.real`
+  # and the live `binary-path:` said `/usr/bin/repro.real`, a file that
+  # was not there. One guarded call site and one unguarded one is not a
+  # platform mystery, it is half a fix.
+  let daemon = binaryIdentity("repro-daemon",
+    daemonImagePath(getAppFilename(), config.sourceExe,
+                    devRestart.runningImagePath,
+                    launchPath = daemonLaunchPath()),
+    versionString())
   socket.writeFrame(udkHelloAck, helloAckBody(daemon, UserDaemonFeatureFlags,
     generation))
   logLine(config.logPath, "handshake client=" & hello.client.name &
@@ -1445,7 +1485,7 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
     socket.writeFrame(udkError, errorBody(
       "first user-daemon message must be hello, got " & $helloFrame.kind))
     return
-  if not handleHello(socket, config, generation, helloFrame.body):
+  if not handleHello(socket, config, generation, helloFrame.body, devRestart):
     return
 
   let frame = socket.readFrame(ServerRequestReadTimeoutMs)
