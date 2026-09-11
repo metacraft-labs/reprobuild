@@ -198,6 +198,33 @@ int repro_hcr_lx_probe_last_text_left_writable(void) {
   return repro_hcr_lx_last_report.text_left_writable;
 }
 
+/* HLX-M7 §10.1 — the cross-patcher claim outcome for the last publication. */
+unsigned int repro_hcr_lx_probe_last_claim_holder(void) {
+  return (unsigned int)repro_hcr_lx_last_report.claim_holder;
+}
+
+int repro_hcr_lx_probe_last_claim_held(void) {
+  return repro_hcr_lx_last_report.claim_held;
+}
+
+/*
+ * Forget every site.
+ *
+ * The site table is process-global and lives for the life of the provider, by
+ * design (§4.5: a re-patch's admissible pre-state is the word the provider
+ * itself published). A gate that publishes into freshly mapped memory needs a
+ * clean table between cases, or case N+1 takes the re-patch branch against a
+ * site whose window address has since been unmapped and remapped for something
+ * else. Tests only; the agent never calls it.
+ */
+void repro_hcr_lx_probe_reset_sites(void) {
+  int i;
+  for (i = 0; i < REPRO_HCR_LX_MAX_SITES; ++i) {
+    repro_hcr_lx_sites[i].used = 0;
+    repro_hcr_lx_sites[i].claimed = 0;
+  }
+}
+
 void *repro_hcr_lx_probe_map(size_t length, int protection) {
   return repro_hcr_lx_map_anonymous(NULL, length, protection, 0);
 }

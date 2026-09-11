@@ -307,6 +307,32 @@ proc isRfc3339*(s: string): bool =
 # Validation
 # ---------------------------------------------------------------------
 
+proc validateUnverifiedClaims*(c: UnverifiedClaims) =
+  ## The claim fields' shapes, on their own.
+  ##
+  ## Extracted from ``validateAttestationReport`` — which calls it, so
+  ## there is still exactly one implementation — because an agent has to
+  ## check the identity it was configured with at start-up, and a daemon
+  ## that discovers its configuration is unusable on the first request
+  ## has already been running for hours by the time anyone finds out.
+  if not isSafeToken(c.unverifiedGeneration, MaxClaimTokenLen):
+    raise newException(ReportError,
+      "claims.generation must be a non-empty token of at most " &
+      $MaxClaimTokenLen & " characters from [0-9A-Za-z._:;,+/=@-], got " &
+      c.unverifiedGeneration.escapeJson())
+  if not isSafeToken(c.unverifiedConfigFingerprint, MaxClaimTokenLen):
+    raise newException(ReportError,
+      "claims.configFingerprint must be a non-empty token of at most " &
+      $MaxClaimTokenLen & " characters from [0-9A-Za-z._:;,+/=@-], got " &
+      c.unverifiedConfigFingerprint.escapeJson())
+  if c.unverifiedVerityRootHash.len != 64 or
+     not isLowerHex(c.unverifiedVerityRootHash):
+    raise newException(ReportError,
+      "claims.verityRootHash must be 64 lower-case hex characters — the " &
+      "same spelling a measurement manifest uses, so the cheap pre-check " &
+      "is a string comparison — got " &
+      c.unverifiedVerityRootHash.escapeJson())
+
 proc validateAttestationReport*(r: AttestationReport) =
   ## The single validator. The renderer runs it before it writes and the
   ## parser runs it after it reads, so a report cannot become acceptable
@@ -379,23 +405,7 @@ proc validateAttestationReport*(r: AttestationReport) =
         raise newException(ReportError,
           "certificates[" & $i & "] must be canonical base64")
 
-  if not isSafeToken(r.claims.unverifiedGeneration, MaxClaimTokenLen):
-    raise newException(ReportError,
-      "claims.generation must be a non-empty token of at most " &
-      $MaxClaimTokenLen & " characters from [0-9A-Za-z._:;,+/=@-], got " &
-      r.claims.unverifiedGeneration.escapeJson())
-  if not isSafeToken(r.claims.unverifiedConfigFingerprint, MaxClaimTokenLen):
-    raise newException(ReportError,
-      "claims.configFingerprint must be a non-empty token of at most " &
-      $MaxClaimTokenLen & " characters from [0-9A-Za-z._:;,+/=@-], got " &
-      r.claims.unverifiedConfigFingerprint.escapeJson())
-  if r.claims.unverifiedVerityRootHash.len != 64 or
-     not isLowerHex(r.claims.unverifiedVerityRootHash):
-    raise newException(ReportError,
-      "claims.verityRootHash must be 64 lower-case hex characters — the " &
-      "same spelling a measurement manifest uses, so the cheap pre-check " &
-      "is a string comparison — got " &
-      r.claims.unverifiedVerityRootHash.escapeJson())
+  validateUnverifiedClaims(r.claims)
 
 # ---------------------------------------------------------------------
 # Reading a report, with the trust rules in the names

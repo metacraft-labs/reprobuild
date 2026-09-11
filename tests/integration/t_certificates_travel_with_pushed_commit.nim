@@ -237,7 +237,7 @@ suite "TC-2 — certificates travel with the pushed commit":
         fx.workspaceRoot, fx.libASha, currentPlatformTag())
       check fileExists(certFile)
       let cert = readCertificateFile(certFile)
-      check cert.commit == fx.libASha
+      check cert.vcs.commit == fx.libASha
       check "t-unit" in cert.targets
 
       # --- attach it to commit C (the TC-2 carrier) -----------------------
@@ -246,7 +246,7 @@ suite "TC-2 — certificates travel with the pushed commit":
 
       # A SECOND platform's certificate for the SAME commit. We can only run
       # on one real platform, so this one is a synthetic-platform clone of the
-      # genuine cert (same commit/lock, a different ``platform`` + target).
+      # genuine cert (same commit, a different ``platform`` + target). It is
       # Accumulation (append, no overwrite) is what we are exercising.
       var cert2 = cert
       cert2.platform =
@@ -287,7 +287,7 @@ suite "TC-2 — certificates travel with the pushed commit":
       for c in upstreamCerts:
         upstreamPlatforms.add(c.platform)
         # Each travelled cert genuinely attests C (round-trips the binding).
-        check c.commit == fx.libASha
+        check c.vcs.commit == fx.libASha
         check c.schema == testCertificateSchemaV1
       check cert.platform in upstreamPlatforms
       check cert2.platform in upstreamPlatforms
@@ -302,7 +302,7 @@ suite "TC-2 — certificates travel with the pushed commit":
       # drop the mismatch filter and this cert is returned (count climbs to 3,
       # and the wrong-commit platform appears).
       var mismatch = cert
-      mismatch.commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+      mismatch.vcs.commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
       mismatch.platform = "linux/mismatch"
       let attM = attachCertificate(gitBin, fx.libAPath, fx.libASha, mismatch)
       check attM.ok
@@ -311,5 +311,5 @@ suite "TC-2 — certificates travel with the pushed commit":
       # Still exactly the two genuine certs for C; the misfiled one is dropped.
       check afterMismatch.len == 2
       for c in afterMismatch:
-        check c.commit == fx.libASha
+        check c.vcs.commit == fx.libASha
         check c.platform != "linux/mismatch"

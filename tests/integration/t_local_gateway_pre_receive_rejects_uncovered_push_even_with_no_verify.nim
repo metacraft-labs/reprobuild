@@ -234,7 +234,7 @@ proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
     fx.workspaceRoot, headSha, currentPlatformTag())
   check fileExists(certFile)
   result = readCertificateFile(certFile)
-  check result.commit == headSha
+  check result.vcs.commit == headSha
   check "t-unit" in result.targets
   let att = attachCertificate(gitBin, fx.libAPath, headSha, result)
   check att.ok
@@ -268,12 +268,11 @@ suite "TC-6 — local gateway pre-receive rejects uncovered push even " &
       defer: removeDir(fx.scratch)
 
       # ---- wire the gateway as the developer clone's PUSH remote ----------
-      # We resolve the lock digest the cert will bind to by issuing the cert
-      # below; for the gateway config we read it back from the (b) cert. The
-      # (a) reject path needs no digest match (there is no cert at all), so we
-      # wire with a placeholder lock and REWIRE before (b) with the cert's
-      # exact digest — modelling the daemon configuring the gateway from the
-      # project's resolved policy + lock.
+      # TC-7: the gateway is configured with the per-repo LOCK SUBTREE rather
+      # than a lock digest, and resolves the lock at the attested commit
+      # itself — modelling the daemon configuring the gateway from the
+      # project's resolved policy. The subtree is empty until ``seedLock``
+      # runs below, which is exactly the state the (a) reject path is in.
       let registeredKeysPath = registeredKeyStorePath(fx.workspaceRoot)
 
       # ---- (a) NO covering cert, even `git push --no-verify` → REJECTED ----
@@ -284,7 +283,8 @@ suite "TC-6 — local gateway pre-receive rejects uncovered push even " &
         gateMode: cgmRequired,
         requiredTargets: @["t-unit"],
         requiredPlatforms: @[currentPlatformTag()],
-        lockDigest: "blake3:placeholder-no-cert-present",
+        lockRecordsDir: lockRecordsDirFor(
+          fx.workspaceRoot / ".repro" / "manifests", "lib-a", "lib-a"),
         registeredKeysPath: registeredKeysPath)
       let wiredA = wirePushGateway(gitBin, fx.libAPath, fx.gatewayBare,
         fileUrl(fx.upstreamBare), cfgA)
@@ -319,17 +319,25 @@ suite "TC-6 — local gateway pre-receive rejects uncovered push even " &
       # Confirm the rewind: the upstream tip is back at seed before the gateway
       # push, so the forward assertion below proves the gateway advanced it.
       check not upstreamHasCommit(gitBin, fx.upstreamBare, newSha)
-      # Rewire the gateway config with the cert's EXACT lock digest so coverage
-      # binds correctly (the daemon would resolve the same digest from the
-      # workspace lock the cert was issued against).
-      var cfgB = cfgA
-      cfgB.lockDigest = cert.lock
+      # Rewrite the gateway config so it also carries the real UPSTREAM (the
+      # value ``wirePushGateway`` filled in on the first wiring).
+      #
+      # TC-7: there is no lock DIGEST to copy out of the certificate any more.
+      # The gateway resolves the lock ITSELF, in the per-repo lock subtree
+      # below, keyed by the commit the certificate attests — so a certificate
+      # naming a commit with no committed lock record is refused on the
+      # receiving side even when its signature is impeccable.
+      let gatewayLockRecordsDir = lockRecordsDirFor(
+        fx.workspaceRoot / ".repro" / "manifests", "lib-a", "lib-a")
+      check dirExists(gatewayLockRecordsDir)
+      check resolveLockAtCommit(gatewayLockRecordsDir,
+        cert.vcs.commit).status == lacPresent
       writeFile(gatewayConfigPath(fx.gatewayBare),
         serializeGatewayConfig(GatewayConfig(
           gateMode: cgmRequired,
           requiredTargets: @["t-unit"],
           requiredPlatforms: @[currentPlatformTag()],
-          lockDigest: cert.lock,
+          lockRecordsDir: gatewayLockRecordsDir,
           registeredKeysPath: registeredKeysPath,
           upstreamUrl: fileUrl(fx.upstreamBare))))
 

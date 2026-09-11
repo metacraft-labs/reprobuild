@@ -225,7 +225,7 @@ proc issueAndReadCert(fx: Fixture): TestCertificate =
     fx.workspaceRoot, fx.libASha, currentPlatformTag())
   check fileExists(certFile)
   result = readCertificateFile(certFile)
-  check result.commit == fx.libASha
+  check result.vcs.commit == fx.libASha
   check "t-unit" in result.targets
 
 const otherPlatform = "linux/tc3-second"
@@ -307,7 +307,7 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
             namedMissingPlatform = true
       check namedMissingPlatform
 
-      # Attach a SECOND cert for the other platform (same commit + lock, a
+      # Attach a SECOND cert for the other platform (same commit, a
       # different platform + the required target). Now the UNION of the two
       # certs covers BOTH required platforms.
       #

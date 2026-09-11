@@ -54,6 +54,8 @@
 #include <mach-o/nlist.h>
 #include <mach-o/reloc.h>
 #elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
+#include "repro_hcr_sha256.h"
+#include "repro_hcr_mcr_bridge.h"
 #include "repro_hcr_linux_x86_64.h"
 #include "repro_hcr_linux_elf_symbols.h"
 #ifndef MAP_ANONYMOUS
@@ -109,10 +111,14 @@ static void repro_hcr_notify_did_patch(void *entry, void *dispatch_entry,
     hook(entry, dispatch_entry, patch_len);
   }
 #elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
-  /* HLX-M7 widens this into the MCR `ct_repro_hcr_agent_did_patch` bridge
-   * (patchId, patchedSymbols, code hashes). HLX-M0 deliberately does not
-   * resolve the hook through `dlsym`, so the agent imposes no libdl link
-   * requirement on the targets it is compiled into. */
+  /* HLX-M7 landed the widened bridge as `repro_hcr_notify_code_patch` below.
+   * It carries the whole `CodePatchEvent` — patchId, patchedSymbols, the
+   * bundle and the code hashes — and is called from the agent thread, where
+   * those strings exist; three untyped words here could not carry any of it.
+   * The three-argument hook stays untouched so the Apple arm's behaviour is
+   * preserved by construction, and the Linux arm still resolves nothing
+   * through `dlsym`: the bridge binds a WEAK undefined symbol at load time, so
+   * the agent still imposes no libdl link requirement on its targets. */
   (void)entry;
   (void)dispatch_entry;
   (void)patch_len;
@@ -1210,6 +1216,192 @@ static void *repro_hcr_apply_direct_patch(void *entry,
   return patch_page;
 }
 
+/* ---------------------------------------------------------------------------
+ * HLX-M7 — emitting the `CodePatchEvent` (design §10.3, protocol §7.2).
+ *
+ * WHAT THIS FIXES. Measured on the Godot demo before this existed: a recording
+ * taken while this provider patched a live engine function had an IDENTICAL SET
+ * OF EVENT KINDS to a control recording with no patch. Nothing in the container
+ * said the process's text had changed, so a replay would have run the ORIGINAL
+ * code's semantics against events the NEW code produced — wrong, and silently
+ * so, from the patch point onwards.
+ *
+ * THE HASHES ARE HASHES. `codeHashBefore` / `codeHashAfter` are SHA-256 over
+ * the bytes that actually changed — the published 8-byte window, before and
+ * after the store — not over the whole `.text`, which under ASLR is neither
+ * stable nor cheap (§10.3). They are computed from
+ * `repro_hcr_lx_last_report.original_word` / `.published_word`, which are read
+ * out of live target memory by the publication path itself, and the same words
+ * are carried in the event's per-site record so a consumer can recompute both
+ * digests and check them. `repro_hcr_sha256_selftest` runs first: a hash
+ * function that silently computed the wrong thing would place a plausible
+ * 32-byte value in a protocol field, which is the one failure mode nothing
+ * downstream could detect.
+ *
+ * TIER. HLX-M4 (quiescence) is not done, so publication is tier 1 and the
+ * event's geid is an APPROXIMATE boundary. §10.3 requires that be recorded
+ * rather than hidden, so the tier is a field and the recorder prints it.
+ * ------------------------------------------------------------------------- */
+
+typedef struct repro_hcr_code_patch_outcome {
+  int attempted;       /* a patch was published, so an event was owed        */
+  int bridge_present;  /* libct_interpose was in this process                */
+  int bridge_result;   /* 1 recorded, 0 not recording, <0 refused            */
+  int hash_selftest;   /* SHA-256 self-test outcome                          */
+  unsigned tier;
+  unsigned long long symbol_generation;
+  char code_hash_before_hex[2 * REPRO_HCR_SHA256_DIGEST_BYTES + 1];
+  char code_hash_after_hex[2 * REPRO_HCR_SHA256_DIGEST_BYTES + 1];
+  char patch_bundle_hex[2 * REPRO_HCR_SHA256_DIGEST_BYTES + 1];
+} repro_hcr_code_patch_outcome;
+
+static repro_hcr_code_patch_outcome repro_hcr_last_code_patch;
+
+static void repro_hcr_hex32(const uint8_t *digest, char *out) {
+  static const char digits[] = "0123456789abcdef";
+  int i;
+  for (i = 0; i < REPRO_HCR_SHA256_DIGEST_BYTES; ++i) {
+    out[2 * i] = digits[(digest[i] >> 4) & 0x0F];
+    out[2 * i + 1] = digits[digest[i] & 0x0F];
+  }
+  out[2 * REPRO_HCR_SHA256_DIGEST_BYTES] = '\0';
+}
+
+/*
+ * Build the NUL-separated, DOUBLE-NUL-terminated symbol blob the note ABI
+ * wants. `changed_function` is the name the client asked to be replaced;
+ * `target_symbol` is the mangled symbol that was actually resolved in the
+ * process. Both are recorded when they differ, because §7.2's `patchedSymbols`
+ * has to be usable BY A READER OF THE TRACE, who has the binary and not the
+ * client's request.
+ */
+static size_t repro_hcr_build_symbol_blob(const char *changed_function,
+                                          const char *target_symbol,
+                                          char *out, size_t out_cap) {
+  size_t used = 0;
+  const char *names[2];
+  int count = 0;
+  int i;
+
+  if (changed_function != NULL && changed_function[0] != '\0') {
+    names[count++] = changed_function;
+  }
+  if (target_symbol != NULL && target_symbol[0] != '\0' &&
+      (count == 0 || strcmp(target_symbol, names[0]) != 0)) {
+    names[count++] = target_symbol;
+  }
+  if (count == 0 || out_cap < 2) {
+    return 0;
+  }
+  for (i = 0; i < count; ++i) {
+    size_t n = strlen(names[i]);
+    if (used + n + 2 > out_cap) {
+      break;
+    }
+    memcpy(out + used, names[i], n);
+    used += n;
+    out[used++] = '\0';
+  }
+  if (used == 0 || used + 1 > out_cap) {
+    return 0;
+  }
+  out[used] = '\0';   /* the terminating empty name */
+  return used;
+}
+
+static void repro_hcr_notify_code_patch(const char *patch_id,
+                                        const char *changed_function,
+                                        const char *target_symbol,
+                                        const char *support_profile,
+                                        void *entry,
+                                        const uint8_t *patch_bytes,
+                                        size_t patch_len) {
+  ct_repro_hcr_patch_note_v1 note;
+  ct_repro_hcr_patch_site_v1 site;
+  uint8_t hash_before[REPRO_HCR_SHA256_DIGEST_BYTES];
+  uint8_t hash_after[REPRO_HCR_SHA256_DIGEST_BYTES];
+  uint8_t hash_bundle[REPRO_HCR_SHA256_DIGEST_BYTES];
+  uint8_t word_before[8];
+  uint8_t word_after[8];
+  char symbol_blob[1024];
+  size_t symbol_blob_len;
+  size_t i;
+
+  memset(&repro_hcr_last_code_patch, 0, sizeof(repro_hcr_last_code_patch));
+  repro_hcr_last_code_patch.attempted = 1;
+  repro_hcr_last_code_patch.tier = REPRO_HCR_PUBLICATION_TIER_NO_QUIESCENCE;
+  repro_hcr_last_code_patch.symbol_generation =
+      (unsigned long long)repro_hcr_lx_last_report.generation;
+
+  repro_hcr_last_code_patch.hash_selftest = repro_hcr_sha256_selftest();
+  if (!repro_hcr_last_code_patch.hash_selftest) {
+    /* Refusing to record beats recording a digest that is not one. The caller
+     * turns this into a visible `codePatchEvent` failure in the response. */
+    return;
+  }
+
+  /* The patched byte range, in the byte order it has in memory. The words are
+   * hashed AS BYTES rather than as integers so the digest is over exactly the
+   * bytes a reader would find at `windowAddress`, with no endianness step to
+   * get wrong on either side. */
+  for (i = 0; i < 8; ++i) {
+    word_before[i] =
+        (uint8_t)((repro_hcr_lx_last_report.original_word >> (8 * i)) & 0xFF);
+    word_after[i] =
+        (uint8_t)((repro_hcr_lx_last_report.published_word >> (8 * i)) & 0xFF);
+  }
+  repro_hcr_sha256(word_before, sizeof(word_before), hash_before);
+  repro_hcr_sha256(word_after, sizeof(word_after), hash_after);
+  repro_hcr_sha256(patch_bytes, patch_len, hash_bundle);
+
+  repro_hcr_hex32(hash_before, repro_hcr_last_code_patch.code_hash_before_hex);
+  repro_hcr_hex32(hash_after, repro_hcr_last_code_patch.code_hash_after_hex);
+  repro_hcr_hex32(hash_bundle, repro_hcr_last_code_patch.patch_bundle_hex);
+
+  repro_hcr_last_code_patch.bridge_present =
+      (ct_repro_hcr_agent_did_patch_v2 != NULL) ? 1 : 0;
+  if (!repro_hcr_last_code_patch.bridge_present) {
+    /* No `libct_interpose` in this process: nothing is recording, so there is
+     * no trace for the event to be missing from. */
+    return;
+  }
+
+  symbol_blob_len = repro_hcr_build_symbol_blob(changed_function, target_symbol,
+                                                symbol_blob,
+                                                sizeof(symbol_blob));
+  if (symbol_blob_len == 0) {
+    return;
+  }
+
+  memset(&site, 0, sizeof(site));
+  site.entryAddress = (uint64_t)(uintptr_t)entry;
+  site.sledAddress = repro_hcr_lx_last_report.sled_address;
+  site.windowAddress = repro_hcr_lx_last_report.window_address;
+  site.dispatchAddress = repro_hcr_lx_last_report.dispatch_address;
+  site.codeWordBefore = repro_hcr_lx_last_report.original_word;
+  site.codeWordAfter = repro_hcr_lx_last_report.published_word;
+  site.windowLength = REPRO_HCR_LX_WINDOW_BYTES;
+  site.generation = (uint32_t)repro_hcr_lx_last_report.generation;
+
+  memset(&note, 0, sizeof(note));
+  note.structSize = (uint32_t)sizeof(note);
+  note.noteVersion = 1u;
+  note.publicationTier = REPRO_HCR_PUBLICATION_TIER_NO_QUIESCENCE;
+  note.siteCount = 1u;
+  note.patchId = patch_id;
+  note.patchedSymbols = symbol_blob;
+  note.supportProfile = support_profile;
+  note.patchBundle = patch_bytes;
+  note.patchBundleLen = (uint64_t)patch_len;
+  note.codeHashBefore = hash_before;
+  note.codeHashAfter = hash_after;
+  note.patchBundleHash = hash_bundle;
+  note.sites = &site;
+
+  repro_hcr_last_code_patch.bridge_result =
+      ct_repro_hcr_agent_did_patch_v2(&note);
+}
+
 #else
 static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_bytes,
                                           size_t patch_len) {
@@ -1217,6 +1409,30 @@ static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_byte
   (void)patch_bytes;
   (void)patch_len;
   return NULL;
+}
+#endif
+
+#if !defined(REPRO_HCR_TARGET_LINUX_X86_64)
+/*
+ * HLX-M7 is a Linux/x86_64 deliverable. On the Apple arm and the generic
+ * fallback the notifier is inert and the `patchApplied` response is BYTE FOR
+ * BYTE what it was before HLX-M7 — the campaign's standing rule that no macOS
+ * outcome changes is preserved by construction, not by inspection.
+ */
+static void repro_hcr_notify_code_patch(const char *patch_id,
+                                        const char *changed_function,
+                                        const char *target_symbol,
+                                        const char *support_profile,
+                                        void *entry,
+                                        const uint8_t *patch_bytes,
+                                        size_t patch_len) {
+  (void)patch_id;
+  (void)changed_function;
+  (void)target_symbol;
+  (void)support_profile;
+  (void)entry;
+  (void)patch_bytes;
+  (void)patch_len;
 }
 #endif
 
@@ -1321,47 +1537,147 @@ static char *repro_hcr_lifecycle_json(const char *patch_id, const char *event,
   return json;
 }
 
+/*
+ * HLX-M7 — the `codePatchEvent` object appended to `patchApplied`.
+ *
+ * WHY THE RESPONSE CARRIES IT AT ALL, given the event is in the trace. Two
+ * reasons, both about being able to check the trace:
+ *
+ *   1. The coordinator learns whether the event was RECORDED, and if not, why.
+ *      Before this, a patch under `ct-mcr record` and a patch outside one were
+ *      indistinguishable to the client — which is how a missing CodePatchEvent
+ *      would go unnoticed for a second time.
+ *   2. It gives a gate a SECOND, INDEPENDENT copy of the digests to compare the
+ *      trace's against. A digest that matches here and in the container was
+ *      computed once and transported twice; a digest the gate can also
+ *      recompute from the patch object it built is a digest, full stop.
+ *
+ * Empty on every non-Linux arm, so the macOS `patchApplied` message is
+ * unchanged byte for byte.
+ */
+static const char *repro_hcr_code_patch_json_fragment(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  static char buffer[768];
+  if (!repro_hcr_last_code_patch.attempted) {
+    return "";
+  }
+  snprintf(buffer, sizeof(buffer),
+           ",\"codePatchEvent\":{\"recorded\":%s,\"bridgePresent\":%s,"
+           "\"bridgeResult\":%d,\"hashSelfTest\":%s,\"publicationTier\":%u,"
+           "\"codeHashBefore\":\"sha256:%s\",\"codeHashAfter\":\"sha256:%s\","
+           "\"patchBundle\":\"sha256:%s\",\"claimHeld\":%s}",
+           repro_hcr_last_code_patch.bridge_result == 1 ? "true" : "false",
+           repro_hcr_last_code_patch.bridge_present ? "true" : "false",
+           repro_hcr_last_code_patch.bridge_result,
+           repro_hcr_last_code_patch.hash_selftest ? "true" : "false",
+           repro_hcr_last_code_patch.tier,
+           repro_hcr_last_code_patch.code_hash_before_hex,
+           repro_hcr_last_code_patch.code_hash_after_hex,
+           repro_hcr_last_code_patch.patch_bundle_hex,
+           repro_hcr_lx_last_report.claim_held ? "true" : "false");
+  return buffer;
+#else
+  return "";
+#endif
+}
+
+static unsigned long long repro_hcr_symbol_generation(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  /* HLX-M7: the REAL generation, from the per-site table the re-patch rule of
+   * design §4.5 already maintains. Until now this field was the literal `1`
+   * inside the format string below, which looked like generation tracking and
+   * was not; anything reading it as evidence of a second reload would have
+   * been reading a constant. macOS keeps the literal because that arm has no
+   * generation counter to report and HLX-M0 forbids changing its outcomes. */
+  return (unsigned long long)repro_hcr_lx_last_report.generation;
+#else
+  return 1ull;
+#endif
+}
+
 static char *repro_hcr_patch_applied_json(const char *patch_id,
                                           const char *changed_function,
                                           const char *debug_digest,
                                           const char *unwind_digest,
                                           void *entry,
                                           void *dispatch_entry) {
+  char *json = (char *)malloc(8192);
+  if (json == NULL) {
+    return NULL;
+  }
+  snprintf(json, 8192,
+           "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
+           "\"protocolVersion\":1,\"messageId\":\"agent-patch-applied-1\","
+           "\"kind\":\"patchApplied\",\"patchApplied\":{\"patchId\":\"%s\","
+           "\"changedFunctions\":[\"%s\"],\"symbolGeneration\":%llu,"
+           "\"debugObjectDigest\":\"%s\",\"unwindMetadataDigest\":\"%s\","
+           "\"sourceGenerationMapDigest\":\"blake3-256:c-agent-source-generation-map\","
+           "\"entryAddress\":\"0x%llx\","
+           "\"dispatchAddress\":\"0x%llx\","
+           "\"oldCodeRetained\":true,\"sharedLibraryPositivePath\":false%s}}",
+           REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE, patch_id,
+           changed_function, repro_hcr_symbol_generation(),
+           debug_digest == NULL ? "" : debug_digest,
+           unwind_digest == NULL ? "" : unwind_digest,
+           (unsigned long long)(uintptr_t)entry,
+           (unsigned long long)(uintptr_t)dispatch_entry,
+           repro_hcr_code_patch_json_fragment());
+  return json;
+}
+
+/*
+ * HLX-M7 §10.1 — `skippedFunctions`.
+ *
+ * A function whose sled bytes MCR has already claimed is NOT a broken patch and
+ * NOT a property of the target's code: the same function is patchable in the
+ * same process a moment earlier or later. The claim map's rule ends "…never to
+ * a silent skip", and reporting the refusal is the half of that rule this side
+ * owns — the client is told which function was skipped and by whom, in a
+ * structured field, instead of being handed a message it would have to parse.
+ *
+ * SCOPE, STATED RATHER THAN IMPLIED. The C agent applies exactly ONE changed
+ * function per patch request, so today a claim conflict always skips the whole
+ * patch and this rides on `patchFailed`. The `patchApplied`-with-skips shape
+ * that a multi-function patch would need is a real gap and is recorded as one;
+ * it is not reachable from this agent and is not simulated here.
+ */
+static const char *repro_hcr_skipped_functions_fragment(
+    const char *changed_function) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  static char buffer[512];
+  if (repro_hcr_lx_last_report.refusal !=
+      REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER) {
+    return "";
+  }
+  snprintf(buffer, sizeof(buffer),
+           ",\"skippedFunctions\":[{\"function\":\"%s\","
+           "\"reason\":\"claimed-by-recorder\",\"holder\":%u,"
+           "\"windowAddress\":\"0x%llx\"}]",
+           changed_function == NULL ? "" : changed_function,
+           repro_hcr_lx_last_report.claim_holder,
+           (unsigned long long)repro_hcr_lx_last_report.window_address);
+  return buffer;
+#else
+  (void)changed_function;
+  return "";
+#endif
+}
+
+static char *repro_hcr_patch_failed_json(const char *patch_id,
+                                         const char *changed_function,
+                                         const char *message) {
   char *json = (char *)malloc(4096);
   if (json == NULL) {
     return NULL;
   }
   snprintf(json, 4096,
            "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
-           "\"protocolVersion\":1,\"messageId\":\"agent-patch-applied-1\","
-           "\"kind\":\"patchApplied\",\"patchApplied\":{\"patchId\":\"%s\","
-           "\"changedFunctions\":[\"%s\"],\"symbolGeneration\":1,"
-           "\"debugObjectDigest\":\"%s\",\"unwindMetadataDigest\":\"%s\","
-           "\"sourceGenerationMapDigest\":\"blake3-256:c-agent-source-generation-map\","
-           "\"entryAddress\":\"0x%llx\","
-           "\"dispatchAddress\":\"0x%llx\","
-           "\"oldCodeRetained\":true,\"sharedLibraryPositivePath\":false}}",
-           REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE, patch_id,
-           changed_function, debug_digest == NULL ? "" : debug_digest,
-           unwind_digest == NULL ? "" : unwind_digest,
-           (unsigned long long)(uintptr_t)entry,
-           (unsigned long long)(uintptr_t)dispatch_entry);
-  return json;
-}
-
-static char *repro_hcr_patch_failed_json(const char *patch_id,
-                                         const char *message) {
-  char *json = (char *)malloc(2048);
-  if (json == NULL) {
-    return NULL;
-  }
-  snprintf(json, 2048,
-           "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
            "\"protocolVersion\":1,\"messageId\":\"agent-patch-failed-1\","
            "\"kind\":\"patchFailed\",\"patchFailed\":{\"patchId\":\"%s\","
-           "\"stage\":\"applyDirectPatchRequest\",\"message\":\"%s\"}}",
+           "\"stage\":\"applyDirectPatchRequest\",\"message\":\"%s\"%s}}",
            REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE,
-           patch_id == NULL ? "" : patch_id, message);
+           patch_id == NULL ? "" : patch_id, message,
+           repro_hcr_skipped_functions_fragment(changed_function));
   return json;
 }
 
@@ -1470,6 +1786,18 @@ static void *repro_hcr_agent_thread(void *raw_args) {
                                                        patch_len);
       dispatch_entry = patch_entry;
       ok = dispatch_entry != NULL;
+      if (ok) {
+        /* HLX-M7 — record the code-version boundary while the words that
+         * changed are still in `repro_hcr_lx_last_report`, and BEFORE the
+         * lifecycle/patchApplied messages go out, so the response can say
+         * whether the trace carries the event.  Nothing after the publishing
+         * store may run before this: every event the target emits from here on
+         * was produced by the NEW code, and an event recorded late would put
+         * the boundary in the wrong place. */
+        repro_hcr_notify_code_patch(patch_id, changed_function, target_symbol,
+                                    args->support_profile, entry, patch_bytes,
+                                    patch_len);
+      }
       if (!ok) {
         const char *detail = repro_hcr_direct_patch_failure_detail();
         if (detail != NULL && detail[0] != '\0') {
@@ -1522,7 +1850,7 @@ static void *repro_hcr_agent_thread(void *raw_args) {
       repro_hcr_lifecycle_json(patch_id == NULL ? "" : patch_id,
                                "hcr/patchFailed", 2));
     repro_hcr_send_owned_json(fd,
-      repro_hcr_patch_failed_json(patch_id, failure_message));
+      repro_hcr_patch_failed_json(patch_id, changed_function, failure_message));
   }
 
   free(patch_bytes);

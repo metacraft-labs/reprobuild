@@ -254,5 +254,5 @@ suite "TC-1 — re-certify is a no-op when no executed function changed":
         fx.workspaceRoot, newSha, currentPlatformTag())
       check fileExists(newCertOut)
       let newCert = readCertificateFile(newCertOut)
-      check newCert.commit == newSha
+      check newCert.vcs.commit == newSha
       check "t-unit" in newCert.targets
