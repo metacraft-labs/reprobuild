@@ -38163,13 +38163,32 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     # unreachable from the index and from every commit. Aborting over it gave
     # one unrelated file — an operator's ``NOTES.toml``, or a record some older
     # writer left at a non-canonical path and never tracked — a veto over
-    # publication for every repo in the workspace. A canonical untracked record
-    # is NOT excused: the publisher stages those, so by the time control
-    # reaches here one can only mean the staging step disagreed with this one,
-    # which is exactly the kind of split this change exists to remove.
-    if entry.code == "??" and pathIsUnderLocks(entry.path) and
-        not parseLockRecordRelPath(entry.path).ok:
-      continue
+    # publication for every repo in the workspace.
+    #
+    # A canonical untracked record USED to be refused here, on the reasoning
+    # that "the publisher stages those, so one can only mean the staging step
+    # disagreed with this one". Invariant 13 makes that premise false on
+    # purpose: publication now stages only what the operation ANCHORS, so a
+    # canonical record belonging to some OTHER repo is expected to sit here
+    # untracked. It is that repo's draft, waiting for the push that anchors it
+    # — `post-commit` writes one on every commit — and it is not this
+    # operation's business.
+    #
+    # The narrower claim survives, because it is the one that catches a real
+    # split: a record THIS operation is supposed to publish must not still be
+    # untracked by the time we verify it. That is checked against
+    # ``expected``, which is exactly the set the publisher was told to stage.
+    if entry.code == "??" and pathIsUnderLocks(entry.path):
+      let parsed = parseLockRecordRelPath(entry.path)
+      if not parsed.ok:
+        continue
+      var anchoredHere = false
+      for item in expected:
+        if item.relPath == entry.path:
+          anchoredHere = true
+          break
+      if not anchoredHere:
+        continue
     result.diagnostic = "backend has uncommitted state (" & entry.code & " " &
       entry.path & "); refusing verified lock recovery"
     return
@@ -38437,6 +38456,33 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
         canonicalToStage.add(rel)
       else:
         vanishedRecords.add(rel)
+
+    # INVARIANT 13 (push-hook-publication-protocol.md §"Publication stages only
+    # the records this operation anchors"). Stage exactly what this operation
+    # ANCHORS — the caller's ``exactExpected`` — not every canonical record the
+    # scan happened to find. A record is published by the push that anchors it,
+    # never swept in by a sibling's push.
+    #
+    # The sweep above finds drafts too. ``post-commit`` files one keyed at the
+    # committing repo's HEAD, pinning its siblings AS OF THAT INSTANT; a
+    # ``push --sync --rebase`` then moves a sibling, so that draft describes a
+    # state which will never ship. Publishing it is not a tidiness problem:
+    # published records are immutable, so the repo it names can never afterwards
+    # record its real state at that key, and its push fails permanently on a
+    # record it did not write.
+    #
+    # An EMPTY ``exactExpected`` keeps the old unscoped behaviour deliberately:
+    # callers that publish without naming records (recovery and resume paths,
+    # which re-drive whatever a previous interrupted run left staged) still work
+    # exactly as before.
+    if exactExpected.len > 0:
+      var anchored = initHashSet[string]()
+      for item in exactExpected:
+        anchored.incl(item.relPath)
+      var scoped: seq[string]
+      for rel in canonicalToStage:
+        if rel in anchored: scoped.add(rel)
+      canonicalToStage = scoped
     canonicalToStage.sort()
     vanishedRecords.sort()
 
