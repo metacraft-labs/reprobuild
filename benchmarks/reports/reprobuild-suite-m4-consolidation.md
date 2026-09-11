@@ -654,6 +654,292 @@ line 211, twelve times), and its binary exits 1 run whole. This is a
 pre-existing `origin/dev` failure, not a consolidation effect — but a group
 carrying a red case cannot be evidence that consolidation preserved outcomes.
 
+## Batch 2 landed: `libs/repro_lock_files` (second group) + two `libs/repro_core` groups + `libs/repro_dsl_stdlib` catalogs
+
+Recorded in full, with per-member figures, in
+`reprobuild-suite-m4-consolidation-batch2.json`. Measured at Reprobuild
+`4a9a3070b`, Nim 2.3.1 from the dev shell, gcc 15.2.0, on the same shared
+32-core host. Every compile-cost and footprint figure below was taken in one
+window at load 65–95; the mutation runs later in the session ran at load
+200–300 and contribute no cost figure to this report, only exit codes and
+per-case verdicts. Every binary compiled fresh into a private nimcache;
+nothing below is read back out of a pre-existing artifact or carried forward
+from batch 1 — including batch 1's two bundles, which this batch rebuilt only so
+the verification test could run against them, and did not re-record.
+
+Four groups, 22 members, 22 → 4 binaries, 232 logical cases preserved.
+
+| Group | Members | Cases | Compile CPU s | nimcache MB | C files | Binary MB | Per-case warm CPU s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `libs/repro_lock_files` (2nd group) before | 3 | 24 | 117.4 | 6.04 | 86 | 1.29 | 0.166 |
+| `libs/repro_lock_files` (2nd group) after | 1 | 24 | **54.8** | **3.23** | **32** | **0.66** | 0.170 |
+| `libs/repro_core` `['repro_core']` before | 3 | 63 | 161.9 | 9.63 | 99 | 2.04 | 0.480 |
+| `libs/repro_core` `['repro_core']` after | 1 | 63 | **109.8** | **7.20** | **46** | **1.47** | 0.498 |
+| `libs/repro_core` dep-scanners before | 3 | 35 | 218.8 | 12.44 | 118 | 2.64 | 0.282 |
+| `libs/repro_core` dep-scanners after | 1 | 35 | **116.7** | **6.99** | **45** | **1.48** | 0.289 |
+| `libs/repro_dsl_stdlib` catalogs before | 13 | 110 | 914.8 | 50.46 | 678 | 9.85 | 0.855 |
+| `libs/repro_dsl_stdlib` catalogs after | 1 | 110 | **309.2** | **21.47** | **167** | **3.93** | 0.965 |
+| **batch total before** | **22** | **232** | **1,412.97** | **78.57** | **981** | **15.82** | **1.783** |
+| **batch total after** | **4** | **232** | **590.57** | **38.89** | **290** | **7.54** | **1.922** |
+
+Build cost falls **2.39x** in CPU seconds, nimcache bytes **2.02x**, emitted C
+files **3.38x**, test-binary bytes **2.10x**, binaries 22 → 4.
+
+The 2.39x is honestly smaller than batch 1's 8.2x and the reason is
+arithmetic, not regression: three of these four groups have only three members,
+and a group of N cannot beat N. Read per group, the 13-member
+`repro_dsl_stdlib` group returns **2.96x** and the three-member groups return
+2.14x, 1.47x and 1.87x. The shared closure that batch 1's 13-member
+`repro_peer_cache` group amortised (bearssl, the codec, the cuckoo filter) is
+simply larger than what three `repro_core` tests share.
+
+All four bundles exit 0 run whole and pass 24/24, 63/63, 35/35 and 110/110
+individually under `--run`. Catalog parity is exact in both directions for all
+four: zero missing, zero extra. Thirteen protocol fields were compared per case
+(`bodyHash`, `column`, `deterministic`, `file`, `group`, `kind`, `line`, `name`,
+`suite`, `tags`, `test`, `threadsRequired`, `xfail`) and **only `bodyHash`
+moves** — 24 of 24, 45 of 63, 16 of 35, 99 of 110. Everything that a selector is
+made of is unchanged.
+
+**The warm run does not get faster, and is slightly slower**: 1.783 → 1.922 CPU
+seconds over the same 232 cases (+7.8%), measured the way batch 1 measured it —
+one process per case, `--run "suite::test"`, two passes, the second reported.
+The 13-member bundle carries most of it (+12.9%); the three-member bundles are
++2.4%, +2.6% and +3.7%. Consolidation is a BUILD-cost optimisation.
+
+A second run figure is recorded per binary and is *not* the one compared:
+running each binary once with no arguments. On that metric the batch gets
+**faster** — 0.278 → 0.158 CPU seconds, 1.76x — for the trivial reason that 22
+process startups become 4 and each module init is paid once instead of once per
+case. It is in the ledger as `wholeBinaryWarm*` so that nobody re-derives it and
+quotes it as the run-time win: the M3 runner spends one process per case, so
+`perCaseWarm*` is the column that describes what CI pays, and that one is
+7.8% worse.
+
+Suite-wide, both sides stated rather than netted: **1,512 → 1,494 Nim test
+binaries**, a fall of 18, which is exactly the 22 members minus the 4 bundles
+that replaced them. Unlike batch 1 this batch adds **no** binary of its own — the
+verification test already exists — so there is nothing to subtract. Test
+entries (Nim + Python) 1,520 → 1,502. **Static case sum 8,767 → 8,767,
+unchanged**: consolidation contributes zero and this batch adds no test.
+
+Consolidation groups 48 → 46: four consumed, and **two new ones created whose
+members are themselves bundles** — `(tests/bundles, ['repro_lock_files'])` now
+pairs `bundle_repro_lock_files_pure_unit` with
+`bundle_repro_lock_files_cli_pure_unit`, and `(tests/bundles, ['repro_core'])`
+pairs the two `repro_core` bundles. Neither is actionable: `checkBundleLimits`
+refuses any member under `tests/bundles` by construction. The candidate list
+does not know that, so it will keep proposing them; that is a defect in the
+candidate list, not in the limit.
+
+### What the verification test had to be changed to say
+
+Extending `tests/integration/t_m4_pure_unit_consolidation.nim` to a second
+ledger turned up two assertions that were true only of a one-batch world.
+
+**`declaredSources.len >= after` was false on arrival.** Batch 1 anchored it to
+that batch's `nimTestBinariesAfter` on the reasoning that the count only ever
+grows. It does not: the next consolidation batch makes it *fall*. It is now
+anchored to the newest ledger's `after`, which is the only one that is a lower
+bound, because every later batch can only remove more.
+
+**`staticTotal == enumerated` was ill-formed, and batch 1 passed by luck.** It
+compared the Python source scan's count of a bundle against the built binary's
+own catalog. The static table's own header says the scan "sums every when/else
+branch"; `libs/repro_core/tests/t_smoke_repro_core.nim` has six cases under
+`when defined(windows)` and one under `else`, so the scan counts 14 where a
+Linux binary enumerates 8 — and `bundle_repro_core_pure_unit` went red at 69 vs
+63 the first time the verification test ran against it. None of batch 1's 21
+members was platform-conditional, so the equality had never been exercised.
+
+The fix keeps two producers and drops the assumption that the scanner is exact:
+the scanner's count of the *bundle* must equal the scanner's count of the
+*members*, summed, as recorded per member in the ledger
+(`staticCaseCountAtBase`) when the batch landed. The over-count is a property of
+the member sources and survives the move unchanged, so it cancels on both sides;
+a deleted `test` block does not. This is what the file's own header always
+claimed — "a loss has to be written into both before this file goes quiet" —
+and what the old form did not deliver, since a deletion moved static and
+enumerated together and left the equality green. Batch 1's ledger carries no
+per-member static counts and therefore keeps the assertion it shipped with,
+unrelaxed.
+
+The mutation `M2-static` below exists precisely because that arm was changed and
+had to be shown to discriminate.
+
+### Batch 2's gates, and the runs that show they can fail
+
+| Mutation | Verification exit | case 1 list | case 2 footprint | case 3 selectors |
+| --- | --- | --- | --- | --- |
+| baseline | 0 | OK | OK | OK |
+| **M3** rename a member's `suite`, case count held at 24, bundle rebuilt | 1 | **FAILED** | **OK** | **FAILED** |
+| M1 delete one `test` block, bundle rebuilt | 1 | FAILED | FAILED | FAILED |
+| M2-static delete one `test` block, regenerate the static table, bundle NOT rebuilt | 1 | OK | **FAILED** | OK |
+| M6-coverage empty batch 1's `bundlesNotCoveredByThisLedger` | 1 | FAILED | OK | OK |
+| M7-ledger-drop remove a member row from batch 2's ledger | 1 | FAILED | FAILED | OK |
+
+**M3 is the discriminating one and it still discriminates.** The rename holds
+the bundle at 24 enumerated cases — confirmed by asking the mutated binary — so
+case 2, which compares counts and bytes, stays green while cases 1 and 3 go red
+on the changed `suite::test` selector. That separation is structural, not luck.
+
+**M2-static isolates the arm that changed.** Deleting a case from a member's
+source and regenerating the static table *without* rebuilding the bundle leaves
+the binary enumerating 24 against a ledger recording 24 — so cases 1 and 3 are
+green — while the scanner now counts 23 in the bundle against 24 summed from the
+members. Only case 2 goes red, and only on the new comparison. The old
+`staticTotal == enumerated` form would have been green here.
+
+Three generator refusals, exit code read directly from `nim r`:
+
+| Mutation | Generator exit | Message |
+| --- | --- | --- |
+| M4-gen-owners: add `libs/repro_system_apply/tests/t_b1_dsl_parse.nim` to the `libs/repro_lock_files` bundle | 1 | `spans 2 owners (libs/repro_lock_files, libs/repro_system_apply); MaxBundleOwners=1` |
+| M5-gen-size: 25 real, same-owner members in `bundle_repro_dsl_stdlib_catalogs_pure_unit` | 1 | `25 members exceeds MaxBundleMembers=24` |
+| M5-control: the same bundle at exactly **24** real members | **0** | *(accepted — the cap is a cap at 25, not an artifact of this batch's 13)* |
+
+The last row is there because a refusal that fires at 25 proves nothing unless
+24 is shown to pass; without it `MaxBundleMembers` could be any number at or
+below 13 and the M5 run would look identical.
+
+`--run` was confirmed to discriminate against a real batch-2 bundle: a
+selector that cannot exist exits 1, a bare test name with the suite stripped off
+exits 1, and the full `suite::test` form exits 0. Without that, every per-case
+exit-0 assertion in the verification test would be vacuous.
+
+Restoration was an explicit byte snapshot of exactly the files each mutation
+touched, not `git checkout --`. `git status --porcelain` matched the
+pre-mutation listing exactly afterwards, the rebuilt bundle's md5 was identical
+to its pre-mutation value (`794a4a7b…`), and the baseline was re-run at the end
+and was green.
+
+### Groups measured and NOT consolidated
+
+`libs/repro_system_apply` (3 members, 30 cases, shape
+`['repro_core', 'repro_system_apply']`) was compiled and executed standalone for
+this batch and is **clean**: 30/30 cases pass individually, all three binaries
+exit 0 run whole. It is out only to keep the batch at four groups. Its
+before-side figures are in the ledger under `groupsMeasuredAndDeferred`, so the
+next batch inherits a measured "before" and has only the bundle left to measure.
+
+`libs/repro_cas_store` (5 members, 100 cases) was **not** attempted, and the
+reason generalises past this group. Its recorded dependency shape is
+`['repro_cas_store', 'repro_core']`, and that shape does not name the library
+through which its members actually share process-global state:
+`t_link_capability_probe.nim` calls `resetGlobalLinkCapabilityCache()` and
+asserts `globalProbeCount()` transitions on the global cache defined in
+`libs/repro_local_store/src/repro_local_store/link_capability.nim`, while its
+three group-mates drive that same global through `casMaterialize` →
+`linkCapabilities` (`libs/repro_cas_store/src/repro_cas_store.nim:619`). The
+probe test resets before it asserts, so a failure is not certain — this is not a
+claim that the group is broken. It is a claim that **"same dependency shape" is
+not a statement about shared process-global state**, because
+`local_dependency_shape` records direct imports only. That group needs its own
+evidence before it earns a process.
+
+`libs/repro_dsl_stdlib`'s *other* group — 22 members, shape
+`['repro_dsl_stdlib', 'repro_project_dsl']`, 322 static cases, and therefore the
+largest prize still under the 24-member limit — was also refused. It is the
+package-declaration family: `t_nde*`, `t_packaging_*`, `t_prefix_layout` and
+friends run `repro_project_dsl`'s `package` macro at module init. That is the
+same family whose from-source recipe cousins failed merged at 24 and passed at
+16 in the crossover section above, and the accumulating per-module solve
+underneath it is an unresolved product question rather than a bundle-size one.
+The 13-member group this batch *did* take is the complement of exactly that
+distinction, and the distinction was checked rather than assumed: not one of its
+13 members declares a top-level `package` block, and neither does the single
+helper one of them reaches by path import
+(`libs/repro_dsl_stdlib/tests/packaging_test_support.nim`, which imports
+`repro_project_dsl` but declares only procs). Nothing in that bundle runs the
+`package` macro at module init; every member of the 22-member group does. That
+is why the two are separate rows in the candidate list, and it is the whole
+reason one of them is safe to take today.
+
+### What batch 2 ran, and what it did not
+
+The bar for a suite-wide change is a full green local run. **This batch does not
+meet that bar and does not claim to.** What follows is the exact boundary, so
+nobody reads a bounded substitute as though it were the suite. The same list is
+in the ledger under `executionScope`.
+
+**Executed.**
+
+* **25 member sources**, compiled standalone from scratch and executed: this
+  batch's 22 plus `libs/repro_system_apply`'s 3. Each run whole — 25 of 25 exit
+  0 — and every case run in its own process via `--run "suite::test"`: **262
+  case executions, every one exit 0**. This is the `before` side, and it is also
+  the red-on-`dev` check batch 1 established: none of the 25 is red standalone
+  on this tree.
+* **The 4 bundles**, compiled from scratch: all exit 0 run whole, plus **232
+  per-case `--run` executions, every one exit 0**.
+* **`tests/integration/t_m4_pure_unit_consolidation.nim`**: 3/3, exit 0. It
+  internally drives all six bundles named across both ledgers — batch 1's 71
+  cases and batch 2's 232 — for **303 further per-case `--run` executions** plus
+  the two negative controls.
+* **The mutation campaign**: 8 runs, per-case verdicts tabulated above.
+* **Gates, every exit code read directly and never through a pipe**:
+  `--check-inventory` 0, `--check-static-case-counts` 0,
+  `check_test_body_helper_compilation.py` 0, `check_vacuous_test_cases.py` 0,
+  `just build` 0 (all nine app entrypoints — which is what compiles the
+  generated `repro_tests.nim` into the graph), `check_repo_requirements.sh` 0,
+  `check_ambient_execution.sh` 0, `check_dev_shell_env.sh` 0,
+  `check_shell_command_strings.sh` 0 and `--self-test` 0, `check_workflows.sh` 0.
+
+**Not executed.**
+
+* **The full test suite.** `just test` / `scripts/run_tests.sh` was not run.
+  Nothing outside the 25 member sources, the 6 bundles and the verification test
+  was executed at all, and no claim in this section covers any other test. This
+  batch therefore contributes **no** independent observation of the known-red
+  set on `dev`.
+* **`just lint` as a whole.** Ten of its eleven steps were run individually to
+  exit 0 (listed above). The eleventh, `scripts/check_nim_sources.sh` — a
+  `nim check` sweep over all 82 libraries and 9 app entrypoints — was still
+  running at hand-off — it had cleared the first 31 of 82 libraries with zero
+  errors when this was written — on a host at load 145–260 from another
+  session's concurrent full-suite measurement. **A reviewer must run it.** This
+  batch modifies no
+  file under `libs/` and no app entrypoint, so that step's outcome is
+  structurally independent of the change. That is a reason to expect it green,
+  not evidence that it is.
+* **The graph-driven build of the bundles.** The four bundle binaries were
+  compiled with a direct `nim c` matching this report's compile command, not
+  through `repro build`. What is established about the generated edges is that
+  `repro_tests.nim` compiles into the graph and that the generator is
+  idempotent. That the four new test edges execute correctly **under the
+  engine** is not established here.
+* **Anything about a rebased tree.** This batch is based on `4a9a3070b`;
+  `origin/dev` had advanced to `251ae56b6` by hand-off. The suite-wide pair
+  1,512 → 1,494 is a dated fact about `4a9a3070b`. A rebase that adds tests
+  needs `repro_tests.nim`, the static-case-count TSV and the source inventory
+  regenerated; the verification test's live invariant
+  (`declaredSources.len >= the newest ledger's after`) tolerates that in the
+  growing direction.
+
+### A note on batch 1's ledger
+
+Two things in it are worth correcting for the record, neither of which changes
+any of batch 1's measured figures:
+
+* Both of its bundles record `"dependencyShape": []`. For
+  `bundle_repro_lock_files_pure_unit` that is right — its eight members reach
+  `repro_lock_files` through `./nlf_m8_fixture`, and the shape function does not
+  follow path imports, so the group's recorded shape genuinely was `[]`. For
+  `bundle_repro_peer_cache_pure_unit` it is not: that group's shape was
+  `['repro_peer_cache']`. Either way the effect is the same — an empty list
+  makes `check bundle["dependencyShape"].len <= maxDeps` assert nothing. This
+  batch records the real shapes (1, 1, 2, 1 roots against a limit of 4), so the
+  assertion has something to bite on.
+* `local_dependency_shape` is **not** closed over repository-local path imports,
+  although `pure_unit_verdict` now is. That asymmetry is why
+  `libs/repro_lock_files` presented as two groups: the eight fixture-using
+  members scored `[]` and the three direct importers scored
+  `['repro_lock_files']`. Closing it would not have merged them —
+  `nlf_m8_fixture` imports `repro_solver` as well, so the eight would score
+  `['repro_lock_files', 'repro_solver']` — but the split is currently an
+  accident of how far the scan looks rather than a fact about the tests, and the
+  next batch should not rely on it.
+
 ## Recommended next batch
 
 `libs/repro_peer_cache` was the largest measured prize at 20.5x and is now
@@ -661,11 +947,20 @@ landed — the fixed-port multicast test that made its merged binary exit 1 is
 excluded by the predicate rather than by hand, so the 13 members that remain
 are the ones the scan can show tolerate neighbours.
 
-Next: `libs/repro_lock_files` also has a second group (3 members, dependency
-shape `['repro_lock_files']`) and `libs/repro_core` has two 3-member groups, one
-of which (`t_convention_attribution`, 40 cases) is the largest single-source
-case count among the small groups. `libs/repro_project_dsl`'s 41- and 38-member
-groups are over the 24 limit and would have to be split.
+Batch 2 took the three groups this paragraph named — `libs/repro_lock_files`'
+second group and both `libs/repro_core` groups — plus the 13-member
+`libs/repro_dsl_stdlib` catalog group.
+
+After batch 2 the list stands at 46 groups, two of which are the
+bundle-against-bundle artifacts described above and are not actionable. The next
+batch should take `libs/repro_system_apply` (3 members, 30 cases), whose
+before-side is already measured and clean in batch 2's ledger, and then decide
+about `libs/repro_cas_store` (5 members, 100 cases) — which needs an answer to
+the shared `repro_local_store` link-capability global before it earns a process.
+`libs/repro_project_dsl`'s 41- and 38-member groups, and
+`libs/repro_dsl_stdlib`'s 22-member package-declaration group, are all over or
+at the limit and all belong to the package-declaration family; none should be
+attempted before the module-init solve question below is settled.
 
 The recipe family should not be consolidated on the strength of this report.
 Its 16-per-binary figure is **a bound we failed to falsify, not a measured
