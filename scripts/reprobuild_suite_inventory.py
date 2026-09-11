@@ -2587,23 +2587,76 @@ def probe_binary_catalog(
             "status": "no-protocol-support",
             "detail": "no protocol marker string present in the binary",
         }
+    # The probe runs an arbitrary test binary. It must therefore assume the
+    # binary may spawn children, and that a binary which has hung may be
+    # hanging BECAUSE it is spawning them.
+    #
+    # `subprocess.run(..., timeout=...)` is the wrong tool for that: on
+    # TimeoutExpired it kills the direct child and nothing else, so every
+    # grandchild is orphaned and keeps running — and keeps spawning. A
+    # recursive binary therefore survived its own timeout, survived the serial
+    # retry below, and outlived this process entirely. One did: it reached
+    # ~1100 processes and load average 1042, and the host had to be rebooted.
+    # The recursion itself is fixed, but "the probe leaks whatever it started"
+    # is the part that turned one bad binary into an outage, and that is this
+    # function's to own.
+    #
+    # So: own process group (`start_new_session`), and kill the GROUP on the
+    # way out — on timeout, and on any other exit path, since a binary that
+    # answered `--list-json` correctly may still have left something behind.
+    # Same shape as `run_suite_with_timeout` below; the two should stay in step.
+    proc = None
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             [str(binary_path), "--list-json"],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
-            timeout=timeout_seconds,
             cwd=str(cwd),
             env=env,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "timeout",
-            "detail": f"--list-json exceeded {timeout_seconds}s",
-        }
     except OSError as exc:
         return {"status": "nonzero-exit", "detail": f"could not execute: {exc}"}
+
+    def reap_group() -> None:
+        """SIGKILL the probe's whole process group, tolerating a dead group."""
+        if proc is None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    try:
+        stdout, stderr_text = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        reap_group()
+        try:
+            proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+        return {
+            "status": "timeout",
+            "detail": f"--list-json exceeded {timeout_seconds}s "
+            "(process group killed)",
+        }
+    finally:
+        # Not only the timeout path: a binary can exit while leaving a child
+        # behind, and an unreaped child of a probe is indistinguishable from
+        # the failure above once this process has moved on.
+        reap_group()
+
+    completed = subprocess.CompletedProcess(
+        args=[str(binary_path), "--list-json"],
+        returncode=proc.returncode,
+        stdout=stdout,
+        stderr=stderr_text,
+    )
 
     stderr = completed.stderr or ""
     # The loader check comes first: a link failure can surface as any exit
