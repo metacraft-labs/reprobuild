@@ -366,7 +366,11 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
     def test_benchmark_workflow_follows_metacraft_policy(self):
         workflow = (ROOT / ".github" / "workflows" / "benchmark.yml").read_text()
 
-        self.assertIn("branches: [main]", workflow)
+        # The branches named here must be branches this repository actually
+        # has, or the workflow silently never triggers on push. `main` does
+        # not exist on the remote and never has; the default branch is `dev`,
+        # and `stable` is the release line.
+        self.assertIn("branches: [dev, stable]", workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn(
             'runner: \'["self-hosted", "Linux", "X64", "benchmark"]\'', workflow
