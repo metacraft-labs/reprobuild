@@ -5351,7 +5351,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 354,
+          "line": 356,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "cc"
@@ -5373,7 +5373,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 355,
+          "line": 357,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "gcc"
@@ -5395,7 +5395,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 372,
+          "line": 374,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -5417,7 +5417,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 377,
+          "line": 379,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -32201,7 +32201,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_nix_propagated_store_paths.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
