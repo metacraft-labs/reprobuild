@@ -7329,27 +7329,36 @@ proc monitorEvidenceScope(config: BuildEngineConfig): EvidenceScope =
   config.evidenceScope
 
 proc monitorEvidenceFlag(scope: EvidenceScope): seq[string] =
-  ## The wrapped path's argv spelling of `scope`, or nothing at all.
+  ## The wrapped path's argv spelling of `scope`.
   ##
   ## `evidenceScopeToken` is io-mon's codec and the ONLY speller of these
-  ## tokens; `esUnrecognized` has no spelling by construction (it is a READING
-  ## of someone else's token, not a scope this build can ask for) and encodes
-  ## as the empty string. A future `EvidenceScope` member added without a wire
-  ## token would do the same, and silently passing `--evidence ""` would ship a
-  ## depfile stamped with an empty `evidence=` key — which io-mon reads as
-  ## STATED AND UNEVALUABLE, i.e. a capture every consumer rejects, discovered
-  ## only as a build that stops caching. Omitting the flag instead means io-mon
-  ## captures FULL evidence, which is the safe direction (more is recorded, the
-  ## stamp is honest), and this build's own requirement then refuses to trust
-  ## the result because `esFull` does not cover a scope it cannot name. Loud
-  ## and conservative beats silent and narrow.
+  ## tokens. THERE IS NO EMPTY-TOKEN CASE LEFT TO HANDLE, on either of the two
+  ## grounds the deleted guard rested on:
   ##
-  ## Unreachable from the CLI today: `parseEvidenceScope` refuses any value
-  ## io-mon cannot name, so only `full` and `reads-only` get this far.
-  let token = evidenceScopeToken(scope)
-  if token.len == 0:
-    return @[]
-  @["--evidence", token]
+  ## * "a future `EvidenceScope` member added without a wire token" is now a
+  ##   COMPILE ERROR in io-mon rather than a possibility here.
+  ##   `evidenceScopeToken` is an exhaustive `case`, and a `static:` block
+  ##   beside it asserts over the whole enum that `esUnrecognized` is the only
+  ##   member whose token is empty (and that every other member's token
+  ##   survives the wire and decodes back to itself). Graded by io-mon's
+  ##   `tests/portable/test_io_mon_evidence_scope.nim`, which mutates a copy of
+  ##   `types.nim` and reads the real compiler's exit code.
+  ## * `esUnrecognized` itself cannot reach this proc: `parseEvidenceScope`
+  ##   refuses it, `monitorEvidenceScope` passes `config.evidenceScope` straight
+  ##   through with no policy of its own, and that field's zero value is
+  ##   `esFull`.
+  ##
+  ## The guard that stood here returned `@[]` on an empty token. Its own
+  ## docstring already conceded it was unreachable, and deleting it was MEASURED
+  ## to redden nothing. A branch no test can redden is one the next reader takes
+  ## for load-bearing again — the precedent set for the `run`-verb skip.
+  ##
+  ## And if a library caller outside the CLI ever did hand this an unspellable
+  ## scope, omitting the flag is the WEAKER answer, not the safer one: io-mon
+  ## would then capture full evidence silently. Passing the empty value instead
+  ## makes io-mon refuse it in the scope vocabulary and exit non-zero — measured
+  ## at the real binary. Loud beats silent here too.
+  @["--evidence", evidenceScopeToken(scope)]
 
 proc monitorEvidenceRequirement(action: BuildAction;
                                 config: ptr BuildEngineConfig):
