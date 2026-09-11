@@ -977,12 +977,29 @@ suite "derived IPC trust: the daemons this process spawned":
       # return, and registers NOTHING — this milestone trusts only what it
       # spawned, and adopting a running daemon is declared attribution (DA-4).
       #
-      # WHICH EARLY RETURN, STATED EXACTLY, because there are two and this
-      # drives ONE of them. `startAutoRunQuotaIfNeeded` returns nil when
-      # (1) `RUNQUOTA_SOCKET` is set AND reachable, or (2) the daemon is
-      # reachable on `runquota_ipc.defaultEndpoint`. The first call left
-      # `RUNQUOTA_SOCKET` pointing at the per-PID socket it bound, so what runs
-      # below is (1).
+      # WHICH EARLY RETURN, STATED EXACTLY AND THEN ASSERTED, because there
+      # are two and this drives ONE of them. `startAutoRunQuotaIfNeeded`
+      # returns nil when (1) `RUNQUOTA_SOCKET` is set AND reachable, or (2) the
+      # daemon is reachable on `runquota_ipc.defaultEndpoint`. The first call
+      # left `RUNQUOTA_SOCKET` pointing at the per-PID socket it bound, so what
+      # runs below is (1) — and the preconditions of (1) are checked here
+      # rather than narrated, because the sentence naming the arm was the only
+      # thing saying which arm this case reaches.
+      let publishedSocket = getEnv("RUNQUOTA_SOCKET", "")
+      checkpoint("RUNQUOTA_SOCKET after the spawn=" & publishedSocket)
+      check publishedSocket.len > 0
+      check publishedSocket != scratch / "no-such-runquota.sock"
+      # Arm (1) needs the variable set AND the path answering, so the path has
+      # to exist. NOT `fileExists`, which is `S_ISREG` and answers false for
+      # every socket there is; `getFileInfo` stats whatever is there and
+      # raises only when nothing is.
+      var publishedSocketExists = false
+      try:
+        discard getFileInfo(publishedSocket)
+        publishedSocketExists = true
+      except OSError:
+        publishedSocketExists = false
+      check publishedSocketExists
       #
       # The two topologies the registration site calls out — a provisioned
       # POSIX host (`/run/runquota/runquotad.sock`) and Windows from build #2
@@ -1069,6 +1086,14 @@ suite "derived IPC trust: the daemons this process spawned":
       var stranger = f.startDaemon("unix", "stranger")
       defer: stopDaemon(stranger)
       check not isLiveTrustedPid(processID(stranger.process))
+      # "ALIVE AT THE SAME MOMENT" IS ASSERTED HERE AND NOT ONLY ARRANGED. It
+      # was arranged — the trusted daemon's `stopDaemon` is deferred, so it is
+      # still running at this line — but an arrangement is not an observation,
+      # and without this the negative below is equally consistent with "the
+      # trusted daemon has since died and the trust set is simply empty now".
+      # That is a weaker fact than the one this arm is for, which is that ONE
+      # fold discriminates between TWO simultaneously live peers.
+      check isLiveTrustedPid(daemonPid)
       let strangerCapture = f.workRoot / "str.iomon"
       let strangerEdge = f.reportEdge(repoRoot, "ipctrust/report-untrusted",
         stranger.address, "stranger", strangerCapture)

@@ -4225,12 +4225,33 @@ type
     ## "checked and trusted". The safe default has to be the absence of a
     ## verdict, so it is.
     ##
-    ## Reordering was verified safe rather than assumed: all 56 uses of this
-    ## type across the engine, the CLI and the suite are `==`, `!=`, `$` or a
-    ## type annotation — no `ord`, no `succ`, no indexing, no `<`, no iteration
-    ## over the enum and no persistence of an ordinal, so nothing reads the
-    ## member positions. Keep it that way; the moment one does, this member's
-    ## position becomes a wire fact.
+    ## Reordering was verified safe rather than assumed: EVERY use of this
+    ## type is `==`, `!=`, `$` or a type annotation — no `ord`, no `succ`, no
+    ## indexing, no `<`, no iteration over the enum and no persistence of an
+    ## ordinal, so nothing reads the member positions. Keep it that way; the
+    ## moment one does, this member's position becomes a wire fact.
+    ##
+    ## WHERE THE USES ARE: this module and
+    ## `tests/integration/t_declared_daemon_ipc_trust.nim`, and nowhere else.
+    ## The CLI is NOT a third site — it holds a `DaemonCheckReport` and renders
+    ## it, and names neither this type nor any member of it — so a sweep that
+    ## goes looking for one there will not find it and should not conclude it
+    ## missed something.
+    ##
+    ## NO COUNT IS STATED, DELIBERATELY — AND NOT BECAUSE THE ONE THAT USED TO
+    ## STAND HERE HAD ROTTED. It had not. MEASURED (2026-09-11) across both
+    ## files with comments and string literals stripped, "all 56 uses" is still
+    ## exactly right — 29 here and 27 in the suite — as it was at `88e3b7e7`
+    ## where it was written. The number is dropped because it is a SECOND
+    ## claim, one that has to be re-established on every edit, standing beside
+    ## the claim that actually carries the argument and can be checked by
+    ## reading: that no use reads a member POSITION. Count it yourself when you
+    ## re-run the sweep. THE TRAP WHEN YOU DO —
+    ## `DependencyOutputKind`'s members share the `dco` prefix
+    ## (`dcoReproPathSet`, `dcoRecognizedFormat`) and ARE read ordinally, in
+    ## `repro_domain_types/codec.nim` and the CLI's copy of that decoder. Sweep
+    ## by TYPE, not by member prefix; a `grep "ord(dco"` hits the other enum
+    ## and reports a dependency this one does not have.
     dcoNotChecked
       ## No check has run. The zero value, and never an answer: nothing
       ## produces it, `trustDaemonWeChecked` refuses it, and it renders as

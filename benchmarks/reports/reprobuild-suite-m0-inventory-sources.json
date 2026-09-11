@@ -2806,6 +2806,8 @@
           "directExecutionLine": false,
           "executedVariables": [
             "address",
+            "argv",
+            "binary",
             "cc",
             "command",
             "f",
@@ -2813,7 +2815,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 420,
+          "line": 464,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -2826,6 +2828,8 @@
           "directExecutionLine": true,
           "executedVariables": [
             "address",
+            "argv",
+            "binary",
             "cc",
             "command",
             "f",
@@ -2833,7 +2837,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 422,
+          "line": 466,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -21870,7 +21874,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_declared_daemon_ipc_trust.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

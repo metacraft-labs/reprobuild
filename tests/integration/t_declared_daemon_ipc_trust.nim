@@ -73,6 +73,18 @@
 ##     into setuid-root `sudo` shows the same pid and the same field 22 with
 ##     euid 1007 → 0.
 ##
+## WHICH UID FIELD THE RE-CHECK READS IS GRADED ON A REAL DIVERGENT PEER, and
+## that one is not constructed at all. Every daemon above runs with
+## `ruid == euid`, so the perturbations say nothing about whether
+## `processEffectiveUid` reads `Uid:`'s real field or its effective one —
+## MEASURED (2026-09-11), the mutation reading the real one left all 16 cases
+## green. "The uid re-check reads the EFFECTIVE uid" therefore `execve`s a
+## SETUID-ROOT program from a closed allowlist, on an argument that does not
+## exist so it fails at once, and reads the kernel's own `Uid:` line for it:
+## real still ours, effective root. Nothing is substituted for anything; the
+## divergence is the kernel's, and an unprivileged process has no other way to
+## produce it.
+##
 ## All five share one UNPERTURBED control built by the same function
 ## (`selfAsCheckedPeer`), which carries ALL THREE assertions and is asserted to
 ## re-validate — so a green in any of them is not a green produced by a harness
@@ -116,14 +128,20 @@
 ##    by a different process (live — daemon A checked, killed, daemon B bound
 ##    to the same path), the pid recycled, the peer exec'd in place, and the
 ##    peer's effective uid raised in place. Every assertion the check verified
-##    is re-verified at grading time, `daUid` included.
+##    is re-verified at grading time, `daUid` included — and against the
+##    EFFECTIVE uid, which is graded separately on a real setuid-root peer
+##    because no fixture with `ruid == euid` can tell the two fields apart.
 ##
 ## 6. THE DECLARATION SURFACE IS BOUNDED BY WHAT THE CHECK CAN VERIFY. A
 ##    declaration that asserts nothing about the peer is refused, because
 ##    "something is listening at this path" is not a check; and so is one that
 ##    asserts only a `uid`, because the §Class 3 branch is a property of the
 ##    PROGRAM and a check that identifies no program has not established what
-##    the branch is about. Both are refused BEFORE the connect. The class-3
+##    the branch is about. Both are refused BEFORE the connect, and that
+##    ORDERING is asserted AT THE DAEMON rather than inferred from the
+##    outcome: the fixture daemon logs every `accept(2)`, both refusals assert
+##    the log is still empty afterwards, and the passing control asserts it is
+##    not. The class-3
 ##    branch is not declarable at all — asserted with `compiles`, with a
 ##    positive control. An unknown daemon name and an unknown key are refused
 ##    rather than ignored, so a typo cannot rot into a silent no-op, and the
@@ -253,6 +271,19 @@ proc ccPath(): string =
 ## pid, TWO endpoints, and `SO_PEERCRED` answering the same pid on both. The
 ## accept loop polls both listeners so neither endpoint starves the other, and
 ## a single-socket run is byte-identical in behaviour to the pre-existing one.
+##
+## IT ALSO KEEPS AN ACCEPT LOG, WHICH IS WHAT MAKES "REFUSED BEFORE IT
+## CONNECTS" AN OBSERVATION RATHER THAN A NAME. One line is appended to
+## `<readyPath>.contacts` for every `accept(2)` that returns, BEFORE the byte
+## is written, so the log counts "how many times anything reached this daemon
+## at all" and not "how many conversations completed". Without it the ordering
+## claim in that case's own name was ungraded: moving the declaration gate to
+## after the connect preserves every outcome exactly, and MEASURED
+## (2026-09-11) left all 16 cases of this file green.
+##
+## The log path is derived from the ready path and fixed BEFORE the ready file
+## is written, so a client that has seen the ready file cannot race a daemon
+## that has not yet decided where to record.
 const DaemonSource = """
 #include <stdio.h>
 #include <string.h>
@@ -262,6 +293,15 @@ const DaemonSource = """
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+
+static char contactLog[4096];
+
+static void recordContact(void) {
+  FILE *log = fopen(contactLog, "a");
+  if (!log) return;
+  fputs("contacted\n", log);
+  fclose(log);
+}
 
 static int bindUnix(const char *path) {
   struct sockaddr_un addr;
@@ -311,6 +351,9 @@ int main(int argc, char **argv) {
   }
   fds[0].fd = listenFd;
   fds[0].events = POLLIN;
+  if (snprintf(contactLog, sizeof contactLog, "%s.contacts", argv[3]) >=
+      (int)sizeof contactLog)
+    return 71;
   {
     FILE *ready = fopen(argv[3], "w");
     if (!ready) return 69;
@@ -325,6 +368,7 @@ int main(int argc, char **argv) {
       if ((fds[i].revents & POLLIN) == 0) continue;
       c = accept(fds[i].fd, 0, 0);
       if (c < 0) continue;
+      recordContact();
       if (write(c, "x", 1) != 1) { close(c); continue; }
       close(c);
     }
@@ -466,6 +510,38 @@ proc runCount(f: Fixture; name: string): int =
     return 0
   p.readFile.splitLines.countIt(it.strip().len > 0)
 
+proc contactLogPath(f: Fixture; name: string): string =
+  ## Where the daemon started as `name` appends one line per `accept(2)`.
+  f.workRoot / (name & ".ready.contacts")
+
+proc contactCount(f: Fixture; name: string): int =
+  ## HOW MANY TIMES ANYTHING HAS REACHED THIS DAEMON. The daemon logs after
+  ## `accept(2)` returns and before it writes its byte, so a connection that
+  ## was closed the instant the peer credential was taken still counts —
+  ## which is precisely the connection a check makes.
+  let p = f.contactLogPath(name)
+  if not fileExists(p):
+    return 0
+  p.readFile.splitLines.countIt(it.strip().len > 0)
+
+proc contactsWithin(f: Fixture; name: string; atLeast, timeoutMs: int): int =
+  ## Poll the accept log until it shows at least `atLeast` contacts or the
+  ## timeout expires, and return the count either way.
+  ##
+  ## POLLING IS WHAT MAKES "NOT CONTACTED" A FACT RATHER THAN A RACE. The
+  ## daemon accepts asynchronously and `checkDeclaredDaemon` closes its socket
+  ## the moment the kernel has named the peer, so a contact that DID happen
+  ## may not be on disk yet when the call returns. Waiting out a window and
+  ## still finding nothing is the negative; the early exit is what keeps the
+  ## positive arm from paying for that window.
+  var waited = 0
+  while true:
+    result = f.contactCount(name)
+    if result >= atLeast or waited >= timeoutMs:
+      return
+    sleep(20)
+    waited += 20
+
 proc awaitReady(f: Fixture; readyPath, mode, image, address,
                 name: string): LiveDaemon =
   ## The ready file is written AFTER `listen(2)` returns, so a client that sees
@@ -501,6 +577,7 @@ proc startDetachedDaemon(f: Fixture; mode, name: string;
   ## has on a provisioned host.
   let readyPath = f.workRoot / (name & ".ready")
   removeFile(readyPath)
+  removeFile(readyPath & ".contacts")
   let image = if imageOverride.len > 0: imageOverride else: f.daemonPath
   let address = if mode == "unix": f.workRoot / (name & ".sock") else: ""
   let second =
@@ -529,6 +606,7 @@ proc startDaemon(f: Fixture; mode, name: string): LiveDaemon =
   ## the guarantee.
   let readyPath = f.workRoot / (name & ".ready")
   removeFile(readyPath)
+  removeFile(readyPath & ".contacts")
   let address = if mode == "unix": f.workRoot / (name & ".sock") else: ""
   let process = startProcess(f.daemonPath,
     args = [mode, address, readyPath], options = {poStdErrToStdOut})
@@ -676,6 +754,113 @@ proc outcomeFor(reports: seq[DaemonCheckReport];
 # recycled-pid and exec-in-place shapes cannot be produced from outside the
 # peer process.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# A PEER WHOSE REAL AND EFFECTIVE UIDS GENUINELY DIFFER — and it is not a
+# mock either. See "the uid re-check reads the EFFECTIVE uid" below for why
+# nothing weaker can grade that field, and why an unprivileged process cannot
+# manufacture the divergence in any other way.
+# ---------------------------------------------------------------------------
+
+const SetuidSearchDirs = ["/run/wrappers/bin", "/usr/bin", "/bin",
+                          "/usr/local/bin", "/usr/sbin", "/sbin"]
+
+const SetuidRootProbeArgv = [
+  @["newgrp", "repro-no-such-group"],
+  @["sg", "repro-no-such-group", "true"],
+  @["su", "repro-no-such-user"]]
+  ## A CLOSED allowlist, each entry invoked on a group or user name that does
+  ## not exist. Every one of them resolves its argument before it does
+  ## anything at all, so the helper's whole run is: the kernel raises the
+  ## effective uid at the setuid `execve`, the program looks the name up,
+  ## fails, and exits. Nothing on the host is read, written or changed.
+  ##
+  ## The list is an allowlist and not a scan of the setuid bits on this host
+  ## precisely because a test may not run an arbitrary privileged program to
+  ## see what happens.
+
+proc isSetuidRootExecutable(path: string): bool =
+  ## Owned by root AND carrying the set-user-ID bit — both halves, because
+  ## either alone raises nothing. Read through `stat(2)` and not through
+  ## `getFilePermissions`, whose `FilePermission` set has no member for the
+  ## setuid bit.
+  var info: Stat
+  if stat(path.cstring, info) != 0:
+    return false
+  if info.st_uid.int != 0:
+    return false
+  (info.st_mode.uint and S_ISUID.uint) != 0
+
+proc setuidRootBinary(name: string): string =
+  for dir in SetuidSearchDirs:
+    let candidate = dir / name
+    if fileExists(candidate) and isSetuidRootExecutable(candidate):
+      return candidate
+  ""
+
+proc kernelReportedUids(pid: int): tuple[real, effective: int] =
+  ## `/proc/<pid>/status`'s `Uid:` line — real first, effective second —
+  ## PARSED HERE and deliberately not through `processEffectiveUid`.
+  ##
+  ## That function is the thing under test, and an expectation derived from it
+  ## would agree with it whichever of the four fields it read. This parse is
+  ## the independent reading the comparison needs.
+  result = (-1, -1)
+  let path = "/proc/" & $pid & "/status"
+  if not fileExists(path):
+    return
+  var raw = ""
+  try:
+    raw = readFile(path)
+  except CatchableError:
+    return
+  for line in raw.splitLines():
+    if line.startsWith("Uid:"):
+      let fields = line["Uid:".len .. ^1].splitWhitespace()
+      if fields.len < 2:
+        return
+      try:
+        return (parseInt(fields[0]), parseInt(fields[1]))
+      except ValueError:
+        return
+
+proc startDivergentUidPeer(): tuple[process: Process; pid, real,
+                                    effective: int] =
+  ## Run a setuid-root helper and hand back its pid together with the REAL and
+  ## EFFECTIVE uids the kernel recorded for it, or `(nil, 0, -1, -1)` when this
+  ## host offers no helper from the allowlist.
+  ##
+  ## The returned `Process` is NOT reaped — the caller owns it — because the
+  ## helper is expected to have exited already and `/proc` only keeps
+  ## answering for an unreaped child. The credentials it answers with are the
+  ## ones the kernel stamped at the setuid `execve`, which is all this fixture
+  ## is for.
+  result = (nil, 0, -1, -1)
+  for argv in SetuidRootProbeArgv:
+    let binary = setuidRootBinary(argv[0])
+    if binary.len == 0:
+      continue
+    var process: Process
+    try:
+      process = startProcess(binary, args = argv[1 .. ^1],
+        options = {poStdErrToStdOut})
+    except CatchableError:
+      continue
+    let pid = processID(process)
+    var waited = 0
+    while waited < 2_000:
+      let uids = kernelReportedUids(pid)
+      if uids.real >= 0 and uids.effective >= 0 and
+          uids.real != uids.effective:
+        return (process, pid, uids.real, uids.effective)
+      sleep(20)
+      waited += 20
+    try:
+      process.terminate()
+      discard process.waitForExit()
+      process.close()
+    except CatchableError:
+      discard
 
 proc selfAsCheckedPeer(): TrustedDaemonPeer =
   ## A DECLARED-shaped trust fact naming a process that is certainly alive and
@@ -986,17 +1171,22 @@ suite "declared IPC trust: the check is what makes it a claim":
       reset()
 
   test "a checked peer that is REPLACED does not inherit trust":
-    ## Three ways a peer can be replaced after its check passed, and none of
-    ## them may carry the trust across.
+    ## Every way a peer can be replaced after its check passed, and none of
+    ## them may carry the trust across. The arms are numbered in the body; no
+    ## count is stated here, because the last one to state a count was written
+    ## when there were three and was still saying so when there were four.
     ##
     ## The first is live: daemon A is checked at socket S, killed, and daemon B
     ## binds the same S. The declaration still names S; the action's peer pid is
     ## B's; B is in no trust set. That is the case a path-shaped check — one
     ## that concluded "the daemon is at this socket" — would have got wrong.
     ##
-    ## The second and third perturb a recorded trust fact (see the header for
-    ## why they cannot be arranged from outside the peer process), and share
-    ## the unperturbed control immediately above them.
+    ## The rest perturb a recorded trust fact (see the header for why they
+    ## cannot be arranged from outside the peer process), and share the
+    ## unperturbed control immediately above them. The `daUid` arm's own
+    ## question — WHICH uid field the re-check reads — needs a peer whose real
+    ## and effective uids differ, which no fixture here is; that is the case
+    ## immediately below.
     if ccPath().len == 0:
       skip()
     else:
@@ -1078,11 +1268,136 @@ suite "declared IPC trust: the check is what makes it a claim":
       var reUided = control
       reUided.checkedUid = control.checkedUid + 1
       check revalidatedTrustedDaemons([reUided]).len == 0
-      # A peer the kernel will not answer for at all is dropped, not defaulted.
+      # TWO DIFFERENT SUBJECTS, and this comment used to name only the first.
+      #
+      # (i) THE ACCESSOR: a pid the kernel will not answer for reads as -1
+      # rather than as some uid.
       check processEffectiveUid(0) == -1
+      # (ii) THE RECORD: a peer whose RECORDED uid is -1 — a value
+      # `SO_PEERCRED` never supplies — is dropped rather than treated as
+      # matching. Note what is actually perturbed here: the peer is `control`,
+      # which the kernel answers for perfectly well. This arm is about the
+      # recording, not about an unanswerable peer.
+      #
+      # AND THE HONEST LIMIT OF IT, because the two halves of the guard are
+      # not equally graded. The guard is
+      # `checkedUid < 0 or processEffectiveUid(pid) != checkedUid`, and it is
+      # the SECOND disjunct that drops this input (-1 against our real euid).
+      # The first is UNREACHABLE here on Linux: reaching it needs
+      # `processEffectiveUid` to answer -1 for a pid whose
+      # `processStartIdentity` has just re-validated, and `/proc/<pid>/status`
+      # exists exactly when `/proc/<pid>/stat` does. MEASURED (2026-09-11):
+      # deleting the `checkedUid < 0` disjunct leaves all 17 cases of this
+      # file green. It is kept as defence in depth against a future caller
+      # that records a uid it never read — not because anything here grades
+      # it, and this note is here so the next sweep does not mistake the
+      # assertion below for a case that does.
       var unreadableUid = control
       unreadableUid.checkedUid = -1
       check revalidatedTrustedDaemons([unreadableUid]).len == 0
+
+  test "the uid re-check reads the EFFECTIVE uid, on a peer whose two differ":
+    ## ARM (4) OF THE CASE ABOVE, ON A PEER THE TWO UIDS ACTUALLY COME APART
+    ## FOR — which no fixture in this file was, and which is why the field the
+    ## re-check reads was ungraded. Every daemon here runs with
+    ## `ruid == euid`, so `/proc/<pid>/status`'s first and second `Uid:` fields
+    ## hold the same number and reading either one gives the same answer.
+    ## MEASURED (2026-09-11): making `processEffectiveUid` return the REAL uid
+    ## left all 16 cases of this file green.
+    ##
+    ## `processEffectiveUid`'s own docstring carries the argument — the
+    ## effective uid is the field `SO_PEERCRED` reports, so it is the field
+    ## `checkedUid` was recorded from and the only one the re-check may compare
+    ## against. This case is what stands behind it.
+    ##
+    ## WHY IT MATTERS MORE THAN TIDINESS. The `daUid` re-check exists for a
+    ## daemon that dropped from root: root stays in its SAVED set-user-ID and
+    ## it may `seteuid(0)` back at any moment, with no exec, an unchanged image
+    ## and an unchanged `comm` — invisible to the other two re-checks. A
+    ## re-check reading the REAL uid would see 0 throughout and miss exactly
+    ## that; a re-check reading the EFFECTIVE uid sees the raise.
+    ##
+    ## THE FIXTURE IS A REAL SETUID-ROOT PROGRAM, AND IT IS NOT A MOCK.
+    ## Nothing is substituted for a collaborator: the KERNEL raises the
+    ## effective uid in place at a setuid `execve` and leaves the real uid
+    ## alone, and `/proc/<pid>/status` is the kernel's own rendering of both.
+    ## The divergence cannot be produced any other way from an unprivileged
+    ## process — an unprivileged `setresuid` may only choose among the uids the
+    ## process already holds, and for this one all four are the same number.
+    ## The helper is run on a group/user name that does not exist, so it
+    ## resolves, fails and exits without touching anything; it stays UNREAPED
+    ## until the readings are taken, which is what keeps `/proc` answering.
+    ##
+    ## GRADED AT BOTH ALTITUDES, because grading the accessor alone would leave
+    ## the comparison `revalidatedTrustedDaemons` actually makes untested: the
+    ## accessor returns the effective field, AND the production re-validation
+    ## KEEPS a peer whose recorded uid is the effective one while DROPPING the
+    ## same peer with the real one recorded.
+    if getuid() == 0:
+      # As root a setuid-root `execve` raises nothing — `ruid == euid == 0` —
+      # so the divergence this case is about cannot exist here. Say what this
+      # host is instead of passing quietly.
+      #
+      # `echo` AND NOT `checkpoint`, because a checkpoint is flushed ONLY when
+      # a case FAILS. MEASURED on this toolchain: a checkpoint on a passing
+      # case and a checkpoint before `skip()` both print nothing whatsoever.
+      # A checkpoint here would have been precisely the quiet pass this arm
+      # exists to avoid.
+      echo "NOT GRADED HERE (loudly): running as root, so ruid == euid and " &
+        "no peer on this host can show the divergence this case grades"
+      check processEffectiveUid(getCurrentProcessId()) == 0
+    else:
+      let peer = startDivergentUidPeer()
+      defer:
+        if peer.process != nil:
+          try:
+            peer.process.terminate()
+            discard peer.process.waitForExit()
+            peer.process.close()
+          except CatchableError:
+            discard
+      if peer.pid == 0:
+        # Loud, for the reason given on the root arm above and in this
+        # suite's existing idiom for it (see
+        # `t_a_behind_only_refusal_names_a_pasteable_command`): `[SKIPPED]`
+        # with nothing but a checkpoint behind it is a SILENT skip, and a
+        # skip proves nothing — so WHY it skipped has to reach the run
+        # output, where the zero-skip gate's reader will see it.
+        echo "SKIPPED (loudly): no setuid-root helper from the allowlist (" &
+          SetuidRootProbeArgv.mapIt(it[0]).join(", ") & ") on this host, so " &
+          "the uid divergence cannot be produced and this case grades nothing"
+        skip()
+      else:
+        checkpoint("setuid peer pid=" & $peer.pid & " real=" & $peer.real &
+          " effective=" & $peer.effective)
+        # The fixture is the shape the case needs, asserted rather than
+        # assumed: a real uid that is still ours and an effective uid that is
+        # root's.
+        check peer.real == int(getuid())
+        check peer.effective == 0
+        check peer.real != peer.effective
+
+        # THE ACCESSOR. Reading `Uid:`'s real field would answer `peer.real`
+        # here, so the two assertions cannot both hold for the wrong field.
+        check processEffectiveUid(peer.pid) == peer.effective
+        check processEffectiveUid(peer.pid) != peer.real
+
+        # THE PRODUCTION CALL, which is the property. `checkedUid` can only
+        # ever hold the EFFECTIVE uid, because `SO_PEERCRED` reports no other
+        # — so a peer recorded that way must survive re-validation, and the
+        # same peer recorded with the real uid must not. Only `daUid` is in
+        # `checked`, so this is the uid re-check on its own.
+        let identity = processStartIdentity(peer.pid)
+        check identity.len > 0
+        template asRecordedUid(uid: int): TrustedDaemonPeer =
+          TrustedDaemonPeer(
+            pid: peer.pid, identity: identity, name: "runquotad",
+            contribution: tdcNoContent, origin: tdoDeclaredAndChecked,
+            declaredSocket: "/run/runquota/runquotad.sock",
+            checked: {daUid}, checkedUid: uid)
+        check revalidatedTrustedDaemons(
+          [asRecordedUid(peer.effective)]).len == 1
+        check revalidatedTrustedDaemons([asRecordedUid(peer.real)]).len == 0
 
   test "a declaration that identifies no program is refused before it connects":
     ## TWO REFUSALS AT THE DECLARATION SURFACE, in increasing order of
@@ -1104,6 +1419,21 @@ suite "declared IPC trust: the check is what makes it a claim":
     ## process that serves all of them. Refused, and refused BEFORE THE
     ## CONNECTION: an inadequate declaration must not even touch the daemon.
     ##
+    ## THE ORDERING IS OBSERVED AT THE DAEMON, NOT INFERRED FROM THE OUTCOME,
+    ## because the outcome does not distinguish the two. MEASURED
+    ## (2026-09-11): moving the gate to AFTER the connect preserves every
+    ## enum, every rendered line and every `declaredPids()` answer in this
+    ## case exactly, and left all 16 cases of this file green — the ordering
+    ## claim in this case's own NAME was the only thing asserting it. So the
+    ## fixture daemon keeps an ACCEPT LOG (see `DaemonSource`) and both
+    ## refusals assert it is still empty afterwards, with the passing control
+    ## at the end asserting it is not — which is what stops an empty log from
+    ## being a green produced by a recorder that never records.
+    ##
+    ## The property is not cosmetic: refusing before connecting is what keeps a
+    ## declaration that cannot discharge rule 5 from opening a connection to an
+    ## arbitrary path named by that same declaration.
+    ##
     ## The refusal is asserted on a REACHABLE daemon, so it cannot be confused
     ## with `dcoUnreachable`; the control adds a program assertion to the same
     ## live daemon at the same endpoint and passes.
@@ -1115,15 +1445,21 @@ suite "declared IPC trust: the check is what makes it a claim":
       defer: removeDir(f.root)
       var daemon = f.startDetachedDaemon("unix", "bare")
       defer: stopDaemon(daemon)
+      # Nothing has reached the daemon yet, so every count below is a
+      # difference this case caused.
+      check f.contactCount("bare") == 0
+
       f.declare(runquotadSection(daemon.address, ""))
       check applyDeclarationsNow().outcomeFor(ddkRunQuota) == dcoNothingAsserted
       check declaredPids().len == 0
+      check f.contactsWithin("bare", 1, 400) == 0
 
       reset()
       f.declare(runquotadSection(daemon.address, "uid = " & $int(geteuid())))
       let uidOnly = applyDeclarationsNow()
       check uidOnly.outcomeFor(ddkRunQuota) == dcoNoProgramAssertion
       check declaredPids().len == 0
+      check f.contactsWithin("bare", 1, 400) == 0
       # The rendered line has to say what to do about it, because the operator
       # reading it wrote a declaration that used to work.
       let line = renderDaemonCheckReport(uidOnly[0])
@@ -1149,6 +1485,11 @@ suite "declared IPC trust: the check is what makes it a claim":
         "\nuid = " & $int(geteuid())))
       check applyDeclarationsNow().outcomeFor(ddkRunQuota) == dcoTrusted
       check declaredPids() == @[daemon.pid]
+      # AND THE ACCEPT LOG'S OWN POSITIVE CONTROL. An ADEQUATE declaration
+      # does connect, and the daemon records it — so the two empty counts
+      # above are the gate refusing before the connect and not a log that
+      # never fills.
+      check f.contactsWithin("bare", 1, 5_000) >= 1
 
   test "a declaration naming a peer that never appears is reported":
     ## The milestone's third named test. A daemon that has moved, been renamed
