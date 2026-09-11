@@ -154,6 +154,17 @@ proc reprobuildRuntimeLibraryComponents(targetOs: TargetOs):
   for stem in ["librepro_monitor_shim", "librepro_project_dsl_runtime"]:
     result.add(runtimeLibraryComponent(PrebuiltLib & "/" & stem & ext))
   if targetOs == toWindows:
+    # THE WINDOWS RUNTIME CLOSURE, DECLARED BECAUSE NOTHING WALKS IT.
+    # The layer's closure walk is ELF-only, so on Windows the package
+    # shipped its executables and none of the libraries they load --
+    # which is why the installed CLI answered ``repro --version`` on a
+    # developer's machine and the installed SERVICE could not start at
+    # all. See ``reprobuildWindowsLoaderLibraries`` for how the list was
+    # measured. ``crRuntimeLibrary`` puts them in ``bin/``, beside the
+    # images that open them, which is the only directory a
+    # service process searches.
+    for leaf in reprobuildWindowsLoaderLibraries(includeCli = true):
+      result.add(runtimeLibraryComponent(PrebuiltLib & "/" & leaf))
     # The linker aliases below exist for ``-l<name>`` on POSIX. The
     # Windows provider compile takes the vendored-C-source path
     # (``-d:reproVendoredHash``) and links no such libraries, so there
@@ -333,6 +344,23 @@ package `reprobuild-packages`:
       executableComponent(PrebuiltBin & "/repro-binary-cache" &
         (if targetOs == toWindows: ".exe" else: ""))
     ]
+    if targetOs == toWindows:
+      # The SERVICE package is the one where this is not a convenience.
+      # ``msiServiceRows`` registers the REAL image rather than the
+      # ``.cmd`` wrapper -- correct, since the SCM cannot start a batch
+      # file -- so the service process gets no wrapper environment and
+      # searches only its own directory. Measured by running the shipped
+      # exe as ``NT AUTHORITY\SYSTEM``: ``could not load:
+      # libcrypto-3-x64.dll``, then ``could not load:
+      # (sqlite3_64|sqlite3|sqlite3_32).dll``, then exit 0.
+      #
+      # ``includeCli = false``: the cache server is not the solver and
+      # does not carry the DSL runtime DLL, so clingo, zstd and MinGW's
+      # unwinder are the CLI package's business and shipping them here
+      # would be three files this package never opens.
+      for leaf in reprobuildWindowsLoaderLibraries(includeCli = false):
+        cacheDist.components.add(
+          runtimeLibraryComponent(PrebuiltLib & "/" & leaf))
 
     let site = packagingSite("reprobuild-packages")
     when defined(windows):
@@ -350,34 +378,18 @@ package `reprobuild-packages`:
       # The URL is left as ``ScoopUrlToken``: where a release is
       # published is M3's business, and a manifest with a plausible but
       # wrong URL installs whatever is at that address.
-      # SCOOP IS NOT EMITTED FROM THIS ARM, AND THE REASON IS M0's
-      # :caveats: (1) rather than a change of mind about Scoop.
-      #
-      # A Scoop manifest describes an ARCHIVE, so emitting one means
-      # calling ``tarballPackage`` first, and that registers an edge
-      # that names the ``tar`` tool. Tool resolution is LAZY -- only
-      # tools an EDGE names are resolved, which is why the nineteen
-      # other ``uses:`` entries (dpkg-deb, rpmbuild, patchelf,
-      # appimagetool, bsdtar...) cost a Windows build nothing -- but
-      # ``tar`` IS named by that edge, and ``packages/tar.nim`` declares
-      # a nixPackage channel only. Its header says why: Win11 ships
-      # ``tar.exe`` in System32, so the package deliberately has no
-      # Windows provisioning channel and relies on ``%PATH%``
-      # resolution. Under ``--tool-provisioning=tarball`` -- the mode
-      # the WiX tools need, and the mode M0's Windows MSI verification
-      # used -- that is a hard refusal:
-      #
-      #   tool-resolution failed: package "tar" requested by uses "tar"
-      #   does not declare provisioning: tarball metadata
-      #
-      # and ``--tool-provisioning=path`` is not an alternative, because
-      # WiX would then have to be on ``%PATH%``. One mode governs the
-      # whole build; there is no per-tool mode. Answering that is a
-      # tool-provisioning question (give ``tar`` a Windows channel, or
-      # make ``uses:`` expressible per target), not a packaging one, and
-      # the MSI cycle -- which IS one of M1's gate items -- should not
-      # wait on it. Scoop's own mechanism stays verified by its digest
-      # probe over a real archive; see :scoop-digest-measured:.
+      # SCOOP IS EMITTED AGAIN (M1's N20). The Windows arm dropped the
+      # pair for one reason and it is now gone: ``tarballPackage``
+      # registers an edge naming ``tar``, and ``packages/tar.nim``
+      # declared a nix channel only, which
+      # ``--tool-provisioning=tarball`` -- the mode the WiX tools need,
+      # and the mode that governs the WHOLE build rather than one edge
+      # -- refused outright. ``tar``, ``gzip`` and ``install-file`` now
+      # each carry a Windows tarball channel over the PortableGit
+      # archive this repo ALREADY pins by sha256 for ``sh`` and
+      # ``bash``, so the refusal is answered with no new download and no
+      # new lock identity.
+      discard scoopPackage(dist, tarballPackage(dist, site), site)
     else:
       discard debPackage(dist, site)
       discard rpmPackage(dist, site)

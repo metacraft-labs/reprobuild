@@ -490,6 +490,68 @@ proc reprobuildNimToolchainPrefixRel*(dist: Distribution): string =
   roleDefaultSubdir(dist, crHelperExecutable) & "/" &
     ReprobuildNimToolchainSubdir
 
+proc reprobuildWindowsLoaderLibraries*(includeCli: bool): seq[string] =
+  ## THE WINDOWS RUNTIME CLOSURE, AS A LIST, BECAUSE WINDOWS HAS NO WALK.
+  ##
+  ## ``stageInstallTree``'s closure walk is ELF-only: it seeds from the
+  ## shipped objects' ``DT_NEEDED``, rewrites RPATHs with ``patchelf``
+  ## and vendors what it finds. Windows has no analogue here, so the
+  ## Windows packages shipped their executables and NOTHING they load,
+  ## and every Windows measurement in this milestone was made on a host
+  ## whose developer ``%PATH%`` happened to supply the difference.
+  ##
+  ## What that hid, measured on this host by running the shipped
+  ## ``repro-binary-cache.exe`` as ``NT AUTHORITY\SYSTEM`` (a scheduled
+  ## task, so the process gets a machine ``%PATH%`` and no user profile)
+  ## and reading what it said before exiting 1::
+  ##
+  ##   could not load: libcrypto-3-x64.dll
+  ##   could not load: (sqlite3_64|sqlite3|sqlite3_32).dll
+  ##
+  ## -- one at a time, each appearing only once the previous one was
+  ## satisfied. The service the MSI registers therefore could not have
+  ## started even with the SCM protocol in the binary (M1's N23), and
+  ## the installed CLI answers ``repro --version`` on a developer's
+  ## machine and on no one else's.
+  ##
+  ## THE LIST IS A MEASUREMENT, not a guess: it is the union of every
+  ## Nim ``dynlib`` string present in the staged ``.exe`` files and every
+  ## non-system name in their PE import tables. ``msvcrt``, ``KERNEL32``
+  ## and ``ADVAPI32`` are Windows' own and are excluded; ``libgcc_s_seh-1``
+  ## is MinGW's and is not.
+  ##
+  ## ``crRuntimeLibrary`` is the right role WITHOUT a special case,
+  ## because ``roleDefaultSubdir`` already sends that role to
+  ## ``runtimeLibDir(plWindowsTree)`` -- which is ``bin`` -- and the
+  ## Windows loader searches the calling image's own directory first.
+  ## That matters for the SERVICE specifically: ``msiServiceRows``
+  ## registers the REAL executable rather than the ``.cmd`` wrapper, so
+  ## a service process inherits none of the wrapper's environment and
+  ## the only search path it has is the directory it was started from.
+  result = @[
+    # Nim's ``-d:ssl`` OpenSSL binding, loaded at MODULE INIT -- before
+    # ``main``, so a missing one is not a degraded TLS path, it is a
+    # process that prints one line and exits 1.
+    "libcrypto-3-x64.dll",
+    "libssl-3-x64.dll",
+    # ``repro_local_store``'s sqlite binding. The dynlib pattern is
+    # ``(sqlite3_64|sqlite3|sqlite3_32).dll``; the middle alternative is
+    # the one shipped, and Nim tries them in order.
+    "sqlite3.dll",
+  ]
+  if includeCli:
+    # §5's two dlopen-by-leaf-name libraries, which on POSIX the closure
+    # walk vendors because ``reprobuildDlopenLeafNames`` declares them.
+    # The cache server links neither: it is not the solver and its
+    # decompression path is the client's.
+    result.add("libzstd.dll")
+    result.add("clingo.dll")
+    # MinGW's unwinder, a STATIC import of
+    # ``librepro_project_dsl_runtime.dll`` and therefore resolved by the
+    # loader before that DLL's first call. Found in the PE import table
+    # rather than in any source string, which is why both scans are run.
+    result.add("libgcc_s_seh-1.dll")
+
 proc reprobuildNimDlopenLeafNames*(targetOs: TargetOs): seq[string] =
   ## What the BUNDLED COMPILER dlopens by leaf name, so the runtime
   ## closure walk vendors it.
@@ -666,6 +728,42 @@ proc reprobuildUserDaemonService*(targetOs: TargetOs): ServiceDef =
     restartOnFailure: true,
     after: @[])
 
+const
+  PosixCacheStateDir* = "/var/lib/repro-binary-cache"
+    ## Where the cache SERVER keeps its store, keys and manifests on a
+    ## POSIX target. The FHS answer for machine-local variable state a
+    ## system service owns.
+  WindowsCacheStateDir* = r"C:\ProgramData\reprobuild-binary-cache"
+    ## The same fact on Windows, and M1's N22.
+    ##
+    ## The MSI registered the service with the POSIX spelling: `sc qc`
+    ## answered ``--root=/var/lib/repro-binary-cache`` on a system that
+    ## has no such path. ``ServiceDef.execArgs`` was passed through
+    ## verbatim by every renderer, so the one list had to be right for
+    ## three service mechanisms at once and was right for two.
+    ##
+    ## ``%ProgramData%`` is the machine-wide state location on Windows
+    ## and the one a LocalSystem service can write. It is spelled out
+    ## rather than written as an environment reference because the SCM
+    ## does NOT expand environment references in a service's argument
+    ## list -- ``--root=%ProgramData%...`` would create a directory
+    ## literally called ``%ProgramData%`` beside the current directory.
+    ##
+    ## The SAME string is the daemon's own compiled-in default
+    ## (``apps/repro-binary-cache/repro_binary_cache.nim``'s
+    ## ``WindowsCacheStateDir``), so a hand-run and the service agree on
+    ## where the state is; ``t_packaging_service_exec_args`` reads that
+    ## file and refuses the drift.
+
+func reprobuildCacheStateDir*(targetOs: TargetOs): string =
+  ## The cache server's state root FOR THE TARGET. A per-target value
+  ## rather than a constant, because that is the shape of the defect:
+  ## one literal cannot be correct for a filesystem with a root
+  ## directory and one with drive letters.
+  case targetOs
+  of toWindows: WindowsCacheStateDir
+  of toLinux, toDarwin: PosixCacheStateDir
+
 proc reprobuildCacheService*(targetOs: TargetOs): ServiceDef =
   ## §4's third role: the network binary-cache SERVER, system scope.
   ##
@@ -691,7 +789,7 @@ proc reprobuildCacheService*(targetOs: TargetOs): ServiceDef =
     # that the unit says what this proc says, and both would have been
     # wrong together. A package whose unit fails to start is installed,
     # enabled, and dead.
-    execArgs: @["--root=/var/lib/repro-binary-cache",
+    execArgs: @["--root=" & reprobuildCacheStateDir(targetOs),
                 "--listen=0.0.0.0:" & $ReprobuildCachePort],
     environment: @[("REPRO_BINARY_CACHE_ROLE", "server")],
     startAtBoot: false,

@@ -141,6 +141,7 @@ libs/repro_core/tests/t_rust_dep_scanner.nim	nim	15
 libs/repro_core/tests/t_show_conventions_cli.nim	nim	7
 libs/repro_core/tests/t_show_conventions_manual_deps.nim	nim	10
 libs/repro_core/tests/t_smoke_repro_core.nim	nim	14
+libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	5
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	4
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
@@ -198,9 +199,10 @@ libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim	nim	17
 libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim	nim	25
 libs/repro_dsl_stdlib/tests/t_packaging_rpm_authoring.nim	nim	23
-libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	nim	26
+libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	nim	27
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_packaging_scoop_manifest.nim	nim	9
+libs/repro_dsl_stdlib/tests/t_packaging_service_exec_args.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim	nim	17
 libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim	nim	11

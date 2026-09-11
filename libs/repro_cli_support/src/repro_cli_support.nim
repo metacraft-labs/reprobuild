@@ -16129,15 +16129,20 @@ const
     # usually unset, CODETRACER_PINNED_SRC is the flake pin the daemon must
     # still be able to fall back to when there is no sibling checkout.
     "CODETRACER_SRC", "CODETRACER_PINNED_SRC",
-    # CT_INTERPOSE_SRC threads the ct_interpose package (monitor hooks /
-    # SIP-rewrite helpers) onto config.nims's --path. REPROBUILD_SOURCE_ROOT
-    # lets reprobuildLibraryWorkDir() locate reprobuild's OWN libs
-    # (repro_interface_artifacts, repro_project_dsl, ...) when compiling the
-    # interface extractor and providers — the compiled-in source path points
-    # at the now-deleted build sandbox, so without this env var the daemon
-    # falls back to the project dir and the extractor fails with
-    # "cannot open file: repro_interface_artifacts".
-    "CT_INTERPOSE_SRC", "REPROBUILD_SOURCE_ROOT"
+    # ``CT_INTERPOSE_SRC`` WAS HERE, on the same false premise the flake
+    # carried: that config.nims threads the ct_interpose package onto
+    # ``--path``. ``86cb1bf6`` (ct_interpose -> nim-stackable-hooks) removed
+    # the only reader, so forwarding it to the daemon propagated a variable
+    # no process on either side consults. Dropped with M1's N19, which
+    # removed the last setter.
+    #
+    # REPROBUILD_SOURCE_ROOT lets reprobuildLibraryWorkDir() locate
+    # reprobuild's OWN libs (repro_interface_artifacts, repro_project_dsl,
+    # ...) when compiling the interface extractor and providers — the
+    # compiled-in source path points at the now-deleted build sandbox, so
+    # without this env var the daemon falls back to the project dir and the
+    # extractor fails with "cannot open file: repro_interface_artifacts".
+    "REPROBUILD_SOURCE_ROOT"
   ]
 
   ## Well-known toolchain env vars that must also be forwarded to the daemon

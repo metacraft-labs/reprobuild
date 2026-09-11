@@ -22,6 +22,38 @@ import std/[asyncdispatch, os, parseopt, sets, strutils]
 
 import repro_binary_cache_server
 import repro_local_store
+import repro_daemon_core/windows_service
+
+const
+  WindowsCacheStateDir* = r"C:\ProgramData\reprobuild-binary-cache"
+    ## The DEFAULT on-disk root on Windows, and the value the packaging
+    ## layer renders into the service's command line.
+    ##
+    ## Distribution-And-Packaging M1's N22: the MSI registered the
+    ## service with the POSIX ``--root=/var/lib/repro-binary-cache``,
+    ## which is not a path Windows has. ``%ProgramData%`` is the
+    ## machine-wide state location every Windows install has and the one
+    ## a LocalSystem service can write; it is spelled out rather than
+    ## taken from the environment because the SCM does NOT expand
+    ## environment references in a service's argument list, so a
+    ## ``%ProgramData%`` left unexpanded would become a literal
+    ## directory of that name.
+    ##
+    ## Pinned against the packaging layer's copy by
+    ## ``t_packaging_service_exec_args`` -- two spellings of one fact are
+    ## exactly the shape that drifts.
+  WindowsServiceName* = "repro-binary-cache"
+    ## The SCM service name the MSI's ``ServiceInstall`` row registers.
+    ## Pinned against the packaging layer's ``ServiceDef.name`` by
+    ## ``t_packaging_service_exec_args``: the name the binary answers to
+    ## and the name the installer enrols MUST be one string, and nothing
+    ## in Windows tells you when they are two.
+  PosixCacheStateDir* = "/var/lib/repro-binary-cache"
+    ## The same fact on Linux/macOS. See ``WindowsCacheStateDir``.
+
+proc defaultCacheRoot*(): string =
+  when defined(windows): WindowsCacheStateDir
+  else: PosixCacheStateDir
 
 const
   Usage = """
@@ -31,8 +63,9 @@ Usage:
   repro-binary-cache [--root=PATH] [--listen=HOST:PORT] [--store-dir=PATH]
 
 Options:
-  --root=PATH         On-disk layout root. Default: $REPRO_BINARY_CACHE_ROOT
-                      or /var/lib/repro-binary-cache.
+  --root=PATH         On-disk layout root. Default: $REPRO_BINARY_CACHE_ROOT,
+                      else /var/lib/repro-binary-cache (POSIX) or
+                      C:\ProgramData\reprobuild-binary-cache (Windows).
   --listen=HOST:PORT  Bind address. Default: 0.0.0.0:7878.
   --store-dir=PATH    Value advertised in GET /cache-info as StoreDir.
                       Default: <root>/store.
@@ -73,8 +106,7 @@ type
 
 proc parseCli(): CliOpts =
   result.listen = DefaultListenAddr
-  result.root = getEnv("REPRO_BINARY_CACHE_ROOT",
-                       "/var/lib/repro-binary-cache")
+  result.root = getEnv("REPRO_BINARY_CACHE_ROOT", defaultCacheRoot())
   result.tlsCert = getEnv("REPRO_BINARY_CACHE_TLS_CERT", "")
   result.tlsKey = getEnv("REPRO_BINARY_CACHE_TLS_KEY", "")
   result.allowedSigners = getEnv("REPRO_BINARY_CACHE_ALLOWED_SIGNERS", "")
@@ -118,11 +150,19 @@ proc hex65(pub: PublicKeyBytes): string =
     result.add(HexChars[int(b shr 4) and 0x0f])
     result.add(HexChars[int(b) and 0x0f])
 
-proc main() {.async.} =
+proc main(asService = false) {.async.} =
   let opts = parseCli()
   if opts.showHelp:
     echo Usage
     quit(0)
+  if asService:
+    # BEFORE the first ``stderr.writeLine`` below. A service inherits no
+    # standard handles and Nim's ``File`` write RAISES when the write
+    # does not complete, so an un-redirected progress line is a crash
+    # rather than a lost message.
+    discard redirectStdioToFile(opts.root / "logs" / "service.log")
+    stderr.writeLine("repro-binary-cache: started by the Windows Service " &
+                     "Control Manager")
   if opts.root.len == 0:
     stderr.writeLine("--root or REPRO_BINARY_CACHE_ROOT is required")
     quit(2)
@@ -185,8 +225,30 @@ proc main() {.async.} =
   stderr.writeLine("repro-binary-cache root          = " & opts.root)
   stderr.writeLine("repro-binary-cache storeDir adv  = " & state.info.storeDir)
   stderr.flushFile()
-  while srv.running:
-    await sleepAsync(1000)
+  # RUNNING is reported only HERE -- after ``srv.start`` returned and the
+  # listener is bound. Reporting it from ``serviceMain`` would make ``sc
+  # start`` succeed for a daemon that went on to fail its bind, which is
+  # precisely the class of "installed, enrolled and dead" the service
+  # host exists to stop hiding.
+  if asService:
+    reportWindowsServiceRunning()
+  # 250 ms rather than 1 s: this is now also the stop latency the SCM
+  # measures, and a service that takes a second to notice STOP looks
+  # wedged in the Services console.
+  while srv.running and not windowsServiceStopRequested():
+    await sleepAsync(250)
+  if asService and windowsServiceStopRequested():
+    reportWindowsServiceStopping()
+    stderr.writeLine("repro-binary-cache: stop requested by the SCM")
+    stderr.flushFile()
+    srv.close()
 
 when isMainModule:
-  waitFor main()
+  # Ask the SCM whether it launched us. ``false`` -- which is what a
+  # console run, and every POSIX run, gets -- leaves the behaviour below
+  # exactly what it was before the service host existed.
+  let asService = beginWindowsServiceHost(WindowsServiceName)
+  try:
+    waitFor main(asService)
+  finally:
+    endWindowsServiceHost(0)

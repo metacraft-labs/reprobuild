@@ -49,13 +49,36 @@ const
   InstalledLibDir = "/usr/lib/repro/lib"
   OtherLibDir = "/opt/other/lib"
 
+proc canonical(path: string): string =
+  ## One path spelling, so a case can state a POSIX install tree and run
+  ## on a host whose separator is the other one. See `probeFor`.
+  result = newStringOfCap(path.len)
+  for ch in path:
+    result.add(if ch == '\\': '/' else: ch)
+
 proc probeFor(present: openArray[string]): proc(path: string): bool =
   ## An existence probe over a fixed set of paths, so a case can
   ## describe a filesystem it is not running on.
-  let known = @present
+  ##
+  ## SEPARATORS ARE NORMALISED BEFORE COMPARISON, and that is the whole
+  ## of what makes these cases runnable on Windows. The tree every case
+  ## here describes is an INSTALLED POSIX PREFIX -- `/usr/lib/repro/lib`
+  ## -- because that is the layout the two resolvers exist for. The
+  ## resolvers join with the HOST's separator, so on Windows they ask the
+  ## probe about `/usr/lib/repro/lib\librepro_monitor_shim.so` and an
+  ## exact-string probe answers false for every arm at once: three cases
+  ## failed for one reason that had nothing to do with either resolver.
+  ##
+  ## Normalising here rather than teaching the resolvers to emit `/`
+  ## keeps the change inside the test: which separator a resolver joins
+  ## with is the host's business and is correct as it stands.
+  var known: seq[string] = @[]
+  for item in present:
+    known.add(canonical(item))
   result = proc(path: string): bool =
+    let probe = canonical(path)
     for item in known:
-      if item == path:
+      if item == probe:
         return true
     false
 
@@ -65,7 +88,7 @@ suite "installed-layout resolvers":
     let path = monitorShimLibInLibraryPath(
       InstalledLibDir, "so",
       probeFor([InstalledLibDir & "/librepro_monitor_shim.so"]))
-    check path == InstalledLibDir & "/librepro_monitor_shim.so"
+    check canonical(path) == InstalledLibDir & "/librepro_monitor_shim.so"
 
   test "the library path is a LIST and every entry is probed in order":
     # The flake sets six directories in this variable; a native package
@@ -75,13 +98,13 @@ suite "installed-layout resolvers":
     let path = monitorShimLibInLibraryPath(
       listed, "so",
       probeFor([InstalledLibDir & "/librepro_monitor_shim.so"]))
-    check path == InstalledLibDir & "/librepro_monitor_shim.so"
+    check canonical(path) == InstalledLibDir & "/librepro_monitor_shim.so"
     # ...and the FIRST match wins, not the last.
     let both = monitorShimLibInLibraryPath(
       listed, "so",
       probeFor([OtherLibDir & "/librepro_monitor_shim.so",
                 InstalledLibDir & "/librepro_monitor_shim.so"]))
-    check both == OtherLibDir & "/librepro_monitor_shim.so"
+    check canonical(both) == OtherLibDir & "/librepro_monitor_shim.so"
 
   test "an empty or all-missing library path resolves to nothing":
     # The caller treats "" as "monitor not configured" and falls back to
@@ -107,11 +130,11 @@ suite "installed-layout resolvers":
     # the other way first.) Splitting is the one thing about this arm
     # that genuinely cannot be checked for a foreign target from here;
     # the EXTENSION, which is what the case is about, can.
-    check monitorShimLibInLibraryPath("/repro/lib", "dll",
-      probeFor(["/repro/lib/librepro_monitor_shim.dll"])) ==
+    check canonical(monitorShimLibInLibraryPath("/repro/lib", "dll",
+      probeFor(["/repro/lib/librepro_monitor_shim.dll"]))) ==
       "/repro/lib/librepro_monitor_shim.dll"
-    check monitorShimLibInLibraryPath("/usr/lib/repro/lib", "dylib",
-      probeFor(["/usr/lib/repro/lib/librepro_monitor_shim.dylib"])) ==
+    check canonical(monitorShimLibInLibraryPath("/usr/lib/repro/lib", "dylib",
+      probeFor(["/usr/lib/repro/lib/librepro_monitor_shim.dylib"]))) ==
       "/usr/lib/repro/lib/librepro_monitor_shim.dylib"
     # The stem is one constant, shared with the packaging recipe that
     # ships the file, so the two cannot drift.
@@ -125,7 +148,7 @@ suite "installed-layout resolvers":
     let dir = dslRuntimeLibDirInLibraryPath(
       OtherLibDir & PathSep & InstalledLibDir, "so",
       probeFor([InstalledLibDir & "/librepro_project_dsl_runtime.so"]))
-    check dir == InstalledLibDir
+    check canonical(dir) == InstalledLibDir
     check ProjectDslRuntimeLibStem == "librepro_project_dsl_runtime"
 
   test "a library path with no DSL runtime in it answers nothing":

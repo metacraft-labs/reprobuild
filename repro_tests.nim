@@ -1215,6 +1215,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_daemon_image_path.nim",
+    binary: "build/test-bin/t_daemon_image_path",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_l4_daemon_leases.nim",
     binary: "build/test-bin/t_l4_daemon_leases",
     defines: @[],
@@ -1748,6 +1757,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_scoop_manifest.nim",
     binary: "build/test-bin/t_packaging_scoop_manifest",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_packaging_service_exec_args.nim",
+    binary: "build/test-bin/t_packaging_service_exec_args",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

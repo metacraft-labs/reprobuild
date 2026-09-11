@@ -237,16 +237,17 @@
     };
     codetracer-native-recorder = {
       # ct_interpose lives under ``ct_interpose/src`` in the native-recorder
-      # repo. This comment USED TO SAY that config.nims threads
-      # CT_INTERPOSE_SRC onto Nim's --path, and that stopped being true at
-      # ``86cb1bf6`` (the ct_interpose -> nim-stackable-hooks migration),
-      # which removed the only reader. ``grep -c CT_INTERPOSE_SRC
-      # config.nims`` answers 0 today, so the variable is set by this flake
-      # and read by nothing; the packaging layer's wrapper set and this
-      # derivation's ``--set-default`` loop have both dropped it. The
-      # ``export``/attribute forms below are inert leftovers, kept only
-      # because removing them changes this derivation's hash for no
-      # behavioural gain -- tracked as a residual rather than left implied.
+      # repo. This flake USED TO EXPORT ``CT_INTERPOSE_SRC`` pointing at it,
+      # on the belief that config.nims threaded the variable onto Nim's
+      # ``--path``. That stopped being true at ``86cb1bf6`` (the
+      # ct_interpose -> nim-stackable-hooks migration), which removed the
+      # only reader: ``grep -c CT_INTERPOSE_SRC config.nims`` answers 0.
+      # The packaging layer's wrapper set and this derivation's
+      # ``--set-default`` loop dropped it first (M1's N16); the dev-shell
+      # export, the lint hook and both derivation attributes are now gone
+      # too (M1's N19), so nothing anywhere sets a variable nothing reads.
+      # The INPUT stays: the package-closure assertion below still requires
+      # this store path to be reachable from the built package.
       # In the CodeTracer workspace this input ``follows`` codetracer's own
       # native-recorder input, so a local sibling checkout is used.
       #
@@ -474,11 +475,6 @@
             checksumsSrc = nim-checksums-src;
             nimonySrc = nim-nimony-src;
           };
-          # CT_INTERPOSE_SRC points at the directory that *contains* the
-          # ``ct_interpose`` package, which is ``ct_interpose/src`` inside
-          # the native-recorder checkout. NOTHING READS IT since
-          # ``86cb1bf6``; see the note on the input above.
-          ctInterposeSrc = "${codetracer-native-recorder}/ct_interpose/src";
           # CodeTracer's top-level ct entry point imports the span-stream
           # writer. Fail during Nix evaluation if a future pin regression
           # silently points at a pre-span trace-format tree; otherwise the
@@ -669,7 +665,6 @@
                 export CODETRACER_PINNED_SRC=${codetracer-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
-                export CT_INTERPOSE_SRC=${ctInterposeSrc}
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
                 export XXHASH_PREFIX=${pkgs.xxHash}
@@ -823,7 +818,6 @@
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
-            CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             SQLITE_PREFIX = pkgs.sqlite.out;
@@ -1474,7 +1468,6 @@
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
-            CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             # Read by RUNQUOTA'S ``config.nims``, not by ours.

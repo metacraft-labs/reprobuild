@@ -219,12 +219,39 @@ suite "packaging: the vendored runtime-library closure":
       check script.contains(stem & "|") or script.contains("|" & stem & ")")
     check script.contains("ld-linux*|ld|ld64*|linux-vdso*|linux-gate*|libnss_*")
 
-  test "an extra system name reaches the generated shell":
+  test "an extra system name reaches the generated shell, QUOTED":
     resetBuildActionRegistry()
     var dist = sampleDistribution(toLinux)
     dist.runtime.extraSystemLibraryLeafNames = @["libselinux.so.1"]
     discard stageInstallTree(dist, "deb")
-    check closureScriptOf(closureEdges()[0]).contains("libselinux.so.1|libselinux)")
+    # M1's N6: the name is a recipe's string and this is a `case` pattern
+    # list. Quoted, the pattern is the file name; unquoted it was both a
+    # glob and, for the right value, an injection point. The stem is
+    # added beside it because `is_system` matches on `${1%%.so*}`.
+    check closureScriptOf(closureEdges()[0]).contains(
+      "'libselinux.so.1'|'libselinux')")
+
+  test "a leaf name carrying shell syntax is REFUSED":
+    # M1's N6, the half quoting does not cover. Each of these either ends
+    # the `case` pattern or opens a substitution, and the unquoted splice
+    # this replaces turned every one of them into script executed by the
+    # staging edge. The refusal is a build-graph-time `ValueError` naming
+    # the value, not a script that misbehaves later.
+    for bad in ["libx.so) ; rm -rf /tmp/x ;;",
+                "libx.so|*",
+                "$(id).so",
+                "lib x.so",
+                "../../etc/libx.so"]:
+      resetBuildActionRegistry()
+      var dist = sampleDistribution(toLinux)
+      dist.runtime.extraSystemLibraryLeafNames = @[bad]
+      var raised = false
+      try:
+        discard stageInstallTree(dist, "deb")
+      except ValueError as err:
+        raised = true
+        doAssert err.msg.contains(bad), err.msg
+      doAssert raised, "accepted a leaf name carrying shell syntax: " & bad
 
   test "dlopen leaf names become a checked post-condition":
     # DT_NEEDED cannot see a dlopen, so the walk cannot DISCOVER these.

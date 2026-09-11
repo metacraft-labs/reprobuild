@@ -271,11 +271,18 @@ suite "packaging: the drift guard has a PER-BINARY dimension":
     # comparison above.
     check "CT_INTERPOSE_SRC" notin ReprobuildWrapperVariables
     check "CT_INTERPOSE_SRC" notin flakeWrapperVariables()
-    # It is still SET by the flake for the BUILD (an inert leftover,
-    # recorded as such in flake.nix), so a check that simply grepped the
-    # file would pass for the wrong reason. The claim here is about the
-    # WRAPPER contract, which is the thing the packaging layer mirrors.
-    check flakeText().contains("CT_INTERPOSE_SRC")
+    # M1's N19 finished the job: the flake no longer SETS it either, in
+    # the dev shell, in the lint hook or in the package environment.
+    #
+    # The assertion is about ASSIGNMENT rather than about the string,
+    # deliberately. ``flake.nix`` still NAMES the variable -- in the
+    # comment that records why it went -- so ``not
+    # flakeText().contains("CT_INTERPOSE_SRC")`` would fail on a correct
+    # flake and would have to be "fixed" by deleting the explanation.
+    # What must be absent is a setter, in either of the two forms the
+    # file uses.
+    check not flakeText().contains("export CT_INTERPOSE_SRC=")
+    check not flakeText().contains("CT_INTERPOSE_SRC = ")
 
   test "the list's variables are read by something, and 14 by config.nims":
     # The test N16's evidence should have been. ``config.nims`` is the
