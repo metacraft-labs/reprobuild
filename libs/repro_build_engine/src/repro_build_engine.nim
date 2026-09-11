@@ -2661,13 +2661,18 @@ proc selfConsumedDeclaredPaths*(action: BuildAction): seq[string] =
 proc isVolatileMonitorPath(path: string): bool =
   ## Runtime pseudo-filesystems describe the monitored process or host at one
   ## instant. They cannot be reopened reliably when the action is fingerprinted
-  ## and must never become cache inputs. Keep this aligned with
-  ## repro_local_store.isVolatileDevicePath.
-  let normalized = path.replace('\\', '/')
-  normalized == "/dev" or normalized.startsWith("/dev/") or
-    normalized == "/proc" or normalized.startsWith("/proc/") or
-    normalized == "/sys" or normalized.startsWith("/sys/") or
-    normalized == "/run" or normalized.startsWith("/run/")
+  ## and must never become cache inputs.
+  ##
+  ## The predicate itself lives in ``repro_core/paths`` and is SHARED with
+  ## ``repro_local_store``'s ``isRecordableInput``, which used to carry a
+  ## hand-copied duplicate under a "keep this aligned" comment. The two
+  ## have to agree exactly: this one decides what reaches the evidence, the
+  ## other decides what reaches the cache RECORD, and a path the first
+  ## admits and the second drops is fingerprinted as an input the entry
+  ## does not carry — the same stale serve, one layer down. A comment
+  ## cannot enforce that; one function can.
+  isVolatileRuntimeStatePath(path)
+
 proc parseCreateActionRecord(payload, path: string; lineNo: int;
                              governingLockIdentity: LockIdentity): BuildAction =
   ## Decode an M25 ``create-action`` JSON payload into a BuildAction. The

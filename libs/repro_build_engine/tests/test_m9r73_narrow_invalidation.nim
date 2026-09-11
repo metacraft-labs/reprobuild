@@ -186,8 +186,10 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
         osPid: 1, threadId: 1, path: "/sys/devices/system/cpu/online"),
       MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
         osPid: 1, threadId: 1, path: "/dev/null"),
+      # HOST runtime state under `/run`, which is what the `/run` prefix is
+      # for: a pid file rewritten by a daemon nobody in this build controls.
       MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
-        osPid: 1, threadId: 1, path: "/run/user/1000/socket"),
+        osPid: 1, threadId: 1, path: "/run/systemd/userdb/io.systemd.Machine"),
     ]
     writeFile(rmdfPath, cast[string](encodeCanonical(records)))
 
@@ -199,3 +201,53 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     check evidence.monitorReads == @[stablePath]
     check evidence.monitorWrites.len == 0
     check evidence.monitorProbes.len == 0
+
+  test "the XDG runtime directory is an ordinary place to keep build inputs":
+    ## The companion of the case above, and the reason its `/run` example
+    ## had to change. `/run` used to be volatile as a whole PREFIX, which
+    ## swept in `/run/user/<uid>` — `$XDG_RUNTIME_DIR`, the default
+    ## `TMPDIR` on a systemd host and the one this repo's agent
+    ## instructions hand out. An action whose work tree lives there had
+    ## every read, write and probe discarded before any arm of the fold
+    ## saw it, and was then fingerprinted as an action with no observed
+    ## inputs at all: change the input, still a cache HIT.
+    ##
+    ## Measured, before the fix, on a real `sh -c 'cat input > output'`
+    ## under `TMPDIR=/run/user/1007/…`: io-mon recorded
+    ## `mrFileOpen`+`mrFileRead` for the input and `mrFileOpen/moFileWrite`
+    ## for the output, and `evidence.monitorReads` came back holding the
+    ## twenty `/nix/store` DSOs and `coreutils/bin/cat` — and nothing
+    ## whatsoever from the work tree.
+    ##
+    ## The paths here are DELIBERATELY not the ones the harness runs
+    ## under: a fixture that inherited `$XDG_RUNTIME_DIR` would assert
+    ## nothing on a host that has none. `1000` is a literal.
+    resetTmp()
+    let rmdfPath = TmpDir / "xdg-runtime-paths.iomon"
+    let inputPath = "/run/user/1000/build-scratch/input.txt"
+    let outputPath = "/run/user/1000/build-scratch/output.txt"
+    let probedPath = "/run/user/1000/build-scratch/maybe.h"
+    let records = @[
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: inputPath),
+      MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
+        osPid: 1, threadId: 1, path: outputPath),
+      MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
+        osPid: 1, threadId: 1, path: probedPath),
+      # Still volatile: a sibling prefix that merely LOOKS like the XDG
+      # one, and the non-numeric spelling, must not be let through with it.
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: "/run/userland/state.db"),
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: "/run/user/by-name/state.db"),
+    ]
+    writeFile(rmdfPath, cast[string](encodeCanonical(records)))
+
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
+
+    check status == mesComplete
+    check evidence.monitorReads == @[inputPath]
+    check evidence.monitorWrites == @[outputPath]
+    check evidence.monitorProbes == @[probedPath]
