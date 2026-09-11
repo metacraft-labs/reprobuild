@@ -369,6 +369,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_da1i_evidence_scope.nim",
+    binary: "build/test-bin/t_da1i_evidence_scope",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim",
     binary: "build/test-bin/t_dark_window_cache_records_are_drained",
     defines: @[],
@@ -8703,6 +8712,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_da1i_evidence_scope_reaches_io_mon.nim",
+    binary: "build/test-bin/t_da1i_evidence_scope_reaches_io_mon",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_daemon_accept_loop_survives_probe.nim",
     binary: "build/test-bin/t_daemon_accept_loop_survives_probe",
     defines: @[],
@@ -12737,6 +12755,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim",
     binary: "build/test-bin/t_ct_test_nim_unittest_path_mm_pool",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_da1i_evidence_help_names_the_hazard.nim",
+    binary: "build/test-bin/t_da1i_evidence_help_names_the_hazard",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

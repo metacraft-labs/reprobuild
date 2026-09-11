@@ -277,7 +277,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -396,7 +396,43 @@ proc renderUsage*(programName: string): string =
       "build progress bars: default=overlay; use --progress-bars=split " &
       "or REPROBUILD_PROGRESS_BARS=split for separate check/exec bars\n" &
       "build color: auto by default; set NO_COLOR or REPROBUILD_COLOR=never " &
-      "to disable, REPROBUILD_COLOR=always to force"
+      "to disable, REPROBUILD_COLOR=always to force\n" &
+      # DA-1i. THE HAZARD, NOT ONLY THE BEHAVIOUR. An operator choosing this
+      # flag is accepting a specific, nameable risk, and a risk described only
+      # in a spec directory is not one they were given the chance to accept.
+      # The table is narrower than "probes are unsafe" and that is its value,
+      # so all three copies (here, docs/dependency-collection.md,
+      # reprobuild-specs/CLI/build.md) carry the same four rows AND the
+      # sentence that row 1 does not cover row 4.
+      "build evidence: default=full, which records every observation " &
+      "including lookups that found nothing. --evidence=reads-only records " &
+      "only lookups that SUCCEEDED (about a third of the records on a real " &
+      "nim c) and is NOT merely faster: it weakens \"is this build up to " &
+      "date?\" in one direction. Still detected: a recorded file is " &
+      "modified; a recorded file is deleted. NOT detected: a file is ADDED " &
+      "that shadows one earlier in a search path; a file that exists but " &
+      "could not be opened (a permission bit, a directory where a file was " &
+      "wanted) becomes openable. Those two are one rule — only successful " &
+      "lookups are recorded, so any later change that makes an " &
+      "unsuccessful lookup succeed is invisible — and \"a recorded file is " &
+      "modified\" does NOT cover the second, because the file is not " &
+      "recorded at all. This is ninja's own stale-build failure, which is " &
+      "why the mode exists: like-for-like comparison with depfile-driven " &
+      "tools, not speed. Artifacts built this way are correct and " &
+      "publishable; what degrades is the staleness check. Recover with " &
+      "--evidence=full or a clean build. A capture made under reads-only " &
+      "is refused by a build that requires full evidence, which recomputes " &
+      "locally instead; the scope is not part of the cache key, so a " &
+      "full-evidence result stays usable by everyone. NAME THE BLAST " &
+      "RADIUS: that refusal is SESSION-WIDE, not per-action. It is graded " &
+      "as an unknown-scope evidence loss, because a reads-only record " &
+      "cannot say which lookups it dropped, so there is no narrower set to " &
+      "invalidate -- and the first refused capture therefore turns every " &
+      "later cache lookup in that session into a miss. The build stays " &
+      "correct; it stops being incremental. You only reach it by reading a " &
+      "capture SOMEONE ELSE narrowed, never your own. Recover by opting " &
+      "into the reduced scope with --evidence=reads-only, or by " &
+      "re-capturing under --evidence=full."
   else:
     programName & " " & versionString() & "\nusage: " & programName & " --version"
 
@@ -8367,6 +8403,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         restoreCachedOutputs = false;
 
                         monitorHosting = mhmNever;
+                        evidenceScope = esFull;
                         benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
@@ -8716,6 +8753,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # `REPROBUILD_MONITOR_HOSTING` said otherwise, so the shipped default
       # is unchanged and `test_umask_wrap_both_spawn_paths` still pins it.
       monitorHosting: monitorHosting,
+      # DA-1i — the operator's dependency-evidence scope, wired into BOTH
+      # user-facing build configs for the same reason `monitorHosting` above
+      # is: they are alternative entry points into the SAME build, and a flag
+      # wired to only one of them takes effect or not depending on whether the
+      # lowered-graph cache happened to hit. `esFull` unless `--evidence` said
+      # otherwise, which is the documented default and the enum's zero value.
+      evidenceScope: evidenceScope,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       # Edge-Determinism-And-Soft-Rebuild.md §4. Wired into EVERY
@@ -10168,6 +10212,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # wired to only one of them would work or not depending on whether
       # the lowered-graph cache happened to hit.
       monitorHosting: monitorHosting,
+      # DA-1i — the operator's dependency-evidence scope, wired into BOTH
+      # user-facing build configs for the same reason `monitorHosting` above
+      # is: they are alternative entry points into the SAME build, and a flag
+      # wired to only one of them takes effect or not depending on whether the
+      # lowered-graph cache happened to hit. `esFull` unless `--evidence` said
+      # otherwise, which is the documented default and the enum's zero value.
+      evidenceScope: evidenceScope,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       # Edge-Determinism-And-Soft-Rebuild.md §4. Wired into EVERY
@@ -19433,6 +19484,23 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # and ``required`` FAILS the action with ``monitorHostingRefusal``'s
   # sentence rather than running it unmonitored.
   var monitorHosting = configuredMonitorHostingMode()
+  # DA-1i — `repro build --evidence=full|reads-only`. `full` is the default and
+  # the only scope that records failed lookups; `reads-only` records only the
+  # lookups that SUCCEEDED, which reproduces the evidence model of a
+  # compiler-emitted depfile (`gcc -MD`) and, with it, ninja's precise
+  # one-directional staleness: a file ADDED that shadows one earlier in a
+  # search path does not invalidate, and neither does a file that existed but
+  # could not be opened becoming openable. Modified and deleted inputs are
+  # still caught. The hazard table is normative and appears in
+  # `renderUsage` (what an operator sees), `docs/dependency-collection.md` and
+  # `reprobuild-specs/CLI/build.md` §"Dependency Evidence Scope".
+  #
+  # DELIBERATELY NO ENVIRONMENT SPELLING. `--monitor-hosting` has one because
+  # it is a measurement knob whose value an operator wants to pin for a whole
+  # session; this flag trades a named correctness property for speed, and an
+  # exported variable is how that trade gets made once and then forgotten by
+  # everyone who inherits the shell. It must be typed per invocation.
+  var evidenceScope = esFull
   # Named-Targets M5: ``--list-targets`` enumerates every implicit /
   # explicit target name visible in the current project's target-export
   # table. ``--list-targets-json`` is the JSON view; ``--list-targets``
@@ -19597,6 +19665,15 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
       monitorHosting = parseMonitorHostingMode(
         valueFromFlag(args, i, "--monitor-hosting"), "--monitor-hosting")
+    elif arg == "--evidence" or arg.startsWith("--evidence="):
+      # DA-1i. `parseEvidenceScope` lives beside the enum in
+      # `repro_build_engine` and decodes through io-mon's own token codec, so
+      # the value an operator types here and the `evidence=` stamp a later
+      # reader compares against come from ONE table. An unknown or empty value
+      # raises and the flag loop's handler turns it into a usage error rather
+      # than quietly selecting the default.
+      evidenceScope = parseEvidenceScope(
+        valueFromFlag(args, i, "--evidence"), "--evidence")
     elif arg == "--unicode":
       setUnicodeOverride(true)
     elif arg == "--no-unicode":
@@ -19955,6 +20032,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         restoreCachedOutputs = restoreCachedOutputs,
 
         monitorHosting = monitorHosting,
+        evidenceScope = evidenceScope,
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck,
@@ -27783,7 +27861,8 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
       forceRefresh = true
     elif arg in ["--daemon", "--progress", "--progress-bars",
         "--write-diagnostics", "--show", "--measure", "--write-report",
-        "--log", "--write-benchmark", "--write-stats", "--monitor-hosting"]:
+        "--log", "--write-benchmark", "--write-stats", "--monitor-hosting",
+        "--evidence"]:
       discard valueFromFlag(args, i, arg)
     elif arg == "--no-write-report":
       discard
@@ -27795,6 +27874,7 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
         arg.startsWith("--log=") or arg.startsWith("--write-benchmark=") or
         arg.startsWith("--write-stats=") or
         arg.startsWith("--monitor-hosting=") or
+        arg.startsWith("--evidence=") or
         arg.startsWith("--stats-groups="):
       discard
     elif arg == "--prepare-only":
@@ -57032,6 +57112,12 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
       # can drive the same experiment as `repro build`.
       result.buildFlags.add("--monitor-hosting=" &
         valueFromFlag(args, i, "--monitor-hosting"))
+    elif arg == "--evidence" or arg.startsWith("--evidence="):
+      # DA-1i: forwarded verbatim, like every other value-taking build flag
+      # here, so `repro test`/`bench`/`lint` capture under the scope the
+      # operator asked for instead of silently reverting to `full`.
+      result.buildFlags.add("--evidence=" &
+        valueFromFlag(args, i, "--evidence"))
     elif arg == "--package" or arg.startsWith("--package="):
       result.buildFlags.add("--package=" &
         valueFromFlag(args, i, "--package"))

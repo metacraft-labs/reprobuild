@@ -676,6 +676,29 @@ type
     # that only L1 (``--no-runquota``) can host, so the experiment is
     # ``--no-runquota --monitor-hosting=where-supported``.
     monitorHosting*: MonitorHostingMode
+    evidenceScope*: EvidenceScope
+      ## DA-1i — HOW MUCH OF WHAT THE MONITOR OBSERVES THIS BUILD WRITES DOWN,
+      ## and, symmetrically, the narrowest capture this build will TRUST.
+      ## ``repro build --evidence=full|reads-only`` sets it; the default is
+      ## ``esFull``, which is also the enum's zero value, so every caller that
+      ## predates this field keeps exactly its previous meaning with no special
+      ## case anywhere.
+      ##
+      ## It does NOT change what the monitor observes and it is NOT a
+      ## completeness input: a narrowed capture is the operator answering a
+      ## narrower question honestly, not the monitor failing, and
+      ## ``mcIncomplete`` means the latter. See io-mon's ``EvidenceScope``,
+      ## which owns the vocabulary, the record-side predicate and the trust
+      ## order; nothing about any of the three is restated here.
+      ##
+      ## IT IS DELIBERATELY NOT A CACHE-KEY COMPONENT. Trust here is a PARTIAL
+      ## ORDER, not a partition — full evidence is strictly stronger than
+      ## reads-only evidence, so a reads-only consumer must accept a full
+      ## capture while a strict consumer rejects a narrowed one. Keying on the
+      ## scope would make the two disjoint and block the useful direction: the
+      ## careful teammate publishes and the fast teammate cannot consume.
+      ## ``cacheInputPaths`` and the fingerprints therefore never read this
+      ## field, and ``t_da1i_evidence_scope`` pins that they do not.
     dryRun*: bool
     progressCallback*: BuildProgressCallback
     cancelCallback*: BuildCancelCallback
@@ -905,6 +928,33 @@ type
     cirEmptyEvidence = "empty-evidence"
     cirMonitorLoss = "monitor-loss"
     cirMonitorFlushFailed = "monitor-flush-failed"
+
+  MonitorEvidenceRequirement* = object
+    ## WHAT THIS BUILD NEEDS A CAPTURE TO HAVE OBSERVED BEFORE IT WILL TRUST IT
+    ## — the consumer side of DA-1i and DA-1j, in one object so a fold site
+    ## cannot satisfy one axis and forget the other.
+    ##
+    ## Two axes, both io-mon's, and they are composed rather than conflated
+    ## because they gate different things: ``interest`` is the KIND axis
+    ## (DA-1j — which categories of event the capture was asked for) and
+    ## ``evidenceScope`` is the RESULT axis (DA-1i — whether lookups that
+    ## found nothing were written down). A capture is trustworthy iff it
+    ## covers BOTH.
+    ##
+    ## NEITHER COMPARISON IS IMPLEMENTED HERE. ``observedInterestCovers`` and
+    ## ``observedEvidenceScopeCovers`` live in io-mon beside the enums they
+    ## order, and this module only supplies the required side and reports the
+    ## refusal — see ``monitorScopeRefusal``. Restating either order here is
+    ## how the two copies drift, and the direction that drift fails in is the
+    ## cardinal one: accepting a narrowed capture as though it were complete.
+    ##
+    ## DO NOT DEFAULT-CONSTRUCT THIS. The zero value has ``interest == {}``,
+    ## which ``observedInterestCovers`` accepts from ANY capture (a consumer
+    ## that needs no category cannot be missing one) — fail-open, and exactly
+    ## the wrong direction. Use ``FullMonitorEvidenceRequirement`` or build it
+    ## from the action and the config with ``monitorEvidenceRequirement``.
+    interest*: set[EventCategory]
+    evidenceScope*: EvidenceScope
 
   EvidenceCollection = object
     evidence: PathSetEvidence
@@ -5532,11 +5582,124 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   else:
     discard
 
+# The strictest requirement there is, and therefore the right DEFAULT for
+# every fold site that has not been told otherwise: a capture is trusted only
+# if it observed every event category and wrote down every lookup, including
+# the ones that found nothing.
+#
+# Being the default is what makes the back-compat story hold in the safe
+# direction. A depfile written before DA-1i/DA-1j states neither stamp;
+# io-mon's ``effectiveObservedInterest`` / ``effectiveObservedEvidenceScope``
+# widen an ABSENT stamp to full on both axes, so such a file still passes this
+# requirement unchanged — while a file that STATES a narrowing does not.
+# "Silent" and "narrowed" are different facts and only the first one reads as
+# full.
+const FullMonitorEvidenceRequirement* = MonitorEvidenceRequirement(
+  interest: FullInterest, evidenceScope: esFull)
+
+proc monitorScopeRefusal*(dep: MonitorDepFile;
+                          required: MonitorEvidenceRequirement): string =
+  ## Is this capture's STATED scope enough for what this build requires? The
+  ## empty string means yes; anything else is the sentence explaining the
+  ## refusal, in the operator's terms.
+  ##
+  ## THE TWO PARTIAL ORDERS ARE DELEGATED, NOT REPRODUCED. This proc chooses
+  ## the required side and phrases the verdict; ``observedEvidenceScopeCovers``
+  ## and ``observedInterestCovers`` decide it, in io-mon, beside the enums they
+  ## order and beside the three-way not-stated / stated-and-named /
+  ## stated-and-unnamable reading that a bare field read gets wrong. A second
+  ## copy of "full is stronger than reads-only" here would be a copy that can
+  ## drift, and the way it drifts is not symmetric: the failure it produces is
+  ## accepting a narrowed capture as complete evidence, which is the cardinal
+  ## sin this stamp exists to make impossible.
+  ##
+  ## THE VERDICT IS NOT A COMPLETENESS VERDICT. A narrowed capture is an honest
+  ## answer to a narrower question; ``mcIncomplete`` means the monitor could not
+  ## observe something. The caller maps a refusal onto the Level-2 rung of
+  ## Failure-Semantics.md's ladder — the action still succeeds, nothing is
+  ## published from evidence this build cannot vouch for, and the next build
+  ## recomputes locally.
+  if not dep.observedEvidenceScopeCovers(required.evidenceScope):
+    let stated =
+      if dep.statesUnevaluableEvidenceScope:
+        "declares evidence scope `" & dep.observedEvidenceScopeToken &
+          "`, which this build cannot evaluate"
+      else:
+        "was captured with evidence scope `" &
+          evidenceScopeToken(effectiveObservedEvidenceScope(dep)) & "`"
+    return "monitor capture " & stated & ", which does not cover the `" &
+      evidenceScopeToken(required.evidenceScope) &
+      "` this build requires; its evidence is not trusted and the action-cache " &
+      "publish is skipped this session (DA-1i, CLI/build.md " &
+      "§Dependency Evidence Scope)"
+  if not dep.observedInterestCovers(required.interest):
+    let stated =
+      if dep.statesUnevaluableInterest:
+        "declares event interest `" & dep.observedInterestTokens &
+          "`, which this build cannot evaluate"
+      else:
+        "was captured with event interest `" &
+          interestToTokens(effectiveObservedInterest(dep)) & "`"
+    return "monitor capture " & stated & ", which does not cover the `" &
+      interestToTokens(required.interest) &
+      "` this build requires; its evidence is not trusted and the action-cache " &
+      "publish is skipped this session (DA-1j)"
+  ""
+
+proc gradeCaptureScope(profileRecords: openArray[MonitorRecord];
+                       evidence: var PathSetEvidence;
+                       required: MonitorEvidenceRequirement):
+                       MonitorEvidenceStatus =
+  ## Grade a capture's stamps, given the backend-profile records it carried.
+  ##
+  ## THE STAMPS ARE PARSED BY io-mon, not here. Both ride as `;`-separated keys
+  ## on the ``mrBackendProfile`` record's detail — which is why neither needed a
+  ## depfile envelope bump — and ``depFileFromRecords`` is the exported door
+  ## onto that decode. Handing it only the profile records reproduces io-mon's
+  ## own reading exactly (its readers scan for the FIRST profile record and
+  ## these arrive in stream order), while keeping the streaming fold's promise
+  ## that a 97k-record depfile is never materialized to grade it.
+  ##
+  ## NO PROFILE RECORD AT ALL grades as full scope on both axes, because
+  ## ``depFileFromRecords(@[])`` states neither stamp and io-mon widens an
+  ## absent stamp to full. That is the back-compat arm and it is reached by
+  ## every depfile written before this shipped.
+  let dep = depFileFromRecords(profileRecords)
+  let refusal = monitorScopeRefusal(dep, required)
+  if refusal.len == 0:
+    return mesComplete
+  evidence.diagnostics.add(refusal)
+  # Level 2 (unknown scope). This build cannot bound WHAT the narrowing left
+  # out — for `esReadsOnly` the dropped observations name paths that were never
+  # written down, so there is no path set to invalidate narrowly — and the
+  # action therefore succeeds and publishes nothing.
+  #
+  # DELIBERATELY NOT LEVEL 3. The capture is not corrupt and monitoring did not
+  # fail. Failing a successful command for a property of its evidence is the
+  # same mistake as grading a deliberate narrowing `mcIncomplete`, which DA-1i
+  # already discarded — one rung further up the ladder.
+  #
+  # DELIBERATELY NOT LEVEL 1 EITHER. Level 1 publishes the action's own record
+  # and only gates DOWNSTREAM lookups; here it is precisely this action's own
+  # input set that is narrower than this build trusts.
+  #
+  # AND THE COST IS NAMED RATHER THAN ELIDED: Level 2 additionally flips the
+  # scheduler's session-wide `sessionCachePublishDisabled`, so one refused
+  # capture turns every later lookup in the session into a miss. That is
+  # broader than the contract asks for — the untrusted evidence belongs to one
+  # action — and it is accepted here rather than papered over, because the
+  # alternative is a new rung on Failure-Semantics.md's ladder, which is a
+  # change to the shared monitor-loss vocabulary and not to this feature. It is
+  # also the rare path: a build reaches it only when it reads a capture SOMEONE
+  # ELSE narrowed, since its own captures are taken under exactly the scope it
+  # requires (`monitorEvidenceRequirement`).
+  mesUnknownScopeLoss
 
 proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
                                  seen: var EvidenceSeenSets;
-                                 attribution: var MonitorPeerAttribution):
+                                 attribution: var MonitorPeerAttribution;
+                                 required = FullMonitorEvidenceRequirement):
                                  MonitorEvidenceStatus =
   ## Fold depfile records directly into build-engine evidence.
   ##
@@ -5577,16 +5740,32 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   ## is the conservative direction and not a lost downgrade: the caller grades a
   ## read failure as `mesMonitorUnavailable` and refuses the publish, which is
   ## strictly worse than the `mesUnknownScopeLoss` the deferred losses carried.
+  ##
+  ## DA-1i/DA-1j — `required` is the narrowest capture this build will trust,
+  ## and it defaults to the STRICTEST answer so that a caller who has not
+  ## thought about it gets the safe one. The backend-profile records carry both
+  ## scope stamps, so they are collected as the stream goes past and graded
+  ## once at the end by `gradeCaptureScope`; a capture that does not cover the
+  ## requirement comes back `mesUnknownScopeLoss` with the reason in
+  ## `evidence.diagnostics`, so the action succeeds and publishes nothing.
   result = mesComplete
+  # Profile records only — a handful per capture, never the record body. The
+  # streaming read exists so a 97k-record depfile is not materialized, and
+  # grading its stamps must not undo that.
+  var profileRecords: seq[MonitorRecord] = @[]
   try:
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
+      if record.kind == mrBackendProfile:
+        profileRecords.add(record)
       foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
   except CatchableError:
     attribution.pendingIpcLosses.setLen(0)
     attribution.ipcRecords.setLen(0)
     raise
   resolvePeerAttribution(attribution, evidence, result)
+  result = worseMonitorStatus(result,
+    gradeCaptureScope(profileRecords, evidence, required))
 
 proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
@@ -5600,7 +5779,8 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
                                  cwd: string;
                                  evidence: var PathSetEvidence;
                                  seen: var EvidenceSeenSets;
-                                 attribution: var MonitorPeerAttribution):
+                                 attribution: var MonitorPeerAttribution;
+                                 required = FullMonitorEvidenceRequirement):
                                  MonitorEvidenceStatus =
   ## In-Process-Monitor-Hosting HM-5 — the same fold, over records the engine
   ## ALREADY HAS instead of over a file it has to read back.
@@ -5628,10 +5808,21 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   ## The records are borrowed, not retained: the caller drops them as soon as
   ## this returns, so the engine's "path sets + completeness, never a retained
   ## depfile" rule is unchanged.
+  ##
+  ## DA-1i/DA-1j — the scope stamps are graded here too, from the SAME records
+  ## and by the SAME proc the file path uses. The hosted and wrapped paths are
+  ## required to produce identical evidence for the same action
+  ## (IoMon-Decomposed-Host-API DH-4); a guard wired to one of them is a guard
+  ## half of production does not execute.
   result = mesComplete
+  var profileRecords: seq[MonitorRecord] = @[]
   for record in records:
+    if record.kind == mrBackendProfile:
+      profileRecords.add(record)
     foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
   resolvePeerAttribution(attribution, evidence, result)
+  result = worseMonitorStatus(result,
+    gradeCaptureScope(profileRecords, evidence, required))
 
 proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
                                  cwd: string;
@@ -5930,6 +6121,14 @@ proc cacheInputPaths*(action: BuildAction;
                       evidence: PathSetEvidence): seq[string]
 proc evidenceInputPaths(action: BuildAction;
                         evidence: PathSetEvidence): seq[string]
+# DA-1i/DA-1j — forward-declared for the same reason: `collectEvidence` has to
+# state what it requires of a capture before it trusts one, and the definition
+# belongs beside `monitorInterest`, which answers half of it. Two procs, one
+# for each direction of the same contract (what we ASK io-mon for, what we
+# DEMAND of what comes back), kept adjacent so they cannot drift apart.
+proc monitorEvidenceRequirement(action: BuildAction;
+                                config: ptr BuildEngineConfig):
+                                MonitorEvidenceRequirement
 
 proc isExecutableFile(path: string): bool =
   ## `execvp`'s candidate test, as close as a consumer can get to it: the
@@ -6170,6 +6369,13 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # talks to the same daemons as one the engine monitors, and a guard wired at
   # one of two sites is a guard half of production does not execute.
   var attribution = initMonitorPeerAttribution(trustedDaemonRegistry())
+  # DA-1i/DA-1j — what this build demands of a capture before it trusts one.
+  # Shared by BOTH fold sites below for exactly the reason `attribution` is: an
+  # edge that PRODUCES its own `.iomon` is the likeliest source of a capture
+  # this build did not take — a teammate's, a CI runner's, an inner `ct test`'s
+  # — so the arm that consumes such a file is the last one that may go
+  # ungraded. See `monitorEvidenceRequirement`.
+  let scopeRequirement = monitorEvidenceRequirement(action, config)
   # The action's own root image is contributed by `foldLauncherRootImage` at
   # the END of this proc, NOT here. It is a launcher-side reconstruction rather
   # than an observation, and the zero-evidence guard in
@@ -6212,7 +6418,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
         for resolved in resolvedPaths:
           try:
             let status = foldMonitorDepFileEvidence(resolved, action.cwd,
-              result.evidence, seen, attribution)
+              result.evidence, seen, attribution, scopeRequirement)
             applyMonitorEvidenceStatus(action, status, result)
           except MonitorDepFileReaderError as err:
             result.evidence.diagnostics.add(
@@ -6337,10 +6543,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
       let status =
         if hostedRecords != nil:
           foldMonitorRecordsEvidence(hostedRecords[], action.cwd,
-            result.evidence, seen, attribution)
+            result.evidence, seen, attribution, scopeRequirement)
         else:
           foldMonitorDepFileEvidence(action.monitorDepfile,
-            action.cwd, result.evidence, seen, attribution)
+            action.cwd, result.evidence, seen, attribution, scopeRequirement)
       applyMonitorEvidenceStatus(action, status, result)
       applyEntropyBlessingPolicy(action, result)
     except MonitorDepFileReaderError as err:
@@ -7107,6 +7313,67 @@ proc monitorInterest(action: BuildAction): set[EventCategory] =
   ## own blast radius.
   FullInterest
 
+proc monitorEvidenceScope(config: BuildEngineConfig): EvidenceScope =
+  ## The evidence scope `config` asks io-mon for — ONE definition, read by BOTH
+  ## hosting forms, for exactly the reason `monitorInterest` above is one proc:
+  ## the two paths carrying different answers for the same action was a live
+  ## defect on the interest axis, and this axis has the identical two-channel
+  ## shape (an argv flag on the wrapped path, a request field on the hosted
+  ## one).
+  ##
+  ## Straight through from the operator, with no policy of its own. There is no
+  ## per-action narrowing and there must not be one invented here: DA-1i's
+  ## hazard is something the OPERATOR accepts for a whole build after reading
+  ## what it costs, not something an engine heuristic may decide on their
+  ## behalf for the edges it guesses are cheap.
+  config.evidenceScope
+
+proc monitorEvidenceFlag(scope: EvidenceScope): seq[string] =
+  ## The wrapped path's argv spelling of `scope`, or nothing at all.
+  ##
+  ## `evidenceScopeToken` is io-mon's codec and the ONLY speller of these
+  ## tokens; `esUnrecognized` has no spelling by construction (it is a READING
+  ## of someone else's token, not a scope this build can ask for) and encodes
+  ## as the empty string. A future `EvidenceScope` member added without a wire
+  ## token would do the same, and silently passing `--evidence ""` would ship a
+  ## depfile stamped with an empty `evidence=` key — which io-mon reads as
+  ## STATED AND UNEVALUABLE, i.e. a capture every consumer rejects, discovered
+  ## only as a build that stops caching. Omitting the flag instead means io-mon
+  ## captures FULL evidence, which is the safe direction (more is recorded, the
+  ## stamp is honest), and this build's own requirement then refuses to trust
+  ## the result because `esFull` does not cover a scope it cannot name. Loud
+  ## and conservative beats silent and narrow.
+  ##
+  ## Unreachable from the CLI today: `parseEvidenceScope` refuses any value
+  ## io-mon cannot name, so only `full` and `reads-only` get this far.
+  let token = evidenceScopeToken(scope)
+  if token.len == 0:
+    return @[]
+  @["--evidence", token]
+
+proc monitorEvidenceRequirement(action: BuildAction;
+                                config: ptr BuildEngineConfig):
+                                MonitorEvidenceRequirement =
+  ## The narrowest capture this build will TRUST for `action` — the consumer
+  ## side of the same two axes `monitorInterest` / `monitorEvidenceScope`
+  ## request, which is why it is spelled here and not at the fold sites.
+  ##
+  ## The two sides are deliberately the SAME VALUE and not merely compatible
+  ## ones. A build that asks io-mon for reads-only evidence and then demands
+  ## full evidence of what comes back would refuse its own captures; a build
+  ## that asks for full and accepts reads-only would silently consume a
+  ## teammate's narrowed record. Deriving both from one place makes the pair
+  ## consistent by construction.
+  ##
+  ## `config == nil` is every caller that does not have one (the direct-engine
+  ## API, most of the suite) and it requires FULL evidence. Fail-closed: the
+  ## cost of being wrong that way is a re-capture, and the cost of the other
+  ## way is publishing a narrowed capture as complete.
+  MonitorEvidenceRequirement(
+    interest: monitorInterest(action),
+    evidenceScope:
+      if config != nil: monitorEvidenceScope(config[]) else: esFull)
+
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
                      cacheRoot: string;
                      hostInProcess: bool): tuple[action: BuildAction;
@@ -7225,10 +7492,17 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # was therefore writing into a variable io-mon overwrites, which is what
       # made this path's request silently different from the hosted path's —
       # see ``monitorInterest``.
+      # DA-1i — `--evidence` travels on the ARGV for the same reason
+      # `--interest` does: `REPRO_MONITOR_EVIDENCE` is io-mon's OWN channel to
+      # the shim, written last by `childEnv`, so an engine that seeded it into
+      # the action's environment would be writing into a variable io-mon
+      # overwrites before any shim could read it. The flag is a channel io-mon
+      # does not own and therefore cannot overwrite.
       result.action.argv = @[monitorCli] & config.monitorCliArgs &
         @["--depfile", result.capturePath,
-          "--interest", interestToTokens(monitorInterest(action)),
-          "--"] & action.argv
+          "--interest", interestToTokens(monitorInterest(action))] &
+        monitorEvidenceFlag(monitorEvidenceScope(config)) &
+        @["--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
     # ``launchChildEnv`` (NOT here on ``result.action.env``). The seed
     # MUST NOT enter the action's fingerprint — the absolute path of
@@ -9656,6 +9930,38 @@ func parseMonitorHostingMode*(value, source: string): MonitorHostingMode =
       "unsupported " & source & "=" & value &
         " (expected never, where-supported, or required)")
 
+func parseEvidenceScope*(value, source: string): EvidenceScope =
+  ## DA-1i — the OPERATOR SURFACE for ``BuildEngineConfig.evidenceScope``:
+  ## ``repro build --evidence=full|reads-only``.
+  ##
+  ## THE VOCABULARY IS io-mon's AND IS NOT RESTATED. ``parseEvidenceScopeToken``
+  ## is the single codec for both channels the token travels on (the
+  ## ``--evidence`` flag this decodes, and the ``evidence=`` stamp a depfile
+  ## carries), so the value an operator types and the value a reader later
+  ## compares against cannot come from two tables that drift.
+  ##
+  ## TWO VALUES ARE REJECTED THAT ``parseEvidenceScopeToken`` ACCEPTS or
+  ## PRODUCES, and both rejections are the point of this wrapper:
+  ##
+  ## * the EMPTY string. On the env channel an absent ``REPRO_MONITOR_EVIDENCE``
+  ##   means "write everything down", so io-mon widens it to ``esFull``. On a
+  ##   command line ``--evidence=`` is a typo, and answering a typo with the
+  ##   default is how an operator who meant ``reads-only`` gets ``full``
+  ##   silently — or, far worse, believes they got the narrowing they asked for.
+  ## * anything io-mon cannot name, which parses to ``esUnrecognized``. That is
+  ##   a READING of a stamp from a newer io-mon, never a scope this build can
+  ##   ask for; it covers nothing, so accepting it here would build with a
+  ##   scope whose own captures this build then refuses to trust.
+  ##
+  ## ``source`` is the spelling to blame in the diagnostic, exactly as
+  ## ``parseMonitorHostingMode(value, source)`` uses it.
+  let scope = parseEvidenceScopeToken(value)
+  if value.strip().len == 0 or scope == esUnrecognized:
+    raise newException(ValueError,
+      "unsupported " & source & "=" & value &
+        " (expected full or reads-only)")
+  scope
+
 proc configuredMonitorHostingMode*(): MonitorHostingMode =
   ## The environment default for ``--monitor-hosting``. ``mhmNever`` when
   ## unset, which is the same value ``BuildEngineConfig``'s zero value gives,
@@ -9747,7 +10053,8 @@ proc allocMonitorHostSlot(pool: var MonitorHostPool): int =
 
 proc monitorHostRequest(action: BuildAction;
                         command: ReproCommandSpec;
-                        depFilePath: string): FsSnoopRequest =
+                        depFilePath: string;
+                        evidenceScope: EvidenceScope): FsSnoopRequest =
   ## Project the ONE argv+env contract every launch path shares onto io-mon's
   ## request. Both sides layer over the hosting process's own environment
   ## (``ReproCommandSpec.env`` through RunQuota's process backend,
@@ -9766,12 +10073,19 @@ proc monitorHostRequest(action: BuildAction;
   # (which forwards the same answer to `repro internal io monitor` as
   # `--interest`), so the two hosting forms cannot ask io-mon for different
   # categories for the same action — see ``monitorInterest``.
+  #
+  # DA-1i — the evidence scope arrives as an ARGUMENT rather than being read
+  # from a config here, because this proc has no config and the caller
+  # (``startMonitorHost``) does. It is ``monitorEvidenceScope``'s answer, the
+  # same one the wrapped path spells as ``--evidence``, so the two hosting
+  # forms cannot narrow differently for the same action.
   result = FsSnoopRequest(
     command: command.argv,
     depFilePath: depFilePath,
     cwd: command.cwd,
     streamMode: fsoNone,
     interest: monitorInterest(action),
+    evidenceScope: evidenceScope,
     passthroughChildStdout: true,
     passthroughChildStderr: true)
   for entry in command.env:
@@ -9974,7 +10288,7 @@ proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
     pool.records[slot].depTempPath = depTemp
     pool.records[slot].depDestPath = depDest
     pool.handles[slot] = startMonitor(monitorHostRequest(action, command,
-      depTemp))
+      depTemp, monitorEvidenceScope(config)))
     pool.records[slot].handleLive = true
     pool.records[slot].rootPid = int(rootPid(pool.handles[slot]))
   except CatchableError:

@@ -47,6 +47,7 @@ libs/repro_binary_cache_server/tests/t_a2_p2_rest_surface.nim	nim	2
 libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim	nim	1
 libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	nim	12
 libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim	nim	5
+libs/repro_build_engine/tests/t_da1i_evidence_scope.nim	nim	24
 libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim	nim	9
 libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	nim	12
 libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	4
@@ -973,6 +974,7 @@ tests/integration/t_d3_ct_test_flake_pin_carries_b4_api.nim	nim	2
 tests/integration/t_d4_evidence_collection_scales_linearly.nim	nim	2
 tests/integration/t_d5_collection_member_selector.nim	nim	5
 tests/integration/t_d6_runner_test_timeout.nim	nim	3
+tests/integration/t_da1i_evidence_scope_reaches_io_mon.nim	nim	3
 tests/integration/t_daemon_accept_loop_survives_probe.nim	nim	3
 tests/integration/t_daemon_idle_does_not_reread_its_image.nim	nim	1
 tests/integration/t_declared_daemon_ipc_trust.nim	nim	17
@@ -1423,6 +1425,7 @@ tests/unit/t_configure_build_tree_cleanup.nim	nim	5
 tests/unit/t_constructor_fetch_tool_refs.nim	nim	3
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
+tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_fribidi_dev_stub.nim	nim	1

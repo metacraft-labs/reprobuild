@@ -121,6 +121,115 @@ the exception is a property of the tool's runtime behavior. Project recipes
 should not repeat this knowledge, and the build engine should not know about
 specific tools such as Cargo.
 
+## Dependency Evidence Scope (`--evidence`)
+
+```sh
+repro build --evidence=full         # the default
+repro build --evidence=reads-only
+```
+
+`--evidence` selects **how much of what the monitor observes gets written
+down**. It does not change what the monitor observes, and it is not a
+monitoring failure: a monitoring *failure* still downgrades the action to
+incomplete exactly as it does today, and a deliberate narrowing does not.
+
+`full` records every observation, including **failed lookups** — the paths a
+tool searched for and did not find. A build searches far more than it reads,
+and most of what it searches for is absent, so these dominate the record count:
+on a measured `nim c`, 66,996 records drop to 23,049 under `reads-only`
+(−65.6%).
+
+`reads-only` records only the lookups that **succeeded**. That is the evidence
+model of a compiler-emitted depfile — `gcc -MD` lists the headers actually
+opened, never the ones searched for — and reproducing it is the point of the
+mode.
+
+### The hazard, exactly
+
+The risk is **one-directional**. It affects the question *"is this build up to
+date?"*, and only for changes of one shape: something that did not exist, or
+could not be reached, becoming available.
+
+| change to your tree | detected under `reads-only`? |
+|---|---|
+| a file the build read is **modified** | ✓ yes |
+| a file the build read is **deleted** | ✓ yes |
+| a file is **added** that shadows one earlier in a search path | ✗ **no** |
+| a file that **exists but could not be opened** becomes openable (a `chmod`, a directory replaced by a file) | ✗ **no** |
+
+Rows 3 and 4 are one rule with two faces: **`reads-only` records only lookups
+that succeeded, so any later change that makes an unsuccessful lookup succeed
+is invisible.** Row 1 does **not** cover row 4, however much it reads as though
+it should — the file is **not recorded at all**, so "a file the build read"
+never names it. (A record cannot say *why* a lookup failed: `open` returns `-1`
+for "no such file" and for "permission denied" alike, and no error code reaches
+the depfile, so unreachable paths are dropped alongside genuinely absent ones.)
+
+Worked example. Compiling `repro.nim`, `nim` looks for
+`libs/repro_core/src/repro_core/types.nim`, does not find it, and resolves
+`types` from somewhere else. Under `full` that failed lookup is recorded, so
+creating that file tomorrow invalidates the action. Under `reads-only` it is
+not recorded, the key does not change, and `repro build` reports "up to date"
+while compiling against the old module.
+
+This is the same staleness ninja exhibits when you add a header earlier in the
+include path. Recovery is `repro build --evidence=full`, or a clean build;
+nothing is corrupted and previously produced artifacts are unaffected.
+
+### Why it exists — and it is not for speed
+
+The failed lookups this drops are largely elidable **soundly**, at no
+correctness cost, by content-addressed-root elision (64% of them on the
+measured build). Only the remaining, load-bearing ones — misses in mutable,
+non-store directories — are what `reads-only` actually removes.
+
+It exists so reprobuild's dependency evidence can be compared like-for-like
+with tools that consume compiler-emitted depfiles (ninja via `gcc -MD`). Same
+work, same blind spot, which is what makes a cost comparison honest in both
+directions.
+
+### What it does not affect
+
+- **Output artifacts.** The bytes are a function of the inputs actually used. A
+  narrower *record* of those inputs does not change what was built, so a result
+  produced under `reads-only` is as usable as any other.
+- **Publishing.** A build made under `reads-only` may be published normally.
+  The degraded thing is the up-to-dateness check, not the product.
+- **Completeness grading.** `reads-only` is a deliberate choice, not a
+  monitoring failure, so it does not report an incomplete capture. A real
+  monitoring failure still does.
+
+### How a teammate is protected
+
+Every dependency record states the scope it was captured under. A build that
+requires full evidence sees that a record was captured as `reads-only`,
+declines to trust it, and recomputes locally — the action still succeeds, it
+simply publishes nothing, and the reason is in the action's diagnostics.
+
+**The blast radius is the session, not the action.** A refusal is graded as an
+*unknown-scope* evidence loss, and it has to be: a `reads-only` record cannot
+say *which* lookups it dropped — they are the ones nothing wrote down — so
+there is no narrower set of paths to invalidate instead. Like every other
+unknown-scope loss, it therefore makes
+**every later cache lookup in that session** a miss.
+The build stays correct and produces correct artifacts; what you lose is
+incrementality, for the rest of that invocation.
+
+You only reach this by consuming a capture *someone else* narrowed. Your own
+captures are taken under exactly the scope your build requires, so a
+`--evidence=reads-only` build never refuses its own work. To recover, either
+opt into the reduced scope yourself (`--evidence=reads-only`, which accepts
+such records) or re-capture the inputs under `--evidence=full`.
+
+The check is one-way on purpose: full evidence is strictly stronger, so it is
+always acceptable to a `reads-only` consumer. The scope is **not** part of the
+action-cache key. Keying on it would stop a careful teammate's full-evidence
+result from being usable by anyone who opted into the faster mode — the careful
+teammate publishes and the fast one cannot consume.
+
+A record that states a scope this build has never heard of (written by a newer
+reprobuild) is refused too, rather than read as full evidence.
+
 ## Trusted IPC Peers (`daemons.conf`)
 
 An action that opens an IPC channel to a process outside its own monitored tree

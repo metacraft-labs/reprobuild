@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 18,
-    "nimTestBinaries": 1483,
-    "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 598,
+    "nimTestBinaries": 1486,
+    "pureUnitConsolidationGroups": 51,
+    "pureUnitTests": 600,
     "staticallyDetectedRuntimeCompilerFlowTests": 85,
-    "testEntries": 1488
+    "testEntries": 1491
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -914,6 +914,19 @@
       "targetOs": "soAny"
     },
     {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_capabilities.nim",
+        "tests/unit/t_da1i_evidence_help_names_the_hazard.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 4,
       "defines": [
         "reproProviderMode"
@@ -1123,8 +1136,8 @@
     "classificationCounts": {
       "graph-fixture": 16,
       "integration": 640,
-      "platform/destructive": 108,
-      "pure unit": 598,
+      "platform/destructive": 109,
+      "pure unit": 600,
       "unclassified": 126
     },
     "graphOwnedTestArtifacts": [
@@ -1237,9 +1250,9 @@
         "source": "apps/repro-binary-cache/repro_binary_cache_m6.nim"
       }
     ],
-    "nimTestBinaryCount": 1483,
+    "nimTestBinaryCount": 1486,
     "pythonTestFileCount": 5,
-    "testEntryCount": 1488
+    "testEntryCount": 1491
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5488,6 +5501,26 @@
       "source": "libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_da1i_evidence_scope",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_da1i_evidence_scope.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21820,6 +21853,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_da1i_evidence_scope_reaches_io_mon",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_da1i_evidence_scope_reaches_io_mon.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_daemon_accept_loop_survives_probe",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -29252,6 +29305,23 @@
       "source": "tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_da1i_evidence_help_names_the_hazard",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_da1i_evidence_help_names_the_hazard.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
