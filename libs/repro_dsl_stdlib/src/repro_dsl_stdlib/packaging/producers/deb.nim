@@ -48,8 +48,34 @@ proc debDescriptionField(dist: Distribution): string =
     if trimmed.len == 0: result.add(" .\n")
     else: result.add(" " & trimmed & "\n")
 
-proc debControlText*(dist: Distribution): string =
+proc debDependsFields*(dist: Distribution; withGlibcFloor: bool): seq[string] =
+  ## The ``Depends:`` list, with the C-library floor first when the tree
+  ## computes one.
+  ##
+  ## ``libc6`` is Debian's name for the glibc runtime on every
+  ## architecture this producer can spell (``debArchitecture``), and
+  ## ``>=`` on a version is Debian's relation grammar. Neither belongs
+  ## in the walk that computed the number — rpm says ``glibc >= X`` for
+  ## the same fact — which is why the floor arrives as a bare ``2.38``
+  ## and each producer says it in its own vocabulary.
+  ##
+  ## FIRST in the list rather than appended, because ``Depends:`` is
+  ## read by humans as often as by dpkg and the C library is the
+  ## dependency that decides whether the package can run at all.
+  if withGlibcFloor:
+    result.add("libc6 (>= " & GlibcFloorToken & ")")
+  for dep in dist.metadata.debDepends:
+    result.add(dep)
+
+proc debControlText*(dist: Distribution; withGlibcFloor = false): string =
   ## The ``DEBIAN/control`` stanza.
+  ##
+  ## When ``withGlibcFloor`` the ``Depends:`` line carries
+  ## ``types.GlibcFloorToken`` where the version goes; the staging step
+  ## replaces it with the value the closure edge measured. The token
+  ## never survives into the package — a build in which it did would
+  ## mean the substitution edge had not run, and dpkg-deb refuses a
+  ## ``Depends`` version it cannot parse, so the failure is loud.
   result = "Package: " & dist.name & "\n"
   result.add("Version: " & dist.fullVersion & "\n")
   result.add("Architecture: " & dist.debArchitecture & "\n")
@@ -62,10 +88,14 @@ proc debControlText*(dist: Distribution): string =
   result.add("Priority: " &
     (if dist.metadata.priority.len > 0: dist.metadata.priority
      else: "optional") & "\n")
-  if dist.metadata.debDepends.len > 0:
-    result.add("Depends: " & dist.metadata.debDepends.join(", ") & "\n")
+  let depends = debDependsFields(dist, withGlibcFloor)
+  if depends.len > 0:
+    result.add("Depends: " & depends.join(", ") & "\n")
   if dist.metadata.homepage.len > 0:
     result.add("Homepage: " & dist.metadata.homepage & "\n")
+  for (name, value) in dist.metadata.debControlExtraFields:
+    if name.len > 0:
+      result.add(name & ": " & value & "\n")
   # ``Description`` is last because a malformed continuation line would
   # otherwise swallow every field after it.
   result.add(debDescriptionField(dist))
@@ -95,7 +125,17 @@ proc debPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
     tree.addGeneratedFile(systemdUnitPath(dist, svc),
       systemdUnitText(dist, svc), 0o644, site)
 
-  tree.addGeneratedFile("DEBIAN/control", debControlText(dist), 0o644, site)
+  # The control stanza is the one generated file whose text is not fully
+  # knowable at graph time: the C-library floor is read out of
+  # ``.gnu.version_r`` of files the closure edge has only just produced.
+  # ``substitutions`` is how the value gets in without a second edge
+  # rewriting a file this one wrote.
+  let withFloor = tree.glibcFloorPath.len > 0
+  tree.addGeneratedFile("DEBIAN/control", debControlText(dist, withFloor),
+    0o644, site,
+    substitutions =
+      (if withFloor: @[(GlibcFloorToken, tree.glibcFloorPath)]
+       else: @[]))
   let conffiles = debConffilesText(dist)
   if conffiles.len > 0:
     tree.addGeneratedFile("DEBIAN/conffiles", conffiles, 0o644, site)
@@ -124,6 +164,26 @@ proc debPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
     archive = outPath,
     actionId = "pkg-deb-" & dist.name,
     after = tree.terminal,
+    # THE PRODUCER DECIDES THE TIMESTAMPS; NOTHING AMBIENT LEAKS IN.
+    #
+    # dpkg-deb takes its member mtimes and its ar header timestamps from
+    # SOURCE_DATE_EPOCH in the ENVIRONMENT. It has no command-line
+    # equivalent, so unlike ``tar --mtime`` this cannot be an argv flag
+    # — but it can still be graph data, and that is the whole point:
+    # ``extraEnv`` lands in ``BuildActionDef.env``, is keyed into the
+    # action's fingerprint, and is layered OVER the inherited
+    # environment when the action launches, so a caller's value is
+    # overridden rather than consulted.
+    #
+    # Without it the archive was reproducible because of the SHELL
+    # rather than because of the graph: inside ``nix develop`` the
+    # variable is 315532800 and three passes of M0 produced identical
+    # bytes; with it unset the same tree gives wall-clock mtimes and a
+    # different .deb every run. That is the same failure in kind as
+    # letting the builder's installed packages decide a package's
+    # contents, and it defeats content-addressing, which is the layer's
+    # core property.
+    extraEnv = @[("SOURCE_DATE_EPOCH", $dist.sourceDateEpoch)],
     # Naming every staged file as an input is what makes this edge
     # content-addressed over the tree's CONTENTS. Without it the edge's
     # only input would be a directory name, and a changed binary inside

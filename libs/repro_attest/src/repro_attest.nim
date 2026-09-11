@@ -18,10 +18,16 @@
 ##     envelope an instance answers a challenge with: typed record,
 ##     canonical renderer, strict parser, and the trust rules encoded in
 ##     the names a reader has to use.
+##   * ``repro_attest/driver`` — the backend seam: what the agent asks a
+##     root of trust for, and the little it is allowed to tell it.
+##   * ``repro_attest/mock_backend`` — a backend for a root of trust that
+##     does not exist, so every other layer runs unmodified without one.
 
 import ./repro_attest/measurement
 import ./repro_attest/manifest
 import ./repro_attest/binding
 import ./repro_attest/report
+import ./repro_attest/driver
+import ./repro_attest/mock_backend
 
-export measurement, manifest, binding, report
+export measurement, manifest, binding, report, driver, mock_backend

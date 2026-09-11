@@ -231,6 +231,10 @@ typedef struct repro_hcr_elf_resolution {
   repro_hcr_elf_candidate candidates[REPRO_HCR_ELF_MAX_CANDIDATES];
   uint64_t symbols_scanned;
   uint64_t runtime_address; /* valid only when refusal == REPRO_HCR_ELF_OK */
+  /* HLX-M4: the chosen candidate's `st_size`. Authoritative on ELF (design
+   * §7.5) and 0 when the symbol declares none, which callers must treat as
+   * "extent unknown" rather than "empty function". */
+  uint64_t runtime_size;
   char detail[REPRO_HCR_ELF_DETAIL_MAX];
 } repro_hcr_elf_resolution;
 
@@ -1415,6 +1419,7 @@ static int repro_hcr_elf_select(repro_hcr_elf_resolution *result,
   }
 
   result->runtime_address = result->candidates[chosen].runtime_address;
+  result->runtime_size = result->candidates[chosen].size;
   if (chosen != 0) {
     repro_hcr_elf_candidate swap = result->candidates[0];
     result->candidates[0] = result->candidates[chosen];
@@ -1547,6 +1552,11 @@ REPRO_HCR_ELF_MAYBE_UNUSED static int repro_hcr_elf_resolve_in_file(const char *
  */
 static int repro_hcr_elf_last_symbol_refusal = REPRO_HCR_ELF_OK;
 
+/* Optional sink for the resolved symbol's `st_size`. A pointer rather than an
+ * extra parameter so the two existing call sites and the probe shim keep their
+ * signatures; the agent points it at its own variable before resolving. */
+static uint64_t *repro_hcr_elf_last_resolved_size = NULL;
+
 REPRO_HCR_ELF_MAYBE_UNUSED static const char *repro_hcr_elf_last_symbol_refusal_name(void) {
   return repro_hcr_elf_refusal_name(repro_hcr_elf_last_symbol_refusal);
 }
@@ -1572,6 +1582,16 @@ REPRO_HCR_ELF_MAYBE_UNUSED static uint64_t repro_hcr_elf_resolve_function_addres
   rc = repro_hcr_elf_resolve(&query, &resolution);
   if (refusal_out != NULL) {
     *refusal_out = rc;
+  }
+  /* HLX-M4 needs the EXTENT, not just the entry: on-stack detection (§6.2 step
+   * 5) asks whether any parked thread's PC or return address lies inside the
+   * function about to be patched, which is a range question. `st_size` is
+   * authoritative on ELF (design §7.5), so this is a real bound and not an
+   * estimate — but it can be 0 for a hand-written asm symbol, and the caller
+   * must treat 0 as "extent unknown" rather than as "empty function". */
+  if (repro_hcr_elf_last_resolved_size != NULL) {
+    *repro_hcr_elf_last_resolved_size =
+        rc == REPRO_HCR_ELF_OK ? resolution.runtime_size : 0;
   }
   return rc == REPRO_HCR_ELF_OK ? resolution.runtime_address : 0;
 }

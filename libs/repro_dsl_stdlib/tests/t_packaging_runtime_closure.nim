@@ -154,8 +154,17 @@ suite "packaging: the vendored runtime-library closure":
     discard stageInstallTree(sampleDistribution(toLinux), "deb")
     let edge = closureEdges()[0]
     check edge.declaredOutputs.len == 1
-    check edge.outputs.len == 1
-    check edge.outputs[0].endsWith("deb-runtime-closure.manifest")
+    # TWO ordinary outputs beside the write root: the manifest, and the
+    # C-library floor. Both are BUILD data rather than payload -- the
+    # manifest tells the artifact edge the vendored set moved, and the
+    # floor is spliced into a control stanza -- so neither is in the
+    # tree, and the write root is still the only thing declared as one.
+    check edge.outputs.len == 2
+    var outputTails: seq[string] = @[]
+    for o in edge.outputs:
+      outputTails.add(o[o.rfind('/') + 1 .. ^1])
+    check "deb-runtime-closure.manifest" in outputTails
+    check "deb-glibc-floor.txt" in outputTails
 
   test "the closure edge names sh, patchelf and coreutils":
     # An action's PATH holds only the tools its own edge named. The walk
@@ -210,12 +219,39 @@ suite "packaging: the vendored runtime-library closure":
       check script.contains(stem & "|") or script.contains("|" & stem & ")")
     check script.contains("ld-linux*|ld|ld64*|linux-vdso*|linux-gate*|libnss_*")
 
-  test "an extra system name reaches the generated shell":
+  test "an extra system name reaches the generated shell, QUOTED":
     resetBuildActionRegistry()
     var dist = sampleDistribution(toLinux)
     dist.runtime.extraSystemLibraryLeafNames = @["libselinux.so.1"]
     discard stageInstallTree(dist, "deb")
-    check closureScriptOf(closureEdges()[0]).contains("libselinux.so.1|libselinux)")
+    # M1's N6: the name is a recipe's string and this is a `case` pattern
+    # list. Quoted, the pattern is the file name; unquoted it was both a
+    # glob and, for the right value, an injection point. The stem is
+    # added beside it because `is_system` matches on `${1%%.so*}`.
+    check closureScriptOf(closureEdges()[0]).contains(
+      "'libselinux.so.1'|'libselinux')")
+
+  test "a leaf name carrying shell syntax is REFUSED":
+    # M1's N6, the half quoting does not cover. Each of these either ends
+    # the `case` pattern or opens a substitution, and the unquoted splice
+    # this replaces turned every one of them into script executed by the
+    # staging edge. The refusal is a build-graph-time `ValueError` naming
+    # the value, not a script that misbehaves later.
+    for bad in ["libx.so) ; rm -rf /tmp/x ;;",
+                "libx.so|*",
+                "$(id).so",
+                "lib x.so",
+                "../../etc/libx.so"]:
+      resetBuildActionRegistry()
+      var dist = sampleDistribution(toLinux)
+      dist.runtime.extraSystemLibraryLeafNames = @[bad]
+      var raised = false
+      try:
+        discard stageInstallTree(dist, "deb")
+      except ValueError as err:
+        raised = true
+        doAssert err.msg.contains(bad), err.msg
+      doAssert raised, "accepted a leaf name carrying shell syntax: " & bad
 
   test "dlopen leaf names become a checked post-condition":
     # DT_NEEDED cannot see a dlopen, so the walk cannot DISCOVER these.

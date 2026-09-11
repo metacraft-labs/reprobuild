@@ -44,7 +44,7 @@
 ## rebuild is a cache hit rather than a re-run that happens to produce
 ## the same bytes.
 
-import std/[strutils]
+import std/[strutils, algorithm, os]
 
 import repro_project_dsl
 import ../fs as dslfs
@@ -55,6 +55,20 @@ import ./types
 import ../packages/patchelf as patchelf_module
 import ../packages/coreutils_install as install_module
 import ../packages/sh as sh_module
+# Imported for its REGISTRATION side effect only. ``readelf`` is never
+# CALLED from Nim -- the closure walk's generated shell program execs it
+# off the PATH the resolver composed for that edge -- so there is no
+# typed wrapper to reference and the compiler's unused-import heuristic
+# does not apply. Same pattern as ``producers/tarball.nim``'s ``gzip``
+# import, and the failure it prevents is the same one: without the
+# import the ``package readelf:`` block never runs, the selector
+# resolves against the bootstrap-floor name instead, and
+# ``repro build`` refuses with "package readelf ... does not declare
+# provisioning: nixPackage metadata" -- which is what happened on the
+# first real Linux run of this code.
+{.push warning[UnusedImport]: off.}
+import ../packages/readelf
+{.pop.}
 
 {.experimental: "callOperator".}
 
@@ -88,6 +102,24 @@ const
     ## and ``dirname`` come from too. Naming it is how the walk gets
     ## them; the tar/gzip finding of the first Linux build is the same
     ## lesson, one tool further out.
+  ReadelfSelector* = "readelf"
+    ## The dependency floor's reader, named on the SAME edge as the
+    ## walk.
+    ##
+    ## Same edge and not one of its own, for the same reason ``gzip``
+    ## rides on the ``tar`` edge: the floor is the maximum
+    ## ``GLIBC_x.y`` reference over the payload AND the vendored
+    ## closure, and the vendored set does not exist until the walk has
+    ## finished putting it there. An edge that ran readelf over the
+    ## private libdir would have to be ordered after the walk and would
+    ## then have to re-derive which files the walk had chosen — which
+    ## the walk already knows, in a shell variable, at the moment it
+    ## finishes. See ``packages/readelf.nim`` for why patchelf cannot
+    ## answer this and ``glibcFloorFunctions`` for the parse.
+    ##
+    ## Declared only when ``types.computesDependencyFloor`` holds, so a
+    ## distribution that switches the floor off does not acquire a tool
+    ## dependency it never uses.
 
 type
   StagedFile* = object
@@ -155,6 +187,33 @@ type
       ## being per-file edge outputs, so there is no staged path for the
       ## producer to name, and without the manifest the artifact edge
       ## would not be re-run when the closure changed.
+    sourceTreeRoots*: seq[string]
+      ## Root-relative directory of every ``crSourceTree`` component in
+      ## this tree.
+      ##
+      ## Carried separately from ``files`` because two producers need
+      ## the DIRECTORY rather than its contents. rpm's ``%files`` owns a
+      ## directory and everything under it recursively when it names the
+      ## directory, so one entry replaces ~1,000 — and the alternative
+      ## is not merely verbose: ``ownedDirectories`` would then emit a
+      ## ``%dir`` line for every subdirectory of every shipped source
+      ## tree, which is a spec the size of the payload. The tarball and
+      ## the deb need neither, and the MSI needs the per-file list it
+      ## already gets from ``files``, so this is additive rather than a
+      ## replacement.
+    glibcFloorPath*: string
+      ## Build-tree path of the one-line file holding the C-library
+      ## floor this tree needs (``2.38``), or empty when the tree
+      ## computes none (``types.computesDependencyFloor``).
+      ##
+      ## A producer reads this, not the value: the value does not exist
+      ## until the closure edge has run. What a producer does with it is
+      ## write ``types.GlibcFloorToken`` into its own dependency field
+      ## and hand the pair to ``addGeneratedFile``'s ``substitutions``,
+      ## which splices the file's contents in at build time. That keeps
+      ## the FORMAT knowledge where it belongs — ``libc6 (>= 2.38)`` is
+      ## Debian's spelling and ``glibc >= 2.38`` is rpm's, and neither
+      ## belongs in the walk that computed the number.
 
   ToolDependencySite* = object
     ## Where the recipe's ``package`` declaration is, so a producer can
@@ -310,6 +369,17 @@ proc rpathFor*(dist: Distribution; fromPrefixRelDir: string): string =
 # ---------------------------------------------------------------------------
 
 const
+  PosixPrefixExpr* = "\"$__repro_prefix\""
+    ## How the POSIX wrapper spells "the prefix this package was
+    ## installed under" inside a value. Named once so the emitter and
+    ## ``wrapperExportedValues`` — the reader that checks the emitter —
+    ## cannot drift into two spellings, which is the failure mode that
+    ## made M1's docker gate parse zero lines out of a wrapper it was
+    ## asserting about.
+
+  WindowsPrefixExpr* = "%REPRO_PACKAGE_PREFIX%"
+    ## The ``cmd`` wrapper's spelling of the same thing.
+
   PrefixToken* = "@PREFIX@"
     ## Placeholder a recipe may use inside ``RuntimeContract.envDefaults``
     ## values. It expands, AT RUN TIME inside the wrapper, to the
@@ -381,7 +451,7 @@ proc posixWrapperText*(dist: Distribution; realName: string;
         if rest.len > 0: expr.add(posixSingleQuote(rest))
         break
       if idx > 0: expr.add(posixSingleQuote(rest[0 ..< idx]))
-      expr.add("\"$__repro_prefix\"")
+      expr.add(PosixPrefixExpr)
       rest = rest[idx + PrefixToken.len .. rest.high]
     if expr.len == 0: expr = "''"
     # Written as an explicit test rather than as ``${NAME:=value}``.
@@ -439,12 +509,152 @@ proc windowsWrapperText*(dist: Distribution; realName: string;
       # separators into Windows ones here is the layer honouring the
       # single-definition promise. Values with NO token are left exactly
       # as authored, because nothing says they are paths.
-      value = value.replace(PrefixToken, "%REPRO_PACKAGE_PREFIX%")
+      value = value.replace(PrefixToken, WindowsPrefixExpr)
       value = value.replace("/", "\\")
     result.add("if not defined " & name & " set \"" & name & "=" & value &
       "\"\r\n")
   result.add("\"%~dp0" & realName & "\" %*\r\n")
   result.add("exit /b %ERRORLEVEL%\r\n")
+
+proc unquotePosixConcat(expr: string; ok: var bool): string =
+  ## Turn a ``'a'"$__repro_prefix"'b'`` concatenation back into the
+  ## string the shell would build, with the prefix token standing in
+  ## for the run-time prefix. ``ok`` is set false for anything this
+  ## does not understand, so a caller can refuse rather than guess.
+  const
+    Quote = '\x27'
+    Backslash = '\x5C'
+  ok = true
+  var i = 0
+  while i < expr.len:
+    if expr[i] == Quote:
+      inc i
+      while true:
+        if i >= expr.len:
+          ok = false
+          return
+        if expr[i] == Quote:
+          # ``posixSingleQuote`` writes an embedded quote as the four
+          # characters close-quote, backslash, quote, open-quote. Read
+          # that back rather than treating the first of them as the end
+          # of the literal.
+          if i + 3 < expr.len and expr[i + 1] == Backslash and
+              expr[i + 2] == Quote and expr[i + 3] == Quote:
+            result.add(Quote)
+            i += 4
+            continue
+          inc i
+          break
+        result.add(expr[i])
+        inc i
+    elif expr.continuesWith(PosixPrefixExpr, i):
+      result.add(PrefixToken)
+      i += PosixPrefixExpr.len
+    else:
+      ok = false
+      return
+
+proc wrapperExportedValues*(dist: Distribution; text: string):
+    seq[(string, string)] =
+  ## Read the emitted wrapper BACK: the (name, value) pairs the script
+  ## actually assigns, parsed out of its own text.
+  ##
+  ## This exists so an assertion about "what the wrapper names" can be
+  ## made against the artifact rather than against the list the artifact
+  ## was generated from. Two derivations of one list agree by
+  ## construction and can therefore assert nothing about each other,
+  ## which is exactly how M1's totality case came to measure nothing.
+  ##
+  ## It REFUSES rather than returning a short list: a parser that
+  ## silently matches fewer lines than the wrapper has variables is the
+  ## specific failure that made M1's docker gate print
+  ## ``ALL WRAPPER PATHS EXIST`` over an empty loop. The count it
+  ## recovers must equal ``envDefaults.len`` or this raises.
+  var seen = 0
+  for rawLine in text.splitLines():
+    if dist.targetOs == toWindows:
+      let line = rawLine.strip()
+      if not line.startsWith("if not defined "):
+        continue
+      let cut = line.find(" set \"")
+      if cut < 0:
+        continue
+      var assign = line[cut + " set \"".len .. ^1]
+      if assign.endsWith("\""):
+        assign = assign[0 ..< assign.len - 1]
+      let eq = assign.find('=')
+      if eq <= 0:
+        continue
+      var value = assign[eq + 1 .. ^1]
+      if value.startsWith(WindowsPrefixExpr):
+        value = PrefixToken & value[WindowsPrefixExpr.len .. ^1].replace("\\", "/")
+      result.add((assign[0 ..< eq], value))
+      inc seen
+    else:
+      if not rawLine.startsWith("  ") or rawLine.len < 3:
+        continue
+      let body = rawLine[2 .. ^1]
+      let eq = body.find('=')
+      if eq <= 0:
+        continue
+      let name = body[0 ..< eq]
+      var isName = true
+      for ch in name:
+        if ch notin {'A' .. 'Z', '0' .. '9', '_'}: isName = false
+      if not isName:
+        continue
+      var ok = false
+      let value = unquotePosixConcat(body[eq + 1 .. ^1], ok)
+      if not ok:
+        raise newException(ValueError,
+          "distribution '" & dist.name & "': the wrapper line '" &
+          rawLine.strip() & "' is not in a form the layer can read back")
+      result.add((name, value))
+      inc seen
+  if seen != dist.runtime.envDefaults.len:
+    raise newException(ValueError,
+      "distribution '" & dist.name & "': read " & $seen &
+      " assignments back out of the generated wrapper but it was " &
+      "generated from " & $dist.runtime.envDefaults.len &
+      " env defaults; refusing a check that would pass over the " &
+      "lines it failed to parse")
+
+proc envDefaultPayloadGaps*(dist: Distribution; wrapperText: string;
+                            stagedRootRelPaths: openArray[string];
+                            rootedAtPrefix: bool): seq[string] =
+  ## Every prefix-relative path the EMITTED wrapper names that nothing
+  ## in the STAGED TREE puts there, as human-readable lines.
+  ##
+  ## The two sides are independent on purpose — see
+  ## ``RuntimeContract.requireEnvDefaultPayload``. The staged side is
+  ## the file list ``stageInstallTree`` built by enumerating the build
+  ## tree on disk; the wrapper side is text.
+  ##
+  ## The private libdir is the one exemption, and it is not a hole: on
+  ## Linux the runtime-closure walk fills it at BUILD time from a set
+  ## discovered by reading ``DT_NEEDED``, so there are no per-file
+  ## staged paths to match against — and that walk is itself a checked
+  ## post-condition (``dlopenLeafNames``) that fails the build when a
+  ## name will not resolve into it.
+  let closureFills =
+    dist.targetOs == toLinux and dist.runtime.vendorRuntimeClosure
+  let privateLib = privateLibPrefixRelDir(dist)
+  for (name, value) in wrapperExportedValues(dist, wrapperText):
+    if not value.startsWith(PrefixToken & "/"):
+      continue
+    let rel = value[PrefixToken.len + 1 .. ^1]
+    if closureFills and privateLib.len > 0 and
+        (rel == privateLib or rel.startsWith(privateLib & "/")):
+      continue
+    let want =
+      if rootedAtPrefix: rel else: prefixRelToRoot(dist, rel)
+    var covered = false
+    for staged in stagedRootRelPaths:
+      if staged == want or staged.startsWith(want & "/"):
+        covered = true
+        break
+    if not covered:
+      result.add(name & " -> <prefix>/" & rel)
 
 proc wrapperFileName*(dist: Distribution; publicName: string): string =
   ## What the user-invoked file is called.
@@ -573,7 +783,14 @@ vendor() {
   # patchelf rewrites the file, so its mtime becomes "now". Pinning it
   # keeps the staged tree -- and the archive built from it -- a pure
   # function of its inputs rather than of when the build ran.
-  touch -d @1 -- "$LIBDIR/$1"
+  #
+  # Pinned to the DISTRIBUTION's SOURCE_DATE_EPOCH rather than to a bare
+  # @1, so every member of the produced archive carries the same
+  # timestamp. dpkg-deb CLAMPS mtimes to SOURCE_DATE_EPOCH rather than
+  # setting them, so a file left at @1 would stay at @1 while every
+  # other member landed on the epoch -- deterministic either way, but
+  # two answers to a question the layer now has one field for.
+  touch -d @"$EPOCH" -- "$LIBDIR/$1"
   if [ -z "$vendored" ]; then
     vendored=$1
   else
@@ -654,6 +871,125 @@ done
 
 """
     ## The transitive ``DT_NEEDED`` fixed point itself.
+  ClosureScriptFloorFunctions = """
+# ---------------------------------------------------------------------------
+# The C-library floor.
+#
+# Emitted only when the distribution asks for it. What it computes is the
+# maximum GLIBC_x.y symbol-version reference across every object this walk
+# SHIPS -- which is exactly `$seen`: the seeds are the payload, and the only
+# other things pushed onto it are the files that were vendored. A system
+# library the walk merely resolved and left to the target is never pushed,
+# which is right: the floor is a statement about what the package NEEDS from
+# the target's glibc, not about what the builder happened to have.
+#
+# Why this is here and not a Nim function: `.gnu.version_r` is a property of
+# a file no edge has produced at the moment the graph is built -- the same
+# reason the walk itself is a script. And why readelf rather than patchelf:
+# patchelf edits DT_* dynamic-section entries and has no reader for the
+# version-requirements section at all.
+# ---------------------------------------------------------------------------
+
+floor_maj=0
+floor_min=0
+floor_pat=0
+
+# Record one `x`, `x.y` or `x.y.z` if it is greater than what we have.
+# Three components because glibc really does use them (GLIBC_2.2.5), even
+# though every version that matters in practice has two.
+floor_note() {
+  fn_a=${1%%.*}
+  fn_r=${1#*.}
+  if [ "$fn_r" = "$1" ]; then
+    fn_b=0
+    fn_c=0
+  else
+    fn_b=${fn_r%%.*}
+    fn_r2=${fn_r#*.}
+    if [ "$fn_r2" = "$fn_r" ]; then
+      fn_c=0
+    else
+      fn_c=${fn_r2%%.*}
+    fi
+  fi
+  case $fn_a in ''|*[!0-9]*) return 0 ;; esac
+  case $fn_b in ''|*[!0-9]*) fn_b=0 ;; esac
+  case $fn_c in ''|*[!0-9]*) fn_c=0 ;; esac
+  if [ "$fn_a" -gt "$floor_maj" ] ||
+     { [ "$fn_a" -eq "$floor_maj" ] && [ "$fn_b" -gt "$floor_min" ]; } ||
+     { [ "$fn_a" -eq "$floor_maj" ] && [ "$fn_b" -eq "$floor_min" ] &&
+       [ "$fn_c" -gt "$floor_pat" ]; }; then
+    floor_maj=$fn_a
+    floor_min=$fn_b
+    floor_pat=$fn_c
+  fi
+  return 0
+}
+
+# `readelf -V` prints .gnu.version, .gnu.version_d AND .gnu.version_r. Only
+# the last two spell a version as `Name: GLIBC_x.y`; the first prints
+# `(GLIBC_x.y)` per symbol index, so matching on `Name: GLIBC_` selects the
+# requirement entries without needing a section-aware parser. The output is
+# walked out of a shell variable rather than through a pipe because a pipe
+# would put the loop in a subshell and the running maximum would not survive
+# it -- the same reason every other loop in this script sets IFS by hand.
+floor_scan() {
+  fs_out=$(readelf -V -W -- "$1" 2>/dev/null || printf '')
+  if [ -z "$fs_out" ]; then
+    return 0
+  fi
+  fs_ifs=$IFS
+  IFS=$NL
+  for fs_line in $fs_out; do
+    IFS=$fs_ifs
+    case $fs_line in
+      *"Name: GLIBC_"[0-9]*)
+        fs_v=${fs_line#*"Name: GLIBC_"}
+        fs_v=${fs_v%% *}
+        floor_note "$fs_v"
+        ;;
+    esac
+    IFS=$NL
+  done
+  IFS=$fs_ifs
+  return 0
+}
+
+"""
+    ## The dependency-floor reader. Included in the generated program
+    ## only when ``types.computesDependencyFloor`` holds for the
+    ## distribution, so a tree that does not want the floor does not
+    ## carry the code for it and its edge does not name ``readelf``.
+  ClosureScriptFloorEpilogue = """
+floor_ifs=$IFS
+IFS=$NL
+for floor_obj in $seen; do
+  IFS=$floor_ifs
+  floor_scan "$floor_obj"
+  IFS=$NL
+done
+IFS=$floor_ifs
+
+if [ "$floor_maj" -eq 0 ] && [ "$floor_min" -eq 0 ] && [ "$floor_pat" -eq 0 ]; then
+  fail "no GLIBC_x.y version reference found across the payload and the vendored closure; this package cannot state the C-library floor its rewritten PT_INTERP binds it to. If the target is deliberately not glibc, set runtime.computeDependencyFloor = false and supply metadata.debDepends / metadata.rpmRequires by hand"
+fi
+if [ "$floor_pat" -gt 0 ]; then
+  printf '%s.%s.%s\n' "$floor_maj" "$floor_min" "$floor_pat" > "$FLOOR"
+else
+  printf '%s.%s\n' "$floor_maj" "$floor_min" > "$FLOOR"
+fi
+printf 'runtime-closure: glibc floor %s\n' "$(cat -- "$FLOOR")"
+"""
+    ## Runs AFTER the fixed point, so ``$seen`` is complete, and after
+    ## the manifest write, so a floor failure cannot leave a half-built
+    ## tree looking finished.
+    ##
+    ## An empty result is a hard failure rather than an omitted field.
+    ## The alternative -- emit ``Depends: libc6 (>= )`` -- is a control
+    ## stanza dpkg rejects at build time in the good case and accepts as
+    ## an unversioned dependency in the bad one, which is precisely the
+    ## "installs cleanly, cannot start" failure the floor exists to
+    ## stop.
   ClosureScriptEpilogue = """
 stale_ifs=$IFS
 IFS=$NL
@@ -683,11 +1019,17 @@ printf '%s' "$manifest" | LC_ALL=C sort > "$MANIFEST"
 # The runtime-library closure walk.
 # ---------------------------------------------------------------------------
 
-proc shellSingleQuote(value: string): string =
+proc shellSingleQuote*(value: string): string =
   ## Same escaping as ``posixSingleQuote``; kept separate because that
   ## one is part of the WRAPPER's text, which ships, and this one is
   ## part of a BUILD-TIME script, which does not — the two must be free
   ## to diverge.
+  ##
+  ## Exported for producers that generate a build-time script of their
+  ## own (the Arch producer's installed-size measurement). Exporting the
+  ## build-time one rather than the shipping one is the whole point: a
+  ## third hand-written copy of shell quoting is how a package ends up
+  ## with a path it cannot handle.
   result = "'"
   for ch in value:
     if ch == '\'': result.add("'\\''")
@@ -697,7 +1039,8 @@ proc shellSingleQuote(value: string): string =
 proc runtimeClosureScript*(dist: Distribution;
                            componentSources: openArray[string];
                            libDir, manifestPath: string;
-                           keepLeafNames: openArray[string]): string =
+                           keepLeafNames: openArray[string];
+                           floorPath = ""): string =
   ## The POSIX-shell program that walks the runtime closure and fills
   ## the private libdir the §5 RPATH points at.
   ##
@@ -747,12 +1090,38 @@ proc runtimeClosureScript*(dist: Distribution;
   ## shipping a package that is missing one library is precisely the
   ## defect this proc exists to close, and it is invisible until the
   ## package is installed on a machine that is not the builder.
+  # M1's N6. These names come from a RECIPE and are spliced into a `case`
+  # pattern list in a generated shell script. Unquoted, a name containing
+  # `)`, `|`, `;`, `$`, a backtick or whitespace does not merely fail to
+  # match -- it closes the pattern and the rest becomes script, executed by
+  # the staging edge with the builder's privileges. Two defences, because
+  # each catches what the other cannot:
+  #
+  #   * REFUSE anything that is not a plausible shared-library leaf name.
+  #     A build-graph-time `ValueError` naming the value, in the same shape
+  #     as `types.validate`'s other refusals, rather than a script that
+  #     misbehaves at staging time.
+  #   * QUOTE what survives. `case` patterns may be quoted, and quoting
+  #     removes their glob meaning, so `libfoo.so.1` matches the file
+  #     called that and nothing else. Belt and braces: the filter is a
+  #     judgement about what a leaf name looks like and the quoting is not
+  #     a judgement about anything.
+  const AllowedLeafChars = {'a'..'z', 'A'..'Z', '0'..'9', '.', '_', '+', '-'}
   var systemCases: seq[string] = @[]
   for name in dist.runtime.extraSystemLibraryLeafNames:
     if name.len > 0:
-      systemCases.add(name)
+      for ch in name:
+        if ch notin AllowedLeafChars:
+          raise newException(ValueError,
+            "runtime.extraSystemLibraryLeafNames: " &
+            "'" & name & "' is not a shared-library leaf name (the " &
+            "character '" & $ch & "' is not allowed). The value is " &
+            "spliced into a generated shell script's `case` pattern " &
+            "list; a name is a FILE NAME, never a path and never a " &
+            "pattern.")
+      systemCases.add(shellSingleQuote(name))
       let stem = libraryStem(name)
-      if stem != name: systemCases.add(stem)
+      if stem != name: systemCases.add(shellSingleQuote(stem))
   result = ""
   result.add("set -euf\n")
   result.add("# Generated by the reprobuild DSL packaging layer\n")
@@ -760,7 +1129,12 @@ proc runtimeClosureScript*(dist: Distribution;
   result.add("NL='\n'\n")
   result.add("LIBDIR=" & shellSingleQuote(libDir) & "\n")
   result.add("MANIFEST=" & shellSingleQuote(manifestPath) & "\n")
+  result.add("EPOCH=" & shellSingleQuote($dist.sourceDateEpoch) & "\n")
+  if floorPath.len > 0:
+    result.add("FLOOR=" & shellSingleQuote(floorPath) & "\n")
   result.add(ClosureScriptPreamble)
+  if floorPath.len > 0:
+    result.add(ClosureScriptFloorFunctions)
   # The system/private rule, emitted so the shell applies exactly the
   # rule ``types.isSystemLibraryLeafName`` states.
   result.add("is_system() {\n")
@@ -802,6 +1176,8 @@ proc runtimeClosureScript*(dist: Distribution;
     if leaf.len > 0:
       result.add("keep=$keep" & shellSingleQuote(leaf) & "$NL\n")
   result.add(ClosureScriptEpilogue)
+  if floorPath.len > 0:
+    result.add(ClosureScriptFloorEpilogue)
 
 # ---------------------------------------------------------------------------
 # Staging.
@@ -812,6 +1188,64 @@ proc sanitizeIdPart(value: string): string =
     if ch.isAlphaNumeric or ch == '-' or ch == '_': result.add(ch)
     elif ch == '/' or ch == '.': result.add('-')
     else: result.add('_')
+
+proc stagedIdPrefix*(dist: Distribution; variant: string): string =
+  ## Action-id namespace for one staged tree: variant AND distribution
+  ## name.
+  ##
+  ## The variant alone was enough for M0, and stopped being enough the
+  ## first time a recipe staged TWO distributions. M0 put the variant in
+  ## here because two producers over ONE ``Distribution`` were handed the
+  ## same per-file ids -- "the deb tree's ``pkg-rpath-bin-hello`` and the
+  ## tarball tree's are different edges with different outputs", and the
+  ## engine keys the action cache by id, so a collision serves one edge's
+  ## outputs for the other.
+  ##
+  ## The SAME argument applies one axis over, and reprobuild's own
+  ## packaging is what surfaced it: §3 splits the product into
+  ## ``reprobuild`` and ``reprobuild-binary-cache``, both built from one
+  ## recipe, both staging a ``deb`` tree. Their trees differ (the
+  ## staging roots are derived from the distribution name) but their
+  ## action ids did not, and the build refused outright with
+  ## ``duplicate graph node id: project:action:pkg-deb-runtime-closure``.
+  ## That refusal is the engine doing the right thing; a producer that
+  ## had let it through would have shipped one package's runtime closure
+  ## inside the other's.
+  "pkg-" & sanitizeIdPart(variant) & "-" & sanitizeIdPart(dist.name) & "-"
+
+proc sourceTreeRelFiles*(root: string): seq[string] =
+  ## Every regular file under ``root``, as ``/``-separated paths
+  ## relative to it, SORTED.
+  ##
+  ## Walked at GRAPH TIME, which is the same thing
+  ## ``repro_project_dsl.fs.preserveTree`` does with the same directory
+  ## a line later — the staging edge below hands ``preserveTree`` the
+  ## root and this walk enumerates it again so the ``StagedTree`` can
+  ## tell a producer WHICH files the edge is going to write. rpm needs
+  ## that to own the directory, the MSI needs it to emit one component
+  ## per file, and the tarball and deb need it not at all.
+  ##
+  ## Sorted because a producer's output is a function of this list and
+  ## ``walkDir`` order is a property of the filesystem, not of the
+  ## graph. Symlinks are followed as their KIND rather than resolved:
+  ## ``preserveTree`` re-creates a symlink as a symlink, so a link to a
+  ## file is one entry here exactly as it is one entry there.
+  if not dirExists(root):
+    return @[]
+  var pending = @[""]
+  while pending.len > 0:
+    let rel = pending.pop()
+    let dir = if rel.len == 0: root else: root / rel
+    for kind, child in walkDir(dir, relative = true):
+      let childRel = if rel.len == 0: child else: rel & "/" & child
+      case kind
+      of pcDir:
+        pending.add(childRel)
+      of pcFile, pcLinkToFile:
+        result.add(childRel)
+      of pcLinkToDir:
+        result.add(childRel)
+  result.sort(system.cmp[string])
 
 proc stageInstallTree*(dist: Distribution; variant: string;
                        site = noSite()): StagedTree =
@@ -829,7 +1263,32 @@ proc stageInstallTree*(dist: Distribution; variant: string;
   let treeRoot = dist.stagingRoot & "/" & variant
   let genRoot = dist.stagingRoot & "/gen-" & variant
   result = StagedTree(dist: dist, root: treeRoot, genRoot: genRoot,
-    idPrefix: "pkg-" & sanitizeIdPart(variant) & "-")
+    idPrefix: stagedIdPrefix(dist, variant))
+
+  # THE GENERATED-INTERMEDIATE DIRECTORY, created by an edge of its own.
+  #
+  # ``patchelf --output <path>`` does not create ``<path>``'s parent: it
+  # answers ``patchelf: open: No such file or directory``, which names
+  # neither the file nor the directory. Until now nothing noticed,
+  # because every tree also had a ``writeText`` into the same genRoot
+  # (the §5 wrapper, or a producer's control file) and ``fs.writeText``
+  # DOES create parents — so the directory existed by the time patchelf
+  # ran, whenever the scheduler happened to run that edge first.
+  #
+  # That is a race, and it was won by luck rather than by ordering. It
+  # lost the moment a distribution with ``wrapExecutables = false``
+  # staged a tree whose only genRoot writer was patchelf itself: the
+  # ``reprobuild-binary-cache`` package's Arch tree, which stopped the
+  # build with that message while its deb and rpm trees — identical in
+  # every other way — passed.
+  let genRootEdge = dslfs.ensureDir(genRoot,
+    actionId = stagedIdPrefix(dist, variant) & "gen-root")
+
+  var emittedWrapperTexts: seq[string] = @[]
+    ## Every wrapper this staging actually WROTE, kept so the
+    ## ``requireEnvDefaultPayload`` post-condition below can be made
+    ## against the emitted text rather than against the list it was
+    ## generated from.
 
   var selectors: seq[string] = @[]
   proc noteSelector(selector: string) =
@@ -869,7 +1328,7 @@ proc stageInstallTree*(dist: Distribution; variant: string;
   proc treePath(prefixRel: string; role: ComponentRole): string =
     treeRoot & "/" & rootRelFor(prefixRel, role)
 
-  let idPrefix = "pkg-" & sanitizeIdPart(variant) & "-"
+  let idPrefix = stagedIdPrefix(dist, variant)
 
   # The objects the runtime-closure walk starts from, AS BUILT. Not the
   # patched copies: patching replaces the RPATH, which is the only record
@@ -909,6 +1368,52 @@ proc stageInstallTree*(dist: Distribution; variant: string;
     let publicName = defaultInstallName(component)
     let prefixRel = installRelPath(dist, component)
     let prefixRelDir = dirOf(prefixRel)
+
+    # ---- 0. a whole SOURCE TREE ------------------------------------
+    #
+    # Handled before everything else and by ``continue``, because none
+    # of what follows applies: a source tree has no wrapper, no RPATH,
+    # no ELF interpreter, no mode of its own and no place in the
+    # runtime-closure walk. It is the one component role whose payload
+    # is a directory, and ``fs.preserveTree`` -- an engine BUILTIN --
+    # is what mirrors it, so this arm adds no tool dependency and
+    # behaves identically on Windows.
+    if component.role == crSourceTree:
+      let treeRootRel = rootRelFor(prefixRel, crSourceTree)
+      let destDir = treeRoot & "/" & treeRootRel
+      let relFiles = sourceTreeRelFiles(component.buildPath)
+      if relFiles.len == 0:
+        # REFUSED, rather than staged empty. ``preserveTree`` over a
+        # directory that does not exist (or that holds nothing) is
+        # SILENT: it enumerates no entries, declares no outputs and
+        # creates an empty directory in the tree. The package then
+        # installs, its wrapper names the directory, the directory is
+        # there -- and the compile that the tree exists to serve fails
+        # on the target with a missing import. That is precisely the
+        # failure mode this whole component role was added to close, so
+        # it must not be reachable by forgetting to stage a payload.
+        raise newException(ValueError,
+          "distribution '" & dist.name & "': crSourceTree component '" &
+          component.buildPath & "' (installing to '" & treeRootRel &
+          "') contains no files; a source tree that stages empty would " &
+          "give the target a directory the wrapper names and nothing " &
+          "to compile against")
+      let edge = dslfs.preserveTree(component.buildPath, destDir,
+        actionId = idPrefix & "srctree-" & sanitizeIdPart(treeRootRel),
+        after = component.producedBy)
+      # One ``StagedFile`` per mirrored file, all naming the SAME edge.
+      # That is not a fiction: ``preserveTree`` declares every one of
+      # them as an output, so a producer that depends on these paths
+      # depends on exactly the edge that writes them.
+      for rel in relFiles:
+        result.files.add(StagedFile(
+          rootRelPath: treeRootRel & "/" & rel,
+          edge: edge,
+          role: crSourceTree,
+          isPublicEntryPoint: false))
+      result.terminal.add(edge)
+      result.sourceTreeRoots.add(treeRootRel)
+      continue
     let mode = if component.mode != 0: component.mode
                else: roleDefaultMode(component.role)
     let wrapThis =
@@ -952,7 +1457,10 @@ proc stageInstallTree*(dist: Distribution; variant: string;
         output = patched,
         file = component.buildPath,
         actionId = idPrefix & "rpath-" & sanitizeIdPart(prefixRel),
-        after = component.producedBy)
+        # ...and the directory the ``--output`` lands in. See
+        # ``genRootEdge``: patchelf will not create it, and the failure
+        # it reports names neither the file nor the directory.
+        after = component.producedBy & @[genRootEdge])
       declareProducerTool(site, edge.id, PatchelfSelector)
       noteSelector(PatchelfSelector)
       payloadSource = patched
@@ -986,6 +1494,7 @@ proc stageInstallTree*(dist: Distribution; variant: string;
           windowsWrapperText(dist, realName, prefixRelDir)
         else:
           posixWrapperText(dist, realName, prefixRelDir)
+      emittedWrapperTexts.add(text)
       let wrapperPublic =
         (if prefixRelDir.len > 0: prefixRelDir & "/" else: "") &
           wrapperFileName(dist, publicName)
@@ -1018,8 +1527,13 @@ proc stageInstallTree*(dist: Distribution; variant: string;
     let libDir = treeRoot & "/" & libRootRel
     let manifestPath = genRoot & "/" & sanitizeIdPart(variant) &
       "-runtime-closure.manifest"
+    let floorPath =
+      if dist.computesDependencyFloor():
+        genRoot & "/" & sanitizeIdPart(variant) & "-glibc-floor.txt"
+      else:
+        ""
     let script = runtimeClosureScript(dist, closureSources, libDir,
-      manifestPath, declaredLibLeafNames)
+      manifestPath, declaredLibLeafNames, floorPath)
     var after = closureAfter
     for edge in result.terminal:
       after.add(edge)
@@ -1030,7 +1544,14 @@ proc stageInstallTree*(dist: Distribution; variant: string;
       # re-runs the walk -- a new dependency in a component is exactly
       # the change that must reach the shipped library set.
       extraInputs = closureSources,
-      extraOutputs = @[manifestPath],
+      # The floor file joins the manifest as a declared output rather
+      # than being written into the tree: it is BUILD data, consumed by
+      # the edge that splices it into a control stanza, and a file that
+      # shipped inside the package would be telling the target
+      # something it already knows.
+      extraOutputs =
+        (if floorPath.len > 0: @[manifestPath, floorPath]
+         else: @[manifestPath]),
       # The walk reads back what it just wrote (patchelf re-reads the
       # copy it is about to rewrite, and the prune lists the
       # directory). Those are its own writes, not inputs, and treating
@@ -1049,14 +1570,133 @@ proc stageInstallTree*(dist: Distribution; variant: string;
     # see the note on ``ShSelector``.
     declareProducerTool(site, edge.id, InstallSelector)
     noteSelector(InstallSelector)
+    if floorPath.len > 0:
+      # Named on THIS edge, not on one of its own: the floor covers the
+      # vendored set, and the vendored set does not exist until this
+      # action has put it there.
+      declareProducerTool(site, edge.id, ReadelfSelector)
+      noteSelector(ReadelfSelector)
     result.terminal.add(edge)
     result.producerExtraInputs.add(manifestPath)
+    # NOT added to ``producerExtraInputs``. The floor reaches a producer
+    # through ``addGeneratedFile``'s ``substitutions``, which names it as
+    # an input of the edge that splices it; the artifact edge then
+    # depends on it transitively through the staged control file. Naming
+    # it in both places would be true and redundant.
+    result.glibcFloorPath = floorPath
+
+  # ---- 4. the env-default payload post-condition -------------------
+  #
+  # See ``RuntimeContract.requireEnvDefaultPayload``. Deliberately the
+  # LAST thing staging does, and deliberately reading ``result.files``:
+  # by this point that list is every path this tree will contain, and
+  # the source-tree entries in it were enumerated from the build tree on
+  # disk rather than derived from anything the wrapper was built from.
+  #
+  # A distribution that turns this on and emits no wrapper at all is a
+  # contradiction rather than a vacuous pass, so it is refused too: the
+  # check is about what the wrapper names, and there being no wrapper
+  # means nothing was checked.
+  if dist.runtime.requireEnvDefaultPayload:
+    if dist.runtime.envDefaults.len > 0 and emittedWrapperTexts.len == 0:
+      raise newException(ValueError,
+        "distribution '" & dist.name & "': requireEnvDefaultPayload is set " &
+        "and " & $dist.runtime.envDefaults.len & " env defaults are " &
+        "declared, but this tree emitted no wrapper to check them against")
+    var stagedRootRelPaths: seq[string] = @[]
+    for f in result.files:
+      stagedRootRelPaths.add(f.rootRelPath)
+    var gaps: seq[string] = @[]
+    for text in emittedWrapperTexts:
+      for gap in envDefaultPayloadGaps(dist, text, stagedRootRelPaths,
+          rootedAtPrefix):
+        if gap notin gaps:
+          gaps.add(gap)
+    if gaps.len > 0:
+      raise newException(ValueError,
+        "distribution '" & dist.name & "' (" & variant & "): the wrapper " &
+        "it emits names " & $gaps.len & " prefix-relative path(s) that " &
+        "nothing in this package installs:" & "\n" & "  " &
+        gaps.join("\n" & "  ") & "\n" &
+        "A package whose wrapper points at nothing installs cleanly, " &
+        "runs --version, and fails on the first thing that opens one of " &
+        "these. Ship the payload, drop the variable, or turn " &
+        "requireEnvDefaultPayload off and say why.")
 
   result.stagingSelectors = selectors
 
+proc substitutionScript*(text: string; genPath: string;
+                         substitutions: openArray[(string, string)]): string =
+  ## The POSIX-shell program that writes ``genPath`` from ``text`` with
+  ## each ``(token, valueFile)`` pair spliced in.
+  ##
+  ## ## Why a script rather than a Nim string replace
+  ##
+  ## Same reason as the closure walk, one step further on: the VALUE
+  ## does not exist at graph time. The C-library floor is read out of
+  ## ``.gnu.version_r`` of files no edge has produced yet, so the only
+  ## place that can put it into a ``Depends:`` line is an action.
+  ##
+  ## ## Why splicing and not rewriting the staged file in place
+  ##
+  ## An in-place rewrite would mean two edges writing one path, which
+  ## breaks the property the header of this module states plainly:
+  ## no edge here rewrites a file another edge produced. So the
+  ## substitution happens on the way IN — this script replaces the
+  ## ``writeText`` edge rather than following it — and the tree still
+  ## has one producer per path.
+  ##
+  ## The text is split on the token at GRAPH time and re-assembled by
+  ## ``printf`` at build time, so no ``sed`` is needed and no escaping
+  ## question arises about what the value might contain: the pieces are
+  ## single-quoted literals and the value arrives through ``$(cat)``,
+  ## which strips the trailing newline ``printf '%s\n'`` wrote.
+  result = "set -euf\n"
+  result.add("# Generated by the reprobuild DSL packaging layer\n")
+  result.add("# (Distribution-And-Packaging.md " & "SECT" & "6). Do not edit.\n")
+  result.add("mkdir -p -- \"$(dirname -- " & shellSingleQuote(genPath) &
+    ")\"\n")
+  var pieces = @[text]
+  var valueVars: seq[string] = @[]
+  for i in 0 ..< substitutions.len:
+    let token = substitutions[i][0]
+    let valueFile = substitutions[i][1]
+    let varName = "SUBST" & $i
+    result.add(varName & "=$(cat -- " & shellSingleQuote(valueFile) & ")\n")
+    result.add("if [ -z \"$" & varName & "\" ]; then\n")
+    result.add("  printf 'packaging: substitution value file %s is empty\\n' " &
+      shellSingleQuote(valueFile) & " >&2\n")
+    result.add("  exit 1\n")
+    result.add("fi\n")
+    valueVars.add(varName)
+    # Split every piece produced so far on this token, so a token that
+    # occurs more than once (rpm states the same floor in ``Requires:``
+    # and nowhere else today, but deb's ``Pre-Depends`` would repeat it)
+    # is replaced at every occurrence rather than only at the first.
+    var next: seq[string] = @[]
+    for piece in pieces:
+      var rest = piece
+      while true:
+        let cut = rest.find(token)
+        if cut < 0:
+          next.add(rest)
+          break
+        next.add(rest[0 ..< cut])
+        next.add("\x00" & varName)
+        rest = rest[cut + token.len .. ^1]
+    pieces = next
+  result.add("{\n")
+  for piece in pieces:
+    if piece.len > 1 and piece[0] == '\x00':
+      result.add("  printf '%s' \"$" & piece[1 .. ^1] & "\"\n")
+    elif piece.len > 0:
+      result.add("  printf '%s' " & shellSingleQuote(piece) & "\n")
+  result.add("} > " & shellSingleQuote(genPath) & "\n")
+
 proc addGeneratedFile*(tree: var StagedTree; rootRelPath, text: string;
-                       mode = 0o644; site = noSite()): BuildActionDef
-    {.discardable.} =
+                       mode = 0o644; site = noSite();
+                       substitutions: openArray[(string, string)] = []):
+    BuildActionDef {.discardable.} =
   ## Put a producer-generated text file into an already-staged tree.
   ##
   ## Producers need this for the parts of a package that ARE the format:
@@ -1066,10 +1706,40 @@ proc addGeneratedFile*(tree: var StagedTree; rootRelPath, text: string;
   ## ``postinst`` a producer generates is 0755 for the same reason and
   ## by the same code as a §5 wrapper — the modes are not a thing each
   ## producer remembers.
+  ##
+  ## ``substitutions`` names ``(token, valueFilePath)`` pairs whose
+  ## value is only knowable at BUILD time — today just the C-library
+  ## floor (``types.GlibcFloorToken`` against
+  ## ``StagedTree.glibcFloorPath``). With the list empty the file is
+  ## written by an ordinary ``writeText`` edge, exactly as before;
+  ## with entries, that edge becomes a ``sh`` one that assembles the
+  ## same text with the values spliced in. Either way the file's ONE
+  ## producer is a single edge and the install step is unchanged.
   let genPath = tree.genRoot & "/" & tree.idPrefix &
     sanitizeIdPart(rootRelPath) & ".gen"
-  let writeEdge = dslfs.writeText(genPath, text,
-    actionId = tree.idPrefix & "gen-text-" & sanitizeIdPart(rootRelPath))
+  let writeEdge =
+    if substitutions.len == 0:
+      dslfs.writeText(genPath, text,
+        actionId = tree.idPrefix & "gen-text-" & sanitizeIdPart(rootRelPath))
+    else:
+      var valueFiles: seq[string] = @[]
+      for i in 0 ..< substitutions.len:
+        valueFiles.add(substitutions[i][1])
+      let e = sh_module.shell(
+        substitutionScript(text, genPath, substitutions),
+        actionId = tree.idPrefix & "gen-subst-" & sanitizeIdPart(rootRelPath),
+        # The value files are real inputs: a floor that moved because a
+        # vendored library grew a newer symbol version must re-write the
+        # control stanza, and without this the edge would have no reason
+        # to notice.
+        extraInputs = valueFiles,
+        extraOutputs = @[genPath])
+      declareProducerTool(site, e.id, ShSelector)
+      # ``cat``/``mkdir``/``dirname`` come from coreutils, reached
+      # through the ``install`` executable's package -- the same
+      # indirection the closure walk uses and for the same reason.
+      declareProducerTool(site, e.id, InstallSelector)
+      e
   let target = tree.root & "/" & rootRelPath
   let installEdge =
     if tree.dist.targetOs != toWindows:
@@ -1094,6 +1764,52 @@ proc addGeneratedFile*(tree: var StagedTree; rootRelPath, text: string;
     isPublicEntryPoint: false))
   tree.terminal.add(installEdge)
   installEdge
+
+proc addGeneratedIntermediate*(tree: var StagedTree; name, text: string;
+                               site = noSite();
+                               substitutions: openArray[(string, string)] = []):
+    tuple[path: string, edge: BuildActionDef] =
+  ## Generate a text file BESIDE the tree rather than inside it, and
+  ## make the tree's producer depend on it.
+  ##
+  ## The deb producer needs its ``control`` INSIDE the payload
+  ## (``DEBIAN/control`` is where dpkg-deb looks); rpm needs its
+  ## ``.spec`` OUTSIDE the buildroot, because anything inside the
+  ## buildroot that ``%files`` does not list is an unpackaged-file
+  ## error and anything it does list ships. That is a real difference
+  ## between the two formats rather than an accident of either, so the
+  ## layer offers both placements rather than making one producer
+  ## work around the other's assumption.
+  ##
+  ## The returned path is appended to ``producerExtraInputs``, so the
+  ## artifact edge depends on the file's CONTENTS — a spec whose
+  ## ``Requires:`` changed must rebuild the rpm even though no staged
+  ## file moved.
+  # The FILE keeps ``name`` verbatim; only the ACTION ID is sanitised.
+  # ``sanitizeIdPart`` maps ``.`` to ``-``, which is right for an id and
+  # wrong for a file: rpmbuild is handed this path as its spec operand,
+  # and a ``.spec`` that arrived as ``-spec`` is a working-by-accident
+  # arrangement waiting for the first tool that dispatches on extension.
+  let genPath = tree.genRoot & "/" & tree.idPrefix & name
+  let edge =
+    if substitutions.len == 0:
+      dslfs.writeText(genPath, text,
+        actionId = tree.idPrefix & "gen-aux-" & sanitizeIdPart(name))
+    else:
+      var valueFiles: seq[string] = @[]
+      for i in 0 ..< substitutions.len:
+        valueFiles.add(substitutions[i][1])
+      let e = sh_module.shell(
+        substitutionScript(text, genPath, substitutions),
+        actionId = tree.idPrefix & "gen-aux-subst-" & sanitizeIdPart(name),
+        extraInputs = valueFiles,
+        extraOutputs = @[genPath])
+      declareProducerTool(site, e.id, ShSelector)
+      declareProducerTool(site, e.id, InstallSelector)
+      e
+  tree.terminal.add(edge)
+  tree.producerExtraInputs.add(genPath)
+  (genPath, edge)
 
 proc stagedPaths*(tree: StagedTree): seq[string] =
   ## Every staged file's build-tree path, for a producer to declare as
@@ -1136,13 +1852,13 @@ const
     "CODETRACER_PINNED_SRC",
     "REPRO_CT_TEST_RUNNER_SRC",
     "REPRO_TEST_ADAPTERS_SRC",
-    "CT_INTERPOSE_SRC",
     "REPROBUILD_USE_SYSTEM_HASH_LIBS",
     "REPROBUILD_NIX_DAEMON_BIN",
     "RUNQUOTA_SRC",
     "SQLITE_PREFIX",
     "XXHASH_PREFIX",
-    "CLINGO_PREFIX"
+    "CLINGO_PREFIX",
+    "REPRO_NIM_COMPILER"
   ]
     ## §12's first open question — "exact ``REPROBUILD_*``/``*_PREFIX``
     ## wrapper-var list to encode in the packaging layer (derive
@@ -1160,8 +1876,119 @@ const
     ## store paths in the flake and cannot be: a native package's values
     ## are paths inside its own install prefix, which is what
     ## ``PrefixToken`` exists to express.
+    ##
+    ## ``CT_INTERPOSE_SRC`` WAS THE TWENTY-FIRST AND IS GONE, REMOVED BY
+    ## MEASUREMENT RATHER THAN BY TIDYING. It was a variable both worlds
+    ## set, this list pinned, the drift guard compared and the package
+    ## shipped a 1.4 MB source tree for -- and that NOTHING READ.
+    ## ``86cb1bf6`` (the ct_interpose -> nim-stackable-hooks migration)
+    ## took it out of ``config.nims``, and after that it occurred only in
+    ## ``flake.nix``, in a forward-if-present list in
+    ## ``repro_cli_support``, and here. A ``grep -c CT_INTERPOSE_SRC
+    ## config.nims`` answers 0.
+    ##
+    ## The same measurement corrects the ARGUMENT that used to excuse it.
+    ## ``reprobuildCacheWrapperValues`` explains the names ``repro``
+    ## does not carry by saying they are read by ``config.nims``: that
+    ## is true of FOURTEEN of these names, not of two, and "occurs as a
+    ## string in the binary" is the wrong test for whether a variable is
+    ## needed, because a variable ``config.nims`` reads would never
+    ## appear as a literal in ``repro``. It remains the RIGHT test for
+    ## ``repro-binary-cache``, which compiles nothing and therefore runs
+    ## no ``config.nims``.
+    ##
+    ## ``REPRO_NIM_COMPILER`` IS THE TWENTY-FIRST, AND IT WAS ADDED TO
+    ## BOTH WORLDS AT ONCE. It is not a packaging invention: the
+    ## resolver that consumes it (``repro_interface_artifacts.
+    ## nimCompilerPath``) has always taken it as its highest-priority
+    ## arm, and its next arm is ``BuiltNimCompilerPath``, a constant
+    ## baked at COMPILE TIME out of ``staticExec("command -v nim")``.
+    ## Under Nix that constant is a store path that exists, so the flake
+    ## never needed to say anything; in a native package it is a store
+    ## path that does not, and the arm after it is ``nim`` on ``$PATH``.
+    ##
+    ## That last arm is where the measurement bites. Neither
+    ## ``debian:trixie-slim`` nor ``fedora:latest`` PACKAGES A NIM
+    ## COMPILER AT ALL (Debian bookworm's is 1.6.10, older than the
+    ## sources this package ships; Arch's is 2.2.12 and is the only
+    ## adequate distribution build found), so ``Depends: nim`` is not a
+    ## dependency a package manager could satisfy on the two images M1's
+    ## gate uses -- it is a package that will not install. And
+    ## reprobuild's own tool-provisioning cannot supply it either,
+    ## because the compile that needs it is the one that READS THE
+    ## RECIPE that would declare it. A bootstrap dependency with no
+    ## external supplier is exactly the case for vendoring, so the
+    ## package ships a toolchain and this variable names it.
+    ##
+    ## The flake sets it too, at the same store path its
+    ## ``BuiltNimCompilerPath`` would have found, which makes the
+    ## resolution explicit in both worlds rather than implicit in one.
 
-  ReprobuildDlopenLeafNames* = ["zstd", "clingo"]
+  ReprobuildDlopenPackages* = ["zstd", "clingo"]
     ## §5: "clingo and zstd … the last two ``dlopen``'d by leaf name".
     ## These are the reason the RPATH is mandatory rather than
     ## redundant.
+    ##
+    ## PACKAGE names, which is all §5's prose gives. They are kept
+    ## because they are what the spec says and what a human recognises,
+    ## and they are NOT what ``RuntimeContract.dlopenLeafNames`` takes —
+    ## see ``reprobuildDlopenLeafNames`` immediately below.
+
+proc reprobuildDlopenLeafNames*(targetOs: TargetOs): seq[string] =
+  ## The names reprobuild's own binaries actually hand to ``dlopen``,
+  ## reduced to the LEAF FILE NAME the closure walk can look for.
+  ##
+  ## ## What was wrong with the constant this replaces
+  ##
+  ## M0 left ``ReprobuildDlopenLeafNames = ["zstd", "clingo"]`` in a
+  ## field that had just become a CHECKED POST-CONDITION, and the two
+  ## halves are not compatible. ``require_dlopen`` resolves a name by
+  ## exact file name against the walk's search path, so ``zstd`` — a
+  ## package name, not a file name — cannot resolve, and the first
+  ## recipe to feed the constant to the field it was written for would
+  ## have failed the build with "no search path contains it". The
+  ## constant was inert when it was written and stopped being inert
+  ## when the assertion landed; nothing rechecked it. M0 recorded that
+  ## as residual R3 and left it, on the grounds that guessing the
+  ## soversions would be inventing data — which was the right call,
+  ## because the data is not a guess and does not live in §5's prose.
+  ##
+  ## ## Where the answer comes from
+  ##
+  ## The dlopen strings are already stated, exactly once each, at the
+  ## call sites: ``repro_binary_cache_client/dynlib_names.zstdDynlibName``
+  ## and ``repro_solver/dynlib_names.clingoDynlibName``, both written as
+  ## per-target functions precisely so a non-Darwin host can verify what
+  ## Darwin will pass to ``loadLib``. This proc mirrors them, per target,
+  ## and ``t_packaging_wrapper_vars_match_flake`` asserts the two cannot
+  ## drift — the same drift-guard shape ``ReprobuildWrapperVariables``
+  ## already uses against ``flake.nix``.
+  ##
+  ## ## Why mirrored rather than imported
+  ##
+  ## Importing them would make the DSL stdlib — which every recipe
+  ## compiles — depend on the solver and the cache client, two of the
+  ## heaviest modules in the tree, for two string literals. The drift
+  ## guard buys the same property for the price of one test.
+  ##
+  ## ## Leaf name, not the dlopen string
+  ##
+  ## On Darwin the dlopen argument is ``@rpath/libzstd.1.dylib``: a bare
+  ## leaf name does NOT consult an image's ``LC_RPATH``, so the
+  ## ``@rpath/`` prefix is load-bearing in the CALL. It is not part of
+  ## the FILE's name, and the field is a post-condition about a file in
+  ## the private libdir, so the prefix is stripped here. Getting that
+  ## backwards would make the Darwin check ask for a file called
+  ## ``@rpath/libzstd.1.dylib`` and fail a package that is correct.
+  case targetOs
+  of toLinux:
+    @["libzstd.so.1", "libclingo.so"]
+  of toDarwin:
+    @["libzstd.1.dylib", "libclingo.dylib"]
+  of toWindows:
+    # Recorded for completeness and inert in practice: Windows stages no
+    # closure edge (``stageInstallTree`` gates it on ``toLinux``), so
+    # nothing consumes this arm today. It is written out rather than
+    # left as an empty seq because an empty seq would read as "reprobuild
+    # dlopens nothing on Windows", which is false.
+    @["libzstd.dll", "clingo.dll"]

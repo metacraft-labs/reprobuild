@@ -26,9 +26,13 @@
  * the site table and the capability cache, so it can be included from the agent
  * translation unit and, separately, from the unit-test probe shim.
  *
- * Scope note: HLX-M0 is single threaded by construction. Nothing here is safe
- * for a multithreaded target yet — thread quiescence and the proof of tier-1
- * publication under concurrent execution are HLX-M4.
+ * Scope note, updated by HLX-M4. HLX-M0 was single threaded by construction.
+ * This header now also carries tier-2 quiescence (`repro_hcr_linux_quiesce.h`,
+ * design §6.2/§6.3) and the `HLX-OQ-3` fallback. What HLX-M4 did NOT do is make
+ * bare tier-1 publication safe for a multithreaded target: design §6.1 point 4
+ * — a thread whose PC is inside the published window — is a hazard no aligned
+ * store and no membarrier can address, and the provider's only remedy for it is
+ * the tier-2 IP adjustment below. A multithreaded target must therefore quiesce.
  */
 
 #ifndef REPRO_HCR_LINUX_X86_64_H
@@ -37,6 +41,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+#include "repro_hcr_mcr_bridge.h"
 
 /* ---------------------------------------------------------------------------
  * Refusal vocabulary. Every refusal cause is distinct and named; §4.3 forbids
@@ -57,7 +63,31 @@ enum {
   REPRO_HCR_LX_REFUSED_TEXT_PROTECTION_FAILED = 10,
   REPRO_HCR_LX_REFUSED_PATCH_MEMORY_PROTECTION_FAILED = 11,
   REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT = 12,
-  REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL = 13
+  REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL = 13,
+  /* HLX-M7, design §10.1: MCR's own patchers had already claimed bytes in the
+   * window this provider was about to publish into. Distinct from every
+   * refusal above because it is not a property of the target's code — the same
+   * function is patchable in the same process a moment earlier or later — and
+   * because §10.1 requires it be REPORTED to the client as
+   * `skippedFunctions[].reason == "claimed-by-recorder"` rather than folded
+   * into a whole-patch failure. */
+  REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER = 14,
+  /* HLX-M4, closing `HLX-OQ-3`. The host cannot give us a
+   * context-synchronizing event on every core running the process, AND the
+   * caller is not holding quiescence — under which the signal round trip
+   * supplies one instead. Publishing anyway is the behaviour this refusal
+   * replaces: before HLX-M4 the provider recorded `membarrier_result = -1` and
+   * stored into live text regardless, which is precisely the "executing
+   * processor performs no serializing operation" case Intel SDM §8.1.3/§9.3
+   * leaves undefined. */
+  REPRO_HCR_LX_REFUSED_SYNC_CORE_UNAVAILABLE = 15,
+  /* HLX-M4, design §6.3. Quiescence was required (the target has more than one
+   * thread) and could not be reached inside the bounded wait. The defined
+   * outcome is: release everyone who parked, write NOTHING, and report naming
+   * the unresponsive tids. Distinct from every refusal above because it is a
+   * property of the RUNNING PROCESS at this instant, not of the target's code
+   * or the host — the same function is patchable a moment later. */
+  REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED = 16
 };
 
 static const char *repro_hcr_lx_refusal_name(int code) {
@@ -90,6 +120,12 @@ static const char *repro_hcr_lx_refusal_name(int code) {
       return "invalid-argument";
     case REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL:
       return "site-table-full";
+    case REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER:
+      return "claimed-by-recorder";
+    case REPRO_HCR_LX_REFUSED_SYNC_CORE_UNAVAILABLE:
+      return "sync-core-unavailable";
+    case REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED:
+      return "quiescence-failed";
     default:
       return "unknown-refusal";
   }
@@ -133,6 +169,15 @@ static long repro_hcr_lx_raw_membarrier(int command, unsigned int flags) {
   return repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_MEMBARRIER, (long)command,
                                (long)flags, 0);
 }
+
+/* Tier-2 quiescence (design §6.2/§6.3, HLX-M4). Included here rather than by
+ * the agent translation unit because `repro_hcr_lx_apply_direct_patch_at` below
+ * consults `repro_hcr_lx_quiesce_is_held()` for the `HLX-OQ-3` fallback: with no
+ * `SYNC_CORE` available, the signal round trip is what supplies the
+ * context-synchronizing event, so whether quiescence is held decides between
+ * publishing and refusing. The header reuses `repro_hcr_lx_syscall3` above and
+ * is not standalone. */
+#include "repro_hcr_linux_quiesce.h"
 
 /* ---------------------------------------------------------------------------
  * x86_64 NOP decoding.
@@ -447,6 +492,15 @@ typedef struct repro_hcr_lx_capabilities {
   int membarrier_sync_core;        /* 1 when SYNC_CORE is registered and usable */
   long membarrier_query_mask;
   long membarrier_register_result;
+  /* HLX-M4. 1 when the host permits a transient RW|EXEC mapping of live text.
+   * This is NOT a nicety. The publication's writable step is an `mprotect` over
+   * the page the target is EXECUTING FROM; dropping `PROT_EXEC` for the
+   * duration means any thread whose PC is anywhere in that 4 KiB page — not
+   * just in the 8-byte window — takes an instruction-fetch fault and dies.
+   * With `PROT_EXEC` retained the page stays runnable across the store, and the
+   * only remaining concurrency hazard is design §6.1 point 4. */
+  int text_rwx_transition;
+  long protection_probe_rwx_result;
   int text_left_writable;          /* set if a PROT_EXEC restore ever failed */
 } repro_hcr_lx_capabilities;
 
@@ -505,12 +559,75 @@ static void repro_hcr_lx_probe_capabilities(void) {
        repro_hcr_lx_caps.protection_probe_rx_result == 0)
           ? 1
           : 0;
+  /*
+   * Probed on the same provider-owned scratch page, for the same reason the
+   * RW/RX round trip is: a host that refuses RWX must be discovered at agent
+   * start, not in the middle of a publication. MDWE and some SELinux policies
+   * refuse it; on such a host the provider falls back to the plain RW
+   * transient, which drops `PROT_EXEC` for the whole 4 KiB page and so faults
+   * ANY thread whose PC is anywhere in it.
+   *
+   * WHERE THAT COUPLING IS ACTUALLY ENFORCED, stated precisely because this
+   * comment used to claim a check that did not exist ("therefore REQUIRES
+   * quiescence"): there is no `text_rwx_transition`-conditioned refusal in
+   * this file. The property holds for the production path only because
+   * `repro_hcr_apply_direct_patch` quiesces whenever the target has more than
+   * one thread, independently of RWX. A caller that reaches
+   * `repro_hcr_lx_apply_direct_patch_at` directly, as the test probe shim
+   * does, gets no such protection on a host that refuses RWX. Recorded as a
+   * known gap rather than asserted as a guarantee; a host that refuses RWX is
+   * needed to gate it and none is available here.
+   */
+  repro_hcr_lx_caps.protection_probe_rwx_result = repro_hcr_lx_raw_mprotect(
+      (uint64_t)(uintptr_t)scratch, page_size,
+      REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE |
+          REPRO_HCR_LX_PROT_EXEC);
+  repro_hcr_lx_caps.text_rwx_transition =
+      repro_hcr_lx_caps.protection_probe_rwx_result == 0 ? 1 : 0;
+  if (repro_hcr_lx_caps.text_rwx_transition) {
+    (void)repro_hcr_lx_raw_mprotect(
+        (uint64_t)(uintptr_t)scratch, page_size,
+        REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_EXEC);
+  }
   repro_hcr_lx_unmap(scratch, page_size);
 }
 
 static const repro_hcr_lx_capabilities *repro_hcr_lx_capability_report(void) {
   repro_hcr_lx_probe_capabilities();
   return &repro_hcr_lx_caps;
+}
+
+/* ---------------------------------------------------------------------------
+ * HLX-M4 levers and counters over the publication's SECOND half.
+ *
+ * Design §6.1's safety argument has two halves — the aligned store and the
+ * `SYNC_CORE` event — and the milestone requires that "the test must be able to
+ * remove the second and observe the difference". These three objects are that
+ * ability, and they are also how a gate proves the event is ISSUED rather than
+ * merely coded for: a membarrier that is never reached looks exactly like one
+ * that always succeeds if nothing counts it.
+ *
+ * `repro_hcr_lx_sync_core_suppressed` is a test-only lever. It does NOT fake
+ * the capability away — `repro_hcr_lx_pretend_sync_core_unavailable` does that,
+ * for the `HLX-OQ-3` refusal arm. The two are separate because they exercise
+ * opposite paths: suppression publishes without the event (to measure whether
+ * the event matters), while pretending it is unavailable must REFUSE to
+ * publish at all. The agent sets neither.
+ * ------------------------------------------------------------------------- */
+
+static int repro_hcr_lx_sync_core_suppressed = 0;
+static int repro_hcr_lx_pretend_sync_core_unavailable = 0;
+static uint64_t repro_hcr_lx_membarrier_issued_count = 0;
+static uint64_t repro_hcr_lx_publication_count = 0;
+
+/* The effective answer to "can this host give us a context-synchronizing event
+ * on every core running the process?". Routed through one function so the
+ * refusal below and the issuance after the store cannot disagree. */
+static int repro_hcr_lx_sync_core_available(void) {
+  if (repro_hcr_lx_pretend_sync_core_unavailable) {
+    return 0;
+  }
+  return repro_hcr_lx_capability_report()->membarrier_sync_core;
 }
 
 /* ---------------------------------------------------------------------------
@@ -529,11 +646,20 @@ typedef struct repro_hcr_lx_site {
   int used;
   uint64_t entry_address;
   uint64_t sled_address;
+  uint64_t sled_end;       /* first byte after the decoded NOP run; retained so
+                            * a re-patch can still walk sled boundaries for the
+                            * tier-2 IP adjustment (HLX-M4) */
   uint64_t window_address;
   uint64_t original_word;  /* rollback target; always the ORIGINAL, never the
                             * previous generation (design §4.5) */
   uint64_t published_word;
   uint64_t generation;
+  /* HLX-M7 §10.1: the claim on this window is taken once, at the FIRST
+   * publication, and RETAINED across re-patch generations. Re-claiming on
+   * generation 2 would be refused by our own live claim, and releasing between
+   * generations would open a window in which MCR could take the bytes out from
+   * under a site this provider is still publishing into. */
+  int claimed;
 } repro_hcr_lx_site;
 
 static repro_hcr_lx_site repro_hcr_lx_sites[REPRO_HCR_LX_MAX_SITES];
@@ -653,6 +779,22 @@ typedef struct repro_hcr_lx_patch_report {
   uint64_t generation;
   long membarrier_result;
   int text_left_writable;
+  /* HLX-M7 §10.1: which patcher held the contested bytes when a claim was
+   * refused. Carried so the `skippedFunctions` entry can name the holder
+   * instead of saying only that something else got there first. */
+  unsigned claim_holder;
+  int claim_held;   /* 1 once this provider owns the window's claim */
+  /* HLX-M4. `quiesced` records whether this publication was tier 2;
+   * `ip_adjustments` is how many parked threads were standing INSIDE the
+   * window and had their resume PC nudged, which is the number that proves the
+   * §6.2 step 6 mechanism engaged rather than silently no-opped;
+   * `resume_target` is where they were nudged to. */
+  int quiesced;
+  int32_t ip_adjustments;
+  uint64_t resume_target;
+  /* 1 when the writable transient retained `PROT_EXEC`, so live threads
+   * executing elsewhere in the same text page kept running across the store. */
+  int transient_kept_exec;
 } repro_hcr_lx_patch_report;
 
 static repro_hcr_lx_patch_report repro_hcr_lx_last_report;
@@ -692,6 +834,8 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   uint64_t span_start;
   uint64_t span_end;
   int encode_rc;
+  int claimed_here;
+  int transient_protection;
 
   memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
 
@@ -707,6 +851,37 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
      * The provider probed this at agent start and refuses here rather than
      * discovering it after the point of no return. */
     repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_UNSUPPORTED_HOST;
+    return NULL;
+  }
+
+  /*
+   * HLX-OQ-3, resolved in HLX-M4: **always quiesce; refuse if we cannot.**
+   *
+   * The two candidates the design left open were (a) refuse to patch without
+   * quiescence and (b) always quiesce, "where the signal delivery is itself a
+   * context-synchronizing event on every thread". (b) is adopted, with (a) as
+   * its floor, and the two compose into one rule checked here:
+   *
+   *   publish only if SYNC_CORE is available, OR quiescence is held.
+   *
+   * Why quiescence substitutes. Every thread that could be executing this text
+   * has entered the kernel to take the `SIGRTMIN+n` and will return through
+   * `IRET` (x86_64) or `ERET` (aarch64), both of which are architecturally
+   * context-synchronizing — so the pipeline half of §4.4 is discharged by the
+   * handshake itself, for exactly the set of threads that matters. A thread
+   * created after the handshake cannot have prefetched the old bytes.
+   *
+   * Why the floor is a refusal and not "publish anyway". Before this milestone
+   * the code recorded `membarrier_result = -1` and stored regardless, which is
+   * the case Intel SDM §8.1.3/§9.3 leaves undefined, reported as success. The
+   * refusal is named and reaches the coordinator; it is never a silent no-op.
+   *
+   * Checked HERE, before the claim and before any mapping, so the refusal costs
+   * nothing and cannot leave state behind.
+   */
+  if (!repro_hcr_lx_sync_core_available() && !repro_hcr_lx_quiesce_is_held()) {
+    repro_hcr_lx_last_report.refusal =
+        REPRO_HCR_LX_REFUSED_SYNC_CORE_UNAVAILABLE;
     return NULL;
   }
 
@@ -730,6 +905,8 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
     }
     memset(&plan, 0, sizeof(plan));
     plan.sled_address = site->sled_address;
+    plan.sled_end = site->sled_end;
+    plan.sled_length = (uint32_t)(site->sled_end - site->sled_address);
     plan.window_address = window_address;
     plan.window_offset = (uint32_t)(window_address - site->sled_address);
     plan.refusal = REPRO_HCR_LX_OK;
@@ -760,6 +937,51 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   repro_hcr_lx_last_report.window_offset = plan.window_offset;
   repro_hcr_lx_last_report.original_word = original_word;
 
+  /* -------------------------------------------------------------------------
+   * ARBITRATION (design §10.1). Claim the published window BEFORE anything
+   * that could write to it.
+   *
+   * MCR's patchers claim through the same map, so a `-2` here means the
+   * recorder already owns bytes this provider was about to store into — the
+   * one situation in which publishing anyway reproduces task #422 in reverse.
+   * The refusal is NAMED (`claimed-by-recorder`) and carries the holder out, so
+   * the agent reports it as a skipped function rather than a mystery.
+   *
+   * `ct_claimed_guest_text_claim` is weak: when `libct_interpose` is not in the
+   * process it is NULL, which means there is no other patcher of this text and
+   * therefore no claim to conflict with. That is not the "silent skip" the
+   * map's rule forbids — the rule is about refusing to write over bytes ANOTHER
+   * PATCHER holds, and with no other patcher present there are none.
+   *
+   * The claim is taken only for a FRESH site. A re-patch is publishing into a
+   * window this provider already owns; re-claiming would be refused by its own
+   * live claim (§4.5).
+   * ---------------------------------------------------------------------- */
+  claimed_here = 0;
+  if (fresh_site && ct_claimed_guest_text_claim != NULL) {
+    unsigned holder = 0;
+    int claim_rc = ct_claimed_guest_text_claim(
+        (uintptr_t)window_address, (size_t)REPRO_HCR_LX_WINDOW_BYTES,
+        REPRO_HCR_CGT_OWNER_REPRO_HCR, &holder);
+    if (claim_rc == -2) {
+      repro_hcr_lx_last_report.claim_holder = holder;
+      repro_hcr_lx_last_report.refusal =
+          REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER;
+      return NULL;
+    }
+    if (claim_rc != 0) {
+      /* -1 is a degenerate range, which cannot happen for an 8-byte window at
+       * a non-wrapping address; treat it as an argument error rather than
+       * proceeding unclaimed. */
+      repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+      return NULL;
+    }
+    claimed_here = 1;
+    repro_hcr_lx_last_report.claim_held = 1;
+  } else if (!fresh_site) {
+    repro_hcr_lx_last_report.claim_held = site->claimed;
+  }
+
   /* The patch body is provider-owned memory no other thread can reach until the
    * publishing store makes it reachable. */
   if (patch_len < sizeof(repro_hcr_lx_endbr64) ||
@@ -769,6 +991,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   }
   body_len = body_prefix + patch_len;
   if (body_len > page_size) {
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
     return NULL;
   }
@@ -776,6 +1007,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   patch_page =
       (uint8_t *)repro_hcr_lx_map_patch_page_near(window_address, page_size);
   if (patch_page == NULL) {
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_NO_PATCH_MEMORY;
     return NULL;
   }
@@ -791,6 +1031,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
                                 REPRO_HCR_LX_PROT_READ |
                                     REPRO_HCR_LX_PROT_EXEC) != 0) {
     repro_hcr_lx_unmap(patch_page, page_size);
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal =
         REPRO_HCR_LX_REFUSED_PATCH_MEMORY_PROTECTION_FAILED;
     return NULL;
@@ -801,6 +1050,15 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
       repro_hcr_lx_encode_jmp_rel32(window_address, dispatch_address, jmp_bytes);
   if (encode_rc != REPRO_HCR_LX_OK) {
     repro_hcr_lx_unmap(patch_page, page_size);
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal = encode_rc;
     return NULL;
   }
@@ -810,10 +1068,20 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
     site = repro_hcr_lx_claim_site(entry_address);
     if (site == NULL) {
       repro_hcr_lx_unmap(patch_page, page_size);
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
       repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL;
       return NULL;
     }
     site->sled_address = plan.sled_address;
+    site->sled_end = plan.sled_end;
     site->window_address = window_address;
     site->original_word = original_word;
   }
@@ -823,15 +1091,43 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
                  window_address + REPRO_HCR_LX_WINDOW_BYTES - 1, page_size) +
              (uint64_t)page_size;
 
-  /* Everything above this line is reversible without touching target memory.
-   * Below it, exactly one store lands in live text. */
+  /*
+   * Everything above this line is reversible without touching target memory.
+   * Below it, exactly one store lands in live text.
+   *
+   * THE TRANSIENT KEEPS `PROT_EXEC` WHEN THE HOST ALLOWS IT, and HLX-M4 found
+   * that the hard way. `mprotect(RW)` over a live text page removes the NX
+   * clearance for the WHOLE PAGE, not for the eight bytes being written, so
+   * every thread whose PC is anywhere in those 4 KiB faults on its next
+   * instruction fetch. Against a hot multithreaded target that is a far more
+   * likely killer than the in-window hazard §6.1 point 4 describes, and it is
+   * invisible to a single-threaded gate. Retaining `PROT_EXEC` across the store
+   * removes it entirely.
+   *
+   * `text_left_writable` is not the relevant risk here: the restore below puts
+   * the page back to RX, and the window is 8-byte aligned so the store itself
+   * is unaffected by the protection bits beyond being permitted at all.
+   */
+  transient_protection = REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE;
+  if (caps->text_rwx_transition) {
+    transient_protection |= REPRO_HCR_LX_PROT_EXEC;
+  }
+  repro_hcr_lx_last_report.transient_kept_exec = caps->text_rwx_transition;
   if (repro_hcr_lx_raw_mprotect(span_start, (size_t)(span_end - span_start),
-                                REPRO_HCR_LX_PROT_READ |
-                                    REPRO_HCR_LX_PROT_WRITE) != 0) {
+                                transient_protection) != 0) {
     repro_hcr_lx_unmap(patch_page, page_size);
     if (fresh_site) {
       site->used = 0;
     }
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
     repro_hcr_lx_last_report.refusal =
         REPRO_HCR_LX_REFUSED_TEXT_PROTECTION_FAILED;
     return NULL;
@@ -860,11 +1156,82 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
    *      forces a context-synchronizing event on every core running this
    *      process.
    *
-   * HLX-M0 is single threaded, so half 2 cannot be exercised here; HLX-M4 owns
-   * proving it and owns the fallback when SYNC_CORE is unavailable (HLX-OQ-3).
+   *   3. A thread whose PC is INSIDE the window is the hazard neither half
+   *      addresses, and it is real: the sled is executable instructions, so an
+   *      interrupt can leave a thread at window byte 1..7, and on resume it
+   *      executes the tail of this very `E9 rel32` as though it were an
+   *      instruction (design §6.1 point 4). Half 1 does not help — the bytes
+   *      are unambiguous and still wrong for that resume point — and neither
+   *      does half 2. Only tier 2 can fix it, by reading the parked PC out of
+   *      a `ucontext_t` and nudging it past the window, which is what the
+   *      `repro_hcr_lx_quiesce_adjust_window` call below does. Tier 1 has no
+   *      such capability, which is why HLX-M4 resolves `HLX-OQ-2` by requiring
+   *      tier 2 for any target with more than one thread.
+   *
+   * HLX-M0 was single threaded, so halves 2 and 3 could not be exercised there;
+   * HLX-M4 owns them, owns the `HLX-OQ-3` fallback checked above, and owns the
+   * measurement behind the tier rule.
    */
   *(volatile uint64_t *)(uintptr_t)window_address = published_word;
   __atomic_signal_fence(__ATOMIC_SEQ_CST);
+  repro_hcr_lx_publication_count += 1;
+
+  /*
+   * Tier-2 IP adjustment (§6.2 step 6), applied while every thread is still
+   * parked. A thread standing at window byte 1..7 has its resume PC moved to
+   * the first instruction boundary at or after the window's end, so it falls
+   * through the remaining sled into the retained old body instead of decoding
+   * our `rel32` as opcodes. Under tier 1 `quiesce_is_held()` is false and this
+   * is a no-op — which is the hazard, not an oversight.
+   */
+  if (repro_hcr_lx_quiesce_is_held()) {
+    uint64_t window_end = window_address + (uint64_t)REPRO_HCR_LX_WINDOW_BYTES;
+    /*
+     * Where to nudge to. `Trampoline-Mechanics.md:196` and §6.2 step 6 say
+     * "forward to the first real instruction", which preserves §6.1 point 3 —
+     * an in-flight entry completes in the RETAINED old body. That is only
+     * legal if `window_end` is an instruction boundary of the remaining sled;
+     * it is for GCC's single-byte sled and it is not guaranteed in general, so
+     * it is CHECKED rather than assumed.
+     *
+     * The fallback when it cannot be confirmed is `window_address` itself, not
+     * "leave the PC alone". Resuming at the window's first byte executes the
+     * freshly published `E9 rel32` — a complete, valid instruction at a
+     * boundary the provider itself chose — so the thread takes the new body.
+     * That is a different semantic (this entry gets the new version) and it is
+     * always safe; leaving the PC alone is the one option that is not.
+     */
+    uint64_t resume_target = window_address;
+    /*
+     * Decide it from the window's ORIGINAL bytes, not from live memory: by the
+     * time this runs the store has already landed, so reading the window back
+     * would decode our own `E9` and conclude — wrongly, every time — that
+     * `window_end` is not a boundary. `original_word` is the saved pre-state
+     * (§11.2), and because the window always STARTS at a boundary, its eight
+     * original bytes decoding into whole NOP instructions is exactly the
+     * condition for `window_end` to be one too.
+     */
+    uint8_t original_bytes[REPRO_HCR_LX_WINDOW_BYTES];
+    size_t consumed = 0;
+    memcpy(original_bytes, &original_word, sizeof(original_bytes));
+    while (consumed < REPRO_HCR_LX_WINDOW_BYTES) {
+      size_t len = repro_hcr_lx_nop_length(
+          original_bytes + consumed, REPRO_HCR_LX_WINDOW_BYTES - consumed);
+      if (len == 0) {
+        break;
+      }
+      consumed += len;
+    }
+    if (consumed == REPRO_HCR_LX_WINDOW_BYTES &&
+        window_end < plan.sled_end) {
+      resume_target = window_end;
+    }
+    repro_hcr_lx_last_report.resume_target = resume_target;
+    repro_hcr_lx_last_report.ip_adjustments =
+        repro_hcr_lx_quiesce_adjust_window(window_address, window_end,
+                                           resume_target);
+    repro_hcr_lx_last_report.quiesced = 1;
+  }
 
   if (repro_hcr_lx_raw_mprotect(span_start, (size_t)(span_end - span_start),
                                 REPRO_HCR_LX_PROT_READ |
@@ -877,15 +1244,27 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
     repro_hcr_lx_last_report.text_left_writable = 1;
   }
 
-  if (caps->membarrier_sync_core) {
+  /* Half 2 of the safety argument. The counter is not decoration: it is the
+   * only way a gate can distinguish "the event was issued and returned 0" from
+   * "this branch was never reached", which look identical in a report whose
+   * `membarrier_result` field starts life as 0. */
+  if (repro_hcr_lx_sync_core_available() && !repro_hcr_lx_sync_core_suppressed) {
     repro_hcr_lx_last_report.membarrier_result = repro_hcr_lx_raw_membarrier(
         REPRO_HCR_LX_MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0);
+    repro_hcr_lx_membarrier_issued_count += 1;
   } else {
+    /* Reachable only under quiescence (the refusal above is the other case),
+     * where the handshake's own kernel entry/exit is the context-synchronizing
+     * event, or under the test lever that removes half 2 deliberately. */
     repro_hcr_lx_last_report.membarrier_result = -1;
   }
 
   site->published_word = published_word;
   site->generation += 1;
+  if (claimed_here) {
+    site->claimed = 1;
+  }
+  repro_hcr_lx_last_report.claim_held = site->claimed;
   repro_hcr_lx_last_report.published_word = published_word;
   repro_hcr_lx_last_report.dispatch_address = dispatch_address;
   repro_hcr_lx_last_report.generation = site->generation;

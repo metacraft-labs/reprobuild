@@ -155,6 +155,14 @@ proc catalogNames(doc: JsonNode): seq[string] =
   for entry in doc["tests"]:
     result.add(entry["name"].getStr())
 
+proc catalogFiles(doc: JsonNode): Table[string, string] =
+  ## case name -> the `file` field the binary reports for it. Used to
+  ## ATTRIBUTE a case the ledger does not record to the member source it came
+  ## from; see the extra-case block below for why absence is the wrong test.
+  result = initTable[string, string]()
+  for entry in doc["tests"]:
+    result[entry["name"].getStr()] = entry["file"].getStr()
+
 proc catalogSuites(doc: JsonNode): Table[string, string] =
   ## case name -> the `suite` field the binary reports for it.
   result = initTable[string, string]()
@@ -217,14 +225,59 @@ suite "M4 pure-unit consolidation":
 
       let missing = expected.filterIt(it notin enumerated.toHashSet)
       let extra = enumerated.filterIt(it notin expected.toHashSet)
+
+      # THE LOSS DETECTOR, and it is exact. Every case name the ledger read
+      # out of a member's own standalone binary must still enumerate here.
       check missing.len == 0
       if missing.len > 0:
         checkpoint(bundle["name"].getStr() & " lost " & $missing.len &
           " case(s): " & missing.join(", "))
-      check extra.len == 0
+
+      # EXTRA CASES ARE ATTRIBUTED, NOT FORBIDDEN.
+      #
+      # This used to be `check extra.len == 0`, and that was wrong in a way
+      # only a merge could show. The ledger is a DATED record of what each
+      # member enumerated before it was folded in; it is never rewritten,
+      # because the standalone binaries it describes no longer exist. A live
+      # repository, meanwhile, keeps adding cases to those member sources —
+      # and every such addition made this equality red, permanently, for a
+      # reason the author of the addition did not cause and could not fix
+      # without rewriting a measurement record.
+      #
+      # That is not hypothetical. Merging `origin/dev` into this batch turned
+      # it red: three unrelated packaging commits added seven `test` blocks to
+      # `libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim`,
+      # a member of bundle_repro_dsl_stdlib_catalogs_pure_unit, and the bundle
+      # enumerated 112 against a recorded 110.
+      #
+      # What `extra.len == 0` was actually buying is kept in full: it caught a
+      # member that was added to the generator's bundle table and never
+      # written into the ledger, whose cases would then be compiled, run, and
+      # vouched for by nobody. So the test is now attribution rather than
+      # absence — every extra case must come from a FILE this bundle's ledger
+      # entry lists as a member. A case added to a known member is the
+      # repository working; a case arriving from a file no ledger names is the
+      # defect, and it still goes red here.
+      var memberFiles = initHashSet[string]()
+      for member in bundle["members"]:
+        memberFiles.incl(extractFilename(member["source"].getStr()))
+      let byName = catalogFiles(doc)
+      var unattributed: seq[string] = @[]
+      for name in extra:
+        let file = byName.getOrDefault(name, "")
+        if file notin memberFiles:
+          unattributed.add(name & " (from `" & file & "`)")
+      check unattributed.len == 0
+      if unattributed.len > 0:
+        checkpoint(bundle["name"].getStr() & " enumerates " &
+          $unattributed.len & " case(s) from a file no ledger lists as one " &
+          "of its members: " & unattributed.join(", ") & ". A member added " &
+          "to `PureUnitBundles` in " & GeneratorPath & " and not written " &
+          "into a ledger is a member whose cases nobody vouched for.")
       if extra.len > 0:
-        checkpoint(bundle["name"].getStr() & " invented " & $extra.len &
-          " case(s): " & extra.join(", "))
+        checkpoint(bundle["name"].getStr() & " enumerates " & $extra.len &
+          " case(s) added to its members since the batch landed; all are " &
+          "attributed to files the ledger names.")
 
       for name in expected:
         let rc = runOne(binary, name)
@@ -331,10 +384,16 @@ suite "M4 pure-unit consolidation":
         let doc = listJson(bundleBinary(bundle))
         let enumerated = catalogNames(doc).len
         let recorded = ledgerMemberNames(bundle).len
-        check enumerated == recorded
-        if enumerated != recorded:
+        # A FALL IS A LOSS; A RISE IS THE REPOSITORY WORKING. Exact equality
+        # here had the same defect as `extra.len == 0` above and for the same
+        # reason — see that block. The loss this arm exists to catch is caught
+        # by name, exactly, by `missing.len == 0` in case 1; this one holds the
+        # count so a loss cannot hide behind a simultaneous addition.
+        check enumerated >= recorded
+        if enumerated < recorded:
           checkpoint(name & ": binary enumerates " & $enumerated &
-            " cases, ledger records " & $recorded & " from its members")
+            " cases, fewer than the " & $recorded &
+            " the ledger records from its members")
         # THE SECOND PRODUCER, compared to the thing it can actually be
         # compared to.
         #
@@ -369,13 +428,19 @@ suite "M4 pure-unit consolidation":
             break
           staticFromMembers += member["staticCaseCountAtBase"].getInt()
         if membersCarryStatic:
-          check staticTotal == staticFromMembers
-          if staticTotal != staticFromMembers:
+          # `>=`, for the same reason as the two arms above: the right-hand
+          # side is a DATED sum and the member sources keep growing. A fall
+          # below it is a `test` block that left a member and is the thing
+          # this producer exists to catch; a rise is a `test` block someone
+          # added, which is not a defect and must not redden this file.
+          check staticTotal >= staticFromMembers
+          if staticTotal < staticFromMembers:
             checkpoint(name & ": the static source scan counts " &
-              $staticTotal & " cases in the bundle where its members summed " &
-              $staticFromMembers & " when the batch landed. The scan is one " &
-              "producer and the binary catalog is the other; this side says " &
-              "a member's source lost or gained a `test` block.")
+              $staticTotal & " cases in the bundle, FEWER than the " &
+              $staticFromMembers & " its members summed when the batch " &
+              "landed. The scan is one producer and the binary catalog is " &
+              "the other; this side says a member's source lost a `test` " &
+              "block.")
         else:
           # A ledger that predates `staticCaseCountAtBase` keeps the assertion
           # it shipped with, unchanged and unrelaxed. It happens to hold for
@@ -427,10 +492,20 @@ suite "M4 pure-unit consolidation":
           " removed and " & $added & " added")
 
     check removedBinaries >= 1
-    check casesAfter == casesBefore
+    # `>=` for the third time and the last: `casesBefore` sums the ledgers'
+    # dated per-member records and `casesAfter` sums what the bundles
+    # enumerate today. Consolidation itself contributes zero to the
+    # difference — every case that moved is still there, which is what
+    # `missing.len == 0` asserts by name — so the only way this total can
+    # move is a member source gaining or losing cases afterwards.
+    check casesAfter >= casesBefore
     checkpoint("removed " & $removedBinaries & " binaries across " &
       $ledgers.len & " batch ledger(s) " & $removedByLedger & "; cases " &
-      $casesBefore & " -> " & $casesAfter)
+      $casesBefore & " -> " & $casesAfter &
+      (if casesAfter > casesBefore:
+         " (+" & $(casesAfter - casesBefore) &
+           " added to member sources since the batches landed)"
+       else: ""))
 
     # DELIBERATELY NOT `after == declaredSources.len`.
     #

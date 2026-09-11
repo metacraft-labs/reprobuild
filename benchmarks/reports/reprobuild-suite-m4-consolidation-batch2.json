@@ -1205,5 +1205,269 @@
    "Any check of whether the tree still behaves after rebasing onto a moved origin/dev. This batch is based on 4a9a3070b; origin/dev had advanced to 251ae56b6 by hand-off. The suite-wide before/after pair (1512 -> 1494) is a dated fact about 4a9a3070b. A rebase that adds tests will need repro_tests.nim, the static-case-count TSV and the source inventory regenerated; the verification test's live invariant (`declaredSources.len >= newest ledger's after`) tolerates that in the growing direction."
   ],
   "unrelatedFailuresObserved": "None. No test outside this batch's scope was executed, so this batch contributes no independent observation of the known-red set on dev."
+ },
+ "reviewerVerification": {
+  "who": "Independent review of batch 2 before it was opened as a PR. Nothing here is copied from the batch's own run; every figure comes from binaries this review compiled from scratch.",
+  "tree": "The MERGED tree: this branch merged with origin/dev 11d9838ff. That is deliberately not the tree the batch measured (4a9a3070b) \u2014 the batch's cost and footprint figures are dated facts about its own base and were not re-measured. What was re-measured is every claim that has to stay true on the tree that will land.",
+  "generatedArtifactsResolvedByRegeneration": {
+   "how": "repro_tests.nim, scripts/reprobuild-suite-static-case-counts.tsv and benchmarks/reports/reprobuild-suite-m0-inventory-sources.json all conflicted in the merge. Each was regenerated from the merged tree rather than resolved to a side.",
+   "proofItIsARegenerationAndNotASideTake": "The TSV and the source inventory were each regenerated TWICE, once starting from `--ours` and once from `--theirs`, and the two outputs are byte-identical (TSV md5 bde35448fba0d9e35db22f2ff8bec23b). repro_tests.nim is written whole by generate_test_edges.nim, which reported 1525 Nim tests + 8 Python tests on the merged tree.",
+   "gatesAfterRegeneration": "--check-static-case-counts 0; --check-inventory 0."
+  },
+  "identityLevelCatalogParity": {
+   "method": "All 22 member sources AND all 4 bundles compiled from scratch on the merged tree (26 binaries, every compile exit 0). Each member's own --list-json catalog was compared to the bundle's, matched on (suite, test) IDENTITY rather than by count, field by field over all 13 protocol fields the protocol emits.",
+   "result": "Exact in both directions on all four bundles: 0 missing, 0 extra. ONLY bodyHash moves. Every other field \u2014 file, line, column, name, suite, test, group, kind, tags, xfail, threadsRequired, deterministic \u2014 is identical for every case. This confirms the batch's claim at identity level.",
+   "denominatorNote": "bodyHash moves 24/24, 45/63, 16/35, 99/112. The batch recorded 99/110 for the last; the 112 is the merged tree, where origin/dev added cases to t_packaging_wrapper_vars_match_flake.nim. The numerators are identical.",
+   "perBundle": {
+    "bundle_repro_lock_files_cli_pure_unit": {
+     "enumerated": 24,
+     "membersSummedLive": 24,
+     "catalogMissing": 0,
+     "catalogExtra": 0,
+     "protocolFieldsCompared": [
+      "bodyHash",
+      "column",
+      "deterministic",
+      "file",
+      "group",
+      "kind",
+      "line",
+      "name",
+      "suite",
+      "tags",
+      "test",
+      "threadsRequired",
+      "xfail"
+     ],
+     "protocolFieldsMoved": {
+      "bodyHash": 24
+     },
+     "bundleExitCodeRunWhole": 0,
+     "bundlePerCaseRuns": 24,
+     "bundlePerCaseNonZero": 0
+    },
+    "bundle_repro_core_pure_unit": {
+     "enumerated": 63,
+     "membersSummedLive": 63,
+     "catalogMissing": 0,
+     "catalogExtra": 0,
+     "protocolFieldsCompared": [
+      "bodyHash",
+      "column",
+      "deterministic",
+      "file",
+      "group",
+      "kind",
+      "line",
+      "name",
+      "suite",
+      "tags",
+      "test",
+      "threadsRequired",
+      "xfail"
+     ],
+     "protocolFieldsMoved": {
+      "bodyHash": 45
+     },
+     "bundleExitCodeRunWhole": 0,
+     "bundlePerCaseRuns": 63,
+     "bundlePerCaseNonZero": 0
+    },
+    "bundle_repro_core_dep_scanners_pure_unit": {
+     "enumerated": 35,
+     "membersSummedLive": 35,
+     "catalogMissing": 0,
+     "catalogExtra": 0,
+     "protocolFieldsCompared": [
+      "bodyHash",
+      "column",
+      "deterministic",
+      "file",
+      "group",
+      "kind",
+      "line",
+      "name",
+      "suite",
+      "tags",
+      "test",
+      "threadsRequired",
+      "xfail"
+     ],
+     "protocolFieldsMoved": {
+      "bodyHash": 16
+     },
+     "bundleExitCodeRunWhole": 0,
+     "bundlePerCaseRuns": 35,
+     "bundlePerCaseNonZero": 0
+    },
+    "bundle_repro_dsl_stdlib_catalogs_pure_unit": {
+     "enumerated": 112,
+     "membersSummedLive": 112,
+     "catalogMissing": 0,
+     "catalogExtra": 0,
+     "protocolFieldsCompared": [
+      "bodyHash",
+      "column",
+      "deterministic",
+      "file",
+      "group",
+      "kind",
+      "line",
+      "name",
+      "suite",
+      "tags",
+      "test",
+      "threadsRequired",
+      "xfail"
+     ],
+     "protocolFieldsMoved": {
+      "bodyHash": 99
+     },
+     "bundleExitCodeRunWhole": 0,
+     "bundlePerCaseRuns": 112,
+     "bundlePerCaseNonZero": 0
+    }
+   }
+  },
+  "redOnDevRecheck": {
+   "what": "The batch's rule: every member must be shown clean STANDALONE before it is folded in, so 'the cases still pass' is a comparison and not an assertion.",
+   "result": "All 22 members compiled standalone from scratch on the merged tree, all 22 exit 0 run whole, and 234 per-case `--run` executions every one exit 0. Bundles likewise: 4/4 exit 0 run whole, 234 per-case executions every one exit 0.",
+   "countNote": "234, not the batch's 232, for the same reason as above: origin/dev added two Linux-visible cases to a member."
+  },
+  "checkNimSourcesGap": {
+   "status": "CLOSED. This is the step batch 2 declared not-executed and handed to a reviewer.",
+   "exitCode": 0,
+   "errors": 0,
+   "howTheExitCodeWasRead": "Written to its own file by the runner, never through a pipe: `NIMCHECK_EXIT=0`.",
+   "scopeCorrection": "Batch 2 described this step as 'a nim check sweep over all 82 libraries and 9 app entrypoints' and reported progress as '31 of 82'. Neither denominator is what the script iterates. check_nim_sources.sh reads libs/libraries.txt (35 entries; there are 80 directories under libs/) and apps/entrypoints.txt (12 on the merged tree, 11 at the batch's base). The sweep is 47 projects, and every one of the 47 reported SuccessX with zero Error: lines. The mis-stated denominator also under-reported the batch's own progress: '31 of 82' was 31 of 35 libraries, nearly through the library half rather than barely into it."
+  },
+  "defectFoundAndFixedAtReview": {
+   "what": "The verification test pinned the bundles to the ledger with `==` on case counts and on the extra-case set. The ledger is a DATED record that is never rewritten, so the first time anyone adds a case to a consolidated member source the file goes red permanently, for a reason the author of the addition did not cause and cannot fix without falsifying a measurement.",
+   "itWasNotHypothetical": "Merging origin/dev turned it red: exit 1 with four failed assertions (extra.len == 0; enumerated == recorded; staticTotal == staticFromMembers; casesAfter == casesBefore). Three unrelated packaging commits (ea73d993b, b3d6117d0, 937cd66ad) had added seven `test` blocks to libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim, a member of bundle_repro_dsl_stdlib_catalogs_pure_unit. Fourteen commits was all it took.",
+   "fix": "missing.len == 0 is UNCHANGED and exact \u2014 it is the loss detector and it works by name. `extra.len == 0` becomes attribution: every extra case must come from a `file` the bundle's ledger entry lists as a member, which keeps the power that check actually had (a member added to PureUnitBundles and written into no ledger cannot pass) while tolerating a case added to a known member. The three count comparisons become >=: a fall is a loss and stays red, a rise is the repository working.",
+   "whyThisIsNotAWeakening": "Every loss is still caught, and by name rather than by count. The mutation campaign below re-runs on the merged tree and shows it: M1 (a deleted case) red, M2-static (deleted in source, table regenerated, binary stale) red on the static arm alone, M3 (a renamed suite at unchanged count) red on cases 1 and 3 with case 2 green, M-attrib (a member in the generator that no ledger names) red on the attribution check. M-grow is the control that makes the fix meaningful rather than merely quiet: a case ADDED to a member, bundle rebuilt, static table regenerated \u2014 green."
+  },
+  "mutationsRerunOnTheMergedTree": {
+   "caseOrder": [
+    "test_consolidated_pure_unit_cases_list_individually",
+    "test_consolidation_reduces_binary_footprint",
+    "test_consolidation_preserves_selection_names"
+   ],
+   "harness": "Byte snapshot of exactly the 12 files any mutation touches, restored and compared back after every run; the final restore was verified exact and the baseline re-run green afterwards.",
+   "runs": [
+    {
+     "exit": 0,
+     "cases": [
+      "OK",
+      "OK",
+      "OK"
+     ],
+     "bundleEnumerated": 24,
+     "mutation": "baseline"
+    },
+    {
+     "exit": 0,
+     "cases": [
+      "OK",
+      "OK",
+      "OK"
+     ],
+     "bundleEnumerated": 25,
+     "expect": "all OK -- growth is not a defect",
+     "mutation": "M-grow"
+    },
+    {
+     "exit": 1,
+     "cases": [
+      "FAILED",
+      "FAILED",
+      "FAILED"
+     ],
+     "bundleEnumerated": 23,
+     "expect": "red -- a case was lost",
+     "mutation": "M1"
+    },
+    {
+     "exit": 1,
+     "cases": [
+      "FAILED",
+      "OK",
+      "FAILED"
+     ],
+     "bundleEnumerated": 24,
+     "expect": "cases 1+3 red, case 2 GREEN -- count unchanged",
+     "mutation": "M3"
+    },
+    {
+     "exit": 1,
+     "cases": [
+      "FAILED",
+      "OK",
+      "OK"
+     ],
+     "bundleEnumerated": 29,
+     "generatorExit": 0,
+     "expect": "case 1 red -- cases from a file no ledger names",
+     "mutation": "M-attrib"
+    },
+    {
+     "members": 25,
+     "generatorExit": 1,
+     "expected": 1,
+     "message": [
+      "generate_test_edges: pure-unit bundle limits violated:",
+      "bundle_repro_dsl_stdlib_catalogs_pure_unit: 25 members exceeds MaxBundleMembers=24"
+     ],
+     "mutation": "M5-25"
+    },
+    {
+     "members": 24,
+     "generatorExit": 0,
+     "expected": 0,
+     "message": [],
+     "mutation": "M5-24"
+    },
+    {
+     "exit": 0,
+     "cases": [
+      "OK",
+      "OK",
+      "OK"
+     ],
+     "mutation": "baselineAfter"
+    },
+    {
+     "mutation": "M2-static (FIRST ATTEMPT \u2014 VACUOUS, recorded not discarded)",
+     "what": "wrapped the target `test` block in `when false:`, regenerated the static table, did not rebuild the bundle",
+     "exit": 0,
+     "cases": [
+      "OK",
+      "OK",
+      "OK"
+     ],
+     "whyItProvedNothing": "The scanner sums every when/else branch, so `when false:` does not move it: the bundle's static count stayed at 24, identical to the baseline 24. The instrument never moved, so the green verdict said nothing about the arm it was meant to exercise. It is recorded here because a mutation that cannot fail looks exactly like a gate that cannot fail, and the difference has to be on paper."
+    },
+    {
+     "mutation": "M2-static (REAL)",
+     "what": "deleted the `test` block's lines from the member source and regenerated the static table, leaving the bundle binary STALE",
+     "instrumentMoved": true,
+     "bundleStaticBefore": 24,
+     "bundleStaticAfter": 19,
+     "staleBinaryStillEnumerates": 24,
+     "exit": 1,
+     "cases": [
+      "OK",
+      "FAILED",
+      "OK"
+     ],
+     "reads": "ISOLATES THE STATIC ARM. The stale binary still enumerates 24 against a ledger recording 24, so cases 1 and 3 cannot see the deletion and stay green; the scanner's count of the bundle fell to 19, below the ledger's per-member sum, and case 2 alone goes red. Note the deletion was truncating rather than surgical \u2014 it removed the block's first four lines, which is why the scanner's count fell by five rather than one and why the member would no longer compile. Neither affects what the run establishes: the arm is isolated, and it fires on a FALL."
+    }
+   ]
+  },
+  "notExecutedByTheReviewEither": [
+   "THE FULL TEST SUITE. `just test` was not run by the review either. The host carried load 130-330 from concurrent sessions throughout and a full suite run was not affordable; this is stated rather than quietly omitted.",
+   "THE GRAPH-DRIVEN BUILD. The bundles were compiled with direct `nim c` here too. That the four test edges execute correctly under `repro build` is still not established.",
+   "The remaining nine `just lint` steps were re-run by the review and all exited 0 (check_vacuous_test_cases.py, check_test_body_helper_compilation.py, check_ambient_execution.sh, check_shell_command_strings.sh and --self-test, check_workflows.sh, check_repo_requirements.sh, --check-static-case-counts, --check-inventory). check_dev_shell_env.sh was NOT re-run."
+  ]
  }
 }

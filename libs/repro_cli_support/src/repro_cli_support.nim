@@ -1718,16 +1718,39 @@ proc resolveMonitorShimLibPath(): string =
   ##    threads the user's checkout through ``REPROBUILD_SOURCE_ROOT`` (and
   ##    the daemon forwards it), so this fallback recovers the shim in the
   ##    daemon-hosted CMake develop flow.
-  ## 4. Empty string when none match; the caller (the engine's monitor
+  ## 4. ``$REPROBUILD_RUNTIME_LIBRARY_PATH`` — the INSTALLED-PACKAGE arm.
+  ##    Arms (2) and (3) both look for a reprobuild SOURCE CHECKOUT with a
+  ##    ``build/`` directory in it, and an installed ``/usr/bin/repro.real``
+  ##    is inside no such thing however the package lays its files out, so
+  ##    before this arm existed a native package could not resolve the shim
+  ##    at all — the FIRST error of every ``repro build`` from a .deb/.rpm
+  ##    was ``repro internal io monitor: error: cannot find
+  ##    librepro_monitor_shim.so`` (Distribution-And-Packaging M1 N7).
+  ##    Shipping the file was necessary and not sufficient: the resolver
+  ##    had no arm that could name it.
+  ##
+  ##    The variable is the natural one rather than a new one. It is
+  ##    already part of the §5 wrapper contract
+  ##    (``runtime_contract.ReprobuildWrapperVariables``), the wrapper
+  ##    already sets it to ``<prefix>/lib/repro`` — the package's private
+  ##    libdir, which is exactly where the shipped shim lands as a
+  ##    ``crRuntimeLibrary`` component — and under Nix it is already the
+  ##    library search path of the installed closure. So no new variable,
+  ##    no new drift guard, and the same arm serves both worlds. It is a
+  ##    ``PathSep``-separated LIST (the flake sets six directories), so
+  ##    every entry is probed in order.
+  ##
+  ##    LAST, deliberately: a develop-mode checkout beside the running
+  ##    binary must keep winning over an installed copy, because that is
+  ##    the whole point of arms (2) and (3). This arm only fires where
+  ##    they all return empty.
+  ## 5. Empty string when none match; the caller (the engine's monitor
   ##    launcher) treats that as "monitor not configured" and falls back
   ##    to ``REPRO_MONITOR_BYPASS=1`` semantics.
   let override = getEnv("REPRO_MONITOR_SHIM_LIB")
   if override.len > 0:
     return override
-  const dllExt =
-    when defined(windows): "dll"
-    elif defined(macosx):  "dylib"
-    else:                  "so"
+  const dllExt = HostDynamicLibraryExt
   let exePath = getAppFilename()
   if exePath.len > 0:
     let localSourceRoot =
@@ -1745,10 +1768,15 @@ proc resolveMonitorShimLibPath(): string =
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
     let candidate = sourceRoot / "build" / "lib" /
-      ("librepro_monitor_shim." & dllExt)
+      (MonitorShimLibStem & "." & dllExt)
     if fileExists(extendedPath(candidate)):
       return candidate
-  ""
+  # Arm 4 — the installed package. The arm itself lives in
+  # ``repro_build_engine`` because that is where the seed the ORDINARY
+  # build path uses is computed; this proc only ever reaches the dev-env
+  # engine. Both call the same code so the two cannot answer differently.
+  monitorShimLibInLibraryPath(getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH"),
+    dllExt, proc(path: string): bool = fileExists(extendedPath(path)))
 
 proc moduleHasBuildBlock(modulePath: string): bool =
   for line in readFile(extendedPath(modulePath)).splitLines:
@@ -7995,7 +8023,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
                           statsEnabled = false;
                           validateExistingOnly = false;
                           providerCompilerCommand: seq[string] = @[];
-                          cancelCheck: BuildCancelCallback = nil):
+                          cancelCheck: BuildCancelCallback = nil;
+                          observeRunResult: proc(r: BuildRunResult) {.closure.}
+                            = nil):
     ProjectInterfaceArtifact =
   ## Materialize a project interface through the build engine.
   ##
@@ -8151,6 +8181,16 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   try:
     let edgeResult = runBuild(graph([extractAction]), edgeConfig)
     stats.mergeStats(edgeResult.stats)
+    # M1 N11. This edge may run under the RunQuota bypass while the rest
+    # of the build does not (see ``interfaceEdgeRunQuotaBypass``), and
+    # the compensating control for a bypass is the warning that says one
+    # happened. It has to be raised HERE because the edge's result never
+    # leaves this proc: ``extractInterfaceEdge`` returns an artifact, and
+    # review measured zero warning lines in a flagless run precisely
+    # because every ``warnRunQuotaBypassIfUsed`` call site was on a
+    # result this one does not produce.
+    if observeRunResult != nil:
+      observeRunResult(edgeResult)
     if edgeResult.hasFailedActions():
       # The child's captured stdout/stderr carries the recipe's own compiler
       # diagnostics (file, line, message). Surfacing them verbatim is the whole
@@ -8388,7 +8428,43 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # entirely: every action goes through the bypass-spawn path with no lease
   # round-trip. Default is "use runquota when reachable, fall back if not".
   let bypassRunQuota = bypassRunQuotaExplicit
+  # THE BYPASS IS SCOPED TO THE BOOTSTRAP EDGE, not to the build.
+  #
+  # The problem M1's N8 found is real and is only about ONE edge. The
+  # mode is UNSPECIFIED for every invocation that passes no
+  # ``--tool-provisioning`` and sets no ``REPRO_TOOL_PROVISIONING``,
+  # because the project's own ``defaultToolProvisioning`` is not
+  # readable until its interface has been extracted — and extracting
+  # that interface IS a build. So a plain ``repro build`` on a machine
+  # with no ``runquotad`` died on its FIRST edge with ``runquota daemon
+  # unreachable and bypass is disabled``, remediating to ``cd
+  # ../runquota && just build``: advice a user who installed a PACKAGE
+  # cannot follow, and a primary verb made to depend on an undocumented
+  # environment variable (``REPROBUILD_NO_RUNQUOTA=1``).
+  #
+  # The FIRST fix widened this variable to include ``tpmUnspecified``,
+  # and review was right that it was under-scoped in three ways. (a) The
+  # variable governs EVERY edge of the build, so a project that declares
+  # no ``defaultToolProvisioning`` — for which the narrowing
+  # re-resolution below is guarded on ``defaultToolProvisioning.len >
+  # 0`` and therefore never runs — had its WHOLE GRAPH run unleased,
+  # not just its bootstrap. (b) The justification named ``from-source``
+  # as the one mode that demands a coordinator when ``nix`` and
+  # ``tarball`` refuse too, so "the one such mode" was simply false.
+  # (c) The compensating control it leaned on — the warning — did not
+  # fire at the interface-extraction edge at all.
+  #
+  # So: the variable keeps its old, narrow value, and the bootstrap edge
+  # gets its own. ``interfaceEdgeRunQuotaBypass`` covers exactly the
+  # extraction that has to happen before the mode can be known, and the
+  # warning is wired to THAT edge (see ``warnRunQuotaBypassIfUsed``'s
+  # ``enabled`` parameter and its call after ``extractInterfaceEdge``),
+  # which is where the bypass now actually fires. Every other edge of an
+  # unspecified-mode build is leased exactly as before, whether or not
+  # the project declares a default.
   var fallbackToRunQuotaBypass = mode in {tpmPathOnly, tpmScoop}
+  let interfaceEdgeRunQuotaBypass =
+    fallbackToRunQuotaBypass or mode == tpmUnspecified
   var warnedRunQuotaBypass = false
 
   template logSummary(line: string) =
@@ -8452,14 +8528,22 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logSummary(environmentInheritanceHeaderLine(
       runResult.environmentInheritance))
 
-  proc warnRunQuotaBypassIfUsed(runResult: BuildRunResult) =
-    if warnedRunQuotaBypass or not fallbackToRunQuotaBypass:
+  proc warnRunQuotaBypassIfUsed(runResult: BuildRunResult;
+                                enabled = true; scope = "") =
+    ## ``enabled`` exists because the bypass is no longer one switch.
+    ## The bootstrap edge may fall back while the rest of the build may
+    ## not, so a caller says which of the two it is reporting on — and
+    ## the interface-extraction call site passes
+    ## ``interfaceEdgeRunQuotaBypass``, which is the one place review
+    ## measured ZERO warning lines for a bypass that was firing.
+    if warnedRunQuotaBypass or not enabled:
       return
     if not usesRunQuotaBypass(runResult):
       return
     warnedRunQuotaBypass = true
     logSummary("repro build: WARNING runquotad is not reachable; using " &
-      "RunQuota bypass for tool-provisioning=" & mode.modeName &
+      "RunQuota bypass for " &
+      (if scope.len > 0: scope else: "tool-provisioning=" & mode.modeName) &
       " (no quotas/leases enforced). Start `runquotad` and rerun to " &
       "use the real lease coordinator.")
 
@@ -8670,7 +8754,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     for item in buildResult.results:
       if item.launched:
         inc benchmarkExecutedActions
-    warnRunQuotaBypassIfUsed(buildResult)
+    warnRunQuotaBypassIfUsed(buildResult,
+      enabled = fallbackToRunQuotaBypass)
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
@@ -8793,7 +8878,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       buildStats.mergeStats(cmakeRegenerationResult.stats)
     finishStat(buildStats, statsEnabled, "repro cmake regeneration",
       cmakeRegenerationStart)
-    warnRunQuotaBypassIfUsed(cmakeRegenerationResult)
+    warnRunQuotaBypassIfUsed(cmakeRegenerationResult,
+      enabled = fallbackToRunQuotaBypass)
     for item in cmakeRegenerationResult.results:
       logAction("cmakeRegenerationAction: " & item.id & " status=" &
         $item.status & " launched=" & $item.launched & " cache=" &
@@ -8946,12 +9032,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     outDir / "build-engine-cache", buildStats,
     requireStub = false,
     bypassRunQuota = bypassRunQuota,
-    fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
+    # THE ONE EDGE the unspecified-mode fallback covers. Every other
+    # edge below reads ``fallbackToRunQuotaBypass``, which is unchanged
+    # by the mode being unknown.
+    fallbackToRunQuotaBypass = interfaceEdgeRunQuotaBypass,
     forceRebuild = forceRebuild,
     suppressTrace = mcTrace notin measureSet,
     skipCacheHitEvidence = mcCacheEvidence notin measureSet,
     statsEnabled = statsEnabled,
-    cancelCheck = cancelCheck)
+    cancelCheck = cancelCheck,
+    observeRunResult = proc(r: BuildRunResult) =
+      warnRunQuotaBypassIfUsed(r, enabled = interfaceEdgeRunQuotaBypass,
+        scope = "the project-interface extraction edge"))
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
@@ -8961,6 +9053,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       artifact.projectInterface.defaultToolProvisioning.len > 0:
     effectiveMode = parseToolProvisioning(
       artifact.projectInterface.defaultToolProvisioning)
+    # M1 N11: this assignment is a NARROWING for ``path``/``scoop`` and
+    # a no-op otherwise, because ``fallbackToRunQuotaBypass`` no longer
+    # starts true for an unspecified mode. That matters for the case
+    # review found: a project declaring NO ``defaultToolProvisioning``
+    # never reaches this branch at all, and used to have its whole graph
+    # run unleased as a result. It now runs leased, like every other
+    # project, and only the bootstrap edge above was ever exempt.
     fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
 
   var buildArtifact = artifact
@@ -9688,7 +9787,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       providerCompileResult = runBuild(graph([providerCompileAction]),
         providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
-      warnRunQuotaBypassIfUsed(providerCompileResult)
+      warnRunQuotaBypassIfUsed(providerCompileResult,
+        enabled = fallbackToRunQuotaBypass)
       noteProviderCompileConsultation(providerCompileResult)
       for item in providerCompileResult.results:
         # `status`/`launched`/`cache` describe THIS consultation only.
@@ -10093,7 +10193,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     for item in buildResult.results:
       if item.launched:
         inc benchmarkExecutedActions
-    warnRunQuotaBypassIfUsed(buildResult)
+    warnRunQuotaBypassIfUsed(buildResult,
+      enabled = fallbackToRunQuotaBypass)
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
@@ -16028,15 +16129,20 @@ const
     # usually unset, CODETRACER_PINNED_SRC is the flake pin the daemon must
     # still be able to fall back to when there is no sibling checkout.
     "CODETRACER_SRC", "CODETRACER_PINNED_SRC",
-    # CT_INTERPOSE_SRC threads the ct_interpose package (monitor hooks /
-    # SIP-rewrite helpers) onto config.nims's --path. REPROBUILD_SOURCE_ROOT
-    # lets reprobuildLibraryWorkDir() locate reprobuild's OWN libs
-    # (repro_interface_artifacts, repro_project_dsl, ...) when compiling the
-    # interface extractor and providers — the compiled-in source path points
-    # at the now-deleted build sandbox, so without this env var the daemon
-    # falls back to the project dir and the extractor fails with
-    # "cannot open file: repro_interface_artifacts".
-    "CT_INTERPOSE_SRC", "REPROBUILD_SOURCE_ROOT"
+    # ``CT_INTERPOSE_SRC`` WAS HERE, on the same false premise the flake
+    # carried: that config.nims threads the ct_interpose package onto
+    # ``--path``. ``86cb1bf6`` (ct_interpose -> nim-stackable-hooks) removed
+    # the only reader, so forwarding it to the daemon propagated a variable
+    # no process on either side consults. Dropped with M1's N19, which
+    # removed the last setter.
+    #
+    # REPROBUILD_SOURCE_ROOT lets reprobuildLibraryWorkDir() locate
+    # reprobuild's OWN libs (repro_interface_artifacts, repro_project_dsl,
+    # ...) when compiling the interface extractor and providers — the
+    # compiled-in source path points at the now-deleted build sandbox, so
+    # without this env var the daemon falls back to the project dir and the
+    # extractor fails with "cannot open file: repro_interface_artifacts".
+    "REPROBUILD_SOURCE_ROOT"
   ]
 
   ## Well-known toolchain env vars that must also be forwarded to the daemon
@@ -22711,9 +22817,6 @@ proc parsePositiveIntFlag(flagName, value: string): int =
   if result <= 0:
     raise newException(ValueError, flagName & " must be greater than zero")
 
-const CodetracerHcrSupportProfile =
-  "macos-arm64-direct-hcr-in-codetracer-v1"
-
 type
   HcrWatchConfig = object
     targetName: string
@@ -22799,6 +22902,22 @@ const HostDefaultHcrSupportProfile =
   else:
     HcrLinuxX86_64DirectSupportProfile
 
+const CodetracerHcrSupportProfile* = HostDefaultHcrSupportProfile
+  ## The profile `repro hcr coordinate` and the `repro watch --hcr-*` session
+  ## negotiate with the agent.
+  ##
+  ## This was pinned to the macOS string. An agent compiled for a Linux host
+  ## advertises `linux-x86_64-elf-direct-hcr-v1` in its hello
+  ## (`defaultDirectSupportProfile`), and the session rejects a mismatch — so on
+  ## Linux the shipped CLI could not complete a negotiation at all, which is why
+  ## the Linux HCR demo needed a separate patch driver rather than this command.
+  ##
+  ## It also made the watch path disagree with itself: `defaultObjectSymbol`
+  ## already picked the object symbol from `HostDefaultHcrSupportProfile`, so on
+  ## Linux the symbol was chosen ELF-style while `objectFunctionBytes` — which
+  ## defaults to this constant — still ran the Mach-O parser over an ELF object.
+  ## Both halves now answer from the same host-derived profile.
+
 proc hcrProfileIsElf(supportProfile: string): bool =
   ## HLX-M1 (design §7.4): whether a support profile names the Linux ELF
   ## provider. The two object formats disagree about symbol naming and about
@@ -22808,7 +22927,7 @@ proc hcrProfileIsElf(supportProfile: string): bool =
   supportProfile == HcrLinuxX86_64DirectSupportProfile or
     supportProfile.startsWith("linux-")
 
-proc hcrObjectSymbolFor(supportProfile, functionName: string): string =
+proc hcrObjectSymbolFor*(supportProfile, functionName: string): string =
   ## The name a function's code is filed under in a relocatable object.
   ##
   ## Mach-O prefixes C symbols with an underscore; ELF does not. Design §7.4
@@ -22824,11 +22943,12 @@ proc hcrObjectSymbolFor(supportProfile, functionName: string): string =
 proc objectFunctionBytes(objectPath, symbolName: string;
                          supportProfile = CodetracerHcrSupportProfile):
     seq[byte] =
-  ## The default is the Mach-O profile rather than the host-derived one,
-  ## because this proc previously ALWAYS parsed Mach-O regardless of host and
-  ## its unqualified caller is the macOS watch session. Changing the default
-  ## would repoint that caller at a different parser as a side effect; callers
-  ## on the ELF path pass their profile explicitly.
+  ## The default is host-derived. It used to be the Mach-O profile outright,
+  ## which meant the unqualified caller — the watch session — parsed its object
+  ## as Mach-O on every host, while `defaultObjectSymbol` had already been
+  ## host-derived since HLX-M1 and named the symbol ELF-style on Linux. Those
+  ## two halves have to agree or the lookup is guaranteed to miss, so the
+  ## parser now follows the same profile the symbol name does.
   let graph =
     if hcrProfileIsElf(supportProfile):
       parseElfX86_64Object(objectPath)
@@ -22840,6 +22960,48 @@ proc objectFunctionBytes(objectPath, symbolName: string;
     raise newException(ValueError,
       "could not extract function bytes for " & symbolName & " from " &
         objectPath)
+
+proc hcrUnwindMetadataFor*(supportProfile, objectPath: string): seq[byte] =
+  ## The `unwindMetadataPayload` bytes a coordinator sends with a direct patch.
+  ##
+  ## Profile-conditional for the same reason `hcrObjectSymbolFor` is. Both call
+  ## sites used to send `minimalAarch64EhFrameTemplate()` unconditionally: a
+  ## synthetic AArch64 CIE/FDE, whose register numbers and CFA rules describe
+  ## neither the architecture nor the function on an x86_64 ELF host. Sending it
+  ## there is worse than sending nothing, because it is unwind data that is
+  ## wrong rather than absent.
+  ##
+  ## The ELF branch sends the patch object's OWN `.eh_frame` — real x86_64
+  ## unwind information for the very function being patched, and exactly the
+  ## input HLX-M5's first deliverable relocates. It is deliberately NOT
+  ## relocated here: adjusting the FDE `initial_location` to the live patch
+  ## address, and the `__register_frame` call that would consume the result, are
+  ## HLX-M5 (`HCR/Linux-ELF-Provider.md` §8). The Linux profile lists
+  ## `unwind-and-debugger-registration` in its `missingComponents` and the agent
+  ## leaves `registerDebugUnwind` off there, so nothing reads these bytes yet.
+  ## What this buys today is that the payload the request carries — and the
+  ## digest recorded in `patch-bundle-metadata.json` — is honest about its
+  ## architecture.
+  ##
+  ## Note the milestone forbids the obvious shortcut: HLX-M5 specifies the
+  ## compiler-generated `.eh_frame`, "not a synthetic minimal template as the
+  ## macOS path uses", so a hand-written x86_64 twin of the AArch64 template
+  ## would be building the wrong thing.
+  if not hcrProfileIsElf(supportProfile):
+    return minimalAarch64EhFrameTemplate()
+  let graph = parseElfX86_64Object(objectPath)
+  for section in graph.sections:
+    if section.name == ".eh_frame" and section.data.len > 0:
+      return section.data
+  # Refuse rather than fall back to the AArch64 template. An empty payload is
+  # rejected downstream by `requirePayloadDigest` with a message that names the
+  # field and not the cause, and the AArch64 fallback would be silently wrong,
+  # so neither substitute is better than saying what is missing.
+  raise newException(ValueError,
+    "patch object carries no .eh_frame section to send as unwind metadata: " &
+      objectPath &
+      " (an x86_64 C toolchain emits one by default; check that the patch " &
+      "target is not built with -fno-asynchronous-unwind-tables)")
 
 proc hcrWatchEnabled(config: HcrWatchConfig): bool =
   config.socketPath.len > 0 or config.artifacts.len > 0 or
@@ -23261,7 +23423,8 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
     targetSymbols = [session.metadata.targetSymbol],
     directPatchBytes = patchBytes,
     debugObjectBytes = objectBytes,
-    unwindMetadataBytes = minimalAarch64EhFrameTemplate(),
+    unwindMetadataBytes = hcrUnwindMetadataFor(
+      CodetracerHcrSupportProfile, session.newObject),
     sourceGenerationMap = [sourceGeneration])
   # Named-Targets M4 §3.4: emit ``hcr/patchCompiling`` for the SSE
   # consumer before the patch is sent to the agent. ``target`` is the
@@ -25372,8 +25535,9 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       "there is nothing `repro develop` can manage. Every backend the " &
       "configuration plane resolved was consulted:\n" & inventory.join("\n") &
       "\nPublish a lock record through one of them (`repro lock refresh` " &
-      "writes the committed lock; `repro workspace lock` records a routed " &
-      "tier's per-repo entries)."
+      "writes a repo's own committed lock and must RUN IN that repo, beside " &
+      "its project file — there is no workspace-wide `repro.lock`; " &
+      "`repro workspace lock` records a routed tier's per-repo entries)."
     var r = failure(msg, notices, 1)
     r.backends = composed.backends
     return r
@@ -27204,7 +27368,8 @@ proc runHcrCoordinateCommand(args: seq[string]): int =
     targetSymbols = [parsed.patchFunction],
     directPatchBytes = patchBytes,
     debugObjectBytes = objectBytes,
-    unwindMetadataBytes = minimalAarch64EhFrameTemplate(),
+    unwindMetadataBytes = hcrUnwindMetadataFor(
+      CodetracerHcrSupportProfile, newObject),
     sourceGenerationMap = [sourceGeneration])
   client.sendCoordinatorMessage(connection,
     client.coordinatorPatchRequestMessage(request))
@@ -32736,6 +32901,102 @@ proc lockRecordAtCommitOrAncestor*(store: LockStore; project, repo, sha: string;
     if rec.isSome:
       return (rec: rec, foundAt: ancestor, distance: idx)
 
+type
+  PublicTierCommittedLocks = object
+    ## The PUBLIC tier's committed-lock medium, read across the workspace.
+    ##
+    ## The public tier's durable backend is "the **in-repo** committed
+    ## `repro.lock`" (Unified-Locking-And-Hooks.md §3, the *public* row, whose
+    ## record is "the solved-graph pins for **the repo's** public dependencies +
+    ## **the repo's own** public coordinates"), and MO-1 puts that file *in the
+    ## project repo* (Workspace-Manifest-Optional.milestones.org MO-1: "a lock
+    ## file **committed in the project repo**"). A workspace root is such a repo
+    ## only when it is itself a project; for a multi-repo workspace the root is
+    ## the *bill of materials*, and `<workspaceRoot>/repro.lock` is a file the
+    ## model has no place for. Reading only that one path therefore answers
+    ## "this workspace has no public lock record at all" for a workspace in
+    ## which every participating repo commits one — which is the shape
+    ## CLAUDE.md states outright ("Locking is **per repo**: each participating
+    ## repo commits its own `repro.lock` … There is no workspace-wide lock file")
+    ## and which CLI/develop.md §"The Develop Set Is The Workspace Lock Set"
+    ## legislates for directly:
+    ##
+    ##   > A repo is *develop-manageable* in workspace `W` if some lock record
+    ##   > readable from `W` names it and pins it to an exact revision. Which
+    ##   > **file** that record lives in is a storage detail, not a boundary the
+    ##   > user should have to think about.
+    ##
+    ## So the medium is read at every participating repo, and the reads compose:
+    ## the root's own lock (present exactly when the root IS a project repo, and
+    ## the whole of the pre-DS-1 read) plus, for each participating repo, the
+    ## record that repo publishes for ITSELF.
+    deps: seq[LockedDep]        ## the per-repo self-records, workspace-rebased
+    probed: seq[string]         ## repo paths whose checkout was probed
+    carrying: seq[string]       ## repo paths that actually carried a lock
+
+proc participatingRepoCommittedLocks(workspaceRoot: string):
+    PublicTierCommittedLocks =
+  ## Read every participating repo's OWN in-repo committed lock and return the
+  ## record each one publishes for ITSELF, rebased onto workspace-relative
+  ## paths.
+  ##
+  ## Only the repo's own record is taken, deliberately. A repo's lock also pins
+  ## that repo's dependencies, but two participating repos may legitimately pin
+  ## a third at different revisions (that is precisely the disagreement
+  ## `collectLockCoherence` reports, and reports as ADVISORY —
+  ## `t_lock_coherence_reports_the_diff_advisory_only`). Folding those cross
+  ## claims into the union would turn an advisory diff into the composer's
+  ## fatal DS-2 "two backends disagree" refusal. Each repo is the sole authority
+  ## on its own pin, so restricting the fold to self-records is both the §3
+  ## reading ("the repo's own public coordinates") and conflict-free by
+  ## construction.
+  ##
+  ## Best-effort by design: this is the *public* tier's medium, whose absence is
+  ## never a refusal ("An ABSENT `repro.lock` … is recorded as a backend that
+  ## contributed nothing — NOT as a refusal"). A workspace whose membership
+  ## cannot be resolved at all contributes no per-repo records and is reported
+  ## by the composer's own membership refusal further down, not here.
+  let root = absolutePath(workspaceRoot)
+  var repos: seq[ResolvedRepo]
+  try:
+    repos = resolveWorkspaceProjectShared(root, "", "`repro develop`").resolved.repos
+  except CatchableError:
+    return
+  for repo in repos:
+    # ``.`` (or an empty path) is the workspace root itself, already read as the
+    # root committed lock by the caller; re-reading it here would duplicate
+    # every dep it holds.
+    if repo.path.len == 0 or repo.path == ".": continue
+    let repoRoot = root / repo.path
+    if not dirExists(extendedPath(repoRoot)): continue
+    result.probed.add(repo.path)
+    let lockP = committedLockPath(repoRoot)
+    if not fileExists(extendedPath(lockP)): continue
+    var parsed: LockedDependencies
+    try:
+      parsed = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+    except CatchableError:
+      # An unparseable in-repo lock is the lock verbs' loud business (`repro
+      # lock validate`), not a reason to refuse the whole develop set — the
+      # same judgement `collectLockCoherence` makes about the same file.
+      continue
+    result.carrying.add(repo.path)
+    for dep in parsed.deps:
+      # The lock's OWN repo: `path == "."` / empty, exactly as
+      # ``isRootLockedDep`` and ``collectLockCoherence`` read it.
+      if not (dep.path.len == 0 or dep.path == "."): continue
+      if dep.coordinates.kind != ckVcs: continue
+      if dep.coordinates.revision.len == 0: continue
+      var rebased = dep
+      # Rebase onto the workspace: inside its own lock the repo is the root
+      # consumer (`.`); inside the WORKSPACE's lock set it is a repo at its
+      # workspace-relative path, which is what makes it develop-manageable and
+      # what a checkout row is keyed on.
+      rebased.path = repo.path
+      if rebased.name.len == 0: rebased.name = repo.name
+      result.deps.add(rebased)
+      break
+
 proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
                            args: DevelopAllArgs): DevelopLockSet =
   let root = absolutePath(workspaceRoot)
@@ -32775,12 +33036,59 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   if publicContributes:
     result.lock = populateLockedDeps(
       LockSource(kind: lskCommittedLock, workspaceRoot: root))
+  # …and the SAME medium at every OTHER participating repo. The public tier's
+  # backend is the in-repo committed lock, and in a multi-repo workspace there
+  # is one per repo, not one at the root (see
+  # ``participatingRepoCommittedLocks``). Reading only the root path made a
+  # workspace in which every repo commits its own lock resolve NOTHING, and
+  # since "An empty union … is the only lock-set failure" that turned a
+  # perfectly locked workspace into an unresolvable one — with no repair, since
+  # a root `repro.lock` is a file the model forbids at a non-project root
+  # (`repro lock refresh` there correctly answers "no solver inputs found").
+  var perRepo: PublicTierCommittedLocks
+  var perRepoContributed = 0
+  if publicContributes:
+    perRepo = participatingRepoCommittedLocks(root)
+    # The ROOT lock wins where both speak. Its entry for a repo is this
+    # workspace's own solved pin; the repo's self-record is what that repo last
+    # published about itself, and the two disagreeing is a lock-coherence
+    # observation (advisory, and already reported as such), never a develop-set
+    # failure. Gap-filling keeps the composed set a strict superset of the
+    # pre-DS-1 read for every workspace that has a root lock.
+    var haveNames = initHashSet[string]()
+    var havePaths = initHashSet[string]()
+    for d in result.lock.deps:
+      if d.name.len > 0: haveNames.incl(d.name)
+      if d.path.len > 0: havePaths.incl(d.path)
+    for d in perRepo.deps:
+      if (d.name.len > 0 and d.name in haveNames) or
+          (d.path.len > 0 and d.path in havePaths):
+        continue
+      if d.name.len > 0: haveNames.incl(d.name)
+      if d.path.len > 0: havePaths.incl(d.path)
+      result.lock.deps.add(d)
+      inc perRepoContributed
+  let perRepoLocation =
+    "the in-repo repro.lock of each participating repo under " & root
   var committedLockReport = DevelopBackendReport(tier: "public",
-    backendKind: "committed-lock", location: committedLockP,
-    reachable: committedLockPresent,
+    backendKind: "committed-lock",
+    # Name the medium that actually answered. A workspace whose records live in
+    # the participating repos must not have its inventory line point at a root
+    # path nothing reads and nothing may write.
+    location:
+      (if committedLockPresent or perRepoContributed == 0: committedLockP
+       else: perRepoLocation),
+    reachable: committedLockPresent or perRepoContributed > 0,
     diagnostic:
-      (if committedLockPresent: ""
-       else: "no committed lock at " & committedLockP),
+      (if committedLockPresent or perRepoContributed > 0: ""
+       elif perRepo.probed.len == 0: "no committed lock at " & committedLockP
+       else: "no committed lock at " & committedLockP & ", and none of the " &
+         $perRepo.probed.len & " participating repo checkout(s) under " & root &
+         " carries one either" &
+         (if perRepo.carrying.len > 0:
+            " that pins its own revision (read: " &
+              perRepo.carrying.join(", ") & ")"
+          else: "")),
     records: result.lock.deps.len)
   if not publicContributes:
     # DS-8 — ``--tier`` excluded the public tier. The committed lock is not
@@ -35979,6 +36287,18 @@ type
       ## MO-4 — per-repo participation recorded through each repo's ASSIGNED
       ## locking backend (empty unless the host bootstrap config declares
       ## `[locking]` routes; the all-public default records nothing here).
+    routed*: bool
+      ## Whether ANY configuration layer declares a `[locking]` route for this
+      ## workspace (`ComposedRouting.hasExplicitRoutes`). False is the
+      ## public-only shape of Unified-Locking-And-Hooks.md §10 ("A workspace
+      ## with neither a configured route nor a record store is public-only and
+      ## writes only `repro.lock`"), in which this command has no backend to
+      ## record into and legitimately writes nothing.
+      ##
+      ## Carried on the REPORT rather than re-derived by each surface because
+      ## `participation` is filled only on the non-deferred path, so "empty
+      ## participation" cannot by itself distinguish "public-only" from "the
+      ## participation writes were deferred to the gate".
     exitCode*: int
 
   WorkspaceLockOutcome* = object
@@ -35997,6 +36317,7 @@ proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
   result["createdAt"] = %report.createdAt
   result["workspaceBranch"] = %report.workspaceBranch
   result["replacedExistingEntry"] = %report.replacedExistingEntry
+  result["routed"] = %report.routed
   var repos = newJArray()
   for entry in report.repos:
     var obj = newJObject()
@@ -36049,15 +36370,63 @@ proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
         " (trigger=" & report.triggerRepo & "@" &
         report.triggerSha & ")")
     else:
-      # HL-2 (§6 Decision 1) routed case: no manifest partition lock was
-      # written because the git-checkout manifest backend owns no repo in this
-      # workspace (every declared route points elsewhere, or the workspace is
-      # public-only). Each repo's record went to its assigned backend and is
-      # reported by the `recorded … via … backend` lines below. Avoid printing
-      # a blank path.
-      result.add("workspace lock: recorded per-repo lock entries" &
-        " (trigger=" & report.triggerRepo & "@" &
-        report.triggerSha & ")")
+      # No manifest partition lock was written. Two very different situations
+      # reach here, and they must not be reported with the same sentence.
+      var recordedAny = false
+      for p in report.participation:
+        if p.recorded:
+          recordedAny = true
+          break
+      if not report.routed:
+        # PUBLIC-ONLY: no `[locking]` route and no record store, so there is no
+        # backend to record anything into and this command wrote NOTHING. That
+        # is the specified outcome — Unified-Locking-And-Hooks.md §8.4,
+        # "Public-only workspace, no configured route and no record store": "No
+        # store is synthesized: the record-store root is unset, no `locks/`
+        # record is written … Publication is the repo's own push of its in-tree
+        # `repro.lock`", and §6 Decision 1's public row: the public partition is
+        # "recorded in the committed `repro.lock` … for the MO-1 sentinel this
+        # is `repro lock refresh`, not a separate store write".
+        #
+        # Writing nothing is therefore CORRECT. Claiming to have "recorded
+        # per-repo lock entries" is not: this branch printed that sentence
+        # unconditionally, so the one observable difference between a
+        # public-only no-op and a successful routed fan-out was that the no-op
+        # ALSO listed no entries — a distinction nobody reading a success line
+        # looks for. An operation must not report work it did not do.
+        result.add("workspace lock: recorded nothing: this workspace declares " &
+          "no lock route and has no record store, so it is public-only and " &
+          "there is no backend for a workspace lock record. Each repo's own " &
+          "committed repro.lock is its lock record — refresh one with " &
+          "`repro lock refresh` in that repo, and publish it by pushing the " &
+          "repo.")
+      elif recordedAny:
+        # HL-2 (§6 Decision 1) routed case: the git-checkout manifest backend
+        # owns no repo in this workspace (every declared route points
+        # elsewhere), so each repo's record went to its assigned backend and is
+        # reported by the `recorded … via … backend` lines below. Avoid
+        # printing a blank path.
+        result.add("workspace lock: recorded per-repo lock entries" &
+          " (trigger=" & report.triggerRepo & "@" &
+          report.triggerSha & ")")
+      elif report.participation.len > 0:
+        # Routed (``[locking]`` routes ARE declared — that is the only thing
+        # that makes ``recordRoutedParticipation`` report at all), but no repo's
+        # record was actually written: every one was either covered by its
+        # committed lock or failed. Both are spelled out per repo immediately
+        # below, so this line states the outcome and defers the reasons rather
+        # than claiming entries that do not exist.
+        result.add("workspace lock: no lock record was written" &
+          " (trigger=" & report.triggerRepo & "@" &
+          report.triggerSha & ") — see the per-repo lines below")
+      else:
+        # Routed, participation was DEFERRED (the pre-push path builds the
+        # writes and executes them itself), so this renderer has no per-repo
+        # outcomes to report. Say that, rather than claiming either extreme.
+        result.add("workspace lock: no lock record was written here" &
+          " (trigger=" & report.triggerRepo & "@" &
+          report.triggerSha & "); the routed per-repo writes are reported by " &
+          "whoever executes them")
     for entry in report.repos:
       result.add("workspace lock: locked " & entry.path & " @ " &
         entry.revision &
@@ -36596,6 +36965,12 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # never silently go public-only; warn (once) and name the ``adopt-manifest``
   # remedy. Best-effort — never blocks the lock.
   maybeWarnLegacyManifestWithoutTeamRoute(args.workspaceRoot, composed)
+  # Carried into the report so every surface can tell a public-only workspace
+  # (no route, no store, nothing to record — §10) apart from a routed one whose
+  # per-repo writes went elsewhere or were deferred. Without it the two are
+  # indistinguishable downstream, and the renderer reported the first as the
+  # second.
+  report.routed = composed.hasExplicitRoutes
   let manifestRepos = manifestOwnedRepos(
     composed, lockRepos, args.workspaceRoot, manifestLayerRoot, identity)
 
@@ -41242,63 +41617,128 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
 # and TC-2 reader for the TC-3/RA-32 certificate-coverage stage.
 
 # ============================================================================
-# TC-1 — Test certificates: schema + reader/writer + verifier.
+# Test certificates — the vendor-neutral ``test-certificate.v1`` standard.
 #
-# A test certificate (``reprobuild.test-certificate.v1``; see
-# Test-Certificates.md §"What a certificate attests") is a small record that
-# attests: ON PLATFORM ``P``, the test targets ``T`` PASSED, with the repo at
-# commit ``C`` and its develop-mode dependency closure clean and at the
-# revisions pinned by lock ``L``. The binding fields (``commit`` / ``lock`` /
-# ``platform`` / ``targets``) make it CHECKABLE; the ``signature`` is what
-# makes it UNFORGEABLE WITHOUT THE KEY.
+# The record format, the canonical payload, the signing primitive, the
+# key-store semantics, coverage evaluation and transport are defined by the
+# vendor-neutral TEST CERTIFICATE STANDARD rather than by this project, so
+# that any test runner or build system can issue certificates any other one
+# verifies. Everything below implements that standard; the only
+# reprobuild-specific thing in a record is the ``framework`` VALUE. Section
+# references below (Standard §…, Canonical-Payload §…, Verification §…) are
+# to that document.
 #
-# TC-1 deferral (HONEST): TC-1 ships the schema, issuance, the incremental
-# no-op, and the verifier. The ``signature`` is left explicitly UNSIGNED
-# (empty ``algorithm`` + empty ``value``) — TC-5 wires the privileged daemon's
-# real ed25519 signing and key registration. We NEVER fabricate a signature.
-# The verifier below is a COVERAGE verifier (does the cert set cover a
-# (commit, lock, platform, targets) tuple); the TC-5 SIGNATURE verifier is a
-# separate, additive check.
+# What a certificate asserts (Standard §1): on platform ``P``, framework ``F``
+# executed commands ``C`` covering targets ``T``, producing result ``R``, in
+# repository ``repo`` whose working tree was in VCS state ``V``.
+#
+# TC-7 MIGRATION — EVERY difference below changes the SIGNED BYTES. A
+# certificate issued before this milestone cannot be verified after it and
+# MUST be **re-issued, never translated**: translating would mean re-signing a
+# payload the original signer never saw. So the reader REFUSES the retired
+# ``reprobuild.test-certificate.v1`` id outright (``crRetiredSchema``), with a
+# re-issue instruction rather than a corruption-shaped complaint, and there is
+# deliberately NO compatibility reader.
+#
+#   |               | before TC-7                     | this standard        |
+#   | schema        | reprobuild.test-certificate.v1  | test-certificate.v1  |
+#   | framework     | absent                          | required             |
+#   | repo state    | flat repo/commit + lock digest  | [certificate.vcs]    |
+#   | commands      | not recorded                    | [[certificate.command]], >= 1 |
+#   | targets       | observed/run order              | sorted + deduplicated |
+#   | namespace     | reprobuild-test-certificate-v1  | test-certificate-v1  |
+#
+# THE LOCK DIGEST IS GONE, NOT MOVED (Canonical-Payload §7). reprobuild's lock
+# RECORD is committed and keyed by the trigger commit, so ``vcs.commit``
+# already binds it: a verifier that wants the lock resolves it AT THAT COMMIT
+# itself (``resolveLockAtCommit`` below — the standard's framework-specific
+# validity step, Verification §4.2) instead of trusting a digest the record
+# carried. That digest was information the commit already implied, at the cost
+# of making the format ecosystem-specific.
+#
+# The signature (TC-5, further down) is what makes a record unforgeable
+# without the key; the verifier here answers the other two of Verification
+# §1's three questions — is this mine to evaluate, and does it cover what I
+# care about.
 # ============================================================================
 
 const
-  testCertificateSchemaV1* = "reprobuild.test-certificate.v1"
-    ## The ``schema`` value every v1 certificate carries.
+  testCertificateSchemaV1* = "test-certificate.v1"
+    ## The ``schema`` value every v1 certificate carries (Standard §3.1).
+  retiredReprobuildCertificateSchema* = "reprobuild.test-certificate.v1"
+    ## The PRE-MIGRATION reprobuild-only schema id. Recognised ONLY so the
+    ## reader can refuse it with an actionable "re-issue" message instead of
+    ## reporting it as an unknown format. Never emitted, never translated.
+  reprobuildFrameworkId* = "reprobuild"
+    ## reprobuild's ``framework`` identifier (Standard §4). Matched by exact
+    ## string equality; no other framework may claim it, and reprobuild's
+    ## validity rules apply to no other framework's certificates.
 
 type
   TestCertificateResult* = enum
-    ## The ``result`` field. TC-1 issues a certificate ONLY for ``tcrPassed``;
-    ## a run with any failing target yields NO certificate (the attestation is
-    ## withheld). ``tcrFailed`` exists so a reader can round-trip a record that
-    ## was authored out-of-band, but the issuer never emits one.
+    ## The ``result`` field. Issuance emits ONLY ``tcrPassed``; a run with any
+    ## failing target yields NO certificate (the attestation is withheld).
+    ## ``tcrFailed`` exists so a reader can round-trip a record authored
+    ## out-of-band, but the issuer never emits one.
     tcrPassed = "passed"
     tcrFailed = "failed"
 
   TestCertificateSignature* = object
-    ## The detached signature over the canonical ``[certificate]`` body.
-    ## TC-1 leaves BOTH fields empty (clearly unsigned); TC-5 fills them.
-    algorithm*: string   ## e.g. ``ed25519`` once TC-5 lands; "" at TC-1.
-    value*: string       ## base64 detached signature; "" at TC-1.
+    ## The detached signature over the canonical payload (Standard §6).
+    ## Both fields empty means UNSIGNED, which is identical in meaning to an
+    ## absent block (Canonical-Payload §6).
+    algorithm*: string   ## ``ed25519``
+    value*: string       ## base64 (RFC 4648 §4, padded, single line)
+
+  TestCertificateWorktree* = object
+    ## ``[certificate.vcs.worktree]`` — the modified state a ``clean = false``
+    ## certificate was tested against (Standard §3.2.2). reprobuild does not
+    ## ISSUE this form (see ``issueCertificate``), but the format layer
+    ## round-trips and canonicalises it because a verifier must be able to
+    ## reconstruct any conforming producer's signed bytes.
+    present*: bool         ## whether the table is present at all
+    tree*: string          ## VCS canonical content id of the tested state
+    format*: string        ## opaque id pinning the exact diff semantics
+    patchDigest*: string   ## ``<algo>:<hex>`` over the exact patch bytes
+
+  TestCertificateVcs* = object
+    ## ``[certificate.vcs]`` — the repository state the tests ran against
+    ## (Standard §3.2). ``clean`` and ``untracked`` are SEPARATE fields
+    ## because they mean different things: a modified tracked file means the
+    ## tests ran against something other than ``commit``, while untracked
+    ## files usually mean scratch work but can mean a file the build picked
+    ## up. Both are reported honestly or no certificate is issued at all.
+    repo*: string
+    commit*: string
+    paths*: seq[string]    ## scope; empty means the WHOLE repository
+    clean*: bool
+    untracked*: bool
+    worktree*: TestCertificateWorktree
+
+  TestCertificateCommand* = object
+    ## One ``[[certificate.command]]`` entry — the argument vector as
+    ## executed, unshelled (Standard §3.3). Order is part of the claim.
+    argv*: seq[string]
 
   TestCertificate* = object
-    ## One ``reprobuild.test-certificate.v1`` record.
+    ## One ``test-certificate.v1`` record.
     schema*: string
+    framework*: string     ## whose rules apply (Standard §4)
     project*: string
-    repo*: string
-    commit*: string      ## exact repo commit the tests ran against (HEAD)
-    lock*: string        ## digest of the dependency lock (clean deps)
-    platform*: string    ## OS/arch the tests executed on, e.g. ``linux/amd64``
-    targets*: seq[string]  ## the targets that PASSED (the covered set)
+    platform*: string      ## ``<os>/<arch>`` the tests executed on
+    targets*: seq[string]  ## covered set; sorted+deduplicated when serialized
     result*: TestCertificateResult
-    issuedAt*: string    ## RFC3339 UTC timestamp
-    issuer*: string      ## who observed/issued, e.g. ``repro-test@<host>``
-    keyId*: string       ## which registered key signed (empty until TC-5)
+    issuedAt*: string      ## RFC 3339, UTC, ``Z`` form, copied verbatim
+    issuer*: string        ## informational, not a trust input
+    keyId*: string         ## which registered key signed; omitted when unsigned
+    vcs*: TestCertificateVcs
+    commands*: seq[TestCertificateCommand]  ## execution order; at least one
     signature*: TestCertificateSignature
 
 proc isSigned*(cert: TestCertificate): bool =
   ## A certificate is SIGNED only when both the algorithm and the signature
-  ## value are present. TC-1 always returns ``false`` (the deliberate,
-  ## documented deferral to TC-5).
+  ## value are present. An absent block and a present-but-empty block are the
+  ## same thing (Canonical-Payload §6) and both answer ``false``.
   cert.signature.algorithm.len > 0 and cert.signature.value.len > 0
 
 proc currentPlatformTag*(): string =
@@ -41307,24 +41747,39 @@ proc currentPlatformTag*(): string =
   ## ``repro capabilities`` host block reports.
   hostOS & "/" & hostCPU
 
-proc certificateLockDigest*(lockFilePath: string): string =
-  ## RA-1/RA-7 reuse: the ``lock`` binding is a content digest of the
-  ## workspace lock file the gate resolved as current. We hash the lock
-  ## file's bytes with the same ``blake3DomainDigest`` the rest of the CLI
-  ## uses for metadata envelopes and prefix the algorithm so the digest is
-  ## self-describing (``blake3:<hex>``). An empty / missing path yields the
-  ## empty string so the caller can decline to issue rather than bind to a
-  ## non-existent lock.
-  if lockFilePath.len == 0 or not fileExists(lockFilePath):
-    return ""
-  let body =
-    try: readFile(lockFilePath)
-    except CatchableError: return ""
-  "blake3:" & digestHex(blake3DomainDigest(body.bytesOf(), hdMetadataEnvelope))
+type
+  CertificateSerializationError* = object of CatchableError
+    ## Raised when a field value has NO canonical form, which today means one
+    ## thing only: a control character the escape table does not cover (see
+    ## ``certificateValueIsRepresentable``). Producing such a record would put
+    ## bytes on the wire that no conforming verifier can reconstruct.
+
+proc certificateValueIsRepresentable*(value: string): bool =
+  ## Canonical-Payload §4: a TOML basic string cannot carry a raw control
+  ## character, and the escape table defines an escape for exactly five of
+  ## them (``\n \r \t \b \f``). A value containing any OTHER character in
+  ## ``U+0000``–``U+001F``, or ``U+007F``, therefore has no canonical form.
+  ## Producers MUST NOT emit one and verifiers MUST reject it as malformed
+  ## rather than invent an escape — inventing one would be a repair, which
+  ## Canonical-Payload §5 forbids.
+  for ch in value:
+    let code = ord(ch)
+    if code == 0x7F: return false
+    if code < 0x20 and ch notin {'\n', '\r', '\t', '\b', '\f'}:
+      return false
+  true
 
 proc tomlEscapeCert(value: string): string =
-  ## Local copy of the basic-string escaper (mirrors lock_writer's
-  ## ``tomlEscape``) so the certificate writer is self-contained.
+  ## The certificate escape table (Canonical-Payload §4), and NOTHING else.
+  ##
+  ## In particular ``/`` is an ordinary character here and is emitted
+  ## literally. It appears in almost every certificate — ``platform`` is
+  ## ``os/arch``, every multi-segment ``paths`` entry has one — and a JSON
+  ## encoder is PERMITTED to write it as ``\/``, which is valid JSON, invalid
+  ## here, and a DIFFERENT SIGNATURE. Non-ASCII is likewise emitted literally
+  ## as UTF-8, never as ``\uXXXX``. This is why the escaper is hand-written
+  ## rather than delegated: where an encoder and the table disagree, the table
+  ## wins.
   result = newStringOfCap(value.len + 2)
   for ch in value:
     case ch
@@ -41337,55 +41792,123 @@ proc tomlEscapeCert(value: string): string =
     of '\f': result.add("\\f")
     else: result.add(ch)
 
-proc serializeCertificateToToml*(cert: TestCertificate): string =
-  ## Render a ``TestCertificate`` to the canonical TOML form documented in
-  ## Test-Certificates.md. Key order is fixed and deterministic so two issues
-  ## of the same observed state produce byte-identical bodies (modulo the
-  ## ``issued_at`` timestamp). ``targets`` is a flat string ARRAY (not a
-  ## nested array-of-tables) — the nested-table TOML constraint other
-  ## milestones hit does not apply to a scalar list. The ``[certificate]``
-  ## body is what TC-5 will sign; the ``[certificate.signature]`` block sits
-  ## AFTER it and is excluded from the canonical signing payload.
-  result = newStringOfCap(512)
-  result.add("schema = \"")
-  result.add(tomlEscapeCert(testCertificateSchemaV1))
-  result.add("\"\n\n")
-  result.add("[certificate]\n")
+proc canonicalStringList*(values: openArray[string]): seq[string] =
+  ## Canonical-Payload §3: deduplicate, then sort in ASCENDING BYTE ORDER —
+  ## a plain lexicographic sort over the UTF-8 bytes of the RAW values.
+  ##
+  ## Three things this sort is deliberately NOT, each of which is some
+  ## language's default:
+  ##   * NOT locale collation, which folds case and accents.
+  ##   * NOT UTF-16 code-unit order, under which a surrogate pair beginning
+  ##     ``D800``–``DBFF`` compares BELOW ``E000``–``FFFF`` and reverses the
+  ##     byte order for astral characters.
+  ##   * NOT a sort of the ESCAPED rendering. Escaping happens AFTER sorting:
+  ##     a value containing TAB sorts by ``09`` while its rendering ``\t``
+  ##     would sort by ``5C``.
+  ##
+  ## No Unicode normalization is applied anywhere: a precomposed ``é``
+  ## (U+00E9) and a decomposed ``e``+U+0301 are DIFFERENT values, are not
+  ## folded together, are not deduplicated against each other, and sort by
+  ## their bytes like anything else. Normalizing would silently change what a
+  ## signature covers.
+  ##
+  ## Nim's ``cmp`` for strings is a byte comparison (``memcmp`` over the raw
+  ## bytes, then length), which is exactly the required order.
+  var seen = initHashSet[string]()
+  for v in values:
+    if not seen.containsOrIncl(v):
+      result.add(v)
+  sort(result)
+
+proc appendInlineArray(dest: var string; key: string;
+                       values: openArray[string]) =
+  ## ``key = ["a", "b"]`` — elements separated by a comma and a single space,
+  ## no trailing comma, no spaces inside the brackets.
+  dest.add(key & " = [")
+  for i, v in values:
+    if i > 0: dest.add(", ")
+    if not certificateValueIsRepresentable(v):
+      raise newException(CertificateSerializationError,
+        "certificate value has no canonical form (unescapable control " &
+        "character) in '" & key & "'")
+    dest.add("\"" & tomlEscapeCert(v) & "\"")
+  dest.add("]\n")
+
+proc canonicalCertificatePayload*(cert: TestCertificate): string =
+  ## THE CANONICAL PAYLOAD (Canonical-Payload.md): the exact byte sequence a
+  ## signature covers. UTF-8, no BOM, LF line endings, no trailing whitespace,
+  ## ends with a newline. The signature block is excluded — it cannot cover
+  ## itself.
+  ##
+  ## Key order is FIXED as below and is not alphabetical; tables are separated
+  ## by exactly one blank line; ``key_id`` and ``paths`` are OMITTED ENTIRELY
+  ## rather than emitted empty (an omitted key and an empty one are different
+  ## payloads); ``clean``/``untracked`` are bare TOML booleans; every other
+  ## value is a quoted basic string — including ``issued_at``, which is copied
+  ## VERBATIM and never re-formatted.
+  ##
+  ## A verifier MUST reconstruct these bytes FROM THE PARSED FIELDS, never by
+  ## slicing the received file: a cosmetically reformatted certificate parses
+  ## to identical values and must still verify against its own signature.
+  result = newStringOfCap(768)
   template kv(key, value: string) =
+    if not certificateValueIsRepresentable(value):
+      raise newException(CertificateSerializationError,
+        "certificate value has no canonical form (unescapable control " &
+        "character) in '" & key & "'")
     result.add(key & " = \"" & tomlEscapeCert(value) & "\"\n")
+  kv("schema",
+     if cert.schema.len > 0: cert.schema else: testCertificateSchemaV1)
+  result.add("\n[certificate]\n")
+  kv("framework", cert.framework)
   kv("project", cert.project)
-  kv("repo", cert.repo)
-  kv("commit", cert.commit)
-  kv("lock", cert.lock)
   kv("platform", cert.platform)
-  # targets as an inline string array, stable order (as observed/run).
-  result.add("targets = [")
-  for i, t in cert.targets:
-    if i > 0: result.add(", ")
-    result.add("\"" & tomlEscapeCert(t) & "\"")
-  result.add("]\n")
+  appendInlineArray(result, "targets", canonicalStringList(cert.targets))
   kv("result", $cert.result)
   kv("issued_at", cert.issuedAt)
   kv("issuer", cert.issuer)
   if cert.keyId.len > 0:
     kv("key_id", cert.keyId)
-  # Signature block. TC-1 emits it with empty fields so the on-disk shape is
-  # stable for TC-5 (which fills algorithm + value) and so a reader can tell
-  # "unsigned" (present, empty) from "absent". This is the explicit deferral.
+  result.add("\n[certificate.vcs]\n")
+  kv("repo", cert.vcs.repo)
+  kv("commit", cert.vcs.commit)
+  let scope = canonicalStringList(cert.vcs.paths)
+  if scope.len > 0:
+    appendInlineArray(result, "paths", scope)
+  result.add("clean = " & (if cert.vcs.clean: "true" else: "false") & "\n")
+  result.add("untracked = " &
+    (if cert.vcs.untracked: "true" else: "false") & "\n")
+  if cert.vcs.worktree.present:
+    result.add("\n[certificate.vcs.worktree]\n")
+    if cert.vcs.worktree.tree.len > 0: kv("tree", cert.vcs.worktree.tree)
+    if cert.vcs.worktree.format.len > 0: kv("format", cert.vcs.worktree.format)
+    if cert.vcs.worktree.patchDigest.len > 0:
+      kv("patch_digest", cert.vcs.worktree.patchDigest)
+  # Command entries stay in EXECUTION ORDER — that order is part of the claim
+  # and MUST NOT be sorted — and each is preceded by exactly one blank line.
+  # ``argv`` is serialized like ``targets`` but is NEVER sorted or
+  # deduplicated: an argument vector is ordered by nature and a repeated
+  # argument is meaningful. An empty ARGUMENT, by contrast, is an ordinary
+  # argument and survives as ``""``.
+  for cmd in cert.commands:
+    result.add("\n[[certificate.command]]\n")
+    appendInlineArray(result, "argv", cmd.argv)
+
+proc serializeCertificateToToml*(cert: TestCertificate): string =
+  ## The on-disk / on-the-wire record: the canonical payload followed by the
+  ## ``[certificate.signature]`` block. The two never drift because this IS
+  ## the payload plus a suffix — a verifier that reconstructs the payload from
+  ## the parsed fields gets byte-identical bytes.
+  ##
+  ## The signature block is emitted even when empty so the on-disk shape is
+  ## stable between an unsigned record and the signed record it later becomes;
+  ## Canonical-Payload §6 makes the two forms equivalent, and neither affects
+  ## the payload since the block is excluded from it in both cases.
+  result = canonicalCertificatePayload(cert)
   result.add("\n[certificate.signature]\n")
   result.add("algorithm = \"" &
     tomlEscapeCert(cert.signature.algorithm) & "\"\n")
   result.add("value = \"" & tomlEscapeCert(cert.signature.value) & "\"\n")
-
-proc canonicalCertificatePayload*(cert: TestCertificate): string =
-  ## The canonical serialization of the ``[certificate]`` body (EXCLUDING the
-  ## signature block) — the exact bytes TC-5's daemon will sign and the
-  ## verifier will check the signature against. Re-uses the writer and slices
-  ## off the trailing signature block so the two never drift.
-  let full = serializeCertificateToToml(cert)
-  let marker = "\n[certificate.signature]\n"
-  let idx = full.find(marker)
-  if idx >= 0: full[0 ..< idx] else: full
 
 type
   TestCertificateParseError* = object of CatchableError
@@ -41444,57 +41967,353 @@ proc parseTomlStringArray(rhs: string): seq[string] =
     else:
       inc i
 
-proc parseCertificateFromToml*(content: string): TestCertificate =
-  ## Strict-enough reader for a ``reprobuild.test-certificate.v1`` record
-  ## that round-trips ``serializeCertificateToToml``. Raises
-  ## ``TestCertificateParseError`` on a missing/mismatched schema or a
-  ## malformed ``result``. Unknown keys are ignored (forward-compatible).
-  result.signature = TestCertificateSignature()
-  var inSignature = false
-  var sawSchema = false
-  for rawLine in content.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"):
+# ---- reader ---------------------------------------------------------------
+#
+# A received certificate may differ from canonical form in whitespace, key
+# order, table order and escaping while parsing to identical values
+# (Canonical-Payload §5), so the reader is a real (small) TOML scanner rather
+# than a line matcher: it accepts CRLF, aligned ``=``, tables in any order,
+# literal ``'...'`` strings, ``\uXXXX`` escapes, and arrays spread over
+# several lines. What it will NOT do is repair: a value it cannot represent
+# canonically is malformed, not something to normalise.
+
+proc appendUtf8(dest: var string; codePoint: int) =
+  ## Encode one code point as UTF-8. Hand-rolled rather than pulled from
+  ## ``std/unicode`` so this module's import surface does not grow a
+  ## name-clashing dependency for four lines of arithmetic.
+  if codePoint < 0x80:
+    dest.add(chr(codePoint))
+  elif codePoint < 0x800:
+    dest.add(chr(0xC0 or (codePoint shr 6)))
+    dest.add(chr(0x80 or (codePoint and 0x3F)))
+  elif codePoint < 0x10000:
+    dest.add(chr(0xE0 or (codePoint shr 12)))
+    dest.add(chr(0x80 or ((codePoint shr 6) and 0x3F)))
+    dest.add(chr(0x80 or (codePoint and 0x3F)))
+  else:
+    dest.add(chr(0xF0 or (codePoint shr 18)))
+    dest.add(chr(0x80 or ((codePoint shr 12) and 0x3F)))
+    dest.add(chr(0x80 or ((codePoint shr 6) and 0x3F)))
+    dest.add(chr(0x80 or (codePoint and 0x3F)))
+
+proc hexDigitValue(ch: char): int =
+  case ch
+  of '0'..'9': ord(ch) - ord('0')
+  of 'a'..'f': ord(ch) - ord('a') + 10
+  of 'A'..'F': ord(ch) - ord('A') + 10
+  else: -1
+
+proc skipCertTomlBlanks(s: string; i: var int) =
+  ## Spaces and tabs only — never a newline, so a key with no value on its
+  ## own line cannot silently borrow the next line's.
+  while i < s.len and s[i] in {' ', '\t', '\r'}: inc i
+
+proc skipCertTomlTrivia(s: string; i: var int) =
+  ## Whitespace (including newlines) and whole-line comments.
+  while i < s.len:
+    case s[i]
+    of ' ', '\t', '\r', '\n': inc i
+    of '#':
+      while i < s.len and s[i] != '\n': inc i
+    else: return
+
+proc parseCertTomlString(s: string; i: var int): string =
+  ## One TOML string: basic ``"..."`` (escapes processed) or literal
+  ## ``'...'`` (escapes are ordinary characters). ``\uXXXX`` / ``\UXXXXXXXX``
+  ## are accepted on INPUT for interoperability, and are never produced when
+  ## re-serializing (Canonical-Payload §4).
+  if i >= s.len:
+    raise newException(TestCertificateParseError, "expected a string value")
+  if s[i] == '\'':
+    inc i
+    let start = i
+    while i < s.len and s[i] != '\'': inc i
+    if i >= s.len:
+      raise newException(TestCertificateParseError,
+        "unterminated literal string")
+    result = s[start ..< i]
+    inc i
+    return
+  if s[i] != '"':
+    raise newException(TestCertificateParseError,
+      "expected a quoted string, found '" & $s[i] & "'")
+  inc i
+  result = newStringOfCap(32)
+  while i < s.len and s[i] != '"':
+    if s[i] != '\\':
+      result.add(s[i])
+      inc i
       continue
-    if line.startsWith("["):
-      inSignature = (line == "[certificate.signature]")
-      continue
-    let eq = line.find('=')
-    if eq <= 0: continue
-    let key = line[0 ..< eq].strip()
-    let rhs = line[eq + 1 .. ^1]
-    if key == "schema":
-      result.schema = parseTomlBasicValue(rhs)
-      sawSchema = true
-    elif inSignature:
-      case key
-      of "algorithm": result.signature.algorithm = parseTomlBasicValue(rhs)
-      of "value": result.signature.value = parseTomlBasicValue(rhs)
-      else: discard
+    inc i
+    if i >= s.len:
+      raise newException(TestCertificateParseError, "trailing backslash")
+    case s[i]
+    of '\\': result.add('\\'); inc i
+    of '"': result.add('"'); inc i
+    of 'n': result.add('\n'); inc i
+    of 'r': result.add('\r'); inc i
+    of 't': result.add('\t'); inc i
+    of 'b': result.add('\b'); inc i
+    of 'f': result.add('\f'); inc i
+    of '/':
+      # Not one of ours, and never produced — but a JSON-shaped producer may
+      # have written it, and accepting it on input costs nothing because the
+      # re-serialization emits a bare '/'.
+      result.add('/'); inc i
+    of 'u', 'U':
+      let width = if s[i] == 'u': 4 else: 8
+      inc i
+      if i + width > s.len:
+        raise newException(TestCertificateParseError,
+          "truncated unicode escape")
+      var codePoint = 0
+      for k in 0 ..< width:
+        let digit = hexDigitValue(s[i + k])
+        if digit < 0:
+          raise newException(TestCertificateParseError,
+            "invalid unicode escape")
+        codePoint = codePoint * 16 + digit
+      i += width
+      appendUtf8(result, codePoint)
     else:
+      raise newException(TestCertificateParseError,
+        "unknown escape '\\" & $s[i] & "'")
+  if i >= s.len:
+    raise newException(TestCertificateParseError, "unterminated basic string")
+  inc i
+
+proc parseCertTomlStringArray(s: string; i: var int): seq[string] =
+  ## ``[ "a", "b" ]`` — tolerant of newlines and of a trailing comma.
+  if i >= s.len or s[i] != '[':
+    raise newException(TestCertificateParseError, "expected an array")
+  inc i
+  while true:
+    skipCertTomlTrivia(s, i)
+    if i >= s.len:
+      raise newException(TestCertificateParseError, "unterminated array")
+    if s[i] == ']':
+      inc i
+      return
+    result.add(parseCertTomlString(s, i))
+    skipCertTomlTrivia(s, i)
+    if i < s.len and s[i] == ',':
+      inc i
+    elif i < s.len and s[i] == ']':
+      inc i
+      return
+    else:
+      raise newException(TestCertificateParseError,
+        "expected ',' or ']' in array")
+
+type
+  CertificateReadStatus* = enum
+    ## Why a found record is or is not evidence, kept apart because the three
+    ## failures call for three different operator responses (Verification §7).
+    crsOk                ## a well-formed ``test-certificate.v1`` record
+    crsRetiredSchema     ## the PRE-MIGRATION reprobuild id — must be RE-ISSUED
+    crsUnknownSchema     ## a schema version this build does not implement
+    crsMalformed         ## decidably invalid: unparseable, or a missing field
+
+  CertificateReadResult* = object
+    status*: CertificateReadStatus
+    cert*: TestCertificate
+    schemaSeen*: string   ## the raw ``schema`` value, even when unreadable
+    detail*: string       ## human-facing reason, including the remedy
+
+proc certificateStructuralDefect*(cert: TestCertificate): string =
+  ## "" when every REQUIRED v1 field is present (Standard §3.1/§3.2/§3.3),
+  ## otherwise the name of the first missing one. A record missing a required
+  ## field is DECIDABLY INVALID and contributes nothing — which is a different
+  ## failure from a schema version this verifier cannot read, and the two must
+  ## not be reported as one.
+  if cert.framework.len == 0: return "framework"
+  if cert.project.len == 0: return "project"
+  if cert.platform.len == 0: return "platform"
+  if cert.targets.len == 0: return "targets (at least one is required)"
+  if cert.issuedAt.len == 0: return "issued_at"
+  if cert.issuer.len == 0: return "issuer"
+  if cert.vcs.repo.len == 0: return "vcs.repo"
+  if cert.vcs.commit.len == 0: return "vcs.commit"
+  if cert.commands.len == 0:
+    return "certificate.command (at least one is required)"
+  for cmd in cert.commands:
+    if cmd.argv.len == 0:
+      return "certificate.command.argv (describes no command)"
+  # Standard §3.2.2: ``worktree`` is REQUIRED when ``clean = false`` and MUST
+  # be absent when ``clean = true``. A dirty certificate without it identifies
+  # no state at all.
+  if not cert.vcs.clean and not cert.vcs.worktree.present:
+    return "certificate.vcs.worktree (required when clean = false)"
+  if cert.vcs.clean and cert.vcs.worktree.present:
+    return "certificate.vcs.worktree (must be absent when clean = true)"
+  if cert.vcs.worktree.present and cert.vcs.worktree.tree.len == 0 and
+      cert.vcs.worktree.patchDigest.len == 0:
+    return "certificate.vcs.worktree (needs tree or patch_digest)"
+  ""
+
+proc parseCertificateBody(content: string): TestCertificate =
+  ## The scanner proper. Raises ``TestCertificateParseError``; the schema is
+  ## read but NOT judged here, because the caller has to tell an unknown
+  ## schema apart from a malformed record.
+  var i = 0
+  var table = ""
+  while true:
+    skipCertTomlTrivia(content, i)
+    if i >= content.len: break
+    if content[i] == '[':
+      var doubled = false
+      inc i
+      if i < content.len and content[i] == '[':
+        doubled = true
+        inc i
+      let start = i
+      while i < content.len and content[i] != ']': inc i
+      if i >= content.len:
+        raise newException(TestCertificateParseError,
+          "unterminated table header")
+      table = content[start ..< i].strip()
+      inc i
+      if doubled:
+        if i < content.len and content[i] == ']': inc i
+        if table == "certificate.command":
+          result.commands.add(TestCertificateCommand())
+      if table == "certificate.vcs.worktree":
+        result.vcs.worktree.present = true
+      continue
+    let keyStart = i
+    while i < content.len and content[i] notin {'=', ' ', '\t', '\r', '\n'}:
+      inc i
+    let key = content[keyStart ..< i]
+    if key.len == 0:
+      raise newException(TestCertificateParseError,
+        "expected a key at offset " & $keyStart)
+    skipCertTomlBlanks(content, i)
+    if i >= content.len or content[i] != '=':
+      raise newException(TestCertificateParseError,
+        "expected '=' after key '" & key & "'")
+    inc i
+    skipCertTomlBlanks(content, i)
+    if i >= content.len:
+      raise newException(TestCertificateParseError,
+        "missing value for key '" & key & "'")
+    # The value. Booleans are bare; everything else is a string or an array of
+    # strings, so the first character decides.
+    if content[i] == '[':
+      let values = parseCertTomlStringArray(content, i)
+      case table
+      of "certificate":
+        if key == "targets": result.targets = values
+      of "certificate.vcs":
+        if key == "paths": result.vcs.paths = values
+      of "certificate.command":
+        if key == "argv" and result.commands.len > 0:
+          result.commands[^1].argv = values
+      else: discard
+      continue
+    if content[i] in {'t', 'f'}:
+      let boolStart = i
+      while i < content.len and content[i] in {'a'..'z'}: inc i
+      let word = content[boolStart ..< i]
+      if word notin ["true", "false"]:
+        raise newException(TestCertificateParseError,
+          "unexpected bare value '" & word & "' for key '" & key & "'")
+      let flag = word == "true"
+      if table == "certificate.vcs":
+        case key
+        of "clean": result.vcs.clean = flag
+        of "untracked": result.vcs.untracked = flag
+        else: discard
+      continue
+    let value = parseCertTomlString(content, i)
+    case table
+    of "":
+      if key == "schema": result.schema = value
+    of "certificate":
       case key
-      of "project": result.project = parseTomlBasicValue(rhs)
-      of "repo": result.repo = parseTomlBasicValue(rhs)
-      of "commit": result.commit = parseTomlBasicValue(rhs)
-      of "lock": result.lock = parseTomlBasicValue(rhs)
-      of "platform": result.platform = parseTomlBasicValue(rhs)
-      of "targets": result.targets = parseTomlStringArray(rhs)
+      of "framework": result.framework = value
+      of "project": result.project = value
+      of "platform": result.platform = value
       of "result":
-        let r = parseTomlBasicValue(rhs)
-        case r
+        case value
         of "passed": result.result = tcrPassed
         of "failed": result.result = tcrFailed
         else:
           raise newException(TestCertificateParseError,
-            "invalid certificate result: '" & r & "'")
-      of "issued_at": result.issuedAt = parseTomlBasicValue(rhs)
-      of "issuer": result.issuer = parseTomlBasicValue(rhs)
-      of "key_id": result.keyId = parseTomlBasicValue(rhs)
+            "invalid certificate result: '" & value & "'")
+      of "issued_at": result.issuedAt = value
+      of "issuer": result.issuer = value
+      of "key_id": result.keyId = value
       else: discard
-  if not sawSchema or result.schema != testCertificateSchemaV1:
-    raise newException(TestCertificateParseError,
-      "not a " & testCertificateSchemaV1 & " certificate (schema='" &
-      result.schema & "')")
+    of "certificate.vcs":
+      case key
+      of "repo": result.vcs.repo = value
+      of "commit": result.vcs.commit = value
+      else: discard
+    of "certificate.vcs.worktree":
+      case key
+      of "tree": result.vcs.worktree.tree = value
+      of "format": result.vcs.worktree.format = value
+      of "patch_digest": result.vcs.worktree.patchDigest = value
+      else: discard
+    of "certificate.signature":
+      case key
+      of "algorithm": result.signature.algorithm = value
+      of "value": result.signature.value = value
+      else: discard
+    else: discard
+
+proc readCertificateRecord*(content: string): CertificateReadResult =
+  ## Read a found record and CLASSIFY it. This is the entry point a verifier
+  ## uses, because the three ways a record can fail to be evidence lead to
+  ## three different reports (Verification §7):
+  ##
+  ##   * ``crsRetiredSchema`` — a certificate issued before the TC-7
+  ##     migration. Its signature was made over a payload that is no longer
+  ##     the canonical form, so it cannot be verified and MUST NOT be
+  ##     translated: translating would mean re-signing bytes the original
+  ##     signer never saw. The operator is told to RE-ISSUE, which is a
+  ##     different instruction from "this file is damaged".
+  ##   * ``crsUnknownSchema`` — a schema version this build does not
+  ##     implement. It may be a perfectly good certificate this consumer
+  ##     simply cannot read, so it is reported UNVERIFIABLE, not invalid.
+  ##   * ``crsMalformed`` — unparseable, or missing a required v1 field. The
+  ##     consumer asked the question and got an answer: not evidence.
+  try:
+    result.cert = parseCertificateBody(content)
+  except TestCertificateParseError as err:
+    result.status = crsMalformed
+    result.detail = err.msg
+    return
+  result.schemaSeen = result.cert.schema
+  if result.cert.schema == retiredReprobuildCertificateSchema:
+    result.status = crsRetiredSchema
+    result.detail = "certificate uses the retired '" &
+      retiredReprobuildCertificateSchema & "' schema, which predates the " &
+      "test-certificate.v1 standard. Its signature covers a payload that is " &
+      "no longer the canonical form, so it cannot be verified and MUST NOT " &
+      "be translated — RE-ISSUE it with 'repro certify'."
+    return
+  if result.cert.schema != testCertificateSchemaV1:
+    result.status = crsUnknownSchema
+    result.detail = "schema '" & result.cert.schema &
+      "' is not implemented by this build (expected '" &
+      testCertificateSchemaV1 & "')"
+    return
+  let defect = certificateStructuralDefect(result.cert)
+  if defect.len > 0:
+    result.status = crsMalformed
+    result.detail = "certificate is missing a required field: " & defect
+    return
+  result.status = crsOk
+
+proc parseCertificateFromToml*(content: string): TestCertificate =
+  ## Raising reader for callers that want a certificate or an exception.
+  ## Prefer ``readCertificateRecord`` where the DISTINCTION between a retired
+  ## schema, an unimplemented one and a malformed record matters.
+  let read = readCertificateRecord(content)
+  if read.status != crsOk:
+    raise newException(TestCertificateParseError, read.detail)
+  read.cert
 
 proc writeCertificateFile*(cert: TestCertificate; path: string) =
   ## Serialize ``cert`` and write it to ``path`` (creating parent dirs).
@@ -41511,43 +42330,134 @@ proc readCertificateFile*(path: string): TestCertificate =
   parseCertificateFromToml(readFile(path))
 
 # ---- verifier --------------------------------------------------------------
+#
+# Verification answers three INDEPENDENT questions, in this order
+# (Verification §1):
+#
+#   1. Is this certificate mine to evaluate?  — framework filtering (§2)
+#   2. Is it authentic?                       — signature + key store (§3)
+#   3. Does it cover what I care about?       — VCS match + coverage union (§4, §5)
+#
+# A certificate can be perfectly authentic and cover nothing relevant. It can
+# cover exactly the right thing and be unsigned. It can be both and belong to
+# a framework this consumer knows nothing about. None of the three implies
+# another, and conflating them is the most common way to get this wrong.
 
 type
   CoverageRequirement* = object
-    ## The tuple a verifier checks a certificate SET against.
-    commit*: string
-    lock*: string
+    ## The state, scope and platform ONE certificate is checked against.
+    ##
+    ## The pre-TC-7 ``lock`` digest is deliberately absent: ``commit`` already
+    ## binds every committed input, and a framework that wants its lock
+    ## resolves it AT that commit itself (``resolveLockAtCommit``,
+    ## Verification §4.2) rather than trusting a digest the record carried.
+    framework*: string           ## only this framework's certificates count
+    repo*: string                ## repository under evaluation ("" = unchecked)
+    commit*: string              ## the commit under evaluation
+    tree*: string                ## content id of that state ("" = unknown)
     platform*: string
     requiredTargets*: seq[string]
+    requiredPaths*: seq[string]  ## scope that must be covered; empty = whole repo
 
   CoverageResult* = object
     ## Outcome of ``verifyCoverage``. ``covered`` is the verdict; the other
-    ## fields explain a miss so the gate (TC-3) / CI (TC-4) can render an
-    ## actionable diagnostic.
+    ## fields explain a miss so a gate can render an actionable diagnostic.
     covered*: bool
     coveredTargets*: seq[string]   ## union of targets across matching certs
     missingTargets*: seq[string]   ## required ∖ covered
-    matchingCerts*: int            ## certs matching commit/lock/platform
+    matchingCerts*: int            ## certs that bound this state + platform
+
+  StateBinding* = enum
+    ## Whether a certificate describes the state under evaluation.
+    sbBound            ## yes — it attests exactly this state
+    sbOtherState       ## no  — it attests a different one (not evidence here)
+    sbUnreproducible   ## cannot tell: this consumer cannot reproduce the claim
+
+proc scopeCoversPath*(scope: openArray[string]; required: string): bool =
+  ## Standard §3.2.1: a path naming a DIRECTORY scopes the subtree beneath it,
+  ## a path naming a file scopes that file. Paths are repo-relative, use ``/``
+  ## separators, never begin with ``./`` and never end with ``/`` — so subtree
+  ## containment is a prefix test on whole segments, never a bare
+  ## ``startsWith`` (which would let ``src/db`` swallow ``src/db-backend``).
+  for entry in scope:
+    if entry == required: return true
+    if required.startsWith(entry & "/"): return true
+  false
+
+proc certificateScopeSatisfies*(cert: TestCertificate;
+                                requiredPaths: openArray[string]): bool =
+  ## Verification §4.1.2: a certificate carrying ``vcs.paths`` covers only
+  ## those paths and says nothing about the rest of the tree. A consumer
+  ## requiring broader coverage MUST reject it — treating a scoped
+  ## certificate as a whole-repository one is the mistake the field exists to
+  ## prevent.
+  if cert.vcs.paths.len == 0:
+    return true                  # whole-repository claim covers any scope
+  if requiredPaths.len == 0:
+    return false                 # whole repository required, narrower claim
+  for required in requiredPaths:
+    if not scopeCoversPath(cert.vcs.paths, required):
+      return false
+  true
+
+proc certificateBindsState*(cert: TestCertificate; req: CoverageRequirement):
+    tuple[binding: StateBinding; why: string] =
+  ## The generic VCS check (Verification §4.1), independent of platform.
+  if req.repo.len > 0 and cert.vcs.repo != req.repo:
+    return (sbOtherState, "attests repository '" & cert.vcs.repo & "'")
+  if cert.vcs.clean:
+    if req.commit.len == 0 or cert.vcs.commit != req.commit:
+      return (sbOtherState, "attests commit " & cert.vcs.commit)
+  else:
+    # A ``clean = false`` certificate does not describe ``commit``; it
+    # describes ``commit`` PLUS the modification in ``worktree``, and is
+    # matched by CONTENT rather than by commit identity (§4.1.1). That is what
+    # lets a certificate issued against a dirty tree still cover the commit
+    # that tree was later committed as.
+    if not cert.vcs.worktree.present:
+      return (sbOtherState, "clean = false with no worktree identifies no state")
+    if cert.vcs.worktree.tree.len > 0:
+      if req.tree.len == 0:
+        return (sbUnreproducible,
+          "no content id is available for the state under evaluation")
+      if cert.vcs.worktree.tree != req.tree:
+        return (sbOtherState, "worktree.tree " & cert.vcs.worktree.tree &
+          " is not the tree under evaluation")
+    else:
+      # ``patch_digest`` only. Reproducing the patch requires the exact
+      # semantics named in ``format``, which this consumer does not implement,
+      # so the record is UNVERIFIABLE rather than invalid (§4.1.1).
+      return (sbUnreproducible, "patch_digest in format '" &
+        cert.vcs.worktree.format & "' cannot be reproduced by this consumer")
+  if not certificateScopeSatisfies(cert, req.requiredPaths):
+    return (sbOtherState, "scoped to [" & cert.vcs.paths.join(", ") &
+      "], which is narrower than the requirement")
+  (sbBound, "")
 
 proc certificateMatches*(cert: TestCertificate;
                          req: CoverageRequirement): bool =
-  ## A certificate is RELEVANT to a requirement iff it is a passed cert whose
-  ## ``commit`` / ``lock`` / ``platform`` all match. A mismatch on ANY binding
-  ## field means the cert attests a DIFFERENT state and is ignored (the spec:
-  ## "Verifiers ignore … notes whose ``commit`` field doesn't match").
+  ## A certificate is RELEVANT to a requirement iff it is a ``passed`` record
+  ## from the framework being evaluated, for the platform being satisfied,
+  ## that binds the state under evaluation. A mismatch on ANY of those means
+  ## it attests something else and contributes nothing.
+  ##
+  ## This is the single relevance predicate: the push gate, the CI plan, the
+  ## receiving-side gateway and the standard's own three-valued evaluator all
+  ## go through it, so there is no second opinion about what a certificate
+  ## covers.
   cert.result == tcrPassed and
-    cert.commit == req.commit and
-    cert.lock == req.lock and
-    cert.platform == req.platform
+    (req.framework.len == 0 or cert.framework == req.framework) and
+    cert.platform == req.platform and
+    certificateBindsState(cert, req).binding == sbBound
 
 proc verifyCoverage*(certs: openArray[TestCertificate];
                      req: CoverageRequirement): CoverageResult =
-  ## Does the certificate SET cover ``(commit, lock, platform,
-  ## required-targets)``? The covered set is the UNION of ``targets`` across
-  ## every matching certificate (partial coverage across several certs is
-  ## allowed, per Test-Certificates.md §"Gate integration"); coverage holds
-  ## iff that union ⊇ ``requiredTargets``. Certs whose commit/lock/platform
-  ## mismatch are ignored entirely.
+  ## Does the certificate SET cover this requirement on this platform? The
+  ## covered set is the UNION of ``targets`` across every matching certificate
+  ## — partial coverage across several certificates is the NORMAL case, not a
+  ## degraded one (Verification §5) — and coverage holds iff that union ⊇
+  ## ``requiredTargets``. Non-matching certs are ignored entirely; none can
+  ## ever subtract, which is what makes coverage monotonic (§7.1).
   var union = initHashSet[string]()
   for cert in certs:
     if certificateMatches(cert, req):
@@ -41601,11 +42511,18 @@ proc verifyCoverage*(certs: openArray[TestCertificate];
 # ============================================================================
 
 const
-  certificateSignatureNamespace* = "reprobuild-test-certificate-v1"
-    ## The ``ssh-keygen -Y sign -n <namespace>`` namespace. Both sign and
-    ## verify MUST use the same namespace; a mismatch fails verification (a
-    ## cheap domain-separation guard so a cert signature can never be confused
-    ## with, e.g., an RA-17 manifest signature).
+  certificateSignatureNamespace* = "test-certificate-v1"
+    ## The ``ssh-keygen -Y sign -n <namespace>`` namespace for this schema
+    ## version (Standard §6.1). It is VENDOR-NEUTRAL, like the schema id: a
+    ## certificate signed by CodeTracer's ``ct test`` and one signed by
+    ## reprobuild are checkable by the same verifier, which is the whole point
+    ## of extracting the standard.
+    ##
+    ## Domain separation is NOT optional. Without it, a signature obtained for
+    ## another purpose can be replayed as a certificate signature over
+    ## identical bytes — and developers who sign commits have already produced
+    ## signatures over arbitrary bytes under OpenSSH's ``git`` namespace. Both
+    ## sign and verify use this value; a mismatch fails verification.
   certificateSignatureAlgorithm* = "ed25519"
     ## The ``[certificate.signature] algorithm`` value TC-5 writes.
 
@@ -41691,41 +42608,6 @@ proc serializeRegisteredKeyStore*(store: RegisteredKeyStore): string =
     result.add("public_key = \"" & tomlEscapeCert(k.publicKey) & "\"\n")
     result.add("status = \"" & $k.status & "\"\n")
 
-proc parseRegisteredKeyStore*(content: string): RegisteredKeyStore =
-  ## Reader for ``serializeRegisteredKeyStore``. Tolerant of unknown keys; a
-  ## missing/empty file parses to an EMPTY store (no allowed signers → every
-  ## cert is rejected, fail-closed).
-  var cur: RegisteredKey
-  var inKey = false
-  template flush() =
-    if inKey and cur.keyId.len > 0:
-      result.keys.add(cur)
-    cur = RegisteredKey()
-    inKey = false
-  for rawLine in content.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"): continue
-    if line == "[[key]]":
-      flush()
-      inKey = true
-      cur = RegisteredKey(status: rksActive)
-      continue
-    if line.startsWith("["): continue
-    let eq = line.find('=')
-    if eq <= 0: continue
-    let key = line[0 ..< eq].strip()
-    let rhs = line[eq + 1 .. ^1]
-    if not inKey:
-      continue
-    case key
-    of "key_id": cur.keyId = parseTomlBasicValue(rhs)
-    of "public_key": cur.publicKey = parseTomlBasicValue(rhs)
-    of "status":
-      cur.status =
-        if parseTomlBasicValue(rhs) == $rksRevoked: rksRevoked else: rksActive
-    else: discard
-  flush()
-
 proc registeredKeyStorePath*(workspaceRoot: string): string =
   ## Where the allowed-signers store lives for a workspace. CI / the server
   ## owns this set (Test-Certificates.md: "CI/server registers trusted public
@@ -41733,12 +42615,128 @@ proc registeredKeyStorePath*(workspaceRoot: string): string =
   ## both the issuance path and the pre-push gate read the SAME registry.
   workspaceRoot / ".repro" / "workspace" / "certificates" / "registered-keys.toml"
 
-proc readRegisteredKeyStore*(path: string): RegisteredKeyStore =
-  ## Read the store from ``path``; a missing file is an EMPTY store
-  ## (fail-closed: no registered signers → nothing verifies).
+proc parseRegisteredKeyStoreStrict*(content: string): RegisteredKeyStore =
+  ## STRICT reader: raises ``ValueError`` on content that is not well-formed
+  ## TOML in the store's shape.
+  ##
+  ## Strictness is the whole point. A tolerant reader turns a CORRUPT store
+  ## into an EMPTY one, and an empty store is fail-closed — so the operator is
+  ## told "nobody is trusted, run the tests again" when the real fault is a
+  ## damaged configuration file that re-running tests cannot fix. The two
+  ## answers have to stay apart (Verification §3.1), and they can only stay
+  ## apart if the reader can say "I could not read this".
+  var i = 0
+  var table = ""
+  var cur: RegisteredKey
+  var inKey = false
+  template flush() =
+    if inKey and cur.keyId.len > 0:
+      result.keys.add(cur)
+    cur = RegisteredKey(status: rksActive)
+    inKey = false
+  while true:
+    skipCertTomlTrivia(content, i)
+    if i >= content.len: break
+    if content[i] == '[':
+      var doubled = false
+      inc i
+      if i < content.len and content[i] == '[':
+        doubled = true
+        inc i
+      let start = i
+      while i < content.len and content[i] != ']': inc i
+      if i >= content.len:
+        raise newException(ValueError,
+          "registered-key store: unterminated table header")
+      table = content[start ..< i].strip()
+      inc i
+      if doubled:
+        if i >= content.len or content[i] != ']':
+          raise newException(ValueError,
+            "registered-key store: unterminated array-of-tables header")
+        inc i
+        if table == "key":
+          flush()
+          inKey = true
+      continue
+    let keyStart = i
+    while i < content.len and content[i] notin {'=', ' ', '\t', '\r', '\n'}:
+      inc i
+    let key = content[keyStart ..< i]
+    if key.len == 0:
+      raise newException(ValueError,
+        "registered-key store: expected a key at offset " & $keyStart)
+    skipCertTomlBlanks(content, i)
+    if i >= content.len or content[i] != '=':
+      raise newException(ValueError,
+        "registered-key store: expected '=' after key '" & key & "'")
+    inc i
+    skipCertTomlBlanks(content, i)
+    if i >= content.len:
+      raise newException(ValueError,
+        "registered-key store: missing value for key '" & key & "'")
+    let value =
+      try:
+        parseCertTomlString(content, i)
+      except TestCertificateParseError as err:
+        raise newException(ValueError,
+          "registered-key store: " & err.msg & " (key '" & key & "')")
+    if not inKey:
+      continue
+    case key
+    of "key_id": cur.keyId = value
+    of "public_key": cur.publicKey = value
+    of "status":
+      cur.status = if value == $rksRevoked: rksRevoked else: rksActive
+    else: discard
+  flush()
+
+type
+  KeyStoreAvailability* = enum
+    ## Whether the registered-key store ANSWERED the trust question.
+    ##
+    ## A missing or EMPTY store answers it — nobody is trusted, fail-closed —
+    ## so the certificates it denies are simply NOT COVERED and the remedy is
+    ## to register a signer. A store that cannot be read or parsed answers
+    ## NOTHING, and the outcome is UNVERIFIABLE. Collapsing the two sends an
+    ## operator to re-run tests when the actual fault is a corrupt
+    ## configuration file (Verification §3.1).
+    ksaReadable
+    ksaUnreadable
+
+  RegisteredKeyStoreLoad* = object
+    availability*: KeyStoreAvailability
+    store*: RegisteredKeyStore
+    detail*: string
+
+proc readRegisteredKeyStoreChecked*(path: string): RegisteredKeyStoreLoad =
+  ## Load the store and say whether it could be read at all.
+  result.availability = ksaReadable
   if path.len == 0 or not fileExists(path):
-    return RegisteredKeyStore()
-  parseRegisteredKeyStore(readFile(path))
+    result.detail = "no registered-key store at '" & path &
+      "' — nobody is trusted"
+    return
+  var body: string
+  try:
+    body = readFile(path)
+  except CatchableError as err:
+    result.availability = ksaUnreadable
+    result.detail = "registered-key store at '" & path &
+      "' could not be read: " & err.msg
+    return
+  try:
+    result.store = parseRegisteredKeyStoreStrict(body)
+  except ValueError as err:
+    result.availability = ksaUnreadable
+    result.detail = "registered-key store at '" & path &
+      "' could not be parsed: " & err.msg
+
+proc readRegisteredKeyStore*(path: string): RegisteredKeyStore =
+  ## Read the store from ``path``; a missing OR UNREADABLE file yields an
+  ## EMPTY store (fail-closed: no registered signers → nothing verifies).
+  ## Callers that must distinguish "nobody is trusted" from "I could not tell"
+  ## use ``readRegisteredKeyStoreChecked`` instead.
+  readRegisteredKeyStoreChecked(path).store
 
 proc writeRegisteredKeyStore*(store: RegisteredKeyStore; path: string) =
   ## Persist the store, creating parent dirs.
@@ -41781,6 +42779,36 @@ proc sshKeygenBinary(): string =
   ## Resolve ``ssh-keygen`` (the real ed25519 signer/verifier). Empty when
   ## absent — callers fail closed (no signature, no certificate; verify fails).
   findExe("ssh-keygen")
+
+const
+  sshSignatureArmorBegin = "-----BEGIN SSH SIGNATURE-----"
+  sshSignatureArmorEnd = "-----END SSH SIGNATURE-----"
+
+proc sshSignatureBlobBase64*(armored: string): string =
+  ## ``signature.value`` carries base64 of the detached signature BLOB — RFC
+  ## 4648 §4, padded, ON A SINGLE LINE, with no embedded whitespace and NO
+  ## ARMOR (Standard §6.1). ``ssh-keygen -Y sign`` writes the armored
+  ## ``-----BEGIN SSH SIGNATURE-----`` form instead, and converting between
+  ## the two is pure framing.
+  ##
+  ## Getting this wrong is INVISIBLE LOCALLY, which is why it is worth a named
+  ## function and this comment: a producer that base64s the whole armored text
+  ## and a verifier that un-base64s it back agree perfectly with each other,
+  ## every one of their signatures verifies, and every certificate they emit
+  ## is unreadable to every other implementation. Only a cross-implementation
+  ## vector catches it — and one did.
+  for line in armored.splitLines():
+    let trimmed = line.strip()
+    if trimmed.len == 0: continue
+    if trimmed == sshSignatureArmorBegin or trimmed == sshSignatureArmorEnd:
+      continue
+    result.add(trimmed)
+
+proc sshSignatureArmorFrom*(value: string): string =
+  ## The inverse framing: wrap the single-line blob base64 back into the
+  ## armored form ``ssh-keygen -Y verify`` reads from ``-s``.
+  sshSignatureArmorBegin & "\n" & value.strip() & "\n" &
+    sshSignatureArmorEnd & "\n"
 
 proc signCertificateOnIssuance*(cert: var TestCertificate;
                                 keyId, signingKeyPath: string) =
@@ -41827,7 +42855,10 @@ proc signCertificateOnIssuance*(cert: var TestCertificate;
       "ssh-keygen produced no signature file")
   cert.signature = TestCertificateSignature(
     algorithm: certificateSignatureAlgorithm,
-    value: encode(readFile(sigPath)))   # base64 of the SSH signature blob
+    # The FIELD carries base64 of the signature BLOB on one line; ssh-keygen
+    # wrote the armored form. Unwrapping here is what makes the record
+    # readable by an implementation that is not this one.
+    value: sshSignatureBlobBase64(readFile(sigPath)))
 
 # ---- signature verification (registered + unrevoked + valid sig) -----------
 
@@ -41927,43 +42958,46 @@ proc runFeedingStdin(exe: string;
     captured.add("\n")
   (code: process.waitForExit(), output: captured)
 
-proc verifyCertificateSignature*(cert: TestCertificate;
-                                 store: RegisteredKeyStore): SignatureVerdict =
-  ## The TC-5 SIGNATURE verifier (additive to the TC-1 COVERAGE verifier). A
-  ## certificate's signature is VALID iff:
-  ##   (a) it is signed (``isSigned``), AND
-  ##   (b) its ``key_id`` resolves to a REGISTERED key in ``store``, AND
-  ##   (c) that key is NOT revoked, AND
-  ##   (d) the ed25519 signature over ``canonicalCertificatePayload(cert)``
-  ##       checks against that registered public key (via ``ssh-keygen -Y
-  ##       verify``).
-  ## Any miss → a specific non-``svValid`` verdict the gate/CI renders.
-  if not cert.isSigned:
-    return svUnsigned
-  let signer = resolveSigner(store, cert.keyId)
-  if not signer.found:
-    return svUnregisteredKey
-  if signer.revoked:
-    return svRevokedKey
+type
+  SignatureCheck* = enum
+    ## Outcome of checking ONE detached signature over ONE payload with ONE
+    ## key, with no key-store question mixed in.
+    scValid              ## verifies over these bytes, under this namespace
+    scInvalid            ## does not
+    scToolingUnavailable ## no ssh-keygen — we could not ask
+
+proc verifyDetachedCertificateSignature*(payload, publicKey,
+                                         signatureValue: string;
+    namespace = certificateSignatureNamespace;
+    identity = "test-certificate-verifier@example.invalid"): SignatureCheck =
+  ## The signature PRIMITIVE (Standard §6.1): does this base64 detached SSH
+  ## signature check out over exactly these payload bytes, against this public
+  ## key, under this namespace?
+  ##
+  ## ``namespace`` is a PARAMETER rather than a constant folded into the body
+  ## because domain separation is a property a test has to be able to falsify.
+  ## The conformance suite's ``wrong-namespace`` vector carries a GENUINE
+  ## signature, by the right key, over exactly the right bytes, made under
+  ## OpenSSH's ``git`` namespace — the one commit and tag signatures use. An
+  ## implementation only demonstrates domain separation by showing that those
+  ## same bytes verify THERE and fail HERE; failing both ways would prove only
+  ## that it compared the payload wrongly. Production callers never pass it.
+  ##
+  ## ``identity`` selects a line in the allowed-signers file and nothing else:
+  ## an SSH signature blob binds the NAMESPACE and the PUBLIC KEY, not a
+  ## principal.
   let sshKeygen = sshKeygenBinary()
   if sshKeygen.len == 0:
-    return svToolingUnavailable
-  let payload = canonicalCertificatePayload(cert)
-  var sigBytes: string
-  try:
-    sigBytes = decode(cert.signature.value)
-  except CatchableError:
-    return svBadSignature
+    return scToolingUnavailable
   let scratch = createTempDir("repro-cert-verify-", "")
   defer: removeDir(scratch)
   let sigFile = scratch / "payload.sig"
   let allowedSigners = scratch / "allowed_signers"
-  writeFile(sigFile, sigBytes)
-  # The allowed-signers file ties THIS key_id's registered public key to the
-  # principal we verify as, so a signature made by a DIFFERENT key (even a
-  # registered one under another id) does not verify for this key_id.
-  writeFile(allowedSigners,
-    allowedSignerIdentity(cert.keyId) & " " & signer.publicKey & "\n")
+  # ``-s`` reads the ARMORED form, so the single-line blob base64 the record
+  # carries is wrapped back up. A malformed value simply fails to parse and
+  # the child's non-zero exit is the verdict.
+  writeFile(sigFile, sshSignatureArmorFrom(signatureValue))
+  writeFile(allowedSigners, identity & " " & publicKey & "\n")
   # ``ssh-keygen -Y verify`` reads the signed payload on STDIN and has no flag
   # to read it from a file, so the payload has to be WRITTEN to the child's
   # input pipe. It must NOT be a `` < file`` appended to a command string:
@@ -41971,9 +43005,53 @@ proc verifyCertificateSignature*(cert: TestCertificate;
   # signature verify against an EMPTY payload and therefore fail — no
   # certificate has ever been trusted on Windows.
   let res = runFeedingStdin(sshKeygen, @["-Y", "verify",
-    "-f", allowedSigners, "-I", allowedSignerIdentity(cert.keyId),
-    "-n", certificateSignatureNamespace, "-s", sigFile], payload)
-  if res.code == 0: svValid else: svBadSignature
+    "-f", allowedSigners, "-I", identity,
+    "-n", namespace, "-s", sigFile], payload)
+  if res.code == 0: scValid else: scInvalid
+
+proc verifyCertificateSignature*(cert: TestCertificate;
+                                 store: RegisteredKeyStore): SignatureVerdict =
+  ## Authenticity (Verification §3): a certificate's signature is VALID iff
+  ##   (a) it is signed (``isSigned``), AND
+  ##   (b) its ``key_id`` resolves to a REGISTERED key in ``store``, AND
+  ##   (c) that key is NOT revoked, AND
+  ##   (d) the ed25519 signature over ``canonicalCertificatePayload(cert)``
+  ##       checks against THAT registered public key.
+  ## Any miss → a specific non-``svValid`` verdict the gate/CI renders.
+  ##
+  ## Note (c): revocation is a status flip, never a deletion, and a revoked
+  ## key's certificates are rejected even though their signatures remain
+  ## cryptographically valid.
+  if not cert.isSigned:
+    return svUnsigned
+  let signer = resolveSigner(store, cert.keyId)
+  if not signer.found:
+    return svUnregisteredKey
+  if signer.revoked:
+    return svRevokedKey
+  # The allowed-signers file ties THIS key_id's registered public key to the
+  # principal we verify as, so a signature made by a DIFFERENT key (even a
+  # registered one under another id) does not verify for this key_id.
+  case verifyDetachedCertificateSignature(canonicalCertificatePayload(cert),
+      signer.publicKey, cert.signature.value,
+      identity = allowedSignerIdentity(cert.keyId))
+  of scValid: svValid
+  of scToolingUnavailable: svToolingUnavailable
+  of scInvalid: svBadSignature
+
+proc signatureVerdictReason*(verdict: SignatureVerdict;
+                             keyId: string): string =
+  ## One wording for "why was this certificate not trusted", shared by the
+  ## client gate, the CI plan, the receiving-side gateway and the standard's
+  ## evaluator — so an operator reads the same sentence wherever the refusal
+  ## surfaced.
+  case verdict
+  of svValid: ""
+  of svUnsigned: "unsigned"
+  of svUnregisteredKey: "key_id '" & keyId & "' not registered"
+  of svRevokedKey: "key_id '" & keyId & "' revoked"
+  of svBadSignature: "signature does not verify"
+  of svToolingUnavailable: "ssh-keygen unavailable (cannot verify)"
 
 proc certificateIsTrusted*(cert: TestCertificate;
                            store: RegisteredKeyStore): bool =
@@ -41981,6 +43059,342 @@ proc certificateIsTrusted*(cert: TestCertificate;
   ## TRUSTED iff its signature verdict is ``svValid``.
   verifyCertificateSignature(cert, store) == svValid
 
+
+# ---- the standard's three-valued evaluation (Verification §7) --------------
+
+type
+  VerificationOutcome* = enum
+    ## Three-valued, and collapsing it to two loses the case that matters
+    ## most. ``voNotCovered`` means "I could tell, and it is not covered" —
+    ## run the tests. ``voUnverifiable`` means "I could not tell" — fix the
+    ## configuration; re-running tests changes nothing.
+    voCovered = "covered"
+    voNotCovered = "not-covered"
+    voUnverifiable = "unverifiable"
+
+  FrameworkValidity* = enum
+    ## The verdict of the FRAMEWORK-SPECIFIC validity step (Verification
+    ## §4.2), which the standard deliberately defines none of.
+    fvValid
+    fvInvalid        ## decidably inconsistent for this framework → rejected
+    fvUnverifiable   ## the check could not run → unevaluated
+
+  FrameworkValidityCheck* = proc(cert: TestCertificate):
+    tuple[verdict: FrameworkValidity; detail: string] {.closure, gcsafe.}
+    ## Supplied by the framework whose certificates are being evaluated; ``nil``
+    ## means "no framework-specific step", which is the right value for a
+    ## consumer evaluating ANOTHER framework's certificates — applying one
+    ## framework's validity logic to another's record is always wrong.
+
+  FoundCertificate* = object
+    ## A certificate as FOUND, which may not have parsed. ``name`` is whatever
+    ## identifies it to a human (a file name, a note index).
+    name*: string
+    read*: CertificateReadResult
+
+  VerificationState* = object
+    ## The world being evaluated. ``tree`` is the canonical content id of that
+    ## state, used to match modified-worktree claims (§4.1.1).
+    repo*: string
+    commit*: string
+    tree*: string
+
+  VerificationRequirement* = object
+    ## What the CONSUMER demands. Separate from the state on purpose: a commit
+    ## is not "on" a platform, and platforms, targets, scope and signature
+    ## policy are all the consumer's choices rather than properties of a tree.
+    frameworksImplemented*: seq[string]
+    framework*: string
+    targets*: seq[string]
+    platforms*: seq[string]
+    requireSignature*: bool
+    paths*: seq[string]        ## empty ⇒ the whole repository
+
+  MissingCoverage* = object
+    ## A gap, named. Verification §5 requires a consumer to report WHICH
+    ## target, on WHICH platform, for WHICH framework — never a bare
+    ## pass/fail, because the remedy depends on the gap.
+    framework*: string
+    platform*: string
+    targets*: seq[string]
+
+  CertificateNote* = object
+    certificate*: string
+    why*: string
+
+  VerificationReport* = object
+    outcome*: VerificationOutcome
+    missing*: seq[MissingCoverage]
+    ignored*: seq[CertificateNote]      ## another framework's — not evidence
+    rejected*: seq[CertificateNote]     ## asked, and got an answer: no
+    unevaluated*: seq[CertificateNote]  ## could not ask
+
+proc certificateCouldSatisfy(cert: TestCertificate;
+                             req: VerificationRequirement): bool =
+  ## Verification §7.1: a record this consumer CAN interpret but could not
+  ## verify is potentially relevant only if its interpreted scope could
+  ## satisfy some part of the requirement. Its fields are readable, in a
+  ## schema this consumer implements, so a certificate for a platform that is
+  ## not required, or naming no required target, could not have changed the
+  ## answer whatever its signature would have said.
+  if cert.platform notin req.platforms: return false
+  for t in cert.targets:
+    if t in req.targets: return true
+  false
+
+proc evaluateCertificates*(found: openArray[FoundCertificate];
+                           state: VerificationState;
+                           req: VerificationRequirement;
+                           store: RegisteredKeyStore;
+                           storeAvailability = ksaReadable;
+                           frameworkValidity: FrameworkValidityCheck = nil):
+                           VerificationReport =
+  ## The standard's verification decision, end to end (Verification §§2–7).
+  ##
+  ## Records reach exactly one of four fates, and the three that are NOT
+  ## "contributed" are reported separately because an implementation that
+  ## confuses them sends operators after the wrong fault:
+  ##   * IGNORED — another framework's certificate. Not evidence FOR this
+  ##     consumer, and not evidence AGAINST anything either.
+  ##   * REJECTED — the consumer asked and got an answer: revoked key, unsigned
+  ##     under a signatures-required policy, a state this record does not
+  ##     describe, a scope narrower than the requirement, a missing field, or
+  ##     the retired pre-TC-7 schema.
+  ##   * UNEVALUATED — the consumer could not ask: an unreadable key store, a
+  ##     schema version it does not implement, a ``patch_digest`` in a format
+  ##     it cannot reproduce.
+  ##   * contributed — counted into its platform's union.
+  var perPlatform = initTable[string, HashSet[string]]()
+  for p in req.platforms:
+    perPlatform[p] = initHashSet[string]()
+  # Two reasons an outcome can be unverifiable, kept apart because only the
+  # first is unconditional (§7.1).
+  var uninterpretableSeen = false   ## a record we cannot interpret at all
+  var relevantUnevaluable = false   ## interpretable, unverifiable, could matter
+
+  for f in found:
+    let cert = f.read.cert
+    # 1. FRAMEWORK FILTERING COMES FIRST (§2). Checking a signature or a VCS
+    #    match on a certificate you were never going to evaluate wastes work
+    #    and, worse, produces verdicts about certificates you do not
+    #    understand.
+    if cert.framework.len > 0 and
+        cert.framework notin req.frameworksImplemented:
+      result.ignored.add(CertificateNote(certificate: f.name,
+        why: "framework '" & cert.framework & "' is not implemented here"))
+      continue
+    case f.read.status
+    of crsUnknownSchema:
+      # RELEVANCE IS ITSELF A SCHEMA-DEPENDENT JUDGEMENT. Reading `platform`
+      # or `targets` out of a record in a schema version we do not implement
+      # and concluding it was irrelevant means trusting an interpretation we
+      # have just admitted we do not have. So it is undecidable, and MUST be
+      # assumed (§7.1).
+      result.unevaluated.add(CertificateNote(certificate: f.name,
+        why: f.read.detail))
+      uninterpretableSeen = true
+      continue
+    of crsRetiredSchema, crsMalformed:
+      result.rejected.add(CertificateNote(certificate: f.name,
+        why: f.read.detail))
+      continue
+    of crsOk: discard
+    if cert.framework != req.framework:
+      # Implemented, but not the framework THIS requirement is about. Two
+      # frameworks may use the same target name for different things, so it
+      # contributes nothing — and it is not a fault to report either.
+      continue
+    # 2. AUTHENTICITY (§3), before platform: whether the signer is trusted is
+    #    a property of the record, not of the platform we happen to need.
+    if req.requireSignature:
+      if not cert.isSigned:
+        result.rejected.add(CertificateNote(certificate: f.name,
+          why: "unsigned, and this consumer requires signatures"))
+        continue
+      if storeAvailability == ksaUnreadable:
+        result.unevaluated.add(CertificateNote(certificate: f.name,
+          why: "the registered-key store could not be read, so this " &
+            "certificate's authenticity could not be determined"))
+        if certificateCouldSatisfy(cert, req):
+          relevantUnevaluable = true
+        continue
+      let verdict = verifyCertificateSignature(cert, store)
+      if verdict == svToolingUnavailable:
+        result.unevaluated.add(CertificateNote(certificate: f.name,
+          why: "no signature tooling available to check this certificate"))
+        if certificateCouldSatisfy(cert, req):
+          relevantUnevaluable = true
+        continue
+      if verdict != svValid:
+        result.rejected.add(CertificateNote(certificate: f.name,
+          why: signatureVerdictReason(verdict, cert.keyId)))
+        continue
+    # 3. RESULT + VCS BINDING (§4.1).
+    if cert.result != tcrPassed:
+      result.rejected.add(CertificateNote(certificate: f.name,
+        why: "result is '" & $cert.result & "', not 'passed'"))
+      continue
+    let platformReq = CoverageRequirement(
+      framework: req.framework, repo: state.repo, commit: state.commit,
+      tree: state.tree, platform: cert.platform,
+      requiredTargets: req.targets, requiredPaths: req.paths)
+    let bound = certificateBindsState(cert, platformReq)
+    case bound.binding
+    of sbOtherState:
+      result.rejected.add(CertificateNote(certificate: f.name,
+        why: bound.why))
+      continue
+    of sbUnreproducible:
+      result.unevaluated.add(CertificateNote(certificate: f.name,
+        why: bound.why))
+      if certificateCouldSatisfy(cert, req):
+        relevantUnevaluable = true
+      continue
+    of sbBound: discard
+    # 4. FRAMEWORK-SPECIFIC VALIDITY (§4.2) — whatever the issuing framework
+    #    says about its OWN inputs at ``vcs.commit``. There is no portable
+    #    substitute for this step and the standard defines none.
+    if frameworkValidity != nil:
+      let fw = frameworkValidity(cert)
+      case fw.verdict
+      of fvInvalid:
+        result.rejected.add(CertificateNote(certificate: f.name, why: fw.detail))
+        continue
+      of fvUnverifiable:
+        result.unevaluated.add(CertificateNote(certificate: f.name,
+          why: fw.detail))
+        if certificateCouldSatisfy(cert, req):
+          relevantUnevaluable = true
+        continue
+      of fvValid: discard
+    # 5. COVERAGE (§5). A certificate for a platform this requirement does not
+    #    ask about is simply not part of any union — a green Linux run says
+    #    nothing about macOS, and saying so is not a fault to report.
+    if cert.platform in perPlatform:
+      for t in cert.targets:
+        perPlatform[cert.platform].incl(t)
+
+  # Gaps, named per platform in the order the requirement asked for them.
+  var gaps: seq[MissingCoverage]
+  for platform in req.platforms:
+    var missing: seq[string]
+    let covered = perPlatform[platform]
+    for t in req.targets:
+      if t notin covered:
+        missing.add(t)
+    if missing.len > 0:
+      gaps.add(MissingCoverage(framework: req.framework,
+        platform: platform, targets: missing))
+
+  # PRECEDENCE (§7.1). Covered wins when every requirement is met by records
+  # that WERE evaluated end to end, because in v1 coverage only ever grows: no
+  # record can subtract, so an unread one could only ever have ADDED coverage.
+  # Reporting unverifiable once the requirement is already met would send an
+  # operator to fix a configuration problem in order to reach a conclusion
+  # that has already been reached.
+  if gaps.len == 0:
+    result.outcome = voCovered
+  elif uninterpretableSeen or relevantUnevaluable:
+    # UNVERIFIABLE NAMES NO GAPS. The apparent shortfall was computed from
+    # records that were evaluated, next to at least one that was not — so it
+    # is not established, and reporting it would tell an operator to run tests
+    # that an unread certificate may already cover. The unevaluated records
+    # are named instead; that is the actionable half.
+    result.outcome = voUnverifiable
+  else:
+    result.outcome = voNotCovered
+    result.missing = gaps
+
+# ---- reprobuild's framework-specific validity: the lock at vcs.commit ------
+#
+# THIS IS WHY THE RECORD CARRIES NO LOCK DIGEST.
+#
+# reprobuild's lock record is COMMITTED and keyed by the trigger commit —
+# ``<manifest-layer>/locks/<project>/<repo>/<sha>.toml`` (RA-1) — so
+# ``vcs.commit`` already binds it, transitively and without the standard
+# needing to know what a reprobuild lock is. A digest carried IN the record
+# was information the commit already implied, at the cost of making the format
+# ecosystem-specific.
+#
+# The difference is not cosmetic. A digest in the record is A CLAIM BY THE
+# ISSUER, checkable only against another copy of the same claim. The record on
+# disk at the named commit is A FACT THE VERIFIER ESTABLISHED for itself. So a
+# certificate whose commit has no committed lock is refused HERE even though
+# the certificate itself is impeccable — which is impossible for an
+# implementation that reads a digest out of the record.
+
+type
+  LockAtCommitStatus* = enum
+    lacPresent   ## a lock record exists at that commit and pins revisions
+    lacAbsent    ## no usable lock record for that commit — decidably not evidence
+    lacUnknown   ## the lock subtree could not be resolved — we could not ask
+
+  LockAtCommit* = object
+    status*: LockAtCommitStatus
+    path*: string
+    detail*: string
+
+proc lockRecordsDirFor*(manifestLayerRoot, project, repo: string): string =
+  ## The per-repo lock subtree ``<manifest-layer>/locks/<project>/<repo>``
+  ## whose files are named by the trigger commit. The relative layout has ONE
+  ## owner (``lockRepoSubtreeRelativePath``); this only anchors it.
+  if manifestLayerRoot.len == 0 or project.len == 0 or repo.len == 0:
+    return ""
+  manifestLayerRoot /
+    lockRepoSubtreeRelativePath(project, repo).replace('/', DirSep)
+
+proc resolveLockAtCommit*(lockRecordsDir, commit: string): LockAtCommit =
+  ## Resolve reprobuild's lock AT ``commit`` — the framework-specific validity
+  ## step (Verification §4.2), which the standard deliberately defines none of.
+  ##
+  ## Three outcomes, not two, because "there is no lock for that commit" and
+  ## "I could not look" lead to different reports: the first is decidably not
+  ## evidence, the second is unverifiable.
+  if lockRecordsDir.len == 0 or commit.len == 0:
+    result.status = lacUnknown
+    result.detail = "no lock subtree to resolve '" & commit & "' against"
+    return
+  if not dirExists(lockRecordsDir):
+    result.status = lacUnknown
+    result.detail = "lock subtree '" & lockRecordsDir & "' does not exist"
+    return
+  result.path = lockRecordsDir / lockFileName(commit)
+  if not fileExists(result.path):
+    result.status = lacAbsent
+    result.detail = "no committed lock record for " & commit &
+      " (expected " & result.path & ")"
+    return
+  var body: string
+  try:
+    body = readFile(result.path)
+  except CatchableError as err:
+    result.status = lacUnknown
+    result.detail = "lock record " & result.path & " could not be read: " &
+      err.msg
+    return
+  # ``shasFromBody`` tolerates both the full-schema lock body and the
+  # schema-less ``[[repo]]`` backend record, which is what the strict reader
+  # cannot do; a body that pins nothing is a record that says nothing.
+  if shasFromBody(body).len == 0:
+    result.status = lacAbsent
+    result.detail = "lock record " & result.path &
+      " pins no revisions for " & commit
+    return
+  result.status = lacPresent
+
+proc reprobuildLockValidity*(lockRecordsDir: string): FrameworkValidityCheck =
+  ## reprobuild's validity check, as the closure ``evaluateCertificates``
+  ## takes. Bound to a lock subtree rather than to a workspace so the client
+  ## gate, the CI plan and the receiving-side gateway can all supply the one
+  ## they have — the gateway bare repo has no checkout to re-resolve from.
+  let dir = lockRecordsDir
+  result = proc(cert: TestCertificate):
+      tuple[verdict: FrameworkValidity; detail: string] {.closure, gcsafe.} =
+    let resolved = resolveLockAtCommit(dir, cert.vcs.commit)
+    case resolved.status
+    of lacPresent: (fvValid, "")
+    of lacAbsent: (fvInvalid, resolved.detail)
+    of lacUnknown: (fvUnverifiable, resolved.detail)
 # ============================================================================
 # TC-2: certificate TRANSPORT — attach/read certificates bound to a commit and
 # carry them on the push.
@@ -42229,8 +43643,11 @@ proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
       cert = parseCertificateFromToml(body)
     except TestCertificateParseError:
       continue
-    # Mismatch filter: only certs that genuinely attest THIS commit.
-    if cert.commit == commit:
+    # Mismatch filter: only certs that genuinely attest THIS commit. A
+    # ``clean = false`` record names its BASE commit here and is matched by
+    # content later (Verification §4.1.1), so the note-level filter is on the
+    # base either way.
+    if cert.vcs.commit == commit:
       result.certs.add(cert)
 
 proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
@@ -42302,10 +43719,17 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
   ## the pushed commit for the required targets on EACH required platform.
   if policy.gateMode == cgmOff:
     return
-  # The lock digest binds a certificate to the clean dependency state. The
-  # stage-4 lock pass filled ``report.lockUpdate.lockFilePath`` in every arm
-  # (already-current / created / refreshed).
-  let lockDigest = certificateLockDigest(report.lockUpdate.lockFilePath)
+  # TC-7: the certificate no longer CARRIES a lock digest, so there is nothing
+  # to compare a record against. What binds the lock is ``vcs.commit``, and
+  # the gate RESOLVES the lock at that commit itself — the standard's
+  # framework-specific validity step. The stage-4 lock pass filled
+  # ``report.lockUpdate.lockFilePath`` in every arm (already-current / created
+  # / refreshed), and that file lives in the per-repo lock subtree whose other
+  # entries are the same repo's other commits.
+  let lockRecordsDir =
+    if report.lockUpdate.lockFilePath.len > 0:
+      parentDir(report.lockUpdate.lockFilePath)
+    else: ""
   # A policy that opts in but lists no required platforms means certificates
   # are advisory-only (the spec: required_platforms may be none). There is
   # nothing to enforce, so ``required`` degrades to a no-op rather than
@@ -42315,10 +43739,10 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
       report.notices.add("certificate advisory: policy sets no " &
         "required_platforms — nothing to attest (pushes not gated)")
     return
-  if pushedCommit.len == 0 or lockDigest.len == 0:
+  if pushedCommit.len == 0 or lockRecordsDir.len == 0:
     let why =
       if pushedCommit.len == 0: "no HEAD commit to attest"
-      else: "no resolvable workspace lock to bind the certificate to"
+      else: "no resolvable workspace lock to check at the attested commit"
     if policy.gateMode == cgmAdvisory:
       report.notices.add("certificate advisory: coverage NOT verified (" &
         why & ")")
@@ -42348,24 +43772,31 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
   var trusted: seq[TestCertificate] = @[]
   var signatureNotes: seq[string] = @[]
   for cert in attached:
+    # TC-7 §2: FILTER BY FRAMEWORK FIRST. A repository may be tested by
+    # several frameworks and their certificates share this note; another
+    # framework's record is not evidence for this gate, and it is not evidence
+    # against anything either — so it is passed over silently rather than
+    # reported as an untrusted certificate.
+    if cert.framework != reprobuildFrameworkId:
+      continue
     let verdict = verifyCertificateSignature(cert, keyStore)
-    if verdict == svValid:
-      trusted.add(cert)
-    else:
-      let why =
-        case verdict
-        of svUnsigned: "unsigned"
-        of svUnregisteredKey: "key_id '" & cert.keyId & "' not registered"
-        of svRevokedKey: "key_id '" & cert.keyId & "' revoked"
-        of svBadSignature: "signature does not verify"
-        of svToolingUnavailable: "ssh-keygen unavailable (cannot verify)"
-        of svValid: ""
-      signatureNotes.add(cert.platform & ": " & why)
+    if verdict != svValid:
+      signatureNotes.add(cert.platform & ": " &
+        signatureVerdictReason(verdict, cert.keyId))
+      continue
+    # TC-7 §4.2: reprobuild's own framework-specific validity — the lock
+    # resolved AT ``vcs.commit``, not a digest the record carried.
+    let lockAt = resolveLockAtCommit(lockRecordsDir, cert.vcs.commit)
+    if lockAt.status != lacPresent:
+      signatureNotes.add(cert.platform & ": " & lockAt.detail)
+      continue
+    trusted.add(cert)
   var perPlatformMissing: seq[string] = @[]
   for platform in policy.requiredPlatforms:
     let req = CoverageRequirement(
+      framework: reprobuildFrameworkId,
+      repo: "",
       commit: pushedCommit,
-      lock: lockDigest,
       platform: platform,
       requiredTargets: policy.requiredTargets)
     let cov = verifyCoverage(trusted, req)
@@ -42467,10 +43898,16 @@ type
     gateMode*: CertificateGateMode
     requiredTargets*: seq[string]
     requiredPlatforms*: seq[string]
-    lockDigest*: string
-      ## The ``blake3:<hex>`` lock digest a covering certificate must bind to
-      ## (``certificateLockDigest`` of the resolved workspace lock). Empty when
-      ## the project does not bind certificates to a lock.
+    lockRecordsDir*: string
+      ## TC-7: the per-repo lock subtree
+      ## (``<manifest-layer>/locks/<project>/<repo>``) the gateway resolves the
+      ## lock AT THE PUSHED COMMIT in — reprobuild's framework-specific
+      ## validity step. It replaces the pre-TC-7 ``lock`` digest, which the
+      ## record no longer carries: a digest was the ISSUER's claim, while the
+      ## record in this subtree at the attested commit is a fact the gateway
+      ## establishes. Empty when the receiving side has no lock subtree to
+      ## resolve against, in which case the framework-specific step is skipped
+      ## and only the generic checks apply.
     registeredKeysPath*: string
       ## Absolute path to the allowed-signers store (TC-5 registered keys). The
       ## ``pre-receive`` reads it to verify each cert's signature.
@@ -42483,7 +43920,8 @@ proc serializeGatewayConfig*(cfg: GatewayConfig): string =
   result = "schema = \"" & gatewayConfigSchemaV1 & "\"\n\n"
   result.add("[gateway]\n")
   result.add("gate_mode = \"" & $cfg.gateMode & "\"\n")
-  result.add("lock = \"" & tomlEscapeCert(cfg.lockDigest) & "\"\n")
+  result.add("lock_records_dir = \"" &
+    tomlEscapeCert(cfg.lockRecordsDir) & "\"\n")
   result.add("registered_keys = \"" &
     tomlEscapeCert(cfg.registeredKeysPath) & "\"\n")
   result.add("upstream = \"" & tomlEscapeCert(cfg.upstreamUrl) & "\"\n")
@@ -42523,7 +43961,7 @@ proc parseGatewayConfig*(content: string): GatewayConfig =
       of "advisory": result.gateMode = cgmAdvisory
       of "required": result.gateMode = cgmRequired
       else: result.gateMode = cgmOff
-    of "lock": result.lockDigest = parseTomlBasicValue(rhs)
+    of "lock_records_dir": result.lockRecordsDir = parseTomlBasicValue(rhs)
     of "registered_keys": result.registeredKeysPath = parseTomlBasicValue(rhs)
     of "upstream": result.upstreamUrl = parseTomlBasicValue(rhs)
     of "required_targets": result.requiredTargets = parseTomlStringArray(rhs)
@@ -43043,29 +44481,35 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
       attached = read.certs
       if read.status == gorUnreadable and noteUnreadable.len == 0:
         noteUnreadable = read.diagnostic
-    # Drop every cert that is not a registered-signed, unrevoked, valid-sig
-    # attestation (TC-5) BEFORE coverage (TC-1).
+    # Drop every cert that is not this framework's, or is not a
+    # registered-signed, unrevoked, valid-sig attestation, BEFORE coverage.
     var trusted: seq[TestCertificate]
     var sigNotes: seq[string]
     for cert in attached:
+      # Framework filtering first: another framework's certificate is not
+      # evidence here and is not a fault to report (Standard §4).
+      if cert.framework != reprobuildFrameworkId:
+        continue
       let verdict = verifyCertificateSignature(cert, keyStore)
-      if verdict == svValid:
-        trusted.add(cert)
-      else:
-        let why =
-          case verdict
-          of svUnsigned: "unsigned"
-          of svUnregisteredKey: "key_id '" & cert.keyId & "' not registered"
-          of svRevokedKey: "key_id '" & cert.keyId & "' revoked"
-          of svBadSignature: "signature does not verify"
-          of svToolingUnavailable: "ssh-keygen unavailable"
-          of svValid: ""
-        sigNotes.add(cert.platform & ": " & why)
+      if verdict != svValid:
+        sigNotes.add(cert.platform & ": " &
+          signatureVerdictReason(verdict, cert.keyId))
+        continue
+      # TC-7: the lock resolved AT the attested commit, when the receiving
+      # side has a lock subtree to resolve it in. An unconfigured subtree
+      # means the gateway cannot run the framework-specific step, so it
+      # applies only the generic checks rather than pretending to.
+      if cfg.lockRecordsDir.len > 0:
+        let lockAt = resolveLockAtCommit(cfg.lockRecordsDir, cert.vcs.commit)
+        if lockAt.status != lacPresent:
+          sigNotes.add(cert.platform & ": " & lockAt.detail)
+          continue
+      trusted.add(cert)
     var missing: seq[string]
     for platform in cfg.requiredPlatforms:
       let req = CoverageRequirement(
+        framework: reprobuildFrameworkId,
         commit: pushedCommit,
-        lock: cfg.lockDigest,
         platform: platform,
         requiredTargets: cfg.requiredTargets)
       let cov = verifyCoverage(trusted, req)
@@ -54234,19 +55678,61 @@ type
   IssuancePreconditions* = object
     ## Result of evaluating the issuance preconditions by REUSING the RA-21
     ## pre-push gate (cleanliness / develop-closure / lock-currency). On
-    ## ``ipOk`` the binding fields (``commit`` of the current repo's HEAD,
-    ## ``lockDigest`` from the resolved lock file, ``platform``) are filled.
-    ## On a non-OK kind, ``offender`` / ``remedy`` carry the RA-28-style
-    ## ambient message (Interactive-UX Principle 2).
+    ## ``ipOk`` the binding fields (``commit`` of the current repo's HEAD, the
+    ## per-repo lock subtree, ``platform``, and the MEASURED worktree state)
+    ## are filled. On a non-OK kind, ``offender`` / ``remedy`` carry the
+    ## RA-28-style ambient message (Interactive-UX Principle 2).
+    ##
+    ## THE DEVELOP-CLOSURE PRECONDITION STAYS HERE, and must. The standard
+    ## binds what is IN THE REPOSITORY; sibling checkouts are not, so no later
+    ## verifier can reconstruct them. A framework that depends on state outside
+    ## the repository has to enforce that at ISSUANCE time or not at all.
     kind*: IssuancePreconditionKind
     commit*: string
-    lockDigest*: string
     lockFilePath*: string
+    lockRecordsDir*: string
+      ## The per-repo lock subtree holding the committed lock record for
+      ## ``commit`` — what a verifier resolves the lock IN, now that the
+      ## certificate carries no digest.
     platform*: string
     project*: string
     repo*: string
+    clean*: bool
+      ## MEASURED: no tracked file differed from ``commit`` at this moment.
+    untracked*: bool
+      ## MEASURED: untracked files were present. Separate from ``clean``
+      ## because they mean different things — a modified tracked file means the
+      ## tests ran against something other than ``commit``, while untracked
+      ## files usually mean scratch work but can mean a file the build picked
+      ## up. Both are reported honestly (Standard §3.2).
     offender*: string
     remedy*: string
+
+proc observeWorktreeState*(identity: GitToolIdentity; repoRoot: string):
+    tuple[ok: bool; clean: bool; untracked: bool; diagnostic: string] =
+  ## MEASURE ``clean`` and ``untracked`` for a repository, separately.
+  ##
+  ## A producer MUST NOT issue ``clean = true`` when it did not check, and if
+  ## it cannot determine cleanliness it MUST NOT issue a certificate at all — a
+  ## guess here invalidates everything downstream (Standard §3.2). So a failed
+  ## status query is ``ok = false``, never a cheerful "clean".
+  ##
+  ## ``--untracked-files=all`` rather than the default: a directory of
+  ## untracked files reports as one entry under ``normal``, and "one entry"
+  ## versus "none" is exactly the distinction being measured.
+  let res = gitRunPlain(identity,
+    ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"])
+  if res.code != 0:
+    return (ok: false, clean: false, untracked: false,
+      diagnostic: "git status --porcelain failed (" & $res.code & "): " &
+        res.output.strip())
+  result = (ok: true, clean: true, untracked: false, diagnostic: "")
+  for rawLine in res.output.splitLines():
+    if rawLine.len < 3: continue
+    if rawLine[0 .. 1] == "??":
+      result.untracked = true
+    else:
+      result.clean = false
 
 proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     toolProvisioning: ToolProvisioningMode): IssuancePreconditions =
@@ -54301,11 +55787,13 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     return
   # Gate passed → issuable. Resolve the binding fields.
   result.lockFilePath = report.lockUpdate.lockFilePath
-  result.lockDigest = certificateLockDigest(result.lockFilePath)
-  if result.lockDigest.len == 0:
+  result.lockRecordsDir =
+    if result.lockFilePath.len > 0: parentDir(result.lockFilePath) else: ""
+  if result.lockRecordsDir.len == 0:
     # The gate passed but no lock file was resolvable (a workspace with no
-    # lock subtree). Without a lock there is nothing reproducible to bind
-    # to, so decline rather than emit an unbindable certificate.
+    # lock subtree). Without a committed lock at the attested commit a
+    # verifier's framework-specific step has nothing to resolve, so decline
+    # rather than emit a certificate whose lock can never be checked.
     result.kind = ipOffLock
     result.offender = report.project
     result.remedy = "create a workspace lock first — run 'repro workspace lock'"
@@ -54324,6 +55812,18 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     result.offender = repoForHead
     result.remedy = "commit your work so the certificate binds to a HEAD commit"
     return
+  # MEASURE the two VCS-state fields rather than inferring them from the gate.
+  # The gate's cleanliness predicate is a conjunction ("nothing to report"),
+  # and the record needs the two halves separately and honestly.
+  let observed = observeWorktreeState(identity, repoForHead)
+  if not observed.ok:
+    result.kind = ipGateError
+    result.offender = repoForHead
+    result.remedy = "could not determine whether the working tree is clean (" &
+      observed.diagnostic & "); no certificate is issued rather than guessing"
+    return
+  result.clean = observed.clean
+  result.untracked = observed.untracked
   result.repo =
     if report.lockUpdate.triggerRepo.len > 0: report.lockUpdate.triggerRepo
     else: result.project
@@ -54337,12 +55837,12 @@ proc certificateNoOpDecision*(existingCertPath: string;
   ##
   ## The decision is driven by TWO honest signals (both must say "unchanged"):
   ##
-  ##   1. A CONTENT/COMMIT/LOCK signal: an existing certificate at the output
-  ##      path already covers (commit, lock, platform) and the requested
-  ##      targets. Because the issuance preconditions require a CLEAN tree at
-  ##      HEAD, the (commit, lock) pair is a precise fingerprint of the tested
-  ##      state — if it is unchanged AND a covering cert exists, nothing
-  ##      relevant changed.
+  ##   1. A CONTENT/COMMIT signal: an existing certificate at the output path
+  ##      already covers (commit, platform) and the requested targets. Because
+  ##      the issuance preconditions require a CLEAN tree at HEAD, the commit
+  ##      is a precise fingerprint of the tested state — and the lock, being
+  ##      committed and keyed by that commit, moves with it — so an unchanged
+  ##      commit plus a covering cert means nothing relevant changed.
   ##   2. The canonical ct-incremental change signal, WHEN a trace dir is
   ##      supplied: ``watchTestEdgeDecision`` (the codetracer-backed adapter)
   ##      returns ``weaSkip`` only when no executed function changed. This is
@@ -54358,7 +55858,8 @@ proc certificateNoOpDecision*(existingCertPath: string;
   except CatchableError:
     return false
   let req = CoverageRequirement(
-    commit: pre.commit, lock: pre.lockDigest, platform: pre.platform,
+    framework: reprobuildFrameworkId, repo: pre.repo,
+    commit: pre.commit, platform: pre.platform,
     requiredTargets: requestedTargets)
   let cov = verifyCoverage(@[existing], req)
   if not cov.covered:
@@ -54375,23 +55876,62 @@ proc certificateNoOpDecision*(existingCertPath: string;
   true
 
 proc issueCertificate*(pre: IssuancePreconditions;
-    passedTargets: seq[string]; issuer: string): TestCertificate =
-  ## Build a ``reprobuild.test-certificate.v1`` for an issuable state. The
-  ## ``result`` is always ``tcrPassed`` (callers only issue on a real pass);
-  ## the SIGNATURE is left explicitly EMPTY — TC-5 wires real daemon signing.
+    passedTargets: seq[string]; commands: seq[seq[string]];
+    issuer: string): TestCertificate =
+  ## Build a ``test-certificate.v1`` for an issuable state. The ``result`` is
+  ## always ``tcrPassed`` (callers only issue on a real pass); the SIGNATURE is
+  ## filled by ``signCertificateOnIssuance`` immediately afterwards.
+  ##
+  ## ``commands`` is the argument vector of every test command this run
+  ## ACTUALLY executed, in execution order — not a normalised or idealised
+  ## form. Commands make the claim concrete: the certificate says not merely
+  ## "tests passed" but "*these commands* ran and passed", so a reader can see
+  ## what was attested without trusting a summary of it.
+  ##
+  ## TWO OPTIONAL FEATURES OF THE STANDARD ARE DELIBERATELY DECLINED HERE, and
+  ## the decision is recorded rather than left to be inferred:
+  ##
+  ##   * THE MODIFIED-WORKTREE FORM (``[certificate.vcs.worktree]``) is not
+  ##     issued. Issuance already requires a clean tree at HEAD, and the
+  ##     standard's own guidance is that the clean-tree form is the normal
+  ##     output because it is the form every consumer can evaluate with a
+  ##     plain commit comparison and no reconstruction. reprobuild's
+  ##     incremental testing makes "run, commit, re-run" nearly free —
+  ##     committing changes no file content, so every per-test hash is
+  ##     unchanged and the second invocation is a hash comparison rather than
+  ##     a test run — so the workflow the clean form asks for costs almost
+  ##     nothing here. The FORMAT layer still round-trips and canonicalises
+  ##     the modified form, because a verifier must be able to reconstruct any
+  ##     conforming producer's signed bytes.
+  ##   * PATH SCOPING (``vcs.paths``) is not issued. The standard permits it
+  ##     only for a producer that knows what its tests read, and FORBIDS it
+  ##     otherwise: "a producer that cannot bound its tests' input set MUST
+  ##     NOT use scoping". reprobuild discovers inputs per ACTION as the build
+  ##     runs; it has no bounded, repo-relative input set for a TARGET at
+  ##     issuance time, and a scope narrower than what the tests actually read
+  ##     yields a certificate that is formally clean and substantively false.
+  ##     So the whole repository is attested. (Monitor-derived scoping is a
+  ##     real future possibility — it is what would make the claim honest —
+  ##     but it is a separate piece of work, not a serialization change.)
   result = TestCertificate(
     schema: testCertificateSchemaV1,
+    framework: reprobuildFrameworkId,
     project: pre.project,
-    repo: pre.repo,
-    commit: pre.commit,
-    lock: pre.lockDigest,
     platform: pre.platform,
     targets: passedTargets,
     result: tcrPassed,
     issuedAt: getTime().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
     issuer: issuer,
     keyId: "",
+    vcs: TestCertificateVcs(
+      repo: pre.repo,
+      commit: pre.commit,
+      clean: pre.clean,
+      untracked: pre.untracked),
     signature: TestCertificateSignature(algorithm: "", value: ""))
+  for argv in commands:
+    if argv.len > 0:
+      result.commands.add(TestCertificateCommand(argv: argv))
 
 proc defaultCertificatePath*(workspaceRoot, commit, platform: string): string =
   ## Default ``--certificate-out`` location: one file per (commit, platform)
@@ -54457,7 +55997,7 @@ type
     platform*: string
     skip*: seq[string]
     run*: seq[string]
-    matchingCerts*: int          ## valid certs matching commit/lock/platform.
+    matchingCerts*: int          ## valid certs matching framework/commit/platform.
     untrustedCerts*: seq[string] ## why a present-but-untrusted cert was dropped.
     advisoryNote*: string
 
@@ -54466,47 +56006,53 @@ type
     ## requested (or per required platform when ``--platform`` is omitted),
     ## plus the binding the decision was made against.
     commit*: string
-    lock*: string
+    lockRecordsDir*: string
+      ## TC-7: the per-repo lock subtree the lock is resolved IN at the
+      ## attested commit — not a digest, which the record no longer carries.
     requiredTargets*: seq[string]
     ciTrust*: CertificateCiTrust
     platforms*: seq[CiPlatformPlan]
 
 proc computeCiPlatformPlan*(certs: openArray[TestCertificate];
-                            commit, lock, platform: string;
+                            commit, lockRecordsDir, platform: string;
                             requiredTargets: seq[string];
                             ciTrust: CertificateCiTrust;
                             keyStore: RegisteredKeyStore): CiPlatformPlan =
-  ## The CORE per-platform decision (pure: no IO). Given the certs attached to
-  ## ``commit`` and the project's required targets, returns which targets CI can
-  ## SKIP (covered by a VALID cert for ``platform``) and which it must RUN.
+  ## The CORE per-platform decision. Given the certs attached to ``commit`` and
+  ## the project's required targets, returns which targets CI can SKIP (covered
+  ## by a VALID cert for ``platform``) and which it must RUN.
   ##
-  ## SECURITY-CRITICAL: a cert counts ONLY when ``verifyCertificateSignature``
-  ## says ``svValid`` (TC-5) AND it matches the binding (TC-1
-  ## ``certificateMatches`` inside ``verifyCoverage``). A forged / unsigned /
-  ## wrong-key / revoked / wrong-commit / wrong-platform cert is dropped, so it
-  ## CANNOT move a target into ``skip``.
+  ## SECURITY-CRITICAL: a cert counts ONLY when it is THIS framework's, when
+  ## ``verifyCertificateSignature`` says ``svValid``, when reprobuild's lock
+  ## resolves at its ``vcs.commit``, and when it matches the binding
+  ## (``certificateMatches`` inside ``verifyCoverage``). A forged / unsigned /
+  ## wrong-key / revoked / wrong-commit / wrong-platform / foreign-framework
+  ## cert is dropped, so it CANNOT move a target into ``skip``. The filter is
+  ## the push gate's, not a second opinion about it.
   result.platform = platform
-  # 1. Filter to TRUSTED certs (registered-signed, unrevoked, sig verifies).
-  #    REUSE the exact TC-5 verifier the push gate uses — no second code path.
+  # 1. Filter to TRUSTED certs (this framework's, registered-signed, unrevoked,
+  #    signature verifies, lock present at the attested commit).
   var trusted: seq[TestCertificate]
   for cert in certs:
+    if cert.framework != reprobuildFrameworkId:
+      continue
     let verdict = verifyCertificateSignature(cert, keyStore)
-    if verdict == svValid:
-      trusted.add(cert)
-    else:
-      let why =
-        case verdict
-        of svUnsigned: "unsigned"
-        of svUnregisteredKey: "key_id '" & cert.keyId & "' not registered"
-        of svRevokedKey: "key_id '" & cert.keyId & "' revoked"
-        of svBadSignature: "signature does not verify"
-        of svToolingUnavailable: "ssh-keygen unavailable (cannot verify)"
-        of svValid: ""
-      result.untrustedCerts.add(cert.platform & ": " & why)
-  # 2. Coverage for THIS platform — REUSE the TC-1 ``verifyCoverage`` union (it
-  #    also enforces the commit/lock/platform binding via ``certificateMatches``).
+    if verdict != svValid:
+      result.untrustedCerts.add(cert.platform & ": " &
+        signatureVerdictReason(verdict, cert.keyId))
+      continue
+    if lockRecordsDir.len > 0:
+      let lockAt = resolveLockAtCommit(lockRecordsDir, cert.vcs.commit)
+      if lockAt.status != lacPresent:
+        result.untrustedCerts.add(cert.platform & ": " & lockAt.detail)
+        continue
+    trusted.add(cert)
+  # 2. Coverage for THIS platform — the same ``verifyCoverage`` union the gate
+  #    runs (it also enforces the framework/commit/platform binding via
+  #    ``certificateMatches``).
   let req = CoverageRequirement(
-    commit: commit, lock: lock, platform: platform,
+    framework: reprobuildFrameworkId,
+    commit: commit, platform: platform,
     requiredTargets: requiredTargets)
   let cov = verifyCoverage(trusted, req)
   result.matchingCerts = cov.matchingCerts
@@ -54538,7 +56084,7 @@ proc renderCiPlanJson*(plan: CiPlan): JsonNode =
   result = newJObject()
   result["schema"] = %"reprobuild.ci-plan.v1"
   result["commit"] = %plan.commit
-  result["lock"] = %plan.lock
+  result["lock_records_dir"] = %plan.lockRecordsDir
   result["ci_trust"] = %($plan.ciTrust)
   result["required_targets"] = %plan.requiredTargets
   var platforms = newJArray()
@@ -54567,6 +56113,11 @@ type
     allPassed*: bool
     passedTargets*: seq[string]
     failedTargets*: seq[string]
+    commands*: seq[seq[string]]
+      ## TC-7: the argument vector of every test command this run EXECUTED, in
+      ## EXECUTION ORDER — captured here rather than reconstructed from the
+      ## flags, because ``[[certificate.command]]`` must record what was
+      ## actually run and not a normalised or idealised form.
 
 proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
   result.strategy = "joint-duration"
@@ -55315,6 +56866,10 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
       # TC-1: record the REAL per-target verdict. The covered set is exactly
       # the selectors whose run command exited 0.
       let targetName = if e.selector.len > 0: e.selector else: e.testName
+      # TC-7: record the command as EXECUTED, in execution order, so the
+      # certificate can say "these commands ran and passed" rather than
+      # summarising them.
+      outcome.commands.add(e.runCmd)
       if res.code == 0:
         inc passed
         outcome.passedTargets.add(targetName)
@@ -55765,8 +57320,18 @@ proc runReproTestCommand*(args: openArray[string];
       stderr.writeLine("repro test: no certificate — the run did not pass " &
         "(result is not 'passed'); fix the failing targets and re-run")
     else:
+      # The attested commands are the argument vectors this run ACTUALLY
+      # executed, in execution order — captured by the runner, never
+      # reconstructed from the flags.
       var cert = issueCertificate(pre, outcome.passedTargets,
-        "repro-test@" & issuerHostTag())
+        outcome.commands, "repro-test@" & issuerHostTag())
+      if cert.commands.len == 0:
+        # A certificate recording no command asserts nothing, and the standard
+        # requires at least one. Withhold rather than emit a claim with no
+        # evidence of what produced it.
+        stderr.writeLine("repro test: no certificate — the run recorded no " &
+          "executed command to attest")
+        return code
       # TC-5: the daemon signs the canonical certificate payload (ed25519) as a
       # side effect of THIS observed clean+passing run. Signing is reachable
       # ONLY here (the issuance path) — there is no "sign this blob" command.
@@ -55783,7 +57348,7 @@ proc runReproTestCommand*(args: openArray[string];
       writeCertificateFile(cert, certOut)
       stderr.writeLine("repro test: issued " & testCertificateSchemaV1 &
         " covering [" & outcome.passedTargets.join(", ") & "] for " &
-        cert.platform & " at " & cert.commit & " → " & certOut &
+        cert.platform & " at " & cert.vcs.commit & " → " & certOut &
         " (signed " & certificateSignatureAlgorithm & ", key_id=" &
         cert.keyId & ")")
     return code
@@ -55862,20 +57427,21 @@ proc runCiPlanCommand(args: openArray[string]): int =
   if policy.requiredTargets.len == 0:
     stderr.writeLine("repro ci plan: project declares no required_targets — " &
       "nothing to plan (CI runs its own targets normally)")
-  # Resolve the (commit, lock) binding the certs must match. We REUSE the
-  # issuance-precondition evaluator so the binding is IDENTICAL to what issuance
-  # and the push gate bind to (HEAD commit + clean-lock digest). When the state
-  # is not issuable (dirty / off-lock / no lock), there is no trustworthy
-  # binding, so NOTHING is skipped — CI runs everything (fail-safe).
+  # Resolve the binding the certs must match. We REUSE the issuance-precondition
+  # evaluator so the binding is IDENTICAL to what issuance and the push gate
+  # bind to (the HEAD commit, plus the per-repo lock subtree the lock is
+  # resolved IN at that commit). When the state is not issuable (dirty /
+  # off-lock / no lock), there is no trustworthy binding, so NOTHING is
+  # skipped — CI runs everything (fail-safe).
   let pre = evaluateIssuancePreconditions(
     parsed.workspaceRoot, parsed.currentRepo, parsed.toolProvisioning)
   var commit = pre.commit
-  var lock = pre.lockDigest
+  var lockRecordsDir = pre.lockRecordsDir
   var bindingNote = ""
   if pre.kind != ipOk:
     commit = ""
-    lock = ""
-    bindingNote = "no trustworthy (commit, lock) binding (" &
+    lockRecordsDir = ""
+    bindingNote = "no trustworthy commit binding (" &
       (if pre.remedy.len > 0: pre.remedy else: "state not issuable") &
       ") — running every target"
   # Read the certs attached to HEAD (TC-2). With no binding we have nothing to
@@ -55892,16 +57458,16 @@ proc runCiPlanCommand(args: openArray[string]): int =
   let keyStore = readRegisteredKeyStore(
     registeredKeyStorePath(parsed.workspaceRoot))
   var plan = CiPlan(
-    commit: commit, lock: lock,
+    commit: commit, lockRecordsDir: lockRecordsDir,
     requiredTargets: policy.requiredTargets,
     ciTrust: policy.ciTrust)
   for platform in planPlatforms:
     var pp =
-      if commit.len == 0 or lock.len == 0:
+      if commit.len == 0 or lockRecordsDir.len == 0:
         # No binding ⇒ run the full required set on this platform.
         CiPlatformPlan(platform: platform, run: policy.requiredTargets)
       else:
-        computeCiPlatformPlan(attached, commit, lock, platform,
+        computeCiPlatformPlan(attached, commit, lockRecordsDir, platform,
           policy.requiredTargets, policy.ciTrust, keyStore)
     if bindingNote.len > 0 and pp.advisoryNote.len == 0:
       pp.advisoryNote = bindingNote

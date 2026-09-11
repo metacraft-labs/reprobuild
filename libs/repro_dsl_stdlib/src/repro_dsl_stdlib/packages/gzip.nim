@@ -44,3 +44,39 @@ package gzip:
     nixPackage "nixpkgs#gzip", executablePath = "bin/gzip",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # WINDOWS: GNU gzip 1.14, from the same archive. ``tar -z`` execs a
+    # program called ``gzip`` off the PATH, so the compressor has to be
+    # resolvable on the tar action's edge on every target, not only on
+    # the one where the walk found it first.
+    #
+    # The SAME PortableGit archive ``packages/sh.nim`` and
+    # ``packages/bash.nim`` already pin by sha256 -- one archive,
+    # one ``packageId``, one ``lockIdentity``, three more
+    # ``executablePath`` views of it. Nothing new is downloaded and
+    # no new lock-identity family appears in ``repro.lock``.
+    #
+    # WHY A CHANNEL IS NEEDED AT ALL when Win11 ships ``tar.exe`` in
+    # System32: tool provisioning is ONE MODE FOR THE WHOLE BUILD.
+    # A Windows build that needs the WiX tools must run
+    # ``--tool-provisioning=tarball``, and in that mode a package
+    # with no tarball channel is a hard refusal -- which is why the
+    # dogfood recipe's Windows arm stopped emitting the
+    # Scoop/tarball pair (M1's N20), and why Linux could not run
+    # that mode either and the AppImage build had to fall back to
+    # ``--tool-provisioning=path``. THIS CHANNEL ANSWERS ONLY THE
+    # WINDOWS HALF, and the distinction is the whole of M1's N20
+    # correction: the entry is declared ``os = "windows"``, so a
+    # Linux host in tarball mode still refuses, in one line --
+    # ``no tarball provisioning entry for package "tar" matches
+    # host cpu=x86_64 os=linux (1 entries)``. Answering Linux means
+    # pinning LINUX tarballs for GNU tar, gzip and coreutils --
+    # three new downloads to vet, which is a decision for whoever
+    # owns the provisioning catalogue rather than a typo here.
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/gzip.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"

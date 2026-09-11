@@ -145,10 +145,45 @@ suite "packaging: producers declare a real dependency on their tool":
     let fixture = repoRootFromTest() &
       "/tests/fixtures/packaging/two-binary-dist/repro.nim"
     let text = readFile(fixture)
-    for selector in [DpkgDebSelector, TarSelector, GzipSelector,
-                     CandleSelector, LightSelector, PatchelfSelector,
-                     InstallSelector, ShSelector]:
+    for selector in [DpkgDebSelector, RpmbuildSelector, TarSelector,
+                     GzipSelector, CandleSelector, LightSelector,
+                     PatchelfSelector, InstallSelector, ShSelector,
+                     ReadelfSelector]:
       check text.contains("\"" & selector & "\"")
+    for selector in RpmScriptletSelectors:
+      check text.contains("\"" & selector & "\"")
+
+  test "the rpm producer declares its own tool and the staging set":
+    resetBuildActionRegistry()
+    let rpm = rpmPackage(sampleDistribution(toLinux))
+    check RpmbuildSelector in rpm.toolSelectors
+    check RpmbuildSelector in toolRefsFor(rpm.edge.id)
+    # The tools rpmbuild EXECS, on the SAME edge -- an action's PATH
+    # holds only what its own edge named, so a separate edge would put
+    # them on the PATH of an action that never runs them.
+    for selector in RpmScriptletSelectors:
+      check selector in rpm.toolSelectors
+      check selector in toolRefsFor(rpm.edge.id)
+    # ...and not the OTHER Linux format's, which would make a project
+    # that asked for an rpm fetch dpkg.
+    check DpkgDebSelector notin rpm.toolSelectors
+    check TarSelector notin rpm.toolSelectors
+
+  test "readelf rides on the closure edge, not on an edge of its own":
+    # The floor covers the VENDORED set, and the vendored set does not
+    # exist until the walk has put it there. Same shape as gzip on the
+    # tar edge: a tool named on the wrong edge is on the PATH of an
+    # action that never runs it, and absent from the one that does.
+    resetBuildActionRegistry()
+    discard debPackage(sampleDistribution(toLinux))
+    var closureId = ""
+    for act in registeredBuildActions():
+      if act.id.endsWith("runtime-closure"): closureId = act.id
+    check closureId.len > 0
+    check ReadelfSelector in toolRefsFor(closureId)
+    for act in registeredBuildActions():
+      if act.id != closureId:
+        check ReadelfSelector notin toolRefsFor(act.id)
 
   test "no producer edge is marked uncacheable":
     # §6: "each producer is an ordinary reprobuild build edge
@@ -160,3 +195,74 @@ suite "packaging: producers declare a real dependency on their tool":
     check deb.edge.cacheable
     for act in registeredBuildActions():
       check act.cacheable
+
+  test "the AppImage producer names appimagetool AND the tools it execs":
+    # Two invisible dependencies on one edge, both of the ``gzip``
+    # class. appimagetool execs ``file`` by name and refuses to run
+    # without it ("file command is missing but required"), and it reads
+    # the PINNED runtime the staging edge copied out of its own
+    # provisioned prefix.
+    resetBuildActionRegistry()
+    let img = appImagePackage(sampleDistribution(toLinux))
+    check img.format == "AppImage"
+    check AppImageToolSelector in toolRefsFor(img.edge.id)
+    check AppImageFileSelector in toolRefsFor(img.edge.id)
+    # The runtime rides on the STAGING edge, not on the image edge: it
+    # is that edge's ``command -v`` that has to find it. A tool named on
+    # the wrong edge is on the PATH of an action that never runs it.
+    var runtimeEdgeId = ""
+    for act in registeredBuildActions():
+      if act.id.endsWith("stage-runtime"): runtimeEdgeId = act.id
+    check runtimeEdgeId.len > 0
+    check AppImageRuntimeSelector in toolRefsFor(runtimeEdgeId)
+    check AppImageRuntimeSelector notin toolRefsFor(img.edge.id)
+
+  test "no other producer drags appimagetool or the runtime in":
+    # Over-declaring costs a project a 15 MB fetch of a tool it never
+    # runs, and a second one of a runtime nothing reads.
+    resetBuildActionRegistry()
+    let deb = debPackage(sampleDistribution(toLinux))
+    check AppImageToolSelector notin deb.toolSelectors
+    check AppImageRuntimeSelector notin deb.toolSelectors
+    resetBuildActionRegistry()
+    let tarball = tarballPackage(sampleDistribution(toLinux))
+    check AppImageToolSelector notin tarball.toolSelectors
+
+  test "the Arch producer names bsdtar on the MTREE edge and nowhere else":
+    # M1's N15. ``bsdtar`` is a SECOND archiver and it belongs to one
+    # step: the mtree. Naming it on the ``tar`` edge would put it on the
+    # PATH of the action that writes the package and leave the action
+    # that writes the record without it.
+    resetBuildActionRegistry()
+    let arch = archPackage(sampleDistribution(toLinux))
+    var mtreeEdgeId = ""
+    for act in registeredBuildActions():
+      if act.id.endsWith("mtree"): mtreeEdgeId = act.id
+    check mtreeEdgeId.len > 0
+    check ArchBsdtarSelector in toolRefsFor(mtreeEdgeId)
+    check ArchGrepSelector in toolRefsFor(mtreeEdgeId)
+    check ArchBsdtarSelector notin toolRefsFor(arch.edge.id)
+    # ...and the deb/rpm/tarball producers acquire neither.
+    resetBuildActionRegistry()
+    check ArchBsdtarSelector notin
+      debPackage(sampleDistribution(toLinux)).toolSelectors
+
+  test "the dogfood fixture's uses: block matches the producers' selectors":
+    # The same pinning the two-binary fixture gets, for the recipe that
+    # produces every package in this milestone. It is the one that grew
+    # two formats' worth of tools this session, and a ``uses:`` entry
+    # missing here is not a warning -- it is an unresolvable tool on the
+    # action's PATH at build time.
+    let fixture = repoRootFromTest() &
+      "/tests/fixtures/packaging/reprobuild-dist/repro.nim"
+    let text = readFile(fixture)
+    for selector in [DpkgDebSelector, RpmbuildSelector, TarSelector,
+                     GzipSelector, PatchelfSelector, InstallSelector,
+                     ShSelector, ReadelfSelector,
+                     ArchBsdtarSelector, ArchGrepSelector,
+                     ArchFindSelector,
+                     AppImageToolSelector, AppImageRuntimeSelector,
+                     AppImageFileSelector]:
+      doAssert text.contains("\"" & selector & "\""),
+        "the dogfood fixture's uses: block does not name '" & selector &
+        "', which a producer it calls declares on an edge"

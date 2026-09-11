@@ -143,6 +143,41 @@ suite "packaging: the lowered graph is a pure function of the Distribution":
       check act.id notin ids
       ids.add(act.id)
 
+  test "TWO distributions in one recipe do not collide on ids either":
+    # The variant alone was enough while a recipe staged one
+    # distribution, and stopped being enough the moment one staged two.
+    # Reprobuild's own packaging is exactly that case -- section 3 splits
+    # the product into ``reprobuild`` and ``reprobuild-binary-cache``,
+    # both built from one recipe, both staging a ``deb`` tree -- and the
+    # first real build of it was refused outright with
+    # ``duplicate graph node id: project:action:pkg-deb-runtime-closure``.
+    # The refusal was the engine doing the right thing; what a producer
+    # must not do is make it possible.
+    resetBuildActionRegistry()
+    var first = sampleDistribution(toLinux)
+    var second = sampleDistribution(toLinux, withService = false)
+    second.name = "sampletool-extra"
+    second.stagingRoot = "build/dist/sampletool-extra-0.2.0"
+    discard debPackage(first)
+    discard debPackage(second)
+    var ids: seq[string] = @[]
+    for act in registeredBuildActions():
+      check act.id notin ids
+      ids.add(act.id)
+    var outputs: seq[string] = @[]
+    for act in registeredBuildActions():
+      for output in act.outputs:
+        check output notin outputs
+        outputs.add(output)
+
+  test "the staged id prefix names both the variant and the distribution":
+    let dist = sampleDistribution(toLinux)
+    check stagedIdPrefix(dist, "deb") == "pkg-deb-sampletool-"
+    check stagedIdPrefix(dist, "tar") == "pkg-tar-sampletool-"
+    var other = sampleDistribution(toLinux)
+    other.name = "other"
+    check stagedIdPrefix(other, "deb") != stagedIdPrefix(dist, "deb")
+
   test "two producers over one Distribution do not collide on outputs":
     # The deb tree and the tarball tree are separate on purpose (the deb
     # needs a DEBIAN/ directory the tarball must not carry). If the

@@ -1,7 +1,7 @@
 ## TC-1 — ``repro test`` issues a test certificate by default in a clean state.
 ##
 ## A clean single-repo workspace at the locked revision with a passing test
-## target → ``repro test --certify`` emits a ``reprobuild.test-certificate.v1``
+## target → ``repro test --certify`` emits a ``test-certificate.v1``
 ## record covering that target for the current platform, bound to HEAD; the
 ## verifier confirms it covers (commit, lock, platform, target).
 ##
@@ -210,11 +210,26 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
       check fileExists(cp)
       let cert = readCertificateFile(cp)
       check cert.schema == testCertificateSchemaV1
-      check cert.commit == fx.libASha            # bound to HEAD (clean tree)
+      # TC-7: the state lives in [certificate.vcs], and ``clean`` /
+      # ``untracked`` are MEASURED and reported separately. Issuance only
+      # happens from a clean tree, so both are the honest values for one.
+      check cert.vcs.commit == fx.libASha        # bound to HEAD (clean tree)
+      check cert.vcs.repo.len > 0
+      check cert.vcs.clean
+      check (not cert.vcs.untracked)
+      check cert.vcs.paths.len == 0              # whole-repository claim
+      check (not cert.vcs.worktree.present)      # clean-tree form
+      check cert.framework == reprobuildFrameworkId
       check cert.platform == currentPlatformTag()
       check cert.result == tcrPassed
       check "t-unit" in cert.targets
-      check cert.lock.len > 0 and cert.lock.startsWith("blake3:")
+      # TC-7: the attested COMMANDS are recorded, in execution order, and are
+      # the argv the fixture actually ran.
+      check cert.commands.len >= 1
+      check cert.commands[0].argv.len > 0
+      check cert.commands[0].argv[0] == "sh"
+      # TC-7: the lock digest is GONE from the record — the commit binds it.
+      check "lock = " notin serializeCertificateToToml(cert)
       # TC-5: the certificate is now daemon-SIGNED (ed25519) by the registered
       # key, and the signature verifies against the workspace registry.
       check cert.isSigned
@@ -225,9 +240,9 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
         registeredKeyStorePath(fx.workspaceRoot))
       check verifyCertificateSignature(cert, regStore) == svValid
 
-      # Verifier: the cert covers (commit, lock, platform, [t-unit]).
+      # Verifier: the cert covers (framework, commit, platform, [t-unit]).
       let req = CoverageRequirement(
-        commit: fx.libASha, lock: cert.lock,
+        framework: reprobuildFrameworkId, commit: fx.libASha,
         platform: currentPlatformTag(), requiredTargets: @["t-unit"])
       let cov = verifyCoverage(@[cert], req)
       check cov.covered
@@ -237,7 +252,7 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
 
       # A requirement for a target NOT covered must NOT verify.
       let reqMiss = CoverageRequirement(
-        commit: fx.libASha, lock: cert.lock,
+        framework: reprobuildFrameworkId, commit: fx.libASha,
         platform: currentPlatformTag(),
         requiredTargets: @["t-unit", "t-integration"])
       let covMiss = verifyCoverage(@[cert], reqMiss)
@@ -246,7 +261,7 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
 
       # A cert for a DIFFERENT commit must be ignored by the verifier.
       var otherCert = cert
-      otherCert.commit = "deadbeef" & cert.commit[8 .. ^1]
+      otherCert.vcs.commit = "deadbeef" & cert.vcs.commit[8 .. ^1]
       let covIgnore = verifyCoverage(@[otherCert], req)
       check (not covIgnore.covered)
       check covIgnore.matchingCerts == 0

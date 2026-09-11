@@ -67,6 +67,38 @@ type
     unwindMetadataPayload*: HcrProtocolPayload
     sourceGenerationMap*: seq[HcrSourceGenerationEntry]
 
+  HcrCodePatchEvent* = object
+    ## HLX-M7 — what the agent did about the `CodePatchEvent` the protocol's
+    ## §7.2 requires when the patched process is being recorded by MCR.
+    ##
+    ## The event itself lives in the trace; this is the agent's REPORT of it, so
+    ## that a coordinator learns whether the recording carries the boundary and,
+    ## when it does not, why.  Before HLX-M7 a patch applied under `ct-mcr
+    ## record` and a patch applied outside one were indistinguishable to the
+    ## client, which is how a missing code-patch event would go unnoticed twice.
+    present*: bool          ## the agent emitted a `codePatchEvent` object
+    recorded*: bool         ## the recorder accepted and published the event
+    bridgePresent*: bool    ## `libct_interpose` was in the target process
+    bridgeResult*: int      ## the bridge's own return code (negative = refused)
+    hashSelfTest*: bool     ## the agent's SHA-256 passed its FIPS vectors
+    publicationTier*: uint32  ## 1 = no quiescence, so the geid boundary is
+                              ## approximate (design §6.1/§10.3)
+    codeHashBefore*: string   ## "sha256:<hex>" over the patched byte range
+    codeHashAfter*: string
+    patchBundle*: string      ## "sha256:<hex>" over the direct-patch bytes
+    claimHeld*: bool          ## this provider owns the window's claim (§10.1)
+
+  HcrSkippedFunction* = object
+    ## §10.1 — a function this patch did NOT touch, and the named reason.
+    ## `"claimed-by-recorder"` means MCR already held bytes in the window, which
+    ## is not a defect in the target and not a whole-patch failure; the claim
+    ## map's rule ends "never to a silent skip", and this field is how the skip
+    ## is not silent.
+    function*: string
+    reason*: string
+    holder*: uint32
+    windowAddress*: string
+
   HcrPatchApplied* = object
     patchId*: string
     changedFunctions*: seq[string]
@@ -78,11 +110,14 @@ type
     dispatchAddress*: string
     oldCodeRetained*: bool
     sharedLibraryPositivePath*: bool
+    codePatchEvent*: HcrCodePatchEvent
+    skippedFunctions*: seq[HcrSkippedFunction]
 
   HcrPatchFailed* = object
     patchId*: string
     stage*: string
     message*: string
+    skippedFunctions*: seq[HcrSkippedFunction]
 
   HcrLifecycleEvent* = object
     patchId*: string
@@ -200,6 +235,29 @@ proc patchRequestJson*(request: HcrPatchRequest): JsonNode =
     generations.add sourceGenerationJson(entry)
   result["sourceGenerationMap"] = generations
 
+proc codePatchEventJson(value: HcrCodePatchEvent): JsonNode =
+  %*{
+    "recorded": value.recorded,
+    "bridgePresent": value.bridgePresent,
+    "bridgeResult": value.bridgeResult,
+    "hashSelfTest": value.hashSelfTest,
+    "publicationTier": value.publicationTier,
+    "codeHashBefore": value.codeHashBefore,
+    "codeHashAfter": value.codeHashAfter,
+    "patchBundle": value.patchBundle,
+    "claimHeld": value.claimHeld
+  }
+
+proc skippedFunctionsJson(values: seq[HcrSkippedFunction]): JsonNode =
+  result = newJArray()
+  for value in values:
+    result.add(%*{
+      "function": value.function,
+      "reason": value.reason,
+      "holder": value.holder,
+      "windowAddress": value.windowAddress
+    })
+
 proc patchAppliedJson(value: HcrPatchApplied): JsonNode =
   result = %*{
     "patchId": value.patchId,
@@ -215,13 +273,19 @@ proc patchAppliedJson(value: HcrPatchApplied): JsonNode =
     result["dispatchAddress"] = newJString(value.dispatchAddress)
   if value.entryAddress.len > 0:
     result["entryAddress"] = newJString(value.entryAddress)
+  if value.codePatchEvent.present:
+    result["codePatchEvent"] = codePatchEventJson(value.codePatchEvent)
+  if value.skippedFunctions.len > 0:
+    result["skippedFunctions"] = skippedFunctionsJson(value.skippedFunctions)
 
 proc patchFailedJson(value: HcrPatchFailed): JsonNode =
-  %*{
+  result = %*{
     "patchId": value.patchId,
     "stage": value.stage,
     "message": value.message
   }
+  if value.skippedFunctions.len > 0:
+    result["skippedFunctions"] = skippedFunctionsJson(value.skippedFunctions)
 
 proc lifecycleEventJson(value: HcrLifecycleEvent): JsonNode =
   %*{
@@ -335,8 +399,42 @@ proc parsePatchRequest*(node: JsonNode): HcrPatchRequest =
   if result.schemaId.len == 0:
     result.schemaId = HcrPatchRequestSchemaId
 
+proc parseCodePatchEvent(node: JsonNode): HcrCodePatchEvent =
+  ## Absent means the agent did not attempt a code-patch event at all (a
+  ## non-Linux arm).  Present-but-`recorded: false` is a DIFFERENT statement:
+  ## the agent tried and the recorder did not take it.  The two must not
+  ## collapse into one, because only the second is ever a defect.
+  if not node.hasKey("codePatchEvent") or
+      node["codePatchEvent"].kind != JObject:
+    return HcrCodePatchEvent(present: false)
+  let value = node["codePatchEvent"]
+  HcrCodePatchEvent(
+    present: true,
+    recorded: value.requireBool("recorded"),
+    bridgePresent: value.requireBool("bridgePresent"),
+    bridgeResult: value.requireInt("bridgeResult"),
+    hashSelfTest: value.requireBool("hashSelfTest"),
+    publicationTier: uint32(value.requireInt("publicationTier")),
+    codeHashBefore: value.requireStr("codeHashBefore"),
+    codeHashAfter: value.requireStr("codeHashAfter"),
+    patchBundle: value.requireStr("patchBundle"),
+    claimHeld: value.requireBool("claimHeld"))
+
+proc parseSkippedFunctions(node: JsonNode): seq[HcrSkippedFunction] =
+  if not node.hasKey("skippedFunctions") or
+      node["skippedFunctions"].kind != JArray:
+    return @[]
+  for value in node["skippedFunctions"]:
+    result.add HcrSkippedFunction(
+      function: value.requireStr("function"),
+      reason: value.requireStr("reason"),
+      holder: uint32(value.requireInt("holder")),
+      windowAddress: value.optionalStr("windowAddress"))
+
 proc parsePatchApplied(node: JsonNode): HcrPatchApplied =
   HcrPatchApplied(
+    codePatchEvent: parseCodePatchEvent(node),
+    skippedFunctions: parseSkippedFunctions(node),
     patchId: node.requireStr("patchId"),
     changedFunctions: node.stringSeq("changedFunctions"),
     symbolGeneration: uint64(node.requireInt("symbolGeneration")),
@@ -352,7 +450,8 @@ proc parsePatchFailed(node: JsonNode): HcrPatchFailed =
   HcrPatchFailed(
     patchId: node.requireStr("patchId"),
     stage: node.requireStr("stage"),
-    message: node.requireStr("message"))
+    message: node.requireStr("message"),
+    skippedFunctions: parseSkippedFunctions(node))
 
 proc parseLifecycleEvent(node: JsonNode): HcrLifecycleEvent =
   HcrLifecycleEvent(

@@ -764,6 +764,61 @@ enumerated together and left the equality green. Batch 1's ledger carries no
 per-member static counts and therefore keeps the assertion it shipped with,
 unrelaxed.
 
+### The defect the merge found: the ledger was pinned with `==`
+
+Found at review, after merging `origin/dev` (`11d9838ff`) into this batch.
+**The verification test went red on the merged tree — exit 1, four failed
+assertions — and nothing was wrong with the batch.**
+
+Three unrelated packaging commits on `dev` (`ea73d993b`, `b3d6117d0`,
+`937cd66ad`) added seven `test` blocks to
+`libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim`. That
+file is a *member* of `bundle_repro_dsl_stdlib_catalogs_pure_unit`. So the
+bundle now enumerates 112 cases where the ledger records 110, and the static
+scan counts 117 where the ledger's per-member sum is 110. Four assertions fired:
+
+```
+t_m4_pure_unit_consolidation.nim(224, 22): Check failed: extra.len == 0
+t_m4_pure_unit_consolidation.nim(334, 25): Check failed: enumerated == recorded
+t_m4_pure_unit_consolidation.nim(372, 28): Check failed: staticTotal == staticFromMembers
+t_m4_pure_unit_consolidation.nim(430, 21): Check failed: casesAfter == casesBefore
+```
+
+All four are the same mistake. The ledger is a **dated** record — it is never
+rewritten, by design, because the standalone binaries it describes no longer
+exist. Pinning a live bundle to it with `==` therefore makes the file red the
+first time anyone adds a case to a consolidated member, permanently, for a
+reason the author of the addition did not cause and cannot fix without
+falsifying a measurement record. It took fourteen commits.
+
+This is the failure mode the file's own header already names, in the comment
+that explains why the suite-size bound is *not* `after == declaredSources.len`:
+"a gate that is red for reasons the author did not cause is a gate somebody
+deletes." The same reasoning was simply not carried to the case counts.
+
+**The fix keeps every loss detector exact and stops asserting that the
+repository holds still.**
+
+* `missing.len == 0` is **unchanged and exact**. Every case name the ledger
+  read out of a member's own standalone binary must still enumerate in the
+  bundle. That is the whole invariant, it is checked by name, and consolidation
+  is what it is about.
+* `extra.len == 0` becomes **attribution**. What that check was actually buying
+  is that a member added to `PureUnitBundles` and written into no ledger — one
+  whose cases would be compiled, run, and vouched for by nobody — cannot pass.
+  So every extra case must now come from a `file` the bundle's ledger entry
+  lists as a member. A case added to a known member is the repository working;
+  a case arriving from an unnamed file is still red. The new mutation
+  `M-attrib` is that proof.
+* `enumerated == recorded`, `staticTotal == staticFromMembers` and
+  `casesAfter == casesBefore` become `>=`. A **fall** is a loss and stays red —
+  `M1` and `M2-static` below both still fire. A **rise** is a `test` block
+  someone added.
+
+The control that matters is `M-grow`: a case added to a member, bundle rebuilt,
+static table regenerated — and the verification test green. Without it, "the
+gate passes now" would be indistinguishable from "the gate stopped working".
+
 The mutation `M2-static` below exists precisely because that arm was changed and
 had to be shown to discriminate.
 
@@ -911,15 +966,12 @@ in the ledger under `executionScope`.
   batch therefore contributes **no** independent observation of the known-red
   set on `dev`.
 * **`just lint` as a whole.** Ten of its eleven steps were run individually to
-  exit 0 (listed above). The eleventh, `scripts/check_nim_sources.sh` — a
-  `nim check` sweep over all 82 libraries and 9 app entrypoints — was still
-  running at hand-off — it had cleared the first 31 of 82 libraries with zero
-  errors when this was written — on a host at load 145–260 from another
-  session's concurrent full-suite measurement. **A reviewer must run it.** This
-  batch modifies no
-  file under `libs/` and no app entrypoint, so that step's outcome is
-  structurally independent of the change. That is a reason to expect it green,
-  not evidence that it is.
+  exit 0 (listed above). The eleventh, `scripts/check_nim_sources.sh`, was
+  still running at hand-off and this batch handed it to a reviewer.
+  **CLOSED AT REVIEW — see "What the review executed" below: exit 0.** Two
+  things about it were also mis-stated here and are corrected in that section:
+  the sweep is not "all 82 libraries and 9 app entrypoints", and the progress
+  figure was measured against the wrong denominator.
 * **The graph-driven build of the bundles.** The four bundle binaries were
   compiled with a direct `nim c` matching this report's compile command, not
   through `repro build`. What is established about the generated edges is that
@@ -1001,3 +1053,153 @@ The prototype bundles are generated import-only modules — one `import "<member
 per line — compiled as ordinary main modules. No member source was edited.
 Bundling by `import` rather than `include` is what keeps member module scopes
 separate and avoids top-level symbol collisions between test files.
+
+## What the review executed
+
+Independent review of batch 2 before it was opened as a PR. Nothing in this
+section is copied from the batch's own run: every figure comes from binaries
+the review compiled from scratch, on the **merged** tree — this branch merged
+with `origin/dev` `11d9838ff`. That is deliberately not the tree the batch
+measured. The batch's compile-cost and footprint figures are dated facts about
+`4a9a3070b` and were not re-measured; what was re-measured is every claim that
+has to stay true on the tree that will actually land.
+
+Host load ran 100–330 from concurrent sessions throughout, so no timing figure
+is taken from this run — only exit codes, catalogs and counts, which load does
+not move.
+
+### The gap batch 2 declared: closed
+
+`scripts/check_nim_sources.sh`, the eleventh `just lint` step, **exit code 0**,
+zero `Error:` lines, all 47 projects reporting `SuccessX`. The exit code was
+written to its own file by the runner and read from there, never through a pipe.
+
+Two things batch 2 said about this step were wrong and are worth correcting,
+because they misdescribe what the gate covers:
+
+* It is **not** "a sweep over all 82 libraries and 9 app entrypoints".
+  `check_nim_sources.sh` iterates `libs/libraries.txt` — **35** entries, against
+  **80** directories under `libs/` — and `apps/entrypoints.txt` — **12** on the
+  merged tree, **11** at the batch's own base. The sweep is 47 projects, not 91.
+  What it says about the other 45 library directories it says only transitively,
+  through imports.
+* The progress figure was against that non-existent denominator. "31 of 82" was
+  **31 of 35 libraries** — nearly through the library half, not barely into it.
+  The batch under-sold its own progress by using a number the script never uses.
+
+### The other ten lint steps
+
+Re-run individually, every exit code read directly: `check_vacuous_test_cases.py`
+0, `check_test_body_helper_compilation.py` 0, `check_ambient_execution.sh` 0,
+`check_shell_command_strings.sh` 0 and `--self-test` 0, `check_workflows.sh` 0,
+`check_repo_requirements.sh` 0, `--check-static-case-counts` 0,
+`--check-inventory` 0. `check_dev_shell_env.sh` was **not** re-run.
+
+### Identity-level catalog parity
+
+All 22 member sources and all 4 bundles compiled from scratch (26 binaries,
+every compile exit 0). Each member's own `--list-json` catalog was compared to
+its bundle's, matched on **(suite, test) identity** rather than by count, field
+by field across all 13 protocol fields.
+
+| Bundle | Enumerated | Members summed | Missing | Extra | Fields moved |
+| --- | --- | --- | --- | --- | --- |
+| `bundle_repro_lock_files_cli_pure_unit` | 24 | 24 | 0 | 0 | `bodyHash` 24 |
+| `bundle_repro_core_pure_unit` | 63 | 63 | 0 | 0 | `bodyHash` 45 |
+| `bundle_repro_core_dep_scanners_pure_unit` | 35 | 35 | 0 | 0 | `bodyHash` 16 |
+| `bundle_repro_dsl_stdlib_catalogs_pure_unit` | 112 | 112 | 0 | 0 | `bodyHash` 99 |
+
+**Only `bodyHash` moves.** `file`, `line`, `column`, `name`, `suite`, `test`,
+`group`, `kind`, `tags`, `xfail`, `threadsRequired` and `deterministic` are
+identical for every one of the 234 cases. The batch's claim is confirmed at
+identity level, not merely by count. Its numerators (24, 45, 16, 99) reproduce
+exactly; the last denominator is 112 rather than 110 because `origin/dev` added
+cases to a member.
+
+### The red-on-`dev` precondition
+
+All 22 members compiled standalone from scratch: **22 of 22 exit 0 run whole,
+and 234 per-case `--run` executions, every one exit 0.** The three deferred
+`libs/repro_system_apply` members were also built and run whole — 3 of 3 exit 0
+— so all 25 sources the batch claimed clean are confirmed clean. The bundles
+likewise: 4 of 4 exit 0 run whole, 234 per-case executions all exit 0.
+
+### The merge, and how the generated artifacts were resolved
+
+`repro_tests.nim`, the static-case-count TSV and the source inventory all
+conflicted. Each was **regenerated from the merged tree**, and that claim is
+checked rather than asserted: the TSV and the inventory were each regenerated
+twice, once starting from `--ours` and once from `--theirs`, and the two outputs
+are **byte-identical** (TSV md5 `bde35448…`). A regeneration that depends on
+which side you start from is a side-take wearing a hat. `repro_tests.nim` is
+written whole by the generator, which reported 1,525 Nim tests + 8 Python tests.
+
+`.envrc` came through from `dev` unchanged — PR #182 landed the plugin hash the
+batch's worktree had been carrying — so it appears nowhere in this branch's diff.
+
+### Mutations, re-run on the merged tree
+
+Backup and restore was a byte snapshot of exactly the twelve files any mutation
+touches, compared back after each run; the final restore was exact and the
+baseline re-ran green.
+
+| Mutation | Verification exit | case 1 | case 2 | case 3 |
+| --- | --- | --- | --- | --- |
+| baseline | 0 | OK | OK | OK |
+| **M-grow** a case ADDED to a member, rebuilt, table regenerated (25 enumerated) | **0** | OK | OK | OK |
+| M1 a case deleted, rebuilt (23 enumerated) | 1 | FAILED | FAILED | FAILED |
+| **M2-static** deleted in source, table regenerated, binary left stale | 1 | OK | **FAILED** | OK |
+| **M3** suite renamed, count held at 24, rebuilt | 1 | **FAILED** | **OK** | **FAILED** |
+| **M-attrib** a 4th member in the generator that no ledger names (29 enumerated) | 1 | **FAILED** | OK | OK |
+| baseline re-run afterwards | 0 | OK | OK | OK |
+
+**M3 still discriminates**, and for the structural reason the batch gave: the
+rename holds the bundle at 24 enumerated cases, so case 2 — which compares
+counts and bytes — stays green while the changed `suite::test` selector reddens
+cases 1 and 3.
+
+**M-grow is the control that makes the relaxation meaningful.** Without it,
+"the file is green after the fix" would be indistinguishable from "the file
+stopped checking".
+
+**M-attrib is the proof that replacing `extra.len == 0` with attribution kept
+its power.** A member added to `PureUnitBundles` and written into no ledger
+still cannot pass.
+
+Generator refusals, exit read directly from `nim r`:
+
+| Mutation | Generator exit | Message |
+| --- | --- | --- |
+| M5-25: 25 real, same-owner members | 1 | `25 members exceeds MaxBundleMembers=24` |
+| **M5-24: the same bundle at exactly 24** | **0** | *(accepted — the cap is a cap at 25)* |
+
+The control is the point: a refusal at 25 says nothing about where the cap sits
+unless 24 is shown to pass.
+
+#### A mutation that proved nothing, recorded rather than discarded
+
+The first M2-static wrapped the target `test` block in `when false:` instead of
+deleting it. The binary honours that, but the static scanner **sums every
+when/else branch** — so the bundle's static count stayed at 24, exactly the
+baseline. The instrument never moved, and the run came back green. A green
+verdict from a mutation that cannot move the thing it measures looks identical
+to a gate that cannot fail, and only one of those is a problem. Redone with a
+real deletion the scanner's count fell 24 → 19 against a stale binary still
+enumerating 24, and case 2 went red alone. (The deletion was truncating rather
+than surgical — it took the block's first four lines, which is why the count
+fell by five and why that member would no longer compile. Neither affects what
+the run establishes: the arm is isolated, and it fires on a *fall*.)
+
+### What the review did NOT execute
+
+* **The full test suite.** `just test` was not run by the review either. The
+  host was carrying 100–330 load from other sessions for the whole window and a
+  full suite run was not affordable. This batch therefore still contributes no
+  independent observation of the known-red set on `dev`.
+* **The graph-driven build.** The bundles were compiled with direct `nim c`
+  here too. That the four generated test edges execute correctly under
+  `repro build` remains unestablished.
+* **`check_dev_shell_env.sh`**, the one lint step not re-run.
+* **Any re-measurement of cost.** Every compile-CPU, nimcache and binary-size
+  figure in this report is the batch's, taken on its own base at load 65–95, and
+  was not reproduced.

@@ -714,6 +714,38 @@ proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
 proc generationFor(startedAt: Time): string =
   $getCurrentProcessId() & "-" & $startedAt.toUnix & "-" & $startedAt.nanosecond
 
+proc daemonImagePath*(appFilename, sourceExe, runningImage: string): string =
+  ## The path the daemon reports as its OWN image, VERIFIED TO EXIST.
+  ##
+  ## Distribution-And-Packaging M1's N21: inside an AppImage, ``repro
+  ## daemon status`` answered ``binary-path: /usr/bin/repro.real`` -- a
+  ## file that does not exist on that host -- while
+  ## ``source-image-path:`` and ``running-image-path:`` on the SAME
+  ## report carried the true ``/tmp/.mount_<random>/usr/bin/repro.real``.
+  ##
+  ## The field was ``getAppFilename()`` and nothing else, so whatever the
+  ## platform answered was printed. WHY that call answered a prefix-rooted
+  ## path under a FUSE-mounted AppDir is not established here, and this
+  ## proc deliberately does not depend on knowing: what it fixes is that a
+  ## STATUS FIELD NAMED A FILE THE DAEMON HAD NOT CHECKED. Every other
+  ## path on the report is either computed from a configured value or
+  ## checked before use; this one was neither.
+  ##
+  ## The order is "what the OS says I am, then what I was launched as,
+  ## then what I am running" -- each used only if it is on disk. If none
+  ## is, the OS's answer is reported UNCHANGED rather than blanked: a
+  ## status line that says something wrong is worse than one that says
+  ## nothing, and a status line that says nothing when the daemon does
+  ## have an image would be worse still.
+  if appFilename.len > 0 and fileExists(appFilename):
+    return appFilename
+  if sourceExe.len > 0 and fileExists(sourceExe):
+    return absoluteNormalized(sourceExe)
+  if runningImage.len > 0 and fileExists(runningImage):
+    return runningImage
+  appFilename
+
+
 proc statusFor(config: UserDaemonConfig; startedAt: Time;
                generation: string; activeSessionCount = 0;
                devRestart: DevRestartState = DevRestartState()):
@@ -728,7 +760,10 @@ proc statusFor(config: UserDaemonConfig; startedAt: Time;
     uptimeSeconds: getTime().toUnix - startedAt.toUnix,
     protocolMajor: UserDaemonProtocolMajor,
     protocolMinor: UserDaemonProtocolMinor,
-    binary: binaryIdentity("repro-daemon", getAppFilename(), versionString()),
+    binary: binaryIdentity("repro-daemon",
+      daemonImagePath(getAppFilename(), config.sourceExe,
+                      devRestart.runningImagePath),
+      versionString()),
     featureFlags: UserDaemonFeatureFlags,
     generation: generation,
     activeSessionCount: activeSessionCount,

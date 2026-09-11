@@ -49,6 +49,36 @@ proc requirePatchId(session: HcrAgentSession; patchId: string; action: string) =
       action & " patch id mismatch: expected " & session.activePatchId &
         ", got " & patchId)
 
+proc verifyBundleSupportProfile*(bundleProfile, hostProfile: string) =
+  ## HLX-M7 / design §10.3, protocol §7.3 — the replay-side twin of the live
+  ## negotiation check below.
+  ##
+  ## §7.3 replays a patched recording by loading the stored patch bundle out of
+  ## the CTFS container and applying it to the replay process. The bundle's wire
+  ## format carries no architecture or ABI tag, so on a foreign host it would be
+  ## applied BLINDLY — a `linux-x86_64` `E9 rel32` published into an arm64
+  ## process is not a wrong patch, it is arbitrary code. `observeHello` already
+  ## refuses a profile mismatch during a LIVE session; replay reads its profile
+  ## out of the recorded `CodePatchEvent` instead of off a socket, so the check
+  ## has to be callable without one. This is that check.
+  ##
+  ## An EMPTY recorded profile is refused rather than waved through. A trace
+  ## that does not say what it was recorded on cannot be shown to match this
+  ## host, and "cannot be shown to match" must not be spelled "matches".
+  if bundleProfile.len == 0:
+    raise newException(ValueError,
+      "patch bundle carries no supportProfile: it cannot be shown to target " &
+        "this host (" & hostProfile & "), and a bundle applied on an " &
+        "unverified host is arbitrary code, not a patch")
+  if hostProfile.len == 0:
+    raise newException(ValueError,
+      "this host advertises no direct-patch support profile, so the bundle's " &
+        bundleProfile & " cannot be honoured here")
+  if bundleProfile != hostProfile:
+    raise newException(ValueError,
+      "patch bundle support profile mismatch: the recording was patched on " &
+        bundleProfile & " and this replay host is " & hostProfile)
+
 proc observeHello(session: var HcrAgentSession; direction: HcrMessageDirection;
                   message: HcrAgentMessage) =
   direction.requireDirection(hmdAgentToCoordinator, "agent hello")

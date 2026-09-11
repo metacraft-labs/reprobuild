@@ -224,3 +224,129 @@ suite "HCR agent protocol":
       session.observeAgentProtocolMessage(
         hmdAgentToCoordinator,
         patchAppliedMessage(sharedLibraryPositivePath = true))
+
+  # --- HLX-M7 -------------------------------------------------------------
+  # Design: `reprobuild-specs/HCR/Linux-ELF-Provider.md` §10.3; protocol
+  # `Hot-Code-Reloading-High-Level-Interfaces.md` §7.2 / §7.3.
+  #
+  # `allowed_mocks: none`. These drive the production codec and the production
+  # session rules; nothing is stubbed.
+
+  test "replay refuses a patch bundle whose supportProfile is not this host's":
+    # §7.3 applies a stored bundle to a REPLAY process. The bundle's wire format
+    # carries no architecture or ABI tag, so on a foreign host it would be
+    # applied blindly — a linux-x86_64 `E9 rel32` published into an arm64
+    # process is not a wrong patch, it is arbitrary code. `observeHello`
+    # already refuses a mismatch during a live session; replay reads its profile
+    # out of the recorded CodePatchEvent instead of off a socket, so the check
+    # has to be callable without one.
+    verifyBundleSupportProfile(HcrLinuxX86_64DirectSupportProfile,
+                               HcrLinuxX86_64DirectSupportProfile)
+
+    expect ValueError:
+      verifyBundleSupportProfile(HcrMacosArm64DirectSupportProfile,
+                                 HcrLinuxX86_64DirectSupportProfile)
+    expect ValueError:
+      verifyBundleSupportProfile(HcrLinuxX86_64DirectSupportProfile,
+                                 HcrMacosArm64DirectSupportProfile)
+
+  test "a bundle that names no supportProfile is refused, not waved through":
+    # "Cannot be shown to match this host" must not be spelled "matches". An
+    # empty profile is the shape a trace recorded by an agent that never
+    # reported one would have, and applying its bundle would be the §7.3
+    # equivalent of patching on faith.
+    expect ValueError:
+      verifyBundleSupportProfile("", HcrLinuxX86_64DirectSupportProfile)
+    expect ValueError:
+      verifyBundleSupportProfile(HcrLinuxX86_64DirectSupportProfile, "")
+
+  test "the codePatchEvent report survives a protocol round trip":
+    # The agent's report of what it recorded has to reach the coordinator
+    # intact: it is the client's only way to learn whether the recording it is
+    # inside carries the code-version boundary, and it is a gate's second,
+    # independently transported copy of the digests.
+    var applied = HcrPatchApplied(
+      patchId: "patch-0001",
+      changedFunctions: @["hcr_target"],
+      symbolGeneration: 3'u64,
+      debugObjectDigest: "blake3-256:debug",
+      unwindMetadataDigest: "blake3-256:unwind",
+      sourceGenerationMapDigest: "blake3-256:map",
+      entryAddress: "0x1000",
+      dispatchAddress: "0x2000",
+      oldCodeRetained: true,
+      sharedLibraryPositivePath: false)
+    applied.codePatchEvent = HcrCodePatchEvent(
+      present: true,
+      recorded: true,
+      bridgePresent: true,
+      bridgeResult: 1,
+      hashSelfTest: true,
+      publicationTier: 1'u32,
+      codeHashBefore: "sha256:" & repeat('a', 64),
+      codeHashAfter: "sha256:" & repeat('b', 64),
+      patchBundle: "sha256:" & repeat('c', 64),
+      claimHeld: true)
+
+    let message = HcrAgentMessage(
+      schemaId: HcrAgentProtocolSchemaId,
+      transportScope: HcrAgentTransportScope,
+      protocolVersion: HcrAgentProtocolVersion,
+      messageId: "agent-patch-applied-1",
+      kind: hmkPatchApplied,
+      patchApplied: applied)
+    let restored = parseFramedAgentMessage(frameAgentMessage(message))
+    check restored.patchApplied.codePatchEvent == applied.codePatchEvent
+    check restored.patchApplied.symbolGeneration == 3'u64
+
+  test "a claim conflict is reported as a named skipped function":
+    # §10.1: the claim map's rule ends "never to a silent skip". A refusal that
+    # reached the client as a bare message string would satisfy the letter and
+    # not the point — the client could not tell a contested function from a
+    # broken one without parsing prose.
+    var failed = HcrPatchFailed(
+      patchId: "patch-0001",
+      stage: "applyDirectPatchRequest",
+      message: "direct patch refused: claimed-by-recorder")
+    failed.skippedFunctions = @[HcrSkippedFunction(
+      function: "hcr_target",
+      reason: "claimed-by-recorder",
+      holder: 1'u32,
+      windowAddress: "0x7f0000001000")]
+
+    let message = HcrAgentMessage(
+      schemaId: HcrAgentProtocolSchemaId,
+      transportScope: HcrAgentTransportScope,
+      protocolVersion: HcrAgentProtocolVersion,
+      messageId: "agent-patch-failed-1",
+      kind: hmkPatchFailed,
+      patchFailed: failed)
+    let restored = parseFramedAgentMessage(frameAgentMessage(message))
+    check restored.patchFailed.skippedFunctions.len == 1
+    check restored.patchFailed.skippedFunctions[0].reason ==
+      "claimed-by-recorder"
+    check restored.patchFailed.skippedFunctions[0].holder == 1'u32
+
+  test "an absent codePatchEvent is not the same as an unrecorded one":
+    # A non-Linux agent emits no `codePatchEvent` at all, and that must decode
+    # to "not attempted" rather than to "attempted and not recorded". Only the
+    # second is ever a defect, and collapsing them would hide it.
+    let applied = HcrPatchApplied(
+      patchId: "patch-0001",
+      changedFunctions: @["hcr_target"],
+      symbolGeneration: 1'u64,
+      debugObjectDigest: "d",
+      unwindMetadataDigest: "u",
+      sourceGenerationMapDigest: "m",
+      oldCodeRetained: true,
+      sharedLibraryPositivePath: false)
+    let message = HcrAgentMessage(
+      schemaId: HcrAgentProtocolSchemaId,
+      transportScope: HcrAgentTransportScope,
+      protocolVersion: HcrAgentProtocolVersion,
+      messageId: "agent-patch-applied-1",
+      kind: hmkPatchApplied,
+      patchApplied: applied)
+    let restored = parseFramedAgentMessage(frameAgentMessage(message))
+    check not restored.patchApplied.codePatchEvent.present
+    check not restored.patchApplied.codePatchEvent.recorded

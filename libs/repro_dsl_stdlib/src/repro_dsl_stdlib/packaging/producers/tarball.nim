@@ -77,7 +77,20 @@ proc tarballPackage*(dist: Distribution;
     # differ run to run and "content-addressed build edge" would be true
     # of the edge and false of anything anyone could observe.
     sortByName = true,
-    mtime = "@0",
+    # ``dist.sourceDateEpoch`` rather than a literal, so ONE number
+    # governs every format's timestamps. tar was never the producer with
+    # the reproducibility hole -- it always passed its own ``--mtime``,
+    # which is why the .tar.gz reproduced across the epochs that moved
+    # the .deb -- but leaving it hardcoded while the deb read the field
+    # would make the field a deb-specific setting wearing a general
+    # name.
+    #
+    # Note the two tools differ in KIND, not only in spelling: tar
+    # ``--mtime`` SETS every member's timestamp, dpkg-deb CLAMPS to
+    # SOURCE_DATE_EPOCH. That is why the default is 1980 rather than
+    # 1970 (``types.DefaultSourceDateEpoch``), and it moves this
+    # producer's members from 1970-01-01 to 1980-01-01.
+    mtime = "@" & $dist.sourceDateEpoch,
     owner = "0",
     group = "0",
     numericOwner = true,

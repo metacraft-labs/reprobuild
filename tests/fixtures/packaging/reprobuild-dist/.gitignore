@@ -1,0 +1,5 @@
+# The payload this fixture packages arrives from an already-built
+# reprobuild (see the header of repro.nim for why, and for what that
+# does and does not weaken). It is ~40 MB of binaries and belongs to
+# whichever build produced it, never to the repository.
+prebuilt/

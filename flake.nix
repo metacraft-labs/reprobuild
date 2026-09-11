@@ -237,13 +237,18 @@
     };
     codetracer-native-recorder = {
       # ct_interpose lives under ``ct_interpose/src`` in the native-recorder
-      # repo. ``repro_monitor_hooks/macos_interpose_runtime`` imports
-      # ``ct_interpose/propagation`` and the cross-platform monitor shim uses
-      # ``ct_interpose/hook_registry``; config.nims threads CT_INTERPOSE_SRC
-      # onto Nim's --path (falling back to a sibling checkout or a vendored
-      # copy when the env var is unset). The Nix build is sandboxed and sees
-      # neither, so we must seed CT_INTERPOSE_SRC from this input. In the
-      # CodeTracer workspace this input ``follows`` codetracer's own
+      # repo. This flake USED TO EXPORT ``CT_INTERPOSE_SRC`` pointing at it,
+      # on the belief that config.nims threaded the variable onto Nim's
+      # ``--path``. That stopped being true at ``86cb1bf6`` (the
+      # ct_interpose -> nim-stackable-hooks migration), which removed the
+      # only reader: ``grep -c CT_INTERPOSE_SRC config.nims`` answers 0.
+      # The packaging layer's wrapper set and this derivation's
+      # ``--set-default`` loop dropped it first (M1's N16); the dev-shell
+      # export, the lint hook and both derivation attributes are now gone
+      # too (M1's N19), so nothing anywhere sets a variable nothing reads.
+      # The INPUT stays: the package-closure assertion below still requires
+      # this store path to be reachable from the built package.
+      # In the CodeTracer workspace this input ``follows`` codetracer's own
       # native-recorder input, so a local sibling checkout is used.
       #
       # We use the ``git+https`` URL form (git wire protocol) rather than
@@ -470,11 +475,6 @@
             checksumsSrc = nim-checksums-src;
             nimonySrc = nim-nimony-src;
           };
-          # CT_INTERPOSE_SRC points at the directory that *contains* the
-          # ``ct_interpose`` package (config.nims validates it by probing
-          # ``<dir>/ct_interpose/hook_registry.nim``), which is
-          # ``ct_interpose/src`` inside the native-recorder checkout.
-          ctInterposeSrc = "${codetracer-native-recorder}/ct_interpose/src";
           # CodeTracer's top-level ct entry point imports the span-stream
           # writer. Fail during Nix evaluation if a future pin regression
           # silently points at a pre-span trace-format tree; otherwise the
@@ -665,7 +665,6 @@
                 export CODETRACER_PINNED_SRC=${codetracer-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
-                export CT_INTERPOSE_SRC=${ctInterposeSrc}
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
                 export XXHASH_PREFIX=${pkgs.xxHash}
@@ -819,7 +818,6 @@
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
-            CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             SQLITE_PREFIX = pkgs.sqlite.out;
@@ -951,13 +949,13 @@
                   --set-default CODETRACER_PINNED_SRC ${codetracer-src}/src \
                   --set-default REPRO_CT_TEST_RUNNER_SRC ${reprobuild-ct-test-runner-src} \
                   --set-default REPRO_TEST_ADAPTERS_SRC ${reprobuild-test-adapters-src}/src \
-                  --set-default CT_INTERPOSE_SRC ${ctInterposeSrc} \
                   --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
                   --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
                   --set-default RUNQUOTA_SRC ${runquota-src} \
                   --set-default SQLITE_PREFIX ${pkgs.sqlite.out} \
                   --set-default XXHASH_PREFIX ${pkgs.xxHash} \
-                  --set-default CLINGO_PREFIX ${pkgs.clingo}
+                  --set-default CLINGO_PREFIX ${pkgs.clingo} \
+                  --set-default REPRO_NIM_COMPILER ${nimFork}/bin/nim
               done
             '';
 
@@ -1089,12 +1087,12 @@
                 CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
-                CT_INTERPOSE_SRC|${ctInterposeSrc}
                 REPROBUILD_USE_SYSTEM_HASH_LIBS|1
                 RUNQUOTA_SRC|${runquota-src}
                 SQLITE_PREFIX|${pkgs.sqlite.out}
                 XXHASH_PREFIX|${pkgs.xxHash}
                 CLINGO_PREFIX|${pkgs.clingo}
+                REPRO_NIM_COMPILER|${nimFork}/bin/nim
                 DEFAULTS
                                       wrapperCount=$((wrapperCount + 1))
                                     done
@@ -1470,7 +1468,6 @@
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
-            CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             # Read by RUNQUOTA'S ``config.nims``, not by ours.

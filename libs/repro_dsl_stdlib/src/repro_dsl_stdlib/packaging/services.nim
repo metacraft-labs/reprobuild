@@ -27,10 +27,38 @@
 ## all, and systemd's ``After=`` is a unit-ordering graph while the
 ## SCM's is a load-order group — related ideas, not the same one.
 ##
-## launchd and rc.d renderers are deliberately NOT here. They would be
-## two more instances of a pattern this module has already demonstrated
-## twice, and M0's gate does not exercise them; adding them now would be
-## writing M1's code without M1's verification.
+## THE LAUNCHD RENDERER IS NOW HERE AND THE RC.D ONE IS STILL NOT, and
+## the two answers have different reasons rather than one reason applied
+## unevenly.
+##
+## M0 left both out with one sentence -- "adding them now would be
+## writing M1's code without M1's verification" -- and that argument is
+## still true of launchd: there is no Darwin host in this environment,
+## so `launchdPlistText` below has NEVER BEEN LOADED BY LAUNCHD. What
+## changed is what the alternative costs. M1 ships a package whose
+## `Distribution` carries `services`, and on a Darwin target that list
+## was silently rendered to nothing at all: not "unsupported", not a
+## refusal -- a `.pkg` with a daemon in its data model and no daemon in
+## its payload. A renderer whose TEXT is pinned by cases is strictly
+## better than that, because the failure mode it leaves is "the plist
+## may be wrong", which someone with a Mac can check in a minute,
+## rather than "the service is absent", which looks like success.
+##
+## So: the plist grammar, the four mappings that are NOT one-to-one, and
+## the one that is a genuine semantic inversion (see `Disabled` in
+## `launchdPlistText`) are all unit-verified. Nothing here is
+## host-verified, and the milestone says so in those words.
+##
+## rc.d is different, and the blocker is not the host. `TargetOs` has
+## three values -- Linux, Darwin, Windows -- so there is no *BSD target
+## to render an rc.d script FOR. Writing the renderer would mean adding
+## a fourth target first, which pulls in a prefix layout
+## (`/usr/local` rather than `/usr`), an ELF interpreter path, a
+## never-vendor library set for a libc that is not glibc, and a
+## dependency-floor computation that has no `libc6` to name -- a
+## data-model change whose first consumer could not be run anywhere in
+## this environment. That is a bigger claim than "no host", and it is
+## the honest reason rc.d is absent.
 
 import std/[strutils]
 
@@ -40,8 +68,9 @@ import ./runtime_contract
 proc systemdUnitFileName*(svc: ServiceDef): string =
   svc.name & ".service"
 
-proc systemdUnitPath*(dist: Distribution; svc: ServiceDef): string =
-  ## Root-relative path of the unit inside a deb/rpm payload.
+proc systemdUnitPath*(dist: Distribution; svc: ServiceDef;
+                      underUsr = false): string =
+  ## Root-relative path of the unit inside a deb/rpm/Arch payload.
   ##
   ## ``lib/systemd/{system,user}`` and not ``etc/systemd/…``: ``/etc``
   ## is the administrator's, and a unit a package ships there cannot be
@@ -51,10 +80,27 @@ proc systemdUnitPath*(dist: Distribution; svc: ServiceDef): string =
   ## unit is. Note this is ROOT-relative, not prefix-relative: systemd
   ## looks in fixed absolute locations, so a package installed under
   ## ``/opt`` still ships its unit here.
+  ##
+  ## ``underUsr`` SPELLS THE SAME LOCATION THE OTHER WAY, and it exists
+  ## because one distribution's package manager refuses the first
+  ## spelling outright. On Arch, ``/lib`` is a SYMLINK to ``usr/lib``
+  ## owned by the ``filesystem`` package, and an archive containing a
+  ## ``lib/`` DIRECTORY makes pacman stop the transaction with
+  ## ``/lib exists in filesystem (owned by filesystem)`` -- measured,
+  ## by installing this layer's first Arch package.
+  ##
+  ## Debian and Fedora are merged-usr too and accept either spelling
+  ## because their own base packages own the symlink in a way dpkg and
+  ## rpm tolerate; Arch does not, and "which of two identical paths a
+  ## package may name" is a fact about the package manager rather than
+  ## about systemd. So the producer that knows its package manager
+  ## passes the flag, and the default stays what deb and rpm have
+  ## shipped all along.
   discard dist
+  let root = if underUsr: "usr/lib/systemd/" else: "lib/systemd/"
   case svc.scope
-  of ssSystem: "lib/systemd/system/" & systemdUnitFileName(svc)
-  of ssUser: "lib/systemd/user/" & systemdUnitFileName(svc)
+  of ssSystem: root & "system/" & systemdUnitFileName(svc)
+  of ssUser: root & "user/" & systemdUnitFileName(svc)
 
 proc installedExecPath*(dist: Distribution; svc: ServiceDef): string =
   ## Absolute path the service's executable will have once installed.
@@ -165,6 +211,219 @@ proc debPreRmText*(dist: Distribution): string =
   result.add("exit 0\n")
 
 # ---------------------------------------------------------------------------
+# The rpm arm.
+#
+# Same systemd unit, different scriptlet vocabulary. Deliberately plain
+# ``/bin/sh`` rather than the ``%systemd_post`` / ``%systemd_preun``
+# macros: those come from the ``systemd-rpm-macros`` package, which a
+# minimal image (and every non-systemd rpm distribution) need not carry,
+# and a spec that used them would fail to BUILD on a host without them
+# — turning a runtime concern into a build-time host assumption, which
+# is the thing §6 rule 1 is about.
+#
+# The guard is the same one the deb scriptlets use, for the same
+# reason: without ``/run/systemd/system`` there is no systemd running
+# and ``systemctl`` would either fail or, worse, talk to the host's
+# systemd from inside a container.
+# ---------------------------------------------------------------------------
+
+proc rpmPostText*(dist: Distribution): string =
+  ## The ``%post`` scriptlet. rpm passes the number of packages of this
+  ## name that will be installed once the transaction completes: 1 on a
+  ## first install, 2 on an upgrade. Enabling on an upgrade would
+  ## re-enable a unit the admin had deliberately disabled, so the
+  ## enable arm is guarded on ``$1 = 1``.
+  let system = systemServices(dist)
+  if system.len == 0:
+    return "/bin/true\n"
+  result = "if [ -d /run/systemd/system ] && " &
+    "command -v systemctl >/dev/null 2>&1; then\n"
+  result.add("  systemctl daemon-reload >/dev/null 2>&1 || true\n")
+  var anyBoot = false
+  for svc in system:
+    if svc.startAtBoot: anyBoot = true
+  if anyBoot:
+    result.add("  if [ \"$1\" = \"1\" ]; then\n")
+    for svc in system:
+      if svc.startAtBoot:
+        let unit = systemdUnitFileName(svc)
+        result.add("    systemctl enable " & unit &
+          " >/dev/null 2>&1 || true\n")
+        result.add("    systemctl start " & unit &
+          " >/dev/null 2>&1 || true\n")
+    result.add("  fi\n")
+  result.add("fi\n")
+  result.add("exit 0\n")
+
+proc rpmPreUnText*(dist: Distribution): string =
+  ## The ``%preun`` scriptlet. ``$1`` is the number of instances that
+  ## will REMAIN: 0 on a real removal, 1 during an upgrade's removal of
+  ## the old package. Stopping on an upgrade would take the service down
+  ## and leave it down, so this fires only at ``$1 = 0`` — which is the
+  ## one place rpm's scriptlet contract differs materially from deb's
+  ## ``prerm`` and the reason these are two procs rather than one.
+  let system = systemServices(dist)
+  if system.len == 0:
+    return "/bin/true\n"
+  result = "if [ \"$1\" = \"0\" ]; then\n"
+  result.add("  if [ -d /run/systemd/system ] && " &
+    "command -v systemctl >/dev/null 2>&1; then\n")
+  for svc in system:
+    let unit = systemdUnitFileName(svc)
+    result.add("    systemctl stop " & unit & " >/dev/null 2>&1 || true\n")
+    result.add("    systemctl disable " & unit & " >/dev/null 2>&1 || true\n")
+  result.add("  fi\n")
+  result.add("fi\n")
+  result.add("exit 0\n")
+
+proc rpmPostUnText*(dist: Distribution): string =
+  ## The ``%postun`` scriptlet: tell systemd the unit files are gone.
+  ## Separate from ``%preun`` because at ``%preun`` time the files are
+  ## still on disk, so a ``daemon-reload`` there would re-read the unit
+  ## that is about to vanish.
+  let system = systemServices(dist)
+  if system.len == 0:
+    return "/bin/true\n"
+  result = "if [ -d /run/systemd/system ] && " &
+    "command -v systemctl >/dev/null 2>&1; then\n"
+  result.add("  systemctl daemon-reload >/dev/null 2>&1 || true\n")
+  result.add("fi\n")
+  result.add("exit 0\n")
+
+# ---------------------------------------------------------------------------
+# The Darwin arm.
+#
+# NOT HOST-VERIFIED. There is no macOS machine in this environment, so
+# every claim below is about the TEXT this renders and none is about
+# what launchd does with it.
+# ---------------------------------------------------------------------------
+
+proc launchdLabel*(dist: Distribution; svc: ServiceDef): string =
+  ## The plist's ``Label``, which is launchd's primary key: two loaded
+  ## jobs may not share one, and ``launchctl`` addresses a job by it.
+  ##
+  ## ``<package>.<service>``, and deliberately NOT a reverse-DNS string.
+  ## Apple's convention is ``com.example.foo``, and a layer that wanted
+  ## to follow it would have to invent an organisation's domain for
+  ## every recipe that did not supply one -- a name that means something
+  ## in the world, chosen by a build system. Reverse-DNS is a CONVENTION
+  ## and uniqueness is the REQUIREMENT; the package name plus the
+  ## service name is unique by the same argument that makes
+  ## ``installRelPath`` unique, and ``validate`` already refuses two
+  ## components that collide.
+  if svc.name == dist.name: svc.name
+  else: dist.name & "." & svc.name
+
+proc launchdPlistFileName*(dist: Distribution; svc: ServiceDef): string =
+  launchdLabel(dist, svc) & ".plist"
+
+proc launchdPlistPath*(dist: Distribution; svc: ServiceDef): string =
+  ## Root-relative path of the plist inside a ``.pkg`` payload.
+  ##
+  ## ROOT-relative rather than prefix-relative, exactly as
+  ## ``systemdUnitPath`` is and for the same reason: launchd reads four
+  ## fixed absolute directories and nothing else, so a package installed
+  ## under ``/opt`` still puts its plist here.
+  ##
+  ## ``LaunchDaemons`` for system scope, ``LaunchAgents`` for user
+  ## scope, both under ``/Library`` rather than ``/System/Library``
+  ## (Apple's, SIP-protected) or ``~/Library`` (per-user, and a package
+  ## installer has no user to write it for -- the same argument that
+  ## keeps the systemd USER unit out of ``postinst``'s enable list).
+  discard dist
+  case svc.scope
+  of ssSystem: "Library/LaunchDaemons/" & launchdPlistFileName(dist, svc)
+  of ssUser: "Library/LaunchAgents/" & launchdPlistFileName(dist, svc)
+
+proc plistEscape(value: string): string =
+  for ch in value:
+    case ch
+    of '&': result.add("&amp;")
+    of '<': result.add("&lt;")
+    of '>': result.add("&gt;")
+    else: result.add(ch)
+
+proc launchdPlistText*(dist: Distribution; svc: ServiceDef): string =
+  ## Render one launchd job from the abstract definition.
+  ##
+  ## FOUR MAPPINGS ARE NOT ONE-TO-ONE, and each is a place where copying
+  ## the systemd renderer's shape would have produced a plausible file
+  ## that behaves differently:
+  ##
+  ## 1. ``startAtBoot = false`` INVERTS. A systemd unit that a package
+  ##    ships and does not ``enable`` simply does not run. launchd has
+  ##    no enable step: it loads every plist in ``/Library/LaunchDaemons``
+  ##    at boot, so shipping the file IS enabling it. The analogue of
+  ##    "installed but not enabled" is therefore an explicit
+  ##    ``Disabled`` key, and omitting it would make the Darwin package
+  ##    start a service on install that every other format's package
+  ##    does not -- which for ``repro-binary-cache`` means opening
+  ##    ``0.0.0.0:7878`` on a machine whose administrator has not chosen
+  ##    a root, a key or a network boundary.
+  ## 2. ``RunAtLoad`` is a SECOND, different switch: it decides whether
+  ##    a LOADED job starts immediately rather than on demand. Both are
+  ##    written, because writing only one leaves the other at a default
+  ##    that differs between macOS releases.
+  ## 3. ``restartOnFailure`` becomes ``KeepAlive`` with
+  ##    ``SuccessfulExit = false``, which is "restart unless it exited
+  ##    zero". A bare ``KeepAlive = true`` is the nearest-looking value
+  ##    and is wrong: it restarts a job that exited SUCCESSFULLY, which
+  ##    turns a one-shot into a spin.
+  ## 4. ``after`` is DROPPED, as it is for the MSI and for the same
+  ##    class of reason: launchd has no ordering graph. It has
+  ##    ``KeepAlive``-with-conditions and ``launchd``-managed sockets,
+  ##    which express "start when this is available" rather than "start
+  ##    after this unit", and mapping ``network.target`` onto either
+  ##    would be an invention.
+  ##
+  ## The executable is the PUBLIC name -- the §5 wrapper when there is
+  ## one -- matching systemd and NOT matching the MSI. launchd forks an
+  ## ordinary process and a shell script is a perfectly good thing to
+  ## fork; the Windows SCM's requirement for a service image is what
+  ## makes that arm the exception.
+  result = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+  result.add("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" " &
+    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
+  result.add("<plist version=\"1.0\">\n")
+  result.add("<dict>\n")
+  result.add("  <key>Label</key>\n  <string>" &
+    plistEscape(launchdLabel(dist, svc)) & "</string>\n")
+  result.add("  <key>ProgramArguments</key>\n  <array>\n")
+  result.add("    <string>" &
+    plistEscape(installedExecPath(dist, svc)) & "</string>\n")
+  for arg in svc.execArgs:
+    result.add("    <string>" & plistEscape(arg) & "</string>\n")
+  result.add("  </array>\n")
+  if svc.environment.len > 0:
+    result.add("  <key>EnvironmentVariables</key>\n  <dict>\n")
+    for pair in svc.environment:
+      result.add("    <key>" & plistEscape(pair[0]) & "</key>\n")
+      result.add("    <string>" & plistEscape(pair[1]) & "</string>\n")
+    result.add("  </dict>\n")
+  result.add("  <key>RunAtLoad</key>\n  <" &
+    (if svc.startAtBoot: "true" else: "false") & "/>\n")
+  # See (1): the inversion. A plist that omits this starts at boot.
+  result.add("  <key>Disabled</key>\n  <" &
+    (if svc.startAtBoot: "false" else: "true") & "/>\n")
+  if svc.restartOnFailure:
+    result.add("  <key>KeepAlive</key>\n  <dict>\n")
+    result.add("    <key>SuccessfulExit</key>\n    <false/>\n")
+    result.add("  </dict>\n")
+  result.add("</dict>\n")
+  result.add("</plist>\n")
+
+proc darwinUnsupportedServices*(dist: Distribution): seq[string] =
+  ## Names of services a launchd package cannot express.
+  ##
+  ## EMPTY, today, and that is the finding rather than an omission:
+  ## launchd is the one of the three mechanisms that has BOTH scopes
+  ## (``LaunchDaemons`` and ``LaunchAgents``), so unlike the MSI it drops
+  ## nothing. The proc exists anyway, with the same name-shape as
+  ## ``droppedUserServices``, so a producer asks the same question of
+  ## every target instead of knowing which targets have an answer.
+  discard dist
+
+# ---------------------------------------------------------------------------
 # The Windows arm.
 # ---------------------------------------------------------------------------
 
@@ -228,6 +487,60 @@ proc msiIdentifier*(value: string): string =
     ident = "_" & ident
   if ident.len > 72: ident = ident[0 ..< 72]
   ident
+
+proc msiOrdinalIdentifier*(prefix: string; ordinal: int;
+                           value: string): string =
+  ## An MSI identifier that is UNIQUE BY CONSTRUCTION, for the tables
+  ## where one has to be.
+  ##
+  ## ## Why ``msiIdentifier`` is not enough, measured rather than argued
+  ##
+  ## ``msiIdentifier`` sanitises and then TRUNCATES at 72 characters,
+  ## and truncation is not injective: two paths that agree for their
+  ## first ~68 characters collapse onto ONE identifier. Nothing in the
+  ## layer noticed until a Windows package was built with a real
+  ## payload, because M0's sample has two files and the deepest path in
+  ## it is ``bin/hello``. With 7,666 files, ``light`` stopped with
+  ## hundreds of::
+  ##
+  ##   error LGHT0091 : Duplicate symbol 'File:fil__5876_share_repro_
+  ##       src_runquota_build_nimcache_t_observation_store_retent'
+  ##
+  ## and the mechanism was worse than a rejected name. The FILE ids
+  ## already carried a unique ordinal at the front, so they were fine;
+  ## it was the DIRECTORY ids that collided, and a collision there makes
+  ## two distinct directory nodes share one ``Directory Id``, so the
+  ## renderer emits the SAME component list under both -- which is how a
+  ## file id that is unique by construction came to appear twice.
+  ##
+  ## ## The shape, and why the ordinal goes in FRONT and the path's TAIL
+  ## ## is what survives
+  ##
+  ## ``<prefix><ordinal>_<...tail of the sanitised value>``. The ordinal
+  ## is what makes the result injective and it must not be truncatable,
+  ## so it leads. What is kept of the value is its END rather than its
+  ## beginning, because the distinctive part of a long install path is
+  ## the leaf: ``..._runquota_build_nimcache_types.nim.c`` identifies a
+  ## row to a human reading a WiX error, and ``share_repro_src_run...``
+  ## identifies several thousand.
+  ##
+  ## The ordinal is assigned in the producer's own deterministic
+  ## traversal order, so two builds of one tree produce the same ids --
+  ## which the artifact's reproducibility needs and a digest-based
+  ## scheme would only approximate.
+  let head = prefix & $ordinal & "_"
+  var tail = ""
+  for ch in value:
+    if ch.isAlphaNumeric or ch == '_' or ch == '.': tail.add(ch)
+    else: tail.add('_')
+  let room = 72 - head.len
+  doAssert room > 0,
+    "msiOrdinalIdentifier: the prefix and ordinal alone exceed the " &
+    "MSI Identifier limit: " & head
+  if tail.len > room: tail = tail[tail.len - room .. ^1]
+  result = head & tail
+  doAssert result.len <= 72, result
+  doAssert result[0].isAlphaAscii or result[0] == '_', result
 
 proc msiServiceRows*(dist: Distribution): seq[MsiServiceRow] =
   ## Project the abstract services onto the SCM's model, dropping what

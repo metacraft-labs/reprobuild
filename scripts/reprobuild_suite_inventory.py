@@ -695,10 +695,19 @@ def pure_unit_verdict(
         if member is None:
             through = ""
         else:
+            # `as_posix()`, not the Path's native str: this string is RECORDED in
+            # benchmarks/reports/reprobuild-suite-m0-inventory-sources.json and
+            # then compared against a fresh scan, so an os.sep in it makes the
+            # artifact host-specific. It had gone that way — 31 reasons were
+            # written with Windows separators and could never match again on the
+            # ubuntu-latest runner that is the only place `--check-inventory`
+            # runs, so the gate was permanently red through no fault of the tree.
+            # Normalising at the source keeps a regeneration from either host
+            # byte-identical instead of flipping the file back and forth.
             try:
-                through = f" (through `{member.relative_to(root)}`)"
+                through = f" (through `{member.relative_to(root).as_posix()}`)"
             except ValueError:
-                through = f" (through `{member}`)"
+                through = f" (through `{member.as_posix()}`)"
 
         for pattern, why in PURE_UNIT_DISQUALIFYING_SYMBOLS:
             if pattern.search(code):

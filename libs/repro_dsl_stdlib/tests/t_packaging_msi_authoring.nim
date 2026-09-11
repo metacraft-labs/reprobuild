@@ -33,7 +33,20 @@ suite "packaging: the MSI producer translates the same Distribution":
     let wxs = wxsFor(sampleDistribution(toWindows))
     check wxs.contains("<Directory Id=\"ProgramFiles64Folder\">")
     check wxs.contains("<Directory Id=\"INSTALLFOLDER\" Name=\"sampletool\">")
-    check wxs.contains("<Directory Id=\"dir_bin\" Name=\"bin\">")
+    # The Directory Id now carries an ALLOCATOR ORDINAL in front of the
+    # path tail. It has to: `msiIdentifier`'s 72-character truncation is
+    # not injective, and two directories sharing a long prefix used to
+    # collapse onto one id -- which makes the renderer emit their
+    # components twice. See the uniqueness cases at the end of this
+    # suite.
+    check wxs.contains(" Name=\"bin\">")
+    var binDirId = ""
+    for line in wxs.splitLines():
+      let t = line.strip()
+      if t.startsWith("<Directory Id=\"") and t.contains(" Name=\"bin\">"):
+        binDirId = t["<Directory Id=\"".len .. ^1].split('"')[0]
+    check binDirId.startsWith("dir")
+    check binDirId.endsWith("_bin")
 
   test "every file is a Component whose key path is that file":
     # The Windows Installer's component rules key identity on the
@@ -167,7 +180,15 @@ suite "packaging: the MSI producer translates the same Distribution":
     # calls out "service + PATH" for this arm specifically.
     let wxs = wxsFor(sampleDistribution(toWindows))
     check wxs.contains("<Environment Id=\"PathEntry\" Name=\"PATH\"")
-    check wxs.contains("Value=\"[dir_bin]\"")
+    # The bin directory's own allocator-assigned id, read back rather
+    # than spelled: it carries an ordinal now (see the uniqueness cases).
+    var binId = ""
+    for line in wxs.splitLines():
+      let t = line.strip()
+      if t.startsWith("<Directory Id=\"") and t.contains(" Name=\"bin\">"):
+        binId = t["<Directory Id=\"".len .. ^1].split('"')[0]
+    check binId.len > 0
+    check wxs.contains("Value=\"[" & binId & "]\"")
     check wxs.contains("Part=\"last\"")
     check wxs.contains("System=\"yes\"")
 
@@ -223,3 +244,86 @@ suite "packaging: the MSI producer translates the same Distribution":
     check "bin/hello-real.exe" in paths
     for path in paths:
       check not path.startsWith("usr/")
+
+  test "identifiers are unique even when paths share a long prefix":
+    # FOUND BY THE FIRST WINDOWS BUILD WITH A REAL PAYLOAD. `msiIdentifier`
+    # truncates at 72 characters and truncation is not injective, so two
+    # deep directories sharing a long prefix collapsed onto ONE
+    # `Directory Id` -- and `renderDirTree` emits a node's component list
+    # per node, so the SAME components were emitted twice and `light`
+    # stopped with hundreds of `Duplicate symbol 'File:fil_...'`.
+    #
+    # The case is built from paths whose first ninety characters agree,
+    # which is what the real payload's `runquota/build/nimcache/...` tree
+    # looked like.
+    resetBuildActionRegistry()
+    var dist = sampleDistribution(toWindows)
+    let deep = "share/repro/src/runquota/build/nimcache/" &
+      "t_observation_store_retention_crash"
+    for leaf in ["alpha", "beta", "gamma"]:
+      dist.components.add(component(crDataFile,
+        "build/gen/" & leaf & ".c",
+        subdir = deep & "/" & leaf,
+        installName = "types.nim.c"))
+      dist.components.add(component(crDataFile,
+        "build/gen/" & leaf & "2.c",
+        subdir = deep & "/" & leaf,
+        installName = "writer.nim.c"))
+    let text = wxsFor(dist)
+    check text.len > 0
+    var fileIds: seq[string] = @[]
+    var dirIdList: seq[string] = @[]
+    for line in text.splitLines():
+      let t = line.strip()
+      if t.startsWith("<File Id=\""):
+        fileIds.add(t["<File Id=\"".len .. ^1].split('"')[0])
+      elif t.startsWith("<Directory Id=\""):
+        dirIdList.add(t["<Directory Id=\"".len .. ^1].split('"')[0])
+    # Non-vacuity: the scan found the rows it is about to assert over,
+    # and the tree really is deep enough to trip the old truncation.
+    check fileIds.len >= 6
+    check dirIdList.len >= 6
+    var seenFile: seq[string] = @[]
+    for id in fileIds:
+      doAssert id notin seenFile,
+        "two <File> rows share the identifier '" & id &
+        "'; MSI identifiers are 72 characters and truncation is not " &
+        "injective"
+      doAssert id.len <= 72, "identifier over the MSI limit: " & id
+      seenFile.add(id)
+    var seenDir: seq[string] = @[]
+    for id in dirIdList:
+      doAssert id notin seenDir,
+        "two <Directory> rows share the identifier '" & id &
+        "'; every component under either would then be emitted twice"
+      doAssert id.len <= 72, "identifier over the MSI limit: " & id
+      seenDir.add(id)
+    # ...and the distinguishing part of the path is what SURVIVES the
+    # truncation, so a WiX error names a row a human can find.
+    var sawLeaf = false
+    for id in fileIds:
+      if id.contains("types.nim.c") or id.contains("writer.nim.c"):
+        sawLeaf = true
+    check sawLeaf
+
+  test "the ordinal identifier is injective and stays inside the limit":
+    # The helper on its own, over the exact shape that broke: a common
+    # 90-character prefix and a one-character difference at the end.
+    let base = "share/repro/src/runquota/build/nimcache/" &
+      "t_observation_store_retention_crash/very/deeply/nested/"
+    var ids: seq[string] = @[]
+    for i in 0 ..< 50:
+      let id = msiOrdinalIdentifier("dir", i, base & "leaf" & $i)
+      check id.len <= 72
+      check id.startsWith("dir" & $i & "_")
+      doAssert id notin ids, "collision at ordinal " & $i & ": " & id
+      ids.add(id)
+    # The OLD rule, shown failing on the same input, so the case is not
+    # asserting a property the previous code also had.
+    var old: seq[string] = @[]
+    var collided = false
+    for i in 0 ..< 50:
+      let id = msiIdentifier("dir_" & base & "leaf" & $i)
+      if id in old: collided = true
+      old.add(id)
+    check collided

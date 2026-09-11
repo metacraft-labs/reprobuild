@@ -756,6 +756,15 @@ integration_hcr_linux_cf_protection_sled_layout:
         tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim \
         2>&1 | tee test-logs/integration_hcr_linux_cf_protection_sled_layout.log
 
+integration_hcr_linux_claim_conflict_with_recorder_refused:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_claim_conflict_with_recorder_refused \
+        --out:build/test-bin/integration_hcr_linux_claim_conflict_with_recorder_refused \
+        tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_claim_conflict_with_recorder_refused.log
+
 unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -1905,3 +1914,39 @@ check-repo-requirements:
 # same probe `scripts/run_tests.sh` runs before the suite.
 check-toolchain-dlopen lib_dir="build/lib":
     bash ./scripts/check_toolchain_dlopen.sh {{lib_dir}}
+
+e2e_hcr_linux_concurrent_patch_no_torn_instruction:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_concurrent_patch_no_torn_instruction \
+        --out:build/test-bin/e2e_hcr_linux_concurrent_patch_no_torn_instruction \
+        tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_concurrent_patch_no_torn_instruction.log
+
+e2e_hcr_linux_quiescence_handshake_and_release:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_quiescence_handshake_and_release \
+        --out:build/test-bin/e2e_hcr_linux_quiescence_handshake_and_release \
+        tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_quiescence_handshake_and_release.log
+
+integration_hcr_linux_quiescence_timeout_aborts_without_writing:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_quiescence_timeout_aborts_without_writing \
+        --out:build/test-bin/integration_hcr_linux_quiescence_timeout_aborts_without_writing \
+        tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_quiescence_timeout_aborts_without_writing.log
+
+integration_hcr_linux_on_stack_function_reported_skipped:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_on_stack_function_reported_skipped \
+        --out:build/test-bin/integration_hcr_linux_on_stack_function_reported_skipped \
+        tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_skipped.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_on_stack_function_reported_skipped.log

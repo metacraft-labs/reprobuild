@@ -67,11 +67,29 @@ import ./packaging/types
 import ./packaging/runtime_contract
 import ./packaging/services
 import ./packaging/producer
+import ./packaging/reprobuild_dist
 import ./packaging/producers/tarball
 import ./packaging/producers/deb
+import ./packaging/producers/rpm
+import ./packaging/producers/arch
+import ./packaging/producers/appimage
 import ./packaging/producers/msi
+import ./packaging/producers/scoop
 
-export types, runtime_contract, services, producer, tarball, deb, msi
+export types, runtime_contract, services, producer, reprobuild_dist
+export tarball, deb, rpm, arch, appimage, msi
+# Scoop is exported but NOT registered with ``registerProducer``, and
+# the asymmetry is the producer's shape rather than an oversight: every
+# registered producer has the signature ``(Distribution,
+# ToolDependencySite) -> PackagedArtifact``, and a Scoop manifest needs
+# a THIRD input -- the archive it describes and hashes. Registering it
+# would mean either inventing an archive inside the producer (two
+# archives per distribution, one of them unpublished and the other
+# unhashed) or widening the registry's signature for one format. The
+# recipe calls ``scoopPackage(dist, tarball, site)`` explicitly instead,
+# which is also the only spelling that makes "this manifest describes
+# THAT archive" visible at the call site.
+export scoop
 
 proc packagingSite*(packageName: string;
                     sourceFile = ""; sourceLine = 0): ToolDependencySite =
