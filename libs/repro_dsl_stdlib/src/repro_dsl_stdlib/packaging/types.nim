@@ -109,6 +109,23 @@ type
       ## walk either — and a script that needs a library would have to
       ## say so through ``runtime.dlopenLeafNames``, because nothing can
       ## read it out of the file.
+      ##
+      ## AND "SKIP PATCHELF" WAS ALL IT MEANT FOR TWO PASSES, WHICH IS
+      ## M1's N33. patchelf was doing TWO things to an executable
+      ## component — rewriting its RPATH and rewriting its ELF
+      ## INTERPRETER — and exempting this role from the tool exempted it
+      ## from both. The RPATH half a script genuinely does not want. The
+      ## INTERPRETER half it wants exactly as much as an ELF image does,
+      ## and for the same reason: a ``#!`` line is an interpreter path
+      ## the target must resolve, ``execve`` fails it with the same
+      ## ``ENOENT`` it gives a missing ``PT_INTERP``, and a script built
+      ## inside a Nix derivation names a store path no target has. Every
+      ## Linux format shipped one for two passes.
+      ##
+      ## So the role carries ``scriptInterpreter`` and staging rewrites
+      ## the first line to it — see that field, and see
+      ## ``stageInstallTree``'s shebang edge, which sits beside the
+      ## patchelf edge it is the analogue of.
     crRuntimeLibrary
       ## A vendored shared library from the runtime closure (§5). Goes
       ## under the package's PRIVATE libdir and is what the RPATH points
@@ -173,6 +190,37 @@ type
       ## on these, which is how a producer ends up ordered after the
       ## compile that made the binary without the recipe author wiring
       ## it up.
+    scriptInterpreter*: string
+      ## ``crHelperScript`` ONLY, and REQUIRED there on a POSIX target:
+      ## the ABSOLUTE path, ON THE TARGET, that the staged script's
+      ## ``#!`` line must name.
+      ##
+      ## This is the shebang's answer to ``runtime.interpreterPath``,
+      ## and it exists for the identical reason. A script built inside a
+      ## Nix derivation names that derivation's interpreter --
+      ## ``#!/nix/store/<hash>-python3-3.13.12/bin/python3`` -- and a
+      ## target with no such path cannot start it. ``execve`` answers
+      ## ``ENOENT`` for a missing SHEBANG INTERPRETER exactly as it does
+      ## for a missing ELF ``PT_INTERP`` and exactly as it does for a
+      ## missing image, so the symptom is ``cannot execute: required
+      ## file not found`` for a file that is plainly there and is plainly
+      ## 0755.
+      ##
+      ## M1's N33 is that case, shipped: every Linux format carried
+      ## ``libexec/reprobuild/reprobuild-nix-daemon`` with a store-path
+      ## shebang for two passes, because ``crHelperScript`` was
+      ## introduced to EXEMPT the file from patchelf and nothing was put
+      ## in the ELF-interpreter rewrite's place.
+      ##
+      ## It is a property of the DISTRIBUTION rather than of the host,
+      ## like every other axis here: the recipe states what the target
+      ## will have, and ``stageInstallTree`` rewrites the first line to
+      ## it. Bare ``/usr/bin/env <name>`` is deliberately NOT the
+      ## default -- it resolves against whatever ``PATH`` the spawning
+      ## process happens to carry, which is the failure ``flake.nix``
+      ## already recorded (launchd's default ``PATH`` found macOS's
+      ## system python 3.9, which cannot parse this script) and which no
+      ## gate can see.
 
   ServiceScope* = enum
     ssSystem
@@ -757,14 +805,30 @@ proc executables*(dist: Distribution): seq[DistComponent] =
 
 proc component*(role: ComponentRole; buildPath: string;
                 producedBy: openArray[BuildActionDef] = [];
-                installName = ""; subdir = ""; mode = 0): DistComponent =
+                installName = ""; subdir = ""; mode = 0;
+                scriptInterpreter = ""): DistComponent =
   DistComponent(
     role: role,
     buildPath: buildPath,
     installName: installName,
     subdir: subdir,
     mode: mode,
-    producedBy: @producedBy)
+    producedBy: @producedBy,
+    scriptInterpreter: scriptInterpreter)
+
+proc helperScriptComponent*(buildPath: string;
+                            scriptInterpreter: string;
+                            producedBy: openArray[BuildActionDef] = [];
+                            installName = ""): DistComponent =
+  ## A ``crHelperScript`` component, with the one field that role
+  ## cannot do without made POSITIONAL rather than optional.
+  ##
+  ## ``component(crHelperScript, path)`` is still legal and still
+  ## refused by ``validate`` on a POSIX target, which is the safety
+  ## net; this constructor is the shape that makes forgetting it hard
+  ## rather than merely fatal.
+  component(crHelperScript, buildPath, producedBy, installName,
+    scriptInterpreter = scriptInterpreter)
 
 proc executableComponent*(buildPath: string;
                           producedBy: openArray[BuildActionDef] = [];
@@ -1095,3 +1159,41 @@ proc validate*(dist: Distribution) =
       "distribution '" & dist.name & "': no known ELF interpreter for " &
       "architecture '" & dist.architecture &
       "'; set runtime.interpreterPath explicitly")
+  # THE SAME REFUSAL, ONE ROLE OVER, and it is here rather than in the
+  # producer because it is the same mistake: a component whose
+  # interpreter is the BUILDER's rather than the TARGET's installs
+  # cleanly and cannot be executed. M1's N33 shipped for two passes
+  # because nothing said this.
+  #
+  # Not gated on ``vendorRuntimeClosure``: a distribution that vendors
+  # nothing still has to be able to run what it ships, and the ELF check
+  # above is gated only because the closure walk is what needs the
+  # interpreter constant.
+  if dist.targetOs != toWindows:
+    for c in dist.components:
+      if c.role != crHelperScript: continue
+      if c.scriptInterpreter.len == 0:
+        raise newException(ValueError,
+          "distribution '" & dist.name & "': crHelperScript component '" &
+          c.buildPath & "' declares no scriptInterpreter; a script that " &
+          "ships must name a '#!' interpreter THE TARGET can resolve, and " &
+          "the one it was built with is the builder's (M1 N33: every " &
+          "Linux format shipped a /nix/store shebang for two passes)")
+      if not c.scriptInterpreter.startsWith("/"):
+        raise newException(ValueError,
+          "distribution '" & dist.name & "': crHelperScript component '" &
+          c.buildPath & "' declares scriptInterpreter '" &
+          c.scriptInterpreter & "', which is not absolute; a relative " &
+          "shebang resolves against the SPAWNING process's PATH, which " &
+          "is the ambient-environment dependency this field removes")
+      if c.scriptInterpreter.contains("/nix/store/"):
+        # The one literal in this file, and it earns its place: it is
+        # the exact shape that shipped. A store path is absolute, is
+        # executable on the build machine and satisfies every other
+        # rule here, so nothing but naming it catches it.
+        raise newException(ValueError,
+          "distribution '" & dist.name & "': crHelperScript component '" &
+          c.buildPath & "' declares scriptInterpreter '" &
+          c.scriptInterpreter & "', which is a /nix/store path; that is " &
+          "a path on the BUILD machine and the target will answer " &
+          "'cannot execute: required file not found'")

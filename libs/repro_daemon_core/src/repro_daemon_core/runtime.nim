@@ -355,6 +355,106 @@ proc reconnectLimitationsText(): string =
     "session diagnostics and stats persist; attached build event streams are " &
     "not replayed after a dev self-restart"
 
+proc daemonLaunchPath*(): string =
+  ## ``argv[0]``, when it is an absolute path.
+  ##
+  ## THIS IS THE CANDIDATE THAT ANSWERS INSIDE AN APPIMAGE, and it is
+  ## there because of what N27 turned out to be. See ``daemonImagePath``.
+  ## Relative and bare-name ``argv[0]``s are dropped rather than resolved:
+  ## resolving one means guessing a working directory or a ``PATH``, and a
+  ## guess is what this whole chain exists to stop reporting.
+  result =
+    try:
+      let launched = paramStr(0)
+      if launched.len > 0 and isAbsolute(launched): launched else: ""
+    except CatchableError, Defect:
+      ""
+
+proc daemonImagePath*(appFilename, sourceExe, runningImage: string;
+                      launchPath = ""): string =
+  ## The path the daemon reports as its OWN image, VERIFIED TO EXIST.
+  ##
+  ## Distribution-And-Packaging M1's N21: inside an AppImage, ``repro
+  ## daemon status`` answered ``binary-path: /usr/bin/repro.real`` -- a
+  ## file that does not exist on that host -- while
+  ## ``source-image-path:`` and ``running-image-path:`` on the SAME
+  ## report carried the true ``/tmp/.mount_<random>/usr/bin/repro.real``.
+  ##
+  ## WHY ``getAppFilename()`` ANSWERED THAT -- M1's N27, and it is no
+  ## longer open. Nim reads ``/proc/self/exe`` on Linux, and for a process
+  ## whose image lives on the AppImage's squashfuse mount the kernel
+  ## answers the path WITH THE MOUNT POINT STRIPPED: measured at this tip
+  ## in ``debian:trixie-slim`` + ``fuse3`` (``--device /dev/fuse
+  ## --cap-add SYS_ADMIN``), ``readlink /proc/<daemon-pid>/exe`` is
+  ## ``/usr/bin/repro.real`` while that same process's ``argv[0]`` is
+  ## ``/tmp/.mount_reprobNdBCIC/usr/bin/repro.real`` and
+  ## ``/usr/bin/repro.real`` does not exist on the host at all. So the
+  ## AppDir's own layout is what comes back, and ``argv[0]`` -- which
+  ## ``AppRun`` execs with the real mount path -- is the candidate that
+  ## can answer. Hence ``launchPath``.
+  ##
+  ## The order is "what the OS says I am, then what I was LAUNCHED as,
+  ## then what I was configured as, then what I am running" -- each used
+  ## only if it is on disk.
+  ##
+  ## AND IF NONE OF THEM IS ON DISK, the SAME order runs again without
+  ## the disk check, which is M1's N30 and is the branch an AppImage
+  ## takes: the mount is gone by the time a live status query reaches the
+  ## daemon, so every candidate fails ``fileExists`` and the fallback is
+  ## the only thing that runs. It never blanks the field -- a status line
+  ## that says nothing when the daemon does have an image would be worse
+  ## than one that names a path that has since been unmounted -- but it
+  ## no longer prefers the OS's answer, because the OS's answer is the
+  ## one candidate known to be able to name a location that never
+  ## existed. See the comment on the fallback itself.
+  if appFilename.len > 0 and fileExists(appFilename):
+    return appFilename
+  if launchPath.len > 0 and fileExists(launchPath):
+    return absoluteNormalized(launchPath)
+  if sourceExe.len > 0 and fileExists(sourceExe):
+    return absoluteNormalized(sourceExe)
+  if runningImage.len > 0 and fileExists(runningImage):
+    return runningImage
+  # NOTHING IS ON DISK -- AND THAT IS THE BRANCH AN APPIMAGE ACTUALLY
+  # TAKES. M1's N30, measured rather than reasoned about. A live
+  # `repro daemon status` is answered by the DAEMON, and by the time it
+  # is asked the AppImage run that launched the daemon has exited and
+  # its squashfuse mount is GONE: `ls /tmp/.mount_*` answers "No such
+  # file or directory", `/proc/<daemon-pid>/mountinfo` has zero entries
+  # mentioning it, and EVERY candidate above fails `fileExists` --
+  # `/usr/bin/repro.real` (the mount-stripped `/proc/self/exe`), the
+  # launch path, the configured source and the running image alike.
+  # Returning `appFilename` here is what printed `binary-path:
+  # /usr/bin/repro.real` beside a `source-image-path:` that named the
+  # true mount. So when nothing can be verified, prefer the path the
+  # process was LAUNCHED as: it is a path this image really did occupy,
+  # whereas a mount-stripped `/proc/self/exe` names a location that
+  # never existed anywhere.
+  #
+  # ONLY the launch path is promoted, deliberately. `sourceExe` and
+  # `runningImage` are configuration and daemon state; when neither is on
+  # disk there is no reason to believe either over what the OS says, and
+  # on a host whose binary was simply DELETED `appFilename` is the honest
+  # answer and stays the answer. `argv[0]` is different in kind: it is
+  # what this process was actually invoked as.
+  if launchPath.len > 0:
+    return absoluteNormalized(launchPath)
+  appFilename
+
+proc daemonSelfImagePath*(sourceExe = ""; runningImage = ""): string =
+  ## ``daemonImagePath`` fed from THIS process.
+  ##
+  ## Every place the daemon names its own image goes through here, so
+  ## that a raw ``getAppFilename()`` cannot be reintroduced one field at
+  ## a time -- which is how M1's N21/N27/N30 kept coming back: N21
+  ## guarded ``statusFor``, N27 found ``handleHello``, and the review
+  ## after it found three more (``statusFor``'s ``runningImagePath``
+  ## fallback, ``runningDevImagePath``'s final fallback and
+  ## ``initDevRestartState``'s ``sourceImagePath`` fallback) all feeding
+  ## the same report.
+  daemonImagePath(getAppFilename(), sourceExe, runningImage,
+                  launchPath = daemonLaunchPath())
+
 proc runningDevImagePath(config: UserDaemonConfig): string =
   if config.stagedGenerationDir.len > 0:
     let staged = config.stagedGenerationDir / addFileExt("repro-daemon", ExeExt)
@@ -364,13 +464,15 @@ proc runningDevImagePath(config: UserDaemonConfig): string =
     let source = absoluteNormalized(config.sourceExe)
     if fileExists(source):
       return source
-  absoluteNormalized(getAppFilename())
+  # N30's sweep: not a raw ``getAppFilename()``. See ``daemonSelfImagePath``.
+  absoluteNormalized(daemonSelfImagePath())
 
 proc initDevRestartState(config: UserDaemonConfig): DevRestartState =
   result.enabled = config.devMode
   result.sourceImagePath =
     if config.sourceExe.len > 0: absoluteNormalized(config.sourceExe)
-    else: absoluteNormalized(getAppFilename())
+    # N30's sweep. See ``daemonSelfImagePath``.
+    else: absoluteNormalized(daemonSelfImagePath())
   result.runningImagePath = runningDevImagePath(config)
   result.sourceHash = imageDigestHex(result.sourceImagePath)
   result.runningHash = imageDigestHex(result.runningImagePath)
@@ -714,60 +816,6 @@ proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
 proc generationFor(startedAt: Time): string =
   $getCurrentProcessId() & "-" & $startedAt.toUnix & "-" & $startedAt.nanosecond
 
-proc daemonLaunchPath*(): string =
-  ## ``argv[0]``, when it is an absolute path.
-  ##
-  ## THIS IS THE CANDIDATE THAT ANSWERS INSIDE AN APPIMAGE, and it is
-  ## there because of what N27 turned out to be. See ``daemonImagePath``.
-  ## Relative and bare-name ``argv[0]``s are dropped rather than resolved:
-  ## resolving one means guessing a working directory or a ``PATH``, and a
-  ## guess is what this whole chain exists to stop reporting.
-  result =
-    try:
-      let launched = paramStr(0)
-      if launched.len > 0 and isAbsolute(launched): launched else: ""
-    except CatchableError, Defect:
-      ""
-
-proc daemonImagePath*(appFilename, sourceExe, runningImage: string;
-                      launchPath = ""): string =
-  ## The path the daemon reports as its OWN image, VERIFIED TO EXIST.
-  ##
-  ## Distribution-And-Packaging M1's N21: inside an AppImage, ``repro
-  ## daemon status`` answered ``binary-path: /usr/bin/repro.real`` -- a
-  ## file that does not exist on that host -- while
-  ## ``source-image-path:`` and ``running-image-path:`` on the SAME
-  ## report carried the true ``/tmp/.mount_<random>/usr/bin/repro.real``.
-  ##
-  ## WHY ``getAppFilename()`` ANSWERED THAT -- M1's N27, and it is no
-  ## longer open. Nim reads ``/proc/self/exe`` on Linux, and for a process
-  ## whose image lives on the AppImage's squashfuse mount the kernel
-  ## answers the path WITH THE MOUNT POINT STRIPPED: measured at this tip
-  ## in ``debian:trixie-slim`` + ``fuse3`` (``--device /dev/fuse
-  ## --cap-add SYS_ADMIN``), ``readlink /proc/<daemon-pid>/exe`` is
-  ## ``/usr/bin/repro.real`` while that same process's ``argv[0]`` is
-  ## ``/tmp/.mount_reprobNdBCIC/usr/bin/repro.real`` and
-  ## ``/usr/bin/repro.real`` does not exist on the host at all. So the
-  ## AppDir's own layout is what comes back, and ``argv[0]`` -- which
-  ## ``AppRun`` execs with the real mount path -- is the candidate that
-  ## can answer. Hence ``launchPath``.
-  ##
-  ## The order is "what the OS says I am, then what I was LAUNCHED as,
-  ## then what I was configured as, then what I am running" -- each used
-  ## only if it is on disk. If none is, the OS's answer is reported
-  ## UNCHANGED rather than blanked: a status line that says something
-  ## wrong is worse than one that says nothing, and a status line that
-  ## says nothing when the daemon does have an image would be worse still.
-  if appFilename.len > 0 and fileExists(appFilename):
-    return appFilename
-  if launchPath.len > 0 and fileExists(launchPath):
-    return absoluteNormalized(launchPath)
-  if sourceExe.len > 0 and fileExists(sourceExe):
-    return absoluteNormalized(sourceExe)
-  if runningImage.len > 0 and fileExists(runningImage):
-    return runningImage
-  appFilename
-
 
 proc statusFor(config: UserDaemonConfig; startedAt: Time;
                generation: string; activeSessionCount = 0;
@@ -784,9 +832,7 @@ proc statusFor(config: UserDaemonConfig; startedAt: Time;
     protocolMajor: UserDaemonProtocolMajor,
     protocolMinor: UserDaemonProtocolMinor,
     binary: binaryIdentity("repro-daemon",
-      daemonImagePath(getAppFilename(), config.sourceExe,
-                      devRestart.runningImagePath,
-                      launchPath = daemonLaunchPath()),
+      daemonSelfImagePath(config.sourceExe, devRestart.runningImagePath),
       versionString()),
     featureFlags: UserDaemonFeatureFlags,
     generation: generation,
@@ -797,7 +843,8 @@ proc statusFor(config: UserDaemonConfig; startedAt: Time;
       if devRestart.runningImagePath.len > 0:
         devRestart.runningImagePath
       else:
-        getAppFilename(),
+        # N30's sweep. See ``daemonSelfImagePath``.
+        daemonSelfImagePath(),
     sourceHash: devRestart.sourceHash,
     runningHash: devRestart.runningHash,
     protocolGeneration:
@@ -874,21 +921,25 @@ proc handleHello(socket: IpcConn; config: UserDaemonConfig; generation: string;
       "user daemon protocol mismatch: client major " & $hello.major &
       ", daemon major " & $UserDaemonProtocolMajor))
     return false
-  # THROUGH `daemonImagePath`, WHICH IS WHERE N21 STOPPED SHORT AND WHY
-  # N27 LOOKED LIKE AN UNEXPLAINED PLATFORM QUIRK. N21 guarded the field
-  # in `statusFor` -- which is what the STATUS FILE is written from -- and
-  # left this handshake constructing the daemon's identity from a raw
-  # `getAppFilename()`. `repro daemon status` on a RUNNING daemon prints
-  # the HelloAck's identity, not the file's, so the two disagreed on one
-  # host and in one direction: measured inside a FUSE-mounted AppImage,
-  # the status file said `binary=/tmp/.mount_<rand>/usr/bin/repro.real`
-  # and the live `binary-path:` said `/usr/bin/repro.real`, a file that
-  # was not there. One guarded call site and one unguarded one is not a
-  # platform mystery, it is half a fix.
+  # THROUGH `daemonSelfImagePath`, WHICH IS WHERE N21 STOPPED SHORT. N21
+  # guarded the field in `statusFor` and left this handshake building the
+  # daemon's identity from a raw `getAppFilename()`.
+  #
+  # WHAT THIS IS NOT, corrected after the seventh-pass review measured the
+  # claim that used to stand here: `repro daemon status` does NOT print
+  # the HelloAck's identity. `queryUserDaemonStatus` returns
+  # `parseStatusBody` of the `udkStatusResponse` frame -- `statusFor`, the
+  # same producer the STATUS FILE is written from -- and the only fields
+  # `connectUserDaemon` reads out of `parseHelloAck` are `major` and
+  # `featureFlags`. `parsed.daemon` is parsed and never read by any
+  # caller, so the file-versus-live disagreement N27 credited to this site
+  # cannot arise on this path. This guard is still correct: the identity
+  # IS on the wire, a future client may read it, and one guarded producer
+  # beside one unguarded producer is the shape the whole N21/N27/N30
+  # sequence kept reappearing in. It is hardening, not the fix for a
+  # measured disagreement, and it is labelled as such.
   let daemon = binaryIdentity("repro-daemon",
-    daemonImagePath(getAppFilename(), config.sourceExe,
-                    devRestart.runningImagePath,
-                    launchPath = daemonLaunchPath()),
+    daemonSelfImagePath(config.sourceExe, devRestart.runningImagePath),
     versionString())
   socket.writeFrame(udkHelloAck, helloAckBody(daemon, UserDaemonFeatureFlags,
     generation))

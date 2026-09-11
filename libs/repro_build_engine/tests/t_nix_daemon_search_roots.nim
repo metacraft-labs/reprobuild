@@ -241,3 +241,81 @@ suite "the engine resolves reprobuild-nix-daemon from both layouts":
     var seen = initHashSet[string]()
     for c in cands:
       doAssert not seen.containsOrIncl(c), "duplicate candidate: " & c
+
+  test "a #! interpreter that is not on this host is REFUSED, not spawned":
+    # M1's N33, from the engine's side. Every Linux package shipped
+    # `libexec/reprobuild/reprobuild-nix-daemon` with
+    # `#!/nix/store/<hash>-python3-3.13.12/bin/python3` on line 1, and
+    # this resolver ACCEPTED it: the file exists and the file is 0755,
+    # so the override was honoured and the process died inside `execve`
+    # with ENOENT -- surfacing as "Failed to connect or spawn
+    # reprobuild-nix-daemon at <socket>", the exact opaque failure
+    # `flake.nix`'s comment says the interpreter substitution was added
+    # to fix. ENOENT for a missing INTERPRETER is indistinguishable from
+    # ENOENT for a missing IMAGE unless something reads line 1.
+    #
+    # THE PARSER FIRST, with no filesystem in it at all, so this half of
+    # the case says the same thing on every host.
+    doAssert shebangInterpreter("#!/usr/bin/python3") == "/usr/bin/python3"
+    doAssert shebangInterpreter("#!/usr/bin/env python3") == "/usr/bin/env"
+    doAssert shebangInterpreter("#! /bin/sh -e") == "/bin/sh"
+    doAssert shebangInterpreter("#!/nix/store/pz-python3-3.13.12/bin/python3") ==
+      "/nix/store/pz-python3-3.13.12/bin/python3"
+    doAssert shebangInterpreter("import sys") == ""
+    # A RELATIVE shebang is not this predicate's business: what the
+    # kernel execs there is whatever PATH resolves, and answering a bare
+    # name would make the caller check the wrong thing.
+    doAssert shebangInterpreter("#!python3") == ""
+
+    let repo = scratch("shebang")
+    let exe = repo / "build" / "bin" / "repro"
+    placeDaemon(exe)
+    # NOT A SCRIPT AT ALL, and not refused: the check must not turn
+    # every ELF helper into a build failure by misreading its first
+    # bytes as a shebang.
+    let elfish = repo / "elsewhere" / "binary-helper"
+    createDir(elfish.parentDir)
+    # Written from `chr` values rather than from escapes: the first
+    # bytes of an ELF image are not text, and a source line that
+    # spells them as escapes is a line every transport in this
+    # campaign has mangled at least once.
+    writeFile(elfish, $chr(0x7F) & "ELF" & $chr(2) & $chr(1) &
+      $chr(1) & $chr(0) & "padding")
+    doAssert unresolvableScriptInterpreter(elfish) == ""
+    # A path that is not there at all is likewise not a shebang problem.
+    doAssert unresolvableScriptInterpreter(repo / "nothing-here") == ""
+
+    # THE SHIPPED SHAPE. POSIX only, and deliberately: Windows' loader
+    # does not read the first line of a file, so a `#!` there is a
+    # comment and `unresolvableScriptInterpreter` answers "" by
+    # construction. Asserting a refusal on a platform with no mechanism
+    # would be asserting the check's own stub.
+    when defined(posix):
+      let bad = repo / "elsewhere" / "reprobuild-nix-daemon"
+      writeFile(bad,
+        "#!/no-such-python-dir-for-n33/bin/python3" & "\n" & "exit 0" & "\n")
+      setFilePermissions(bad, {fpUserRead, fpUserWrite, fpUserExec})
+      doAssert unresolvableScriptInterpreter(bad) ==
+        "/no-such-python-dir-for-n33/bin/python3"
+      var refused = false
+      var msg = ""
+      try:
+        discard resolveNixDaemonExecutable(cwd = repo, exePath = exe,
+          envSourceRoot = "", envBin = bad)
+      except CatchableError as e:
+        refused = true
+        msg = e.msg
+      doAssert refused,
+        "a helper whose interpreter is absent was accepted, and would " &
+        "have died inside execve with nothing to read"
+      doAssert "no-such-python-dir-for-n33" in msg, msg
+      # AND IT DOES NOT REFUSE EVERYTHING, which is what makes the arm
+      # above mean something: the `#!/bin/sh` helper `placeDaemon`
+      # writes names an interpreter every POSIX host has, and it still
+      # resolves.
+      let good = repo / "tools" / "reprobuild-nix-daemon" /
+        "reprobuild-nix-daemon"
+      placeDaemon(good)
+      doAssert unresolvableScriptInterpreter(good) == ""
+      doAssert resolveNixDaemonExecutable(cwd = repo, exePath = exe,
+        envSourceRoot = "", envBin = good) == good

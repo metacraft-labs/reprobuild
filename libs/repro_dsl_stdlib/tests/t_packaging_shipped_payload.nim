@@ -51,9 +51,13 @@ proc reprobuildSample(targetOs = toLinux): Distribution =
   # guard has no such exemption: a file-valued variable is checked
   # against the staged file list like every other value, so the sample
   # has to carry the file the real recipe carries.
+  #
+  # ...AND IT DECLARES ITS INTERPRETER, because M1's N33 is that the
+  # role did not. See the `crHelperScript` shebang cases below.
   if targetOs != toWindows:
-    result.components.add(component(crHelperScript,
-      "prebuilt/bin/reprobuild-nix-daemon"))
+    result.components.add(helperScriptComponent(
+      "prebuilt/bin/reprobuild-nix-daemon",
+      scriptInterpreter = "/usr/bin/python3"))
   result.components.add(
     reprobuildShippedTreeComponents(result, "prebuilt/tree"))
 
@@ -520,6 +524,112 @@ suite "packaging: the payload behind the wrapper variables":
       check err.msg.contains("ghost")
       check err.msg.contains("no files")
     check raised
+
+  test "a crHelperScript's shebang is REWRITTEN, like an ELF interpreter":
+    # M1's N33. `crHelperScript` exists to keep patchelf off a script,
+    # and patchelf was doing TWO things -- the RPATH and the ELF
+    # INTERPRETER. Only the first is unwanted on a script; the second is
+    # wanted exactly as much, because `#!` IS an interpreter path. For
+    # two passes nothing replaced it, so every Linux format shipped
+    # `libexec/reprobuild/reprobuild-nix-daemon` with
+    # `#!/nix/store/<hash>-python3-3.13.12/bin/python3` on line 1 --
+    # 0755, present, and unrunnable anywhere but the build machine.
+    let dist = reprobuildSample()
+    var helpers = 0
+    for c in dist.components:
+      if c.role != crHelperScript: continue
+      helpers.inc
+      doAssert c.scriptInterpreter.len > 0
+      doAssert c.scriptInterpreter.startsWith("/")
+      doAssert not c.scriptInterpreter.contains("/nix/store/")
+    doAssert helpers == 1, "the sample must carry the role under test"
+
+    # The rewrite itself: the emitted program replaces line 1 with the
+    # DECLARED interpreter and keeps everything after it.
+    let script = shebangRewriteScript("build/x/helper", "build/gen/x.shebang",
+      "/usr/bin/python3")
+    doAssert script.contains("'/usr/bin/python3'")
+    doAssert script.contains("'build/x/helper'")
+    doAssert script.contains("tail -n +2")
+    # ...and it REFUSES a file with no shebang rather than staging a
+    # 0755 file the target cannot start.
+    doAssert script.contains("no '#!' line")
+    # Nothing in it consults the BUILD host for the interpreter: a
+    # cross-staged tree names a path the builder need not have.
+    doAssert not script.contains("command -v")
+    doAssert not script.contains("[ -x \"$INTERP\" ]")
+
+  test "the staged helper comes from the REWRITE, not from the payload":
+    # The property that makes the case above load-bearing: the file the
+    # install edge copies is the rewritten one in genRoot, so the
+    # package cannot contain the payload's own first line.
+    resetBuildActionRegistry()
+    let root = payloadRoot("shebang-staged")
+    var dist = reprobuildSample()
+    dist.stagingRoot = "build/test-tmp/shebang-staged-stage"
+    discard withTreesFrom(dist, root)
+    fillPayload(dist, root)
+    let tree = stageInstallTree(dist, "deb")
+    var found = 0
+    for f in tree.files:
+      if f.role != crHelperScript: continue
+      found.inc
+      doAssert f.rootRelPath.contains("reprobuild-nix-daemon")
+      # THE ASSERTION THAT MATTERS: what the install edge READS. It must
+      # be the generated `.shebang` intermediate, never the payload file
+      # the recipe named -- exactly as the executable roles' install
+      # edges read patchelf's `.patched` output rather than the binary
+      # as built.
+      var readsRewrite = false
+      var readsPayload = false
+      for inp in f.edge.inputs:
+        if inp.endsWith(".shebang"): readsRewrite = true
+        if inp == "prebuilt/bin/reprobuild-nix-daemon": readsPayload = true
+      doAssert readsRewrite,
+        "the staged helper is copied from " & $f.edge.inputs &
+        ", not from a shebang rewrite"
+      doAssert not readsPayload,
+        "the staged helper is copied straight from the payload: " &
+        $f.edge.inputs
+    doAssert found == 1
+
+  test "validate REFUSES the three shapes that cannot run on a target":
+    # Each refusal names the component, because the whole of N33 is that
+    # nothing said which file was wrong.
+    proc refused(interp: string; needle: string) =
+      var dist = reprobuildSample()
+      for i in 0 ..< dist.components.len:
+        if dist.components[i].role == crHelperScript:
+          dist.components[i].scriptInterpreter = interp
+      var raised = false
+      try:
+        dist.validate()
+      except ValueError as err:
+        raised = true
+        doAssert err.msg.contains("reprobuild-nix-daemon"),
+          "the refusal does not name the file: " & err.msg
+        doAssert err.msg.contains(needle),
+          "the refusal does not say why: " & err.msg
+      doAssert raised, "validate accepted scriptInterpreter [" & interp & "]"
+    refused("", "declares no scriptInterpreter")
+    refused("python3", "not absolute")
+    # THE SHAPE THAT SHIPPED. It is absolute, it is executable on the
+    # build machine and it passes every other rule here, so only naming
+    # it catches it.
+    refused("/nix/store/pzdalg368npikvpq4ncz2saxnz19v53k-python3-3.13.12/bin/python3",
+      "/nix/store")
+
+  test "Windows needs no interpreter, because it reads no shebang":
+    # NOT an exemption with a shrug: the Windows loader does not read the
+    # first line of a file at all, so a `#!` there is a comment. The
+    # recipe ships no such helper on Windows either -- see the sample --
+    # and `validate` must not invent a requirement for a target that has
+    # no mechanism to satisfy.
+    var dist = reprobuildSample(toWindows)
+    for c in dist.components:
+      doAssert c.role != crHelperScript
+    dist.components.add(component(crHelperScript, "prebuilt/bin/helper"))
+    dist.validate()
 
   test "the distribution still validates with the whole payload attached":
     reprobuildSample().validate()

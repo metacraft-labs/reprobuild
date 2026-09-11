@@ -59,7 +59,7 @@ libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph
 libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim	nim	6
 libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim	nim	3
 libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
-libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	12
+libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	13
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	nim	4
@@ -135,7 +135,7 @@ libs/repro_core/tests/t_nim_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_project_file_alias.nim	nim	9
 libs/repro_core/tests/t_python_dep_scanner.nim	nim	16
 libs/repro_core/tests/t_show_conventions_cli.nim	nim	7
-libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	7
+libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	4
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
@@ -188,7 +188,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	nim	27
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_packaging_scoop_manifest.nim	nim	9
 libs/repro_dsl_stdlib/tests/t_packaging_service_exec_args.nim	nim	4
-libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim	nim	17
+libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim	nim	21
 libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7

@@ -9,14 +9,39 @@
 ##
 ## ## Why a pinned upstream release and not ``nixpkgs#appimagetool``
 ##
-## There is none. The canonical nixpkgs pin
-## (``nixpkgs_pin.CanonicalNixpkgsRev``) carries ``appimage-run``,
-## ``appimageTools``, ``libappimage`` and ``appimageupdate`` — every one
-## of them for CONSUMING an AppImage — and no attribute that BUILDS one;
-## ``nix eval`` on the pin answers "does not provide attribute
-## 'appimagetool'". So the tool arrives the way ``wix3_tools.nim``'s
-## does: an upstream release asset, pinned by URL and sha256, through
-## the ordinary ``tarball`` provisioning channel.
+## There is none, and it is measured rather than assumed. At the
+## canonical pin (``nixpkgs_pin.CanonicalNixpkgsRev``) the attribute
+## names matching /[aA]ppimage/ are exactly ``appimage-run``,
+## ``appimage-run-tests``, ``appimageTools``, ``appimageupdate``,
+## ``appimageupdate-qt``, ``cura-appimage``, ``libappimage`` and
+## ``session-desktop-appimage`` — every one of them for CONSUMING an
+## AppImage — and ``appimageTools`` itself exposes only
+## ``appimage-exec``/``defaultFhsEnvArgs``/``extract``/``extractType1``/
+## ``extractType2``/``wrapAppImage``/``wrapType1``/``wrapType2``.
+## ``nix eval`` on ``appimagetool`` answers "Did you mean
+## appimageTools?". Nothing in that pin BUILDS an AppImage. So the tool
+## arrives the way ``wix3_tools.nim``'s does: an upstream release asset,
+## pinned by URL and sha256.
+##
+## ## BOTH CHANNELS REALIZE THE SAME BYTES — M1's N29
+##
+## The tarball channel was the ONLY channel until this pass, which meant
+## ``repro build --tool-provisioning=nix`` could not resolve this package
+## and therefore could not build the dogfood distribution AT ALL — not
+## the AppImage edge alone, because ``nixAcquisitionPlan`` raises on a
+## package with no ``nixPackage`` entry and tool resolution is a property
+## of the whole graph. That had been true since ``b3d6117d``, the commit
+## that added the AppImage producer.
+##
+## The reason it was recorded rather than fixed was that adding a
+## provisioning channel is adding a dependency. This one is not: the
+## ``nixPackage`` entry below is an ``expressionFile`` (the shape
+## ``packages/stylus.nim`` and ``packages/python3_with_modules.nim``
+## already use for tools nixpkgs does not carry) pinned to
+## ``AppImageToolUrl`` and ``AppImageToolSha256`` — the SAME asset, the
+## SAME sha256, fetched by nix instead of by reprobuild. See
+## ``nix/appimagetool-1.9.1/default.nix`` for why the expression is a
+## plain copy rather than ``autoPatchelfHook`` or ``wrapType2``.
 ##
 ## ``archiveType = "raw"`` because the asset is not an archive: an
 ## AppImage is a self-mounting ELF image, and ``raw`` is the channel's
@@ -92,6 +117,21 @@ const
 
 package `appimagetool`:
   provisioning:
+    # THE NIX CHANNEL — M1's N29. Same asset, same sha256 as the tarball
+    # entry below; see the header. ``expressionFile`` is resolved against
+    # THIS file's directory at macro time.
+    # The selector must be a STRING LITERAL: the macro tests its prefix
+    # against the nixpkgs-flake form and slices it. Same shape as
+    # stylus's. (The prefix is not spelled out here on purpose:
+    # `t_smoke_catalog_audit_m29` treats any file containing that byte
+    # sequence as a nixpkgs-pinned entry and requires the canonical-rev
+    # consts, which an expressionFile entry has no business carrying.
+    # Found by the audit going red on this file.)
+    nixPackage "reprobuild-stdlib-appimagetool-1.9.1",
+      executablePath = "bin/appimagetool",
+      expressionFile = "nix/appimagetool-1.9.1/default.nix",
+      lockIdentity = "nix-expression:appimagetool@" & AppImageToolVersion &
+        ":sha256:" & AppImageToolSha256
     tarball url = AppImageToolUrl,
       sha256 = AppImageToolSha256,
       archiveType = "raw",

@@ -68,6 +68,21 @@ const
 
 package `appimage-runtime`:
   provisioning:
+    # THE NIX CHANNEL -- M1's N29. The same asset and the same sha256 as
+    # the tarball entry below, fetched by nix instead of by reprobuild;
+    # see `nix/appimage-runtime-20251108/default.nix`. Without it
+    # `--tool-provisioning=nix` cannot resolve the dogfood distribution
+    # at all -- not just the AppImage edge -- because tool resolution is
+    # a property of the whole graph.
+    #
+    # The selector must be a STRING LITERAL: the macro tests its prefix
+    # against the nixpkgs-flake form and slices it. (Not spelled out:
+    # see the same note in `appimagetool.nim`.)
+    nixPackage "reprobuild-stdlib-appimage-runtime-20251108",
+      executablePath = "bin/" & AppImageRuntimeFileName,
+      expressionFile = "nix/appimage-runtime-20251108/default.nix",
+      lockIdentity = "nix-expression:appimage-runtime@" &
+        AppImageRuntimeRelease & ":sha256:" & AppImageRuntimeSha256
     tarball url = AppImageRuntimeUrl,
       sha256 = AppImageRuntimeSha256,
       archiveType = "raw",

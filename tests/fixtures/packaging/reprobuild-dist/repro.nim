@@ -118,9 +118,30 @@ proc reprobuildComponents(targetOs: TargetOs): seq[DistComponent] =
   # a Unix path, so there is no such helper to ship and the wrapper
   # variable that names it points at a file a Windows package would
   # never have.
+  #
+  # AND IT DECLARES ITS INTERPRETER, which is M1's N33 and is the half
+  # `crHelperScript` did not do for two passes. The role skips patchelf,
+  # and patchelf was doing TWO things: the RPATH (which a script does
+  # not want) and the ELF INTERPRETER (which a script wants exactly as
+  # much, because `#!` IS an interpreter path). So every Linux format
+  # shipped this file with `#!/nix/store/pzdalg36...-python3-3.13.12/
+  # bin/python3` -- the flake substitutes that deliberately and
+  # correctly FOR THE FLAKE, and `stage_payload_linux.sh` cuts the
+  # package's copy out of the same store output. On any host without
+  # that store path it is `cannot execute: required file not found`.
+  #
+  # `/usr/bin/python3` and not `/usr/bin/env python3`: `env` resolves
+  # against the SPAWNING process's PATH, which is the failure flake.nix
+  # already recorded (launchd's PATH found macOS's system python 3.9,
+  # which cannot parse this script's `X | None` annotations) and which
+  # no gate can see -- a missing interpreter behind `env` exits 127
+  # with a message no loader-failure pattern matches. An absolute path
+  # fails loudly and matches, and is what the three package managers
+  # can be told about; see the `python3` dependency below.
   if targetOs != toWindows:
-    result.add(component(crHelperScript,
-      PrebuiltBin & "/reprobuild-nix-daemon"))
+    result.add(helperScriptComponent(
+      PrebuiltBin & "/reprobuild-nix-daemon",
+      scriptInterpreter = "/usr/bin/python3"))
 
 proc reprobuildRuntimeLibraryComponents(targetOs: TargetOs):
     seq[DistComponent] =
@@ -308,14 +329,35 @@ package `reprobuild-packages`:
     # and links it, so the target needs headers and ``crt1.o``, which
     # the compiler package alone does not pull in on either
     # distribution.
-    dist.metadata.debDepends = @["gcc", "libc6-dev"]
-    dist.metadata.rpmRequires = @["gcc", "glibc-devel"]
+    #
+    # AND `python3`, WHICH IS N33's OTHER HALF. The package ships
+    # `libexec/reprobuild/reprobuild-nix-daemon`, a 0755 file whose
+    # shebang now names `/usr/bin/python3` (see the component above).
+    # Giving it a path the target CAN resolve and then not telling the
+    # target it needs one would be the same defect one step along --
+    # `Depends:` is precisely where "this package needs an interpreter"
+    # is said, and Debian policy requires it of any package shipping a
+    # `#!`-ed script. The minimum is 3.10: the script annotates with
+    # PEP 604 `X | None`, which 3.9 cannot PARSE, so an older
+    # interpreter fails at import rather than at use.
+    #
+    # NOT `Recommends:`/`Suggests:`, even though only
+    # `--tool-provisioning=nix` spawns the helper. The file is shipped
+    # unconditionally and is shipped executable; a dependency that is
+    # optional in the metadata and mandatory in the payload is how a
+    # package comes to contain something that cannot run.
+    dist.metadata.debDepends = @["gcc", "libc6-dev", "python3 (>= 3.10)"]
+    dist.metadata.rpmRequires = @["gcc", "glibc-devel", "python3 >= 3.10"]
     # The same fact in pacman's vocabulary. Arch's C toolchain is `gcc`
     # and its headers are in `glibc` itself rather than in a separate
     # `-dev` package, so the pair is `gcc` + `glibc` and not a
     # transliteration of the two above -- which is exactly why the layer
     # keeps three named lists instead of one abstract one.
-    dist.metadata.archDepends = @["gcc", "glibc"]
+    #
+    # `python` and not `python3`: Arch has ONE python package and it IS
+    # 3.x, so `python3` names nothing in that universe -- the third
+    # named list earning its keep for the second time in four lines.
+    dist.metadata.archDepends = @["gcc", "glibc", "python>=3.10"]
 
     # §4: "reprobuild ships /etc/repro/caches.conf (client trust:
     # per-cache trusted-public-keys, priority)". Generated rather than

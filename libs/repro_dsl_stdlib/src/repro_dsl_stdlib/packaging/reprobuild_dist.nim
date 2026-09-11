@@ -566,6 +566,46 @@ proc reprobuildWindowsLoaderLibraries*(includeCli: bool): seq[string] =
     # of the package the previous pass declared verified; no reading of
     # this list could have.
     result.add("libwinpthread-1.dll")
+    # THE VISUAL C++ RUNTIME (M1's N32), and it is the THIRD occurrence
+    # of the same mistake -- this time found by the general PE walk
+    # rather than by a person, which is why it surfaced on the walk's
+    # first run instead of on the third pass.
+    #
+    # `clingo.dll` is a conda-forge MSVC build and its import table names
+    # these three. They are NOT part of Windows: the VC++ redistributable
+    # is a separate Microsoft package, absent from a clean install, and
+    # present on every machine this campaign measured on only because
+    # some developer tool dropped it into System32. A package that ships
+    # a solver it cannot load is a package whose gate item 4 -- a
+    # packaged `repro build` -- dies in the loader on the first clean
+    # machine it reaches.
+    #
+    # VENDORED rather than declared as an MSI `LaunchCondition`, and the
+    # alternatives were weighed rather than skipped:
+    #
+    # * a `LaunchCondition` covers the MSI and NOTHING ELSE. The Scoop
+    #   leg is an archive with no install-time logic at all, so the
+    #   dependency would stay undeclared in one of the two Windows
+    #   formats -- and a LaunchCondition BLOCKS an install rather than
+    #   making it work, trading a loader failure for a refusal.
+    # * rebuilding clingo without the dependency means owning a `/MT`
+    #   C++ build of a package reprobuild does not build (it consumes a
+    #   conda-forge binary), and `/MT` across a DLL boundary is an ODR
+    #   hazard rather than a neutral flag.
+    # * app-local deployment is Microsoft's own documented and licensed
+    #   mode for exactly these files, it covers BOTH Windows formats
+    #   through the SAME mechanism the other seven third-party DLLs
+    #   already use, and it costs 732,064 bytes.
+    #
+    # Being in this list is what makes the dependency DECLARED: the two
+    # halves of `t_packaging_windows_loader_closure` compare this list
+    # against `scripts/stage_payload_windows.sh` in both directions, and
+    # `check_windows_scrubbed_launch.ps1`'s closure arm now FAILS on a
+    # redistributable requirement that is not staged instead of warning
+    # about it.
+    result.add("msvcp140.dll")
+    result.add("vcruntime140.dll")
+    result.add("vcruntime140_1.dll")
 
 proc reprobuildNimDlopenLeafNames*(targetOs: TargetOs): seq[string] =
   ## What the BUNDLED COMPILER dlopens by leaf name, so the runtime

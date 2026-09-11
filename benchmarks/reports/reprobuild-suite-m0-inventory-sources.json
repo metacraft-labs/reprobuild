@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 20,
     "nimTestBinaries": 1530,
     "pureUnitConsolidationGroups": 46,
-    "pureUnitTests": 560,
+    "pureUnitTests": 559,
     "staticallyDetectedRuntimeCompilerFlowTests": 94,
     "testEntries": 1538
   },
@@ -1043,8 +1043,8 @@
       "graph-fixture": 12,
       "integration": 693,
       "platform/destructive": 112,
-      "pure unit": 560,
-      "unclassified": 161
+      "pure unit": 559,
+      "unclassified": 162
     },
     "graphOwnedTestArtifacts": [
       {
@@ -6377,7 +6377,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -7766,8 +7766,8 @@
     },
     {
       "binary": "build/test-bin/t_daemon_image_path",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "module initialization reads the argument vector",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -7777,7 +7777,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_image_path.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8741,7 +8741,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 17,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

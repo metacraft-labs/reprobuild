@@ -43,7 +43,10 @@ const
   LinuxStagingScriptRel = "scripts/stage_payload_linux.sh"
   ScriptListVars = ["LOADER_LIBS_FROM_BUILD_BIN",
                     "LOADER_LIBS_FROM_MSYS2_MINGW64",
-                    "LOADER_LIBS_FROM_GCC"]
+                    "LOADER_LIBS_FROM_GCC",
+                    # M1's N32: the Visual C++ runtime, vendored app-local
+                    # from the Visual Studio redist directory.
+                    "LOADER_LIBS_FROM_VC_REDIST"]
 
 const OwnSharedLibraries = ["librepro_monitor_shim.dll",
                             "librepro_project_dsl_runtime.dll"]

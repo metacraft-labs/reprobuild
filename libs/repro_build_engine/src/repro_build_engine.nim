@@ -8665,6 +8665,75 @@ proc nixDaemonExecutableFile*(path: string): bool =
   else:
     result = true
 
+proc shebangInterpreter*(firstLine: string): string =
+  ## The ABSOLUTE interpreter path a ``#!`` line names, or ``""``.
+  ##
+  ## Pure, and split out from the file check below so the parsing has a
+  ## test that needs no filesystem. Only an absolute path is answered:
+  ## ``#!/usr/bin/env python3`` names ``/usr/bin/env``, which is what
+  ## the kernel actually execs, and a relative or empty shebang is not
+  ## something this predicate is entitled to have an opinion about.
+  if not firstLine.startsWith("#!"):
+    return ""
+  var rest = firstLine[2 .. ^1]
+  rest = rest.strip()
+  if rest.len == 0 or rest[0] != '/':
+    return ""
+  let sp = rest.find({' ', '\t'})
+  if sp >= 0: rest[0 ..< sp] else: rest
+
+proc unresolvableScriptInterpreter*(path: string): string =
+  ## If ``path`` is a script whose ``#!`` names an absolute interpreter
+  ## that is NOT on this host, answer that interpreter; otherwise ``""``.
+  ##
+  ## WHY THE ENGINE CHECKS THIS AT ALL (M1's N33). Every Linux package
+  ## shipped ``libexec/reprobuild/reprobuild-nix-daemon`` with a
+  ## ``/nix/store/...`` shebang, and this resolver accepted it: the file
+  ## exists, the file is 0755, so the override was honoured and the
+  ## process died in ``execve`` with ``ENOENT`` -- reported by
+  ## ``startProcess`` as a failure to spawn, then by the caller as
+  ## "Failed to connect or spawn reprobuild-nix-daemon at <socket>",
+  ## which is the EXACT opaque failure ``flake.nix``'s comment says the
+  ## interpreter substitution was introduced to fix. ``ENOENT`` for a
+  ## missing interpreter is indistinguishable from ``ENOENT`` for a
+  ## missing image unless something looks at the first line, so this
+  ## looks at the first line.
+  ##
+  ## The packaging layer is where this is FIXED
+  ## (``DistComponent.scriptInterpreter``); this is where it is
+  ## DIAGNOSED, which is a different job: the engine also runs against a
+  ## source checkout, a Nix profile and a hand-set
+  ## ``REPROBUILD_NIX_DAEMON_BIN``, none of which the packaging layer
+  ## ever touches.
+  # WINDOWS HAS NO SHEBANG MECHANISM: its loader does not read the
+  # first line of a file, so a `#!` there is a comment and a refusal
+  # built on it would refuse correct helpers. Answered "" by
+  # construction rather than left to the parser to get right by
+  # accident.
+  when not defined(posix):
+    return ""
+  if path.len == 0 or not fileExists(path):
+    return ""
+  var first = ""
+  # ``f.open(...)`` rather than ``open(path)``: this module also imports
+  # ``repro_local_store``, whose sqlite binding exports an ``open(path:
+  # string, ...)``, and the bare call is AMBIGUOUS -- the nix build
+  # refused it before it refused anything else.
+  var f: File
+  if not f.open(path, fmRead):
+    return ""
+  try:
+    # A binary is not a script and must not be misread as one: the
+    # first "line" of an ELF image is whatever precedes the first
+    # newline, and it does not start with ``#!``.
+    discard f.readLine(first)
+  except CatchableError:
+    first = ""
+  finally:
+    f.close()
+  let interp = shebangInterpreter(first)
+  if interp.len > 0 and not fileExists(interp): interp else: ""
+
 proc resolveNixDaemonExecutable*(cwd, exePath, envSourceRoot,
     envBin: string): string =
   ## RESOLVE ``reprobuild-nix-daemon``, or answer the bare name so that
@@ -8679,6 +8748,16 @@ proc resolveNixDaemonExecutable*(cwd, exePath, envSourceRoot,
     if not nixDaemonExecutableFile(envBin):
       raiseEngine("REPROBUILD_NIX_DAEMON_BIN exists but is not executable: " &
         envBin)
+    # EXISTS AND IS EXECUTABLE IS NOT ENOUGH, and believing it was is
+    # what let a package ship a file that could not run. See
+    # ``unresolvableScriptInterpreter``.
+    let missing = unresolvableScriptInterpreter(envBin)
+    if missing.len > 0:
+      raiseEngine("REPROBUILD_NIX_DAEMON_BIN is a script whose #! " &
+        "interpreter is not on this host: " & envBin & " names " & missing &
+        "; execve answers ENOENT for a missing interpreter exactly as it " &
+        "does for a missing image, so this would have surfaced only as a " &
+        "failure to spawn the daemon")
     return envBin
   for candidate in nixDaemonCandidates(cwd, exePath, envSourceRoot):
     if not fileExists(candidate.path):
@@ -8686,6 +8765,10 @@ proc resolveNixDaemonExecutable*(cwd, exePath, envSourceRoot,
     if not nixDaemonExecutableFile(candidate.path):
       raiseEngine(candidate.label & " exists but is not executable: " &
         candidate.path)
+    let missing = unresolvableScriptInterpreter(candidate.path)
+    if missing.len > 0:
+      raiseEngine(candidate.label & " is a script whose #! interpreter is " &
+        "not on this host: " & candidate.path & " names " & missing)
     return candidate.path
   "reprobuild-nix-daemon"
 

@@ -92,9 +92,34 @@ done
 LOADER_LIBS_FROM_BUILD_BIN='libcrypto-3-x64 libssl-3-x64 sqlite3 clingo'
 LOADER_LIBS_FROM_MSYS2_MINGW64='libzstd'
 LOADER_LIBS_FROM_GCC='libgcc_s_seh-1 libwinpthread-1'
+# THE VISUAL C++ RUNTIME, WHICH IS M1's N32 AND WAS FOUND BY THE PE WALK.
+#
+# `clingo.dll` is a conda-forge binary (build string `py312he3f8637_1`)
+# built with MSVC, and its import table names `MSVCP140.dll`,
+# `VCRUNTIME140.dll` and `VCRUNTIME140_1.dll`. None of the three was
+# staged. All three are in `%SystemRoot%\System32` on this build host --
+# some developer tool put them there -- which is exactly why neither the
+# curated list nor a scrubbed launch could ever have seen it: the loader
+# finds them and the package looks self-contained. It is not. The VC++
+# runtime is a SEPARATE Microsoft package and a clean Windows install may
+# have none, on which `repro build` cannot load the solver.
+#
+# APP-LOCAL DEPLOYMENT is Microsoft's own documented and licensed answer
+# for exactly this, and the source is the Visual Studio REDIST directory
+# rather than System32: System32's copy is servicing state, not a
+# redistributable, and copying from it would make the payload a function
+# of this machine's Windows Update history. `D:\metacraft-dev-deps`'s own
+# CPython does precisely this -- `python/3.12.10/vcruntime140.dll` sits
+# beside `python.exe` -- so the shape is not novel here either.
+#
+# ONE NAMED PATH, pinned, and asserted below: never "whatever is first on
+# %PATH%", which is the developer environment this whole closure exists
+# to stop depending on.
+LOADER_LIBS_FROM_VC_REDIST='msvcp140 vcruntime140 vcruntime140_1'
 
 MSYS2_MINGW64_BIN=$DEVDEPS/msys2/msys64/mingw64/bin
 GCC_BIN=$DEVDEPS/gcc/16.1.0/bin
+VC_REDIST_BIN=${VC_REDIST_DIR:-/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT}
 stage_loader_libs() { # stage_loader_libs <source-dir> <names...>
   from=$1; shift
   for l in "$@"; do
@@ -106,6 +131,8 @@ stage_loader_libs() { # stage_loader_libs <source-dir> <names...>
 stage_loader_libs "$RB/build/bin" $LOADER_LIBS_FROM_BUILD_BIN
 stage_loader_libs "$MSYS2_MINGW64_BIN" $LOADER_LIBS_FROM_MSYS2_MINGW64
 stage_loader_libs "$GCC_BIN" $LOADER_LIBS_FROM_GCC
+# shellcheck disable=SC2086 -- the lists are deliberately word-split.
+stage_loader_libs "$VC_REDIST_BIN" $LOADER_LIBS_FROM_VC_REDIST
 
 # ---- 3. tree/share/repro/source: reprobuild's own libs -------------
 SOURCE="$PRE/tree/share/repro/source"
