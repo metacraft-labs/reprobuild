@@ -1,5 +1,6 @@
 import std/[algorithm, json, locks, monotimes, options, os, osproc, net,
-    nativesockets, sets, streams, strtabs, strutils, tables, tempfiles, times]
+    nativesockets, parsecfg, sets, streams, strtabs, strutils, tables,
+    tempfiles, times]
 
 # The OS is reached through a named symbol list on both platforms, never
 # wholesale. ``std/posix`` exports ``fork`` / ``execvp`` / ``posix_spawn``
@@ -3725,11 +3726,48 @@ type
       ## monitoring the transfer re-derives what the key structurally
       ## guarantees. The repro store daemon is this case.
 
+  TrustedDaemonOrigin* = enum
+    ## How this process came to believe the fact. §"Derived beats declared"
+    ## makes the distinction load-bearing rather than decorative: one of these
+    ## cannot lie and the other can, so an exemption's diagnostic has to say
+    ## which it was.
+    tdoSpawned
+      ## DERIVED (DA-2). This process started the daemon, so the pid is a fact
+      ## it holds rather than a claim anyone made. The zero value, so every
+      ## `TrustedDaemonPeer` written before DA-4 keeps its meaning.
+    tdoDeclaredAndChecked
+      ## DECLARED (DA-4). Someone named the daemon and a check independently
+      ## established, from facts the kernel supplied, that the peer really is
+      ## what was named. See `checkDeclaredDaemon` for exactly what that
+      ## proves and — more importantly — what it does not.
+
+  DaemonAssertion* = enum
+    ## The assertions a declaration may make about a peer, each of which the
+    ## check VERIFIES against the kernel and `revalidatedTrustedDaemons`
+    ## RE-verifies at grading time. Modelled as a set so the zero value is
+    ## `{}` — "nothing was asserted, so nothing has to be re-checked" — which
+    ## is what keeps DA-2's derived peers (and every hand-built fixture value
+    ## predating DA-4) meaning exactly what they meant before.
+    daImage
+      ## `/proc/<pid>/exe` — the file the peer is EXECUTING, resolved by the
+      ## kernel. The strongest of the three, and the one a non-privileged
+      ## process cannot obtain for a root-owned daemon (see
+      ## `checkDeclaredDaemon`).
+    daProgram
+      ## `/proc/<pid>/stat` field 2 (`comm`). Kernel-recorded, world-readable,
+      ## and — this matters — process-SETTABLE via `prctl(PR_SET_NAME)`. It
+      ## narrows accidents, not attackers.
+    daUid
+      ## The peer's uid as `SO_PEERCRED` reports it. Un-forgeable: the kernel
+      ## stamps it at connect time and no userspace end contributes to it.
+
   TrustedDaemonPeer* = object
-    ## One derived trust fact. Public fields so a test can drive
+    ## One trust fact. Public fields so a test can drive
     ## `revalidatedTrustedDaemons` with a hand-built value (which is how the
     ## recycled-pid rejection is graded); the REGISTRY that production reads is
-    ## writable only through `trustDaemonWeSpawned`.
+    ## writable only through `trustDaemonWeSpawned` (derived) and
+    ## `trustDaemonWeChecked` (declared), and the second of those takes a value
+    ## only a completed check can produce.
     pid*: int
     identity*: string
       ## `/proc/<pid>/stat` field 22 at registration time, or "" where the host
@@ -3739,6 +3777,18 @@ type
       ## behaviour instead of silently widening trust there.
     name*: string
     contribution*: TrustedDaemonContribution
+    origin*: TrustedDaemonOrigin
+    declaredSocket*: string
+      ## DA-4 — the endpoint the declaration named, carried so the rule-3
+      ## diagnostic can say WHERE the claim came from. Empty for a derived
+      ## peer, which was not claimed anywhere.
+    checked*: set[DaemonAssertion]
+      ## DA-4 — which assertions the check VERIFIED. Every member is re-checked
+      ## in `revalidatedTrustedDaemons`; a declaration that asserted something
+      ## the check could not answer never reaches this type at all.
+    checkedImage*: string
+    checkedProgram*: string
+    checkedUid*: int
 
 proc processStartIdentity*(pid: int): string =
   ## The kernel's identity for a live pid: field 22 (`starttime`) of
@@ -3773,12 +3823,120 @@ proc processStartIdentity*(pid: int): string =
   else:
     ""
 
+proc processImagePath*(pid: int): string =
+  ## The file `pid` is EXECUTING, as the kernel resolves it: `/proc/<pid>/exe`.
+  ## Empty when the host does not publish it, when the link cannot be read, or
+  ## when the image has been unlinked since exec.
+  ##
+  ## TWO REFUSALS THAT MATTER, both of which fail closed:
+  ##
+  ## * **Permission.** `readlink("/proc/<pid>/exe")` needs
+  ##   `PTRACE_MODE_READ_FSCREDS` — same uid, or `CAP_SYS_PTRACE`. So an
+  ##   unprivileged `repro` CANNOT read this for a root-owned daemon, which is
+  ##   exactly the shipped host-wide `runquotad` and the Nix daemon. That is a
+  ##   real limit on how strong a declared check can be on the topology DA-4
+  ##   exists for, and `checkDeclaredDaemon` refuses rather than degrades when
+  ##   a declaration asserts an image it cannot read.
+  ## * **A deleted image.** The kernel renders an unlinked executable as
+  ##   `<path> (deleted)`. The peer is then running bytes that the declared
+  ##   path no longer names, so the assertion "the peer executes THIS file" is
+  ##   false however the strings compare. Refused, not stripped.
+  if pid <= 0:
+    return ""
+  when defined(linux):
+    try:
+      let resolved = expandSymlink("/proc/" & $pid & "/exe")
+      if resolved.len == 0 or resolved.endsWith(" (deleted)"):
+        return ""
+      resolved
+    except CatchableError:
+      ""
+  else:
+    ""
+
+proc processCommName*(pid: int): string =
+  ## `/proc/<pid>/stat` field 2 — the kernel's short name for the process,
+  ## taken from the executable's basename at `execve` and truncated to 15
+  ## bytes. World-readable, unlike `/proc/<pid>/exe`.
+  ##
+  ## Parsed between the FIRST `(` and the LAST `)` for the same reason
+  ## `processStartIdentity` anchors on `rfind(')')`: `comm` may itself contain
+  ## spaces and parentheses, so any split-based reading of this line is wrong
+  ## for an adversarially named process.
+  ##
+  ## **NOT un-forgeable, and nothing here may pretend otherwise.**
+  ## `prctl(PR_SET_NAME)` lets a process choose its own `comm`, so this
+  ## assertion establishes that the peer CALLS ITSELF the declared name. It
+  ## narrows accidents — some unrelated program listening at the declared path
+  ## — and it does not bound an attacker who already runs code as the uid that
+  ## may bind that path.
+  if pid <= 0:
+    return ""
+  when defined(linux):
+    var raw = ""
+    try:
+      let statPath = "/proc/" & $pid & "/stat"
+      if not fileExists(statPath):
+        return ""
+      raw = readFile(statPath)
+    except CatchableError:
+      return ""
+    let open = raw.find('(')
+    let close = raw.rfind(')')
+    if open < 0 or close <= open:
+      return ""
+    raw[open + 1 ..< close]
+  else:
+    ""
+
+proc processEffectiveUid*(pid: int): int =
+  ## The peer's EFFECTIVE uid right now, from `/proc/<pid>/status`'s `Uid:`
+  ## line, or -1 where the host will not say.
+  ##
+  ## THE EFFECTIVE ONE AND NOT THE REAL ONE, because that is the field
+  ## `SO_PEERCRED` reports: the kernel fills `struct ucred` at connect time
+  ## from `current_euid()`. A re-check that read the REAL uid would compare a
+  ## different quantity against `checkedUid` and would fire spuriously on any
+  ## daemon that had ever changed one without the other. `/proc/<pid>/status`
+  ## renders `Uid:` as four fields — real, effective, saved-set, filesystem —
+  ## and the second is the one this returns.
+  ##
+  ## World-readable, unlike `/proc/<pid>/exe`: this is the same asymmetry
+  ## `checkDeclaredDaemon` relies on, so the re-check is available on exactly
+  ## the cross-uid topology where the image assertion is not.
+  if pid <= 0:
+    return -1
+  when defined(linux):
+    var raw = ""
+    try:
+      let statusPath = "/proc/" & $pid & "/status"
+      if not fileExists(statusPath):
+        return -1
+      raw = readFile(statusPath)
+    except CatchableError:
+      return -1
+    for line in raw.splitLines():
+      if line.startsWith("Uid:"):
+        let fields = line["Uid:".len .. ^1].splitWhitespace()
+        if fields.len >= 2:
+          try:
+            return parseInt(fields[1])
+          except ValueError:
+            return -1
+        return -1
+    -1
+  else:
+    -1
+
 var derivedTrustedDaemons: seq[TrustedDaemonPeer]
-  ## The daemons THIS PROCESS spawned. A process-global rather than a
-  ## `BuildEngineConfig` field on purpose — see the header above: config is a
-  ## declaration surface and this milestone has none. It is written before a
-  ## build starts and read on the scheduler thread; the worker pool never
-  ## touches it.
+  ## Every daemon this process trusts as a class-3 IPC peer, derived (DA-2) and
+  ## declared-and-checked (DA-4) alike, distinguished by `origin`. A
+  ## process-global rather than a `BuildEngineConfig` field on purpose: DA-2
+  ## had no declaration surface at all, and DA-4's surface is a MACHINE fact
+  ## (`daemons.conf`) rather than a per-invocation knob — see
+  ## `loadDeclaredDaemons` for why that layer and not another. It is written
+  ## before a build starts and read on the scheduler thread; the worker pool
+  ## never touches it.
 
 proc trustDaemonWeSpawned*(process: Process; name: string;
                            contribution: TrustedDaemonContribution) =
@@ -3802,14 +3960,32 @@ proc trustDaemonWeSpawned*(process: Process; name: string;
     if existing.pid == pid and existing.identity == identity:
       return
   derivedTrustedDaemons.add(TrustedDaemonPeer(pid: pid, identity: identity,
-    name: name, contribution: contribution))
+    name: name, contribution: contribution, origin: tdoSpawned))
 
 proc forgetDerivedTrustedDaemons*() =
-  ## Drop every registration. For test isolation, and for a caller that has
-  ## torn its daemons down.
+  ## Drop every registration, derived and declared alike. For test isolation,
+  ## and for a caller that has torn its daemons down.
   derivedTrustedDaemons.setLen(0)
 
 proc derivedTrustedDaemonRegistry*(): seq[TrustedDaemonPeer] =
+  ## The DERIVED registrations only — DA-2's set, unchanged, so a test that
+  ## grades spawn-only trust cannot be made to pass by a declaration.
+  result = @[]
+  for peer in derivedTrustedDaemons:
+    if peer.origin == tdoSpawned:
+      result.add(peer)
+
+proc declaredTrustedDaemonRegistry*(): seq[TrustedDaemonPeer] =
+  ## The DECLARED-AND-CHECKED registrations only — DA-4's set.
+  result = @[]
+  for peer in derivedTrustedDaemons:
+    if peer.origin == tdoDeclaredAndChecked:
+      result.add(peer)
+
+proc trustedDaemonRegistry*(): seq[TrustedDaemonPeer] =
+  ## Every trust fact this process holds, whatever its origin. THIS is what
+  ## `collectEvidence` grades an action against; the two accessors above exist
+  ## so a test can ask about one origin without the other answering for it.
   derivedTrustedDaemons
 
 proc revalidatedTrustedDaemons*(peers: openArray[TrustedDaemonPeer]):
@@ -3822,13 +3998,899 @@ proc revalidatedTrustedDaemons*(peers: openArray[TrustedDaemonPeer]):
   ## and the `contribution` at the point an exemption is granted: a diagnostic
   ## that cannot name the daemon it forgave, and cannot say which §Class 3
   ## branch let it, has counted the exemption without naming it.
+  ##
+  ## DA-4 — EVERY ASSERTION A DECLARATION'S CHECK VERIFIED IS RE-VERIFIED HERE,
+  ## and the reason is that `(pid, start-time)` does not pin the PROGRAM. It
+  ## pins the incarnation: `execve` preserves both, so a process that was
+  ## `runquotad` when the check ran and has since exec'd into something else
+  ## has the same pid and the same `starttime`, and a start-time-only
+  ## re-validation would hand it the exemption. Re-reading `/proc/<pid>/exe`
+  ## and `/proc/<pid>/stat`'s `comm` is what closes that.
+  ##
+  ## `daUid` IS RE-CHECKED TOO, AND AN EARLIER VERSION OF THIS COMMENT ARGUED
+  ## IT NEED NOT BE. That argument ran: a surviving `(pid, start-time)` is the
+  ## same process `SO_PEERCRED` answered for, and a process "can drop privileges
+  ## but cannot acquire them", so the only drift is away from a privileged uid
+  ## and re-checking could only reject, never protect. **MEASURED FALSE**
+  ## (2026-09-11), sampling `/proc/<pid>` in a tight loop across an `execve`
+  ## into setuid-root `sudo`:
+  ##
+  ##   t=0.000 pid=1183970 comm=execprobe2 starttime=4661947 uid=1007 euid=1007
+  ##   t=0.158 pid=1183970 comm=sudo       starttime=4661947 uid=1007 euid=0
+  ##
+  ## Same pid, same field 22, euid raised in place. `execve` genuinely does
+  ## preserve `starttime` — that half was right, and it is precisely why the
+  ## preserved pair proves so much less than it looks like it proves. The
+  ## general form does not even need an exec: a daemon that started as root and
+  ## called `seteuid(user)` keeps root in its SAVED set-user-ID and may
+  ## `seteuid(0)` back at any moment, with no exec, no new image and an
+  ## unchanged `comm` — so it is the assertion the other two re-checks cannot
+  ## stand in for.
+  ##
+  ## So every assertion the check verified is re-verified here, `daUid`
+  ## included, against `/proc/<pid>/status`'s EFFECTIVE uid — the field
+  ## `SO_PEERCRED` reported in the first place.
+  ##
+  ## The set is empty for every derived peer and for every value written before
+  ## DA-4, so this loop is exactly DA-2's for them.
   result = @[]
   for peer in peers:
     if peer.pid <= 0 or peer.identity.len == 0:
       continue
     if processStartIdentity(peer.pid) != peer.identity:
       continue
+    if daImage in peer.checked and
+        (peer.checkedImage.len == 0 or
+         processImagePath(peer.pid) != peer.checkedImage):
+      continue
+    if daProgram in peer.checked and
+        (peer.checkedProgram.len == 0 or
+         processCommName(peer.pid) != peer.checkedProgram):
+      continue
+    if daUid in peer.checked and
+        (peer.checkedUid < 0 or
+         processEffectiveUid(peer.pid) != peer.checkedUid):
+      continue
     result.add(peer)
+
+# ---------------------------------------------------------------------------
+# DA-4 — DECLARED IPC trust, and the CHECK that makes it a claim
+# (Dependency-Observation-Attribution.md §Class 3, §"Derived beats declared",
+#  §"Where each declaration lives", rules 3/4/5;
+#  Dependency-Attribution.milestones.org DA-4)
+# ---------------------------------------------------------------------------
+#
+# WHAT DA-2 LEFT OPEN, AND WHY IT IS THE CASE THAT MATTERS. DA-2 trusts only a
+# daemon THIS PROCESS SPAWNED. Measured, that is live only on an unprovisioned
+# Linux host: on a host running the shipped `runquotad` unit,
+# `startAutoRunQuotaIfNeeded` finds the host-wide socket already answered,
+# adopts the daemon and registers nothing — so DA-2 is entirely inert on
+# precisely the topology a shared lease coordinator exists for. Closing that
+# means trusting a daemon this process did not start, which by
+# §"Derived beats declared" is DECLARED attribution, and
+# **a declared attribution needs a check** (rule 5).
+#
+# THE CHECKED-CLAIM PATTERN, WHICH IS THE POINT OF THE MILESTONE. A declaration
+# NAMES a peer. A check must then establish, INDEPENDENTLY OF THE DECLARATION
+# AND FROM FACTS THE DECLARER DOES NOT SUPPLY, that the peer really is what was
+# named. The design constraint runs check-first: the declaration surface is
+# whatever the check can actually verify, and nothing wider. Concretely, this
+# is why there is no `contribution =` key below — see `class3Contribution`.
+#
+# WHAT THE KERNEL WILL VOUCH FOR, WHICH IS THE WHOLE BUDGET.
+#
+#   * `SO_PEERCRED` on a connected AF_UNIX socket yields the peer's
+#     (pid, uid, gid) as of connect. The kernel stamps it; neither end
+#     contributes to it; it cannot be forged from userspace. This is the
+#     foundation, and it is the same fact io-mon's shim reads at the ACTION's
+#     own connect — which is what binds the check to the observation, because
+#     the exemption is keyed on that pid and on nothing else.
+#   * `/proc/<pid>/stat` field 22 (`starttime`) distinguishes an incarnation
+#     from a recycled pid. DA-2 already reads it; DA-4 reuses it verbatim.
+#   * `/proc/<pid>/exe` names the file the peer executes — but only to a
+#     reader with `PTRACE_MODE_READ_FSCREDS` (same uid, or `CAP_SYS_PTRACE`).
+#   * `/proc/<pid>/stat` field 2 (`comm`) is world-readable and
+#     process-settable.
+#
+# WHAT A CHECK CANNOT ESTABLISH, STATED BEFORE THE CODE BECAUSE IT BOUNDS EVERY
+# CLAIM BELOW.
+#
+#   1. **That the declared program deserves trust.** Whether `runquotad`
+#      contributes content is a semantic property of the program, and no
+#      runtime probe answers it. That is why the class-3 branch is NOT
+#      declarable (`class3Contribution` is a closed, compiled-in table) — an
+#      operator who could assert a branch for an arbitrary binary would have an
+#      exemption from reproducibility, not a declaration.
+#   2. **That the socket path is trustworthy.** "Something is listening here"
+#      is arrangeable by accident and by an attacker alike, and it is exactly
+#      the check this code must not be. Every assertion below is about the
+#      PEER, never about the path.
+#   3. **That an unprivileged reader can identify a privileged daemon's
+#      image.** `/proc/<pid>/exe` is unreadable across a uid boundary, so on
+#      the shipped topology — root-owned `runquotad`, root-owned Nix daemon,
+#      unprivileged `repro` — the strongest assertion is UNAVAILABLE and the
+#      check rests on `daUid` (un-forgeable) plus `daProgram` (not). Declaring
+#      an image that cannot be read is REFUSED, not degraded, so an operator
+#      learns this from a report rather than from a silent weakening.
+#   4. **That the peer the ACTION talked to is the peer the check connected
+#      to** — except through the pid, which is precisely how it is established.
+#      A socket re-bound by a different process yields a different peer pid at
+#      the action's connect and is not in the trust set. A pid recycled onto a
+#      different process fails `revalidatedTrustedDaemons`. Neither inherits
+#      anything, and both are graded.
+#   5. **That the channel the ACTION used is the ENDPOINT that was declared.**
+#      THE RESIDUAL. READ THIS BEFORE WIDENING THE VOCABULARY.
+#
+#      A declaration names an endpoint; the exemption is keyed on a PID. io-mon
+#      grants it with `peer in trustedPeerPids` and looks at no path at all
+#      (io-mon `src/io_mon/writer.nim:1992-1994`), so what trust buys is
+#      "everything this process serves", not "the endpoint that was declared".
+#      Under DA-2 the two coincide because the engine spawned the daemon and
+#      knows it end to end; under DA-4 they can come apart, and MEASURED they
+#      do: on a socket-activated host pid 1 answers `/nix/var/nix/daemon-socket
+#      /socket` AND `/run/dbus/system_bus_socket`, so declaring the first
+#      registered a pid that forgave the second.
+#
+#      WHAT NARROWS IT, AND HOW FAR. Requiring a program-identifying assertion
+#      (`declarationIdentifiesAProgram`) refuses the activator outright — pid
+#      1's `comm` is `systemd`, not `nix-daemon` — and, more generally, turns
+#      the trust fact from "pid P" into "pid P, executing declared program X".
+#      That is the granularity the class-3 argument is actually stated at:
+#      `class3Contribution` is a table from PROGRAM to branch, and "runquotad
+#      serves lease decisions and no content" is a claim about the program,
+#      true of every channel it serves. So once the program is identified, the
+#      endpoint is a LOCATOR for finding the peer rather than a term in the
+#      soundness argument, and forgiving X's other channels is forgiving what
+#      the branch already licensed.
+#
+#      WHAT IS LEFT, STATED PLAINLY RATHER THAN IMPLIED. That reduction is
+#      exactly as good as the program identification and as the branch table:
+#
+#        * `daProgram` is `comm`, which the peer sets (`prctl(PR_SET_NAME)`).
+#          Against an attacker already running as the uid that may bind the
+#          declared path, `program` alone identifies nothing — which is why the
+#          documented shape for a privileged daemon is `program` + `uid`, and
+#          why a host that can read `/proc/<pid>/exe` should declare `image`.
+#        * A program admitted to the vocabulary whose branch is true of only
+#          SOME of its channels would be forgiven on all of them. None of the
+#          three admitted today is such a program: `runquotad` speaks one
+#          lease/telemetry protocol on every endpoint it binds; the Nix daemon
+#          and the repro store daemon serve content-addressed store paths on
+#          every endpoint they bind. **A fourth kind must be argued at the
+#          PROGRAM level, not at the endpoint level, or this residual becomes a
+#          hole.**
+#
+#      THE EXACT FIX, AND WHY IT IS NOT HERE. Keying the exemption on
+#      `(pid, endpoint)` would remove the residual outright. It cannot be done
+#      from this repository: on Linux `mrIpcConnect` carries no usable path —
+#      io-mon's `recordIpcConnect` never sets `record.path` there — so the
+#      dedup key io-mon builds for a peer-attributed loss is `pid:<peer>@<start>`
+#      with no path term, and the engine has nothing to match an endpoint
+#      against. It needs an io-mon change (carry the connect path on Linux),
+#      after which this file can compare it to `declaredSocket`, which is
+#      already recorded on every declared `TrustedDaemonPeer` for exactly that
+#      day. Until then the residual is REAL, BOUNDED BY THE PROGRAM, and
+#      graded: see `t_declared_daemon_ipc_trust`'s two-endpoint case, whose
+#      second arm asserts the forgiveness of an undeclared endpoint of a
+#      declared PROGRAM — so that narrowing this later shows up as a red case
+#      to update rather than as a silent change of meaning.
+#
+# AND CLASS 4 IS NOT REACHABLE FROM HERE (rule 4). A declaration's endpoint
+# must be an absolute filesystem path, and `SO_PEERCRED` on anything that is
+# not an AF_UNIX socket yields no pid — `checkDeclaredDaemon` refuses pid <= 0
+# outright. On the observation side io-mon's own exemption requires
+# `peer != 0` (io-mon `writer.nim:1992`) and an INET connect reports peer 0, so
+# a network peer stays unattributable whatever this registry contains.
+
+type
+  DeclarableDaemonKind* = enum
+    ## The CLOSED vocabulary of daemons that may be declared, and the reason it
+    ## is closed rather than a name plus a contribution field.
+    ##
+    ## §Class 3 admits a peer on one of two grounds — it contributes no
+    ## content, or it serves content already in the key — and BOTH are claims
+    ## about what a program DOES. Nothing the engine can probe at runtime
+    ## decides them. So the branch travels with the daemon KIND, compiled in
+    ## here beside the argument for it, exactly as `tdcNoContent` travels with
+    ## `runquotad` at DA-2's spawn site. What the machine layer supplies is
+    ## WHERE the daemon is, which is the part the machine actually knows.
+    ##
+    ## An unrecognised section name in `daemons.conf` is an ERROR, not an
+    ## ignored line: a typo that silently declared nothing would be a
+    ## declaration rotting into a no-op, which is the failure mode DA-4's third
+    ## test exists to prevent.
+    ddkRunQuota
+      ## `runquotad` reached over an endpoint this process did not create —
+      ## the host-wide `/run/runquota/runquotad.sock` the shipped unit owns,
+      ## or an endpoint inherited through `RUNQUOTA_SOCKET`. THE DA-2 GAP.
+    ddkNixDaemon
+      ## The Nix daemon at `/nix/var/nix/daemon-socket/socket`.
+    ddkReproStoreDaemon
+      ## reprobuild's own store daemon (`repro store daemon`,
+      ## `repro_store_daemon.defaultDevEndpoint`). DA-2 verified that it
+      ## satisfies branch (b) and declined it for want of a spawn to derive
+      ## from; under a declared-and-checked regime that objection is answered.
+
+  DaemonCheckOutcome* = enum
+    ## Why a declaration was or was not turned into a trust fact. Every value
+    ## other than `dcoTrusted` is REPORTED — rule 3's "counted and named",
+    ## applied to the declarations as well as to the exemptions.
+    ##
+    ## `dcoNotChecked` IS FIRST, AND THE ORDER IS THE POINT. Nim's zero value
+    ## for an enum is its first member, so whichever value sits here is what a
+    ## default-constructed `DaemonIdentityCheck` or `DaemonCheckReport` claims
+    ## about a peer nobody asked about. With `dcoTrusted` first — which is how
+    ## this enum shipped — an un-run check ANNOUNCED A PASS, and
+    ## `renderDaemonCheckReport` rendered a zero `DaemonCheckReport` as
+    ## "checked and trusted". The safe default has to be the absence of a
+    ## verdict, so it is.
+    ##
+    ## Reordering was verified safe rather than assumed: all 56 uses of this
+    ## type across the engine, the CLI and the suite are `==`, `!=`, `$` or a
+    ## type annotation — no `ord`, no `succ`, no indexing, no `<`, no iteration
+    ## over the enum and no persistence of an ordinal, so nothing reads the
+    ## member positions. Keep it that way; the moment one does, this member's
+    ## position becomes a wire fact.
+    dcoNotChecked
+      ## No check has run. The zero value, and never an answer: nothing
+      ## produces it, `trustDaemonWeChecked` refuses it, and it renders as
+      ## "not checked".
+    dcoTrusted
+    dcoEndpointNotAbsolute
+      ## The endpoint is not an absolute path, so it does not name an AF_UNIX
+      ## socket this code can obtain a peer credential from. Rule 4's shape at
+      ## the declaration surface: an `host:port` endpoint is refused here
+      ## rather than connected to and found unattributable later.
+    dcoUnreachable
+      ## Nothing accepted a connection. A declaration for a daemon that is not
+      ## running is not an error, but it must not be silent either — a stale
+      ## declaration that nobody notices is a permanent exemption waiting for
+      ## a pid collision.
+    dcoNoPeerCredentials
+      ## Connected, but the kernel would not name a peer. Includes every
+      ## non-AF_UNIX transport that somehow got this far.
+    dcoNoKernelIdentity
+      ## No `/proc/<pid>/stat` start time, so the trust could never be
+      ## re-validated. Every non-Linux host is here today, deliberately.
+    dcoNothingAsserted
+      ## The declaration named an endpoint and asserted nothing about the peer.
+      ## Refused: "something is listening at this path" is not a check.
+    dcoNoProgramAssertion
+      ## The declaration asserted something about the peer, but nothing that
+      ## IDENTIFIES THE PROGRAM it is running — `uid` alone, in practice.
+      ## Refused before a connection is attempted. See
+      ## `declarationIdentifiesAProgram` for the whole argument.
+    dcoImageUnreadable
+      ## `image` was asserted and `/proc/<pid>/exe` could not be read — the
+      ## cross-uid case above. Refused rather than degraded.
+    dcoImageMismatch
+    dcoProgramMismatch
+    dcoUidMismatch
+
+  DeclaredDaemon* = object
+    ## One parsed `daemons.conf` section. A DECLARATION and nothing more: no
+    ## field of it is believed until `checkDeclaredDaemon` has answered.
+    kind*: DeclarableDaemonKind
+    endpoint*: string
+      ## Where the daemon listens. Absolute path to an AF_UNIX socket.
+    assertions*: set[DaemonAssertion]
+    image*: string
+    program*: string
+    uid*: int
+    source*: string
+      ## Which file said so, carried into the report so an operator chasing a
+      ## refused declaration is told where to edit.
+
+  DaemonIdentityCheck* = object
+    ## THE RESULT OF A CHECK, and the only thing `trustDaemonWeChecked` accepts.
+    ##
+    ## THE FIELDS ARE PRIVATE ON PURPOSE, and it is the same device DA-2 used
+    ## when it made `trustDaemonWeSpawned` take an `osproc.Process`: a caller
+    ## outside this module can write `DaemonIdentityCheck()` but cannot fill
+    ## it, and the zero value carries `outcome = dcoNotChecked` with `pid = 0`
+    ## and `verified = {}` — which `trustDaemonWeChecked` refuses on all three
+    ## counts. So "trust a peer whose check I did not run" is not a call that
+    ## can be written, and a declaration cannot reach the registry except
+    ## through the code below.
+    outcome: DaemonCheckOutcome
+    pid: int
+    uid: int
+    identity: string
+    image: string
+    program: string
+    verified: set[DaemonAssertion]
+    endpoint: string
+    detail: string
+
+  DaemonCheckReport* = object
+    ## What happened to one declaration, for the build log. Its zero value
+    ## carries `dcoNotChecked` and therefore renders as "not checked"; before
+    ## `dcoNotChecked` existed it rendered as "checked and trusted", which is a
+    ## default-constructed value asserting the strongest thing this type can
+    ## say.
+    kind*: DeclarableDaemonKind
+    endpoint*: string
+    outcome*: DaemonCheckOutcome
+    detail*: string
+    source*: string
+
+proc class3BranchText(contribution: TrustedDaemonContribution): string =
+  ## The §Class 3 branch a trusted daemon satisfies, in the words the operator
+  ## reading a build log needs — "why was this allowed to be forgiven".
+  ##
+  ## Defined here rather than beside its first DA-2 consumer because DA-4's
+  ## declaration report needs the same sentence, and two spellings of "which
+  ## branch let this through" is the shape a later reader has to reconcile.
+  case contribution
+  of tdcNoContent:
+    "branch (a), contributes no content to the action"
+  of tdcContentAlreadyKeyed:
+    "branch (b), serves class-1 content already in the action key"
+
+proc daemonKindName*(kind: DeclarableDaemonKind): string =
+  ## The name a `daemons.conf` section carries, and the name a diagnostic
+  ## prints. One function so the two cannot drift.
+  case kind
+  of ddkRunQuota: "runquotad"
+  of ddkNixDaemon: "nix-daemon"
+  of ddkReproStoreDaemon: "repro-store-daemon"
+
+proc parseDaemonKind*(name: string): Option[DeclarableDaemonKind] =
+  for kind in DeclarableDaemonKind:
+    if daemonKindName(kind) == name:
+      return some(kind)
+  none(DeclarableDaemonKind)
+
+proc class3Contribution*(kind: DeclarableDaemonKind):
+    TrustedDaemonContribution =
+  ## WHICH §Class 3 BRANCH EACH DECLARABLE DAEMON SATISFIES. Compiled in, one
+  ## arm per kind, because this is the half of the attribution that no check
+  ## can establish and no operator may assert (see the header above).
+  case kind
+  of ddkRunQuota:
+    ## BRANCH (a) — contributes NO CONTENT. Its protocol is
+    ## Hello / Acquire / Grant / Release plus the stats-extension rows: lease
+    ## decisions and telemetry. It opens no file on a client's behalf and
+    ## returns no bytes that can reach an action's output. Identical to the
+    ## argument DA-2 makes at its spawn site, and it does not depend on WHO
+    ## started the daemon — which is why the same branch holds for an adopted
+    ## one, and why the only thing DA-4 has to add is the identity check.
+    tdcNoContent
+  of ddkNixDaemon:
+    ## BRANCH (b) — serves CLASS-1 content. Every byte it hands back is a
+    ## `/nix/store/<hash>-<name>` path, and §Class 1 is exactly the statement
+    ## that such a path names its own content and its identity is already in
+    ## the action key by construction. `contentAddressedRoot` in this file
+    ## recognises that root, `toolInputRoots` elides under it and
+    ## `keyedOnContentAddressedToolRoot` keys on it — so the elision this
+    ## branch licenses is the SAME elision the store already gets, reached
+    ## through the daemon instead of through the filesystem. §Class 3 names
+    ## this daemon explicitly.
+    tdcContentAlreadyKeyed
+  of ddkReproStoreDaemon:
+    ## BRANCH (b), for the same reason and over reprobuild's own CAS store:
+    ## it realizes and serves prefixes under
+    ## `<storeRoot>/…/prefixes/<package>/<version>-<16 hex>`, the second root
+    ## `contentAddressedRoot` recognises. DA-2's text names it and DA-2
+    ## declined to register it because nothing spawns it — which is a statement
+    ## about DERIVATION, not about the branch, and is what a checked
+    ## declaration answers.
+    tdcContentAlreadyKeyed
+
+when defined(linux):
+  type
+    SocketPeerCredentials = object
+      ## The ABI of `struct ucred` on Linux: `pid_t`, `uid_t`, `gid_t`, all
+      ## 32-bit on every architecture Nim targets here.
+      ##
+      ## Declared rather than `importc`'d, and the reason is specific:
+      ## `struct ucred` is behind `__USE_GNU` in glibc's `<sys/socket.h>`, so
+      ## importing it would require this file to be compiled with
+      ## `-D_GNU_SOURCE` — a translation-unit-wide change to satisfy one
+      ## struct. The CONSTANT is not behind that guard, so `SO_PEERCRED` and
+      ## `SOL_SOCKET` are imported from the header and only the layout is
+      ## restated.
+      pid: int32
+      uid: uint32
+      gid: uint32
+
+  var
+    SoPeerCredOpt {.importc: "SO_PEERCRED", header: "<sys/socket.h>".}: cint
+    SolSocketLevel {.importc: "SOL_SOCKET", header: "<sys/socket.h>".}: cint
+
+  proc getsockoptRaw(sock: cint; level, optname: cint; optval: pointer;
+                     optlen: ptr cuint): cint
+                    {.importc: "getsockopt", header: "<sys/socket.h>".}
+
+proc peerCredentialsOfSocket(sock: Socket): tuple[pid, uid: int] =
+  ## The kernel's record of the peer's identity on a connected socket, or
+  ## `(0, 0)` when it will not supply one.
+  ##
+  ## THE ONE FACT THIS WHOLE MILESTONE STANDS ON. `SO_PEERCRED` is stamped by
+  ## the kernel at connect time from the peer's credentials — its pid and its
+  ## EFFECTIVE uid/gid; no byte of it crosses the wire and neither end can
+  ## influence it. It is also the SAME mechanism io-mon's shim reads at the
+  ## monitored action's own connect (`linux_preload.channelPeerPid`), which is
+  ## what lets a pid checked here be compared against a pid observed there at
+  ## all. `revalidatedTrustedDaemons` re-reads the effective uid from
+  ## `/proc/<pid>/status` for the same reason it is the effective one here.
+  ##
+  ## AN AF_INET SOCKET DOES NOT FAIL THIS CALL — it SUCCEEDS and answers with a
+  ## nobody. MEASURED (2026-09-11) on a connected loopback AF_INET socket:
+  ##
+  ##   getsockopt rc=0 errno=0 len=12 pid=0 uid=-1 gid=-1
+  ##
+  ## `rc` is 0 and `optlen` comes back the full `sizeof(struct ucred)`, so
+  ## NEITHER guard below is what refuses it — the refusal is `pid == 0` and the
+  ## `pid <= 0` arm in `checkDeclaredDaemon` that reads it. An earlier version
+  ## of this comment said the `getsockopt` fails. The behaviour is the same
+  ## either way, which is exactly why the sentence had to be corrected rather
+  ## than left: the next person changing this function will reason from it, and
+  ## "the call fails" licenses removing the `pid <= 0` test as redundant.
+  ## Rule 4 is held by the pid being zero, not by an error return.
+  result = (0, 0)
+  when defined(linux):
+    var cred = SocketPeerCredentials()
+    var size = cuint(sizeof(SocketPeerCredentials))
+    if getsockoptRaw(cint(sock.getFd()), SolSocketLevel, SoPeerCredOpt,
+        addr cred, addr size) != 0:
+      return
+    if size.int < sizeof(SocketPeerCredentials):
+      return
+    result = (int(cred.pid), int(cred.uid))
+
+const ProgramIdentifyingAssertions* = {daImage, daProgram}
+  ## The assertions that name WHAT THE PEER IS RUNNING, as opposed to what it
+  ## is running AS. `checkDeclaredDaemon` requires at least one; see
+  ## `declarationIdentifiesAProgram`.
+
+proc declarationIdentifiesAProgram*(decl: DeclaredDaemon): bool =
+  ## Does this declaration assert anything that identifies the peer's PROGRAM?
+  ##
+  ## WHY THIS IS REQUIRED, AND WHY `uid` ALONE IS NOT A CHECK OF THE THING
+  ## §Class 3 IS ABOUT. A class-3 exemption is licensed by a claim about a
+  ## PROGRAM: `runquotad` serves lease decisions and no content; the Nix daemon
+  ## serves `/nix/store/<hash>-<name>` paths whose identity is already in the
+  ## key. `class3Contribution` is a table from PROGRAM to branch. A check that
+  ## establishes only "the peer runs as uid 0" has established nothing about
+  ## the subject of that claim — every root daemon on the box satisfies it —
+  ## so it cannot make the claim true, and rule 5's "a declared attribution has
+  ## a check" is not discharged by a check of something else.
+  ##
+  ## MEASURED, AND THIS IS WHY IT IS A HARD REFUSAL RATHER THAN ADVICE. On a
+  ## socket-activated host the process on the far end of a daemon's socket is
+  ## the ACTIVATOR, not the daemon:
+  ##
+  ##   /nix/var/nix/daemon-socket/socket   peer pid=1 uid=0 comm=systemd
+  ##   /run/dbus/system_bus_socket         peer pid=1 uid=0 comm=systemd
+  ##
+  ## A `uid = 0` declaration of `nix-daemon` at the first path passes, and what
+  ## it registers is **pid 1** — after which an action that touches D-Bus, or
+  ## anything else pid 1 serves, is forgiven and publishes. That was measured
+  ## end to end on this host: the declaration passed, pid 1 was registered, and
+  ## an unrelated D-Bus edge published and warm-hit. Requiring a
+  ## program-identifying assertion is what refuses it, and it refuses it
+  ## precisely: `comm` on pid 1 is `systemd`, so `program = nix-daemon` fails
+  ## with `dcoProgramMismatch` and the endpoint simply cannot be declared on
+  ## that topology. That is the correct answer — the peer really is not the
+  ## daemon — and it is a report rather than a silent exemption.
+  ##
+  ## WHAT IT COSTS. `uid`-only was the only form that worked for a root-owned
+  ## daemon read from an unprivileged `repro`, because `image` is unreadable
+  ## across a uid boundary (`processImagePath`). What is left there is
+  ## `program`, which is kernel-recorded and world-readable but SETTABLE by the
+  ## peer via `prctl(PR_SET_NAME)` — it narrows accidents, not attackers. So
+  ## the shipped shape for a privileged daemon is `program` + `uid`: `program`
+  ## identifies the subject of the class-3 claim, `uid` is the un-forgeable
+  ## half, and neither is redundant. Declaring `uid` alone is refused; the
+  ## refusal is `dcoNoProgramAssertion` and it happens BEFORE any connection,
+  ## so a declaration that cannot discharge rule 5 never even touches the
+  ## daemon.
+  (decl.assertions * ProgramIdentifyingAssertions) != {}
+
+proc checkDeclaredDaemon*(decl: DeclaredDaemon): DaemonIdentityCheck =
+  ## THE CHECK. Connect to the declared endpoint, ask the KERNEL who is on the
+  ## other end, and verify every assertion the declaration made against what
+  ## the kernel said. Nothing the declaration supplied is used as evidence for
+  ## itself.
+  ##
+  ## Order matters and is deliberate: the endpoint shape and the ADEQUACY OF
+  ## THE ASSERTIONS are refused before a connection is attempted, the peer
+  ## credential is obtained before any `/proc` read (so a pid of 0 never
+  ## becomes a path), and every assertion is a conjunction — one mismatch
+  ## refuses the whole declaration rather than trusting the remainder.
+  ##
+  ## `dcoNothingAsserted` and `dcoNoProgramAssertion` are the two arms that
+  ## keep this from being theatre. A declaration carrying only an endpoint
+  ## would make "a socket exists at this path" the whole check, and a socket
+  ## path is arrangeable by anyone who can write the directory — the exact
+  ## shape §"Derived beats declared" calls a wish. A declaration carrying only
+  ## a `uid` would make "a root process is listening here" the whole check,
+  ## which identifies no program and therefore checks nothing about the claim
+  ## §Class 3 actually licenses; see `declarationIdentifiesAProgram`, which
+  ## carries the measurement that forced it.
+  ##
+  ## WHAT IT COSTS THE DAEMON: one accepted connection, closed immediately,
+  ## once per declared daemon per build. No protocol is spoken, because the
+  ## kernel supplies the peer credential the moment the connection is accepted
+  ## and nothing a daemon could SAY would add a fact — a self-reported name is
+  ## the declaration again, not a check of it. Every daemon in the closed
+  ## vocabulary is an accept-loop server and tolerates an immediate disconnect.
+  result.endpoint = decl.endpoint
+  if not decl.endpoint.isAbsolute:
+    result.outcome = dcoEndpointNotAbsolute
+    result.detail = "endpoint is not an absolute path to a unix socket"
+    return
+  if decl.assertions == {}:
+    result.outcome = dcoNothingAsserted
+    result.detail = "declaration asserts nothing about the peer; " &
+      "'something is listening at this path' is not a check"
+    return
+  if not decl.declarationIdentifiesAProgram():
+    result.outcome = dcoNoProgramAssertion
+    result.detail = "declaration asserts nothing that identifies the peer's " &
+      "program (declare 'image' or 'program'); the §Class 3 branch is a " &
+      "property of the PROGRAM, so a check that identifies no program has " &
+      "not established what the branch is about — on a socket-activated host " &
+      "the peer of a daemon socket is the activator, and a uid-only " &
+      "declaration would trust everything the activator serves"
+    return
+  var sock: Socket
+  try:
+    sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+      protocol = IPPROTO_IP)
+  except CatchableError:
+    result.outcome = dcoUnreachable
+    result.detail = "cannot create an AF_UNIX socket"
+    return
+  var connected = false
+  try:
+    sock.connectUnix(decl.endpoint)
+    connected = true
+  except CatchableError:
+    result.outcome = dcoUnreachable
+    result.detail = "nothing accepted a connection at " & decl.endpoint
+  if connected:
+    let cred = peerCredentialsOfSocket(sock)
+    result.pid = cred.pid
+    result.uid = cred.uid
+    if result.pid <= 0:
+      result.outcome = dcoNoPeerCredentials
+      result.detail =
+        "the kernel would not name a peer for " & decl.endpoint &
+        " (SO_PEERCRED yields no pid for anything but an AF_UNIX socket)"
+  try:
+    sock.close()
+  except CatchableError:
+    discard
+  if result.outcome != dcoNotChecked or not connected:
+    return
+  result.identity = processStartIdentity(result.pid)
+  if result.identity.len == 0:
+    result.outcome = dcoNoKernelIdentity
+    result.detail = "no kernel start-time identity for pid " & $result.pid &
+      "; the trust could not be re-validated at grading time"
+    return
+  # `/proc/<pid>/exe` and `comm` are read ONCE here and re-read in
+  # `revalidatedTrustedDaemons`. Reading them after the start-time identity is
+  # what makes the pair coherent: the identity says which incarnation the
+  # readings describe.
+  result.image = processImagePath(result.pid)
+  result.program = processCommName(result.pid)
+  if daImage in decl.assertions:
+    if result.image.len == 0:
+      result.outcome = dcoImageUnreadable
+      result.detail = "cannot read /proc/" & $result.pid & "/exe (a " &
+        "cross-uid read needs CAP_SYS_PTRACE, and an unlinked image is " &
+        "refused outright); declare 'program' (with 'uid') instead of " &
+        "'image' for a daemon running as another user"
+      return
+    # The DECLARED path is canonicalised before the comparison, because
+    # `/proc/<pid>/exe` is the kernel's fully-resolved answer and a provisioned
+    # host names its daemons through symlinks — `/run/current-system/sw/bin/…`
+    # on NixOS, `/usr/bin/…` into an alternatives tree elsewhere. Without this
+    # the strongest assertion would be unusable on exactly the topology DA-4
+    # exists for. It does not weaken the check: the comparison TARGET is still
+    # the kernel's reading, and canonicalising the claim only decides which
+    # file the claim is about.
+    var expected = decl.image
+    try:
+      expected = expandFilename(decl.image)
+    except CatchableError:
+      discard
+    if result.image != expected:
+      result.outcome = dcoImageMismatch
+      result.detail = "peer pid " & $result.pid & " executes " & result.image &
+        ", not the declared " & decl.image &
+        (if expected == decl.image: "" else: " (resolving to " & expected & ")")
+      return
+    result.verified.incl(daImage)
+  if daProgram in decl.assertions:
+    if result.program.len == 0 or result.program != decl.program:
+      result.outcome = dcoProgramMismatch
+      result.detail = "peer pid " & $result.pid & " reports comm '" &
+        result.program & "', not the declared '" & decl.program & "'"
+      return
+    result.verified.incl(daProgram)
+  if daUid in decl.assertions:
+    if result.uid != decl.uid:
+      result.outcome = dcoUidMismatch
+      result.detail = "peer pid " & $result.pid & " runs as uid " &
+        $result.uid & ", not the declared " & $decl.uid
+      return
+    result.verified.incl(daUid)
+  # THE PASS IS STATED, NEVER INHERITED. Every arm above leaves this proc with
+  # `dcoNotChecked` still in place unless it set a refusal, so reaching here —
+  # having verified every assertion the declaration made — is the only way
+  # `dcoTrusted` is ever written. A future arm that returns early without
+  # setting an outcome therefore reports "not checked" and is refused, rather
+  # than falling through to the enum's zero value and reporting a pass.
+  result.outcome = dcoTrusted
+  result.detail = "peer pid " & $result.pid & " verified: " &
+    ($result.verified).replace("{", "").replace("}", "")
+
+# Read-only accessors. The FIELDS stay private so nothing outside this module
+# can construct — or complete — a passing check; the READINGS are published
+# because the report and the tests both need them, and publishing a reading
+# grants no ability to produce one.
+proc checkedDaemonPid*(check: DaemonIdentityCheck): int = check.pid
+proc checkedDaemonOutcome*(check: DaemonIdentityCheck): DaemonCheckOutcome =
+  check.outcome
+proc checkedDaemonDetail*(check: DaemonIdentityCheck): string = check.detail
+proc checkedDaemonAssertions*(check: DaemonIdentityCheck):
+    set[DaemonAssertion] = check.verified
+proc checkedDaemonIdentity*(check: DaemonIdentityCheck): string =
+  ## Published so a test can establish that a REFUSED check still carries every
+  ## other field `trustDaemonWeChecked`'s guard reads — which is what makes the
+  ## `outcome` clause of that guard gradeable in isolation.
+  check.identity
+
+proc trustDaemonWeChecked*(kind: DeclarableDaemonKind;
+                           check: DaemonIdentityCheck): bool
+                          {.discardable.} =
+  ## Register a DECLARED daemon whose CHECK PASSED as a class-3 trusted peer.
+  ##
+  ## The parameter is the check's own result, and the type's fields are private
+  ## to this module, so a caller cannot hand in a pass it did not obtain. That
+  ## is the structural half of rule 5: the declaration cannot reach the registry
+  ## except through the check.
+  ##
+  ## The class-3 branch comes from `kind` and never from the caller, so the one
+  ## thing a check cannot establish is also the one thing nobody may assert.
+  ##
+  ## THE GUARD BELOW IS THE FLOOR UNDER THE CALLER'S GATE, AND IT IS GRADED AS
+  ## SUCH. `applyDeclaredDaemonTrust` also tests `outcome == dcoTrusted` before
+  ## calling, so on the production path this guard is a second opinion — but it
+  ## is the one that answers for any OTHER caller, including one that hands in
+  ## a default-constructed value.
+  ##
+  ## It was once not graded at all: a mutation deleting the `outcome`,
+  ## `identity` and `verified` clauses and keeping only `pid <= 0` left all 13
+  ## cases of `t_declared_daemon_ipc_trust` green, because every check the
+  ## suite could reach this call with was either a pass or had `pid == 0`. The
+  ## case *"a refused check is refused HERE, not only by its caller"* closes
+  ## that: it drives the REAL `checkDeclaredDaemon` to a refusal that carries
+  ## `pid > 0`, a non-empty `identity` and a non-empty `verified` — a correct
+  ## `image` with a wrong `program` produces exactly that — so the `outcome`
+  ## clause is the only thing left that can refuse it, and deleting the clauses
+  ## reddens.
+  ##
+  ## The type is the other reason the clauses stay. `DaemonIdentityCheck`'s
+  ## zero value is `dcoNotChecked` / `pid = 0` / `verified = {}`, so an un-run
+  ## check is refused three times over rather than once.
+  if check.outcome != dcoTrusted or check.pid <= 0 or
+      check.identity.len == 0 or check.verified == {}:
+    return false
+  for existing in derivedTrustedDaemons:
+    if existing.pid == check.pid and existing.identity == check.identity and
+        existing.origin == tdoDeclaredAndChecked:
+      return true
+  derivedTrustedDaemons.add(TrustedDaemonPeer(
+    pid: check.pid,
+    identity: check.identity,
+    name: daemonKindName(kind),
+    contribution: class3Contribution(kind),
+    origin: tdoDeclaredAndChecked,
+    declaredSocket: check.endpoint,
+    checked: check.verified,
+    checkedImage: check.image,
+    checkedProgram: check.program,
+    checkedUid: check.uid))
+  true
+
+# --- Where the declaration lives -------------------------------------------
+#
+# §"Where each declaration lives" gives three layers and says what each one
+# KNOWS: the workspace/machine layer knows which roots are content-addressed,
+# the tool package knows what a tool does, and the project recipe declares
+# NOTHING about monitoring. A host-wide daemon socket is a MACHINE fact — it is
+# a property of how this box was provisioned, not of any project built on it,
+# and the same recipe must build identically on a box that has no such daemon.
+# So the declaration is a machine/user config file and there is deliberately:
+#
+#   * no `repro.nim` surface — a recipe author must never learn that
+#     `runquotad` exists, for the same reason they must not learn that nim
+#     reads its stdlib through the store;
+#   * no `BuildEngineConfig` field and no command-line flag — those are
+#     per-invocation, and "which daemons this host runs" is not;
+#   * no environment variable that NOMINATES a daemon. `REPRO_DAEMONS_CONFIG`
+#     selects a FILE (which is how the tests reach it) and cannot by itself
+#     assert anything about a peer; the file still has to declare, and the
+#     declaration still has to pass the check. `isImmutablePackageStoreRoot`
+#     in `repro_local_store` records what an ambient variable that nominates
+#     an exemption actually cost — a transient value permanently poisoned a
+#     record — and that failure mode is why this one selects a file rather
+#     than naming a socket.
+#
+# The layering mirrors `caches_config.nim`, which is the same shape one
+# problem over: a system file, then a per-user file that extends and overrides
+# it by name, and a default of trusting NOTHING. A user file may declare
+# because the exemption it can buy is bounded twice over — by the check, and by
+# the fact that a user's declaration only ever affects that user's own builds.
+
+const
+  DaemonTrustSystemConfigPath* = "/etc/repro/daemons.conf"
+  DaemonTrustUserConfigRelPath* = "repro/daemons.conf"
+  DaemonTrustConfigEnvVar* = "REPRO_DAEMONS_CONFIG"
+
+type
+  DaemonDeclarationError* = object of CatchableError
+    ## A malformed declaration. Raised rather than skipped: an unreadable
+    ## declaration that silently declared nothing is the "stale declaration
+    ## rots into a permanent no-op" failure this milestone is asked to prevent,
+    ## pointed the other way.
+
+proc declarableDaemonNames*(): string =
+  ## The declarable vocabulary as a diagnostic renders it, DERIVED from the
+  ## enum and from `daemonKindName` rather than restated.
+  ##
+  ## It was restated once, and the failure mode is the reason this proc exists:
+  ## the "unknown daemon" error carried the literal string "runquotad,
+  ## nix-daemon, repro-store-daemon", so a fourth `DeclarableDaemonKind` would
+  ## have left the sentence telling an operator that their perfectly valid
+  ## section name is not declarable — with every case in the suite green,
+  ## because nothing compared the sentence to the vocabulary. `daemonKindName`
+  ## is the single source of truth everywhere else; now it is here too, and the
+  ## suite grades the derivation by requiring every member's name to appear.
+  var names: seq[string] = @[]
+  for kind in DeclarableDaemonKind:
+    names.add(daemonKindName(kind))
+  names.join(", ")
+
+proc parseDeclaredDaemonSections(text, source: string): seq[DeclaredDaemon] =
+  ## Parse one `daemons.conf`. Every key is known or the file is refused —
+  ## a typo must not become a default.
+  result = @[]
+  var stream = newStringStream(text)
+  var parser: CfgParser
+  open(parser, stream, source)
+  defer: parser.close()
+  var current = -1
+  while true:
+    let event = parser.next()
+    case event.kind
+    of cfgEof:
+      break
+    of cfgSectionStart:
+      var name = event.section.strip()
+      # `[daemon runquotad]` is accepted as sugar for `[runquotad]`, the same
+      # allowance `caches_config` makes, because `std/parsecfg` section headers
+      # cannot carry quotes.
+      if name.startsWith("daemon "):
+        name = name["daemon ".len .. ^1].strip()
+      let kind = parseDaemonKind(name)
+      if kind.isNone:
+        raise newException(DaemonDeclarationError,
+          source & ": unknown daemon '" & name & "'. Declarable daemons are " &
+          declarableDaemonNames() & " — the class-3 branch is " &
+          "compiled in per daemon and cannot be asserted by configuration.")
+      result.add(DeclaredDaemon(kind: kind.get(), source: source, uid: -1))
+      current = result.high
+    of cfgKeyValuePair, cfgOption:
+      if current < 0:
+        raise newException(DaemonDeclarationError,
+          source & ": key '" & event.key & "' appears before any [daemon] " &
+          "section")
+      let value = event.value.strip()
+      case event.key.strip().toLowerAscii()
+      of "socket", "endpoint":
+        result[current].endpoint = value
+      of "image":
+        result[current].image = value
+        result[current].assertions.incl(daImage)
+      of "program":
+        result[current].program = value
+        result[current].assertions.incl(daProgram)
+      of "uid":
+        var parsed = 0
+        try:
+          parsed = parseInt(value)
+        except ValueError:
+          raise newException(DaemonDeclarationError,
+            source & ": uid '" & value & "' is not a number")
+        result[current].uid = parsed
+        result[current].assertions.incl(daUid)
+      else:
+        raise newException(DaemonDeclarationError,
+          source & ": unknown key '" & event.key & "'. Known keys are " &
+          "socket, image, program, uid.")
+    of cfgError:
+      raise newException(DaemonDeclarationError, source & ": " & event.msg)
+
+proc loadDeclaredDaemons*(): seq[DeclaredDaemon] =
+  ## Read the machine's daemon declarations, system file then user file, the
+  ## user's entry for a given daemon REPLACING the system's rather than adding
+  ## to it. `REPRO_DAEMONS_CONFIG`, when set, replaces both.
+  ##
+  ## A missing file is not an error and yields no declarations, so a host that
+  ## declares nothing behaves exactly as it does today — DA-2's reach and no
+  ## more. This is the default, and it is the untrusting one.
+  result = @[]
+  var files: seq[string] = @[]
+  let overridePath = getEnv(DaemonTrustConfigEnvVar, "")
+  if overridePath.len > 0:
+    files.add(overridePath)
+  else:
+    when not defined(windows):
+      files.add(DaemonTrustSystemConfigPath)
+    files.add(getConfigDir() / DaemonTrustUserConfigRelPath)
+  for file in files:
+    if file.len == 0 or not fileExists(file):
+      continue
+    var text = ""
+    try:
+      text = readFile(file)
+    except CatchableError as exc:
+      raise newException(DaemonDeclarationError,
+        file & ": cannot be read: " & exc.msg)
+    for decl in parseDeclaredDaemonSections(text, file):
+      var replaced = false
+      for i in 0 .. result.high:
+        if result[i].kind == decl.kind:
+          result[i] = decl
+          replaced = true
+          break
+      if not replaced:
+        result.add(decl)
+
+proc applyDeclaredDaemonTrust*(declarations: openArray[DeclaredDaemon]):
+    seq[DaemonCheckReport] =
+  ## Check every declaration and register the ones that pass. Returns one
+  ## report per declaration, PASS AND FAIL ALIKE.
+  ##
+  ## Every declaration is reported because a declaration is the thing that can
+  ## rot. A daemon that has moved, been renamed, or stopped running leaves a
+  ## line in the config that asserts a peer nobody will ever meet; reporting it
+  ## every build is what stops that line from sitting there until some future
+  ## pid collision makes it mean something. This is rule 3 applied to the
+  ## declaration surface rather than only to the exemptions it buys.
+  result = @[]
+  for decl in declarations:
+    let check = checkDeclaredDaemon(decl)
+    var outcome = check.outcome
+    if outcome == dcoTrusted:
+      if not trustDaemonWeChecked(decl.kind, check):
+        # Unreachable while `checkDeclaredDaemon` and `trustDaemonWeChecked`
+        # agree on what a pass is; reported rather than asserted, because the
+        # direction of a disagreement between them must be a refusal.
+        outcome = dcoNoPeerCredentials
+    result.add(DaemonCheckReport(kind: decl.kind, endpoint: decl.endpoint,
+      outcome: outcome, detail: check.detail, source: decl.source))
+
+proc renderDaemonCheckReport*(report: DaemonCheckReport): string =
+  ## The build-log line for one declaration. Names the daemon, the endpoint,
+  ## the outcome, the §Class 3 branch a PASS bought, and the file that declared
+  ## it — so neither a granted exemption nor a rotted declaration is anonymous.
+  let name = daemonKindName(report.kind)
+  if report.outcome == dcoTrusted:
+    "declared ipc peer '" & name & "' at " & report.endpoint &
+      " checked and trusted — Dependency-Observation-Attribution.md §Class 3 " &
+      class3BranchText(class3Contribution(report.kind)) & " (DA-4); " &
+      report.detail & "; declared in " & report.source
+  else:
+    "declared ipc peer '" & name & "' at " & report.endpoint &
+      " NOT trusted (" & $report.outcome & "): " & report.detail &
+      "; declared in " & report.source
 
 const
   UnmonitoredSubtreeLossDetailPrefix* =
@@ -4087,15 +5149,6 @@ proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
     if peer != 0: "pid:" & peerText & "@" & peerStart
     else: "dest:" & path
 
-proc class3BranchText(contribution: TrustedDaemonContribution): string =
-  ## The §Class 3 branch a trusted daemon satisfies, in the words the operator
-  ## reading a build log needs — "why was this allowed to be forgiven".
-  case contribution
-  of tdcNoContent:
-    "branch (a), contributes no content to the action"
-  of tdcContentAlreadyKeyed:
-    "branch (b), serves class-1 content already in the action key"
-
 proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
                             evidence: var PathSetEvidence;
                             status: var MonitorEvidenceStatus) =
@@ -4186,12 +5239,32 @@ proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
     else:
       let peer = attribution.peers[identity.peer]
       inc attribution.attributed
+      # DA-4 — the diagnostic states the ORIGIN of the trust, not just the fact
+      # of it. §"Derived beats declared" makes the two different kinds of
+      # claim: one the engine derived and cannot have got wrong, one somebody
+      # declared and a check had to establish. An operator auditing an
+      # exemption needs to know which, and for a declared one needs the
+      # endpoint that was named and the assertions the check actually verified
+      # — "checked" with no statement of what was checked is the wish this
+      # milestone exists to replace.
+      let provenance =
+        case peer.origin
+        of tdoSpawned:
+          "spawned by this process"
+        of tdoDeclaredAndChecked:
+          "declared at " & peer.declaredSocket & " and checked (" &
+          ($peer.checked).replace("{", "").replace("}", "") &
+          "), re-validated against the kernel at grading time"
+      let milestone =
+        case peer.origin
+        of tdoSpawned: " (DA-2); forgave: "
+        of tdoDeclaredAndChecked: " (DA-4); forgave: "
       evidence.diagnostics.add(
         "ipc peer attributed to daemon '" & peer.name & "' (pid " &
-        $peer.pid & "), spawned by this process — " &
+        $peer.pid & "), " & provenance & " — " &
         "Dependency-Observation-Attribution.md §Class 3 " &
         class3BranchText(peer.contribution) &
-        " (DA-2); forgave: " & loss)
+        milestone & loss)
   attribution.pendingIpcLosses.setLen(0)
   attribution.ipcRecords.setLen(0)
 
@@ -5064,14 +6137,18 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # legacy linear ``find`` made the per-action wrap-up the dominant
   # term on the 14-app / ~1044-action collections from B1/B3/B5.
   var seen: EvidenceSeenSets
-  # DA-2 — the class-3 trust this action's evidence is graded against, derived
-  # (never declared) from the daemons THIS PROCESS spawned and re-validated
-  # against the kernel on the way in, so a dead or recycled pid exempts nothing.
+  # DA-2/DA-4 — the class-3 trust this action's evidence is graded against:
+  # every daemon THIS PROCESS SPAWNED (derived, DA-2) plus every daemon a
+  # machine declaration named AND a check established the identity of
+  # (declared, DA-4). Both are re-validated against the kernel on the way in,
+  # so a dead pid, a recycled pid, or a peer that has exec'd into a different
+  # program since it was checked exempts nothing.
+  #
   # Shared by BOTH fold sites below — the recognized-`.iomon`-report arm and the
   # wrapped/hosted monitor arm — because an edge that produces its own capture
   # talks to the same daemons as one the engine monitors, and a guard wired at
   # one of two sites is a guard half of production does not execute.
-  var attribution = initMonitorPeerAttribution(derivedTrustedDaemonRegistry())
+  var attribution = initMonitorPeerAttribution(trustedDaemonRegistry())
   # The action's own root image is contributed by `foldLauncherRootImage` at
   # the END of this proc, NOT here. It is a launcher-side reconstruction rather
   # than an observation, and the zero-evidence guard in

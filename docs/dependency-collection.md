@@ -121,6 +121,123 @@ the exception is a property of the tool's runtime behavior. Project recipes
 should not repeat this knowledge, and the build engine should not know about
 specific tools such as Cargo.
 
+## Trusted IPC Peers (`daemons.conf`)
+
+An action that opens an IPC channel to a process outside its own monitored tree
+is graded incomplete, so it never publishes a cache entry and rebuilds on every
+run. That is the correct default: the monitor cannot see what the peer did on
+the action's behalf, so it cannot claim the record is complete.
+
+A few peers can nevertheless be accounted for, because of what they are:
+
+- `runquotad` grants and releases leases and accepts telemetry rows. It serves
+  no file content at all, so an action that talks to it has consumed nothing
+  the monitor failed to see.
+- the **Nix daemon** and reprobuild's own **store daemon** serve
+  content-addressed store paths, whose identity is already in the action key.
+
+`repro` comes to trust such a peer in one of two ways, and they are not equally
+strong.
+
+**Derived** — the build started the daemon itself, so its pid is a fact the
+build holds rather than a claim anyone made. Nothing is configured and nothing
+can be got wrong. This is what happens on a host with no host-wide `runquotad`.
+
+**Declared and checked** — the daemon was already running, so the build has to
+be *told* about it and has to *verify* what it was told. Declare it in
+`/etc/repro/daemons.conf` (system) or `~/.config/repro/daemons.conf` (per user;
+it extends the system file and replaces its entry for a repeated daemon):
+
+```ini
+[runquotad]
+socket  = /run/runquota/runquotad.sock
+program = runquotad
+uid     = 0
+
+[nix-daemon]
+socket  = /nix/var/nix/daemon-socket/socket
+program = nix-daemon
+uid     = 0
+
+[repro-store-daemon]
+socket = /run/user/1000/reprostore-1000.sock
+image  = /nix/store/...-reprobuild/bin/repro
+```
+
+Keys:
+
+- `socket` (required) — the absolute path of the daemon's unix socket. An
+  endpoint that is not an absolute path is refused: the kernel names no peer
+  for a network socket, so a network peer can never be trusted.
+- `image` — the executable the peer must be running, compared against
+  `/proc/<pid>/exe`. The strongest assertion. It is **refused, not weakened**,
+  when that link cannot be read — which is the case for a daemon running as a
+  different user — so do not declare `image` for a root-owned daemon.
+- `program` — the peer's `comm`. Kernel-recorded and world-readable, but a
+  process can set its own, so this narrows accidents rather than attackers.
+- `uid` — the peer's *effective* uid as the kernel reports it at connect time.
+  Un-forgeable — no userspace end contributes to it — and it is re-checked at
+  grading time, because a process can acquire privileges in place (by exec'ing
+  a setuid image, or by restoring a saved set-user-ID) without changing its pid
+  or its kernel start time.
+
+**`image` or `program` is required**, and a section that asserts only `uid` is
+refused. The reason is that the §Class 3 branch — what the daemon contributes —
+is a property of the *program*, so a check that identifies no program has not
+checked the thing the exemption rests on. Concretely: on a socket-activated
+host, the process on the far end of a daemon's socket is `systemd`, and it
+answers *every* socket it activates; a `uid = 0` declaration would trust
+everything that process serves. Requiring `program` refuses it, because
+`systemd` is not `nix-daemon`.
+
+That also means **a socket-activated daemon cannot be declared** until it has
+been activated by something else — which is honest: until then, the peer really
+is not the daemon. A section naming only a socket is refused for the related
+reason: "something is listening at this path" is not a check.
+
+For a root-owned daemon read from an unprivileged `repro`, the shipped shape is
+therefore `program` + `uid`. Neither half is redundant: `program` says *what*
+the peer is, `uid` is the half nothing in userspace can forge.
+
+What a daemon *contributes* — whether it serves content, and whether that
+content is already in the key — is **not** configurable. It is a property of
+the program, compiled into `repro` per daemon, which is why the section name
+comes from a fixed vocabulary and an unknown name (or an unknown key) is an
+error rather than an ignored line.
+
+### What the check establishes, and what it does not
+
+At the start of every build `repro` connects to each declared socket, asks the
+kernel for the peer's credentials (`SO_PEERCRED`), and verifies every assertion
+the declaration made. The pid it obtains is the same fact the monitor reads at
+the action's own connect, and that is what ties the check to the observation.
+Each trusted pid is re-validated when an action's evidence is graded — against
+the kernel's process start time, and against every assertion that was verified
+— so a daemon that has exited, had its pid recycled, exec'd into a different
+program, or raised its privileges stops being trusted without anyone having to
+notice.
+
+It does **not** establish that the declared program deserves trust; that is
+what the fixed vocabulary is for. It does not make a network peer attributable.
+And it cannot identify a privileged daemon's executable from an unprivileged
+build, which is why `program` (with `uid`) is what is available there.
+
+**It also does not scope the trust to the endpoint that was declared.** What
+gets recorded is a *process*: "pid P, running the declared program". The
+monitor's exemption is keyed on the peer pid, so if that same process also
+serves some other socket, an action that talks to *that* socket is forgiven
+too. This is why `image`/`program` is mandatory — it is what makes the recorded
+fact a statement about a program rather than about whatever happens to be
+listening — and it is why each declarable daemon's entry in the fixed
+vocabulary has to be true of *every* channel that program serves, not just of
+the one you declared. All three admitted today are: `runquotad` speaks one
+lease/telemetry protocol wherever it binds, and the two store daemons serve
+content-addressed paths wherever they bind.
+
+Every declaration is reported on every build, passed or failed, so a
+declaration for a daemon that has moved or stopped running is visible rather
+than silently inert.
+
 ## Shell Wrappers
 
 If a recipe uses `sh -c "tool ..."` then the action is associated with `sh`, not

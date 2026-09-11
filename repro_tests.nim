@@ -8721,6 +8721,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_declared_daemon_ipc_trust.nim",
+    binary: "build/test-bin/t_declared_daemon_ipc_trust",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_declared_platforms_change_no_existing_resolution.nim",
     binary: "build/test-bin/t_declared_platforms_change_no_existing_resolution",
     defines: @[],

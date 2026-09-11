@@ -16409,13 +16409,61 @@ proc assembleRunquotadPoolArgs*(extraPools: openArray[BuildPool]): seq[string] =
     result.add("--pool")
     result.add(name & "=" & $seen[name])
 
+var machineDaemonTrustApplied = false
+
+proc applyMachineDeclaredDaemonTrust*(): seq[DaemonCheckReport]
+                                     {.discardable.} =
+  ## DA-4 — read this machine's daemon declarations, check each one, register
+  ## the peers whose check PASSED, and report every declaration either way.
+  ##
+  ## WHY IT IS CALLED FROM `startAutoRunQuotaIfNeeded` AND NOT FROM THE BUILD
+  ## COMMANDS. There are three `repro` entry points that start a build and each
+  ## calls `startAutoRunQuotaIfNeeded`; a call added beside those three is a
+  ## call the fourth one will not have. This function is what every build path
+  ## already funnels through, and the call sits ABOVE its first early return so
+  ## the topologies DA-2 cannot reach — the adopted host-wide daemon, the
+  ## inherited `RUNQUOTA_SOCKET`, the bypassed-RunQuota build — are exactly the
+  ## ones it runs on. `Dependency-Observation-Attribution.md` records the
+  ## general form of this mistake twice (a guard wired at the per-edge lookup
+  ## that `tryFastNoopCacheHits` never enters; a fold arm graded at one of two
+  ## sites); this is the same shape with launch paths in place of policy kinds.
+  ##
+  ## A MALFORMED DECLARATION IS LOUD AND NON-FATAL. Refusing to build because
+  ## `/etc/repro/daemons.conf` has a typo would take the whole host down for a
+  ## file whose only power is to GRANT trust; trusting nothing and saying so is
+  ## the fail-closed direction and leaves every build correct, merely slower.
+  if machineDaemonTrustApplied:
+    return @[]
+  machineDaemonTrustApplied = true
+  var declarations: seq[DeclaredDaemon] = @[]
+  try:
+    declarations = loadDeclaredDaemons()
+  except CatchableError as exc:
+    stderr.writeLine("repro: declared ipc peer trust disabled — " & exc.msg)
+    return @[]
+  if declarations.len == 0:
+    return @[]
+  result = applyDeclaredDaemonTrust(declarations)
+  for report in result:
+    stderr.writeLine("repro: " & renderDaemonCheckReport(report))
+
+proc forgetMachineDeclaredDaemonTrust*() =
+  ## Re-arm the once-guard above. For tests that drive the production wiring
+  ## more than once in a process; production calls it nowhere.
+  machineDaemonTrustApplied = false
+
 proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
                                 extraPools: openArray[BuildPool] = []):
     owned(Process) =
-  ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim`, which
-  ## grades DA-2's PRODUCTION WIRING rather than its mechanism: this is the one
-  ## call site that registers a trusted daemon, and a suite that registers by
-  ## hand proves the mechanism and never the wire.
+  ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
+  ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
+  ## PRODUCTION WIRING of DA-2 and DA-4 rather than their mechanisms: this is
+  ## the one call site that registers a trusted daemon of either kind, and a
+  ## suite that registers by hand proves the mechanism and never the wire.
+  # DA-4 — first, and above every early return below, because the declared
+  # peers are the ones the spawn arm can never reach. See
+  # `applyMachineDeclaredDaemonTrust`.
+  applyMachineDeclaredDaemonTrust()
   if bypassRunQuota or not autoRunQuotaEnabled():
     return nil
   # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
@@ -16618,10 +16666,19 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
       #
       # Registered only on the arm that SPAWNED it. The two early returns above
       # — `RUNQUOTA_SOCKET` already serviced, and a daemon a previous build left
-      # running — reuse a daemon this process did not start, and this milestone
-      # trusts nothing it did not spawn. Trusting a reachable daemon by name or
-      # by socket is DECLARED attribution and belongs to DA-4, which owes it a
-      # check.
+      # running — reuse a daemon this process did not start, and DERIVED trust
+      # covers nothing it did not spawn.
+      #
+      # DA-4 NOW COVERS THOSE ARMS, AND DERIVED IS STILL THE PREFERRED ROUTE
+      # WHERE IT IS AVAILABLE. `applyMachineDeclaredDaemonTrust`, called at the
+      # top of this proc and therefore above every early return, trusts an
+      # ADOPTED daemon when the machine declares it and the declaration's check
+      # passes. That is strictly weaker than this line: holding the `Process`
+      # proves the spawn, while a check establishes an identity from what the
+      # kernel will vouch for and is bounded by what the kernel will vouch for
+      # (see `checkDeclaredDaemon`). So the spawn arm keeps registering
+      # derivedly even on a host that also declares this daemon; the two facts
+      # coexist in the registry and the diagnostic says which one forgave.
       #
       # WHAT THAT COSTS, STATED HERE BECAUSE HERE IS WHERE AN OPERATOR MEETS
       # IT. Spawn-only is a real constraint and not a formality; DA-2's reach
@@ -16646,7 +16703,10 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
       #     is reachable before we get here, the second early return fires, and
       #     DA-2 is ENTIRELY INERT — on precisely the topology a shared lease
       #     coordinator exists for. So is a nested `repro` that inherited
-      #     `RUNQUOTA_SOCKET` from its parent.
+      #     `RUNQUOTA_SOCKET` from its parent. **This row is DA-4's, and it is
+      #     covered when `/etc/repro/daemons.conf` declares that endpoint and
+      #     the declaration's check passes; it is still uncovered on a host
+      #     that declares nothing, which is the untrusting default.**
       #   * Windows: INERT AFTER THE FIRST BUILD. The daemon binds the per-user
       #     default pipe and `releaseAutoRunQuotaProcess` deliberately does not
       #     terminate it (a concurrent invocation may have adopted it), so
