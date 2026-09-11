@@ -1365,11 +1365,14 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
   ## Include split-output runtime and development dependencies declared
   ## by Nix outputs. Their lib/include/pkg-config directories must feed
   ## the same action environment as the selected output.
+  ## Compiler wrappers also record their selected runtime in orig-libc.
+  ## It is not a propagated build input, but install normalization needs
+  ## it on LIBRARY_PATH to retain the libc matching the linked PT_INTERP.
   var index = 0
   while index < paths.len:
     let supportDir = paths[index] / "nix-support"
     for manifestName in ["propagated-build-inputs",
-                         "propagated-native-build-inputs"]:
+                         "propagated-native-build-inputs", "orig-libc"]:
       let manifest = supportDir / manifestName
       if not fileExists(extendedPath(manifest)):
         continue
