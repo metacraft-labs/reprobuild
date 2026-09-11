@@ -488,6 +488,60 @@ proc msiIdentifier*(value: string): string =
   if ident.len > 72: ident = ident[0 ..< 72]
   ident
 
+proc msiOrdinalIdentifier*(prefix: string; ordinal: int;
+                           value: string): string =
+  ## An MSI identifier that is UNIQUE BY CONSTRUCTION, for the tables
+  ## where one has to be.
+  ##
+  ## ## Why ``msiIdentifier`` is not enough, measured rather than argued
+  ##
+  ## ``msiIdentifier`` sanitises and then TRUNCATES at 72 characters,
+  ## and truncation is not injective: two paths that agree for their
+  ## first ~68 characters collapse onto ONE identifier. Nothing in the
+  ## layer noticed until a Windows package was built with a real
+  ## payload, because M0's sample has two files and the deepest path in
+  ## it is ``bin/hello``. With 7,666 files, ``light`` stopped with
+  ## hundreds of::
+  ##
+  ##   error LGHT0091 : Duplicate symbol 'File:fil__5876_share_repro_
+  ##       src_runquota_build_nimcache_t_observation_store_retent'
+  ##
+  ## and the mechanism was worse than a rejected name. The FILE ids
+  ## already carried a unique ordinal at the front, so they were fine;
+  ## it was the DIRECTORY ids that collided, and a collision there makes
+  ## two distinct directory nodes share one ``Directory Id``, so the
+  ## renderer emits the SAME component list under both -- which is how a
+  ## file id that is unique by construction came to appear twice.
+  ##
+  ## ## The shape, and why the ordinal goes in FRONT and the path's TAIL
+  ## ## is what survives
+  ##
+  ## ``<prefix><ordinal>_<...tail of the sanitised value>``. The ordinal
+  ## is what makes the result injective and it must not be truncatable,
+  ## so it leads. What is kept of the value is its END rather than its
+  ## beginning, because the distinctive part of a long install path is
+  ## the leaf: ``..._runquota_build_nimcache_types.nim.c`` identifies a
+  ## row to a human reading a WiX error, and ``share_repro_src_run...``
+  ## identifies several thousand.
+  ##
+  ## The ordinal is assigned in the producer's own deterministic
+  ## traversal order, so two builds of one tree produce the same ids --
+  ## which the artifact's reproducibility needs and a digest-based
+  ## scheme would only approximate.
+  let head = prefix & $ordinal & "_"
+  var tail = ""
+  for ch in value:
+    if ch.isAlphaNumeric or ch == '_' or ch == '.': tail.add(ch)
+    else: tail.add('_')
+  let room = 72 - head.len
+  doAssert room > 0,
+    "msiOrdinalIdentifier: the prefix and ordinal alone exceed the " &
+    "MSI Identifier limit: " & head
+  if tail.len > room: tail = tail[tail.len - room .. ^1]
+  result = head & tail
+  doAssert result.len <= 72, result
+  doAssert result[0].isAlphaAscii or result[0] == '_', result
+
 proc msiServiceRows*(dist: Distribution): seq[MsiServiceRow] =
   ## Project the abstract services onto the SCM's model, dropping what
   ## does not cross. See ``MsiServiceRow``.

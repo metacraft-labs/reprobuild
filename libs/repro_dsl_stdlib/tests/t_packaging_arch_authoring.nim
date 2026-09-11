@@ -171,8 +171,13 @@ suite "packaging: the Arch producer's authoring is pacman-shaped":
       if seenDirFlag and (a == "usr" or a == "etc" or a == "lib" or
           a.startsWith(".")):
         members.add(a)
-    check members.len > 0
+    # Non-vacuity: the scan must have found the metadata members, or
+    # every assertion below is about an empty list.
+    check ".PKGINFO" in members
+    check ".MTREE" in members
+    check members.len > 1
     check members[0] == ".PKGINFO"
+    check members[1] == ".MTREE"
     check "." notin members
     for m in members:
       check not m.startsWith("./")
@@ -336,3 +341,122 @@ suite "packaging: the Arch producer's authoring is pacman-shaped":
     check "--owner=0" in first
     check "--group=0" in first
     check "--mtime=@" & $archSample().sourceDateEpoch in first
+
+  test "the .MTREE is written, and pacman -Qkk is why":
+    # M1's N15. Without this member ``pacman -Qkk`` answers
+    # ``reprobuild: no mtree file`` and EXITS 0 -- it does not fail, it
+    # silently checks nothing, which is the worst of the three possible
+    # outcomes.
+    resetBuildActionRegistry()
+    let artifact = archPackage(archSample())
+    var mtreeEdges = 0
+    var script = ""
+    for act in registeredBuildActions():
+      if not act.id.endsWith("mtree"): continue
+      inc mtreeEdges
+      for arg in act.call.arguments:
+        if arg.name == "command": script = arg.encodedValue
+    check mtreeEdges == 1
+    check script.len > 0
+    check script.startsWith("set -eu\n")
+    # It is the member the ARCHIVE names, not a file beside the tree.
+    var archiveInputs: seq[string] = @[]
+    for act in registeredBuildActions():
+      if act.id == artifact.edge.id: archiveInputs = act.inputs
+    check (artifact.tree.root & "/.MTREE") in archiveInputs
+
+  test "every ambient field is overridden in the mtree, and asserted":
+    # An mtree is a RECORD OF THE STAGED TREE, and the staged tree's own
+    # metadata is exactly what the rest of this producer keeps out of
+    # the artifact. Each override below has a measured reason; see the
+    # producer's header.
+    resetBuildActionRegistry()
+    discard archPackage(archSample())
+    var script = ""
+    for act in registeredBuildActions():
+      if act.id.endsWith("mtree"):
+        for arg in act.call.arguments:
+          if arg.name == "command": script = arg.encodedValue
+    check script.len > 0
+    check script.contains("--format=mtree")
+    # The member list is named ABSOLUTELY, because bsdtar reads it from
+    # inside a ``cd`` into the staged tree and every path in the graph
+    # is relative to the build tree. The first real build died with
+    # ``bsdtar: Couldn't open build/dist/.../mtree-members.txt``.
+    check script.contains("__wd=$(pwd)")
+    check script.contains("-T \"$__list_abs\"")
+    # uid/gid: the archive is written --owner=0 --group=0, so the
+    # builder's own uid must not reach the record.
+    check script.contains("--uid 0 --gid 0 --uname root --gname root")
+    # time: pacman compares it against the INSTALLED mtime, which is
+    # what ``tar --mtime=@<epoch>`` wrote -- so it is the same one
+    # number, and NOT the staged files' real mtimes.
+    check script.contains("--mtime '@315532800'")
+    check script.contains("time,")
+    # order: libarchive's tar has no --sort=name, so recursion would
+    # record readdir order.
+    check script.contains("LC_ALL=C sort")
+    check script.contains("-n -T ")
+    # the gzip wrapper: bsdtar's own -z stamps the wall clock into the
+    # gzip header.
+    check script.contains("gzip -n -9 -c")
+    check not script.contains("bsdtar -czf")
+    # ...and it does not record ITSELF, which on a rebuild into a dirty
+    # tree would carry a stale digest.
+    check script.contains("! -path './.MTREE'")
+
+  test "the mtree step asserts what it produced, in four ways":
+    # A generated metadata member that nothing downstream parses at
+    # build time is the easiest thing in this layer to get silently
+    # wrong: every wrong version builds, installs and runs, and reports
+    # four thousand mismatches on a user's machine.
+    resetBuildActionRegistry()
+    discard archPackage(archSample())
+    var script = ""
+    for act in registeredBuildActions():
+      if act.id.endsWith("mtree"):
+        for arg in act.call.arguments:
+          if arg.name == "command": script = arg.encodedValue
+    # (1) every tool it needs is on the PATH...
+    for tool in ["find", "sort", "bsdtar", "gzip", "grep"]:
+      check script.contains("command -v " & tool & " > /dev/null")
+    # (2) ...the tree had members to record...
+    check script.contains("no members to record")
+    # (3) ...bsdtar wrote an mtree and recorded all of them...
+    check script.contains("did not write an mtree")
+    check script.contains("records %s entries for a tree")
+    # (4) ...and EVERY entry carries the one epoch, which is the check
+    # that catches a --mtime that silently did nothing.
+    check script.contains("carry the build epoch")
+    check script.contains("time=315532800")
+
+  test "the installed size EXCLUDES the two metadata members":
+    # A correction the second metadata member forced. The size edge is
+    # ordered before ``.PKGINFO`` on a CLEAN build, so ``find`` never
+    # saw it; on a rebuild into a tree that still held the previous
+    # run's metadata it would have, and the number would drift by the
+    # size of those files -- six hundred bytes for ``.PKGINFO``, which
+    # the container gate's tolerance hid, and rather more for a
+    # ``.MTREE`` over four thousand files, which it would not.
+    resetBuildActionRegistry()
+    let artifact = archPackage(archSample())
+    var sizeScript = ""
+    for act in registeredBuildActions():
+      if act.id.endsWith("installed-size"):
+        for arg in act.call.arguments:
+          if arg.encodedValue.contains("wc -c"):
+            sizeScript = arg.encodedValue
+    check sizeScript.len > 0
+    check sizeScript.contains("! -path '" & artifact.tree.root & "/.PKGINFO'")
+    check sizeScript.contains("! -path '" & artifact.tree.root & "/.MTREE'")
+    # Both ``find`` invocations, not just the counting one -- the count
+    # and the byte sum have to measure the same set or the refusal on a
+    # zero count would be guarding a different number.
+    var occurrences = 0
+    var rest = sizeScript
+    while true:
+      let cut = rest.find("! -path")
+      if cut < 0: break
+      inc occurrences
+      rest = rest[cut + 7 .. ^1]
+    check occurrences == 4

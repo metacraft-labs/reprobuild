@@ -237,13 +237,17 @@
     };
     codetracer-native-recorder = {
       # ct_interpose lives under ``ct_interpose/src`` in the native-recorder
-      # repo. ``repro_monitor_hooks/macos_interpose_runtime`` imports
-      # ``ct_interpose/propagation`` and the cross-platform monitor shim uses
-      # ``ct_interpose/hook_registry``; config.nims threads CT_INTERPOSE_SRC
-      # onto Nim's --path (falling back to a sibling checkout or a vendored
-      # copy when the env var is unset). The Nix build is sandboxed and sees
-      # neither, so we must seed CT_INTERPOSE_SRC from this input. In the
-      # CodeTracer workspace this input ``follows`` codetracer's own
+      # repo. This comment USED TO SAY that config.nims threads
+      # CT_INTERPOSE_SRC onto Nim's --path, and that stopped being true at
+      # ``86cb1bf6`` (the ct_interpose -> nim-stackable-hooks migration),
+      # which removed the only reader. ``grep -c CT_INTERPOSE_SRC
+      # config.nims`` answers 0 today, so the variable is set by this flake
+      # and read by nothing; the packaging layer's wrapper set and this
+      # derivation's ``--set-default`` loop have both dropped it. The
+      # ``export``/attribute forms below are inert leftovers, kept only
+      # because removing them changes this derivation's hash for no
+      # behavioural gain -- tracked as a residual rather than left implied.
+      # In the CodeTracer workspace this input ``follows`` codetracer's own
       # native-recorder input, so a local sibling checkout is used.
       #
       # We use the ``git+https`` URL form (git wire protocol) rather than
@@ -471,9 +475,9 @@
             nimonySrc = nim-nimony-src;
           };
           # CT_INTERPOSE_SRC points at the directory that *contains* the
-          # ``ct_interpose`` package (config.nims validates it by probing
-          # ``<dir>/ct_interpose/hook_registry.nim``), which is
-          # ``ct_interpose/src`` inside the native-recorder checkout.
+          # ``ct_interpose`` package, which is ``ct_interpose/src`` inside
+          # the native-recorder checkout. NOTHING READS IT since
+          # ``86cb1bf6``; see the note on the input above.
           ctInterposeSrc = "${codetracer-native-recorder}/ct_interpose/src";
           # CodeTracer's top-level ct entry point imports the span-stream
           # writer. Fail during Nix evaluation if a future pin regression
@@ -951,7 +955,6 @@
                   --set-default CODETRACER_PINNED_SRC ${codetracer-src}/src \
                   --set-default REPRO_CT_TEST_RUNNER_SRC ${reprobuild-ct-test-runner-src} \
                   --set-default REPRO_TEST_ADAPTERS_SRC ${reprobuild-test-adapters-src}/src \
-                  --set-default CT_INTERPOSE_SRC ${ctInterposeSrc} \
                   --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
                   --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
                   --set-default RUNQUOTA_SRC ${runquota-src} \
@@ -1090,7 +1093,6 @@
                 CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
-                CT_INTERPOSE_SRC|${ctInterposeSrc}
                 REPROBUILD_USE_SYSTEM_HASH_LIBS|1
                 RUNQUOTA_SRC|${runquota-src}
                 SQLITE_PREFIX|${pkgs.sqlite.out}

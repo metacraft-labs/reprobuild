@@ -61,12 +61,51 @@
 ## wants zstd changes one flag once ``packages/zstd.nim`` grows a typed
 ## CLI surface.
 ##
+## ## TRAP 3: ``pacman -Qkk`` without a ``.MTREE`` EXITS 0
+##
+## M1's N15, and the reason this producer now has a second archiver
+## dependency. A package with no ``.MTREE`` member is not rejected and
+## does not warn: ``pacman -Qk`` answers ``N total files, 0 missing
+## files`` and exits 0, and ``pacman -Qkk`` — the FULL check, the one a
+## user runs when they want file properties verified — answers
+## ``reprobuild: no mtree file`` AND ALSO EXITS 0. The package does not
+## visibly lack file-property verification; it quietly forfeits it.
+##
+## So the member is generated, and generating it turned out to be the
+## interesting part, because an mtree is a RECORD OF THE STAGED TREE
+## and the staged tree's own file metadata is exactly what the rest of
+## this producer refuses to let into the artifact:
+##
+## * **``time``** cannot be omitted. ``pacman -Qkk`` compares
+##   ``st_mtime`` against the mtree's ``time`` UNCONDITIONALLY
+##   (``check_file_time`` in pacman's ``src/pacman/check.c``), so an
+##   mtree without the field reads as time 0 and every file reports
+##   ``Modification time mismatch``. It also cannot be the staged
+##   files' real mtimes, because ``tar --mtime=@<epoch>`` rewrites them
+##   in the archive — the INSTALLED mtime is the epoch. So the mtree is
+##   written with ``bsdtar --mtime '@<epoch>'``, the same one number.
+## * **``uid``/``gid``** are forced to 0 with ``--uid 0 --gid 0``, for
+##   the same reason: the archive is written ``--owner=0 --group=0
+##   --numeric-owner``, so the installed files are root's and the
+##   builder's own uid must not reach the record.
+## * **member ORDER** is ours. libarchive's tar has no ``--sort=name``,
+##   so letting it recurse would record readdir order and two builds of
+##   one tree would emit different mtrees. The list is built with
+##   ``find | sort`` and passed with ``-T``/``-n``.
+## * **the gzip wrapper** is written by ``gzip -n`` rather than by
+##   ``bsdtar -z``, because bsdtar's gzip writer stamps the WALL CLOCK
+##   into the gzip header (measured: ``1f 8b 08 00 e9 54 a3 6a``) and
+##   ``gzip -n`` writes a zero there.
+##
+## ``md5digest`` is deliberately not emitted — ``sha256digest`` is, and
+## pacman checks whichever is present.
+##
 ## ## What is NOT here, and is recorded rather than faked
 ##
-## * ``.MTREE`` — pacman uses it for ``pacman -Qkk`` verification and
-##   installs fine without it. Generating one needs ``bsdtar
-##   --format=mtree``, which is libarchive's tar and not GNU's, so it
-##   would be a second archiver dependency for a verification feature.
+## * ``.BUILDINFO`` — what ``devtools`` and Arch's reproducible-builds
+##   tooling read. It records the exact package set of the build
+##   CHROOT, which is a fact about an Arch build host; this package is
+##   not built on one.
 ## * ``.INSTALL`` — Arch's post-install hook script. This package's
 ##   services are not enabled at install time on ANY format (see
 ##   ``ServiceDef.startAtBoot``), so there is nothing for it to do.
@@ -84,11 +123,18 @@ import ../../packages/tar as tar_module
 import ../../packages/sh as sh_module
 {.push warning[UnusedImport]: off.}
 import ../../packages/gzip
-# Imported for its REGISTRATION side effect: the installed-size edge
-# execs ``find``, which is findutils and not the coreutils that
-# ``install`` brings, and an action's PATH holds only the tools its edge
-# NAMED. See ``ArchFindSelector``.
-import ../../packages/host_system_tools
+# libarchive's tar, for the ``.MTREE`` member and for nothing else. Never
+# typed at a call site here -- see ``packages/bsdtar.nim`` for why the
+# mtree step is a script rather than a typed CLI.
+import ../../packages/bsdtar
+# GNU grep, for the mtree post-conditions. A generated metadata member
+# that is checked only for existence is the shape of check this
+# milestone has already found three vacuous instances of.
+import ../../packages/host_system_tools as arch_host_tools
+# ``host_system_tools`` above is imported for its REGISTRATION side
+# effect: the installed-size edge execs ``find``, which is findutils and
+# not the coreutils that ``install`` brings, and an action's PATH holds
+# only the tools its edge NAMED. See ``ArchFindSelector``.
 {.pop.}
 
 {.experimental: "callOperator".}
@@ -100,12 +146,23 @@ const
   ArchGzipSelector* = "gzip"
   ArchShSelector* = "sh"
   ArchFindSelector* = "find"
-    ## findutils, for the installed-size measurement, and NOT part of
-    ## the coreutils the ``install-file`` package brings.
+    ## findutils, for the installed-size measurement and for the
+    ## ``.MTREE`` member list, and NOT part of the coreutils the
+    ## ``install-file`` package brings.
     ##
     ## Declared because the first Arch package this producer built
     ## reported ``size = 0``. See ``installedSizeScript`` for how an
     ## absent tool became a plausible number rather than a failure.
+  ArchBsdtarSelector* = "bsdtar"
+    ## libarchive's tar, the only one that writes an mtree. A SECOND
+    ## archiver dependency, taken deliberately: see TRAP 3 in the
+    ## header for what the package forfeits without it.
+  ArchGrepSelector* = "grep"
+    ## For the ``.MTREE`` post-conditions. The member is metadata
+    ## nothing downstream parses at build time, so "it exists" is the
+    ## easiest check to write and the least informative one — the same
+    ## shape as the three vacuous assertions this milestone has already
+    ## found.
 
 proc archArtifactName*(dist: Distribution): string =
   ## makepkg's own convention:
@@ -175,6 +232,142 @@ proc archPkgInfoText*(dist: Distribution; withGlibcFloor = false): string =
     if c.role == crConfigFile:
       result.add("backup = " & installRelPath(dist, c) & "\n")
 
+const
+  ArchPkgInfoMember* = ".PKGINFO"
+  ArchMtreeMember* = ".MTREE"
+    ## The two metadata members. Named as constants because three
+    ## separate steps have to agree about them: the size measurement
+    ## must EXCLUDE them, the mtree must record ``.PKGINFO`` and not
+    ## itself, and the archive must name them first and in this order.
+
+proc metadataExclusions*(treeRoot: string): string =
+  ## ``find`` predicates that skip the two metadata members.
+  ##
+  ## The installed size is a measurement of the PAYLOAD: makepkg does
+  ## not count ``.PKGINFO`` or ``.MTREE`` either, and pacman reports the
+  ## number as the space the package occupies once unpacked — neither
+  ## metadata member is unpacked anywhere.
+  ##
+  ## Stated as an exclusion rather than relied on through ordering, and
+  ## that is a correction rather than a precaution. The size edge is
+  ## created BEFORE ``.PKGINFO`` is staged and is ordered before it by
+  ## the substitution's own input edge, so on a clean build ``find``
+  ## never saw it. On an INCREMENTAL rebuild into a tree that still held
+  ## the previous run's metadata it would have, and the number would
+  ## have drifted by the size of those files — six hundred bytes for
+  ## ``.PKGINFO``, which the gate's tolerance hid, and rather more for
+  ## a ``.MTREE`` over four thousand files, which it would not.
+  " ! -path " & shellSingleQuote(treeRoot & "/" & ArchPkgInfoMember) &
+    " ! -path " & shellSingleQuote(treeRoot & "/" & ArchMtreeMember)
+
+proc mtreeScript*(treeRoot, listPath, rawPath: string;
+                  sourceDateEpoch: int64): string =
+  ## Write the ``.MTREE`` member: libarchive's mtree over a SORTED
+  ## member list, with every ambient field overridden, gzipped by
+  ## ``gzip -n``.
+  ##
+  ## See TRAP 3 in this module's header for why each override is there.
+  ## What follows is why each POST-CONDITION is there, which is a
+  ## different question: an mtree is metadata that nothing downstream
+  ## parses at build time, so every way of getting it wrong produces a
+  ## package that builds, installs and runs — and whose ``pacman -Qkk``
+  ## then reports four thousand mismatches, or silently verifies
+  ## nothing, on a user's machine.
+  ##
+  ## So the script asserts: that it found files to record at all; that
+  ## what bsdtar wrote is an mtree (first line ``#mtree``); that it has
+  ## at least as many entry lines as the list had members; and that
+  ## EVERY entry carries the one epoch. The last is the one that
+  ## matters, because ``--mtime`` silently doing nothing is exactly the
+  ## failure that would put the builder's wall clock into a record
+  ## ``pacman -Qkk`` compares against.
+  let quotedRoot = shellSingleQuote(treeRoot)
+  let quotedList = shellSingleQuote(listPath)
+  let quotedRaw = shellSingleQuote(rawPath)
+  let outPath = treeRoot & "/" & ArchMtreeMember
+  result = "set -eu\n"
+  result.add("# Generated by the reprobuild DSL packaging layer\n")
+  # THE MEMBER LIST HAS TO BE NAMED ABSOLUTELY, and this is the first
+  # real build's finding rather than a precaution. Every path in the
+  # graph is relative to the build tree, and bsdtar reads the list from
+  # INSIDE a ``cd`` into the staged tree -- so a relative ``-T`` operand
+  # is resolved against the wrong directory and the step dies with
+  # ``bsdtar: Couldn't open build/dist/.../mtree-members.txt: No such
+  # file or directory``. The ``case`` keeps an absolute path absolute,
+  # so this does not become a rule about where graph paths may point.
+  result.add("__wd=$(pwd)\n")
+  for tool in ["find", "sort", "bsdtar", "gzip", "grep"]:
+    result.add("if ! command -v " & tool & " > /dev/null 2>&1; then\n")
+    result.add("  printf '%s\\n' 'packaging: " & tool &
+      " is not on this action PATH; the .MTREE member cannot be" &
+      " written, and a package without one makes pacman -Qkk verify" &
+      " nothing and exit 0' >&2\n")
+    result.add("  exit 1\n")
+    result.add("fi\n")
+  result.add("mkdir -p -- \"$(dirname -- " & quotedList & ")\"\n")
+  # ``! -path <root>/.MTREE``: on a rebuild into a tree that still holds
+  # the previous run's member, an mtree that recorded ITSELF would carry
+  # a stale digest and would differ between a clean and an incremental
+  # build.
+  result.add("(cd " & quotedRoot & " && find . -mindepth 1 ! -path " &
+    shellSingleQuote("./" & ArchMtreeMember) &
+    " -print) | LC_ALL=C sort > " & quotedList & "\n")
+  result.add("__list=" & quotedList & "\n")
+  result.add("case \"$__list\" in\n")
+  result.add("  /*) __list_abs=\"$__list\" ;;\n")
+  result.add("  *) __list_abs=\"$__wd/$__list\" ;;\n")
+  result.add("esac\n")
+  result.add("members=$(wc -l < " & quotedList & ")\n")
+  result.add("members=$(( members + 0 ))\n")
+  result.add("if [ \"$members\" -le 0 ]; then\n")
+  result.add("  printf '%s\\n' 'packaging: the staged tree has no" &
+    " members to record in .MTREE' >&2\n")
+  result.add("  exit 1\n")
+  result.add("fi\n")
+  # ``!all,use-set`` starts from nothing and turns on exactly the
+  # keywords pacman compares. ``md5`` is left off: pacman checks
+  # whichever digest is present and sha256 is the one it prefers.
+  result.add("(cd " & quotedRoot & " && bsdtar -cf - --format=mtree" &
+    " --options=" &
+    shellSingleQuote("!all,use-set,type,uid,gid,mode,time,size," &
+      "sha256,link") &
+    " --uid 0 --gid 0 --uname root --gname root" &
+    " --mtime " & shellSingleQuote("@" & $sourceDateEpoch) &
+    " -n -T \"$__list_abs\") > " & quotedRaw & "\n")
+  result.add("read -r first < " & quotedRaw & " || first=''\n")
+  result.add("if [ \"$first\" != '#mtree' ]; then\n")
+  result.add("  printf 'packaging: bsdtar did not write an mtree" &
+    " (first line was %s)\\n' \"$first\" >&2\n")
+  result.add("  exit 1\n")
+  result.add("fi\n")
+  result.add("entries=$(grep -c " & shellSingleQuote("^\\./") & " " &
+    quotedRaw & " || true)\n")
+  result.add("entries=$(( entries + 0 ))\n")
+  result.add("if [ \"$entries\" -lt \"$members\" ]; then\n")
+  result.add("  printf 'packaging: .MTREE records %s entries for a tree" &
+    " of %s members\\n' \"$entries\" \"$members\" >&2\n")
+  result.add("  exit 1\n")
+  result.add("fi\n")
+  # EVERY entry carries the one epoch. pacman compares this field
+  # against the installed file's mtime, and the installed mtime is what
+  # ``tar --mtime=@<epoch>`` wrote -- so an entry with any other value
+  # is a mismatch this package would report on a user's machine.
+  result.add("stamped=$(grep -c " &
+    shellSingleQuote("^\\./.*time=" & $sourceDateEpoch & "\\.") &
+    " " & quotedRaw & " || true)\n")
+  result.add("stamped=$(( stamped + 0 ))\n")
+  result.add("if [ \"$stamped\" -ne \"$entries\" ]; then\n")
+  result.add("  printf 'packaging: %s of %s .MTREE entries carry the" &
+    " build epoch; pacman -Qkk compares this field against the" &
+    " installed mtime\\n' \"$stamped\" \"$entries\" >&2\n")
+  result.add("  exit 1\n")
+  result.add("fi\n")
+  # ``gzip -n`` rather than ``bsdtar -z``: bsdtar's gzip writer stamps
+  # the wall clock into the gzip header.
+  result.add("gzip -n -9 -c " & quotedRaw & " > " &
+    shellSingleQuote(outPath) & "\n")
+  result.add("gzip -t " & shellSingleQuote(outPath) & "\n")
+
 proc installedSizeScript*(treeRoot, outPath: string): string =
   ## Sum the apparent size of every regular file under ``treeRoot``.
   ##
@@ -213,7 +406,7 @@ proc installedSizeScript*(treeRoot, outPath: string): string =
   result.add("  exit 1\n")
   result.add("fi\n")
   result.add("files=$(find " & shellSingleQuote(treeRoot) &
-    " -type f | wc -l)\n")
+    " -type f" & metadataExclusions(treeRoot) & " | wc -l)\n")
   result.add("if [ \"$(( files + 0 ))\" -eq 0 ]; then\n")
   result.add("  printf 'packaging: no regular files under %s; refusing" &
     " to report an installed size of 0\\n' " &
@@ -221,7 +414,8 @@ proc installedSizeScript*(treeRoot, outPath: string): string =
   result.add("  exit 1\n")
   result.add("fi\n")
   result.add("bytes=$(find " & shellSingleQuote(treeRoot) &
-    " -type f -exec cat -- {} + | wc -c)\n")
+    " -type f" & metadataExclusions(treeRoot) &
+    " -exec cat -- {} + | wc -c)\n")
   # ``$(( ))`` both normalises ``wc``'s leading whitespace and forces
   # the value to be a number: a non-numeric one makes the shell exit
   # here rather than reaching the write.
@@ -314,14 +508,51 @@ proc archPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
   var substitutions = @[(InstalledSizeToken, sizePath)]
   if withFloor:
     substitutions.add((GlibcFloorToken, tree.glibcFloorPath))
-  tree.addGeneratedFile(".PKGINFO", archPkgInfoText(dist, withFloor),
+  tree.addGeneratedFile(ArchPkgInfoMember, archPkgInfoText(dist, withFloor),
     0o644, site, substitutions = substitutions)
+
+  # ---- the .MTREE --------------------------------------------------
+  #
+  # AFTER ``.PKGINFO``, because makepkg's mtree records it and pacman
+  # would otherwise have a member the record does not mention. BEFORE
+  # the archive, obviously, and ordered by ``after = tree.terminal``,
+  # which at this point includes ``.PKGINFO``'s own install edge.
+  #
+  # NOT staged through ``addGeneratedFile``: that path writes TEXT into
+  # the tree through an install edge, and this member is a gzip stream
+  # produced by two tools from the finished tree. It is written
+  # directly into the tree root and named as an explicit archive
+  # member and as an explicit input of the archive edge.
+  let mtreeListPath = tree.genRoot & "/" & tree.idPrefix & "mtree-members.txt"
+  let mtreeRawPath = tree.genRoot & "/" & tree.idPrefix & "mtree.txt"
+  let mtreePath = tree.root & "/" & ArchMtreeMember
+  let mtreeEdge = sh_module.shell(
+    mtreeScript(tree.root, mtreeListPath, mtreeRawPath,
+      dist.sourceDateEpoch),
+    actionId = tree.idPrefix & "mtree",
+    after = tree.terminal,
+    # Every staged file is an input: the mtree carries each one's size
+    # and sha256, so a changed byte anywhere must rewrite it.
+    extraInputs = tree.stagedPaths(),
+    extraOutputs = @[mtreePath, mtreeRawPath, mtreeListPath])
+  declareProducerTool(site, mtreeEdge.id, ArchShSelector)
+  declareProducerTool(site, mtreeEdge.id, ArchBsdtarSelector)
+  declareProducerTool(site, mtreeEdge.id, ArchGzipSelector)
+  declareProducerTool(site, mtreeEdge.id, ArchFindSelector)
+  declareProducerTool(site, mtreeEdge.id, ArchGrepSelector)
+  # ``sort``/``wc``/``mkdir``/``dirname`` -- coreutils, through the
+  # ``install`` executable's package.
+  declareProducerTool(site, mtreeEdge.id, InstallSelector)
+  tree.terminal.add(mtreeEdge)
 
   # ---- the archive -------------------------------------------------
   let outPath = dist.outputDir & "/" & archArtifactName(dist)
-  var members = @[".PKGINFO"]
+  # ``.PKGINFO`` first, ``.MTREE`` second, then the payload -- makepkg's
+  # order, and the order a reader that stops at the first metadata
+  # entry needs.
+  var members = @[ArchPkgInfoMember, ArchMtreeMember]
   for top in archTopLevelMembers(tree):
-    if top != ".PKGINFO":
+    if top notin members:
       members.add(top)
   let edge = tarTool(
     create = true,
@@ -341,7 +572,11 @@ proc archPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
     members = members,
     actionId = "pkg-arch-" & dist.name,
     after = tree.terminal,
-    extraInputs = tree.stagedPaths())
+    # ``.MTREE`` is not a staged FILE (it is written into the tree by
+    # the edge above rather than installed into it), so it has no entry
+    # in ``stagedPaths`` and has to be named here -- without it the
+    # archive edge would not re-run when the record changed.
+    extraInputs = tree.stagedPaths() & @[mtreePath])
   declareProducerTool(site, edge.id, ArchTarSelector)
   declareProducerTool(site, edge.id, ArchGzipSelector)
   PackagedArtifact(
@@ -349,7 +584,8 @@ proc archPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
     path: outPath,
     edge: edge,
     toolSelectors: @[ArchTarSelector, ArchGzipSelector, ArchShSelector,
-                     ArchFindSelector] & tree.stagingSelectors,
+                     ArchFindSelector, ArchBsdtarSelector,
+                     ArchGrepSelector] & tree.stagingSelectors,
     tree: tree)
 
 proc archProducer(dist: Distribution;

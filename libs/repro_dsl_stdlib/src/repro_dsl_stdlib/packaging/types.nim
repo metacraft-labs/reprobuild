@@ -427,6 +427,27 @@ type
       ## deb and rpm identify a product by its name — which is why it
       ## sits here as a named field rather than being conjured by the
       ## MSI producer.
+    desktopCategories*: string
+      ## AppImage only (and any future producer that emits a
+      ## freedesktop ``.desktop`` entry): the ``Categories`` value,
+      ## VERBATIM, semicolon-terminated (``"Development;Utility;"``).
+      ##
+      ## A named field for ``upgradeCode``'s reason. ``Categories`` is a
+      ## claim about where an application belongs in a menu; the layer
+      ## knows nothing about the distribution it is packaging, so it
+      ## cannot derive one. Empty means "the producer's neutral
+      ## default", which ``producers/appimage.nim`` documents and keeps
+      ## deliberately uninformative rather than plausible.
+    desktopIconSvg*: string
+      ## AppImage only: the icon, as SVG SOURCE TEXT.
+      ##
+      ## appimagetool REFUSES an AppDir whose ``Icon`` key names a file
+      ## that is not there, so an icon is mandatory and the producer
+      ## ships a placeholder when this is empty. It is SVG rather than
+      ## PNG because every byte this layer stages is the output of an
+      ## edge over text a reviewer can read; a PNG would have to be a
+      ## checked-in binary blob or a base64 literal, and neither is
+      ## reviewable.
 
   Distribution* = object
     ## The single definition §6 promises: "one source of truth for

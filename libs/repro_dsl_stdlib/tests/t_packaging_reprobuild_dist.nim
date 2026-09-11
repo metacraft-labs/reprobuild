@@ -187,7 +187,7 @@ suite "packaging: reprobuild's own distribution":
     check not ReprobuildSourceRootSubdir.contains(ReprobuildPackageName)
 
   test "the cache package sets NO wrapper variables, and that is measured":
-    # M1's N9. The cache package carried the CLI's twenty-one values
+    # M1's N9. The cache package carried the CLI's whole value list
     # because ``reprobuildWrapperValues`` was keyed on the PRODUCT.
     # Installed alone on a stock image -- a supported installation, its
     # ``Depends:`` being ``libc6`` and nothing else -- twenty of twenty
@@ -198,9 +198,14 @@ suite "packaging: reprobuild's own distribution":
     #
     # The fix is the third of the three available (ship the payload,
     # depend on ``reprobuild``, drop the variables) and it rests on a
-    # measurement of the BINARY: not one of the twenty-one names occurs
-    # as a string in ``repro-binary-cache``, while ``repro`` carries
-    # thirteen of them. The server's whole runtime environment surface
+    # measurement of the BINARY: not one of the names occurs as a
+    # string in ``repro-binary-cache``, while ``repro`` carries thirteen
+    # of them. That evidence is narrower than it reads and the narrowing
+    # is recorded at ``reprobuildCacheWrapperValues``: "occurs as a
+    # string in the binary" is the wrong test in general, because
+    # fourteen of the twenty are read by ``config.nims`` and would never
+    # appear as a literal anywhere. It is the right test for THIS
+    # binary, which compiles nothing. The server's whole runtime environment surface
     # is ``REPRO_BINARY_CACHE_*`` plus OpenSSL's ``SSL_CERT_*``, every
     # one an operator's choice rather than a path into its own prefix.
     let cache = newReprobuildCacheDistribution("0.1.3", toLinux)
@@ -342,3 +347,57 @@ suite "packaging: reprobuild's own distribution":
     for f in rpm.tree.files:
       relPaths.add(f.rootRelPath)
     check "lib/systemd/system/repro-binary-cache.service" in relPaths
+
+  test "a WINDOWS package omits the six values nothing on Windows reads":
+    # M1's N3, and the shape of the answer is the same one N9 gave for
+    # the cache package one axis over: a value that names nothing on the
+    # machine the package lands on is worse than no value at all.
+    #
+    # The refusal this closes was precise and was NOT about staging:
+    # with a fully staged Windows payload (7,666 files: the six
+    # executables, the two DLLs, eleven source trees, reprobuild's own
+    # libs and a Windows Nim toolchain) the build stopped with
+    # ``crSourceTree component 'prebuilt/tree/lib/repro/include'
+    # contains no files`` -- a directory that exists only because four
+    # ``*_PREFIX`` variables name it.
+    let win = newReprobuildDistribution("0.1.3", toWindows, prefix = "")
+    var names: seq[string] = @[]
+    for (name, _) in reprobuildWrapperValues(win): names.add(name)
+    for omitted in reprobuildWindowsOmittedVariables():
+      doAssert omitted notin names,
+        "the Windows wrapper still sets '" & omitted &
+        "', which nothing on Windows reads"
+    check names.len == ReprobuildWrapperVariables.len -
+      reprobuildWindowsOmittedVariables().len
+    # ...and the LINUX list is untouched, which is what makes this a
+    # target key rather than a deletion.
+    let linux = newReprobuildDistribution("0.1.3", toLinux)
+    var linuxNames: seq[string] = @[]
+    for (name, _) in reprobuildWrapperValues(linux): linuxNames.add(name)
+    check linuxNames == @ReprobuildWrapperVariables
+    for omitted in reprobuildWindowsOmittedVariables():
+      check omitted in linuxNames
+
+  test "and therefore ships no private include directory on Windows":
+    # The derivation doing its job: drop the four ``*_PREFIX`` values
+    # and the directory they were the only reason for disappears from
+    # the component list, with nobody editing a second list.
+    let win = newReprobuildDistribution("0.1.3", toWindows, prefix = "")
+    let dirs = reprobuildShippedTreeDirs(win)
+    for d in dirs:
+      check not d.endsWith("include")
+    # The source trees and the bundled compiler's own two directories
+    # are still there, so this is not "Windows ships nothing".
+    check dirs.len > 8
+    # ``bin/nim/lib`` and not ``libexec/reprobuild/nim/lib``: on Windows
+    # a ``crHelperExecutable`` lands in ``bin``, and
+    # ``reprobuildNimToolchainPrefixRel`` derives the toolchain root
+    # from that same rule rather than spelling the POSIX answer.
+    check "bin/nim/lib" in dirs
+    check "bin/nim/config" in dirs
+    let linuxDirs = reprobuildShippedTreeDirs(
+      newReprobuildDistribution("0.1.3", toLinux))
+    var linuxHasInclude = false
+    for d in linuxDirs:
+      if d.endsWith("include"): linuxHasInclude = true
+    check linuxHasInclude

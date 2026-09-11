@@ -2,8 +2,10 @@
 ## ``runtime_contract.ReprobuildWrapperVariables``, the three daemon
 ## roles, and ``/etc/repro/caches.conf``.
 ##
-## M0 put the wrapper-variable NAMES in the layer (twenty then,
-## twenty-one now) and said in so
+## M0 put the wrapper-variable NAMES in the layer (twenty then;
+## twenty-one after ``REPRO_NIM_COMPILER`` joined both worlds, and
+## TWENTY again now that ``CT_INTERPOSE_SRC`` -- a variable nothing has
+## read since ``86cb1bf6`` -- left them) and said in so
 ## many words why it stopped there: "It lives here as data rather than
 ## being spelled into a producer because M1 is the milestone that
 ## packages reprobuild; M0's job is to have the list in the layer, under
@@ -31,7 +33,7 @@
 ## tree gives the right answer in every one of those places.
 ##
 ## So the mapping is not a transcription, it is a translation, and it
-## splits the twenty-one names into four kinds:
+## splits the twenty names into four kinds:
 ##
 ## 1. **The library path** — the private libdir the closure walk fills.
 ## 2. **Library PREFIXES** (``BLAKE3_PREFIX``, ``SQLITE_PREFIX``,
@@ -256,6 +258,72 @@ const
     ## §3: the network cache server's default listen port, and the one
     ## M1's gate curls for ``/healthz``.
 
+proc reprobuildNimToolchainPrefixRel*(dist: Distribution): string
+  ## Forward-declared: ``reprobuildToolWrapperValues`` below has to
+  ## derive ``REPRO_NIM_COMPILER``'s value from the SAME proc the
+  ## component list derives the toolchain's location from. Spelling the
+  ## path twice is what let the Windows package's wrapper name
+  ## ``libexec/reprobuild/nim/bin/nim.exe`` while the component landed
+  ## at ``bin/nim/bin/nim.exe``.
+
+proc reprobuildWindowsOmittedVariables*(): seq[string] =
+  ## The six variables a WINDOWS package must NOT set, and why each one
+  ## is a measurement rather than a preference.
+  ##
+  ## M1's N3 said the Windows leg "REFUSES until ``nim.exe``, the DLLs
+  ## and the sixteen trees exist under a Windows staging root". Staging
+  ## all of that is what turned the refusal into a precise one, and the
+  ## precise one is not about staging at all::
+  ##
+  ##   distribution 'reprobuild': crSourceTree component
+  ##   'prebuilt/tree/lib/repro/include' contains no files
+  ##
+  ## The private prefix's ``include`` half exists BECAUSE four
+  ## ``*_PREFIX`` variables name it. On Linux the layer fills it from
+  ## the three nixpkgs outputs the flake names. On Windows there is no
+  ## such output, and — this is the measurement — **nothing on Windows
+  ## reads any of these four**:
+  ##
+  ## * ``SQLITE_PREFIX`` is read inside ``config.nims``'s
+  ##   ``when not defined(windows) and not defined(macosx):``. It is
+  ##   unreachable on this target, full stop.
+  ## * ``BLAKE3_PREFIX`` and ``XXHASH_PREFIX`` are read only in
+  ##   ``config.nims``'s SYSTEM-HASH branch, and that branch emits
+  ##   ``-L<prefix>/lib -lblake3`` / ``-lxxhash``. There is no
+  ##   ``libblake3`` on Windows for the package to ship, so a package
+  ##   that sent a Windows compile down that branch would fail at LINK
+  ##   rather than at configure — the worst of the three outcomes,
+  ##   because the values would all look right.
+  ## * ``REPROBUILD_USE_SYSTEM_HASH_LIBS=1`` is what SELECTS that
+  ##   branch. The Windows build is a ``-d:reproVendoredHash`` build
+  ##   (measured: ``objdump -p repro.exe`` imports ADVAPI32, KERNEL32
+  ##   and msvcrt and nothing else — no hash library, no OpenSSL, no
+  ##   sqlite), so setting it to 1 would contradict how the shipped
+  ##   binary was built.
+  ## * ``CLINGO_PREFIX`` names the same private prefix, and clingo on
+  ##   Windows arrives as a conda-provisioned DLL rather than as a
+  ##   prefix with an ``include``/``lib`` pair.
+  ## * ``REPROBUILD_NIX_DAEMON_BIN`` names
+  ##   ``libexec/<name>/reprobuild-nix-daemon``, and the recipe does not
+  ##   ship that helper on Windows — ``tool-provisioning=nix`` is a Unix
+  ##   path. The value has always dangled there; it is removed for the
+  ##   same reason the cache package's whole list was (see
+  ##   ``reprobuildCacheWrapperValues``).
+  ##
+  ## WHAT THIS DOES **NOT** SETTLE is where a packaged Windows compile
+  ## would find the VENDORED headers instead. ``config.nims``'s
+  ## vendored branch resolves them against ``reproRepoRoot``, which is
+  ## the directory of the ``config.nims`` being evaluated, and the
+  ## package ships ``share/repro/source/libs`` with no ``config.nims``
+  ## beside it. So M1's gate item 4 — a packaged ``repro build`` — is
+  ## NOT discharged on Windows by this change and is recorded as a
+  ## residual. What the change does is stop the package from shipping
+  ## six values that name nothing, which is the defect the payload work
+  ## closed for Linux.
+  @["BLAKE3_PREFIX", "REPROBUILD_USE_SYSTEM_HASH_LIBS",
+    "REPROBUILD_NIX_DAEMON_BIN", "SQLITE_PREFIX", "XXHASH_PREFIX",
+    "CLINGO_PREFIX"]
+
 proc reprobuildToolWrapperValues*(dist: Distribution): seq[(string, string)] =
   ## The ``ReprobuildWrapperVariables``, with values, in the
   ## flake's declaration order.
@@ -266,10 +334,29 @@ proc reprobuildToolWrapperValues*(dist: Distribution): seq[(string, string)] =
   ## which is the only way to see at a glance that nothing was dropped.
   ## ``t_packaging_reprobuild_dist`` asserts the two lists have the same
   ## names in the same order, so the review is mechanised as well.
+  ##
+  ## ON WINDOWS SIX OF THEM ARE OMITTED. See
+  ## ``reprobuildWindowsOmittedVariables`` for the measurement behind
+  ## each. The list is keyed on the TARGET as well as on the role, which
+  ## is the same move ``reprobuildWrapperValues`` already made one axis
+  ## over and for the same reason: a value that names nothing on the
+  ## machine the package lands on is worse than no value at all.
   let p = PrefixToken
   let src = p & "/" & ReprobuildSourceSubdir
-  @[
-    ("REPROBUILD_RUNTIME_LIBRARY_PATH", p & "/" & ReprobuildPrivateLibSubdir),
+  let omitted = (if dist.targetOs == toWindows:
+                   reprobuildWindowsOmittedVariables()
+                 else: @[])
+  let all = @[
+    # DERIVED from the role's own placement rule, not from the constant
+    # that spells the POSIX answer. ``crRuntimeLibrary`` lands in
+    # ``lib/repro/lib`` on POSIX and in ``bin`` on Windows -- the
+    # loadable image has to sit beside the executables that open it,
+    # which is the Windows loader's rule and is already encoded in
+    # ``roleDefaultSubdir``. The constant gave one answer for both and
+    # the Windows package's wrapper therefore named a directory nothing
+    # installs; the payload post-condition caught it on the first real
+    # Windows build.
+    ("REPROBUILD_RUNTIME_LIBRARY_PATH", p & "/" & privateLibPrefixRelDir(dist)),
     # ``share/repro/...`` rather than ``share/<dist.name>/...``: the
     # SAME tree serves the ``reprobuild`` and ``reprobuild-binary-cache``
     # packages, and a value keyed on the package name would give the
@@ -288,7 +375,15 @@ proc reprobuildToolWrapperValues*(dist: Distribution): seq[(string, string)] =
     ("CODETRACER_PINNED_SRC", src & "/codetracer/src"),
     ("REPRO_CT_TEST_RUNNER_SRC", src & "/reprobuild-ct-test-runner"),
     ("REPRO_TEST_ADAPTERS_SRC", src & "/reprobuild-test-adapters/src"),
-    ("CT_INTERPOSE_SRC", src & "/ct-interpose"),
+    # ``CT_INTERPOSE_SRC`` WAS HERE AND IS GONE. It named
+    # ``share/repro/src/ct-interpose``, the package shipped that tree,
+    # and no consumer has read the variable since ``86cb1bf6`` removed
+    # it from ``config.nims`` -- it survived in this list, in
+    # ``flake.nix``'s wrapper and in the drift guard between them
+    # precisely BECAUSE the guard's job is to keep the two worlds equal
+    # and both worlds were equally wrong. Removing it drops a payload
+    # directory from every package as a side effect, which is the
+    # ``reprobuildShippedTreeDirs`` derivation working as intended.
     # Literal in both worlds.
     ("REPROBUILD_USE_SYSTEM_HASH_LIBS", "1"),
     # ``$out/libexec/...`` in the flake; the same shape here, with the
@@ -305,16 +400,19 @@ proc reprobuildToolWrapperValues*(dist: Distribution): seq[(string, string)] =
     # cannot: neither debian:trixie-slim nor fedora:latest packages one
     # at all.
     ("REPRO_NIM_COMPILER",
-     p & "/libexec/" & dist.name & "/" & ReprobuildNimToolchainSubdir &
+     p & "/" & reprobuildNimToolchainPrefixRel(dist) &
        "/bin/nim" & (if dist.targetOs == toWindows: ".exe" else: ""))
   ]
+  for pair in all:
+    if pair[0] notin omitted:
+      result.add(pair)
 
 proc reprobuildCacheWrapperValues*(dist: Distribution):
     seq[(string, string)] =
   ## What ``reprobuild-binary-cache``'s wrapper sets: NOTHING, and the
   ## empty list is a measurement rather than a shrug.
   ##
-  ## M1 gave this package the CLI's twenty-one variables, because
+  ## M1 gave this package the CLI's whole variable list, because
   ## ``reprobuildWrapperValues`` was keyed on the product and not on the
   ## role. Installed alone on a stock ``debian:trixie-slim`` — which is
   ## a SUPPORTED installation, its ``Depends:`` being ``libc6`` and
@@ -331,10 +429,19 @@ proc reprobuildCacheWrapperValues*(dist: Distribution):
   ## Three fixes were available: ship the payload, declare a dependency
   ## on ``reprobuild``, or drop the variables. The third is right, and
   ## the reason is a measurement of the BINARY rather than a judgement
-  ## about cache servers in general. Not one of the twenty-one names
-  ## occurs as a string in ``repro-binary-cache`` — checked against the
-  ## staged payload, where ``repro`` carries thirteen of them and the
-  ## server carries none. Its whole runtime environment surface is
+  ## about cache servers in general. Not one of the names occurs as a
+  ## string in ``repro-binary-cache`` — checked against the staged
+  ## payload, where ``repro`` carries thirteen of them and the server
+  ## carries none.
+  ##
+  ## THAT EVIDENCE IS NARROWER THAN IT READS, and review was right to
+  ## say so. "Occurs as a string in the binary" is the wrong test for
+  ## whether a variable is NEEDED: fourteen of the twenty are read by
+  ## ``config.nims``, and a variable ``config.nims`` reads would never
+  ## appear as a literal in ``repro``. It is the right test for
+  ## ``repro-binary-cache`` specifically -- that binary compiles nothing
+  ## and therefore runs no ``config.nims`` -- so the CONCLUSION stands
+  ## on the measurement; it just does not generalise. Its whole runtime environment surface is
   ## ``REPRO_BINARY_CACHE_ROOT``, ``..._ALLOWED_SIGNERS``,
   ## ``..._PIN_LIST``, ``..._SOFT_CAP_BYTES``, ``..._HARD_CAP_BYTES``,
   ## ``..._TLS_CERT``, ``..._TLS_KEY`` and OpenSSL's ``SSL_CERT_FILE`` /
@@ -370,7 +477,18 @@ proc reprobuildWrapperValues*(dist: Distribution): seq[(string, string)] =
 
 proc reprobuildNimToolchainPrefixRel*(dist: Distribution): string =
   ## Prefix-relative root of the bundled Nim toolchain.
-  "libexec/" & dist.name & "/" & ReprobuildNimToolchainSubdir
+  ##
+  ## DERIVED from where a ``crHelperExecutable`` actually lands rather
+  ## than spelled out, because the two answers differ by target and the
+  ## spelled-out one was the POSIX answer: ``libexec/<name>`` on POSIX,
+  ## and ``bin`` on Windows, where there is no libexec convention and
+  ## the layer puts helpers beside the CLI. With the constant, the
+  ## Windows package staged ``nim.exe`` at ``bin/nim/bin/nim.exe`` while
+  ## ``REPRO_NIM_COMPILER`` named ``libexec/reprobuild/nim/bin/nim.exe``
+  ## -- a wrapper variable pointing at nothing, which is the defect the
+  ## payload post-condition exists to catch and did.
+  roleDefaultSubdir(dist, crHelperExecutable) & "/" &
+    ReprobuildNimToolchainSubdir
 
 proc reprobuildNimDlopenLeafNames*(targetOs: TargetOs): seq[string] =
   ## What the BUNDLED COMPILER dlopens by leaf name, so the runtime
@@ -599,6 +717,17 @@ proc newReprobuildDistribution*(version: string; targetOs: TargetOs;
     prefix = prefix, release = release, architecture = architecture,
     layout = (if targetOs == toWindows: plWindowsTree else: plUnix),
     stagingRoot = stagingRoot, outputDir = outputDir)
+  # THE PRIVATE LIBDIR IS SET BEFORE THE VALUES ARE COMPUTED, and the
+  # order is load-bearing rather than tidy. ``REPROBUILD_RUNTIME_
+  # LIBRARY_PATH``'s value is DERIVED from ``privateLibPrefixRelDir``
+  # (which is ``roleDefaultSubdir(dist, crRuntimeLibrary)``, so that one
+  # answer serves POSIX's private directory and Windows's
+  # beside-the-executables rule), and reading the field before it is
+  # assigned gives the ROLE DEFAULT -- a bare ``lib``, which under
+  # ``prefix=/usr`` would drop this package's private libstdc++ on top
+  # of the distribution's. The constructor used to spell the value from
+  # a constant, so the ordering did not matter and nothing said so.
+  result.runtime.privateLibSubdir = ReprobuildPrivateLibSubdir
   result.runtime.envDefaults = reprobuildWrapperValues(result)
   # Every one of those values is "here is a payload I ship", so the
   # layer is told to CHECK that -- see
@@ -606,7 +735,6 @@ proc newReprobuildDistribution*(version: string; targetOs: TargetOs;
   # M1's first package needed and did not have: it shipped thirteen
   # paths to nowhere and the build was green.
   result.runtime.requireEnvDefaultPayload = true
-  result.runtime.privateLibSubdir = ReprobuildPrivateLibSubdir
   # THE POINT OF THE FIELD, finally used for real. ``DT_NEEDED`` cannot
   # see a dlopen, so the walk cannot DISCOVER these two -- and unlike
   # the M0 fixture, whose empty list was an honest statement about two
@@ -662,9 +790,13 @@ proc newReprobuildCacheDistribution*(version: string; targetOs: TargetOs;
     prefix = prefix, release = release, architecture = architecture,
     layout = (if targetOs == toWindows: plWindowsTree else: plUnix),
     stagingRoot = stagingRoot, outputDir = outputDir)
+  # Same ordering discipline as the CLI constructor above: the private
+  # libdir is a field the value list READS, so it is set first. This
+  # package's list is empty either way, and the order is still written
+  # the one way that stays correct if it ever stops being.
+  result.runtime.privateLibSubdir = "lib/repro-binary-cache"
   result.runtime.envDefaults = reprobuildWrapperValues(result)
   result.runtime.requireEnvDefaultPayload = true
-  result.runtime.privateLibSubdir = "lib/repro-binary-cache"
   result.runtime.dlopenLeafNames = reprobuildDlopenLeafNames(targetOs)
   # NO WRAPPER, which follows from the value list above being empty
   # rather than being a second decision: ``wrapExecutables``' own

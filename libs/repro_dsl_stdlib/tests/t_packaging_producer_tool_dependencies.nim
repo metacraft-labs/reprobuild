@@ -195,3 +195,74 @@ suite "packaging: producers declare a real dependency on their tool":
     check deb.edge.cacheable
     for act in registeredBuildActions():
       check act.cacheable
+
+  test "the AppImage producer names appimagetool AND the tools it execs":
+    # Two invisible dependencies on one edge, both of the ``gzip``
+    # class. appimagetool execs ``file`` by name and refuses to run
+    # without it ("file command is missing but required"), and it reads
+    # the PINNED runtime the staging edge copied out of its own
+    # provisioned prefix.
+    resetBuildActionRegistry()
+    let img = appImagePackage(sampleDistribution(toLinux))
+    check img.format == "AppImage"
+    check AppImageToolSelector in toolRefsFor(img.edge.id)
+    check AppImageFileSelector in toolRefsFor(img.edge.id)
+    # The runtime rides on the STAGING edge, not on the image edge: it
+    # is that edge's ``command -v`` that has to find it. A tool named on
+    # the wrong edge is on the PATH of an action that never runs it.
+    var runtimeEdgeId = ""
+    for act in registeredBuildActions():
+      if act.id.endsWith("stage-runtime"): runtimeEdgeId = act.id
+    check runtimeEdgeId.len > 0
+    check AppImageRuntimeSelector in toolRefsFor(runtimeEdgeId)
+    check AppImageRuntimeSelector notin toolRefsFor(img.edge.id)
+
+  test "no other producer drags appimagetool or the runtime in":
+    # Over-declaring costs a project a 15 MB fetch of a tool it never
+    # runs, and a second one of a runtime nothing reads.
+    resetBuildActionRegistry()
+    let deb = debPackage(sampleDistribution(toLinux))
+    check AppImageToolSelector notin deb.toolSelectors
+    check AppImageRuntimeSelector notin deb.toolSelectors
+    resetBuildActionRegistry()
+    let tarball = tarballPackage(sampleDistribution(toLinux))
+    check AppImageToolSelector notin tarball.toolSelectors
+
+  test "the Arch producer names bsdtar on the MTREE edge and nowhere else":
+    # M1's N15. ``bsdtar`` is a SECOND archiver and it belongs to one
+    # step: the mtree. Naming it on the ``tar`` edge would put it on the
+    # PATH of the action that writes the package and leave the action
+    # that writes the record without it.
+    resetBuildActionRegistry()
+    let arch = archPackage(sampleDistribution(toLinux))
+    var mtreeEdgeId = ""
+    for act in registeredBuildActions():
+      if act.id.endsWith("mtree"): mtreeEdgeId = act.id
+    check mtreeEdgeId.len > 0
+    check ArchBsdtarSelector in toolRefsFor(mtreeEdgeId)
+    check ArchGrepSelector in toolRefsFor(mtreeEdgeId)
+    check ArchBsdtarSelector notin toolRefsFor(arch.edge.id)
+    # ...and the deb/rpm/tarball producers acquire neither.
+    resetBuildActionRegistry()
+    check ArchBsdtarSelector notin
+      debPackage(sampleDistribution(toLinux)).toolSelectors
+
+  test "the dogfood fixture's uses: block matches the producers' selectors":
+    # The same pinning the two-binary fixture gets, for the recipe that
+    # produces every package in this milestone. It is the one that grew
+    # two formats' worth of tools this session, and a ``uses:`` entry
+    # missing here is not a warning -- it is an unresolvable tool on the
+    # action's PATH at build time.
+    let fixture = repoRootFromTest() &
+      "/tests/fixtures/packaging/reprobuild-dist/repro.nim"
+    let text = readFile(fixture)
+    for selector in [DpkgDebSelector, RpmbuildSelector, TarSelector,
+                     GzipSelector, PatchelfSelector, InstallSelector,
+                     ShSelector, ReadelfSelector,
+                     ArchBsdtarSelector, ArchGrepSelector,
+                     ArchFindSelector,
+                     AppImageToolSelector, AppImageRuntimeSelector,
+                     AppImageFileSelector]:
+      doAssert text.contains("\"" & selector & "\""),
+        "the dogfood fixture's uses: block does not name '" & selector &
+        "', which a producer it calls declares on an edge"

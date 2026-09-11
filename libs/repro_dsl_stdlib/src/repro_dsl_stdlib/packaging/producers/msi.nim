@@ -96,11 +96,34 @@ type
     name: string
     children: OrderedTable[string, DirNode]
 
-proc dirIdFor(path: string): string =
-  if path.len == 0: "INSTALLFOLDER"
-  else: msiIdentifier("dir_" & path)
+proc dirIdFor(assigned: var OrderedTable[string, string];
+              path: string): string =
+  ## Allocate a Directory Id for one prefix-relative directory.
+  ##
+  ## THROUGH AN ALLOCATOR, and that is a correction rather than a style
+  ## choice. This used to be ``msiIdentifier("dir_" & path)``, which
+  ## TRUNCATES at 72 characters -- and truncation is not injective, so
+  ## two directories sharing a long prefix got ONE id. The consequence
+  ## is not a rejected name: ``renderDirTree`` emits
+  ## ``componentsByDir[child.id]`` for every node, so two nodes with one
+  ## id emit the SAME components twice, and ``light`` stops with
+  ## hundreds of ``Duplicate symbol 'File:fil_...'`` naming file ids
+  ## that were unique by construction. Found by the first Windows build
+  ## with a real payload; M0's sample has two files and no path deeper
+  ## than ``bin/hello``, so nothing here could have seen it.
+  ##
+  ## The table also makes the allocation IDEMPOTENT per path, which
+  ## ``ensureDirNode`` needs: it walks every ancestor of every file, so
+  ## one directory is asked for many times and must answer the same
+  ## thing each time.
+  if path.len == 0: return "INSTALLFOLDER"
+  if path in assigned: return assigned[path]
+  let id = msiOrdinalIdentifier("dir", assigned.len, path)
+  assigned[path] = id
+  id
 
-proc ensureDirNode(root: DirNode; relDir: string): DirNode =
+proc ensureDirNode(root: DirNode; assigned: var OrderedTable[string, string];
+                   relDir: string): DirNode =
   result = root
   if relDir.len == 0: return
   var acc = ""
@@ -108,7 +131,7 @@ proc ensureDirNode(root: DirNode; relDir: string): DirNode =
     if part.len == 0: continue
     acc = if acc.len == 0: part else: acc & "/" & part
     if part notin result.children:
-      result.children[part] = DirNode(id: dirIdFor(acc), name: part)
+      result.children[part] = DirNode(id: dirIdFor(assigned, acc), name: part)
     result = result.children[part]
 
 proc renderDirTree(node: DirNode; indent: int;
@@ -181,15 +204,24 @@ proc wxsText*(dist: Distribution; tree: StagedTree): string =
   var componentRefs: seq[string] = @[]
   let binDirRel = roleDefaultSubdir(dist, crExecutable)
 
+  # The Directory-Id allocator. One per rendered distribution, so the
+  # ordinals are a function of the tree and of nothing else.
+  var dirIds = initOrderedTable[string, string]()
   var index = 0
   for f in tree.files:
     inc index
     let relDir = dirOfRel(f.rootRelPath)
-    discard ensureDirNode(root, relDir)
-    let dirId = dirIdFor(relDir)
-    let baseId = msiIdentifier($index & "_" & f.rootRelPath)
-    let cmpId = "cmp_" & baseId
-    let filId = "fil_" & baseId
+    discard ensureDirNode(root, dirIds, relDir)
+    let dirId = dirIdFor(dirIds, relDir)
+    # ``cmp``/``fil`` rather than ``cmp_``/``fil_`` plus a shared base:
+    # the ordinal follows the prefix immediately, so the two tables'
+    # namespaces are separated by the prefix and neither can be
+    # truncated into the other. The previous spelling built one
+    # 72-character base and PREFIXED it, which produced 76-character
+    # identifiers -- over the limit, and relying on light to truncate
+    # them back.
+    let cmpId = msiOrdinalIdentifier("cmp", index, f.rootRelPath)
+    let filId = msiOrdinalIdentifier("fil", index, f.rootRelPath)
     var body = ""
     # ``Guid="*"`` asks WiX to derive a stable GUID from the component's
     # key path and target directory. Deriving it is not a convenience:
@@ -279,8 +311,8 @@ proc wxsText*(dist: Distribution; tree: StagedTree): string =
   # directory already on PATH — an MSI installs into a product
   # directory that is not.
   block pathComponent:
-    discard ensureDirNode(root, binDirRel)
-    let dirId = dirIdFor(binDirRel)
+    discard ensureDirNode(root, dirIds, binDirRel)
+    let dirId = dirIdFor(dirIds, binDirRel)
     var body = ""
     body.add("      <Component Id=\"cmp_path_entry\" Guid=\"" &
       xmlEscape(dist.metadata.upgradeCode) & "\">\n")

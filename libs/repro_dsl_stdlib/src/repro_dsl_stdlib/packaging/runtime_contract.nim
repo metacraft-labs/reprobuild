@@ -1826,7 +1826,6 @@ const
     "CODETRACER_PINNED_SRC",
     "REPRO_CT_TEST_RUNNER_SRC",
     "REPRO_TEST_ADAPTERS_SRC",
-    "CT_INTERPOSE_SRC",
     "REPROBUILD_USE_SYSTEM_HASH_LIBS",
     "REPROBUILD_NIX_DAEMON_BIN",
     "RUNQUOTA_SRC",
@@ -1851,6 +1850,26 @@ const
     ## store paths in the flake and cannot be: a native package's values
     ## are paths inside its own install prefix, which is what
     ## ``PrefixToken`` exists to express.
+    ##
+    ## ``CT_INTERPOSE_SRC`` WAS THE TWENTY-FIRST AND IS GONE, REMOVED BY
+    ## MEASUREMENT RATHER THAN BY TIDYING. It was a variable both worlds
+    ## set, this list pinned, the drift guard compared and the package
+    ## shipped a 1.4 MB source tree for -- and that NOTHING READ.
+    ## ``86cb1bf6`` (the ct_interpose -> nim-stackable-hooks migration)
+    ## took it out of ``config.nims``, and after that it occurred only in
+    ## ``flake.nix``, in a forward-if-present list in
+    ## ``repro_cli_support``, and here. A ``grep -c CT_INTERPOSE_SRC
+    ## config.nims`` answers 0.
+    ##
+    ## The same measurement corrects the ARGUMENT that used to excuse it.
+    ## ``reprobuildCacheWrapperValues`` explains the names ``repro``
+    ## does not carry by saying they are read by ``config.nims``: that
+    ## is true of FOURTEEN of these names, not of two, and "occurs as a
+    ## string in the binary" is the wrong test for whether a variable is
+    ## needed, because a variable ``config.nims`` reads would never
+    ## appear as a literal in ``repro``. It remains the RIGHT test for
+    ## ``repro-binary-cache``, which compiles nothing and therefore runs
+    ## no ``config.nims``.
     ##
     ## ``REPRO_NIM_COMPILER`` IS THE TWENTY-FIRST, AND IT WAS ADDED TO
     ## BOTH WORLDS AT ONCE. It is not a packaging invention: the

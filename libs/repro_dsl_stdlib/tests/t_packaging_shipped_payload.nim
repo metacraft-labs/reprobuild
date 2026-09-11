@@ -155,9 +155,20 @@ suite "packaging: the payload behind the wrapper variables":
     # and the check really did resolve prefix-relative values.
     check tree.files.len > reprobuildShippedTreeDirs(dist).len
     var prefixRelValues = 0
+    var literals: seq[string] = @[]
     for pair in wrapperExportedValues(dist, wrapperTextOf(dist)):
       if pair[1].startsWith(PrefixToken & "/"): inc prefixRelValues
-    check prefixRelValues == 20
+      else: literals.add(pair[0])
+    # DERIVED, not counted by hand. The number this used to carry was a
+    # literal, and a literal is exactly what went stale when
+    # ``CT_INTERPOSE_SRC`` -- a prefix-relative value nothing read --
+    # left the list (M1's N16). The property is that EVERY variable but
+    # the one documented literal names a path under the prefix, and
+    # naming that one exception is what keeps the check from being a
+    # tautology over its own source.
+    check literals == @["REPROBUILD_USE_SYSTEM_HASH_LIBS"]
+    check prefixRelValues == ReprobuildWrapperVariables.len - literals.len
+    check prefixRelValues > 15
 
   test "a wrapper path with no staged tree FAILS the guard":
     # THE PROOF THAT THE CASE ABOVE CAN FAIL, which is the whole reason

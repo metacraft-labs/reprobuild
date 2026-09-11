@@ -6,7 +6,7 @@
 ##
 ## The ``Distribution`` values are NOT defined here. They live in
 ## ``repro_dsl_stdlib/packaging/reprobuild_dist.nim``, because everything
-## in them — the twenty wrapper variables' values, the private libdir,
+## in them — the wrapper variables' values, the private libdir,
 ## the dlopen leaf names, the three daemon roles, ``caches.conf`` — is a
 ## fact about reprobuild's RUNTIME CONTRACT and is the same on every
 ## host and in every format. What is a fact about a particular build,
@@ -231,6 +231,31 @@ package `reprobuild-packages`:
     "sh"
     "wix-candle"
     "wix-light"
+    # ARCH's ``.MTREE`` (M1's N15). libarchive's tar is the only one
+    # that writes an mtree, and ``grep`` is what the mtree step's own
+    # post-conditions run -- a generated metadata member checked only
+    # for existence is the shape of check this milestone has already
+    # found three vacuous instances of.
+    "bsdtar"
+    "grep"
+    # APPIMAGE. Three entries for one format, and none of them is
+    # optional:
+    #
+    #   ``appimagetool``     the producer's tool.
+    #   ``appimage-runtime`` the PINNED type-2 runtime. Without it on
+    #                        the staging edge's PATH the producer stops
+    #                        -- and appimagetool's own fallback is to
+    #                        DOWNLOAD a runtime from a tag that moves,
+    #                        which would make the artifact a function of
+    #                        the day rather than of the graph.
+    #   ``file``             libmagic's CLI, which appimagetool execs by
+    #                        name and refuses to run without. Invisible
+    #                        in any argv this recipe or the producer
+    #                        writes -- the same relationship ``gzip``
+    #                        has with ``tar``.
+    "appimagetool"
+    "appimage-runtime"
+    "file"
 
   build:
     let targetOs = hostTargetOs()
@@ -251,7 +276,7 @@ package `reprobuild-packages`:
     # not inherit a post-condition it cannot satisfy.
     dist.runtime.dlopenLeafNames =
       dist.runtime.dlopenLeafNames & reprobuildNimDlopenLeafNames(targetOs)
-    # Every DIRECTORY the twenty-one wrapper variables name, derived from
+    # Every DIRECTORY the twenty wrapper variables name, derived from
     # the values rather than listed here. Add a variable, or change a
     # value, and the component list follows without anyone editing it --
     # which is exactly what did NOT happen when these values first
@@ -325,7 +350,34 @@ package `reprobuild-packages`:
       # The URL is left as ``ScoopUrlToken``: where a release is
       # published is M3's business, and a manifest with a plausible but
       # wrong URL installs whatever is at that address.
-      discard scoopPackage(dist, tarballPackage(dist, site), site)
+      # SCOOP IS NOT EMITTED FROM THIS ARM, AND THE REASON IS M0's
+      # :caveats: (1) rather than a change of mind about Scoop.
+      #
+      # A Scoop manifest describes an ARCHIVE, so emitting one means
+      # calling ``tarballPackage`` first, and that registers an edge
+      # that names the ``tar`` tool. Tool resolution is LAZY -- only
+      # tools an EDGE names are resolved, which is why the nineteen
+      # other ``uses:`` entries (dpkg-deb, rpmbuild, patchelf,
+      # appimagetool, bsdtar...) cost a Windows build nothing -- but
+      # ``tar`` IS named by that edge, and ``packages/tar.nim`` declares
+      # a nixPackage channel only. Its header says why: Win11 ships
+      # ``tar.exe`` in System32, so the package deliberately has no
+      # Windows provisioning channel and relies on ``%PATH%``
+      # resolution. Under ``--tool-provisioning=tarball`` -- the mode
+      # the WiX tools need, and the mode M0's Windows MSI verification
+      # used -- that is a hard refusal:
+      #
+      #   tool-resolution failed: package "tar" requested by uses "tar"
+      #   does not declare provisioning: tarball metadata
+      #
+      # and ``--tool-provisioning=path`` is not an alternative, because
+      # WiX would then have to be on ``%PATH%``. One mode governs the
+      # whole build; there is no per-tool mode. Answering that is a
+      # tool-provisioning question (give ``tar`` a Windows channel, or
+      # make ``uses:`` expressible per target), not a packaging one, and
+      # the MSI cycle -- which IS one of M1's gate items -- should not
+      # wait on it. Scoop's own mechanism stays verified by its digest
+      # probe over a real archive; see :scoop-digest-measured:.
     else:
       discard debPackage(dist, site)
       discard rpmPackage(dist, site)
@@ -337,6 +389,26 @@ package `reprobuild-packages`:
       # format-neutral, and not merely dpkg-and-rpm-neutral.
       discard archPackage(dist, site)
       discard tarballPackage(dist, site)
+      # APPIMAGE, and it is the one format here that is not an
+      # INSTALLER. There is no install step, no package database and no
+      # ``/etc``; there is one file that mounts itself at a path chosen
+      # at RUN TIME and execs ``AppRun`` out of it.
+      #
+      # That last part is why this leg is worth having beyond "a fourth
+      # Linux format". Every other format lets a WRONG §5
+      # implementation survive: a .deb installed at ``/usr`` works just
+      # as well with a baked ``/usr`` in its wrapper as with a computed
+      # one. An AppImage mounts at ``/tmp/.mount_<random>``, a
+      # different path on every single run, so a baked prefix cannot
+      # work even once -- and an AppImage that answers ``repro
+      # --version`` has therefore proved the prefix was resolved at run
+      # time.
+      #
+      # Only the CLI. The cache server's package is a dozen files and a
+      # system unit; an AppImage of it would be a daemon with no way to
+      # be registered as one, which is the opposite of what a cache
+      # server is installed for.
+      discard appImagePackage(dist, site)
       discard debPackage(cacheDist, site)
       discard rpmPackage(cacheDist, site)
       discard archPackage(cacheDist, site)
