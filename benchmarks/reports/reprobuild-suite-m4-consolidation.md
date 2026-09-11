@@ -266,6 +266,14 @@ the member reported on its own.
 
 ## Assessment against the M4 exit gate
 
+> **Superseded by the three batch sections below.** This assessment was written
+> before any batch landed, and its last two bullets have since been overtaken by
+> events: three batches have landed, and they landed *because* the isolation
+> condition this section demanded was afterwards satisfied per group rather than
+> assumed. The bullets are left as written — the condition they set is the one
+> the batches were held to, and rewriting them would hide that the bar came
+> first and the work came second.
+
 > M4 exits only after small ownership/dependency-compatible consolidation
 > batches preserve every logical identity and case, isolation, selection, and
 > regressions while reducing measured binary/artifact cost.
@@ -279,6 +287,11 @@ Not met, and the gap is specific:
   and fail merged. Until each candidate group has that property verified, no
   batch should land.
 * **Batches landed** — none. This report deliberately changes no build graph.
+  *(As of the batch sections below: three have landed — `libs/repro_solver`,
+  then batch 1, then batch 2 — together taking 67 member binaries to 7 bundles
+  with all 385 cases preserved. Each landed only after every one of its members
+  was run standalone first and the merged bundle exited zero as a whole, which
+  is the isolation property the bullet above requires.)*
 
 Two of the milestone's open questions are now answered by measurement rather
 than argument: the maximum shared-binary size for the recipe family is <= 16
