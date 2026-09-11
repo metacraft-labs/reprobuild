@@ -291,6 +291,11 @@ for libName in [
   # ``std/net`` and the library above it must stay usable by a verifier
   # that listens on nothing.
   "repro_attest_agent",
+  # The other consumer of ``repro_attest``, and deliberately not built on
+  # the one above it: the agent sits inside every attested trusted
+  # computing base, and a verifier linked into it would be the code that
+  # decides whether to trust, shipped inside the thing being trusted.
+  "repro_attest_verify",
   "cbor",
   "repro_domain_types",
   "repro_depfile",

@@ -1,12 +1,46 @@
-import std/[json, strutils]
+import std/[base64, json, strutils]
 
 import repro_hcr_linkgraph
+import repro_hcr_agent/source_digest
+
+export source_digest
 
 const
   HcrAgentProtocolSchemaId* = "reprobuild.hcr.agent-protocol.message.v1"
   HcrAgentProtocolVersion* = 1'u32
   HcrAgentTransportScope* = "hcr-agent-protocol"
   HcrPatchRequestSchemaId* = "reprobuild.hcr.agent-protocol.patch-request.v1"
+
+  HcrAgentProtocolVersionSourceReload* = 2'u32
+    ## GDH design §4.4. `protocolVersion` 1 is the pre-`sourceChanged` wire;
+    ## 2 is the wire that carries `sourceChanged` / `sourceReloadResult`. A
+    ## `sourceChanged` at version 1 is refused BY NAME rather than parsed,
+    ## because a host that silently accepted it would be a host the
+    ## coordinator cannot tell apart from one that understands the message.
+
+  HcrSourceReloadCapability* = "source-reload"
+    ## Advertised in `HcrHello.capabilities` by a host that can apply one
+    ## (design §4.4).
+
+  HcrSourceChangedFirstGeneration* = 2'u32
+    ## §4.3: `generation` 1 is the content the process STARTED with, so the
+    ## first notification carries 2 and a literal 1 is never valid here. That
+    ## is deliberate — it makes the `symbolGeneration: 1` hardcode
+    ## (`repro_hcr_agent.c`) a protocol error on this wire instead of a
+    ## plausible value.
+
+  # §5.5's refusal vocabulary, spelled once so the host and the coordinator
+  # cannot drift into two spellings of the same reason.
+  HcrReloadReasonCapabilityNotNegotiated* = "capability-not-negotiated"
+  HcrReloadReasonDigestMismatch* = "digest-mismatch"
+  HcrReloadReasonDigestAlgorithmUnsupported* = "digest-algorithm-unsupported"
+  HcrReloadReasonLineCountMismatch* = "line-count-mismatch"
+  HcrReloadReasonLineTableMismatch* = "line-table-mismatch"
+  HcrReloadReasonParseError* = "parse-error"
+  HcrReloadReasonWriterRefused* = "writer-refused"
+  HcrReloadReasonInstancesAliveHardReload* = "instances-alive-hard-reload"
+  HcrReloadReasonUnsupportedEncoding* = "unsupported-content-encoding"
+  HcrReloadReasonMultipleFilesUnsupported* = "multiple-changed-files-unsupported"
 
   HcrMacosArm64DirectSupportProfile* =
     "macos-arm64-direct-hcr-in-codetracer-v1"
@@ -39,6 +73,8 @@ type
     hmkPatchApplied
     hmkPatchFailed
     hmkLifecycleEvent
+    hmkSourceChanged
+    hmkSourceReloadResult
 
   HcrProtocolPayload* = object
     digest*: string
@@ -49,6 +85,72 @@ type
     generation*: uint32
     snapshotDigest*: string
     lineTableDigest*: string
+
+  HcrSourceContentEncoding* = enum
+    ## §4.3. `inline` is the default and the only one this campaign writes:
+    ## a `path` handle races the next edit, which would put v3's text in v2's
+    ## slot — the exact misattribution the design exists to prevent. `path` is
+    ## representable because §8.2 permits it once the digest is re-verified
+    ## against the bytes read.
+    hsceInline = "inline"
+    hscePath = "path"
+
+  HcrSourceChangedFile* = object
+    ## §4.3's `changedFiles` element. The first four fields are
+    ## `HcrSourceGenerationEntry`'s, name for name — the design's "no fourth
+    ## vocabulary" rule.
+    sourcePath*: string
+    generation*: uint32
+    snapshotDigest*: string
+    lineTableDigest*: string
+    lineCount*: uint32
+    contentEncoding*: HcrSourceContentEncoding
+    content*: seq[byte]
+
+  HcrSourceChanged* = object
+    reloadId*: string
+    language*: string
+    changedFiles*: seq[HcrSourceChangedFile]
+
+  HcrSourceReloadOutcome* = enum
+    hsroApplied = "applied"
+    hsroRefused = "refused"
+    hsroFailed = "failed"
+
+  HcrSourceReloadAppliedFile* = object
+    ## §4.3's `appliedFiles` element, plus three fields the design's sketch
+    ## does not carry and GDH-M4/M5's gates need.
+    ##
+    ## `appliedDigest` and `appliedLineCount` are the host's OWN recomputation
+    ## over the bytes it applied, not an echo of the request. That distinction
+    ## is the whole difference between this acknowledgement and a chain of
+    ## `success: true` (Verification-Harness-Traps §2): a host that echoed the
+    ## coordinator's digest would report a byte-perfect apply for content it
+    ## never looked at.
+    ##
+    ## `unpreservedState` is §5.3's list of what Godot's reload did NOT keep —
+    ## static variables, `@export` metadata, pending coroutines. Reported,
+    ## never silently absorbed (GDH-M5).
+    sourcePath*: string
+    generation*: uint32
+    pathIndex*: uint64
+    stepIndex*: uint64
+    appliedDigest*: string
+    appliedLineCount*: uint32
+    unpreservedState*: seq[string]
+
+  HcrSourceReloadRefusedFile* = object
+    sourcePath*: string
+    generation*: uint32
+    reason*: string
+    detail*: string
+
+  HcrSourceReloadResult* = object
+    reloadId*: string
+    outcome*: HcrSourceReloadOutcome
+    appliedFiles*: seq[HcrSourceReloadAppliedFile]
+    refusedFiles*: seq[HcrSourceReloadRefusedFile]
+    reason*: string
 
   HcrHello* = object
     supportProfile*: string
@@ -140,6 +242,10 @@ type
       patchFailed*: HcrPatchFailed
     of hmkLifecycleEvent:
       lifecycleEvent*: HcrLifecycleEvent
+    of hmkSourceChanged:
+      sourceChanged*: HcrSourceChanged
+    of hmkSourceReloadResult:
+      sourceReloadResult*: HcrSourceReloadResult
 
 proc kindName*(kind: HcrAgentMessageKind): string =
   case kind
@@ -149,6 +255,11 @@ proc kindName*(kind: HcrAgentMessageKind): string =
   of hmkPatchApplied: "patchApplied"
   of hmkPatchFailed: "patchFailed"
   of hmkLifecycleEvent: "lifecycleEvent"
+  of hmkSourceChanged: "sourceChanged"
+  of hmkSourceReloadResult: "sourceReloadResult"
+
+proc requiresSourceReloadWire*(kind: HcrAgentMessageKind): bool =
+  kind in {hmkSourceChanged, hmkSourceReloadResult}
 
 proc patchModeName*(mode: HcrPatchMode): string =
   case mode
@@ -162,8 +273,27 @@ proc parseKind(value: string): HcrAgentMessageKind =
   of "patchApplied": hmkPatchApplied
   of "patchFailed": hmkPatchFailed
   of "lifecycleEvent": hmkLifecycleEvent
+  of "sourceChanged": hmkSourceChanged
+  of "sourceReloadResult": hmkSourceReloadResult
   else:
     raise newException(ValueError, "unknown HCR agent message kind: " & value)
+
+proc parseContentEncoding(value: string): HcrSourceContentEncoding =
+  case value
+  of "inline": hsceInline
+  of "path": hscePath
+  else:
+    raise newException(ValueError,
+      "unsupported sourceChanged contentEncoding: " & value)
+
+proc parseSourceReloadOutcome(value: string): HcrSourceReloadOutcome =
+  case value
+  of "applied": hsroApplied
+  of "refused": hsroRefused
+  of "failed": hsroFailed
+  else:
+    raise newException(ValueError,
+      "unsupported sourceReloadResult outcome: " & value)
 
 proc parsePatchMode(value: string): HcrPatchMode =
   case value
@@ -210,6 +340,57 @@ proc sourceGenerationJson(entry: HcrSourceGenerationEntry): JsonNode =
     "snapshotDigest": entry.snapshotDigest,
     "lineTableDigest": entry.lineTableDigest
   }
+
+proc sourceChangedFileJson(file: HcrSourceChangedFile): JsonNode =
+  result = %*{
+    "sourcePath": file.sourcePath,
+    "generation": file.generation,
+    "snapshotDigest": file.snapshotDigest,
+    "lineTableDigest": file.lineTableDigest,
+    "lineCount": file.lineCount,
+    "contentEncoding": $file.contentEncoding
+  }
+  if file.contentEncoding == hsceInline:
+    result["content"] = newJString(encode(file.content))
+
+proc sourceChangedJson*(value: HcrSourceChanged): JsonNode =
+  result = %*{
+    "reloadId": value.reloadId,
+    "language": value.language
+  }
+  var files = newJArray()
+  for file in value.changedFiles:
+    files.add sourceChangedFileJson(file)
+  result["changedFiles"] = files
+
+proc sourceReloadResultJson*(value: HcrSourceReloadResult): JsonNode =
+  result = %*{
+    "reloadId": value.reloadId,
+    "outcome": $value.outcome,
+    "reason": value.reason
+  }
+  var applied = newJArray()
+  for file in value.appliedFiles:
+    var entry = %*{
+      "sourcePath": file.sourcePath,
+      "generation": file.generation,
+      "pathIndex": file.pathIndex,
+      "stepIndex": file.stepIndex,
+      "appliedDigest": file.appliedDigest,
+      "appliedLineCount": file.appliedLineCount
+    }
+    entry["unpreservedState"] = stringArray(file.unpreservedState)
+    applied.add entry
+  result["appliedFiles"] = applied
+  var refused = newJArray()
+  for file in value.refusedFiles:
+    refused.add(%*{
+      "sourcePath": file.sourcePath,
+      "generation": file.generation,
+      "reason": file.reason,
+      "detail": file.detail
+    })
+  result["refusedFiles"] = refused
 
 proc helloJson(value: HcrHello): JsonNode =
   %*{
@@ -315,6 +496,11 @@ proc agentMessageJson*(message: HcrAgentMessage): JsonNode =
     result["patchFailed"] = patchFailedJson(message.patchFailed)
   of hmkLifecycleEvent:
     result["lifecycleEvent"] = lifecycleEventJson(message.lifecycleEvent)
+  of hmkSourceChanged:
+    result["sourceChanged"] = sourceChangedJson(message.sourceChanged)
+  of hmkSourceReloadResult:
+    result["sourceReloadResult"] =
+      sourceReloadResultJson(message.sourceReloadResult)
 
 proc requireField(node: JsonNode; field: string): JsonNode =
   if not node.hasKey(field):
@@ -453,6 +639,176 @@ proc parsePatchFailed(node: JsonNode): HcrPatchFailed =
     message: node.requireStr("message"),
     skippedFunctions: parseSkippedFunctions(node))
 
+proc requireUint32(node: JsonNode; field: string): uint32 =
+  let value = node.requireInt(field)
+  if value < 0:
+    raise newException(ValueError, "JSON field is negative: " & field)
+  uint32(value)
+
+proc requireUint64(node: JsonNode; field: string): uint64 =
+  let value = node.requireField(field)
+  if value.kind != JInt:
+    raise newException(ValueError, "JSON field is not an integer: " & field)
+  let raw = value.getBiggestInt()
+  if raw < 0:
+    raise newException(ValueError, "JSON field is negative: " & field)
+  uint64(raw)
+
+proc parseSourceChangedFile(node: JsonNode): HcrSourceChangedFile =
+  result = HcrSourceChangedFile(
+    sourcePath: node.requireStr("sourcePath"),
+    generation: node.requireUint32("generation"),
+    snapshotDigest: node.requireStr("snapshotDigest"),
+    lineTableDigest: node.requireStr("lineTableDigest"),
+    lineCount: node.requireUint32("lineCount"),
+    contentEncoding: parseContentEncoding(node.requireStr("contentEncoding")))
+
+  # §4.3: generation 1 is the content the process STARTED with, so the first
+  # notification carries 2. A literal 1 here is not a plausible value that
+  # happens to be wrong; it is the `symbolGeneration: 1` hardcode arriving on
+  # a wire that can name it. Refusing it by name is the whole reason the
+  # numbering starts where it does.
+  if result.generation < HcrSourceChangedFirstGeneration:
+    raise newException(ValueError,
+      "sourceChanged generation must be >= " &
+        $HcrSourceChangedFirstGeneration & " (1 is the content the process " &
+        "started with, so it is never a valid notification generation); got " &
+        $result.generation & " for " & result.sourcePath)
+  # §4.3: `lineCount` is mandatory because `registerPath` under bit 14 refuses
+  # a path with no count. Zero is the shape of a caller that could not count.
+  if result.lineCount == 0:
+    raise newException(ValueError,
+      "sourceChanged lineCount must be non-zero for " & result.sourcePath)
+  if result.sourcePath.len == 0:
+    raise newException(ValueError, "sourceChanged file has empty sourcePath")
+
+  case result.contentEncoding
+  of hsceInline:
+    if not node.hasKey("content") or node["content"].kind != JString:
+      raise newException(ValueError,
+        "sourceChanged contentEncoding is inline but no content is present " &
+          "for " & result.sourcePath)
+    let decoded = decode(node["content"].getStr())
+    result.content = bytesOfString(decoded)
+  of hscePath:
+    if node.hasKey("content") and node["content"].kind == JString and
+        node["content"].getStr().len > 0:
+      raise newException(ValueError,
+        "sourceChanged contentEncoding is path but content bytes travelled " &
+          "with it for " & result.sourcePath)
+
+proc parseSourceChanged(node: JsonNode): HcrSourceChanged =
+  result = HcrSourceChanged(
+    reloadId: node.requireStr("reloadId"),
+    language: node.requireStr("language"))
+  if result.reloadId.len == 0:
+    raise newException(ValueError, "sourceChanged has empty reloadId")
+  let files = node.requireField("changedFiles")
+  if files.kind != JArray:
+    raise newException(ValueError, "changedFiles must be an array")
+  if files.len == 0:
+    # An empty notification is indistinguishable from a notification that was
+    # dropped on the way, and would let a host answer `applied` having done
+    # nothing at all.
+    raise newException(ValueError, "sourceChanged has no changed files")
+  for file in files:
+    result.changedFiles.add parseSourceChangedFile(file)
+
+proc parseSourceReloadResult(node: JsonNode): HcrSourceReloadResult =
+  result = HcrSourceReloadResult(
+    reloadId: node.requireStr("reloadId"),
+    outcome: parseSourceReloadOutcome(node.requireStr("outcome")),
+    reason: node.optionalStr("reason"))
+  if result.reloadId.len == 0:
+    raise newException(ValueError, "sourceReloadResult has empty reloadId")
+
+  let applied = node.requireField("appliedFiles")
+  if applied.kind != JArray:
+    raise newException(ValueError, "appliedFiles must be an array")
+  for entry in applied:
+    let file = HcrSourceReloadAppliedFile(
+      sourcePath: entry.requireStr("sourcePath"),
+      generation: entry.requireUint32("generation"),
+      pathIndex: entry.requireUint64("pathIndex"),
+      stepIndex: entry.requireUint64("stepIndex"),
+      appliedDigest: entry.optionalStr("appliedDigest"),
+      appliedLineCount: entry.requireUint32("appliedLineCount"),
+      unpreservedState:
+        if entry.hasKey("unpreservedState"): entry.stringSeq("unpreservedState")
+        else: @[])
+    # The same rule as on the request side, and it is here that it bites: a
+    # host that answers with a hardcoded generation `1` is refused BY NAME
+    # instead of being read as "the first reload, which is fine".
+    if file.generation < HcrSourceChangedFirstGeneration:
+      raise newException(ValueError,
+        "sourceReloadResult acknowledged generation " & $file.generation &
+          " for " & file.sourcePath & ", but generation 1 is the content the " &
+          "process started with and can never be the result of a reload")
+    if file.appliedLineCount == 0:
+      raise newException(ValueError,
+        "sourceReloadResult reports an applied file with no lines: " &
+          file.sourcePath)
+    # ADDED AT REVIEW. `appliedDigest` is the host's OWN recomputation over the
+    # bytes it applied — the whole difference between this acknowledgement and
+    # a chain of `success: true` (Verification-Harness-Traps §2). Leaving it
+    # optional made exactly one shape representable: a host whose digest
+    # computation FAILED, answering `applied` with the evidence field empty and
+    # every other field intact. That is "report success when you failed to
+    # observe", and the parser refused the neighbouring shapes
+    # (`applied` with no files, an applied file with no lines) while letting
+    # this one through. It must carry an `<alg>:<hex>` tag, because an untagged
+    # digest cannot be recomputed by the reader and so is not one.
+    if file.appliedDigest.len == 0:
+      raise newException(ValueError,
+        "sourceReloadResult reports " & file.sourcePath & " as applied with " &
+          "an empty appliedDigest. That field is the host's recomputation " &
+          "over the bytes it applied; without it the acknowledgement asserts " &
+          "an apply it offers no evidence for")
+    if digestAlgorithmOf(file.appliedDigest).len == 0:
+      raise newException(ValueError,
+        "sourceReloadResult appliedDigest \"" & file.appliedDigest &
+          "\" for " & file.sourcePath & " carries no \"<alg>:<hex>\" tag, so " &
+          "no reader can recompute it")
+    result.appliedFiles.add file
+
+  let refused = node.requireField("refusedFiles")
+  if refused.kind != JArray:
+    raise newException(ValueError, "refusedFiles must be an array")
+  for entry in refused:
+    let file = HcrSourceReloadRefusedFile(
+      sourcePath: entry.requireStr("sourcePath"),
+      generation: entry.requireUint32("generation"),
+      reason: entry.requireStr("reason"),
+      detail: entry.optionalStr("detail"))
+    if file.reason.len == 0:
+      raise newException(ValueError,
+        "a refused file must carry a named reason: " & file.sourcePath)
+    result.refusedFiles.add file
+
+  # §4.3: `reason` is non-empty iff the outcome is not `applied`.
+  case result.outcome
+  of hsroApplied:
+    if result.reason.len != 0:
+      raise newException(ValueError,
+        "sourceReloadResult outcome is applied but carries reason: " &
+          result.reason)
+    if result.appliedFiles.len == 0:
+      # "Applied, with nothing applied" is the chain-of-`success: true` shape
+      # trap 2 exists for. It is refused at the parser so no consumer has to
+      # remember to check.
+      raise newException(ValueError,
+        "sourceReloadResult outcome is applied but appliedFiles is empty")
+    if result.refusedFiles.len != 0:
+      raise newException(ValueError,
+        "sourceReloadResult outcome is applied but files were refused; " &
+          "§5.5 makes refusal per file and atomic, so a mixed result must " &
+          "not be reported as applied")
+  of hsroRefused, hsroFailed:
+    if result.reason.len == 0:
+      raise newException(ValueError,
+        "sourceReloadResult outcome is " & $result.outcome &
+          " but carries no reason")
+
 proc parseLifecycleEvent(node: JsonNode): HcrLifecycleEvent =
   HcrLifecycleEvent(
     patchId: node.requireStr("patchId"),
@@ -467,10 +823,19 @@ proc parseAgentMessage*(node: JsonNode): HcrAgentMessage =
   if transportScope != HcrAgentTransportScope:
     raise newException(ValueError, "unsupported HCR transport scope: " & transportScope)
   let protocolVersion = uint32(node.requireInt("protocolVersion"))
-  if protocolVersion != HcrAgentProtocolVersion:
+  if protocolVersion != HcrAgentProtocolVersion and
+      protocolVersion != HcrAgentProtocolVersionSourceReload:
     raise newException(ValueError, "unsupported HCR protocol version: " & $protocolVersion)
   let messageId = node.requireStr("messageId")
   let kind = parseKind(node.requireStr("kind"))
+  # Design §4.4. The source-reload messages exist only on version 2. A version-1
+  # peer that met one and parsed it anyway would be indistinguishable, from the
+  # other end, from a peer that understood it.
+  if kind.requiresSourceReloadWire() and
+      protocolVersion < HcrAgentProtocolVersionSourceReload:
+    raise newException(ValueError,
+      kind.kindName & " requires protocolVersion " &
+        $HcrAgentProtocolVersionSourceReload & ", got " & $protocolVersion)
 
   case kind
   of hmkHello, hmkHelloAck:
@@ -513,6 +878,36 @@ proc parseAgentMessage*(node: JsonNode): HcrAgentMessage =
       messageId: messageId,
       kind: hmkLifecycleEvent,
       lifecycleEvent: parseLifecycleEvent(node.requireField("lifecycleEvent")))
+  of hmkSourceChanged:
+    HcrAgentMessage(
+      schemaId: schemaId,
+      transportScope: transportScope,
+      protocolVersion: protocolVersion,
+      messageId: messageId,
+      kind: hmkSourceChanged,
+      sourceChanged: parseSourceChanged(node.requireField("sourceChanged")))
+  of hmkSourceReloadResult:
+    HcrAgentMessage(
+      schemaId: schemaId,
+      transportScope: transportScope,
+      protocolVersion: protocolVersion,
+      messageId: messageId,
+      kind: hmkSourceReloadResult,
+      sourceReloadResult:
+        parseSourceReloadResult(node.requireField("sourceReloadResult")))
+
+proc sourceChangedFile*(sourcePath: string; generation: uint32;
+                        content: openArray[byte]): HcrSourceChangedFile =
+  ## Build a §4.3 `changedFiles` entry from the bytes themselves, so the three
+  ## digest/count fields cannot disagree with the content they describe.
+  HcrSourceChangedFile(
+    sourcePath: sourcePath,
+    generation: generation,
+    snapshotDigest: sourceSnapshotDigest(content),
+    lineTableDigest: sourceLineTableDigest(content),
+    lineCount: sourceLineCount(content),
+    contentEncoding: hsceInline,
+    content: @content)
 
 proc frameAgentMessage*(message: HcrAgentMessage): string =
   let body = $agentMessageJson(message)

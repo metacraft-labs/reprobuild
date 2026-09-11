@@ -12,6 +12,7 @@ type
     hssPatchRequested
     hssPatchFinished
     hssFailed
+    hssSourceReloadRequested
 
   HcrAgentSession* = object
     supportProfile*: string
@@ -19,6 +20,16 @@ type
     agentCapabilities*: seq[string]
     activePatchId*: string
     lifecycleEvents*: seq[string]
+    activeReloadId*: string
+      ## The `reloadId` of the outstanding `sourceChanged`, if any.
+    stateBeforeSourceReload*: HcrAgentSessionState
+    sourceReloadResults*: seq[HcrSourceReloadResult]
+    seenReloadIds*: seq[string]
+      ## Every `reloadId` this session has sent. GDH design §4.3 requires the
+      ## id to be unique per notification and monotonic per session, and a
+      ## SECOND reload that reuses the first one's id is exactly the shape
+      ## GDH-G8 exists to catch — so the reuse is refused here rather than
+      ## left for a gate to remember to check.
 
 proc initHcrAgentSession*(supportProfile: string): HcrAgentSession =
   HcrAgentSession(
@@ -153,10 +164,50 @@ proc observePatchFailed(session: var HcrAgentSession;
     raise newException(ValueError, "patch failed must include stage and message")
   session.state = hssFailed
 
+proc hostAdvertisedSourceReload*(session: HcrAgentSession): bool =
+  ## Whether the host's `hello` listed `source-reload` (design §4.4). A gate
+  ## that asserts a refusal must be able to state that the capability was
+  ## absent from a handshake that COMPLETED — a host that never connected also
+  ## sends no reply, and the two must not be conflated.
+  session.agentCapabilities.containsValue(HcrSourceReloadCapability)
+
+proc observeSourceChanged(session: var HcrAgentSession;
+                          direction: HcrMessageDirection;
+                          changed: HcrSourceChanged) =
+  direction.requireDirection(hmdCoordinatorToAgent, "sourceChanged")
+  if session.state notin {hssNegotiated, hssPatchFinished}:
+    raise newException(ValueError,
+      "sourceChanged is invalid in HCR session state " & $session.state)
+  if session.seenReloadIds.containsValue(changed.reloadId):
+    raise newException(ValueError,
+      "sourceChanged reuses reloadId " & changed.reloadId &
+        "; §4.3 requires it to be unique per notification")
+  session.seenReloadIds.add changed.reloadId
+  session.activeReloadId = changed.reloadId
+  session.stateBeforeSourceReload = session.state
+  session.state = hssSourceReloadRequested
+
+proc observeSourceReloadResult(session: var HcrAgentSession;
+                               direction: HcrMessageDirection;
+                               reloadResult: HcrSourceReloadResult) =
+  direction.requireDirection(hmdAgentToCoordinator, "sourceReloadResult")
+  session.requireState(hssSourceReloadRequested, "sourceReloadResult")
+  if reloadResult.reloadId != session.activeReloadId:
+    raise newException(ValueError,
+      "sourceReloadResult reloadId mismatch: expected " &
+        session.activeReloadId & ", got " & reloadResult.reloadId)
+  session.sourceReloadResults.add reloadResult
+  session.activeReloadId = ""
+  session.state = session.stateBeforeSourceReload
+
 proc observeAgentProtocolMessage*(session: var HcrAgentSession;
                                   direction: HcrMessageDirection;
                                   message: HcrAgentMessage) =
   case message.kind
+  of hmkSourceChanged:
+    session.observeSourceChanged(direction, message.sourceChanged)
+  of hmkSourceReloadResult:
+    session.observeSourceReloadResult(direction, message.sourceReloadResult)
   of hmkHello:
     session.observeHello(direction, message)
   of hmkHelloAck:

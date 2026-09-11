@@ -85,6 +85,19 @@ proc coordinatorPatchRequestMessage*(client: var HcrCoordinatorClient;
     kind: hmkPatchRequest,
     patchRequest: request)
 
+proc coordinatorSourceChangedMessage*(client: var HcrCoordinatorClient;
+                                      changed: HcrSourceChanged):
+                                      HcrAgentMessage =
+  ## Design §4.3/§4.4 — carried on `protocolVersion` 2, the wire that has the
+  ## message on it at all.
+  HcrAgentMessage(
+    schemaId: HcrAgentProtocolSchemaId,
+    transportScope: HcrAgentTransportScope,
+    protocolVersion: HcrAgentProtocolVersionSourceReload,
+    messageId: client.nextMessageId("source-changed"),
+    kind: hmkSourceChanged,
+    sourceChanged: changed)
+
 proc observe(client: var HcrCoordinatorClient; direction: HcrMessageDirection;
              rawFrame: string; message: HcrAgentMessage) =
   client.session.observeAgentProtocolMessage(direction, message)

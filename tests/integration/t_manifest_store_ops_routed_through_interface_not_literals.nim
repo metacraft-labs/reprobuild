@@ -162,9 +162,9 @@ suite "MO-10: lock publish/read routed through LockStore, not literals":
       # sync optimized-fetch read routed through the store:
       check "fetchStore.latestLockShas(resolved.projectName).shas" in src
       # `repro workspace lock` publish routed through the store:
-      check "newGitCheckoutLockStore(identity, outcome.report.manifestLayerRoot)" in
+      check "newGitCheckoutLockStore(identity, outcome.report.recordStoreRoot)" in
         src
       # pre-push gate publish routed through the store:
-      check "newGitCheckoutLockStore(identity, report.manifestLayerRoot)" in src
+      check "newGitCheckoutLockStore(identity, report.recordStoreRoot)" in src
       # pre-push gate offered re-publish routed through the store:
       check "let storePub2 = publishStore.publishPending()" in src

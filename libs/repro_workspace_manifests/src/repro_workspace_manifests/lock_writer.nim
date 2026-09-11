@@ -177,10 +177,10 @@ proc lockFileName*(triggerSha: string): string =
   ## segment (see ``lockFilePath``) rather than a filename prefix.
   lockRecordFileName(triggerSha)
 
-proc lockFilePath*(manifestLayerRoot, project, triggerRepo,
+proc lockFilePath*(recordStoreRoot, project, triggerRepo,
                    triggerSha: string): string =
   ## Full absolute path of the lock file under the manifest layer
-  ## that owns the locks directory. ``manifestLayerRoot`` is the
+  ## that owns the locks directory. ``recordStoreRoot`` is the
   ## directory holding ``projects/`` / ``repos/`` (and now
   ## ``locks/``). The path layout matches the RA-1 spec verbatim:
   ## ``<manifest-layer>/locks/<project>/<repo>/<sha>.toml`` — a
@@ -190,7 +190,7 @@ proc lockFilePath*(manifestLayerRoot, project, triggerRepo,
   ## via ``encodeLockPathSegment``, so a forge-shaped name carrying a
   ## slash (``stripe/sync-engine``) cannot deepen the path past the
   ## four components the format has. See ``lock_paths.nim``.
-  manifestLayerRoot /
+  recordStoreRoot /
     lockRecordRelPath(project, triggerRepo, triggerSha).replace('/', DirSep)
 
 proc lockFileRepoRelativePath*(project, triggerRepo,

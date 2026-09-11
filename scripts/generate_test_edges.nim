@@ -190,6 +190,14 @@ const PureUnitBundles: seq[PureUnitBundle] = @[
   #     on this tree, before any consolidation (`moUnknown` pins at line 211).
   #     A group carrying a red case cannot be evidence that consolidation
   #     preserved outcomes, whichever way it then behaves.
+  #     RESOLVED: that file was retired rather than repaired — its red was an
+  #     ambient-state artefact, not a defect (it drove the migrator against
+  #     whatever `windows/toolchain-versions.env` the host resolved, so the
+  #     same commit passed 8/8 with `METACRAFT_WORKSPACE_ROOT` set and failed
+  #     4/8 without it). The account is in the M2 milestone of
+  #     `reprobuild-specs/Realize-Closure-And-Catalog-Expansion.milestones.org`.
+  #     The `libs/repro_cli_support` group is now free of the red case and can
+  #     be reconsidered on its own merits by a later batch.
 
   PureUnitBundle(
     name: "bundle_repro_lock_files_pure_unit",
@@ -220,6 +228,121 @@ const PureUnitBundles: seq[PureUnitBundle] = @[
       "libs/repro_peer_cache/tests/t_peer_cache_self_signed_cert_round_trip.nim",
       "libs/repro_peer_cache/tests/t_peer_cache_tier2_central_fallthrough.nim",
       "libs/repro_peer_cache/tests/t_peer_cache_tier2_eviction_policy.nim",
+    ]),
+
+  # Suite-Modernization M4, batch 2 (four groups, 22 members, 22 -> 4
+  # binaries). Same discipline as batch 1: each bundle is one whole
+  # `pureUnitConsolidationCandidates` group, re-derived from the tree at this
+  # batch's base rather than carried forward, and every member was compiled and
+  # executed STANDALONE before it was written here, so "the cases still pass"
+  # is a comparison and not an assertion. The numbers, per member and per
+  # bundle, are in
+  # `benchmarks/reports/reprobuild-suite-m4-consolidation-batch2.json`.
+  #
+  # The first three are the groups batch 1's report named as next. The fourth
+  # is the largest group still under `MaxBundleMembers`.
+  #
+  # Dependency shapes, recorded because the ledger asserts them against
+  # `maxDependencyRoots` and an EMPTY list asserts nothing (batch 1's ledger
+  # records `[]` for ONE of its two bundles —
+  # `bundle_repro_lock_files_pure_unit`, whose eight members reach
+  # `repro_lock_files` only through `./nlf_m8_fixture` and whose shape the
+  # scan therefore reads as empty — which makes that assertion vacuous for
+  # that bundle; `bundle_repro_peer_cache_pure_unit` correctly records
+  # `['repro_peer_cache']`):
+  # `['repro_lock_files']`, `['repro_core']`,
+  # `['repro_core', 'repro_project_dsl']`, `['repro_dsl_stdlib']` — 1, 1, 2, 1
+  # roots against a limit of 4.
+  #
+  # THREE groups this batch deliberately does NOT contain:
+  #
+  #   * `libs/repro_dsl_stdlib`'s OTHER group — 22 members, dependency shape
+  #     `['repro_dsl_stdlib', 'repro_project_dsl']`, 322 static cases, and
+  #     therefore the largest prize under the 24-member limit. It is the
+  #     PACKAGE-DECLARATION family: `t_nde*`, `t_packaging_*`, `t_prefix_layout`
+  #     and friends run `repro_project_dsl`'s `package` macro at module init.
+  #     That is the same family whose from-source recipe cousins failed merged
+  #     at 24 and passed at 16 (see the "Recipe group: the crossover" section
+  #     of `benchmarks/reports/reprobuild-suite-m4-consolidation.md`), and the
+  #     accumulating per-module solve underneath it is an unresolved product
+  #     question, not a bundle-size one. The 13-member group below is the
+  #     complement of exactly that: not one of its 13 members declares a
+  #     top-level `package` block, and neither does the single helper one of
+  #     them reaches by path import (`./packaging_test_support`, which imports
+  #     `repro_project_dsl` but declares only procs).
+  #     CORRECTED AT REVIEW: an earlier revision of this comment went on to
+  #     say "nothing in that bundle runs the `package` macro at module init;
+  #     every member of the 22-member group does". Both halves are false once
+  #     the scan follows LIBRARY imports and not only path imports:
+  #     `repro_dsl_stdlib/packages/*` modules declare top-level `package`
+  #     blocks and arrive directly and through `catalog_registry`, so 5 of
+  #     the 13 taken reach one and 21 of the 22 rejected do. The groups
+  #     differ in density (5/13 vs 21/22), not in kind. What licenses taking
+  #     the 13 is the measurement — every member run standalone first, the
+  #     bundle exit 0 whole and 110/110 individually — not the taxonomy; the
+  #     22 are deferred because nobody has measured them merged.
+  #   * `libs/repro_cas_store` (5 members, 100 cases). Its recorded dependency
+  #     shape is `['repro_cas_store', 'repro_core']`, and that shape does not
+  #     mention the library through which its members actually share
+  #     process-global state. `t_link_capability_probe.nim` calls
+  #     `resetGlobalLinkCapabilityCache()` and asserts `globalProbeCount()`
+  #     transitions on the global cache defined in
+  #     `libs/repro_local_store/src/repro_local_store/link_capability.nim`,
+  #     while its three group-mates drive that same global through
+  #     `casMaterialize` -> `linkCapabilities`
+  #     (`libs/repro_cas_store/src/repro_cas_store.nim:619`). The probe test
+  #     resets before it asserts, so a failure is not certain — but the
+  #     general point is worth the exclusion: `local_dependency_shape` records
+  #     DIRECT imports, so "same dependency shape" is not a statement about
+  #     shared process-global state, and this group needs its own evidence
+  #     before it earns a process.
+  #   * `libs/repro_system_apply` (3 members, 30 cases) was measured standalone
+  #     for this batch and is CLEAN — 30/30 cases pass individually, exit 0
+  #     whole. It is left out only to keep the batch at four groups; the
+  #     per-member figures are in this batch's ledger under
+  #     `groupsMeasuredAndDeferred`, so a later batch can consolidate it
+  #     without re-measuring the "before" side.
+
+  PureUnitBundle(
+    name: "bundle_repro_lock_files_cli_pure_unit",
+    members: @[
+      "libs/repro_lock_files/tests/t_cli_binding_forms.nim",
+      "libs/repro_lock_files/tests/t_declared_but_unbound_falls_back.nim",
+      "libs/repro_lock_files/tests/t_doc_comment_attachment_rules.nim",
+    ]),
+
+  PureUnitBundle(
+    name: "bundle_repro_core_pure_unit",
+    members: @[
+      "libs/repro_core/tests/t_convention_attribution.nim",
+      "libs/repro_core/tests/t_edge_determinism_vocabulary.nim",
+      "libs/repro_core/tests/t_smoke_repro_core.nim",
+    ]),
+
+  PureUnitBundle(
+    name: "bundle_repro_core_dep_scanners_pure_unit",
+    members: @[
+      "libs/repro_core/tests/t_cpp_dep_scanner.nim",
+      "libs/repro_core/tests/t_rust_dep_scanner.nim",
+      "libs/repro_core/tests/t_show_conventions_manual_deps.nim",
+    ]),
+
+  PureUnitBundle(
+    name: "bundle_repro_dsl_stdlib_catalogs_pure_unit",
+    members: @[
+      "libs/repro_dsl_stdlib/tests/t_c1_catalog_round_trip.nim",
+      "libs/repro_dsl_stdlib/tests/t_c1_dsl_realize_hash.nim",
+      "libs/repro_dsl_stdlib/tests/t_c2_apt_index.nim",
+      "libs/repro_dsl_stdlib/tests/t_c2_recursive_identity.nim",
+      "libs/repro_dsl_stdlib/tests/t_catalog_claude_code.nim",
+      "libs/repro_dsl_stdlib/tests/t_d2_dnf_index.nim",
+      "libs/repro_dsl_stdlib/tests/t_d2_pacman_index.nim",
+      "libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim",
+      "libs/repro_dsl_stdlib/tests/t_m8_bulk_catalog.nim",
+      "libs/repro_dsl_stdlib/tests/t_packaging_wrapper_vars_match_flake.nim",
+      "libs/repro_dsl_stdlib/tests/t_smoke_catalog_audit_m29.nim",
+      "libs/repro_dsl_stdlib/tests/t_smoke_configurables.nim",
+      "libs/repro_dsl_stdlib/tests/t_versioned_provisioning_schema.nim",
     ]),
 ]
 

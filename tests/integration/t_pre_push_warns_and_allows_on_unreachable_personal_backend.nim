@@ -12,7 +12,7 @@
 ## Case B (manifest-LESS publish — carries deliverable 3). A workspace with NO
 ## ``.repro/manifests`` checkout at all, routing its personal repo to a HEALTHY
 ## git-checkout backend on its own remote, must STILL publish that personal
-## backend at pre-push. This proves HL-3 lifted HL-2's ``manifestLayerRoot.len >
+## backend at pre-push. This proves HL-3 lifted HL-2's ``recordStoreRoot.len >
 ## 0`` gate on the per-backend publish: the routed personal backend's bare
 ## receives the ``locks/`` records even though there is no manifest checkout.
 ##
@@ -20,7 +20,7 @@
 ##   - Case A: applying the refuse policy to a personal repo (or flipping the
 ##     tier test) makes the gate exit 2 and drops the warning → the ``exit 0`` +
 ##     notice assertions trip.
-##   - Case B (deliverable 3): restoring the ``manifestLayerRoot.len > 0`` gate
+##   - Case B (deliverable 3): restoring the ``recordStoreRoot.len > 0`` gate
 ##     around the per-backend publish loop skips the publish in a manifest-less
 ##     workspace → the personal backend's bare receives NO ``locks/`` objects →
 ##     the ``ls-tree`` assertion trips.
@@ -280,7 +280,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
 
       # =================================================================
       # Case B — manifest-LESS workspace publishes its routed personal
-      # backend (deliverable 3: the lifted ``manifestLayerRoot`` gate).
+      # backend (deliverable 3: the lifted ``recordStoreRoot`` gate).
       # =================================================================
       block caseB:
         let scratch = createTempDir("hl3-manifestless-publish-", "")
@@ -289,9 +289,9 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         # A GENUINELY manifest-LESS workspace: a single committed-lock git repo
         # (its ``repro.lock`` is the reproducibility artifact) with NO
         # ``.repro/manifests`` directory at all — so the gate's
-        # ``manifestLayerRoot`` resolves EMPTY and the manifest publish path is
+        # ``recordStoreRoot`` resolves EMPTY and the manifest publish path is
         # skipped entirely. The ONLY way the routed personal backend can be
-        # published is the per-backend publish loop, whose ``manifestLayerRoot >
+        # published is the per-backend publish loop, whose ``recordStoreRoot >
         # 0`` gate HL-3 lifted.
         # The bare is named ``work.git`` deliberately. A committed-lock repo's
         # LOCK IDENTITY is the leaf of its remote URL, not its checkout
@@ -368,11 +368,11 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         check report["exitCode"].getInt() == 0
         # Confirm the workspace really is manifest-LESS (empty layer root) —
         # otherwise this case would not exercise the lifted gate.
-        check report["manifestLayerRoot"].getStr() == ""
+        check report["recordStoreRoot"].getStr() == ""
 
         # deliverable 3: the routed personal backend's bare received the
         # ``locks/`` records EVEN THOUGH there is no manifest checkout. With the
-        # old ``manifestLayerRoot.len > 0`` gate restored, the per-backend
+        # old ``recordStoreRoot.len > 0`` gate restored, the per-backend
         # publish loop would be skipped and this bare would stay empty of
         # ``locks/`` objects.
         let ls = run(q(gitBin) & " -C " & q(personalBare) &

@@ -176,6 +176,8 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
         for key, value in envPairs():
           if key notin ["LIBRARY_PATH", "LD_LIBRARY_PATH"]:
             fixtureEnv[key] = value
+        # The unmatched-loader phase deliberately has no complete closure.
+        fixtureEnv["REPRO_M9R30_NEEDED_CHECK"] = "0"
 
         proc runTool(command: string; args: openArray[string]):
             tuple[output: string, exitCode: int] =

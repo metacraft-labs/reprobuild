@@ -66,6 +66,18 @@
 #endif
 #endif
 
+/*
+ * GDH-M4 needs a digest on EVERY platform, not only the Linux direct-patch
+ * arm: the source-reload handler must recompute `snapshotDigest` over the
+ * bytes it was handed, and a refusal reason the host cannot evaluate
+ * (`digest-mismatch`) would be decoration. The header is guarded and
+ * dependency-free, so including it a second time here costs nothing on the
+ * Linux arm and adds nothing but the digest on the others.
+ */
+#include "repro_hcr_sha256.h"
+
+#include <poll.h>
+
 #define REPRO_HCR_AGENT_SOCKET_ENV "REPRO_HCR_AGENT_SOCKET"
 #define REPRO_HCR_PROTOCOL_SCHEMA "reprobuild.hcr.agent-protocol.message.v1"
 #define REPRO_HCR_TRANSPORT_SCOPE "hcr-agent-protocol"
@@ -79,6 +91,28 @@ typedef struct repro_hcr_agent_thread_args {
 
 static repro_hcr_agent_thread_args *repro_hcr_poll_args = NULL;
 static int repro_hcr_poll_done = 0;
+
+/*
+ * The polled session's own state (GDH-M4).
+ *
+ * Before GDH-M4 there was none: `repro_hcr_agent_poll` ran the whole
+ * connect/handshake/one-patch/close sequence and then latched
+ * `repro_hcr_poll_done`. A long-running session with MORE THAN ONE reload
+ * could not be served at all, which is why every gate in this campaign that
+ * needed two patches in one process was blocked. The fd now outlives a poll.
+ */
+typedef struct repro_hcr_poll_session {
+  int fd;
+  int connected;   /* connect + hello attempted */
+  int hello_acked; /* the coordinator's helloAck has been read */
+  int open;
+  int messages;
+} repro_hcr_poll_session;
+
+static repro_hcr_poll_session repro_hcr_poll_state = {-1, 0, 0, 0, 0};
+
+static repro_hcr_source_reload_handler repro_hcr_source_reload_fn = NULL;
+static void *repro_hcr_source_reload_ctx = NULL;
 
 static void repro_hcr_notify_did_patch(void *entry, void *dispatch_entry,
                                        size_t patch_len) {
@@ -1642,6 +1676,22 @@ static const char *repro_hcr_symbol_failure_detail(void) {
 }
 #endif
 
+/*
+ * Design §4.4: `source-reload` is advertised by a host that can APPLY one, and
+ * by no other. Registering the handler is therefore the only thing that adds
+ * the capability — an agent with no handler advertises nothing and answers
+ * `capability-not-negotiated`, which is the behaviour
+ * `gdh4_unnegotiated_capability_is_refused_not_ignored` is aimed at. Tying the
+ * two together means the advertised list cannot become a claim about a host
+ * that has nothing to serve it with.
+ */
+static const char *repro_hcr_source_reload_capability_suffix(void) {
+  if (repro_hcr_source_reload_fn == NULL) {
+    return "";
+  }
+  return ",\"" REPRO_HCR_AGENT_CAPABILITY_SOURCE_RELOAD "\"";
+}
+
 static char *repro_hcr_hello_json(const char *support_profile) {
   char *json = (char *)malloc(2048);
   if (json == NULL) {
@@ -1651,10 +1701,11 @@ static char *repro_hcr_hello_json(const char *support_profile) {
            "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
            "\"protocolVersion\":1,\"messageId\":\"agent-hello-1\","
            "\"kind\":\"hello\",\"hello\":{\"supportProfile\":\"%s\","
-           "\"agentPid\":%ld,\"capabilities\":[%s]}}",
+           "\"agentPid\":%ld,\"capabilities\":[%s%s]}}",
            REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE,
            support_profile, (long)getpid(),
-           repro_hcr_capabilities_json_array());
+           repro_hcr_capabilities_json_array(),
+           repro_hcr_source_reload_capability_suffix());
   return json;
 }
 
@@ -1858,6 +1909,572 @@ static int repro_hcr_send_owned_json(int fd, char *json) {
   return rc;
 }
 
+/* ==========================================================================
+ * GDH-M4 — the `sourceChanged` / `sourceReloadResult` pair (design §4.3).
+ * ========================================================================== */
+
+int repro_hcr_agent_sha256_hex(const void *data, size_t len, char *out,
+                               size_t out_cap) {
+  uint8_t digest[REPRO_HCR_SHA256_DIGEST_BYTES];
+  if (out == NULL || out_cap < 2 * REPRO_HCR_SHA256_DIGEST_BYTES + 1) {
+    return -1;
+  }
+  /* The self-test is not ceremony. A digest function that silently computes
+   * the wrong thing would put a plausible 64-hex-digit value in a protocol
+   * field that a reader has no way to challenge. */
+  if (!repro_hcr_sha256_selftest()) {
+    return -1;
+  }
+  repro_hcr_sha256(data, len, digest);
+  {
+    /* Spelled locally rather than through `repro_hcr_hex32`, which lives
+     * inside the Linux direct-patch arm. The source-reload path is
+     * platform-independent and must not drag a platform arm in with it. */
+    static const char digits[] = "0123456789abcdef";
+    int i;
+    for (i = 0; i < REPRO_HCR_SHA256_DIGEST_BYTES; ++i) {
+      out[2 * i] = digits[(digest[i] >> 4) & 0x0F];
+      out[2 * i + 1] = digits[digest[i] & 0x0F];
+    }
+    out[2 * REPRO_HCR_SHA256_DIGEST_BYTES] = '\0';
+  }
+  return 0;
+}
+
+int repro_hcr_agent_set_source_reload_handler(
+    repro_hcr_source_reload_handler handler, void *ctx) {
+  if (handler == NULL) {
+    return -1;
+  }
+  repro_hcr_source_reload_fn = handler;
+  repro_hcr_source_reload_ctx = ctx;
+  return 0;
+}
+
+int repro_hcr_agent_advertises_source_reload(void) {
+  return repro_hcr_source_reload_fn != NULL ? 1 : 0;
+}
+
+static int repro_hcr_base64_value(char ch) {
+  if (ch >= 'A' && ch <= 'Z') { return ch - 'A'; }
+  if (ch >= 'a' && ch <= 'z') { return ch - 'a' + 26; }
+  if (ch >= '0' && ch <= '9') { return ch - '0' + 52; }
+  if (ch == '+') { return 62; }
+  if (ch == '/') { return 63; }
+  return -1;
+}
+
+/* Strict base64: anything that is not an alphabet character, padding, or
+ * ASCII whitespace is a decode failure rather than a skipped byte. Silently
+ * dropping a character would hand the host content that is not what the
+ * coordinator sent, and the digest check further down would then report
+ * `digest-mismatch` for a defect that is in this decoder. */
+static unsigned char *repro_hcr_base64_decode(const char *text,
+                                              size_t *out_len) {
+  size_t text_len = strlen(text);
+  unsigned char *out = (unsigned char *)malloc(text_len / 4 * 3 + 4);
+  size_t used = 0;
+  uint32_t accumulator = 0;
+  int bits = 0;
+  size_t i;
+  if (out == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < text_len; ++i) {
+    char ch = text[i];
+    int value;
+    if (ch == '=' ) {
+      continue;
+    }
+    if (ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t') {
+      continue;
+    }
+    value = repro_hcr_base64_value(ch);
+    if (value < 0) {
+      free(out);
+      return NULL;
+    }
+    accumulator = (accumulator << 6) | (uint32_t)value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[used++] = (unsigned char)((accumulator >> bits) & 0xFF);
+    }
+  }
+  *out_len = used;
+  return out;
+}
+
+/* Enough escaping for the fields this agent emits: paths, reason strings and
+ * digests. A control character or a quote in one of them must not be able to
+ * produce a frame the coordinator parses as something else. */
+static void repro_hcr_json_escape(const char *value, char *out,
+                                  size_t out_cap) {
+  size_t used = 0;
+  if (out_cap == 0) {
+    return;
+  }
+  if (value == NULL) {
+    out[0] = '\0';
+    return;
+  }
+  for (; *value != '\0' && used + 7 < out_cap; ++value) {
+    unsigned char ch = (unsigned char)*value;
+    if (ch == '"' || ch == '\\') {
+      out[used++] = '\\';
+      out[used++] = (char)ch;
+    } else if (ch < 0x20) {
+      used += (size_t)snprintf(out + used, out_cap - used, "\\u%04x", ch);
+    } else {
+      out[used++] = (char)ch;
+    }
+  }
+  out[used] = '\0';
+}
+
+/* The value of an unsigned integer field, or `fallback` when it is absent or
+ * not an integer. `found` distinguishes the two, because "absent" and "zero"
+ * are different answers and `lineCount: 0` is itself a refusal. */
+static unsigned long long repro_hcr_json_uint_after(const char *json,
+                                                    const char *key,
+                                                    int *found) {
+  const char *p = strstr(json, key);
+  char *end = NULL;
+  unsigned long long value;
+  if (found != NULL) {
+    *found = 0;
+  }
+  if (p == NULL) {
+    return 0;
+  }
+  p = strchr(p + strlen(key), ':');
+  if (p == NULL) {
+    return 0;
+  }
+  p = repro_hcr_skip_ws(p + 1);
+  if (*p < '0' || *p > '9') {
+    return 0;
+  }
+  value = strtoull(p, &end, 10);
+  if (end == p) {
+    return 0;
+  }
+  if (found != NULL) {
+    *found = 1;
+  }
+  return value;
+}
+
+static const char *repro_hcr_digest_algorithm_end(const char *digest) {
+  return digest == NULL ? NULL : strchr(digest, ':');
+}
+
+static char *repro_hcr_source_reload_result_json(
+    const char *reload_id, const char *source_path, unsigned int generation,
+    const repro_hcr_source_reload_outcome *outcome, const char *whole_reason) {
+  char *json = (char *)malloc(4096);
+  char reload_id_esc[256];
+  char path_esc[1024];
+  char reason_esc[256];
+  char detail_esc[512];
+  char digest_esc[160];
+  int written;
+  if (json == NULL) {
+    return NULL;
+  }
+  repro_hcr_json_escape(reload_id, reload_id_esc, sizeof(reload_id_esc));
+  repro_hcr_json_escape(source_path, path_esc, sizeof(path_esc));
+
+  if (outcome != NULL && outcome->applied) {
+#if defined(REPRO_HCR_GDH4_FALSIFY_HARDCODE_GENERATION)
+    /* FALSIFIER ARM 1 (design §3 / GDH-G8): the acknowledged generation
+     * becomes the literal 1 — the shipping `symbolGeneration: 1` defect
+     * (`repro_hcr_agent.c`'s `patchApplied`) reproduced deliberately.
+     *
+     * NOTE ON WHAT THIS ARM DOES AND DOES NOT SHOW. The milestone says "the
+     * gate must go red on the second notification". It goes red on the FIRST
+     * as well, and that is a property of the design rather than a defect in
+     * the arm: §4.3 numbered generations so that 1 is never a valid
+     * notification value, precisely so that this hardcode is a protocol error
+     * instead of a plausible one. An arm that fires everywhere has not been
+     * shown to discriminate between one reload and two, so it is paired with
+     * ARM 1b below, which does. */
+    unsigned int acknowledged = 1u;
+#elif defined(REPRO_HCR_GDH4_FALSIFY_LATCH_FIRST_GENERATION)
+    /* FALSIFIER ARM 1b (GDH-G8, the discriminating half): every reload is
+     * acknowledged with the generation of the FIRST one. A single-notification
+     * session is then perfectly correct — which is the point — and only a
+     * SECOND reload reveals it. This is the shape the campaign has repeatedly
+     * shipped: a value that is coincidentally right for the one case anybody
+     * ever exercised. */
+    static unsigned int latched = 0u;
+    unsigned int acknowledged;
+    if (latched == 0u) {
+      latched = generation;
+    }
+    acknowledged = latched;
+#else
+    unsigned int acknowledged = generation;
+#endif
+    int i;
+    repro_hcr_json_escape(
+        outcome->applied_digest == NULL ? "" : outcome->applied_digest,
+        digest_esc, sizeof(digest_esc));
+    written = snprintf(
+        json, 4096,
+        "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
+        "\"protocolVersion\":2,\"messageId\":\"agent-source-reload-%d\","
+        "\"kind\":\"sourceReloadResult\",\"sourceReloadResult\":{"
+        "\"reloadId\":\"%s\",\"outcome\":\"applied\",\"reason\":\"\","
+        "\"refusedFiles\":[],\"appliedFiles\":[{"
+        "\"sourcePath\":\"%s\",\"generation\":%u,\"pathIndex\":%llu,"
+        "\"stepIndex\":%llu,\"appliedDigest\":\"%s\",\"appliedLineCount\":%u,"
+        "\"unpreservedState\":[",
+        REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE,
+        repro_hcr_poll_state.messages, reload_id_esc, path_esc, acknowledged,
+        outcome->path_index, outcome->step_index, digest_esc,
+        outcome->applied_line_count);
+    if (written <= 0 || (size_t)written >= 4096) {
+      free(json);
+      return NULL;
+    }
+    for (i = 0; i < outcome->unpreserved_count &&
+                i < REPRO_HCR_AGENT_MAX_UNPRESERVED; ++i) {
+      char item_esc[128];
+      repro_hcr_json_escape(outcome->unpreserved[i], item_esc,
+                            sizeof(item_esc));
+      written += snprintf(json + written, 4096 - (size_t)written, "%s\"%s\"",
+                          i == 0 ? "" : ",", item_esc);
+      if (written <= 0 || (size_t)written >= 4096) {
+        free(json);
+        return NULL;
+      }
+    }
+    written += snprintf(json + written, 4096 - (size_t)written, "]}]}}");
+    if (written <= 0 || (size_t)written >= 4096) {
+      free(json);
+      return NULL;
+    }
+    return json;
+  }
+
+  {
+    const char *reason = whole_reason;
+    const char *detail = "";
+    if (outcome != NULL && outcome->reason != NULL &&
+        outcome->reason[0] != '\0') {
+      reason = outcome->reason;
+      detail = outcome->detail == NULL ? "" : outcome->detail;
+    }
+    if (reason == NULL || reason[0] == '\0') {
+      /* §4.3 makes `reason` non-empty iff the outcome is not `applied`, and
+       * the Nim parser refuses an empty one. A host that refused without
+       * saying why would be reporting a wrong answer with no diagnostic
+       * attached, which is the failure shape this campaign keeps finding. */
+      reason = "unspecified-refusal";
+    }
+    repro_hcr_json_escape(reason, reason_esc, sizeof(reason_esc));
+    repro_hcr_json_escape(detail, detail_esc, sizeof(detail_esc));
+    written = snprintf(
+        json, 4096,
+        "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
+        "\"protocolVersion\":2,\"messageId\":\"agent-source-reload-%d\","
+        "\"kind\":\"sourceReloadResult\",\"sourceReloadResult\":{"
+        "\"reloadId\":\"%s\",\"outcome\":\"failed\",\"reason\":\"%s\","
+        "\"appliedFiles\":[],\"refusedFiles\":[{"
+        "\"sourcePath\":\"%s\",\"generation\":%u,\"reason\":\"%s\","
+        "\"detail\":\"%s\"}]}}",
+        REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE,
+        repro_hcr_poll_state.messages, reload_id_esc, reason_esc, path_esc,
+        generation, reason_esc, detail_esc);
+    if (written <= 0 || (size_t)written >= 4096) {
+      free(json);
+      return NULL;
+    }
+    return json;
+  }
+}
+
+/*
+ * Handle one `sourceChanged` frame and answer it. ALWAYS answers: design §4.4
+ * is explicit that an ignored notification is worse than a refused session,
+ * because a recording in which post-reload steps are attributed to v1 with
+ * nothing saying so is a wrong answer with no diagnostic attached.
+ */
+static int repro_hcr_handle_source_changed(int fd, const char *body) {
+  char *reload_id = repro_hcr_json_string_after(body, "\"reloadId\"");
+  char *language = repro_hcr_json_string_after(body, "\"language\"");
+  const char *files = strstr(body, "\"changedFiles\"");
+  char *source_path = NULL;
+  char *snapshot_digest = NULL;
+  char *line_table_digest = NULL;
+  char *content_encoding = NULL;
+  char *content_b64 = NULL;
+  unsigned char *content = NULL;
+  size_t content_len = 0;
+  unsigned int generation = 0;
+  unsigned int line_count = 0;
+  int found = 0;
+  const char *refusal = NULL;
+  char detail[256];
+  char recomputed[2 * REPRO_HCR_SHA256_DIGEST_BYTES + 1];
+  char tagged[2 * REPRO_HCR_SHA256_DIGEST_BYTES + 16];
+  repro_hcr_source_reload_outcome outcome;
+  char *json = NULL;
+  int rc = -1;
+
+  detail[0] = '\0';
+  memset(&outcome, 0, sizeof(outcome));
+
+  if (reload_id == NULL) {
+    /* Without a reloadId there is nothing to correlate an answer to, so this
+     * is the one case that cannot be answered. It is reported as a hard
+     * session error rather than dropped. */
+    free(language);
+    return -1;
+  }
+
+  if (files == NULL) {
+    refusal = REPRO_HCR_RELOAD_REASON_PARSE_ERROR;
+    snprintf(detail, sizeof(detail), "no changedFiles array in notification");
+    goto respond;
+  }
+
+  source_path = repro_hcr_json_string_after(files, "\"sourcePath\"");
+  snapshot_digest = repro_hcr_json_string_after(files, "\"snapshotDigest\"");
+  line_table_digest =
+      repro_hcr_json_string_after(files, "\"lineTableDigest\"");
+  content_encoding = repro_hcr_json_string_after(files, "\"contentEncoding\"");
+  generation = (unsigned int)repro_hcr_json_uint_after(files, "\"generation\"",
+                                                       &found);
+  if (!found) {
+    refusal = REPRO_HCR_RELOAD_REASON_PARSE_ERROR;
+    snprintf(detail, sizeof(detail), "changedFiles entry has no generation");
+    goto respond;
+  }
+  line_count = (unsigned int)repro_hcr_json_uint_after(files, "\"lineCount\"",
+                                                       &found);
+  if (!found) {
+    refusal = REPRO_HCR_RELOAD_REASON_PARSE_ERROR;
+    snprintf(detail, sizeof(detail), "changedFiles entry has no lineCount");
+    goto respond;
+  }
+
+  if (source_path == NULL) {
+    refusal = REPRO_HCR_RELOAD_REASON_PARSE_ERROR;
+    snprintf(detail, sizeof(detail), "changedFiles entry has no sourcePath");
+    goto respond;
+  }
+
+  /* One file per notification is what this agent serves. More than one is
+   * REFUSED BY NAME rather than silently reduced to the first — a silent skip
+   * is how a reloaded file's text never reaches the trace while every call
+   * reports success. */
+  {
+    const char *first = strstr(files, "\"sourcePath\"");
+    const char *second =
+        first == NULL ? NULL : strstr(first + 1, "\"sourcePath\"");
+    if (second != NULL) {
+      refusal = REPRO_HCR_RELOAD_REASON_MULTIPLE_FILES;
+      snprintf(detail, sizeof(detail),
+               "this host applies one changed file per notification");
+      goto respond;
+    }
+  }
+
+  if (generation < REPRO_HCR_AGENT_FIRST_RELOAD_GENERATION) {
+    refusal = REPRO_HCR_RELOAD_REASON_PARSE_ERROR;
+    snprintf(detail, sizeof(detail),
+             "generation %u is below the first valid reload generation %u",
+             generation, REPRO_HCR_AGENT_FIRST_RELOAD_GENERATION);
+    goto respond;
+  }
+
+  if (content_encoding == NULL || strcmp(content_encoding, "inline") != 0) {
+    refusal = REPRO_HCR_RELOAD_REASON_ENCODING;
+    snprintf(detail, sizeof(detail),
+             "this host accepts only contentEncoding \"inline\"; a path handle "
+             "races the next edit");
+    goto respond;
+  }
+
+  content_b64 = repro_hcr_json_string_after(files, "\"content\"");
+  if (content_b64 == NULL) {
+    refusal = REPRO_HCR_RELOAD_REASON_PARSE_ERROR;
+    snprintf(detail, sizeof(detail), "inline notification carries no content");
+    goto respond;
+  }
+  content = repro_hcr_base64_decode(content_b64, &content_len);
+  if (content == NULL) {
+    refusal = REPRO_HCR_RELOAD_REASON_PARSE_ERROR;
+    snprintf(detail, sizeof(detail), "content is not valid base64");
+    goto respond;
+  }
+
+  /* The digest is verified, and a digest in an algorithm this host does not
+   * implement is REFUSED rather than skipped. Accepting bytes unverified while
+   * a `snapshotDigest` field in the transcript makes them look verified is the
+   * exact shape of silent self-pass this campaign exists to keep out. */
+  {
+    const char *colon = repro_hcr_digest_algorithm_end(snapshot_digest);
+    if (snapshot_digest == NULL || colon == NULL) {
+      refusal = REPRO_HCR_RELOAD_REASON_DIGEST_ALGORITHM;
+      snprintf(detail, sizeof(detail),
+               "snapshotDigest carries no \"<alg>:<hex>\" tag");
+      goto respond;
+    }
+    if ((size_t)(colon - snapshot_digest) != strlen("sha256") ||
+        strncmp(snapshot_digest, "sha256", strlen("sha256")) != 0) {
+      refusal = REPRO_HCR_RELOAD_REASON_DIGEST_ALGORITHM;
+      snprintf(detail, sizeof(detail),
+               "this host implements sha256 only; it cannot verify %s",
+               snapshot_digest);
+      goto respond;
+    }
+    if (repro_hcr_agent_sha256_hex(content, content_len, recomputed,
+                                   sizeof(recomputed)) != 0) {
+      refusal = REPRO_HCR_RELOAD_REASON_DIGEST_ALGORITHM;
+      snprintf(detail, sizeof(detail),
+               "the host's sha256 failed its own FIPS self-test");
+      goto respond;
+    }
+    if (strcmp(colon + 1, recomputed) != 0) {
+      refusal = REPRO_HCR_RELOAD_REASON_DIGEST_MISMATCH;
+      snprintf(detail, sizeof(detail), "expected %s, the bytes hash to sha256:%s",
+               snapshot_digest, recomputed);
+      goto respond;
+    }
+    snprintf(tagged, sizeof(tagged), "sha256:%s", recomputed);
+  }
+
+  /* The line count is verified too: §5.5 names `line-count-mismatch`, and the
+   * count is what the trace writer lays the path's position space out with.
+   * Counting it here, rather than trusting the field, is what makes the
+   * refusal reachable. */
+  {
+    unsigned int counted = content_len == 0 ? 0u : 1u;
+    size_t i;
+    for (i = 0; i + 1 < content_len; ++i) {
+      if (content[i] == '\n') {
+        counted++;
+      }
+    }
+    if (counted != line_count) {
+      refusal = REPRO_HCR_RELOAD_REASON_LINE_COUNT;
+      snprintf(detail, sizeof(detail),
+               "notification says %u lines, the bytes have %u", line_count,
+               counted);
+      goto respond;
+    }
+    outcome.applied_line_count = counted;
+  }
+
+  if (repro_hcr_source_reload_fn == NULL) {
+#if defined(REPRO_HCR_GDH4_FALSIFY_IGNORE_UNKNOWN_KIND)
+    /* FALSIFIER ARM: the host IGNORES a notification it cannot serve. Design
+     * §4.4 forbids exactly this, and the gate must see the absence of a reply
+     * as "no reply", with the transcript, rather than as a timeout.
+     *
+     * `rc = 0` on purpose: the session stays OPEN and healthy, so what the
+     * coordinator observes is silence and not a closed socket. A closed socket
+     * would be a different — and more detectable — defect, and an arm that
+     * modelled the easier one would not have been shown to catch this one. */
+    rc = 0;
+    goto cleanup;
+#else
+    refusal = REPRO_HCR_RELOAD_REASON_CAPABILITY;
+    snprintf(detail, sizeof(detail),
+             "this host did not advertise \"%s\" in its hello",
+             REPRO_HCR_AGENT_CAPABILITY_SOURCE_RELOAD);
+    goto respond;
+#endif
+  }
+
+  {
+    repro_hcr_source_changed_file file;
+    int handler_rc;
+    memset(&file, 0, sizeof(file));
+    file.source_path = source_path;
+    file.generation = generation;
+    file.snapshot_digest = snapshot_digest;
+    file.line_table_digest = line_table_digest;
+    file.line_count = line_count;
+    file.content_encoding = content_encoding;
+    file.content = content;
+    file.content_length = content_len;
+
+    outcome.applied_digest = tagged;
+    handler_rc = repro_hcr_source_reload_fn(repro_hcr_source_reload_ctx,
+                                            reload_id,
+                                            language == NULL ? "" : language,
+                                            &file, &outcome);
+    if (handler_rc != 0 && outcome.applied) {
+      /* A handler that answered "applied" and then failed is contradicting
+       * itself; the refusal wins, because an over-reported apply is the
+       * failure mode that puts the wrong version in the trace. */
+      outcome.applied = 0;
+      if (outcome.reason == NULL || outcome.reason[0] == '\0') {
+        outcome.reason = REPRO_HCR_RELOAD_REASON_WRITER_REFUSED;
+      }
+    }
+    if (outcome.applied && outcome.applied_line_count == 0) {
+      outcome.applied_line_count = line_count;
+    }
+    if (outcome.applied &&
+        (outcome.applied_digest == NULL || outcome.applied_digest[0] == '\0')) {
+      outcome.applied_digest = tagged;
+    }
+  }
+
+respond:
+  json = repro_hcr_source_reload_result_json(
+      reload_id, source_path == NULL ? "" : source_path, generation,
+      refusal == NULL ? &outcome : NULL, refusal);
+  if (json != NULL) {
+    rc = repro_hcr_send_json(fd, json);
+    free(json);
+  }
+
+#if defined(REPRO_HCR_GDH4_FALSIFY_IGNORE_UNKNOWN_KIND)
+cleanup:
+#endif
+  free(reload_id);
+  free(language);
+  free(source_path);
+  free(snapshot_digest);
+  free(line_table_digest);
+  free(content_encoding);
+  free(content_b64);
+  free(content);
+  return rc;
+}
+
+static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
+                                         int fd, char *patch);
+
+/*
+ * Dispatch one coordinator frame by its `kind`.
+ *
+ * Before GDH-M4 there was no dispatch at all: the frame after `helloAck` was
+ * ASSUMED to be a patch request. A `sourceChanged` sent to such an agent would
+ * have been parsed as a patch, found to have no `patchId`, and answered
+ * `patchFailed` — a wrong answer wearing the right protocol's clothes.
+ */
+static int repro_hcr_dispatch_frame(repro_hcr_agent_thread_args *args, int fd,
+                                    char *body) {
+  char *kind = repro_hcr_json_string_after(body, "\"kind\"");
+  int rc = 0;
+  if (kind != NULL && strcmp(kind, "sourceChanged") == 0) {
+    rc = repro_hcr_handle_source_changed(fd, body);
+    free(kind);
+    free(body);
+    return rc;
+  }
+  free(kind);
+  repro_hcr_handle_patch_frame(args, fd, body);
+  return 0;
+}
+
 static void *repro_hcr_agent_thread(void *raw_args) {
   repro_hcr_agent_thread_args *args = (repro_hcr_agent_thread_args *)raw_args;
   int fd = repro_hcr_connect_with_retry(args->socket_path);
@@ -1875,13 +2492,34 @@ static void *repro_hcr_agent_thread(void *raw_args) {
   char *hello_ack = repro_hcr_read_frame_body(fd);
   free(hello_ack);
 
-  char *patch = repro_hcr_read_frame_body(fd);
-  if (patch == NULL) {
-    close(fd);
-    repro_hcr_free_args(args);
-    return NULL;
+  /*
+   * GDH-M4: the session loop.
+   *
+   * This used to be `read one frame, apply, reply, close`. There was no loop
+   * anywhere in this function, and `repro_hcr_agent_poll` latched
+   * `repro_hcr_poll_done` after calling it once — so a process could be served
+   * exactly one patch in its lifetime, and no gate in the GDScript hot-reload
+   * campaign that needed a SECOND reload could run at all. The loop ends when
+   * the peer closes, which `repro_hcr_read_frame_body` reports as NULL: a
+   * named end of session, not a stall.
+   */
+  for (;;) {
+    char *frame = repro_hcr_read_frame_body(fd);
+    if (frame == NULL) {
+      break;
+    }
+    if (repro_hcr_dispatch_frame(args, fd, frame) != 0) {
+      break;
+    }
   }
 
+  close(fd);
+  repro_hcr_free_args(args);
+  return NULL;
+}
+
+static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
+                                         int fd, char *patch) {
   char *patch_id = repro_hcr_json_string_after(patch, "\"patchId\"");
   char *changed_function =
       repro_hcr_json_first_array_string_after(patch, "\"changedFunctions\"");
@@ -2033,9 +2671,9 @@ static void *repro_hcr_agent_thread(void *raw_args) {
   free(debug_digest);
   free(unwind_digest);
   free(patch);
-  close(fd);
-  repro_hcr_free_args(args);
-  return NULL;
+  /* No `close(fd)` and no `repro_hcr_free_args` here any more: the connection
+   * and the args outlive a single patch now, and freeing them would have been
+   * the one-patch-per-process limit relocated rather than removed. */
 }
 
 /* Design §4.4 and §5.2 both require work "at agent start": SYNC_CORE
@@ -2145,12 +2783,159 @@ int repro_hcr_agent_start_polling_from_env(const char *support_profile,
   return repro_hcr_poll_args == NULL ? -1 : 0;
 }
 
-int repro_hcr_agent_poll(void) {
-  if (repro_hcr_poll_args == NULL || repro_hcr_poll_done) {
+static int repro_hcr_poll_readable(int fd) {
+  struct pollfd pfd;
+  int rc;
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+  do {
+    rc = poll(&pfd, 1, 0);
+  } while (rc < 0 && errno == EINTR);
+  if (rc <= 0) {
     return 0;
   }
-  repro_hcr_agent_thread(repro_hcr_poll_args);
-  repro_hcr_poll_args = NULL;
+  /* POLLHUP with no POLLIN means the peer closed with nothing left to read;
+   * reporting it as readable lets `read_frame_body` turn it into the same
+   * NULL — one end-of-session path, not two. */
+  return (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+}
+
+static void repro_hcr_poll_end_session(void) {
+  if (repro_hcr_poll_state.fd >= 0) {
+    close(repro_hcr_poll_state.fd);
+  }
+  repro_hcr_poll_state.fd = -1;
+  repro_hcr_poll_state.open = 0;
+  if (repro_hcr_poll_args != NULL) {
+    repro_hcr_free_args(repro_hcr_poll_args);
+    repro_hcr_poll_args = NULL;
+  }
   repro_hcr_poll_done = 1;
+}
+
+int repro_hcr_agent_poll_session_open(void) {
+  return repro_hcr_poll_state.open;
+}
+
+int repro_hcr_agent_poll_messages_handled(void) {
+  return repro_hcr_poll_state.messages;
+}
+
+/*
+ * GDH-M4's drain-and-return poll. See the contract on the declaration in
+ * `repro_hcr_agent.h`.
+ *
+ * The first call deliberately BLOCKS for one frame. That is not a leftover:
+ * HLX-M0's target (`tests/e2e/hcr-linux-direct/hcr_lx_m0_target.c`) calls
+ * `poll()` exactly once and its gate asserts the patched function returns 77
+ * by the time it returned. A poll that answered "nothing available yet" would
+ * turn that gate red for a reason that has nothing to do with what it
+ * measures, so the FIRST frame keeps the old blocking behaviour and only the
+ * frames after it are drained non-blocking.
+ */
+static int repro_hcr_agent_poll_internal(int block_for_first) {
+  if (repro_hcr_poll_done && !repro_hcr_poll_state.open) {
+    return 0;
+  }
+
+  if (!repro_hcr_poll_state.connected) {
+    if (repro_hcr_poll_args == NULL) {
+      return 0;
+    }
+    repro_hcr_poll_state.fd =
+        repro_hcr_connect_with_retry(repro_hcr_poll_args->socket_path);
+    repro_hcr_poll_state.connected = 1;
+    if (repro_hcr_poll_state.fd < 0) {
+      repro_hcr_poll_end_session();
+      return 0;
+    }
+    if (repro_hcr_send_owned_json(
+            repro_hcr_poll_state.fd,
+            repro_hcr_hello_json(repro_hcr_poll_args->support_profile)) != 0) {
+      repro_hcr_poll_end_session();
+      return 0;
+    }
+  }
+
+  if (!repro_hcr_poll_state.hello_acked) {
+    if (!block_for_first && !repro_hcr_poll_readable(repro_hcr_poll_state.fd)) {
+      return 0; /* the coordinator has not answered yet; try again next call */
+    }
+    {
+      char *hello_ack = repro_hcr_read_frame_body(repro_hcr_poll_state.fd);
+      if (hello_ack == NULL) {
+        repro_hcr_poll_end_session();
+        return 0;
+      }
+      free(hello_ack);
+    }
+    repro_hcr_poll_state.hello_acked = 1;
+    repro_hcr_poll_state.open = 1;
+
+    if (block_for_first) {
+      /* The first frame, blocking — see the note above. */
+      char *frame = repro_hcr_read_frame_body(repro_hcr_poll_state.fd);
+      if (frame == NULL) {
+        repro_hcr_poll_end_session();
+        return 0;
+      }
+      repro_hcr_poll_state.messages++;
+      if (repro_hcr_dispatch_frame(repro_hcr_poll_args,
+                                   repro_hcr_poll_state.fd, frame) != 0) {
+        repro_hcr_poll_end_session();
+        return 0;
+      }
+#if defined(REPRO_HCR_GDH4_FALSIFY_ONE_SHOT_POLL)
+      /* FALSIFIER ARM: the pre-GDH-M4 behaviour restored verbatim — the
+       * session is torn down after the FIRST message. A second notification is
+       * then never read, and the coordinator sees the socket close. The gate
+       * must report that as a named end of session, not as a timeout. */
+      repro_hcr_poll_end_session();
+      return 0;
+#endif
+    }
+  }
+
+  if (!repro_hcr_poll_state.open) {
+    return 0;
+  }
+
+  while (repro_hcr_poll_readable(repro_hcr_poll_state.fd)) {
+    char *frame = repro_hcr_read_frame_body(repro_hcr_poll_state.fd);
+    if (frame == NULL) {
+      repro_hcr_poll_end_session();
+      return 0;
+    }
+    repro_hcr_poll_state.messages++;
+    if (repro_hcr_dispatch_frame(repro_hcr_poll_args, repro_hcr_poll_state.fd,
+                                 frame) != 0) {
+      repro_hcr_poll_end_session();
+      return 0;
+    }
+#if defined(REPRO_HCR_GDH4_FALSIFY_ONE_SHOT_POLL)
+    repro_hcr_poll_end_session();
+    return 0;
+#endif
+  }
   return 0;
+}
+
+int repro_hcr_agent_poll(void) { return repro_hcr_agent_poll_internal(1); }
+
+/*
+ * GDH-M5's engine seam calls this, once per frame, and it must never stop the
+ * frame.
+ *
+ * `repro_hcr_agent_poll` blocks for the FIRST frame so HLX-M0's one-shot
+ * target keeps working. An engine cannot afford that: its first safe point
+ * would freeze the main loop until a coordinator chose to send something, and
+ * a driver that waits for tick 8 before reloading would deadlock against an
+ * engine stopped at tick 0. That was not hypothetical — it is why this
+ * function exists. Here the handshake itself is incremental: connect and
+ * `hello` on the first call, `helloAck` whenever it becomes readable, then
+ * drain whatever is already there.
+ */
+int repro_hcr_agent_poll_nonblocking(void) {
+  return repro_hcr_agent_poll_internal(0);
 }

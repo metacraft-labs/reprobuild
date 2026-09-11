@@ -75,6 +75,31 @@ const
     (envVar: "CMAKE_VERSION",   tool: "cmake"),
     (envVar: "NINJA_VERSION",   tool: "ninja"),
     (envVar: "NODE_VERSION",    tool: "node"),
+    # KNOWN DEFECT, latent — this row names the WRONG catalog entry for
+    # the pin the Windows env file actually carries, and a migrated
+    # ``home.nim`` would select the wrong compiler the day gcc leaves
+    # ``DeferredTools``. Recorded in full in
+    # ``reprobuild-specs/CLI/home/migrate-from-env-scripts.md`` under
+    # "Known gaps"; do not treat the comment as the fix.
+    #
+    # ``windows/toolchain-versions.env`` pins ``GCC_VERSION=16.1.0``
+    # alongside ``GCC_WINLIBS_RELEASE`` / ``GCC_WINLIBS_SHA256``: it is
+    # the WinLibs POSIX/UCRT distribution, whose catalog entry is
+    # ``gcc-winlibs`` (``packages/gcc_winlibs.nim``, single slice
+    # ``16.1.0posix-14.0.0-ucrt-r2``). ``gcc`` is a DIFFERENT catalog
+    # entry — the nuwen.net components build harvested from Scoop
+    # (``packages/gcc.nim``, 15.2.0) — and the two differ in the CRT
+    # they target, which is the whole reason env.ps1 pins the ucrt
+    # variant (an MSVCRT gcc against the pinned ucrt64 OpenSSL links
+    # and then misbehaves at runtime).
+    #
+    # Nothing surfaces this today only because ``gcc`` is in
+    # ``DeferredTools`` and ``planMigration`` tests deferral BEFORE it
+    # tests ``catalogVersionAvailable`` — so the pin renders as a TODO
+    # and the version is never resolved. Remove gcc from the deferred
+    # list (M3 already closed its realize-time gap) and this row starts
+    # emitting ``package(gcc, "16.1.0")``: the wrong distribution, at a
+    # version neither catalog carries.
     (envVar: "GCC_VERSION",     tool: "gcc"),
     (envVar: "GIT_VERSION",     tool: "git"),
     (envVar: "MESON_VERSION",   tool: "meson"),

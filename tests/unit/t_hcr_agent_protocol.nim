@@ -350,3 +350,232 @@ suite "HCR agent protocol":
     let restored = parseFramedAgentMessage(frameAgentMessage(message))
     check not restored.patchApplied.codePatchEvent.present
     check not restored.patchApplied.codePatchEvent.recorded
+
+# ---------------------------------------------------------------------------
+# GDH-M4 — the `sourceChanged` / `sourceReloadResult` pair (design §4.3/§4.4).
+# ---------------------------------------------------------------------------
+
+const
+  GdhPath = "res://gdh4/probe.gd"
+  GdhV2 = "extends Node\n\nfunc tick() -> int:\n\treturn 2\n"
+  GdhV3 = "extends Node\n\nfunc tick() -> int:\n\treturn 3\n"
+
+proc gdhSourceChanged(reloadId: string; generation: uint32;
+                      text: string): HcrAgentMessage =
+  HcrAgentMessage(
+    schemaId: HcrAgentProtocolSchemaId,
+    transportScope: HcrAgentTransportScope,
+    protocolVersion: HcrAgentProtocolVersionSourceReload,
+    messageId: "coordinator-source-changed-1",
+    kind: hmkSourceChanged,
+    sourceChanged: HcrSourceChanged(
+      reloadId: reloadId,
+      language: "gdscript",
+      changedFiles: @[
+        sourceChangedFile(GdhPath, generation, bytesOfString(text))]))
+
+proc gdhAppliedResult(reloadId: string;
+                      generation: uint32): HcrAgentMessage =
+  HcrAgentMessage(
+    schemaId: HcrAgentProtocolSchemaId,
+    transportScope: HcrAgentTransportScope,
+    protocolVersion: HcrAgentProtocolVersionSourceReload,
+    messageId: "agent-source-reload-result-1",
+    kind: hmkSourceReloadResult,
+    sourceReloadResult: HcrSourceReloadResult(
+      reloadId: reloadId,
+      outcome: hsroApplied,
+      appliedFiles: @[
+        HcrSourceReloadAppliedFile(
+          sourcePath: GdhPath,
+          generation: generation,
+          pathIndex: 7'u64,
+          stepIndex: 481230'u64,
+          appliedDigest: sourceSnapshotDigest(bytesOfString(GdhV2)),
+          appliedLineCount: sourceLineCount(bytesOfString(GdhV2)))]))
+
+suite "GDH-M4 source reload protocol":
+  test "the digest both ends must agree on is SHA-256, pinned to FIPS 180-4":
+    # The C agent recomputes these with `repro_hcr_sha256.h` and the
+    # coordinator with `source_digest.nim`. Two independent implementations
+    # agreeing is only evidence if both are pinned to the published vectors —
+    # otherwise they could agree on being wrong together.
+    check sha256Hex("") ==
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    check sha256Hex("abc") ==
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    check sha256Hex(
+      "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    check sourceSnapshotDigest(bytesOfString("abc")).startsWith("sha256:")
+    check digestAlgorithmOf(sourceSnapshotDigest(bytesOfString("abc"))) ==
+      "sha256"
+    # An untagged digest must NOT be read as this algorithm. A host that
+    # guessed would report a verification it did not perform.
+    check digestAlgorithmOf("deadbeef") == ""
+
+  test "the line table and the line count agree on the same convention":
+    # They have to: a file could otherwise pass `lineCount` and fail
+    # `lineTableDigest` for a reason no reader could act on.
+    check sourceLineCount(bytesOfString("a\nb\nc\n")) == 3'u32
+    check sourceLineCount(bytesOfString("a\nb\nc")) == 3'u32
+    check sourceLineCount(bytesOfString("")) == 0'u32
+    check sourceLineStartOffsets(bytesOfString("a\nb\nc\n")) == @[0'u32, 2'u32, 4'u32]
+    check uint32(sourceLineStartOffsets(bytesOfString("a\nbb\nc")).len) ==
+      sourceLineCount(bytesOfString("a\nbb\nc"))
+    # Same line count, different bytes: the case §4.3 says `lineTableDigest`
+    # exists for, where an index- or count-keyed scheme looks right.
+    check sourceLineCount(bytesOfString(GdhV2)) ==
+      sourceLineCount(bytesOfString(GdhV3))
+    check sourceSnapshotDigest(bytesOfString(GdhV2)) !=
+      sourceSnapshotDigest(bytesOfString(GdhV3))
+
+  test "a sourceChanged frame round-trips with its content intact":
+    let message = gdhSourceChanged("gdh4-r-0002", 2'u32, GdhV2)
+    let restored = parseFramedAgentMessage(frameAgentMessage(message))
+    check restored.kind == hmkSourceChanged
+    check restored.protocolVersion == HcrAgentProtocolVersionSourceReload
+    check restored.sourceChanged.reloadId == "gdh4-r-0002"
+    check restored.sourceChanged.changedFiles.len == 1
+    let file = restored.sourceChanged.changedFiles[0]
+    check file.sourcePath == GdhPath
+    check file.generation == 2'u32
+    check file.contentEncoding == hsceInline
+    check file.content == bytesOfString(GdhV2)
+    check file.snapshotDigest == sourceSnapshotDigest(bytesOfString(GdhV2))
+    check file.lineCount == sourceLineCount(bytesOfString(GdhV2))
+
+  test "generation 1 is refused by name on BOTH directions of the wire":
+    # §4.3 numbered generations so that 1 — the content the process started
+    # with — is never a valid notification value. That is what turns the
+    # shipping `symbolGeneration: 1` hardcode into a protocol error here
+    # instead of a plausible one.
+    expect ValueError:
+      discard parseFramedAgentMessage(
+        frameAgentMessage(gdhSourceChanged("gdh4-r-0002", 1'u32, GdhV2)))
+    expect ValueError:
+      discard parseFramedAgentMessage(
+        frameAgentMessage(gdhAppliedResult("gdh4-r-0002", 1'u32)))
+    # …and 2 is accepted, so the refusal above is about the value and not
+    # about the shape of the message.
+    let ok = parseFramedAgentMessage(
+      frameAgentMessage(gdhAppliedResult("gdh4-r-0002", 2'u32)))
+    check ok.sourceReloadResult.appliedFiles[0].generation == 2'u32
+
+  test "the source-reload messages exist only on protocolVersion 2":
+    var message = gdhSourceChanged("gdh4-r-0002", 2'u32, GdhV2)
+    message.protocolVersion = HcrAgentProtocolVersion
+    expect ValueError:
+      discard parseFramedAgentMessage(frameAgentMessage(message))
+
+  test "\"applied\" with nothing applied is refused":
+    # Trap 2: a chain of `success: true` is not a result. The parser refuses
+    # the shape so that no consumer has to remember to check it.
+    var message = gdhAppliedResult("gdh4-r-0002", 2'u32)
+    message.sourceReloadResult.appliedFiles = @[]
+    expect ValueError:
+      discard parseFramedAgentMessage(frameAgentMessage(message))
+    # `reason` is non-empty iff the outcome is not applied — both halves.
+    var withReason = gdhAppliedResult("gdh4-r-0002", 2'u32)
+    withReason.sourceReloadResult.reason = "something"
+    expect ValueError:
+      discard parseFramedAgentMessage(frameAgentMessage(withReason))
+    var refusedNoReason = gdhAppliedResult("gdh4-r-0002", 2'u32)
+    refusedNoReason.sourceReloadResult.outcome = hsroFailed
+    refusedNoReason.sourceReloadResult.appliedFiles = @[]
+    refusedNoReason.sourceReloadResult.reason = ""
+    expect ValueError:
+      discard parseFramedAgentMessage(frameAgentMessage(refusedNoReason))
+
+  test "an applied file with no recomputed digest is refused":
+    # ADDED AT REVIEW. `appliedLineCount == 0` and `appliedFiles == []` were
+    # already refused; an empty `appliedDigest` was not, which left one shape
+    # representable: a host whose digest computation failed answering
+    # `applied` with the evidence field blank and everything else intact.
+    var noDigest = gdhAppliedResult("gdh4-r-0002", 2'u32)
+    noDigest.sourceReloadResult.appliedFiles[0].appliedDigest = ""
+    expect ValueError:
+      discard parseFramedAgentMessage(frameAgentMessage(noDigest))
+    # An UNTAGGED digest is refused too: a reader cannot recompute a bare hex
+    # string without knowing the algorithm, so it is not a digest.
+    var untagged = gdhAppliedResult("gdh4-r-0002", 2'u32)
+    untagged.sourceReloadResult.appliedFiles[0].appliedDigest =
+      sha256Hex(GdhV2)
+    expect ValueError:
+      discard parseFramedAgentMessage(frameAgentMessage(untagged))
+    # …and the tagged one is accepted, so the refusals above are about the
+    # field's content and not about the message's shape.
+    let ok = parseFramedAgentMessage(
+      frameAgentMessage(gdhAppliedResult("gdh4-r-0002", 2'u32)))
+    check ok.sourceReloadResult.appliedFiles[0].appliedDigest ==
+      sourceSnapshotDigest(bytesOfString(GdhV2))
+
+  test "a mandatory lineCount of zero is refused":
+    var message = gdhSourceChanged("gdh4-r-0002", 2'u32, GdhV2)
+    message.sourceChanged.changedFiles[0].lineCount = 0'u32
+    expect ValueError:
+      discard parseFramedAgentMessage(frameAgentMessage(message))
+
+  test "an empty changedFiles list is refused":
+    var message = gdhSourceChanged("gdh4-r-0002", 2'u32, GdhV2)
+    message.sourceChanged.changedFiles = @[]
+    expect ValueError:
+      discard parseFramedAgentMessage(frameAgentMessage(message))
+
+  test "a refused file must carry a named reason":
+    let message = HcrAgentMessage(
+      schemaId: HcrAgentProtocolSchemaId,
+      transportScope: HcrAgentTransportScope,
+      protocolVersion: HcrAgentProtocolVersionSourceReload,
+      messageId: "agent-source-reload-result-1",
+      kind: hmkSourceReloadResult,
+      sourceReloadResult: HcrSourceReloadResult(
+        reloadId: "gdh4-r-0002",
+        outcome: hsroFailed,
+        reason: HcrReloadReasonCapabilityNotNegotiated,
+        refusedFiles: @[
+          HcrSourceReloadRefusedFile(
+            sourcePath: GdhPath, generation: 2'u32, reason: "")]))
+    expect ValueError:
+      discard parseFramedAgentMessage(frameAgentMessage(message))
+
+  test "a session refuses a reused reloadId and a mismatched acknowledgement":
+    var session = initHcrAgentSession(SupportProfile)
+    session.observeAgentProtocolMessage(hmdAgentToCoordinator,
+      HcrAgentMessage(
+        schemaId: HcrAgentProtocolSchemaId,
+        transportScope: HcrAgentTransportScope,
+        protocolVersion: HcrAgentProtocolVersion,
+        messageId: "agent-hello-1",
+        kind: hmkHello,
+        hello: HcrHello(
+          supportProfile: SupportProfile, agentPid: 1,
+          capabilities: @["hcr-agent-protocol", HcrSourceReloadCapability])))
+    check session.hostAdvertisedSourceReload()
+    session.observeAgentProtocolMessage(hmdCoordinatorToAgent,
+      HcrAgentMessage(
+        schemaId: HcrAgentProtocolSchemaId,
+        transportScope: HcrAgentTransportScope,
+        protocolVersion: HcrAgentProtocolVersion,
+        messageId: "coordinator-hello-ack-1",
+        kind: hmkHelloAck,
+        hello: HcrHello(supportProfile: SupportProfile, agentPid: 0,
+          capabilities: @["hcr-agent-protocol"])))
+    check session.state == hssNegotiated
+
+    session.observeAgentProtocolMessage(hmdCoordinatorToAgent,
+      gdhSourceChanged("gdh4-r-0002", 2'u32, GdhV2))
+    check session.state == hssSourceReloadRequested
+    # An acknowledgement for a different reload is refused: without this, two
+    # notifications in flight could be answered once and counted twice.
+    expect ValueError:
+      session.observeAgentProtocolMessage(hmdAgentToCoordinator,
+        gdhAppliedResult("gdh4-r-9999", 2'u32))
+    session.observeAgentProtocolMessage(hmdAgentToCoordinator,
+      gdhAppliedResult("gdh4-r-0002", 2'u32))
+    check session.state == hssNegotiated
+    check session.sourceReloadResults.len == 1
+    # §4.3 requires the id to be unique per notification.
+    expect ValueError:
+      session.observeAgentProtocolMessage(hmdCoordinatorToAgent,
+        gdhSourceChanged("gdh4-r-0002", 3'u32, GdhV3))
