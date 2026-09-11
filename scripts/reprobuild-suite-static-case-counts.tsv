@@ -1007,6 +1007,7 @@ tests/integration/t_develop_ignores_sha_pinned_manifest_without_a_lock_record.ni
 tests/integration/t_develop_list_reports_tier_and_backend.nim	nim	1
 tests/integration/t_develop_lock_store_supplies_private_route.nim	nim	1
 tests/integration/t_develop_only_except_refuse_unknown_names.nim	nim	1
+tests/integration/t_develop_per_repo_lock_contributes_only_its_self_record.nim	nim	1
 tests/integration/t_develop_public_only_unchanged.nim	nim	1
 tests/integration/t_develop_reads_each_participating_repos_committed_lock.nim	nim	1
 tests/integration/t_develop_refuses_cross_backend_revision_conflict.nim	nim	1
@@ -1014,6 +1015,7 @@ tests/integration/t_develop_refuses_inexact_revision_and_leaves_no_checkout.nim	
 tests/integration/t_develop_refuses_unreachable_team_backend.nim	nim	1
 tests/integration/t_develop_refuses_unreadable_backend_before_membership_degrades.nim	nim	1
 tests/integration/t_develop_refuses_unreadable_backend_of_any_kind.nim	nim	1
+tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim	nim	1
 tests/integration/t_develop_selectors_compose_in_fixed_order.nim	nim	1
 tests/integration/t_develop_set_is_union_of_all_backends.nim	nim	1
 tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	nim	1
