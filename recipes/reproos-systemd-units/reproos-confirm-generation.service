@@ -1,6 +1,6 @@
 [Unit]
 Description=ReproOS confirm generation (B3 boot-success hook)
-Documentation=https://github.com/metacraft-labs/reprobuild-specs/blob/main/ReproOS-Generations-And-Foreign-Packages.milestones.org
+Documentation=https://github.com/metacraft-labs/reprobuild/blob/dev/recipes/reproos-systemd-units/README.md
 # Confirm-generation runs ONLY after multi-user.target has been
 # reached. If the boot fails before multi-user.target, this unit
 # never fires, <state>/staged-next is left untouched, and the next

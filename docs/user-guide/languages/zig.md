@@ -122,4 +122,8 @@ No Zig scanner today. All cross-package edges are hand-authored in
 ## See also
 
 - [Cross-language Zig ↔ C/C++](../cross-language/zig-and-c-cpp.md)
-- [Language-Conventions/Zig.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/Zig.md)
+- `Language-Conventions/Zig.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

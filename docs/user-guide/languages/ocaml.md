@@ -110,4 +110,8 @@ A follow-up provisioning milestone will automate this.
 
 ## See also
 
-- [Language-Conventions/OCaml.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/OCaml.md)
+- `Language-Conventions/OCaml.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

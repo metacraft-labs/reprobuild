@@ -125,5 +125,9 @@ use. Be aware before adding Java to your reprobuild workflow.
 
 ## See also
 
-- [Language-Conventions/Java.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/Java.md)
+- `Language-Conventions/Java.md`
 - [kotlin.md](kotlin.md) — Kotlin + Gradle, also Java-capable.
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

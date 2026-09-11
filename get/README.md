@@ -1,8 +1,10 @@
 # `get/` — source for https://get.reprobuild.com
 
 This directory is the source tree for Reprobuild's install/onboarding host,
-`get.reprobuild.com`, per
-[product-install-domains.md](https://github.com/metacraft-labs/metacraft-dev-guidelines/blob/main/policies/product-install-domains.md).
+`get.reprobuild.com`. The naming and layout follow Metacraft Labs' internal
+`product-install-domains.md` policy: each product serves its install surfaces
+from `get.<product>.<tld>`, with `/sh` and `/pwsh` as the two canonical
+one-liner endpoints.
 
 It exposes three surfaces:
 

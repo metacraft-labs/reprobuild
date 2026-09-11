@@ -103,4 +103,8 @@ and Windows install from `swift.org/download`.
 
 ## See also
 
-- [Language-Conventions/Swift.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/Swift.md)
+- `Language-Conventions/Swift.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

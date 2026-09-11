@@ -232,9 +232,12 @@ as ecosystem-external — system headers, third-party deps).
 
 ## See also
 
-- [Language-Conventions/C-Cpp.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/C-Cpp.md) —
-  Mode 3 `c-cpp-direct` spec.
-- [Language-Conventions/C-Cpp-Make.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/C-Cpp-Make.md)
-- [Language-Conventions/C-Cpp-CMake.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/C-Cpp-CMake.md)
-- [Language-Conventions/C-Cpp-Meson.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/C-Cpp-Meson.md)
-- [Language-Conventions/C-Cpp-Autotools.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/C-Cpp-Autotools.md)
+- `Language-Conventions/C-Cpp.md` — Mode 3 `c-cpp-direct` spec.
+- `Language-Conventions/C-Cpp-Make.md`
+- `Language-Conventions/C-Cpp-CMake.md`
+- `Language-Conventions/C-Cpp-Meson.md`
+- `Language-Conventions/C-Cpp-Autotools.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

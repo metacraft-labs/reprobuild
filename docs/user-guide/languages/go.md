@@ -169,5 +169,8 @@ into the dep graph. Hand-author cross-language `depends_on` edges.
 ## See also
 
 - [Cross-language Go ↔ C/C++](../cross-language/go-and-c-cpp.md)
-- [Language-Conventions/Go.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/Go.md) —
-  contributor-facing convention spec.
+- `Language-Conventions/Go.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

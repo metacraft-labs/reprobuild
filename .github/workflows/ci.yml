@@ -36,7 +36,8 @@ concurrency:
 #     checkouts instead of pinned github tarballs.
 #
 # Policy doc:
-#   github.com/metacraft-labs/metacraft-dev-guidelines/blob/latest/policies/ci-shared-dev-env.md
+#   policies/ci-shared-dev-env.md in the internal metacraft-dev-guidelines
+#   repository.
 
 jobs:
   lint:

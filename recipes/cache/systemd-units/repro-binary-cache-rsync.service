@@ -1,6 +1,6 @@
 [Unit]
 Description=rsync mirror of the reprobuild binary cache to the Windows-side backup
-Documentation=https://github.com/metacraft-labs/reprobuild-specs/blob/latest/Binary-Caches.md
+Documentation=https://github.com/metacraft-labs/reprobuild/blob/dev/recipes/cache/README.md
 After=repro-binary-cache.service
 Requires=repro-binary-cache.service
 

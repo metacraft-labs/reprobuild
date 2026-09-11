@@ -202,5 +202,8 @@ automatically. Cross-language Rust → C edges are hand-authored in
 ## See also
 
 - [Cross-language Rust ↔ C/C++](../cross-language/rust-and-c-cpp.md)
-- [Language-Conventions/Rust.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/Rust.md) —
-  contributor-facing convention spec.
+- `Language-Conventions/Rust.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

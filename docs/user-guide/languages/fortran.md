@@ -128,4 +128,8 @@ but for now the file is essentially empty for Fortran-only workspaces.
 ## See also
 
 - [Cross-language Fortran ↔ C/C++](../cross-language/fortran-and-c-cpp.md)
-- [Language-Conventions/Fortran.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/Fortran.md)
+- `Language-Conventions/Fortran.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

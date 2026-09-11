@@ -7,8 +7,9 @@ artifact caching, and distributed execution. This guide is the
 reprobuild and how to build it, language by language.
 
 If you are a contributor or want to learn about engine internals, see
-the [contributor-facing specs in `reprobuild-specs/`](https://github.com/metacraft-labs/reprobuild-specs)
-instead.
+the [Reprobuild docs home](../README.md) instead — it covers
+capabilities, dependency collection, the bootstrap build graph, and the
+rest of the implementation documentation.
 
 ## Quick navigation
 
@@ -124,8 +125,6 @@ combinations and the patterns each one uses.
 
 - [Reprobuild docs home](../README.md) — the rest of the docs in this
   repo, including engine internals and capabilities.
-- [reprobuild-specs](https://github.com/metacraft-labs/reprobuild-specs) —
-  contributor-facing design docs and convention specs.
 - [reprobuild-examples](https://github.com/metacraft-labs/reprobuild-examples) —
   end-to-end fixtures for every supported language and cross-language
   combination. Every page in this guide points at the corresponding

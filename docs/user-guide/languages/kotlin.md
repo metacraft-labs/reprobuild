@@ -114,5 +114,9 @@ The M9 harness SKIPs cleanly if either tool is missing.
 
 ## See also
 
-- [Language-Conventions/Kotlin.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/Kotlin.md)
+- `Language-Conventions/Kotlin.md`
 - [java.md](java.md) — Java + Maven, sibling JVM convention.
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

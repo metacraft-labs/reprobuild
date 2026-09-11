@@ -1,6 +1,6 @@
 [Unit]
 Description=Reprobuild binary-cache server (ReproOS-Generations-And-Foreign-Packages A2)
-Documentation=https://github.com/metacraft-labs/reprobuild-specs/blob/latest/Binary-Caches.md
+Documentation=https://github.com/metacraft-labs/reprobuild/blob/dev/recipes/cache/README.md
 After=network-online.target
 Wants=network-online.target
 

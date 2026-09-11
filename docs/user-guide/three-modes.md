@@ -4,9 +4,11 @@ Reprobuild describes a project to its action graph through one of three
 modes, distinguished by how much you write by hand. The modes coexist
 in the same workspace — you don't pick one and live with it forever.
 
-This page is the user-facing summary. For the full design spec, see
-[Three-Mode-Convention-System.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Three-Mode-Convention-System.md)
-in `reprobuild-specs/`.
+This page is the user-facing summary. The full design spec,
+`Three-Mode-Convention-System.md`, lives in Reprobuild's non-public
+specification repository; everything you need in order to choose and use
+a mode is on this page, and the per-language recognition rules are
+summarized on each [language page](README.md#languages).
 
 ## Mode 1 — layout-as-manifest *(supported for Nim, Rust, Go, Python, JS/TS, C/C++, Fortran, Zig, D)*
 
@@ -259,11 +261,14 @@ comment marker.
 
 ## Related reading
 
-- [Three-Mode-Convention-System.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Three-Mode-Convention-System.md) —
-  the contributor-facing design spec.
-- [Package-Model.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Package-Model.md) —
-  the `repro.nim` DSL surface (`package`, `uses:`, `executable`,
-  `library`, `files`).
-- [Language-Conventions/](https://github.com/metacraft-labs/reprobuild-specs/tree/main/Language-Conventions) —
-  the per-language recognition rules that Modes 1 and 2 share.
+- [Languages](README.md#languages) — the per-language recognition rules
+  that Modes 1 and 2 share, one page per language.
 - [Getting Started](getting-started.md) — five-minute walkthrough.
+- [Reprobuild docs home](../README.md) — engine internals and
+  capabilities.
+
+The contributor-facing design specs behind this page
+(`Three-Mode-Convention-System.md`, `Package-Model.md`, and the
+`Language-Conventions/` set describing the `repro.nim` DSL surface —
+`package`, `uses:`, `executable`, `library`, `files`) are maintained in
+Reprobuild's non-public specification repository.

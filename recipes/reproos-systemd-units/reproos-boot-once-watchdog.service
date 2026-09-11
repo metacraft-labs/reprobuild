@@ -1,6 +1,6 @@
 [Unit]
 Description=ReproOS boot-once watchdog (B3 auto-rollback)
-Documentation=https://github.com/metacraft-labs/reprobuild-specs/blob/main/ReproOS-Generations-And-Foreign-Packages.milestones.org
+Documentation=https://github.com/metacraft-labs/reprobuild/blob/dev/recipes/reproos-systemd-units/README.md
 # Boot-once watchdog: if multi-user.target is not reached within the
 # deadline (default 60 s), invoke the auto-rollback primitive. The
 # primitive clears <state>/staged-next and rewrites grub.cfg so the

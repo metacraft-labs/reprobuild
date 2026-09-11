@@ -1,10 +1,13 @@
 # Contributing to Reprobuild
 
 This repository is the public `metacraft-labs/reprobuild` product repository.
-The architecture is specified in
-[metacraft-labs/reprobuild-specs](https://github.com/metacraft-labs/reprobuild-specs);
-when a change alters behavior described there, update the spec together with
-the code.
+The architecture is specified in a separate, non-public specification
+repository (`reprobuild-specs`); when a change alters behavior described
+there, update the spec together with the code. If you do not have access to
+it, describe the behavior change in your pull request and a maintainer will
+carry it into the spec — the public counterpart of those documents is
+[`docs/`](./docs), which should be updated in the same change whenever it
+covers the behavior you touched.
 
 ## Local Tooling
 

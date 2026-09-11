@@ -311,10 +311,15 @@ Reprobuild wraps all development workflows under one CLI.
 
 ## 8. Learn More
 
-- **Design specifications:** the complete architecture is specified in
-  [metacraft-labs/reprobuild-specs](https://github.com/metacraft-labs/reprobuild-specs)
-  — one document per subsystem, from the package model to hermetic
-  execution and the CLI surface.
+- **Documentation:** [`docs/`](./docs) holds the published guides — start
+  with the [User Guide](./docs/user-guide/README.md) for describing and
+  building a project, and see the per-subsystem pages on
+  [capabilities](./docs/capabilities.md),
+  [dependency collection](./docs/dependency-collection.md) and the
+  [bootstrap build graph](./docs/bootstrap-build-graph.md) for how the
+  engine works. The full design specification set — one document per
+  subsystem, from the package model to hermetic execution and the CLI
+  surface — is maintained in a separate, non-public repository.
 - **ReproOS:** the Reprobuild-based Linux distribution lives at
   [metacraft-labs/reproos](https://github.com/metacraft-labs/reproos).
 - **Contributing:** see [CONTRIBUTING.md](./CONTRIBUTING.md) for building

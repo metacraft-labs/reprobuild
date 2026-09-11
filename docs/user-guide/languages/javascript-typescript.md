@@ -138,5 +138,8 @@ deps and ignored — Mode 2 / `package.json` handles those.
 
 ## See also
 
-- [Language-Conventions/JavaScript-TypeScript.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/JavaScript-TypeScript.md) —
-  contributor-facing convention spec.
+- `Language-Conventions/JavaScript-TypeScript.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

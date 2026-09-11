@@ -289,8 +289,8 @@ proc formatProfileCompileError*(commandName, profilePath,
       "\n" &
     "  diagnostic:\n" &
     "    " & compileError.strip().replace("\n", "\n    ") & "\n" &
-    "  hint: see reprobuild-specs/Profile-Migration-Patterns.md for " &
-      "the Phase A migration recipe.\n" &
+    "  hint: see Profile-Migration-Patterns.md in Reprobuild's internal " &
+      "specification set for the Phase A migration recipe.\n" &
     "  hint: run `" & plan & "` to see whether the issue is profile " &
       "syntax vs. an apply-side problem."
 

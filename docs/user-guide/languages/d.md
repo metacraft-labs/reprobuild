@@ -135,4 +135,8 @@ No D scanner today. All cross-package edges are hand-authored.
 ## See also
 
 - [Cross-language D ↔ C/C++](../cross-language/d-and-c-cpp.md)
-- [Language-Conventions/D.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/D.md)
+- `Language-Conventions/D.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

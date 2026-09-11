@@ -65,8 +65,10 @@ REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL:-http://127.0.0.1:7878/}"
 # REPRO_SMOKE_RECIPE=... to point at another from-source recipe.
 REPRO_SMOKE_RECIPE="${REPRO_SMOKE_RECIPE:-recipes/packages/source/expat}"
 
-# Git URLs (public). Override REPROBUILD_GIT_URL / REPROBUILD_SPECS_GIT_URL
-# to lift from a local mirror or a fork.
+# Git URLs. REPROBUILD_GIT_URL is the public product repository;
+# REPROBUILD_SPECS_GIT_URL points at the specification repository, which is
+# NOT public and needs credentials to clone. Override either to lift from a
+# local mirror or a fork.
 REPROBUILD_GIT_URL="${REPROBUILD_GIT_URL:-https://github.com/metacraft-labs/reprobuild}"
 REPROBUILD_SPECS_GIT_URL="${REPROBUILD_SPECS_GIT_URL:-https://github.com/metacraft-labs/reprobuild-specs}"
 REPROBUILD_GIT_REF="${REPROBUILD_GIT_REF:-main}"

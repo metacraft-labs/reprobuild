@@ -166,5 +166,8 @@ Run `repro deps refresh` to regenerate `repro.scanned-deps.nim`. Run
   walkthrough.
 - [Cross-language Nim ↔ C/C++](../cross-language/nim-and-c-cpp.md)
 - [Cross-language Nim ↔ Rust](../cross-language/nim-and-rust.md)
-- [Language-Conventions/Nim.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/Nim.md) —
-  the convention spec (contributor-facing).
+- `Language-Conventions/Nim.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

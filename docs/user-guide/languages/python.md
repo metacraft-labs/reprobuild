@@ -138,5 +138,8 @@ edge. Imports that don't are ecosystem-external.
 
 ## See also
 
-- [Language-Conventions/Python.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/Python.md) —
-  contributor-facing convention spec.
+- `Language-Conventions/Python.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

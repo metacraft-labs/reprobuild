@@ -108,4 +108,8 @@ first use.
 
 ## See also
 
-- [Language-Conventions/CSharp-DotNet.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Language-Conventions/CSharp-DotNet.md)
+- `Language-Conventions/CSharp-DotNet.md`
+
+`Language-Conventions/` is the contributor-facing source this page
+summarizes. It is maintained in Reprobuild's non-public specification
+repository.

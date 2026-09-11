@@ -12,9 +12,11 @@ this page — locking works out of the box (see
 [Choosing a scheme](#choosing-a-scheme) below). Come back when you add a
 private team repo or a personal side-repo to the mix.
 
-For the full design rationale, see
-[Unified-Locking-And-Hooks.md](https://github.com/metacraft-labs/reprobuild-specs/blob/latest/Unified-Locking-And-Hooks.md)
-in `reprobuild-specs/`.
+The design rationale behind it is written up in
+`Unified-Locking-And-Hooks.md`, in Reprobuild's non-public specification
+repository. The parts you need in order to use locking are reproduced
+here; `repro locking explain` reports the resolved tier and backend for
+every repo, and which configuration layer decided it.
 
 ## The mental model: tiers and backends
 
@@ -605,10 +607,14 @@ fix it.
 ## Related documentation
 
 - [Reprobuild docs home](../README.md).
-- [Unified-Locking-And-Hooks.md](https://github.com/metacraft-labs/reprobuild-specs/blob/latest/Unified-Locking-And-Hooks.md) —
-  the design spec behind this page.
-- [`repro hooks`](https://github.com/metacraft-labs/reprobuild-specs/blob/latest/CLI/hooks.md) —
-  installing and managing the VCS hooks.
-- [`repro push` and pre-push publication protocol](https://github.com/metacraft-labs/reprobuild-specs/blob/latest/CLI/push-hook-publication-protocol.md) —
-  strict outgoing-HEAD handling, hook protocol v2, lock recovery, and partial
-  publication semantics.
+- [Reading your config: `repro locking explain`](#reading-your-config-repro-locking-explain) —
+  the resolved tier and backend for every repo, and the configuration
+  layer that decided it.
+- `repro hooks ensure --vcs <repo-or-workspace>` — installing and
+  repairing the VCS hooks.
+- `repro push` — outgoing-HEAD handling, lock recovery, and partial
+  publication semantics, described above.
+
+The design specs behind this page (`Unified-Locking-And-Hooks.md`,
+`CLI/hooks.md`, `CLI/push-hook-publication-protocol.md`) live in
+Reprobuild's non-public specification repository.
