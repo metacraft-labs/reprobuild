@@ -2834,6 +2834,8 @@
     "nim-shm-gset-src": {
       "flake": false,
       "locked": {
+        "lastModified": 1787444592,
+        "narHash": "sha256-nO7XSWxBWrLgL8d9q1zhTcGMMjGokZKjYtX9byb9/Vk=",
         "owner": "metacraft-labs",
         "repo": "nim-shm-gset",
         "rev": "c646982b354cb5b1fa8734f94b951a660419d75c",
@@ -2842,7 +2844,7 @@
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-shm-gset",
-        "rev": "360bfc15cadab1ff583e6d1cbc20b389d5d6825f",
+        "rev": "c646982b354cb5b1fa8734f94b951a660419d75c",
         "type": "github"
       }
     },
