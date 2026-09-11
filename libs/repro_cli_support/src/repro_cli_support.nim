@@ -28774,6 +28774,54 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
     if origin.len > 0:
       args.manifestUrl = origin
 
+const
+  RecordStoreDirName* = "records"
+    ## The record store's conventional directory under ``.repro/``. Its own
+    ## repository, holding ONLY generated records — locks, evidence,
+    ## participation (Workspace-Manifests.md §"Metadata and records are
+    ## separate repositories"). Deliberately NOT "manifests": it stores no
+    ## manifests, and that name is what let a probe for the directory read as
+    ## a declaration about where records belong.
+  LegacyRecordStoreDirName* = "manifests"
+    ## Pre-split location, still accepted so a workspace created before the
+    ## separation keeps resolving its store.
+
+proc recordStoreCandidates*(workspaceRoot: string): seq[string] =
+  ## Conventional record-store locations, PREFERRED FIRST. A workspace holding
+  ## both is mid-migration and the new location wins, which is what makes
+  ## moving records a copy-then-delete rather than a flag day.
+  @[workspaceRoot / ".repro" / RecordStoreDirName,
+    workspaceRoot / ".repro" / LegacyRecordStoreDirName]
+
+proc firstExistingRecordStoreDir*(workspaceRoot: string): string =
+  ## First conventional record-store location that exists as a DIRECTORY (a
+  ## store may be present before it is a git checkout), or "" when none does.
+  for candidate in recordStoreCandidates(workspaceRoot):
+    if dirExists(candidate):
+      return candidate
+  ""
+
+proc preferredRecordStoreDir*(workspaceRoot: string): string =
+  ## Where the record store IS, or — when none exists yet — where a new one
+  ## belongs. Never the legacy location for a fresh store: a workspace that
+  ## has not got one should get `.repro/records`, so the legacy path drains
+  ## rather than being repopulated.
+  let existing = firstExistingRecordStoreDir(workspaceRoot)
+  if existing.len > 0: existing
+  else: workspaceRoot / ".repro" / RecordStoreDirName
+
+proc existingRecordStoreRoot*(workspaceRoot: string): string =
+  ## The first conventional location that EXISTS as a git checkout, or "" when
+  ## none does. Presence is the route declaration (Unified-Locking-And-Hooks.md
+  ## §10, "What counts as declaring the route") precisely because the store is
+  ## its own repository: nothing creates that checkout except a decision to
+  ## keep records. Metadata presence declares nothing about records and is
+  ## never consulted here.
+  for candidate in recordStoreCandidates(workspaceRoot):
+    if dirExists(candidate / ".git") or fileExists(candidate / ".git"):
+      return candidate
+  ""
+
 proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   ## RA-11 bootstrap manifest cache. When ``--manifest-url`` is given and
   ## the workspace has no manifest checkout yet, clone the
@@ -30657,21 +30705,21 @@ type
     relPath*: string
 
 proc orderedLockCandidates(identity: GitToolIdentity;
-    manifestLayerRoot, lockPrefix: string): seq[LockCandidate] =
+    recordStoreRoot, lockPrefix: string): seq[LockCandidate] =
   ## Return the lock files under ``lockPrefix`` ordered newest-first.
   ## Committed locks are ordered by first-parent ``git log`` recency
   ## (the exact ordering source the spec names); uncommitted
   ## working-tree locks sort ahead of every committed one (a lock just
   ## written by the current operation is "newer" than anything in
   ## history). ``lockPrefix`` carries a trailing slash.
-  let isGit = discoverGitWorktree(identity, manifestLayerRoot).ok
+  let isGit = discoverGitWorktree(identity, recordStoreRoot).ok
   var committedOrder = initTable[string, int]()
   if isGit:
     # `git log --first-parent --name-only` over the subtree yields the
     # touched lock paths newest-commit-first; the first time we see a
     # path fixes its recency rank.
     let logRes = gitRunPlain(identity,
-      ["-C", manifestLayerRoot, "log", "--first-parent",
+      ["-C", recordStoreRoot, "log", "--first-parent",
        "--format=%x01", "--name-only", "--", lockPrefix])
     if logRes.code == 0:
       var rank = 0
@@ -30688,7 +30736,7 @@ proc orderedLockCandidates(identity: GitToolIdentity;
             inc rank
   # Working-tree scan: enumerate every on-disk lock under the subtree,
   # including not-yet-committed ones.
-  let subtreeAbs = manifestLayerRoot / lockPrefix.replace('/', DirSep)
+  let subtreeAbs = recordStoreRoot / lockPrefix.replace('/', DirSep)
   var seen = initHashSet[string]()
   var uncommitted: seq[string]
   if dirExists(subtreeAbs):
@@ -30699,8 +30747,8 @@ proc orderedLockCandidates(identity: GitToolIdentity;
       if base == "index.toml":
         continue
       var rel = path
-      if rel.startsWith(manifestLayerRoot):
-        rel = rel[manifestLayerRoot.len .. ^1]
+      if rel.startsWith(recordStoreRoot):
+        rel = rel[recordStoreRoot.len .. ^1]
       rel = rel.strip(chars = {'/', '\\'}).replace('\\', '/')
       seen.incl(rel)
       if rel notin committedOrder:
@@ -30713,7 +30761,7 @@ proc orderedLockCandidates(identity: GitToolIdentity;
   for rel, rank in committedOrder:
     # Skip committed entries whose file was deleted in the working tree
     # but still appears in history; only surface files we can read.
-    if fileExists(manifestLayerRoot / rel.replace('/', DirSep)):
+    if fileExists(recordStoreRoot / rel.replace('/', DirSep)):
       committed.add((rank, rel))
   committed.sort(proc (a, b: (int, string)): int = cmp(a[0], b[0]))
   for (_, rel) in committed:
@@ -30739,7 +30787,7 @@ proc parseTriggerFromLockRelPath*(relPath: string):
   (repo: parsed.repo, sha: parsed.sha)
 
 proc latestLockRelPathForRepoViaGit*(identity: GitToolIdentity;
-    manifestLayerRoot, project, repo: string): string =
+    recordStoreRoot, project, repo: string): string =
   ## RA-1 per-repo "latest lock" query: the manifest-layer-relative
   ## path (forward slashes) of the newest lock under
   ## ``locks/<project>/<repo>/`` by Git first-parent history, falling
@@ -30747,13 +30795,13 @@ proc latestLockRelPathForRepoViaGit*(identity: GitToolIdentity;
   ## Returns "" when no lock exists for the repo. This is the resolver
   ## the dropped ``index.toml`` used to back; it reads **no** index.
   let lockPrefix = lockRepoSubtreeRelativePath(project, repo)
-  let candidates = orderedLockCandidates(identity, manifestLayerRoot, lockPrefix)
+  let candidates = orderedLockCandidates(identity, recordStoreRoot, lockPrefix)
   if candidates.len == 0:
     return ""
   candidates[0].relPath
 
 proc latestLockShasViaGit(identity: GitToolIdentity;
-    manifestLayerRoot, project: string): tuple[
+    recordStoreRoot, project: string): tuple[
       shas: Table[string, string]; lockRelPath: string] =
   ## Overall "latest lock" map for ``repro check`` stage 5 / ``repro
   ## workspace status``: the ``path -> revision`` contents of the newest
@@ -30767,7 +30815,7 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
   # for any project name outside ``[A-Za-z0-9._-]`` this query silently answered
   # "no lock" and `repro check` stage 5 / `repro workspace status` saw none.
   let lockPrefix = "locks/" & encodeLockPathSegment(project) & "/"
-  let candidates = orderedLockCandidates(identity, manifestLayerRoot, lockPrefix)
+  let candidates = orderedLockCandidates(identity, recordStoreRoot, lockPrefix)
   if candidates.len == 0:
     return
   # Merge ``path -> revision`` across every candidate newest-first, so BOTH
@@ -30784,7 +30832,7 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
   # its team backend. Newest-first with "first writer wins per path" keeps the
   # most recent revision for each repo.
   for cand in candidates:
-    let lockPath = manifestLayerRoot / cand.relPath.replace('/', DirSep)
+    let lockPath = recordStoreRoot / cand.relPath.replace('/', DirSep)
     if not fileExists(extendedPath(lockPath)):
       continue
     let body =
@@ -30935,7 +30983,7 @@ proc coherenceRemedies(finding: CoherenceFinding): seq[string] =
 proc collectLockCoherence*(identity: GitToolIdentity;
                            workspaceRoot: string;
                            repos: openArray[ResolvedRepo];
-                           manifestLayerRoot, project: string):
+                           recordStoreRoot, project: string):
                           CoherenceReport =
   ## The one shared read-only implementation behind ``sync`` / ``status`` /
   ## ``check``. Read-only in the strict sense: it runs only git QUERIES and
@@ -30952,9 +31000,9 @@ proc collectLockCoherence*(identity: GitToolIdentity;
   # Claim source 1: the manifests DB (the private-pin lock).
   var dbClaims = initTable[string, string]()
   var dbSource = ""
-  if manifestLayerRoot.len > 0 and project.len > 0:
+  if recordStoreRoot.len > 0 and project.len > 0:
     try:
-      let latest = latestLockShasViaGit(identity, manifestLayerRoot, project)
+      let latest = latestLockShasViaGit(identity, recordStoreRoot, project)
       dbClaims = latest.shas
       if latest.lockRelPath.len > 0:
         dbSource = latest.lockRelPath
@@ -31053,7 +31101,7 @@ proc resolveCoherenceLayerRoot(workspaceRoot, project: string): string =
   # the encoded project component. Probing the raw name made a workspace whose
   # project name is not filename-shaped contribute no DB claim at all.
   let segment = encodeLockPathSegment(project)
-  for candidate in [workspaceRoot / ".repro" / "manifests", workspaceRoot]:
+  for candidate in recordStoreCandidates(workspaceRoot) & @[workspaceRoot]:
     if dirExists(extendedPath(candidate / "locks" / segment)):
       return candidate
   ""
@@ -31334,6 +31382,13 @@ method latestLockShas*(s: GitCheckoutLockStore; project: string):
   (shas: r.shas, lockKey: key)
 
 method manifestLayerRoots*(s: GitCheckoutLockStore): seq[string] =
+  ## LEGACY CO-LOCATION. This returns the STORE root as though it were a
+  ## metadata layer root, which is true only while one checkout carries both
+  ## `locks/` and `projects/`/`repos/`. Workspace-Manifests.md §"Metadata and
+  ## records are separate repositories" retires that: a separated store holds
+  ## no metadata layers and this should return `@[]` for it, exactly as the
+  ## record-only backends already do. Kept until the migration lands, so a
+  ## co-located workspace keeps resolving its membership.
   @[s.manifestRepoRoot]
 
 method readabilityDiagnostic*(s: GitCheckoutLockStore): string =
@@ -31809,7 +31864,7 @@ proc isWorkspaceLockDocument*(body: string): bool =
     if line[0 ..< eq].strip() == "schema": return true
   false
 
-proc storeRootMatches(store: LockStore; manifestLayerRoot: string): bool
+proc storeRootMatches(store: LockStore; recordStoreRoot: string): bool
   ## Forward declaration — defined with the HL-2 partition helpers below.
 
 proc prepareWorkspaceParticipation(
@@ -32294,23 +32349,23 @@ proc prepareRoutedParticipation(workspaceRoot: string;
 # routed to it, and the pre-push read / post-gate publish iterate per-backend.
 # ---------------------------------------------------------------------------
 
-proc storeRootMatches(store: LockStore; manifestLayerRoot: string): bool =
+proc storeRootMatches(store: LockStore; recordStoreRoot: string): bool =
   ## True when ``store`` is a durable backend whose on-disk root is exactly
-  ## ``manifestLayerRoot`` (the git-checkout manifest the partitioned
+  ## ``recordStoreRoot`` (the git-checkout manifest the partitioned
   ## ``writeLockFile`` targets). Used to decide which observed repos belong in
   ## the manifest lock file: only the repos routed to THAT git-checkout backend.
   if store.isNil: return false
-  let want = os.normalizedPath(absolutePath(manifestLayerRoot))
+  let want = os.normalizedPath(absolutePath(recordStoreRoot))
   for r in store.manifestLayerRoots():
     if os.normalizedPath(absolutePath(r)) == want:
       return true
   false
 
 proc manifestOwnedRepos*(composed: ComposedRouting;
-    lockRepos: seq[ResolvedRepo]; workspaceRoot, manifestLayerRoot: string;
+    lockRepos: seq[ResolvedRepo]; workspaceRoot, recordStoreRoot: string;
     identity: GitToolIdentity): seq[ResolvedRepo] =
   ## HL-2 — the subset of ``lockRepos`` whose resolved backend is the
-  ## git-checkout manifest at ``manifestLayerRoot``. When NO configuration
+  ## git-checkout manifest at ``recordStoreRoot``. When NO configuration
   ## layer declares an explicit route (the today's-common single-tier shape),
   ## every observed repo is manifest-owned, so the monolithic ``writeLockFile``
   ## stays BYTE-IDENTICAL to the pre-HL-2 behavior (all repos, one TOML). When
@@ -32325,7 +32380,7 @@ proc manifestOwnedRepos*(composed: ComposedRouting;
     byPath[a.repoPath] = a
   for repo in lockRepos:
     if byPath.hasKey(repo.path) and
-        storeRootMatches(byPath[repo.path].store, manifestLayerRoot):
+        storeRootMatches(byPath[repo.path].store, recordStoreRoot):
       result.add(repo)
 
 # ---------------------------------------------------------------------------
@@ -32350,7 +32405,7 @@ proc maybeWarnLegacyManifestWithoutTeamRoute*(workspaceRoot: string;
   ## HL-2 (§10) — emit the one-time guidance when a ``.repro/manifests`` DB
   ## checkout exists but no explicit route is declared (the workspace that WOULD
   ## silently go public-only). Best-effort: never raises, never blocks the caller.
-  let manifestsDir = workspaceRoot / ".repro" / "manifests"
+  let manifestsDir = firstExistingRecordStoreDir(workspaceRoot)
   if not dirExists(manifestsDir): return
   if composed.hasExplicitRoutes: return
   let sentinel = legacyManifestMigrationSentinelPath(workspaceRoot)
@@ -34470,7 +34525,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   block:
     # Membership resolves at the workspace root (or a `.repro/manifests`
     # checkout); the lock records live in the `.repro/manifests` store DB.
-    let storeRoot = args.workspaceRoot / ".repro" / "manifests"
+    let storeRoot = preferredRecordStoreDir(args.workspaceRoot)
     if resolved.projectName.len > 0 and dirExists(storeRoot):
       try:
         # MO-10: route the RA-14 optimized-fetch lock read through the abstract
@@ -36202,7 +36257,7 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
 #      lives in the manifest repo (per spec), and a workspace with
 #      multiple layers picks the FIRST layer (the "anchor" layer —
 #      typically the public manifest). The operator can override with
-#      ``--manifest-layer-root=PATH`` to target an internal/private
+#      ``--record-store-root=PATH`` to target an internal/private
 #      layer instead.
 #   3. For every declared repo, gather a fresh observation: HEAD SHA
 #      via the M2 ``headShaQuery`` adapter; clean/dirty via
@@ -36268,7 +36323,7 @@ type
     ## re-lock-at-same-SHA case.
     project*: string
     workspaceRoot*: string
-    manifestLayerRoot*: string
+    recordStoreRoot*: string
     lockFilePath*: string
     indexFilePath*: string
     triggerRepo*: string
@@ -36309,7 +36364,7 @@ proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
   result = newJObject()
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
-  result["manifestLayerRoot"] = %report.manifestLayerRoot
+  result["recordStoreRoot"] = %report.recordStoreRoot
   result["lockFilePath"] = %report.lockFilePath
   result["indexFilePath"] = %report.indexFilePath
   result["triggerRepo"] = %report.triggerRepo
@@ -36457,7 +36512,7 @@ type
   WorkspaceLockArgs = object
     workspaceRoot: string
     projectName: string
-    manifestLayerRoot: string
+    recordStoreRoot: string
     triggerRepo: string
     triggerRepoPath: string
       ## RA-30 — the ON-DISK path of the repo whose commit triggered this
@@ -36523,7 +36578,7 @@ proc parseWorkspaceLockArgs(args: openArray[string]): WorkspaceLockArgs =
   ## ``.repo/workspace.toml`` is present — same dispatch rule as
   ## M10's sync command). Optional flags:
   ##   ``--workspace-root=PATH``
-  ##   ``--manifest-layer-root=PATH``
+  ##   ``--record-store-root=PATH``
   ##   ``--sha=SHA``           — explicit trigger commit (M16 hook)
   ##   ``--trigger-repo=NAME``  — explicit trigger repo
   ##   ``--tool-provisioning=path|nix|tarball|scoop``
@@ -36534,10 +36589,10 @@ proc parseWorkspaceLockArgs(args: openArray[string]): WorkspaceLockArgs =
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--manifest-layer-root" or
-        arg.startsWith("--manifest-layer-root="):
-      result.manifestLayerRoot = valueFromFlag(args, i,
-        "--manifest-layer-root")
+    elif arg == "--record-store-root" or
+        arg.startsWith("--record-store-root="):
+      result.recordStoreRoot = valueFromFlag(args, i,
+        "--record-store-root")
     elif arg == "--sha" or arg.startsWith("--sha="):
       result.triggerSha = valueFromFlag(args, i, "--sha")
     elif arg == "--trigger-repo" or arg.startsWith("--trigger-repo="):
@@ -36560,8 +36615,8 @@ proc parseWorkspaceLockArgs(args: openArray[string]): WorkspaceLockArgs =
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
-  if result.manifestLayerRoot.len > 0:
-    result.manifestLayerRoot = absolutePath(result.manifestLayerRoot)
+  if result.recordStoreRoot.len > 0:
+    result.recordStoreRoot = absolutePath(result.recordStoreRoot)
 
 proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
     tuple[resolved: ResolvedProject; workspaceLocal: Option[WorkspaceLocal]] =
@@ -36591,7 +36646,7 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
           # PS-2 — a lock with no explicit ``<project>`` is a snapshot of the
           # WORKSPACE, so it pins every repo of the active project set. The
           # lock's DESTINATION stays the primary project (see
-          # ``pickManifestLayerRoot`` and the ``locks/<project>/`` layout).
+          # ``pickRecordStoreRoot`` and the ``locks/<project>/`` layout).
           let recovered = resolveWorkspaceLockProject(withProject)
           return (extendWithActiveProjectSet(parsed.workspaceRoot,
             recovered.resolved), recovered.workspaceLocal)
@@ -36624,10 +36679,10 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
       "' found under '" & manifestsRoot &
       "' (looked for '" & projectFile & "' and '" & variantFile & "')")
 
-proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
+proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
                            workspaceLocal: Option[WorkspaceLocal]): string =
   ## Resolve the directory that will OWN the lock file. Priority:
-  ##   1. The explicit ``--manifest-layer-root`` flag (M16 callers,
+  ##   1. The explicit ``--record-store-root`` flag (M16 callers,
   ##      multi-tier setups).
   ##   2. The first ``[[manifest]]`` layer in
   ##      ``.repro/workspace.toml`` (composer mode). For ``local_path``
@@ -36637,8 +36692,8 @@ proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
   ##      ``<workspaceRoot>/.repro/manifests-<i>-<sanitized>``.
   ##   3. ``<workspaceRoot>`` (single-project mode,
   ##      matching M9/M10's resolver dispatch).
-  if parsed.manifestLayerRoot.len > 0:
-    return parsed.manifestLayerRoot
+  if parsed.recordStoreRoot.len > 0:
+    return parsed.recordStoreRoot
   if workspaceLocal.isSome:
     let local = workspaceLocal.get()
     if local.manifest.len > 0:
@@ -36687,17 +36742,25 @@ proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
   # forbids: "The route is EXPLICIT, not inferred from the manifest's presence. A
   # workspace that never declares a team route is public-only and writes only
   # `repro.lock`." The unconditional return also made every downstream
-  # `manifestLayerRoot.len > 0` guard permanently true — including the HL-3 guard
+  # `recordStoreRoot.len > 0` guard permanently true — including the HL-3 guard
   # on the RA-7/RA-21 manifest publish, documented as firing "ONLY when a
   # `.repro/manifests` git-checkout is present". An all-public workspace would
   # then materialize a lock under a gitignored, non-git directory and report
   # "cannot publish lock" for a publish that should never have been attempted.
   # Empty means "no manifest-backed route declared"; the committed in-tree
   # `repro.lock` is the whole story (spec §8.2 public row).
-  let nativeStore = parsed.workspaceRoot / ".repro" / "manifests"
-  if dirExists(nativeStore / ".git") or fileExists(nativeStore / ".git"):
-    return nativeStore
-  ""
+  # The record store's conventional location is ``.repro/records`` — its own
+  # repository, holding ONLY generated records (Workspace-Manifests.md
+  # §"Metadata and records are separate repositories"). Its presence as a
+  # checkout IS the route declaration, because nothing creates that checkout
+  # except a decision to keep records; §10 forbids inferring a route from
+  # METADATA, which is a different thing entirely and lives elsewhere.
+  #
+  # ``.repro/manifests`` is accepted as the LEGACY location so a workspace
+  # created before the split keeps resolving its store. It is checked second:
+  # a workspace that has both is mid-migration and the new store wins, which
+  # is what makes moving records a copy-then-delete rather than a flag day.
+  existingRecordStoreRoot(parsed.workspaceRoot)
 
 proc sameFilesystemPath(a, b: string): bool =
   ## Compare paths robustly across native vs forward-slash spelling.
@@ -36800,8 +36863,8 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   let (resolved, workspaceLocal) = resolveWorkspaceLockProject(args)
   report.project = resolved.projectName
 
-  let manifestLayerRoot = pickManifestLayerRoot(args, workspaceLocal)
-  report.manifestLayerRoot = manifestLayerRoot
+  let recordStoreRoot = pickRecordStoreRoot(args, workspaceLocal)
+  report.recordStoreRoot = recordStoreRoot
 
   let identity = ensureGitToolResolvable(
     args.toolProvisioning, getEnv("PATH"))
@@ -36972,7 +37035,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # second.
   report.routed = composed.hasExplicitRoutes
   let manifestRepos = manifestOwnedRepos(
-    composed, lockRepos, args.workspaceRoot, manifestLayerRoot, identity)
+    composed, lockRepos, args.workspaceRoot, recordStoreRoot, identity)
 
   var lock = buildLockFromLiveState(
     project = resolved.projectName,
@@ -36999,7 +37062,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
       name: entry.name, path: entry.path, remoteName: remoteName,
       reason: entry.reason))
 
-  let lockPath = lockFilePath(manifestLayerRoot, resolved.projectName,
+  let lockPath = lockFilePath(recordStoreRoot, resolved.projectName,
     triggerRepo.name, triggerSha)
   # RA-1: per-repo lock directory keyed by the full trigger SHA; no
   # shared index is written. Re-locking the same SHA overwrites the
@@ -37029,13 +37092,13 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # record git is tracking is history, and history is what must not be
   # rewritten. An untracked path is a draft.
   let lockRelForTracking =
-    if manifestLayerRoot.len > 0 and lockPath.startsWith(manifestLayerRoot):
-      lockPath[manifestLayerRoot.len .. ^1].strip(
+    if recordStoreRoot.len > 0 and lockPath.startsWith(recordStoreRoot):
+      lockPath[recordStoreRoot.len .. ^1].strip(
         chars = {DirSep, '/'}, trailing = false).replace('\\', '/')
     else: ""
   let lockAlreadyPublished =
     lockAlreadyExisted and lockRelForTracking.len > 0 and
-      gitRunPlain(identity, ["-C", manifestLayerRoot, "ls-files",
+      gitRunPlain(identity, ["-C", recordStoreRoot, "ls-files",
         "--error-unmatch", "--", lockRelForTracking]).code == 0
   # HL-2 (§6 Decision 1 — target write path) — the trigger-keyed
   # ``writeLockFile`` is the git-checkout manifest backend's PARTITION of the
@@ -37059,7 +37122,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # way. The partition lock is what that consumer reads, and the reason the
   # record is keyed by the TRIGGER commit at all.
   #
-  # ``manifestLayerRoot`` is EMPTY when no manifest-backed route is declared
+  # ``recordStoreRoot`` is EMPTY when no manifest-backed route is declared
   # (§10 "No implicit team route"): there is no git-checkout store to write a
   # trigger-keyed record into, and the committed in-tree ``repro.lock`` is the
   # whole publication story. Writing anyway would resolve ``lockPath`` relative
@@ -37103,7 +37166,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     if repo.path == triggerRepo.path:
       triggerInManifestPartition = true
       break
-  let writeManifestPartition = manifestLayerRoot.len > 0 and
+  let writeManifestPartition = recordStoreRoot.len > 0 and
     not args.triggerOutsideEveryPartition and
     (not composed.hasExplicitRoutes or triggerInManifestPartition)
   # False only when the trigger coordinate is already occupied by a PUBLISHED
@@ -37274,7 +37337,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # per repo, naming the very partitions those repos had published themselves.
   let participationPartitionRoot =
     if partitionRecordPresent or args.triggerOutsideEveryPartition:
-      manifestLayerRoot
+      recordStoreRoot
     else: ""
   if deferParticipation:
     result.deferredParticipation = prepareRoutedParticipation(
@@ -38330,7 +38393,7 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     # invocation would then plan a repair of the wrong store (or none) and
     # report "nothing to do" about a store that is still wedged.
     stderr.writeLine("repro:   repair it with 'repro workspace migrate-locks " &
-      "--dry-run --manifest-layer-root=" & manifestRepoRoot &
+      "--dry-run --record-store-root=" & manifestRepoRoot &
       "' (then '--apply'); publication of the other records in " &
       "this store is unaffected")
 
@@ -38483,7 +38546,7 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
       $strayRecords.len & " lock record(s) at a non-canonical path (" &
       strayRecords[0] & (if strayRecords.len > 1: ", ..." else: "") &
       "); repair with 'repro workspace migrate-locks --dry-run " &
-      "--manifest-layer-root=" & manifestRepoRoot & "', then '--apply'"
+      "--record-store-root=" & manifestRepoRoot & "', then '--apply'"
 
 # ---------------------------------------------------------------------------
 # RA-32 — `repro workspace migrate-locks`: the EXPLICIT lock-record repair.
@@ -38893,7 +38956,7 @@ proc renderLockMigrationPlan*(plan: LockMigrationPlan): seq[string] =
 
 proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
   ## `repro workspace migrate-locks [--dry-run|--apply]
-  ## [--manifest-layer-root=PATH] [--workspace-root=PATH]
+  ## [--record-store-root=PATH] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]`.
   ##
   ## Exit codes:
@@ -38904,7 +38967,7 @@ proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
   ##   - 2 — bad usage.
   var apply = false
   var dryRun = false
-  var manifestLayerRoot = ""
+  var recordStoreRoot = ""
   var workspaceRoot = ""
   # Every other verb's parser seeds ``tpmPathOnly`` and lets
   # ``--tool-provisioning`` override it. This one seeded
@@ -38925,7 +38988,7 @@ proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
     let arg = args[i]
     flagName = ""
     flagValue = ""
-    for candidate in ["--manifest-layer-root", "--workspace-root",
+    for candidate in ["--record-store-root", "--workspace-root",
                       "--tool-provisioning"]:
       if arg == candidate:
         flagName = candidate
@@ -38945,7 +39008,7 @@ proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
           " requires a value")
         return 2
       case flagName
-      of "--manifest-layer-root": manifestLayerRoot = flagValue
+      of "--record-store-root": recordStoreRoot = flagValue
       of "--workspace-root": workspaceRoot = flagValue
       else: toolProvisioning = parseToolProvisioning(flagValue)
     elif arg.startsWith("--"):
@@ -38965,22 +39028,22 @@ proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
   # upward search, so the two verbs agree about which workspace they mean.
   if workspaceRoot.len == 0: workspaceRoot = getCurrentDir()
   workspaceRoot = absolutePath(workspaceRoot)
-  if manifestLayerRoot.len == 0:
-    manifestLayerRoot = workspaceRoot / ".repro" / "manifests"
-  manifestLayerRoot = absolutePath(manifestLayerRoot)
-  if not dirExists(extendedPath(manifestLayerRoot)):
+  if recordStoreRoot.len == 0:
+    recordStoreRoot = preferredRecordStoreDir(workspaceRoot)
+  recordStoreRoot = absolutePath(recordStoreRoot)
+  if not dirExists(extendedPath(recordStoreRoot)):
     stderr.writeLine("repro workspace migrate-locks: no manifest layer at '" &
-      manifestLayerRoot & "'")
+      recordStoreRoot & "'")
     return 1
 
   let identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
-  let plan = planLockRecordMigration(identity, manifestLayerRoot)
+  let plan = planLockRecordMigration(identity, recordStoreRoot)
   if not plan.ok:
     stderr.writeLine("repro workspace migrate-locks: " & plan.diagnostic)
     return 1
   if plan.steps.len == 0:
     stdout.writeLine("repro workspace migrate-locks: every lock record in '" &
-      manifestLayerRoot & "' is already at its canonical path; nothing to do")
+      recordStoreRoot & "' is already at its canonical path; nothing to do")
     return 0
 
   let plural = if plan.steps.len == 1: "record" else: "records"
@@ -38997,7 +39060,7 @@ proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
       "their canonical paths.")
     return 0
 
-  let outcome = applyLockRecordMigration(identity, manifestLayerRoot, plan)
+  let outcome = applyLockRecordMigration(identity, recordStoreRoot, plan)
   if not outcome.ok:
     stderr.writeLine("repro workspace migrate-locks: " & outcome.diagnostic)
     return 1
@@ -39133,7 +39196,7 @@ method publishPending*(s: GitCheckoutLockStore): StorePutResult =
 
 proc runWorkspaceLockCommand*(args: openArray[string]): int =
   ## ``repro workspace lock [<project>] [--workspace-root=PATH]
-  ## [--manifest-layer-root=PATH] [--sha=SHA] [--trigger-repo=NAME]
+  ## [--record-store-root=PATH] [--sha=SHA] [--trigger-repo=NAME]
   ## [--tool-provisioning=path|nix|tarball|scoop]``.
   ##
   ## Exit codes (per M11 design):
@@ -39158,7 +39221,7 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
   # the operator but does not change the lock command's exit code (the lock
   # was still written locally; post-commit/next-push can re-publish).
   if outcome.report.exitCode == 0 and
-      outcome.report.manifestLayerRoot.len > 0:
+      outcome.report.recordStoreRoot.len > 0:
     let identity = ensureGitToolResolvable(
       parsed.toolProvisioning, getEnv("PATH"))
     # MO-10: route the RA-7 publish through the abstract ``LockStore``. The
@@ -39166,7 +39229,7 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
     # ``publishWorkspaceLock``; the 1:1 outcome mapping recovers the exact
     # ``LockPublishResult`` the branch below acts on.
     let publishStore: LockStore =
-      newGitCheckoutLockStore(identity, outcome.report.manifestLayerRoot)
+      newGitCheckoutLockStore(identity, outcome.report.recordStoreRoot)
     let storePub = publishStore.publishPending()
     let pub = LockPublishResult(
       outcome: lockPublishFromStorePut(storePub.outcome),
@@ -40346,7 +40409,7 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
       let identity = ensureGitToolResolvable(
         parsed.toolProvisioning, getEnv("PATH"))
       probe = probePostCommitPublication(identity,
-        outcome.report.manifestLayerRoot, outcome.report.lockFilePath,
+        outcome.report.recordStoreRoot, outcome.report.lockFilePath,
         triggerRepoRoot)
     except CatchableError as err:
       probe.detail = err.msg
@@ -41037,7 +41100,7 @@ type
     # caller can publish (commit + push) the just-written lock after a
     # successful gate. Empty when the gate short-circuited before the lock
     # stage (e.g. a dirty sibling).
-    manifestLayerRoot*: string
+    recordStoreRoot*: string
     # HL-3 (§6 Decision 2) — per-repo participation outcomes (tier-tagged) from
     # the lock write, so ``runCheckCommand`` and the JSON report can see WHICH
     # repo's backend was unreachable and at what tier. Empty for a workspace
@@ -41114,7 +41177,7 @@ proc toJsonNode*(report: CheckReport): JsonNode =
   lockObj["triggerSha"] = %report.lockUpdate.triggerSha
   lockObj["diagnostic"] = %report.lockUpdate.diagnostic
   result["lockUpdate"] = lockObj
-  result["manifestLayerRoot"] = %report.manifestLayerRoot
+  result["recordStoreRoot"] = %report.recordStoreRoot
   var participation = newJArray()
   for p in report.participation:
     var obj = newJObject()
@@ -41342,7 +41405,7 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
 #       ``projects/<p>.toml`` to discover which repos the layer declares.
 #       Mirrors ``compose.layerDirName`` / ``compose.sanitizeForPath``
 #       for ``url``-backed layers and the in-tree path for ``local_path``
-#       layers (matching ``pickManifestLayerRoot``'s convention).
+#       layers (matching ``pickRecordStoreRoot``'s convention).
 #
 #   (b) A per-repo-path visibility classification — which manifest layer
 #       tiers (``public`` / ``org`` / ``team`` / ``private``) declare
@@ -43334,13 +43397,13 @@ type
     path*: string
     detail*: string
 
-proc lockRecordsDirFor*(manifestLayerRoot, project, repo: string): string =
-  ## The per-repo lock subtree ``<manifest-layer>/locks/<project>/<repo>``
-  ## whose files are named by the trigger commit. The relative layout has ONE
-  ## owner (``lockRepoSubtreeRelativePath``); this only anchors it.
-  if manifestLayerRoot.len == 0 or project.len == 0 or repo.len == 0:
+proc lockRecordsDirFor*(recordStoreRoot, project, repo: string): string =
+  ## The per-repo lock subtree ``<record-store>/locks/<project>/<repo>`` whose
+  ## files are named by the trigger commit. The relative layout has ONE owner
+  ## (``lockRepoSubtreeRelativePath``); this only anchors it.
+  if recordStoreRoot.len == 0 or project.len == 0 or repo.len == 0:
     return ""
-  manifestLayerRoot /
+  recordStoreRoot /
     lockRepoSubtreeRelativePath(project, repo).replace('/', DirSep)
 
 proc resolveLockAtCommit*(lockRecordsDir, commit: string): LockAtCommit =
@@ -45116,7 +45179,7 @@ proc workspaceLockRoots(workspaceRoot: string;
     layerLocations: openArray[ManifestLayerLocation]): seq[string] =
   ## Every on-disk root that can own a ``locks/`` subtree for this workspace.
   ##
-  ## This deliberately mirrors every arm of ``pickManifestLayerRoot`` rather
+  ## This deliberately mirrors every arm of ``pickRecordStoreRoot`` rather
   ## than calling it: that proc answers "where does THIS operation write", and
   ## a rewrite must be checked against every record the workspace can still
   ## READ. The arms are the native ``.repro/manifests`` git-checkout store, the
@@ -45124,7 +45187,8 @@ proc workspaceLockRoots(workspaceRoot: string;
   ## explicitly declared ``[[manifest]]`` layer, the membership root, and the
   ## workspace root itself. Roots with no ``locks/`` subtree cost nothing.
   var candidates = @[
-    workspaceRoot / ".repro" / "manifests",
+    workspaceRoot / ".repro" / RecordStoreDirName,
+    workspaceRoot / ".repro" / LegacyRecordStoreDirName,
     manifestsRoot(workspaceRoot),
     workspaceRoot]
   for loc in layerLocations:
@@ -46173,7 +46237,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # particular".
   lockArgs.triggerOutsideEveryPartition =
     currentRepoName.len == 0 and currentIsMembershipRepo
-  let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
+  let recordStoreRoot = pickRecordStoreRoot(lockArgs, workspaceLocal)
   # MO-2 — manifest-optional gate. When the workspace has NO resolved manifest
   # checkout on disk (a committed-lock-only / manifest-less workspace), there
   # is no manifest-repo SHA-lock to write or publish: the
@@ -46181,7 +46245,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # separately by the MO-1 ``validateCommittedLockAdvisory``). The
   # cleanliness / publication STAGES above already ran on the committed-lock-
   # derived participating set, so the gate verdict is sound; here we simply
-  # skip the manifest-SHA-lock write/publish and leave ``manifestLayerRoot``
+  # skip the manifest-SHA-lock write/publish and leave ``recordStoreRoot``
   # empty so the caller's publish step is a no-op. Manifest-present
   # workspaces always have a real ``.repo/manifests`` (or a composed layer)
   # on disk, so this never changes their behavior.
@@ -46255,14 +46319,14 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     return
   # RA-7: surface the manifest-layer root so the caller can publish
   # (commit + push) the lock after the gate passes.
-  result.manifestLayerRoot = manifestLayerRoot
+  result.recordStoreRoot = recordStoreRoot
   # RA-1: resolve the latest lock via Git history over the per-repo lock
   # subtree (no shared index). MO-3: this gate read is routed through the
   # ``LockStore`` interface — the git-checkout backend delegates to the
   # byte-identical ``latestLockShasViaGit``. ``lockKey.sha`` is "" (no lock
   # record) exactly when the underlying ``lockRelPath`` is "".
   let gateStore: LockStore =
-    newGitCheckoutLockStore(identity, manifestLayerRoot)
+    newGitCheckoutLockStore(identity, recordStoreRoot)
   # HL-2 (§6 Decision 1 — target read path) — per-backend currency read.
   #
   # When NO explicit route is declared (today's single-tier shape), the read is
@@ -46484,11 +46548,11 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # record it is also willing to write.
   #
   # Guarded on a manifest layer EXISTING. With no declared route
-  # ``manifestLayerRoot`` is empty (§10, "No implicit team route"), there is no
+  # ``recordStoreRoot`` is empty (§10, "No implicit team route"), there is no
   # git-checkout store to hold a trigger-keyed record and none is verified
   # either; probing ``git -C "" ls-tree`` would merely fail and be misread as
   # "the record is missing".
-  if manifestLayerRoot.len > 0:
+  if recordStoreRoot.len > 0:
     for expectedRecord in result.expectedManifestRecords:
       # A record already ON DISK satisfies the obligation even when it is not
       # committed yet: the publisher stages untracked canonical records under
@@ -46501,11 +46565,11 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       # same except ``created_at``, and that is enough to move the lock's
       # identity: a certificate issued against the draft stops covering it,
       # and "the gate did not rewrite an already-current lock" stops holding.
-      if fileExists(extendedPath(manifestLayerRoot /
+      if fileExists(extendedPath(recordStoreRoot /
           expectedRecord.relPath.replace('/', DirSep))):
         continue
       let present = gitRunPlain(identity,
-        ["-C", manifestLayerRoot, "ls-tree", "HEAD", "--",
+        ["-C", recordStoreRoot, "ls-tree", "HEAD", "--",
          expectedRecord.relPath])
       if present.code != 0 or present.output.strip().len == 0:
         lockMissing = true
@@ -46552,7 +46616,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       let lockRel = lockFileRepoRelativePath(
         latest.lockKey.project, latest.lockKey.repo, latest.lockKey.sha)
       result.lockUpdate.lockFilePath =
-        manifestLayerRoot / lockRel.replace('/', DirSep)
+        recordStoreRoot / lockRel.replace('/', DirSep)
     result.lockUpdate.indexFilePath = ""
     result.lockUpdate.triggerRepo = latest.lockKey.repo
     result.lockUpdate.triggerSha = latest.lockKey.sha
@@ -46777,7 +46841,7 @@ type
       ## when a previous explicit lock command already wrote/committed the
       ## record and the current gate therefore has no deferred write.
 
-proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
+proc perBackendPublishTargets(parsed: CheckArgs; recordStoreRoot: string;
     identity: GitToolIdentity): seq[PerBackendPublishTarget] =
   ## HL-2 — resolve the DISTINCT non-manifest durable backends a routed
   ## workspace must publish through at pre-push, so a personal repo's record
@@ -46828,7 +46892,7 @@ proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
   var backendIndexes = initTable[string, int]()
   for asg in assignments:
     if asg.store.isNil: continue          # committed-lock: repo's own push
-    if storeRootMatches(asg.store, manifestLayerRoot): continue
+    if storeRootMatches(asg.store, recordStoreRoot): continue
     # De-dupe shared backends (a per-tier backend serves every repo of that
     # tier). Key on backend kind + its manifest roots.
     var key = asg.backendKind
@@ -46865,14 +46929,14 @@ proc manifestPublicationEnabled(workspaceRoot: string): bool =
   except CatchableError:
     result = false
 
-proc manifestBackendParticipates(parsed: CheckArgs; manifestLayerRoot: string;
+proc manifestBackendParticipates(parsed: CheckArgs; recordStoreRoot: string;
     identity: GitToolIdentity): bool =
   ## A legacy, unrouted workspace owns all of its generated records in the
   ## manifest checkout. With explicit tier routes, publish that checkout only
   ## when an in-scope repo is actually assigned to it. Otherwise an empty
   ## default manifest must not manufacture a second publication failure beside
   ## the real routed backend failure.
-  if manifestLayerRoot.len == 0: return false
+  if recordStoreRoot.len == 0: return false
   let composed = composeLockingRouting(parsed.workspaceRoot,
       identity.binaryPath)
   if not composed.hasExplicitRoutes: return true
@@ -46901,7 +46965,7 @@ proc manifestBackendParticipates(parsed: CheckArgs; manifestLayerRoot: string;
     for asg in resolveRepoBackends(
         composed, inScope, parsed.workspaceRoot, identity,
         identity.binaryPath):
-      if storeRootMatches(asg.store, manifestLayerRoot):
+      if storeRootMatches(asg.store, recordStoreRoot):
         return true
   except StoreRoutingError:
     # The write/gate path reports routing errors. Keep the conservative legacy
@@ -46987,10 +47051,10 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
       let identity = ensureGitToolResolvable(
         parsed.toolProvisioning, getEnv("PATH"))
       # HL-3 (deliverable 3) — the RA-7/RA-21 MANIFEST publish runs ONLY when a
-      # ``.repo/manifests`` git-checkout is present (``manifestLayerRoot`` set).
+      # ``.repo/manifests`` git-checkout is present (``recordStoreRoot`` set).
       # The per-backend publish below runs whenever the gate passes and there
       # ARE routed non-manifest backends, REGARDLESS of manifest presence —
-      # lifting HL-2's ``manifestLayerRoot.len > 0`` gate so a manifest-less
+      # lifting HL-2's ``recordStoreRoot.len > 0`` gate so a manifest-less
       # workspace's personal/team-on-their-own-remote backends still publish
       # (spec §5/§9). The manifest-present behavior below is byte-identical to
       # HL-2 (same store, same policy, same offer-to-run remedy).
@@ -47000,15 +47064,15 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
       # `[manifest] publish_locks = true`. Otherwise the workspace is
       # committed-lock-only: the gate has already passed and the lock is written
       # locally, so we simply skip publication (a clean pass, no hard error).
-      if report.manifestLayerRoot.len > 0 and
+      if report.recordStoreRoot.len > 0 and
           not manifestPublicationEnabled(parsed.workspaceRoot):
         when defined(reproVerboseLockPublish):
           stderr.writeLine(
             "repro check: lock publish disabled by config " &
             "([manifest] publish_locks not set)")
-      elif report.manifestLayerRoot.len > 0 and
+      elif report.recordStoreRoot.len > 0 and
           manifestBackendParticipates(
-            parsed, report.manifestLayerRoot, identity):
+            parsed, report.recordStoreRoot, identity):
         # MO-10: route the RA-7/RA-21 pre-push publish through the abstract
         # ``LockStore`` (mirroring the gate's already-routed lock READ and
         # ``executePush``). The git-checkout backend's ``publishPending`` delegates
@@ -47016,7 +47080,7 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
         # recovers the exact ``LockPublishResult`` the gate policy below branches
         # on.
         let publishStore =
-          newGitCheckoutLockStore(identity, report.manifestLayerRoot)
+          newGitCheckoutLockStore(identity, report.recordStoreRoot)
         publishStore.pendingExpected = report.expectedManifestRecords
         let storePub = publishStore.publishPending()
         let pub = LockPublishResult(
@@ -47091,14 +47155,14 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
       # personal store and a non-manifest team repo's record reaches its own
       # store — never the one manifest.
       #
-      # HL-3 lifts HL-2's ``manifestLayerRoot.len > 0`` gate: this loop now runs
+      # HL-3 lifts HL-2's ``recordStoreRoot.len > 0`` gate: this loop now runs
       # even in a manifest-LESS workspace (a public + personal shape with no team
       # manifest), so a personal git-checkout-on-a-remote backend gets its remote
       # push. And it applies the tier split on a publish FAILURE: a public/team
       # backend REFUSES (exit 2), a personal backend WARNS + ALLOWS (exit
       # unchanged), per §6 Decision 2.
       for target in perBackendPublishTargets(
-          parsed, report.manifestLayerRoot, identity):
+          parsed, report.recordStoreRoot, identity):
         if target.store of GitCheckoutLockStore:
           var expected: seq[ExpectedLockRecord]
           for write in report.deferredPublishWrites:
@@ -47967,7 +48031,7 @@ proc preflightBackendHook(identity: GitToolIdentity; backendRoot: string):
 
 proc pushLockBackendPlans(identity: GitToolIdentity; workspaceRoot: string;
     resolved: ResolvedProject; order: openArray[string];
-    preflight: Table[string, PushPreflightRepo]; manifestLayerRoot: string):
+    preflight: Table[string, PushPreflightRepo]; recordStoreRoot: string):
     seq[PushLockBackendPlan] =
   ## Resolve the same composed routing plane used by the gate and group exact
   ## content-addressed records by their durable Git checkout. A backend shared
@@ -48003,9 +48067,9 @@ proc pushLockBackendPlans(identity: GitToolIdentity; workspaceRoot: string;
 
   let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
   if not composed.hasExplicitRoutes:
-    if manifestLayerRoot.len > 0 and gitTopLevel(manifestLayerRoot).len > 0:
+    if recordStoreRoot.len > 0 and gitTopLevel(recordStoreRoot).len > 0:
       for name in order:
-        add(manifestLayerRoot, "git-checkout", wvTeam, name,
+        add(recordStoreRoot, "git-checkout", wvTeam, name,
           reposByName[name].path, preflight[name].headSha,
           lockFileRepoRelativePath(resolved.projectName, name,
             preflight[name].headSha))
@@ -48230,7 +48294,7 @@ proc executePush(args: PushArgs): PushReport =
   for repo in resolved.repos:
     byName[repo.name] = repo
 
-  let manifestLayerRoot = pickManifestLayerRoot(WorkspaceLockArgs(
+  let recordStoreRoot = pickRecordStoreRoot(WorkspaceLockArgs(
     workspaceRoot: args.workspaceRoot,
     toolProvisioning: args.toolProvisioning), workspaceLocal)
 
@@ -48278,7 +48342,7 @@ proc executePush(args: PushArgs): PushReport =
   var backendPlans: seq[PushLockBackendPlan]
   try:
     backendPlans = pushLockBackendPlans(identity, args.workspaceRoot, resolved,
-      result.order, preflight, manifestLayerRoot)
+      result.order, preflight, recordStoreRoot)
   except CatchableError as err:
     result.stoppedRepo = result.project
     result.stoppedStage = "lock-backend-plan-preflight"
@@ -48384,7 +48448,7 @@ proc executePush(args: PushArgs): PushReport =
 
     try:
       backendPlans = pushLockBackendPlans(identity, args.workspaceRoot,
-        resolved, result.order, preflight, manifestLayerRoot)
+        resolved, result.order, preflight, recordStoreRoot)
     except CatchableError as err:
       result.stoppedRepo = result.project
       result.stoppedStage = "lock-backend-plan-preflight"
@@ -48797,7 +48861,7 @@ type
     project*: string
     workspaceRoot*: string
     activeBranch*: string
-    manifestLayerRoot*: string
+    recordStoreRoot*: string
     lockIndexPath*: string
     hasLockIndex*: bool
     manifestLayers*: seq[WorkspaceStatusManifestEntry]
@@ -48811,7 +48875,7 @@ proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["activeBranch"] = %report.activeBranch
-  result["manifestLayerRoot"] = %report.manifestLayerRoot
+  result["recordStoreRoot"] = %report.recordStoreRoot
   result["lockIndexPath"] = %report.lockIndexPath
   result["hasLockIndex"] = %report.hasLockIndex
   var layers = newJArray()
@@ -49002,8 +49066,8 @@ proc resolveWorkspaceStatusProject(parsed: WorkspaceStatusArgs):
 proc pickStatusManifestLayerRoot(workspaceRoot: string;
     workspaceLocal: Option[WorkspaceLocal]): string =
   ## Resolve the manifest-layer root that OWNS the lock subtree for
-  ## status's drift comparison. Mirrors M11's ``pickManifestLayerRoot``
-  ## but without the ``--manifest-layer-root`` override (status is
+  ## status's drift comparison. Mirrors M11's ``pickRecordStoreRoot``
+  ## but without the ``--record-store-root`` override (status is
   ## read-only and uses the same anchor M11 wrote to).
   if workspaceLocal.isSome:
     let local = workspaceLocal.get()
@@ -49131,9 +49195,9 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     # observation pass below still works.
     discard
 
-  let manifestLayerRoot = pickStatusManifestLayerRoot(
+  let recordStoreRoot = pickStatusManifestLayerRoot(
     args.workspaceRoot, workspaceLocal)
-  report.manifestLayerRoot = manifestLayerRoot
+  report.recordStoreRoot = recordStoreRoot
 
   let identity = ensureGitToolResolvable(
     args.toolProvisioning, getEnv("PATH"))
@@ -49146,12 +49210,12 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
   # found at all"; ``lockIndexPath`` surfaces the resolved lock file
   # path (empty when none).
   let latestLock = latestLockShasViaGit(
-    identity, manifestLayerRoot, resolved.projectName)
+    identity, recordStoreRoot, resolved.projectName)
   let lockedShas = latestLock.shas
   report.hasLockIndex = latestLock.lockRelPath.len > 0 and lockedShas.len > 0
   report.lockIndexPath =
     if report.hasLockIndex:
-      manifestLayerRoot / latestLock.lockRelPath.replace('/', DirSep)
+      recordStoreRoot / latestLock.lockRelPath.replace('/', DirSep)
     else: ""
 
   for repo in resolved.repos:
@@ -61128,11 +61192,12 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
     workspaceRoot = getCurrentDir()
   workspaceRoot = absolutePath(workspaceRoot)
 
-  let manifestsDir = workspaceRoot / ".repro" / "manifests"
-  if not dirExists(manifestsDir):
-    stderr.writeLine("repro locking adopt-manifest: no `.repro/manifests` " &
-      "checkout at " & manifestsDir & " — nothing to adopt (this verb makes " &
-      "an EXISTING manifest the team backend).")
+  let manifestsDir = firstExistingRecordStoreDir(workspaceRoot)
+  if manifestsDir.len == 0:
+    stderr.writeLine("repro locking adopt-manifest: no record store at " &
+      recordStoreCandidates(workspaceRoot).join(" or ") &
+      " — nothing to adopt (this verb makes an EXISTING store the team " &
+      "backend).")
     return 2
 
   let effectiveMode = if mode == tpmUnspecified: tpmPathOnly else: mode

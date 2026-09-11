@@ -12,7 +12,7 @@
 ##   * reported "lock publish skipped: … is not a git checkout; cannot publish
 ##     lock" for a publish that should never have been attempted at all.
 ##
-## The unconditional fallback also made every ``manifestLayerRoot.len > 0``
+## The unconditional fallback also made every ``recordStoreRoot.len > 0``
 ## guard permanently true, including the HL-3 guard documented as firing "ONLY
 ## when a `.repro/manifests` git-checkout is present".
 ##

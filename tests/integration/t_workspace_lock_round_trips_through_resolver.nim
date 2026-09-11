@@ -469,7 +469,7 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
       check report.kind == JObject
       check report.hasKey("project")
       check report.hasKey("workspaceRoot")
-      check report.hasKey("manifestLayerRoot")
+      check report.hasKey("recordStoreRoot")
       check report.hasKey("lockFilePath")
       check report.hasKey("indexFilePath")
       check report.hasKey("triggerRepo")
