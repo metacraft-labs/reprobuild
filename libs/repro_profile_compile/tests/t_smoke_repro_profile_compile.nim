@@ -12,6 +12,14 @@
 ##   - `profileCompileBuildAction` shape: argv, inputs, outputs,
 ##     fingerprint binding.
 ##
+## The fingerprint-binding case asserted `act.weakFingerprint == weak` until
+## reprobuild `dev` `6e1173440` (NLF-M7, #91) made Named-Lock-Files §7's keying
+## effective in `action()` itself. That is the milestone at which pass-through
+## stopped being the contract: §7.2 requires the governing lock identity to be
+## mixed in "by construction rather than by convention", precisely so a caller
+## that supplies its own fingerprint cannot opt out. The case now asserts the
+## composition rather than the pass-through — see the comment at the check.
+##
 ## The unit-level coverage uses an in-process flow; the real
 ## library-API end-to-end test (driving `repro.exe` from a tempdir as
 ## the helper subprocess) lives at
@@ -231,7 +239,31 @@ suite "M83 Phase C: profileCompileBuildAction":
     check act.id == "__repro_profile_compile"
     check act.kind == bakProcess
     check act.cacheable
-    check act.weakFingerprint == weak
+    # The caller's `weak` is the SEED of the edge's fingerprint, not the
+    # fingerprint. `action()` keys whatever it is handed on the governing lock
+    # identity, and Named-Lock-Files §7.2 is explicit that a caller must not be
+    # able to opt out of that by supplying its own value: "Every action
+    # fingerprint MUST include the identity of its governing lock file, and
+    # this MUST be enforced by construction rather than by convention", because
+    # under design A "a single edge whose fingerprint forgets the governing
+    # lock identity is a silent poisoning vector — it serves one lock file's
+    # artifacts to another and reports success."
+    #
+    # So `act.weakFingerprint == weak` would be the assertion that this edge
+    # HAS that hole. It is asserted the other way round, against the same
+    # composition `action()` performs, with the identity this edge names in its
+    # own source: `lockIdentityOutsideSolvedGraph`, "the governing lock identity
+    # of an edge that no solved graph reaches". §7.2 itself names three
+    # mechanisms — a non-optional field, a whole-graph fingerprint audit, and a
+    # release gate — and not that helper; the greppability argument for naming
+    # it at the call site rather than defaulting it is made in the helper's own
+    # doc comment in `repro_lock/identity.nim`, which is where to read it.
+    #
+    # The inequality below keeps this from passing vacuously against a
+    # constructor that went back to passing the seed through.
+    check act.weakFingerprint ==
+      keyedOnGoverningLock(weak, lockIdentityOutsideSolvedGraph())
+    check act.weakFingerprint != weak
     check act.argv[0] == "/bin/repro"
     check act.argv[1] == "__repro-compile-profile"
     check "--profile" in act.argv

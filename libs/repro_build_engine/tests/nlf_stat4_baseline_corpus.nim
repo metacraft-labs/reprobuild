@@ -2,7 +2,7 @@
 ##
 ## Named-Lock-Files NLF-M4. Corpus case **NLF-STAT-4** ("a workspace declaring
 ## nothing is unchanged") is the campaign's migration gate. Per
-## `Named-Lock-Files-Test-Corpus.md` §6 it is "the one case in the corpus that
+## `Named-Lock-Files-Test-Corpus.md` §7 it is "the one case in the corpus that
 ## must run against **both** the pre-change and post-change implementation, so
 ## it needs recorded baseline fingerprints as a fixture".
 ##
