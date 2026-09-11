@@ -654,6 +654,18 @@ line 211, twelve times), and its binary exits 1 run whole. This is a
 pre-existing `origin/dev` failure, not a consolidation effect — but a group
 carrying a red case cannot be evidence that consolidation preserved outcomes.
 
+**Resolved 2026-09-11 — and the reading above needs one correction.** That file
+was retired rather than repaired. It was not a "pre-existing `origin/dev`
+failure" in the sense this paragraph implies, because it was not a property of
+the tree at all: the test drove the migrator against whatever
+`windows/toolchain-versions.env` the host resolved, and one binary built at
+`9af08e4ee` exits 0 with 8/8 when `METACRAFT_WORKSPACE_ROOT` points at a
+metacraft workspace and exits 1 with 4/8 when it is unset. The measurement
+recorded here was taken in the second arm. The account is in the M2 milestone of
+`reprobuild-specs/Realize-Closure-And-Catalog-Expansion.milestones.org`. The
+`libs/repro_cli_support` group now carries no red case and can be reconsidered
+on its own merits by a later batch.
+
 ## Batch 2 landed: `libs/repro_lock_files` (second group) + two `libs/repro_core` groups + `libs/repro_dsl_stdlib` catalogs
 
 Recorded in full, with per-member figures, in

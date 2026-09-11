@@ -190,6 +190,14 @@ const PureUnitBundles: seq[PureUnitBundle] = @[
   #     on this tree, before any consolidation (`moUnknown` pins at line 211).
   #     A group carrying a red case cannot be evidence that consolidation
   #     preserved outcomes, whichever way it then behaves.
+  #     RESOLVED: that file was retired rather than repaired — its red was an
+  #     ambient-state artefact, not a defect (it drove the migrator against
+  #     whatever `windows/toolchain-versions.env` the host resolved, so the
+  #     same commit passed 8/8 with `METACRAFT_WORKSPACE_ROOT` set and failed
+  #     4/8 without it). The account is in the M2 milestone of
+  #     `reprobuild-specs/Realize-Closure-And-Catalog-Expansion.milestones.org`.
+  #     The `libs/repro_cli_support` group is now free of the red case and can
+  #     be reconsidered on its own merits by a later batch.
 
   PureUnitBundle(
     name: "bundle_repro_lock_files_pure_unit",

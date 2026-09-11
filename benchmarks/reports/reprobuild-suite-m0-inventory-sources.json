@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1525,
+    "nimTestBinaries": 1524,
     "pureUnitConsolidationGroups": 46,
-    "pureUnitTests": 561,
+    "pureUnitTests": 560,
     "staticallyDetectedRuntimeCompilerFlowTests": 94,
-    "testEntries": 1533
+    "testEntries": 1532
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -103,7 +103,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_cli_support"
@@ -113,8 +113,7 @@
         "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
         "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
         "libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim",
-        "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim",
-        "libs/repro_cli_support/tests/test_m2_env_ps1_migration_clean.nim"
+        "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1044,7 +1043,7 @@
       "graph-fixture": 12,
       "integration": 688,
       "platform/destructive": 111,
-      "pure unit": 561,
+      "pure unit": 560,
       "unclassified": 161
     },
     "graphOwnedTestArtifacts": [
@@ -1169,9 +1168,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1525,
+    "nimTestBinaryCount": 1524,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1533
+    "testEntryCount": 1532
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7556,23 +7555,6 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/test_m2_env_ps1_migration_clean",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_cli_support"
-      ],
-      "owner": "libs/repro_cli_support",
-      "requiresReproBinary": false,
-      "source": "libs/repro_cli_support/tests/test_m2_env_ps1_migration_clean.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
       "binary": "build/test-bin/test_m69_home_add_versioned",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -7602,7 +7584,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/test_m70_migrate_from_env_scripts.nim",
       "sourceSuiteCount": 6,
-      "staticCaseCount": 28,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

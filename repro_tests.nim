@@ -1053,15 +1053,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "libs/repro_cli_support/tests/test_m2_env_ps1_migration_clean.nim",
-    binary: "build/test-bin/test_m2_env_ps1_migration_clean",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
     source: "libs/repro_cli_support/tests/test_m69_home_add_versioned.nim",
     binary: "build/test-bin/test_m69_home_add_versioned",
     defines: @[],

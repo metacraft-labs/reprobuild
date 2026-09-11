@@ -22,6 +22,18 @@
 ##   6. End-to-end CLI invocation: scaffolds a fresh home.nim, applies
 ##      the migration twice, and asserts idempotence (the second run
 ##      adds zero lines).
+##
+## Two cases here were carried over from
+## ``test_m2_env_ps1_migration_clean.nim`` when that file was retired
+## (see the M2 milestone in
+## ``reprobuild-specs/Realize-Closure-And-Catalog-Expansion.milestones.org``
+## for the full account). Both are marked ``carried over from the
+## retired M2 gate`` in their own comments. They are the only two
+## things that file asserted which nothing else did, and both are
+## restated here over an EMBEDDED fixture, because the retired file
+## drove the migrator against whatever ``windows/toolchain-versions.env``
+## the host happened to resolve — which made its verdict a fact about
+## the machine rather than about the code.
 
 import std/[options, os, sets, strutils, unittest]
 
@@ -150,6 +162,26 @@ suite "M70 VAR → tool mapping":
     check not isIgnoredEnvVar("JDK_VERSION")
     check not isIgnoredEnvVar("ZIG_VERSION")
 
+  test "no ignored env var also maps to a catalog tool":
+    # Carried over from the retired M2 gate
+    # (``test_m2_env_ps1_migration_clean.nim``), which stated this
+    # intent as an exact-set comparison of ``IgnoredEnvVars`` against a
+    # hand-copied literal of the same eight strings. A mirror of a
+    # constant can only report that somebody edited the constant; it
+    # cannot say whether the edit was harmful, and it went stale the
+    # moment the list grew (the M2 spec table names four entries, the
+    # constant carries eight, and the retired test asserted the
+    # constant's eight while calling them "the agreed M2 set").
+    #
+    # The harmful edit that comment was actually worried about is
+    # specific and IS checkable: ``planMigration`` consults
+    # ``isIgnoredEnvVar`` BEFORE ``lookupTool``, so any key present in
+    # both tables is dropped from the migration silently — no
+    # ``package(...)`` line and no TODO comment either. That, not the
+    # cardinality of the list, is the invariant.
+    for entry in EnvVarToToolMap:
+      check not isIgnoredEnvVar(entry.envVar)
+
 # ---------------------------------------------------------------------------
 # planMigration: outcome classification
 # ---------------------------------------------------------------------------
@@ -205,6 +237,43 @@ JDK_VERSION=21.0.5
     check plan.lines.len == 1
     check plan.lines[0].kind == moIgnored
     check plan.lines[0].text == ""  # no rendered text for ignored entries
+
+  test "a backfilled (non-HEAD) catalog slice migrates at the pinned version":
+    # Carried over from the retired M2 gate
+    # (``test_m2_env_ps1_migration_clean.nim``), whose closing case
+    # cross-checked every rendered ``package(...)`` line against the
+    # env-file pin so that "a future regression that picked a
+    # non-pinned catalog slice (e.g. defaulting to HEAD when the pin is
+    # a backfilled older slice)" would fail.
+    #
+    # gradle and zig are the only two tools that can carry that
+    # assertion. They are the "(b) backfill" rows of the M2 per-tool
+    # decision table: the catalog holds HEAD *and* the older
+    # env-pinned slice (gradle 9.5.1 over 8.10.2; zig 0.16.0 over
+    # 0.13.0). For every other pin HEAD and the pin are the same
+    # string, so a regression that returned HEAD would still look
+    # correct. Asserting it on jdk alone — the shape the rest of this
+    # file uses — cannot discriminate.
+    #
+    # Embedded fixture rather than the real ``toolchain-versions.env``:
+    # the property under test belongs to the checked-in catalog files,
+    # not to the pin file, and the retired test's habit of reading
+    # whatever env file the host resolved is exactly what made it
+    # answer differently on different machines.
+    let parsed = parseEnvFile("""
+GRADLE_VERSION=8.10.2
+ZIG_VERSION=0.13.0
+""")
+    let plan = planMigration(parsed, "dev", initHashSet[string]())
+    check plan.lines.len == 2
+    check plan.lines[0].kind == moMigrate
+    check plan.lines[0].tool == "gradle"
+    check plan.lines[0].version == "8.10.2"
+    check "package(gradle, \"8.10.2\")" in plan.lines[0].text
+    check plan.lines[1].kind == moMigrate
+    check plan.lines[1].tool == "zig"
+    check plan.lines[1].version == "0.13.0"
+    check "package(zig, \"0.13.0\")" in plan.lines[1].text
 
   test "already-owned tool is skipped (idempotence helper)":
     var owned = initHashSet[string]()
