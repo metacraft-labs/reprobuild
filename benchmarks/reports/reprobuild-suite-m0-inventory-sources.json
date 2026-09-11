@@ -6735,7 +6735,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -117,3 +117,55 @@ proc extendedPath*(path: string): string =
       "\\\\?\\" & canonical
   else:
     path
+
+func isXdgRuntimeDirPath*(normalized: string): bool =
+  ## True for the per-user XDG runtime directory `/run/user/<uid>` and
+  ## anything beneath it. `normalized` must already use forward slashes.
+  ##
+  ## This subtree is NOT host runtime state. It is an ordinary per-user
+  ## tmpfs mount whose entire purpose is user-owned scratch: it holds
+  ## regular files with stable inodes and mtimes that reopen and
+  ## fingerprint exactly like files under `/tmp`. It is also the default
+  ## `TMPDIR` on a systemd host and the `TMPDIR` this repository's own
+  ## agent instructions hand out (short socket paths), so build actions
+  ## routinely read and write their real inputs and outputs here.
+  ##
+  ## It is carved out of `isVolatileRuntimeStatePath` below because the
+  ## blanket `/run` prefix was silently emptying those actions' evidence.
+  if not normalized.startsWith("/run/user/"):
+    return false
+  let rest = normalized["/run/user/".len .. ^1]
+  var uidLen = 0
+  while uidLen < rest.len and rest[uidLen] in {'0' .. '9'}:
+    inc uidLen
+  # `/run/user/<uid>` exactly, or `/run/user/<uid>/...` — never
+  # `/run/userland`, and never a non-numeric component.
+  uidLen > 0 and (uidLen == rest.len or rest[uidLen] == '/')
+
+func isVolatileRuntimeStatePath*(path: string): bool =
+  ## True for paths that describe the running kernel or the host's live
+  ## runtime state at one instant. Such a path cannot be reopened and
+  ## fingerprinted reliably after the action has finished, so it must
+  ## never become a cache input.
+  ##
+  ## `/dev`, `/proc` and `/sys` are kernel pseudo-filesystems and qualify
+  ## outright. `/run` is a tmpfs of ordinary files and qualifies only
+  ## because most of it holds host runtime state (pid files, `nscd`,
+  ## `systemd`, dbus). Its `/run/user/<uid>` subtree does not — see
+  ## `isXdgRuntimeDirPath`.
+  ##
+  ## THIS IS A SILENT DROP, so it is deliberately narrow. A path that
+  ## lands here leaves no diagnostic behind: the monitor records the read
+  ## and the fold discards it, and the action is then fingerprinted as
+  ## though it had never read anything. That direction is a stale SERVE,
+  ## not a spurious miss, which is why the prefix set must cover only
+  ## paths that genuinely cannot be re-read — and why the XDG runtime
+  ## directory, which can, is excluded.
+  let normalized = path.replace('\\', '/')
+  if normalized == "/dev" or normalized.startsWith("/dev/") or
+     normalized == "/proc" or normalized.startsWith("/proc/") or
+     normalized == "/sys" or normalized.startsWith("/sys/"):
+    return true
+  if normalized == "/run" or normalized.startsWith("/run/"):
+    return not normalized.isXdgRuntimeDirPath()
+  false

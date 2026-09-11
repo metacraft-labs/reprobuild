@@ -1478,11 +1478,13 @@ proc observeEnumeratedDirectory*(path: string;
   observeFileWithMetadata(path, policy, fingerprintDirectoryMembership(path))
 
 proc isVolatileDevicePath(path: string): bool =
-  let normalized = path.replace('\\', '/')
-  normalized == "/dev" or normalized.startsWith("/dev/") or
-    normalized == "/proc" or normalized.startsWith("/proc/") or
-    normalized == "/sys" or normalized.startsWith("/sys/") or
-    normalized == "/run" or normalized.startsWith("/run/")
+  ## Shared with the build engine's ``isVolatileMonitorPath`` — see
+  ## ``repro_core/paths.isVolatileRuntimeStatePath``. This used to be a
+  ## hand-copied duplicate of that prefix list; the two layers must admit
+  ## and drop exactly the same paths, because an input the engine puts in
+  ## the fingerprint and this layer silently leaves out of the record is a
+  ## cache entry keyed on something it does not carry.
+  isVolatileRuntimeStatePath(path)
 
 proc isRecordableInput(input: FileFingerprint): bool =
   if input.path.isVolatileDevicePath():
