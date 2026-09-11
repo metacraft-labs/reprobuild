@@ -783,6 +783,17 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_x86_64_single_threaded_direct_patch.log
 
+# GDH-M4 — a session serves more than one reload.
+# Campaign: codetracer-specs/Planned-Features/
+#           GDScript-Hot-Reload-Multi-Version-Sources.milestones.org
+# Four gates (two named + their two control arms) and four falsifier arms,
+# each of which must go red in the gate it is aimed at. The runner drives a
+# real host process linking the production C agent over a real Unix socket.
+e2e_gdh4_source_reload_gates:
+    mkdir -p test-logs
+    bash ./tests/e2e/hcr-source-reload/run_gdh4_gates.sh \
+        2>&1 | tee test-logs/e2e_gdh4_source_reload_gates.log
+
 integration_hcr_linux_elf_symbol_resolution:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
