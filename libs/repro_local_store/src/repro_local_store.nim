@@ -1042,6 +1042,139 @@ var
   actionIndexResolvedHits = 0
   actionIndexUnionFallbacks = 0
   actionIndexUnresolvedRefs = 0
+  inputRevalidateCalls = 0
+  inputRevalidateNanos = 0'i64
+  fsProbeCalls = 0
+  fsProbeNanos = 0'i64
+  absentFirstTouches = 0
+
+proc timedFilesystemProbe(path: string): FileMetadata =
+  ## `fingerprintMetadata` with a clock pair around it, so the syscall can be
+  ## priced IN SITU rather than by differencing two build variants.
+  ##
+  ## That distinction is not pedantic: a variant difference bundles the
+  ## syscall with everything else on the same branch, and this path has had
+  ## three different numbers attached to it by microbenchmark, each wrong by
+  ## a factor of two or more. One clock pair per FIRST TOUCH -- ~4,400 of
+  ## them against ~16,700 input checks -- costs about 0.2 ms, under 1% of
+  ## the loop it measures, which is what makes it affordable here and
+  ## unaffordable per input.
+  let started = getMonoTime()
+  result = fingerprintMetadata(path)
+  fsProbeNanos += (getMonoTime() - started).inNanoseconds
+  inc fsProbeCalls
+
+proc filesystemProbeStats*(): tuple[calls: int; nanos: int64;
+                                    absentFirstTouches: int] =
+  ## FIRST TOUCHES: the recorded-input checks that actually reach the
+  ## filesystem, and the only ones that cost anything.
+  ##
+  ## `FileMetadataCache` serves every REPEAT of a path for free, so of a warm
+  ## no-op's ~16,700 recorded-input checks only ~4,400 are first touches.
+  ## Any optimisation of absent-path probes is bounded by
+  ## `absentFirstTouches` -- ~3,900 -- and NOT by the ~11,700 occurrences of
+  ## absent inputs, which is the number an earlier attempt counted and the
+  ## reason its results could not be reconciled with its own arithmetic.
+  ##
+  ## What this row bought, recorded because it is the kind of thing that is
+  ## expensive to rediscover. On a zlib warm no-op these first touches are
+  ## ~20.9 ms of a ~24 ms input-revalidation loop -- about 87% -- at ~4.8 us
+  ## each. A full search-path collapse was then built against this counter,
+  ## reached 96% of the ceiling (3,754 of 3,928 spared, syscalls 20.9 ->
+  ## 1.4 ms) and was still a net regression of +0.5 ms, because reading a
+  ## directory for the first time costs ~94 us against ~4.8 us for a negative
+  ## `lstat`.
+  ##
+  ## THE WHOLE DECISION IS ONE CONSTANT: collapsing a directory's absent
+  ## probes pays above ~20 FIRST TOUCHES PER DIRECTORY. Divide this row by
+  ## the number of distinct directories those probes fall under and compare.
+  ## The constant is cache-temperature-invariant -- 19.6 warm, 20.6 cold,
+  ## because a cold cache inflates the probe and the directory read together,
+  ## both being dominated by paging in the same directory metadata. This
+  ## workload measures 18.4, just under the line at either temperature.
+  ## See `Filesystem-Policy-And-Observed-Inputs.md` §"Search-Path
+  ## Enumerations" for the measurements and for the two warm-sample errors
+  ## that flattered both operands before they were priced in place.
+  ##
+  ## Reset by `resetOutputStateCheckStats`, which `runBuild` calls, so a
+  ## reading after a build describes THAT build.
+  (calls: fsProbeCalls, nanos: fsProbeNanos,
+   absentFirstTouches: absentFirstTouches)
+
+template timedInputRevalidation*(body: untyped) =
+  ## One clock pair around ONE record's recorded-input revalidation loop.
+  ##
+  ## Wrapped at every site the loop appears, for the reason
+  ## `outputStateCheckStats` gives for doing the same on the output side:
+  ## the loop runs from four places, and instrumenting one of them and
+  ## calling the number "the cost of revalidation" would under-count it by
+  ## the other three.
+  ##
+  ## One clock pair per RECORD, never per input: a record carries hundreds
+  ## of inputs and two `clock_gettime` calls each would cost more than the
+  ## `lstat` they were describing.
+  let revalidationStart = getMonoTime()
+  body
+  inputRevalidateNanos += (getMonoTime() - revalidationStart).inNanoseconds
+  inc inputRevalidateCalls
+
+proc inputRevalidateStats*(): tuple[calls: int; nanos: int64] =
+  ## Wall time spent revalidating RECORDED INPUTS, separated from the rest
+  ## of a cache consultation.
+  ##
+  ## It exists because the standing belief that input revalidation is the
+  ## largest remaining term in a warm no-op was not observable. `repro cache
+  ## lookup` reports the whole consultation -- record decode, environment
+  ## check, input revalidation and output state check together -- and on
+  ## this hardware it ranges 30-65 ms for the same unchanged zlib build from
+  ## one minute to the next. No term inside it could be attributed, so no
+  ## change to any of them could be judged.
+  ##
+  ## What it measured, on a zlib warm no-op -- 37 records, 16,742
+  ## recorded-input CHECKS, of which 12,366 are served by
+  ## `FileMetadataCache` and 4,376 reach the filesystem:
+  ##
+  ##   repro cache lookup        ~35 ms
+  ##   repro input revalidate    ~25 ms   of that
+  ##
+  ## and, decomposed by a ladder of build variants each adding ONE term to
+  ## this region (so the terms sum by construction, not by estimation):
+  ##
+  ##   iterating all 16,742 inputs                     0.00 ms
+  ##   `FileMetadataCache` probe x16,742 + insert       1.6 ms
+  ##   process-global warm table                        0.5 ms
+  ##   extended-path rewrite x4,376                     0.1 ms
+  ##   `lstat` of the ~450 inputs that EXIST            1.4 ms
+  ##   `lstat` of the ~3,926 that are ABSENT           22.0 ms
+  ##   membership check + compare + insert              0.6 ms
+  ##   ------------------------------------------------------
+  ##   sum 26.2 against a loop measured 23.5-26.3; residual +1.0 ms.
+  ##
+  ## SO THE LOOP IS THE SYSCALLS -- about 87% of it, at ~5.6 us per absent
+  ## path. Two things follow that cost real time to learn:
+  ##
+  ## * ITERATION IS FREE. 16,742 elements at 0.00 ms means Nim's `items`
+  ##   yields the `FileFingerprint` without copying its path string.
+  ##   Allocation was the standing suspect here and is excluded.
+  ## * A MICROBENCHMARK OF THIS PATH WILL LIE BY ~7x UNLESS IT REPRODUCES
+  ##   THE ACCESS PATTERN. Re-probing one path in a loop measures 0.725 us
+  ##   because the name cache answers it. That never happens here: the
+  ##   metadata cache absorbs every repeat, so each distinct absent path is
+  ##   touched EXACTLY ONCE per process and every one is a first touch, at
+  ##   5.6 us. Earlier comments here quoted 0.725 us and were wrong by that
+  ##   factor. Measure in place, with this counter.
+  ##
+  ## Note what is NOT in this region: the record is already decoded when the
+  ## timer starts, so `decodeRecord` and the whole paths it builds from
+  ## prefix and leaf are outside it, in the ~10 ms gap between this row and
+  ## `repro cache lookup`. That gap is unattributed.
+  ##
+  ## `Filesystem-Policy-And-Observed-Inputs.md` §"Search-Path Enumerations"
+  ## uses these numbers.
+  ##
+  ## Reset by `resetOutputStateCheckStats`, which `runBuild` calls, so a
+  ## reading after a build describes THAT build.
+  (calls: inputRevalidateCalls, nanos: inputRevalidateNanos)
 
 proc noteActionRecordDecode(frameBytes: int) =
   ## Count ONE decoded `RBAR` record frame and the bytes it spanned.
@@ -1400,7 +1533,7 @@ proc fingerprintMetadata(path: string;
     inc cache[].stats.warmRevalidated
   else:
     inc cache[].stats.coldStats
-  result = fingerprintMetadata(path)
+  result = timedFilesystemProbe(path)
   if hadWarmEntry:
     if result == priorMetadata:
       inc cache[].stats.warmUnchanged
@@ -1427,13 +1560,23 @@ proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
         inc cache[].stats.warmChanged
     return
   if cache.isNil:
-    return fingerprintMetadata(path)
+    # Counted too. A consultation with no metadata cache has every input as
+    # a first touch, and leaving this arm out made the counter read zero for
+    # exactly the callers that do the most filesystem work.
+    if recorded.kind == ffkMissing:
+      inc absentFirstTouches
+    return timedFilesystemProbe(path)
   if cache[].entries.hasKey(path):
     inc cache[].stats.currentRunHits
     return cache[].entries[path]
   inc cache[].stats.warmEntries
   inc cache[].stats.warmRevalidated
-  result = fingerprintMetadata(path)
+  # A FIRST TOUCH of a path recorded ABSENT: the population any search-path
+  # probe optimisation is bounded by, counted whether or not anything
+  # eliminates it, so the ceiling is visible without one.
+  if recorded.kind == ffkMissing:
+    inc absentFirstTouches
+  result = timedFilesystemProbe(path)
   if result == recorded:
     inc cache[].stats.warmUnchanged
   else:
@@ -1863,6 +2006,11 @@ proc resetOutputStateCheckStats*() =
   actionIndexResolvedHits = 0
   actionIndexUnionFallbacks = 0
   actionIndexUnresolvedRefs = 0
+  inputRevalidateCalls = 0
+  inputRevalidateNanos = 0'i64
+  fsProbeCalls = 0
+  fsProbeNanos = 0'i64
+  absentFirstTouches = 0
 
 proc actionIndexStats*(): tuple[negativeHits, resolvedHits, unionFallbacks,
                                 unresolvedReferences: int] =
@@ -3499,12 +3647,17 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
         if envInputChanged(record, resolver, changedEnv):
           return HotMetadataScan(status: hmssInputChanged,
             recordCount: totalRecords, checkedInputCount: checkedInputs)
-        for input in record.inputs:
-          inc checkedInputs
-          if fingerprintRecordedMetadata(input.path, input.metadata,
-              metadataCache) != input.metadata:
-            return HotMetadataScan(status: hmssInputChanged,
-              recordCount: totalRecords, checkedInputCount: checkedInputs)
+        var inputChanged = false
+        timedInputRevalidation:
+          for input in record.inputs:
+            inc checkedInputs
+            if fingerprintRecordedMetadata(input.path, input.metadata,
+                metadataCache) != input.metadata:
+              inputChanged = true
+              break
+        if inputChanged:
+          return HotMetadataScan(status: hmssInputChanged,
+            recordCount: totalRecords, checkedInputCount: checkedInputs)
         # Same rule as `lookupActionResultImpl`: unchanged inputs are only
         # half the hit condition. The declared outputs on disk must still be
         # the ones this record describes (Incremental-Invalidation.md
@@ -3707,14 +3860,19 @@ proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
       else: nil
     if envInputChanged(record, resolver, changedEnv):
       return false
-    for input in record.inputs:
-      let inputKey = hotInputKey(input)
-      if seen.contains(inputKey):
-        continue
-      seen.incl(inputKey)
-      if fingerprintRecordedMetadata(input.path, input.metadata,
-          metadataCache) != input.metadata:
-        return false
+    var inputChanged = false
+    timedInputRevalidation:
+      for input in record.inputs:
+        let inputKey = hotInputKey(input)
+        if seen.contains(inputKey):
+          continue
+        seen.incl(inputKey)
+        if fingerprintRecordedMetadata(input.path, input.metadata,
+            metadataCache) != input.metadata:
+          inputChanged = true
+          break
+    if inputChanged:
+      return false
   true
 
 proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
@@ -3952,14 +4110,15 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
       # versus a stat per recorded input.
       if envInputChanged(hot.record, envResolver, changedInput):
         changed = true
-      for input in hot.record.inputs:
-        if changed:
-          break
-        if fingerprintRecordedMetadata(input.path, input.metadata,
-            metadataCache) != input.metadata:
-          changed = true
-          changedInput = input.path
-          break
+      timedInputRevalidation:
+        for input in hot.record.inputs:
+          if changed:
+            break
+          if fingerprintRecordedMetadata(input.path, input.metadata,
+              metadataCache) != input.metadata:
+            changed = true
+            changedInput = input.path
+            break
       if not changed:
         # Inputs are unchanged, so this record still describes the right
         # computation. It is still only a hit if the DECLARED OUTPUTS on disk

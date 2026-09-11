@@ -9400,6 +9400,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     stats.addCounterMetric("repro output record dir walks", osc.recordDirWalks)
     stats.addCounterMetric("repro output record dir entries",
       int(osc.recordDirEntries))
+    # The INPUT side of the same consultation, separated from `repro cache
+    # lookup` because that row is the whole consultation and cannot
+    # attribute anything inside it: the same unchanged zlib build measures
+    # 30-65 ms of it on this hardware from one minute to the next. See
+    # `inputRevalidateStats` for what the separation showed, which was not
+    # what it was added to confirm.
+    let ir = inputRevalidateStats()
+    stats.addCountedMetric("repro input revalidate", ir.calls,
+      float(ir.nanos) / 1000.0)
+    # FIRST TOUCHES: the only recorded-input checks that reach the
+    # filesystem, priced in situ. The absent ones are the population any
+    # search-path probe optimisation is bounded by -- see
+    # `filesystemProbeStats` for what that bound turned out to be worth.
+    let fp = filesystemProbeStats()
+    stats.addCountedMetric("repro fs probe", fp.calls, float(fp.nanos) / 1000.0)
+    stats.addCounterMetric("repro absent first touches", fp.absentFirstTouches)
     # The byte-scaled half of the cost model, beside the count-scaled half
     # above. Caching-Architecture.md §"Known Limit: The Default Policy Can
     # Serve A Stale Result" is a claim about which of the two a consultation

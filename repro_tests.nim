@@ -2268,6 +2268,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_input_revalidation_is_attributed.nim",
+    binary: "build/test-bin/t_input_revalidation_is_attributed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_m8_multi_output_realize.nim",
     binary: "build/test-bin/t_m8_multi_output_realize",
     defines: @[],
