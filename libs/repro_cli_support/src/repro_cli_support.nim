@@ -5366,6 +5366,17 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   var inputs = plan.inputSources
   if not inputs.contains(interfacePath):
     inputs.add(interfacePath)
+  if helperCliPath.len == 0:
+    # `internalReproHelperCliPath` could not name an image that implements the
+    # `__repro-*` verbs. Refusing here is the point: the previous behaviour
+    # handed back the CURRENT image whatever it was, so an embedded caller had
+    # itself spawned with an internal verb it does not implement — a test
+    # binary re-running its own suite, forever. Fail with a name instead.
+    raise newException(ValueError,
+      "cannot schedule the provider-compile edge for " & modulePath &
+        ": no `repro` image to spawn it with. The running image is " &
+        os.normalizedPath(getAppFilename()) & " and no public CLI path was " &
+        "supplied. An embedded caller must pass one.")
   var command = @[
     helperCliPath,
     "__repro-compile-provider",
@@ -6513,6 +6524,33 @@ proc stablePublicCliPath(): string =
     return os.normalizedPath(getCurrentDir() / resolved)
   os.normalizedPath(getCurrentDir() / app)
 
+proc spawnableWithInternalVerb(candidate: string): bool =
+  ## May ``candidate`` be spawned with an internal selector — ``internal io
+  ## monitor``, ``__repro-extract-interface``, ``__repro-compile-provider``?
+  ##
+  ## Only ``repro`` implements those. The dangerous case is spawning THIS
+  ## process's own image when it is something else: a test binary that links
+  ## the engine in-process gets re-executed with arguments it does not
+  ## understand, ignores them, runs its suite, re-enters the engine, and
+  ## spawns itself again — an unbounded chain, one child per generation, that
+  ## ends only when the machine runs out of processes or memory. Each
+  ## generation also leaves a pid-named scratch directory behind.
+  ##
+  ## Checking only the ARGUMENT is not enough and that is why this exists as a
+  ## separate predicate: ``publicCliPath`` looks explicit at the call site but
+  ## is itself derived from ``getAppFilename()`` further up, so "the caller
+  ## passed a path" is not evidence that the path is `repro`. The test is
+  ## therefore about identity with the running image, not about provenance.
+  ##
+  ## A path that is NOT this image is left alone — a fixture may legitimately
+  ## point at some other binary, and this predicate is not in the business of
+  ## validating those.
+  if candidate.len == 0:
+    return false
+  if extractFilename(candidate) == addFileExt("repro", ExeExt):
+    return true
+  os.normalizedPath(candidate) != os.normalizedPath(getAppFilename())
+
 # Executable-Consolidation M1: the internal io-monitor driver is no longer a
 # standalone monitor binary. ``repro`` self-spawns its own image with this
 # subcommand selector (``repro internal io monitor …``). The
@@ -6523,12 +6561,39 @@ const internalIoMonitorArgs* = @["internal", "io", "monitor"]
 
 proc selfSpawnIoMonitorPath(publicCliPath = ""): string =
   ## Path to the running ``repro`` image used to self-spawn the internal
-  ## io-monitor role.
-  let publicPath =
-    if publicCliPath.len > 0: publicCliPath else: stablePublicCliPath()
-  if publicPath.len > 0:
-    return os.normalizedPath(publicPath)
-  os.normalizedPath(getAppFilename())
+  ## io-monitor role, or "" when no such image can be named.
+  ##
+  ## "" is a SUPPORTED state, not an error: the engine documents an empty
+  ## ``monitorCliPath`` as "no io-monitor driver wired" and falls back to the
+  ## statically declared inputs/outputs (see ``monitorEvidenceRequired``).
+  ##
+  ## The name check on the last arm is the load-bearing part. This used to end
+  ## at ``getAppFilename()`` unconditionally — and ``stablePublicCliPath()``
+  ## also ends there — so an embedded caller, meaning a TEST BINARY that links
+  ## the engine in-process, had ITSELF wrapped as
+  ## ``<test-binary> internal io monitor -- …``. A unittest binary does not
+  ## implement that selector: it ignores the arguments, runs its suite, and
+  ## re-enters here, wrapping itself again. One child per generation, growing
+  ## without bound, each generation also leaving a pid-named scratch directory
+  ## behind. It stops when the machine does.
+  ##
+  ## So the only images accepted are ones somebody has ASSERTED are `repro` —
+  ## an explicit ``publicCliPath``, or ``REPRO_PUBLIC_CLI_PATH`` — plus the
+  ## running image when it is actually named `repro`.
+  let candidate =
+    if publicCliPath.len > 0:
+      os.normalizedPath(publicCliPath)
+    else:
+      let configured = getEnv("REPRO_PUBLIC_CLI_PATH")
+      if configured.len == 0:
+        stablePublicCliPath()
+      elif configured.isAbsolute:
+        os.normalizedPath(configured)
+      else:
+        os.normalizedPath(getCurrentDir() / configured)
+  if spawnableWithInternalVerb(candidate):
+    return candidate
+  ""
 
 proc internalReproHelperCliPath(publicCliPath: string): string =
   ## Path used for monitored internal helper actions. Since the single-`repro`
@@ -6536,12 +6601,32 @@ proc internalReproHelperCliPath(publicCliPath: string): string =
   ## no ``repro-full`` companion), so a real ``repro`` process self-spawns its
   ## current image. Embedded/test callers (whose ``getAppFilename`` is a test
   ## binary) fall back to the explicit ``publicCliPath`` they pass in.
+  ##
+  ## Returns "" when neither is available, and that empty string is the whole
+  ## point of this proc: the ONLY images that may be spawned with a `__repro-*`
+  ## internal verb are an image actually named `repro` and an explicitly
+  ## supplied CLI path. Anything else is some other program that does not
+  ## implement those verbs.
+  ##
+  ## This used to end by returning the current image regardless of its name. An
+  ## embedded caller with no `publicCliPath` — a TEST BINARY linking the engine
+  ## in-process — therefore had ITSELF spawned as `<test-binary>
+  ## __repro-extract-interface …`. A unittest binary ignores those arguments
+  ## and runs its suite, which re-enters the same code and spawns itself again:
+  ## an unbounded self-exec chain, one child per generation, that only stops
+  ## when the machine does. It also littered one scratch directory per
+  ## generation, since those are named after the pid.
+  ##
+  ## Callers must treat "" as "no image to spawn back into" and do the work
+  ## in-process; `extractInterfaceModuleArtifact` already does exactly that,
+  ## and its in-process path is the same code the helper would have run.
   let current = os.normalizedPath(getAppFilename())
   if extractFilename(current) == addFileExt("repro", ExeExt):
     return current
-  if publicCliPath.len > 0:
+  if publicCliPath.len > 0 and
+      spawnableWithInternalVerb(os.normalizedPath(publicCliPath)):
     return os.normalizedPath(publicCliPath)
-  current
+  ""
 
 proc siblingTryCompileProviderPath(publicCliPath: string): string =
   ## Pre-built Tier 2a direct provider binary, normally shipped next to
