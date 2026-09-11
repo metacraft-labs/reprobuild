@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1534,
+    "nimTestBinaries": 1538,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 577,
-    "staticallyDetectedRuntimeCompilerFlowTests": 93,
-    "testEntries": 1542
+    "staticallyDetectedRuntimeCompilerFlowTests": 94,
+    "testEntries": 1546
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1082,7 +1082,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 682,
+      "integration": 686,
       "platform/destructive": 110,
       "pure unit": 577,
       "unclassified": 161
@@ -1209,9 +1209,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1534,
+    "nimTestBinaryCount": 1538,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1542
+    "testEntryCount": 1546
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1799,6 +1799,29 @@
         }
       ],
       "source": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "caseDir",
+            "env",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 311,
+          "path": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "\"gcc\", \"-O2\", \"-g\","
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim"
     },
     {
       "class": "integration",
@@ -18934,6 +18957,68 @@
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_quiescence_handshake_and_release",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_on_stack_function_reported_skipped",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_skipped.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
