@@ -720,6 +720,7 @@ tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim	nim	1
 tests/e2e/codetracer-subset/t_e2e_codetracer_dev_environment_slice.nim	nim	1
 tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim	nim	13
 tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim	nim	4
+tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_binds_materialized_producer.nim	nim	2
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_per_shell.nim	nim	7
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_round_trip.nim	nim	5
