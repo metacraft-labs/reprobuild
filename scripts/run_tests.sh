@@ -423,10 +423,25 @@ export PATH="${REPROBUILD_BIN_ABS}:${PATH}"
 # to refuse instead. Without this the same shortfall would be reported as a
 # skip in the one place it must be an error.
 export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
+# A failing module must not hide the modules after it, nor the entire Nim
+# phase below it. Under `set -e` a bare `python3 "${test_file}"` aborted the
+# whole script: one stale assertion in the fifth of eight modules meant three
+# later modules and all 1441 test binaries never ran, and the suite reported
+# that as a single failure rather than as "nothing after this was measured".
+#
+# Failures are collected and re-raised at the very end of this script, so the
+# run still fails -- it just fails after measuring everything it can.
+python_failed_modules=()
 while IFS= read -r -d '' test_file; do
-  python3 "${test_file}"
+  if ! python3 "${test_file}"; then
+    python_failed_modules+=("${test_file}")
+    printf '::error:: python module FAILED: %s (continuing)\n' "${test_file}" >&2
+  fi
 done < <(
-  find tests -type f -name 'test_*.py' -print0
+  # Sorted so the module order is the same on every host and in every run;
+  # `find` order is filesystem-dependent, which makes "module N of M" in a
+  # report mean nothing.
+  find tests -type f -name 'test_*.py' -print0 | sort -z
 )
 
 # D6 per-test timeout plus an outer wall-clock backstop for runner wedges.
@@ -543,4 +558,13 @@ else
     --bin-dir=build/test-bin \
     --summary-json=test-logs/parallel-run.json \
     --results-dir=test-logs/results
+fi
+
+# Re-raise any Python module failure recorded above. This runs after the Nim
+# phase on purpose: a failing module is a real failure, but it must not cost us
+# the measurement of everything downstream of it.
+if (( ${#python_failed_modules[@]} > 0 )); then
+  printf '\n%d python module(s) failed:\n' "${#python_failed_modules[@]}" >&2
+  printf '  %s\n' "${python_failed_modules[@]}" >&2
+  exit 1
 fi
