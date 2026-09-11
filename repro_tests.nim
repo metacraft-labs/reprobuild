@@ -8280,6 +8280,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_branch_from_mainlines.nim",
+    binary: "build/test-bin/t_branch_from_mainlines",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim",
     binary: "build/test-bin/t_branch_forks_new_workspace_on_feature_branch",
     defines: @[],

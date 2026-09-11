@@ -191,6 +191,15 @@ proc setupFixture(gitBin, slug: string): Fixture =
   cloneInto(gitBin, result.libOrigin, workspaceRoot / "lib")
   result.workspaceRoot = workspaceRoot
   writeWorkspaceBranch(workspaceRoot, project = "app", branch = "main")
+  # Central lock publication is OPT-IN (MO-14). Absent
+  # `[manifest] publish_locks = true` the gate writes and passes but must NOT
+  # push records, so the `lockPublished` assertion below would be asking for
+  # something this workspace disabled.
+  writeFile(workspaceRoot / ".repro-workspace.toml",
+    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+    "[manifest]\n" &
+    "url = \"" & fileUrl(result.manifestBare) & "\"\n" &
+    "publish_locks = true\n")
   for path in [workspaceRoot, manifestsRoot]:
     let installed = runShell(shellCommand(@[result.reproBin, "hooks", "ensure",
       "--vcs", "--workspace-root=" & path]))
@@ -245,6 +254,18 @@ suite "RA-25 — repro push --sync integrates upstream then publishes":
       # The teammate commit is NOT yet in our local history (we haven't synced).
       check not libContainsInLocalHistory(gitBin, fx.workspaceRoot / "lib",
         mateSha)
+      # `app` needs an outgoing commit too. An already-published member's push
+      # is a no-op, so its pre-push hook never fires and no
+      # `locks/<p>/app/<sha>` record is written — and the final verification
+      # correctly refuses a closure whose records do not exist.
+      #
+      # `post-commit` files a DRAFT for this commit pinning lib's pre-rebase
+      # revision. That is fine now: publication stages only what the operation
+      # anchors (Invariant 13), so lib's push no longer sweeps the draft into
+      # published history, and RA-31 lets app's own gate supersede its own
+      # untracked draft with the post-rebase coordinates.
+      discard commitFile(gitBin, fx.workspaceRoot / "app", "app-local.txt",
+        "app work\n", "app local work")
 
       let res = invokePush(fx, ["--sync", "--rebase"])
       checkpoint("sync push output: " & res.output)
