@@ -7668,7 +7668,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "libs/repro_core",
       "requiresReproBinary": true,
