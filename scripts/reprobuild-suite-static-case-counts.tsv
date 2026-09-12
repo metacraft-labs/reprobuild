@@ -1326,6 +1326,7 @@ tests/integration/t_ti1_interface_artifact_edge.nim	nim	4
 tests/integration/t_ti2_separate_module_producer.nim	nim	2
 tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	nim	1
 tests/integration/t_ti3_fingerprint_split.nim	nim	3
+tests/integration/t_tool_probe_stdin.nim	nim	3
 tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim	nim	1
 tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1

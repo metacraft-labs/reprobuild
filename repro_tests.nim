@@ -11880,6 +11880,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_tool_probe_stdin.nim",
+    binary: "build/test-bin/t_tool_probe_stdin",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim",
     binary: "build/test-bin/t_top_level_sync_pull_shortcuts_match_workspace_forms",
     defines: @[],

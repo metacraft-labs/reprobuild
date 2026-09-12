@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, strtabs, strutils, tables, times, net]
+import std/[algorithm, json, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, times, net]
 
 import blake3
 import cbor
@@ -488,6 +488,9 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
     result.output = "probe failed to start: " & err.msg
     return
 
+  # Probes are non-interactive; leaving the parent pipe open makes tools such
+  # as bzip2 wait for input even after printing their version.
+  process.inputStream.close()
   let deadline = epochTime() + probeTimeoutSeconds.float
   var exitCode = -1
   var timedOut = false
