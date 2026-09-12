@@ -1189,6 +1189,7 @@ tests/integration/t_nix_daemon_provisioner.nim	nim	3
 tests/integration/t_no_runtime_compilation_in_tests.nim	nim	2
 tests/integration/t_only_overridden_nodes_are_rewritten.nim	nim	1
 tests/integration/t_output_cleanup_executor.nim	nim	10
+tests/integration/t_pcr_composite_matches_tpm.nim	nim	2
 tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	nim	1
 tests/integration/t_pkgconf_bootstrap_provisioning.nim	nim	1
 tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim	nim	1
@@ -1340,6 +1341,8 @@ tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	nim	1
 tests/integration/t_ti3_fingerprint_split.nim	nim	3
 tests/integration/t_tool_probe_stdin.nim	nim	3
 tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim	nim	1
+tests/integration/t_tpm2_codec_rejects_malformed.nim	nim	2
+tests/integration/t_tpm2_structure_vectors.nim	nim	2
 tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1
 tests/integration/t_unpinned_manifest_is_not_plain_accepted.nim	nim	9
