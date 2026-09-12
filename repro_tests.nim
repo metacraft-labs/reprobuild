@@ -1161,6 +1161,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
+    binary: "build/test-bin/t_daemon_active_session_tally",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_image_path.nim",
     binary: "build/test-bin/t_daemon_image_path",
     defines: @[],
