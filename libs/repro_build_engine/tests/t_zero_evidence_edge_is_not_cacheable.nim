@@ -87,7 +87,7 @@ import repro_build_engine
 import repro_core
 import repro_hash
 import repro_local_store
-import io_mon/[types, writer]
+import io_mon/[capabilities, types, writer]
 
 const TmpDir = "build/test-tmp/t_zero_evidence_edge_is_not_cacheable"
 const ReuseDecisions = {cdHit, cdHybridCutoff}
@@ -137,7 +137,27 @@ proc writeRmdf(f: Fixture; records: seq[MonitorRecord]) =
   ## io-mon's own canonical encoder, so the production reader validates
   ## magic, version, framing, sequence numbers and trailer checksum
   ## exactly as it does for a monitor-written file.
-  writeFile(f.rmdfPath, cast[string](encodeCanonical(records)))
+  ##
+  ## The capture OPENS with this host's own backend profile, from io-mon's
+  ## `defaultHooksMonitorProfile` / `profileRecords` rather than from a
+  ## literal here, because that is what a real capture opens with on every
+  ## launch path (`tests/integration/t_every_launch_path_is_monitored.nim`
+  ## pins `entropyObservability` to a decided value for exactly that reason).
+  ##
+  ## It is not decoration. `applyEntropyBlessingPolicy` treats a capture
+  ## carrying no `mrBackendProfile` record as one whose entropy observability
+  ## is UNKNOWN, and withholds the action-cache publish from any unblessed
+  ## action on that ground alone — "absence of evidence is not evidence of
+  ## absence", Windows-Build-Correctness-Bitness-And-Capabilities M6. A
+  ## fixture without the record therefore cannot reach the question this file
+  ## is about: every edge in it would decline to publish for a reason that has
+  ## nothing to do with how much it observed. The profile records add no
+  ## observation of any kind — `mrBackendProfile` and `mrCapabilityGap` are
+  ## META records in io-mon's own taxonomy, belonging to no event category —
+  ## so the "observed nothing" fixture still observes nothing.
+  writeFile(f.rmdfPath,
+    cast[string](encodeCanonical(
+      profileRecords(defaultHooksMonitorProfile()) & records)))
 
 proc processRecord(): MonitorRecord =
   ## A record that carries no file observation. The real monitor emits
@@ -210,9 +230,20 @@ suite "an edge that observed nothing is not cacheable":
     check r0.launched
     check f.runCount() == 1
 
-    # Denominator: the evidence really is empty, or the assertions below
-    # would be about something else entirely.
-    check r0.evidence.monitorReads.len == 0
+    # Denominator: the MONITOR really observed nothing, or the assertions
+    # below would be about something else entirely.
+    #
+    # The read SET is not empty, and asserting that it is would be asserting
+    # the wrong property. `collectEvidence` folds exactly one entry no
+    # monitor reported — the action's own root image, which
+    # `executedToolImagePath` reconstructs from `argv` precisely because the
+    # launcher's exec precedes the shim's constructor and produces no record
+    # ("a reconstruction of the launcher's resolution, not an observation of
+    # the kernel's"). It is a correct cache input and it is not an
+    # observation; the guard under test turns on that distinction, and this
+    # case is what holds the two apart. Written as an equality rather than a
+    # length so the fixture cannot quietly grow a second read.
+    check r0.evidence.monitorReads == @[act.argv[0]]
     check r0.evidence.monitorWrites.len == 0
     check r0.evidence.monitorProbes.len == 0
 
@@ -252,7 +283,12 @@ suite "an edge that observed nothing is not cacheable":
     checkpoint("first: status=" & $r0.status &
       " reads=" & $r0.evidence.monitorReads.len)
     check r0.status == asSucceeded
-    check r0.evidence.monitorReads.len == 1
+    # The recorded read, PLUS the root image the engine folds for every
+    # monitored action (see the denominator note in the case above). Both are
+    # named so neither can go missing behind a count.
+    check r0.evidence.monitorReads.len == 2
+    check f.observedPath in r0.evidence.monitorReads
+    check act.argv[0] in r0.evidence.monitorReads
     check f.runCount() == 1
     check f.hasRecord(act)
 

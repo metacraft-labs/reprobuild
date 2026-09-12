@@ -928,6 +928,20 @@ type
       ## action's declared inputs (materialized to cwd) intersect the
       ## accumulator is skipped as ``cdMiss``. Empty for Levels 0/2/3.
     monitorStatus: MonitorEvidenceStatus
+    engineSuppliedRootImage: string
+      ## The one entry in ``evidence.monitorReads`` that no monitor reported:
+      ## the action's own root image, reconstructed from its argv by
+      ## ``executedToolImagePath`` and folded in because the launcher's exec
+      ## precedes the shim's constructor and so produces no record. Empty when
+      ## the image could not be identified without guessing, or when the
+      ## action's policy is not a monitor-gathering one.
+      ##
+      ## Recorded because the zero-evidence guard in
+      ## ``applyMonitorEvidenceStatus`` asks whether the MONITOR observed
+      ## anything, and this path is not an observation — see
+      ## ``executedToolImagePath``: "a reconstruction of the launcher's
+      ## resolution, not an observation of the kernel's". Without this field
+      ## the guard reads a set the engine itself seeded and can never fire.
 
   ActionResult* = object
     id*: string
@@ -3737,6 +3751,21 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       else:
         cirEntropyObservabilityUnknown)
 
+proc monitorObservedNoReads(col: EvidenceCollection): bool {.inline.} =
+  ## "Did the monitor report no read at all?" — as distinct from "is the read
+  ## set empty", which it is not required to be for the answer to be yes.
+  ##
+  ## `collectEvidence` folds exactly one read no monitor reported, the
+  ## action's own root image (`executedToolImagePath`). O(1) by construction:
+  ## that entry is the FIRST thing added to the set, so a set with one element
+  ## is the only one it can be alone in.
+  case col.evidence.monitorReads.len
+  of 0: true
+  of 1:
+    col.engineSuppliedRootImage.len > 0 and
+      col.evidence.monitorReads[0] == col.engineSuppliedRootImage
+  else: false
+
 proc applyMonitorEvidenceStatus(action: BuildAction;
                                 status: MonitorEvidenceStatus;
                                 col: var EvidenceCollection) =
@@ -3815,8 +3844,20 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     # from ANY source, including a recognized report's
     # `depfileInputs`. An action with one recorded probe has said
     # something about the world and keeps its record.
+    #
+    # OBSERVED reads, not every read in the set. `collectEvidence` folds
+    # ONE entry nobody observed: the action's own root image, which
+    # `executedToolImagePath` reconstructs from argv precisely because
+    # the launcher's exec precedes the shim's constructor and leaves no
+    # record ("a reconstruction of the launcher's resolution, not an
+    # observation of the kernel's"). It is a correct cache input and a
+    # wrong answer to "did the monitor see anything": it resolves for
+    # essentially every monitored action, so counting it left this guard
+    # unable to fire at all from the day that fold landed.
+    # `engineSuppliedRootImage` is what distinguishes the two, and
+    # `t_zero_evidence_edge_is_not_cacheable` is what holds them apart.
     if action.cacheable and
-        col.evidence.monitorReads.len == 0 and
+        col.monitorObservedNoReads() and
         col.evidence.monitorWrites.len == 0 and
         col.evidence.monitorProbes.len == 0 and
         col.evidence.monitorDirectoryEnumerations.len == 0 and
@@ -4030,6 +4071,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
     let rootImage = executedToolImagePath(action, config)
     if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
       result.evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
+      # Remembered, not just added: the zero-evidence guard downstream asks
+      # what the MONITOR saw, and this entry is a reconstruction rather than
+      # an observation. See `EvidenceCollection.engineSuppliedRootImage`.
+      result.engineSuppliedRootImage = rootImage
   let reports = action.reportSpecsForPolicy()
   if action.dependencyPolicy.kind in RecognizedPolicyKinds and reports.len == 0:
     result.evidence.diagnostics.add(
