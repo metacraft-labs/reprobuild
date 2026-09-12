@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1556,
+    "nimTestBinaries": 1558,
     "pureUnitConsolidationGroups": 46,
-    "pureUnitTests": 564,
+    "pureUnitTests": 566,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1564
+    "testEntries": 1566
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -57,7 +57,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "io_mon",
@@ -68,7 +68,8 @@
       "owner": "libs/repro_build_engine",
       "sources": [
         "libs/repro_build_engine/tests/test_m10_observed_env_cache_key.nim",
-        "libs/repro_build_engine/tests/test_m6_entropy_blessing.nim"
+        "libs/repro_build_engine/tests/test_m6_entropy_blessing.nim",
+        "libs/repro_build_engine/tests/test_m6_entropy_image_attribution.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1048,7 +1049,7 @@
       "graph-fixture": 12,
       "integration": 710,
       "platform/destructive": 115,
-      "pure unit": 564,
+      "pure unit": 566,
       "unclassified": 163
     },
     "graphOwnedTestArtifacts": [
@@ -1173,9 +1174,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1556,
+    "nimTestBinaryCount": 1558,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1564
+    "testEntryCount": 1566
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6863,6 +6864,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_m6_entropy_image_attribution",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/test_m6_entropy_image_attribution.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/test_m9r72_monitor_loss_classifier",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -8293,6 +8314,25 @@
       "source": "libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_entropy_image_blessings",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_entropy_image_blessings.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

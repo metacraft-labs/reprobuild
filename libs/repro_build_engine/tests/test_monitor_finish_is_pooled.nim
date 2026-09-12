@@ -343,13 +343,19 @@ else:
         for entry in value:
           entries.add normalisePath(entry, workDir)
       elif value is seq[EntropyObservation]:
-        # BOTH components. `EntropyCallerOrigin` is the axis on which a
+        # ALL THREE components. `EntropyCallerOrigin` is the axis on which a
         # hosted monitor (io-mon running inside the ENGINE process) could
         # plausibly attribute the same read differently from a monitor in a
         # process of its own, so rendering only `source` would drop exactly
-        # the difference this case exists to find.
+        # the difference this case exists to find. `image` is the pid-resolved
+        # emitter, rendered for the stronger version of the same reason: the
+        # two arms resolve it from their OWN `mrProcessExec` records, so a
+        # difference in which execs each arm saw would show up here and
+        # nowhere else. It is normalised like any other path -- it IS one --
+        # and it is never a pid, which differs on every run by construction.
         for entry in value:
-          entries.add entry.source & "@" & $entry.origin
+          entries.add entry.source & "@" & $entry.origin & "@" &
+            normalisePath(entry.image, workDir)
       elif value is EntropyObservability:
         entries.add $value
       else:
