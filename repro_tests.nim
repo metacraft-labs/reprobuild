@@ -2304,6 +2304,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim",
+    binary: "build/test-bin/t_absent_store_inputs_skip_revalidation",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_c3_sandbox_manifest.nim",
     binary: "build/test-bin/t_c3_sandbox_manifest",
     defines: @[],
