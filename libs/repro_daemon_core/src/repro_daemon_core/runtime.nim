@@ -331,19 +331,6 @@ proc imageDigestHex*(imagePath: string): string =
   hasher.update("companion=" & companionDigest & "\n")
   "blake3-256:" & hasher.finalize().toHex()
 
-proc expectedDaemonRunningDigestHex(sourceExe: string; devMode: bool): string =
-  if sourceExe.len == 0 or not isAbsolute(sourceExe) or
-      not fileExists(sourceExe):
-    return ""
-  if devMode:
-    return imageDigestHex(sourceExe)
-  let companion = companionFullCliPath(sourceExe)
-  if companion.len > 0:
-    let companionDigest = fileDigestHex(companion)
-    if companionDigest.len > 0:
-      return companionDigest
-  fileDigestHex(sourceExe)
-
 proc stageFullCliCompanion(sourceExe, generationDir: string) =
   ## No-op after the single-`repro` consolidation: there is no `repro-full`
   ## companion image to stage alongside the primary daemon image.
@@ -720,6 +707,93 @@ proc noteSessionRecordWritten(config: UserDaemonConfig;
   ## Forward-declared: the tally is defined below, after
   ## `loadSessionRecords` which primes it, but the single write funnel that
   ## folds into it is above.
+
+proc imageDigestCachePath(config: UserDaemonConfig; imagePath: string): string =
+  config.stateDir / "image-digests" /
+    (safePathSegment(imagePath, "image") & ".digest")
+
+proc cachedImageDigestHex(config: UserDaemonConfig; imagePath: string): string =
+  ## `imageDigestHex` memoized on `fileIdentityStamp`.
+  ##
+  ## The digest is hashed over the whole `repro` image -- 15.66 MiB on this
+  ## host -- and the ONLY consumer is the daemon-staleness comparison in
+  ## `startUserDaemon`, which every `repro build` performs. Measured in situ
+  ## it cost 16.5 ms of a 74.7 ms warm no-op: the second-largest term in the
+  ## invocation's fixed cost, and pure re-derivation of an answer that does
+  ## not change between builds.
+  ##
+  ## WHY A STAT STAMP IS ENOUGH HERE, checked rather than assumed. The worry
+  ## is an image whose bytes change without the key moving.
+  ##
+  ## * `fileIdentityStamp` folds DEVICE, INODE, SIZE and mtime at full
+  ##   nanosecond resolution, so a rename-over is a new identity even at an
+  ##   identical size and timestamp -- its own docstring makes that the
+  ##   point, and the daemon's dev-restart poll already trusts it for this
+  ##   exact question (see `restartCandidateReady`).
+  ## * The one in-place-rewrite mechanism in this codebase,
+  ##   `writeExecutableIfChanged`, does NOT truncate in place: it stages
+  ##   beside the target and replaces it with one rename, precisely so an
+  ##   active reader keeps a whole inode. Truncating in place was the bug it
+  ##   was changed away from. It also writes only VCS hook dispatchers, never
+  ##   this image.
+  ## * An unreadable or unstattable image yields an empty stamp, and an empty
+  ##   stamp NEVER consults the cache. A probe failure must not be able to
+  ##   make a stale daemon look current, which is the one direction that
+  ##   matters: the comparison exists to catch a daemon running old code.
+  ##
+  ## WHY NOT ASK THE DAEMON FOR ITS OWN HASH, which looks cheaper still: the
+  ## daemon's `runningHash` covers a DIFFERENT FILE. It digests the STAGED
+  ## image it is executing; this digests the SOURCE image on disk now. The
+  ## comparison is between those two, so the daemon already supplies one side
+  ## for free and cannot supply the other. A daemon asked for the source
+  ## digest would answer from its own init-time reading, which agrees with
+  ## its own running hash by construction -- self-confirming, and a daemon
+  ## that could never look stale is the failure this check exists to prevent.
+  let stamp = fileIdentityStamp(imagePath)
+  if stamp.len == 0:
+    return imageDigestHex(imagePath)
+  let cachePath = imageDigestCachePath(config, imagePath)
+  try:
+    let cached = readFile(cachePath).splitLines()
+    if cached.len >= 2 and cached[0] == stamp and cached[1].len > 0:
+      return cached[1]
+  except CatchableError:
+    discard
+  result = imageDigestHex(imagePath)
+  if result.len > 0:
+    try:
+      createDir(parentDir(cachePath))
+      atomicWriteTextFile(cachePath, stamp & "\n" & result & "\n")
+    except CatchableError:
+      # A cache that cannot be written must not fail the build; the next
+      # invocation simply re-derives. Deliberately silent for that reason.
+      discard
+
+proc expectedDaemonRunningDigestHex(config: UserDaemonConfig;
+                                    sourceExe: string;
+                                    devMode: bool): string
+
+proc expectedDaemonRunningDigestHexForTest*(config: UserDaemonConfig;
+                                           sourceExe: string): string =
+  ## Exported for `t_daemon_image_digest_cache.nim`, which grades the memoized
+  ## digest against the uncached `imageDigestHex` across mutations chosen to
+  ## attack the cache key. Dev mode, because that is the arm the cache is on.
+  expectedDaemonRunningDigestHex(config, sourceExe, devMode = true)
+
+proc expectedDaemonRunningDigestHex(config: UserDaemonConfig;
+                                    sourceExe: string;
+                                    devMode: bool): string =
+  if sourceExe.len == 0 or not isAbsolute(sourceExe) or
+      not fileExists(sourceExe):
+    return ""
+  if devMode:
+    return cachedImageDigestHex(config, sourceExe)
+  let companion = companionFullCliPath(sourceExe)
+  if companion.len > 0:
+    let companionDigest = fileDigestHex(companion)
+    if companionDigest.len > 0:
+      return companionDigest
+  fileDigestHex(sourceExe)
 
 proc writeSessionRecord*(config: UserDaemonConfig; session: UserDaemonSession) =
   ## Exported for `t_daemon_active_session_tally.nim`. It is the daemon's
@@ -2270,7 +2344,8 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     # single full-CLI image (no thin wrapper / `repro-full` companion), so the
     # digest tracks that one binary. If either hash is unavailable we cannot
     # prove staleness, so we leave the daemon running (fail safe).
-    let expectedHash = expectedDaemonRunningDigestHex(sourceExe, config.devMode)
+    let expectedHash = expectedDaemonRunningDigestHex(config, sourceExe,
+      config.devMode)
     if expectedHash.len == 0 or existing.runningHash.len == 0 or
         existing.runningHash == expectedHash:
       return existing

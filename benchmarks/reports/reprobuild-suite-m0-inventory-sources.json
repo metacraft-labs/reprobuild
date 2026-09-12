@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1545,
+    "nimTestBinaries": 1546,
     "pureUnitConsolidationGroups": 46,
     "pureUnitTests": 561,
     "staticallyDetectedRuntimeCompilerFlowTests": 95,
-    "testEntries": 1553
+    "testEntries": 1554
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1045,7 +1045,7 @@
       "integration": 705,
       "platform/destructive": 113,
       "pure unit": 561,
-      "unclassified": 162
+      "unclassified": 163
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1169,9 +1169,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1545,
+    "nimTestBinaryCount": 1546,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1553
+    "testEntryCount": 1554
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7803,6 +7803,23 @@
       "source": "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_image_digest_cache",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
