@@ -26,6 +26,77 @@ elif defined(posix):
   from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
     dup, dup2, close
 
+when defined(posix):
+  type
+    MTimeval {.importc: "struct timeval", header: "<sys/time.h>",
+               bycopy.} = object
+      tv_sec {.importc.}: clong
+      tv_usec {.importc.}: cint
+    MRusage {.importc: "struct rusage", header: "<sys/resource.h>",
+              bycopy.} = object
+      ru_utime {.importc.}: MTimeval
+      ru_stime {.importc.}: MTimeval
+  proc mGetrusage(who: cint; usage: ptr MRusage): cint
+    {.importc: "getrusage", header: "<sys/resource.h>".}
+  # Taken from the header, not restated: the value differs in sign
+  # convention across platforms and a wrong literal reads as RUSAGE_SELF.
+  let mRusageChildren {.importc: "RUSAGE_CHILDREN",
+                        header: "<sys/resource.h>".}: cint
+  proc childCpuUs(): float =
+    ## Total CPU (user + system, in microseconds) burned by the tool
+    ## subprocesses this process has spawned and reaped. Differenced across a
+    ## build, this is what the ``repro child cpu`` stats row reports.
+    ##
+    ## WHY RUSAGE_CHILDREN IS THE RIGHT DENOMINATOR
+    ##
+    ## ``RUSAGE_CHILDREN`` accumulates only children that have been WAITED
+    ## FOR. For the scheduler that is not a limitation, it is the definition
+    ## we want: the scheduler reaps every tool it launches, and it launches
+    ## nothing else, so the counter's population is exactly the set of tool
+    ## launches this build made. Work the build did in its own threads —
+    ## hashing, cache consultation, depfile parsing — lands in
+    ## ``RUSAGE_SELF`` and is deliberately excluded.
+    ##
+    ## HOW TO READ THE ROW — ALWAYS AGAINST ``repro process wait``
+    ##
+    ## ``repro process wait`` is WALL time spent waiting on children;
+    ## ``repro child cpu`` is CPU time those children consumed. Comparing the
+    ## two ratios between a fast and a slow build separates two causes that a
+    ## wall-clock row alone cannot tell apart:
+    ##
+    ## * process wait inflated, child cpu FLAT — the children did the same
+    ##   amount of work and it got SERIALISED. The build is not slower per
+    ##   unit of work; it is running less of that work at once. Look at
+    ##   effective parallelism: the worker pool's width, quota derating,
+    ##   dependency-chain shape.
+    ## * process wait inflated, child cpu ALSO inflated — the work itself
+    ##   changed. The children are doing more (or more expensive) work:
+    ##   different tool arguments, lost caching inside the tool, more edges
+    ##   launched, a slower toolchain.
+    ##
+    ## No wall-clock measurement can distinguish those, because both present
+    ## identically as "the build took longer". That is the entire reason this
+    ## row exists, and it is why it is worth two ``getrusage`` calls per
+    ## build.
+    ##
+    ## This is not hypothetical. A daemon-hosted build measured 1.77x on
+    ## ``repro process wait`` against the direct build, with child cpu at
+    ## 0.97x — parity. That pair of numbers identified derated parallelism
+    ## rather than slower children, and closed the question in one reading
+    ## after two earlier rounds of instrumentation had both pointed at the
+    ## children.
+    var ru: MRusage
+    if mGetrusage(mRusageChildren, addr ru) != 0:
+      return 0.0
+    float(ru.ru_utime.tv_sec) * 1_000_000.0 + float(ru.ru_utime.tv_usec) +
+      float(ru.ru_stime.tv_sec) * 1_000_000.0 + float(ru.ru_stime.tv_usec)
+else:
+  proc childCpuUs(): float =
+    ## No ``getrusage`` off POSIX. The row is reported as zero rather than
+    ## omitted, so a reader comparing two platforms sees "not measured here"
+    ## in the same place instead of a missing row.
+    0.0
+
 import repro_core
 import repro_depfile
 import repro_hash
@@ -12224,6 +12295,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       metadataStats.warmChanged)
 
   let totalStart = statStart()
+  let childCpuAtStart = childCpuUs()
+  proc finishChildCpuStat() =
+    ## Emit ``repro child cpu`` for the window this build actually occupied.
+    ##
+    ## A proc rather than two copies of the subtraction because ``runBuild``
+    ## has TWO exits that report a complete build: the whole-graph fast-noop
+    ## shortcut below and the per-edge scheduler at the end. The warm no-op
+    ## leaves through the shortcut, and the warm no-op is the reading where
+    ## this row is expected to be zero — so a version emitted at only the
+    ## scheduler exit would be missing from exactly the build a reader
+    ## compares a slow build AGAINST.
+    ##
+    ## Gated with the other timing rows: ``statsEnabled`` is what
+    ## ``--measure=timing`` sets, and the row is only interpretable next to
+    ## ``repro process wait``, which that same switch collects.
+    if config.statsEnabled:
+      stats.addCountedMetric("repro child cpu", 1,
+        childCpuUs() - childCpuAtStart)
   let inferStart = statStart()
   # `var` because M25 ``create-action`` dyndep records grow ``buildGraph.actions``
   # mid-build. ``applyDynamicDeps`` appends to it; downstream readers iterate
@@ -12663,6 +12752,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   if fastNoop.isSome:
     runResult = fastNoop.get()
     finishStat("repro scheduler total", totalStart)
+    finishChildCpuStat()
     runResult.stats = stats
     return runResult
 
@@ -14587,6 +14677,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       except CatchableError as err:
         runResult.trace("", "monitor-capture-cleanup-failed", err.msg)
   finishStat("repro scheduler total", totalStart)
+  finishChildCpuStat()
   finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats
   result = runResult

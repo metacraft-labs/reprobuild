@@ -369,6 +369,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_child_cpu_stats_row.nim",
+    binary: "build/test-bin/t_child_cpu_stats_row",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_da1i_evidence_scope.nim",
     binary: "build/test-bin/t_da1i_evidence_scope",
     defines: @[],
