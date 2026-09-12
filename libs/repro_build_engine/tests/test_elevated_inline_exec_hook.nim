@@ -27,11 +27,18 @@
 
 import std/[os, strutils, unittest]
 
+from repro_test_support import testCaseScratchSlug
+
 import repro_build_engine
 import repro_hash
 import repro_local_store
 
-const TmpDir = "build/test-tmp/test_elevated_inline_exec_hook"
+# Per-case private scratch: see the note on the same constant in
+# ``test_binary_cache_publisher_hook``. The cases of one binary run as
+# concurrent processes, every case here calls ``resetTmp``, and a shared
+# path lets one case delete the sqlite store another has open.
+let TmpDir = "build/test-tmp/test_elevated_inline_exec_hook-" &
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

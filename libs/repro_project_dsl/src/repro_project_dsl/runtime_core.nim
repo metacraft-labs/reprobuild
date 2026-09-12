@@ -230,7 +230,7 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 26'u16
+  BuildActionPayloadVersion* = 26'u16
     ## v26: Windows-Build-Correctness M6 — appends the TOOL's entropy
     ## blessing: one strict sentinel byte for the ``NonDeterminismPolicy``
     ## ordinal followed by the length-prefixed justification string.
@@ -3050,16 +3050,22 @@ proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
 
-proc writeCliArg(outp: var seq[byte]; arg: PublicCliArg) =
+proc writeCliArg(outp: var seq[byte]; arg: PublicCliArg; version: uint16) =
+  # Every gate here mirrors one in ``readCliArg`` and exists for the same
+  # reason: see the note on ``encodeBuildActionPayloadAtVersion``.
   outp.writeString(arg.name)
   outp.writeString(arg.nimType)
-  outp.writeByte(byte(ord(arg.kind)))
-  outp.writeU32Le(uint32(arg.position))
-  outp.writeString(arg.alias)
-  outp.writeByte(byte(ord(arg.role)))
-  outp.writeByte(byte(ord(arg.format)))
-  outp.writeByte(if arg.repeated: 1'u8 else: 0'u8)
-  outp.writeByte(byte(ord(arg.placement)))
+  if version >= 2'u16:
+    outp.writeByte(byte(ord(arg.kind)))
+    outp.writeU32Le(uint32(arg.position))
+    outp.writeString(arg.alias)
+  if version >= 4'u16:
+    outp.writeByte(byte(ord(arg.role)))
+  if version >= 5'u16:
+    outp.writeByte(byte(ord(arg.format)))
+    outp.writeByte(if arg.repeated: 1'u8 else: 0'u8)
+  if version >= 6'u16:
+    outp.writeByte(byte(ord(arg.placement)))
   outp.writeString(arg.encodedValue)
 
 proc readCliArg(bytes: openArray[byte]; pos: var int; version: uint16):
@@ -3100,14 +3106,14 @@ proc readCliArg(bytes: openArray[byte]; pos: var int; version: uint16):
     result.placement = capAfterSubcommand
   result.encodedValue = readString(bytes, pos)
 
-proc writeCliCall(outp: var seq[byte]; call: PublicCliCall) =
+proc writeCliCall(outp: var seq[byte]; call: PublicCliCall; version: uint16) =
   outp.writeString(call.packageName)
   outp.writeString(call.executableName)
   outp.writeString(call.subcommand)
   outp.writeString(call.providerEntrypointId)
   outp.writeU32Le(uint32(call.arguments.len))
   for arg in call.arguments:
-    outp.writeCliArg(arg)
+    outp.writeCliArg(arg, version)
 
 proc readCliCall(bytes: openArray[byte]; pos: var int; version: uint16):
     PublicCliCall =
@@ -3121,14 +3127,36 @@ proc readCliCall(bytes: openArray[byte]; pos: var int; version: uint16):
     result.arguments[i] = readCliArg(bytes, pos, version)
 
 proc writeDependencyPolicy(outp: var seq[byte];
-                           policy: BuildActionDependencyPolicy) =
+                           policy: BuildActionDependencyPolicy;
+                           version: uint16) =
   outp.writeByte(byte(ord(policy.kind)))
-  outp.writeStringSeq(policy.depfiles)
-  outp.writeStringSeq(policy.ignoredInputPrefixes)
-  # v25: appended LAST so older readers, which stop after
-  # ``ignoredInputPrefixes``, are unaffected. False for every edge that does
-  # not explicitly ask for the seed to be withheld.
-  outp.writeByte(if policy.suppressMonitorShimSeed: 1'u8 else: 0'u8)
+  if version >= 15'u16:
+    outp.writeStringSeq(policy.depfiles)
+  else:
+    # MR16: v14-and-earlier carried a single ``depfile`` string here. The
+    # read side lifts it back into a one-element seq.
+    outp.writeString(if policy.depfiles.len > 0: policy.depfiles[0] else: "")
+  if version >= 10'u16:
+    outp.writeStringSeq(policy.ignoredInputPrefixes)
+  if version == 24'u16:
+    # v24 alone carried the removed ``bdpTrustedDeclaredInputs`` payload here
+    # (an input seq then a reason string). The fields are gone from the type,
+    # so a v24 image reproduces them as the empty values every surviving
+    # policy kind carried. ``readDependencyPolicy`` consumes and discards
+    # them, and this is the only way to produce bytes it can consume.
+    outp.writeStringSeq(newSeq[string]())
+    outp.writeString("")
+  if version >= 25'u16:
+    # v25: appended LAST within the policy record so a v24 reader, which
+    # stops after ``ignoredInputPrefixes`` + the two trusted fields, is
+    # unaffected. False for every edge that does not explicitly ask for the
+    # seed to be withheld.
+    #
+    # NOTE that "last in the policy record" is NOT "last in the payload":
+    # everything from the action-cache policy onward follows it. That is why
+    # a legacy payload cannot be forged by trimming a current-version one
+    # from the tail — see ``encodeBuildActionPayloadAtVersion``.
+    outp.writeByte(if policy.suppressMonitorShimSeed: 1'u8 else: 0'u8)
 
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16):
     BuildActionDependencyPolicy =
@@ -3231,95 +3259,151 @@ proc readCacheEntryIdentity(bytes: openArray[byte]; pos: var int):
   result.depClosure = readStringSeq(bytes, pos)
   result.providerRevision = readString(bytes, pos)
 
-proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.} =
+proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
+                                        version: uint16): seq[byte]
+                                       {.dynOrStatic.} =
+  ## Encode ``action`` in the wire shape of payload version ``version``.
+  ##
+  ## Production callers want ``encodeBuildActionPayload``, which is this proc
+  ## at ``BuildActionPayloadVersion``. The parameter exists so the
+  ## backward-compatibility tests can produce a GENUINE image of an older
+  ## version instead of fabricating one, and every ``if version >=`` below is
+  ## the exact mirror of a gate in ``decodeBuildActionPayload`` /
+  ## ``readCliArg`` / ``readDependencyPolicy``. Keeping the two sides in one
+  ## file, gate for gate, is the point: a new field that is added to the
+  ## reader and not to the writer breaks the round-trip at its own version,
+  ## which is a red test rather than a silent format fork.
+  ##
+  ## WHY FABRICATION DOES NOT WORK. The obvious alternative — encode at the
+  ## current version, patch the version word down, and trim the trailing
+  ## bytes the newer versions appended — assumes every bump APPENDS at the
+  ## END OF THE PAYLOAD. Not every one does. v25 appended
+  ## ``suppressMonitorShimSeed`` at the end of the DEPENDENCY POLICY record,
+  ## which sits a dozen fields from the tail, and v24 carried two fields there
+  ## that v25 removed. A trimmed image therefore keeps a byte no v11 / v16 /
+  ## v23 reader consumes, every field after the policy is read one byte off,
+  ## and the decode dies on a garbage string length or on trailing bytes. That
+  ## is a defect in the forgery, not in the decoder, but it reads exactly like
+  ## a back-compat regression — which is how it was reported.
+  ##
+  ## Encoding at an older version DROPS the fields that version predates
+  ## (a v11 image carries no ``typedOutputs``, and so on). That is what makes
+  ## it a legacy image; it is not a lossless round-trip and must not be used
+  ## to persist an action.
+  if version < 1'u16 or version > BuildActionPayloadVersion:
+    raisePayload("unsupported build action payload version")
   var payload: seq[byte] = @[]
   payload.writeString(action.id)
-  payload.writeCliCall(action.call)
+  payload.writeCliCall(action.call, version)
   payload.writeStringSeq(action.deps)
   payload.writeStringSeq(action.inputs)
   payload.writeStringSeq(action.outputs)
-  payload.writeString(action.pool)
-  payload.writeU32(action.poolUnits)
+  # v7: pool + poolUnits.
+  if version >= 7'u16:
+    payload.writeString(action.pool)
+    payload.writeU32(action.poolUnits)
   payload.writeString(action.depfile)
-  payload.writeString(action.dynamicDepsFile)
+  # v8: dynamicDepsFile.
+  if version >= 8'u16:
+    payload.writeString(action.dynamicDepsFile)
   payload.writeByte(if action.cacheable: 1'u8 else: 0'u8)
   payload.writeString(action.commandStatsId)
-  payload.writeDependencyPolicy(action.dependencyPolicy)
-  payload.writeActionCachePolicy(action.actionCachePolicy)
+  # v3: the dependency-policy record. Its own internal gates live in
+  # ``writeDependencyPolicy``.
+  if version >= 3'u16:
+    payload.writeDependencyPolicy(action.dependencyPolicy, version)
+  # v9: action cache policy.
+  if version >= 9'u16:
+    payload.writeActionCachePolicy(action.actionCachePolicy)
   # v11: Named-Targets M1 implicit target names.
-  payload.writeStringSeq(action.targetNames)
+  if version >= 11'u16:
+    payload.writeStringSeq(action.targetNames)
   # v12: Typed-Outputs M1 per-output typed entries.
-  payload.writeU32Le(uint32(action.typedOutputs.len))
-  for typedOutput in action.typedOutputs:
-    payload.writeString(typedOutput.fieldName)
-    payload.writeStringSeq(typedOutput.types)
-    payload.writeString(typedOutput.path)
+  if version >= 12'u16:
+    payload.writeU32Le(uint32(action.typedOutputs.len))
+    for typedOutput in action.typedOutputs:
+      payload.writeString(typedOutput.fieldName)
+      payload.writeStringSeq(typedOutput.types)
+      payload.writeString(typedOutput.path)
   # v13: Recipe-Val M8 — Nix-style package-output discriminator.
-  payload.writeString(action.outputTag)
+  if version >= 13'u16:
+    payload.writeString(action.outputTag)
   # v14: MR10 — per-edge env-var injections.
-  payload.writeU32Le(uint32(action.env.len))
-  for entry in action.env:
-    payload.writeString(entry[0])
-    payload.writeString(entry[1])
+  if version >= 14'u16:
+    payload.writeU32Le(uint32(action.env.len))
+    for entry in action.env:
+      payload.writeString(entry[0])
+      payload.writeString(entry[1])
   # v16: M9.L.4-refactor Step B — passive binary-cache publish wiring.
-  payload.writeByte(if action.publishToBinaryCache: 1'u8 else: 0'u8)
-  if action.cacheEntryIdentity.isSome:
-    payload.writeByte(1'u8)
-    payload.writeCacheEntryIdentity(action.cacheEntryIdentity.get())
-  else:
-    payload.writeByte(0'u8)
+  if version >= 16'u16:
+    payload.writeByte(if action.publishToBinaryCache: 1'u8 else: 0'u8)
+    if action.cacheEntryIdentity.isSome:
+      payload.writeByte(1'u8)
+      payload.writeCacheEntryIdentity(action.cacheEntryIdentity.get())
+    else:
+      payload.writeByte(0'u8)
   # v17: M9.N Batch B — tool-identity refs the engine resolves at fork
   # time. Each ref names a ``uses:`` tool whose ``ToolActionIdentity``
   # contributes its binary directory to the action's ``PATH``. Encoded
   # as a length-prefixed string seq so empty lists round-trip with no
   # behaviour change on hosts that supply no resolver.
-  payload.writeU32Le(uint32(action.toolIdentityRefs.len))
-  for refName in action.toolIdentityRefs:
-    payload.writeString(refName)
+  if version >= 17'u16:
+    payload.writeU32Le(uint32(action.toolIdentityRefs.len))
+    for refName in action.toolIdentityRefs:
+      payload.writeString(refName)
   # v19: Windows-System-Resources Phase E — a single sentinel byte
   # carrying the ``requiresElevation`` edge attribute. v18-and-earlier
   # payloads decode with ``false`` so the engine's exec lowering
   # continues to fork every legacy edge directly.
-  payload.writeByte(if action.requiresElevation: 1'u8 else: 0'u8)
+  if version >= 19'u16:
+    payload.writeByte(if action.requiresElevation: 1'u8 else: 0'u8)
   # v20: M9.R.34 — length-prefixed recipe-file digest. Empty for
   # actions registered outside provider mode (unit tests, hand-rolled
   # ``buildAction`` callers, recipes whose file can't be read); the
   # engine's lowering treats an empty payload as "no per-recipe
   # invalidation" so legacy artefacts still fingerprint the same way
   # they did under v19.
-  payload.writeString(action.recipeRevisionFingerprint)
+  if version >= 20'u16:
+    payload.writeString(action.recipeRevisionFingerprint)
   # v21: M9.R.74 — canonical execution root (R2) declaration. One byte
   # for the ``ActionCwdKind`` ordinal followed by a length-prefixed
   # ``cwdCustomPath`` string. The kind byte is strict 0..ord(high) so
   # a mutated payload fails closed on decode instead of silently
   # picking a default kind. Empty ``cwdCustomPath`` is legal for every
   # kind; the resolver treats it as "fall back to the recipe root."
-  payload.writeByte(byte(ord(action.cwdKind)))
-  payload.writeString(action.cwdCustomPath)
+  if version >= 21'u16:
+    payload.writeByte(byte(ord(action.cwdKind)))
+    payload.writeString(action.cwdCustomPath)
   # v22: M9.R.75 — R6 + R7 per-action write-scope declaration. Two
   # length-prefixed string seqs. Empty seqs (the default for legacy
   # actions that don't opt in) reduce to no-op enforcement in the
   # engine's validateGraph pass + spawn wrapper, preserving pre-M9.R.75
   # behaviour byte-for-byte.
-  payload.writeStringSeq(action.declaredOutputs)
-  payload.writeStringSeq(action.readOnlyRoots)
+  if version >= 22'u16:
+    payload.writeStringSeq(action.declaredOutputs)
+    payload.writeStringSeq(action.readOnlyRoots)
   # v23: one strict enum byte per tool-identity ref. The decoder accepts
   # an empty list for legacy/manual actions and the engine applies its
   # historical build-dependency default in that case.
-  payload.writeU32Le(uint32(action.toolIdentityRefKinds.len))
-  for kind in action.toolIdentityRefKinds:
-    payload.writeByte(byte(ord(kind)))
+  if version >= 23'u16:
+    payload.writeU32Le(uint32(action.toolIdentityRefKinds.len))
+    for kind in action.toolIdentityRefKinds:
+      payload.writeByte(byte(ord(kind)))
   # v26: Windows-Build-Correctness M6 — the tool's entropy blessing. One
   # strict enum byte plus the justification the DSL required before it
   # would accept the blessing, so the engine's diagnostic can quote the
   # reason rather than merely asserting that one exists.
-  payload.writeByte(byte(ord(action.nonDeterminism)))
-  payload.writeString(action.nonDeterminismJustification)
+  if version >= 26'u16:
+    payload.writeByte(byte(ord(action.nonDeterminism)))
+    payload.writeString(action.nonDeterminismJustification)
 
   result.add(BuildActionPayloadMagic)
-  result.writeU16Le(BuildActionPayloadVersion)
+  result.writeU16Le(version)
   result.writeU32Le(uint32(payload.len))
   result.add(payload)
+
+proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.} =
+  encodeBuildActionPayloadAtVersion(action, BuildActionPayloadVersion)
 
 proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrStatic.} =
   if bytes.len < 10:

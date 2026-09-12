@@ -31,10 +31,20 @@
 
 import std/[os, strutils, unittest]
 
+from repro_test_support import testCaseScratchSlug
+
 import repro_standard_provider/conventions/emit_cache
 
-const
-  ScratchRoot = "test_emit_cache_m29_scratch"
+# Every case in this suite resets the scratch tree (``setupScratch`` does
+# ``removeDir`` then ``createDir``), and under the binary-runner protocol the
+# cases of one binary run as CONCURRENT PROCESSES — ``<binary> --run
+# "<suite>::<case>"``, one process each. A fixed name under ``getTempDir()``
+# is therefore shared mutable state between those processes: one case's reset
+# deletes the fake tool another case wrote a moment earlier, and the probe
+# that follows fails to open it. ``testCaseScratchSlug`` makes the path
+# private to the process running ONE case; whole-binary execution (a single
+# process, cases strictly sequential) keeps one directory as before.
+let ScratchRoot = "test_emit_cache_m29_scratch-" & testCaseScratchSlug()
 
 proc writeFakeTool(scratch, name, versionOutput: string): string =
   ## Materialise a tiny "fake tool" on disk whose ``--version`` argv

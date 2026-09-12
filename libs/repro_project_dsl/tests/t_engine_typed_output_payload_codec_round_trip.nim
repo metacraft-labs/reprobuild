@@ -79,20 +79,21 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     check decoded.typedOutputs[1].path == "build/test-bin/foo-installer"
 
   test "older v11 payload decodes with empty typed-output list":
-    # Forge a v11 payload by encoding the current-version action with
-    # no typed outputs and no ``outputTag``, then patching the version
-    # field down to 11 and truncating the trailing fields that
-    # ``writeStringSeq`` / ``writeString`` for those empty defaults
-    # emitted.
-    # Recipe-Val M8 (v13) + MR10 (v14) + M9.L.4-refactor Step B (v16)
-    # + M9.N Batch B (v17) + Windows-System-Resources Phase E (v19):
-    # the encoded payload now ends with the u32 typedOutputs count +
-    # the u32 outputTag string length + the u32 env count + the
-    # publishToBinaryCache sentinel byte + the hasIdentity sentinel
-    # byte + the u32 toolIdentityRefs count + the requiresElevation
-    # sentinel byte and everything v20..v23 appended after it (all zero
-    # for an empty action). See ``trimBytes`` below for the running
-    # total that reaches v11's wire shape.
+    # A GENUINE v11 image, produced by the real encoder running at v11
+    # (``encodeBuildActionPayloadAtVersion``), not a v26 image with its
+    # tail chopped off.
+    #
+    # The trimming forgery this replaces was wrong, and wrong in a way
+    # that reported itself as a decoder regression. It assumed every
+    # version bump appends at the END OF THE PAYLOAD, so patching the
+    # version word and dropping N trailing bytes would yield the older
+    # wire shape. v25 broke that assumption: it appended
+    # ``suppressMonitorShimSeed`` at the end of the DEPENDENCY POLICY
+    # record, a dozen fields from the tail. The forged payload kept that
+    # byte, no v11 reader consumes it, every field after the policy was
+    # read one byte off, and the decode died on a garbage string length
+    # ("truncated string in build action payload"). Nothing was wrong
+    # with the decoder or with real v11 artefacts.
     let action = BuildActionDef(
       id: "legacy",
       call: publicCliCall("pkg", "exe", "build",
@@ -103,48 +104,10 @@ suite "t_engine_typed_output_payload_codec_round_trip":
       actionCachePolicy: defaultActionCachePolicy(),
       targetNames: @["legacy-target"])
 
-    var payload = encodeBuildActionPayload(action)
-    # Patch the version word (offset 4..5, little-endian uint16) down
-    # to 11 and re-encode the payload length so the framing self-
-    # consistency check stays valid.
-    # Magic is bytes 0..3; version is bytes 4..5; length is bytes 6..9.
-    # Truncate 40 trailing bytes: 4 for the empty typedOutputs count
-    # (the v12 addition) + 4 for the empty outputTag string length
-    # (the v13 addition) + 4 for the empty env count (the v14
-    # addition) + 1 for the publishToBinaryCache sentinel byte + 1
-    # for the hasIdentity sentinel byte (the v16 addition; both
-    # default-zero when the optional fields are inert) + 4 for the
-    # empty toolIdentityRefs count (the v17 addition) + 1 for the
-    # requiresElevation sentinel byte (the v19 addition) + 4 for the
-    # empty recipeRevisionFingerprint string length (the v20 addition;
-    # zero-length string round-trips as four zero bytes) + 1 for the
-    # cwdKind byte + 4 for the empty cwdCustomPath string length (the
-    # v21 addition) + 4 for the empty declaredOutputs count + 4 for the
-    # empty readOnlyRoots count (the v22 addition) + 4 for the empty
-    # toolIdentityRefKinds count (the v23 addition) + 1 for the
-    # nonDeterminism sentinel byte + 4 for the empty
-    # nonDeterminismJustification string length (the
-    # Windows-Build-Correctness M6 v24 addition). All of these fields
-    # are absent at v11.
-    #
-    # This count MUST be kept in step with ``encodeBuildActionPayload``
-    # whenever a new trailing field bumps ``BuildActionPayloadVersion``:
-    # trimming too few bytes leaves the forged payload with trailing
-    # bytes the v11 decoder never consumes, and the decode fails with
-    # ``trailing build action payload bytes``.
-    let trimBytes = 45
-    let oldLen = int(uint32(payload[6]) or
-      (uint32(payload[7]) shl 8) or
-      (uint32(payload[8]) shl 16) or
-      (uint32(payload[9]) shl 24))
-    payload.setLen(payload.len - trimBytes)
-    let newLen = uint32(oldLen - trimBytes)
-    payload[4] = 11'u8
-    payload[5] = 0'u8
-    payload[6] = byte(newLen and 0xff)
-    payload[7] = byte((newLen shr 8) and 0xff)
-    payload[8] = byte((newLen shr 16) and 0xff)
-    payload[9] = byte((newLen shr 24) and 0xff)
+    let payload = encodeBuildActionPayloadAtVersion(action, 11'u16)
+    # The image really is stamped v11 (magic 0..3, version 4..5 LE).
+    check payload[4] == 11'u8
+    check payload[5] == 0'u8
 
     let decoded = decodeBuildActionPayload(payload)
     check decoded.id == "legacy"
@@ -155,23 +118,9 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     check decoded.outputTag == ""
 
   test "older v16 payload decodes with empty toolIdentityRefs (M9.N Batch B)":
-    # Forge a v16 payload by encoding the current-version action with
-    # no toolIdentityRefs and no requiresElevation, then patching the
-    # version field down to 16 and trimming the trailing 26 bytes (4
-    # for the v17 toolIdentityRefs length-prefix + 1 for the v19
-    # Windows-System-Resources Phase E requiresElevation sentinel byte
-    # + 4 for the M9.R.34 v20 empty recipeRevisionFingerprint string
-    # length + 1 for the v21 cwdKind byte + 4 for the empty v21
-    # cwdCustomPath string + 4 for the empty v22 declaredOutputs seq +
-    # 4 for the empty v22 readOnlyRoots seq + 4 for the empty v23
-    # toolIdentityRefKinds count + 1 for the M6 v24 nonDeterminism
-    # sentinel byte + 4 for its empty justification string).
-    # v16-and-earlier payloads MUST decode
-    # with all newer fields at their inert defaults so legacy artefacts
-    # keep working.
-    #
-    # As above, this count tracks ``encodeBuildActionPayload``'s
-    # trailing-field list and must grow with every version bump.
+    # Same construction as the v11 case above, at v16. v16-and-earlier
+    # payloads MUST decode with all newer fields at their inert defaults
+    # so legacy artefacts keep working.
     let action = BuildActionDef(
       id: "v16-legacy",
       call: publicCliCall("pkg", "exe", "build",
@@ -181,20 +130,9 @@ suite "t_engine_typed_output_payload_codec_round_trip":
       dependencyPolicy: defaultDependencyPolicy(),
       actionCachePolicy: defaultActionCachePolicy())
 
-    var payload = encodeBuildActionPayload(action)
-    let trimBytes = 31
-    let oldLen = int(uint32(payload[6]) or
-      (uint32(payload[7]) shl 8) or
-      (uint32(payload[8]) shl 16) or
-      (uint32(payload[9]) shl 24))
-    payload.setLen(payload.len - trimBytes)
-    let newLen = uint32(oldLen - trimBytes)
-    payload[4] = 16'u8
-    payload[5] = 0'u8
-    payload[6] = byte(newLen and 0xff)
-    payload[7] = byte((newLen shr 8) and 0xff)
-    payload[8] = byte((newLen shr 16) and 0xff)
-    payload[9] = byte((newLen shr 24) and 0xff)
+    let payload = encodeBuildActionPayloadAtVersion(action, 16'u16)
+    check payload[4] == 16'u8
+    check payload[5] == 0'u8
 
     let decoded = decodeBuildActionPayload(payload)
     check decoded.id == "v16-legacy"
@@ -210,3 +148,46 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # ``recipeRevisionFingerprint`` so the engine reverts to the
     # pre-M9.R.34 fingerprint composition for them.
     check decoded.recipeRevisionFingerprint == ""
+
+  test "every payload version from 1 to the current one decodes":
+    ## The decoder claims a RANGE — ``version < 1 or version >
+    ## BuildActionPayloadVersion`` is the only rejection — and the two cases
+    ## above only spot-check two points in it. This walks the whole range, so
+    ## a version whose write-side and read-side gates disagree is caught at
+    ## the version where they diverge rather than whenever someone next
+    ## happens to write a spot check for it.
+    ##
+    ## This is what replaces the hand-maintained trailing-byte counts. Those
+    ## had to be updated by hand on every bump, were documented as such, and
+    ## still went stale — and when they did the failure named the decoder
+    ## rather than the count.
+    let action = BuildActionDef(
+      id: "range",
+      call: publicCliCall("pkg", "exe", "build", "pkg.exe.build", @[
+        inputArg("source", "src/foo.nim"),
+        outputArg("binary", "build/test-bin/foo")
+      ]),
+      deps: @["dep-1"],
+      inputs: @["src/foo.nim"],
+      outputs: @["build/test-bin/foo"],
+      poolUnits: 1'u32,
+      cacheable: true,
+      commandStatsId: "range",
+      dependencyPolicy: defaultDependencyPolicy(),
+      actionCachePolicy: defaultActionCachePolicy(),
+      targetNames: @["foo"])
+
+    for version in 1'u16 .. BuildActionPayloadVersion:
+      let payload = encodeBuildActionPayloadAtVersion(action, version)
+      check payload[4] == byte(version and 0xff'u16)
+      check payload[5] == byte((version shr 8) and 0xff'u16)
+      # Decoding must not raise for ANY version in the supported range.
+      let decoded = decodeBuildActionPayload(payload)
+      # ``id`` precedes every version gate, so it is the one field that
+      # must survive at every version; a cursor that went out of step
+      # anywhere later shows up as a decode failure above.
+      check decoded.id == "range"
+      check decoded.deps == @["dep-1"]
+      check decoded.inputs == @["src/foo.nim"]
+      check decoded.outputs == @["build/test-bin/foo"]
+      check decoded.commandStatsId == "range"

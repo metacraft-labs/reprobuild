@@ -72,28 +72,35 @@ suite "M6 the entropy blessing round-trips through the action payload":
     ## restore cache publication for every artefact written before this
     ## milestone, on the strength of a byte that was never written.
     ##
-    ## The v23 payload is derived from a real v24 one by removing exactly the
-    ## bytes v24 appended and rewriting the header, rather than hand-rolling
-    ## an encoder: a hand-rolled one would stop resembling the real format the
-    ## moment either changed, and would then test nothing.
+    ## The v23 payload comes out of the REAL encoder running at v23
+    ## (`encodeBuildActionPayloadAtVersion`) rather than a hand-rolled one: a
+    ## hand-rolled encoder would stop resembling the real format the moment
+    ## either changed, and would then test nothing.
+    ##
+    ## It used to be derived instead, by taking a current-version image,
+    ## removing the bytes the blessing appended and rewriting the header. That
+    ## is only sound while every intervening bump appends AT THE TAIL, and v25
+    ## does not: it appended `suppressMonitorShimSeed` at the end of the
+    ## dependency-policy record, which sits a dozen fields earlier. The derived
+    ## image kept a byte no v23 reader consumes, so it failed the decoder's
+    ## trailing-bytes check — as a forgery, not as a legacy artefact, though
+    ## the error named the decoder either way.
     let action = BuildActionDef(
       id: "compile",
       call: inlineExecCall(@["nim", "c"]),
       nonDeterminism: ndpEntropyBlessed,
       nonDeterminismJustification: "j")
-    let v24 = encodeBuildActionPayload(action)
-    # Trailer appended by v24: one blessing byte + a u32-length-prefixed
-    # one-character justification.
-    let appended = 1 + 4 + 1
-    var v23 = v24[0 ..< v24.len - appended]
+    let v23 = encodeBuildActionPayloadAtVersion(action, 23'u16)
     # Envelope: magic(4) | version u16 LE | payloadLen u32 LE | payload
-    v23[4] = 23'u8
-    v23[5] = 0'u8
-    let shortened = uint32(v23.len - 10)
-    v23[6] = byte(shortened and 0xFF'u32)
-    v23[7] = byte((shortened shr 8) and 0xFF'u32)
-    v23[8] = byte((shortened shr 16) and 0xFF'u32)
-    v23[9] = byte((shortened shr 24) and 0xFF'u32)
+    check v23[4] == 23'u8
+    check v23[5] == 0'u8
+    # The blessing the action carries is genuinely ABSENT from the image, not
+    # merely ignored on the way in. The v26 encoding is longer by the blessing
+    # byte + its length-prefixed one-character justification (1 + 4 + 1) AND
+    # by v25's `suppressMonitorShimSeed` byte — the mid-payload one. Spelling
+    # both out is the assertion that would have caught the old forgery: it
+    # accounted for the first group and not for the second.
+    check encodeBuildActionPayload(action).len - v23.len == (1 + 4 + 1) + 1
 
     let decoded = decodeBuildActionPayload(v23)
     # The surrounding fields must still decode, or this would be testing a

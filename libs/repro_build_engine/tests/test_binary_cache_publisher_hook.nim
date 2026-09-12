@@ -20,13 +20,25 @@
 
 import std/[options, os, strutils, unittest]
 
+from repro_test_support import testCaseScratchSlug
+
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
 import repro_build_engine
 import repro_hash
 import repro_local_store
 
-const TmpDir = "build/test-tmp/test_binary_cache_publisher_hook"
+# Every case here calls ``resetTmp`` (removeDir + createDir), and under the
+# binary-runner protocol the cases of one binary run as CONCURRENT PROCESSES
+# — ``<binary> --run "<suite>::<case>"``, one process each. A fixed path is
+# therefore shared mutable state between them: one case's reset deletes the
+# cache root another case has an open sqlite store on, which surfaces as
+# ``disk I/O error`` on ``PRAGMA journal_mode = WAL`` or as a missing output
+# file, never as an assertion failure. ``testCaseScratchSlug`` makes the tree
+# private to the process running ONE case; whole-binary execution (one
+# process, cases strictly sequential) keeps the single directory it had.
+let TmpDir = "build/test-tmp/test_binary_cache_publisher_hook-" &
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):
