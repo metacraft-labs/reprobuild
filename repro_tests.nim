@@ -378,8 +378,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim",
-    binary: "build/test-bin/t_dark_window_cache_records_are_drained",
+    source: "libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim",
+    binary: "build/test-bin/t_daemon_check_platform_refusal",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -387,8 +387,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim",
-    binary: "build/test-bin/t_daemon_check_platform_refusal",
+    source: "libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim",
+    binary: "build/test-bin/t_dark_window_cache_records_are_drained",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -736,7 +736,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,
-    selfInterposes: false),
+    selfInterposes: true),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_no_progress_diagnostic.nim",
     binary: "build/test-bin/test_no_progress_diagnostic",
