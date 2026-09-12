@@ -13,7 +13,11 @@ proc registerInstallMirrorTools*(packageName, sourceFile: string;
     if registerPackageNativeTool(packageName, sourceFile, sourceLine, PackageUseDef(
         rawConstraint: toolName, packageSelector: toolName,
         executableName: toolName, depKind: DepKindNative)):
-      registerPackageDep(packageName, DepKindNative, toolName)
+      # ``registerGeneratedToolDep``, not ``registerPackageDep``: these are
+      # the commands the GENERATED install-mirror script runs, not a claim
+      # about the recipe's build system. See the accessor pair on
+      # ``registeredAuthoredNativeBuildDeps``.
+      registerGeneratedToolDep(packageName, DepKindNative, toolName)
       registerSolverDependency(packageName, toolName, toolName,
         depKind = DepKindNative)
   finalizeVariants()

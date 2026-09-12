@@ -3705,6 +3705,28 @@ var dslPortPackageDeps {.threadvar.}: Table[string, seq[string]]
   ## ``dslPortBuildFlagSets`` convention (the ``\x00`` byte cannot
   ## appear in either component so the encoding is unambiguous).
 
+var dslPortGeneratedToolDeps {.threadvar.}: Table[string, seq[string]]
+  ## The subset of ``dslPortPackageDeps`` rows that reprobuild's own
+  ## emitters added, rather than the recipe author.
+  ##
+  ## ``registerSourceFetchTools`` / ``registerInstallMirrorTools`` declare
+  ## the external commands the GENERATED fetch and install-mirror shell
+  ## scripts run (``sh``, ``curl``, ``tar``, ``sed``, ``patchelf``, …) so
+  ## those tools are solved and present before a build body runs. Those
+  ## rows belong in the dep list — the mirror's rpath patching reads them
+  ## back out through ``registeredNativeBuildDeps``.
+  ##
+  ## They are NOT, however, statements about the recipe's own build
+  ## system, and one consumer reads the same row as exactly that: the
+  ## M9.R.6 convention narrowing infers meson / cmake / autotools / make /
+  ## CUSTOM from the declared toolset. Since every generated fetch script
+  ## runs through ``sh``, an unannotated read made every ``fetch:``-bearing
+  ## recipe look shell-driven. Recording the provenance lets each consumer
+  ## ask for the list it actually means.
+  ##
+  ## Same ``packageName & '\x00' & kind`` key encoding as
+  ## ``dslPortPackageDeps``, and the same ``threadvar`` lifetime.
+
 proc m9r1PackageDepsKey(packageName, kind: string): string {.inline.} =
   ## Compose the ``(packageName, kind)`` registry key. Symmetric with
   ## ``m9iFlagSetKey`` (M9.I) — both pin the ``\x00`` separator so the
@@ -3718,6 +3740,7 @@ proc resetDslPortPackageDepsState*() =
   ## Symmetric with ``resetDslPortBuildFlagState`` /
   ## ``resetDslPortFetchState``.
   dslPortPackageDeps.clear()
+  dslPortGeneratedToolDeps.clear()
 
 proc registerPackageDep*(packageName, kind, constraint: string) =
   ## Append ``constraint`` to the ``(packageName, kind)`` row. ``kind``
@@ -3748,6 +3771,11 @@ proc registerPackageDep*(packageName, kind, constraint: string) =
   ## vars / link dirs / CMake module paths — so the lowered graph
   ## stopped being a pure function of the recipe. Collapsing the repeat
   ## keeps every instantiation observing the declared list verbatim.
+  ##
+  ## Registering a constraint HERE also clears any generated-tool mark on
+  ## it (see ``registerGeneratedToolDep``): a recipe that spells ``sh`` in
+  ## its own ``nativeBuildDeps:`` owns that entry no matter which emitter
+  ## also asked for it, and no matter which ran first.
   case kind
   of "build", "native", "runtime":
     let key = m9r1PackageDepsKey(packageName, kind)
@@ -3755,6 +3783,10 @@ proc registerPackageDep*(packageName, kind, constraint: string) =
       dslPortPackageDeps[key] = @[]
     if constraint notin dslPortPackageDeps[key]:
       dslPortPackageDeps[key].add(constraint)
+    if key in dslPortGeneratedToolDeps:
+      let generatedIndex = dslPortGeneratedToolDeps[key].find(constraint)
+      if generatedIndex >= 0:
+        dslPortGeneratedToolDeps[key].delete(generatedIndex)
   else:
     discard
 
@@ -3768,14 +3800,82 @@ proc registeredBuildDeps*(packageName: string): seq[string] =
     return dslPortPackageDeps[key]
   return @[]
 
+proc registerGeneratedToolDep*(packageName, kind, constraint: string) =
+  ## Register a dep that a reprobuild EMITTER needs, not one the recipe
+  ## author wrote. Appends through ``registerPackageDep`` — so every
+  ## existing reader still sees it — and additionally records the
+  ## provenance so ``registeredAuthoredNativeBuildDeps`` can subtract it.
+  ##
+  ## Use this for the external commands a GENERATED script runs. Anything
+  ## the recipe spelled in a ``buildDeps:`` / ``nativeBuildDeps:`` /
+  ## ``runtimeDeps:`` block goes through ``registerPackageDep`` directly.
+  ##
+  ## An entry the recipe ALREADY declared stays authored: the mark is only
+  ## taken when this call is what introduced the constraint. Together with
+  ## the un-marking in ``registerPackageDep`` this makes provenance
+  ## independent of emission order — a recipe that lists ``sh`` itself and
+  ## also declares ``fetch:`` keeps narrowing to the custom convention,
+  ## whichever registration the macro emits first.
+  case kind
+  of "build", "native", "runtime":
+    let key = m9r1PackageDepsKey(packageName, kind)
+    # Three states before this call, and only the first must not be
+    # marked: authored already (leave it authored), marked generated
+    # already (a replayed or overlapping emitter call — keep the mark),
+    # or absent (this call introduces it — mark it).
+    let alreadyGenerated =
+      key in dslPortGeneratedToolDeps and
+      constraint in dslPortGeneratedToolDeps[key]
+    let alreadyAuthored =
+      not alreadyGenerated and
+      key in dslPortPackageDeps and constraint in dslPortPackageDeps[key]
+    # Clears the mark, so the re-mark below must follow it.
+    registerPackageDep(packageName, kind, constraint)
+    if not alreadyAuthored:
+      if key notin dslPortGeneratedToolDeps:
+        dslPortGeneratedToolDeps[key] = @[]
+      if constraint notin dslPortGeneratedToolDeps[key]:
+        dslPortGeneratedToolDeps[key].add(constraint)
+  else:
+    discard
+
 proc registeredNativeBuildDeps*(packageName: string): seq[string] =
   ## Return the constraint-string seq for ``packageName``'s
   ## ``nativeBuildDeps:`` block in source-declaration order. Returns
   ## an empty seq when nothing was registered.
+  ##
+  ## This is the COMPLETE build-time tool set: the recipe's own
+  ## ``nativeBuildDeps:`` entries plus whatever reprobuild's fetch and
+  ## install-mirror emitters need in order to run their generated
+  ## scripts. Callers resolving tools, lib dirs or solver edges want this
+  ## list. Callers INFERRING SOMETHING ABOUT THE RECIPE from it want
+  ## ``registeredAuthoredNativeBuildDeps`` instead.
   let key = m9r1PackageDepsKey(packageName, "native")
   if key in dslPortPackageDeps:
     return dslPortPackageDeps[key]
   return @[]
+
+proc registeredAuthoredNativeBuildDeps*(packageName: string): seq[string] =
+  ## ``registeredNativeBuildDeps`` minus the entries reprobuild's own
+  ## emitters contributed — i.e. exactly what the recipe's
+  ## ``nativeBuildDeps:`` block said, in source-declaration order.
+  ##
+  ## Read this when the answer is a statement ABOUT THE RECIPE, such as
+  ## "which build system does this package use". A generated fetch script
+  ## needing ``sh`` says nothing about whether the upstream project is
+  ## meson-driven; including it made every ``fetch:``-bearing recipe
+  ## narrow to the custom (shell-driver) convention.
+  let key = m9r1PackageDepsKey(packageName, "native")
+  if key notin dslPortPackageDeps:
+    return @[]
+  let generated =
+    if key in dslPortGeneratedToolDeps: dslPortGeneratedToolDeps[key]
+    else: @[]
+  if generated.len == 0:
+    return dslPortPackageDeps[key]
+  for constraint in dslPortPackageDeps[key]:
+    if constraint notin generated:
+      result.add(constraint)
 
 proc registeredRuntimeDeps*(packageName: string): seq[string] =
   ## Return the constraint-string seq for ``packageName``'s

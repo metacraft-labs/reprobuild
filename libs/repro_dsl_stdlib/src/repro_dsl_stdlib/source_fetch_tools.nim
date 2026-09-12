@@ -22,7 +22,11 @@ proc registerSourceFetchTools*(packageName, sourceFile: string; sourceLine: int)
     if registerPackageNativeTool(packageName, sourceFile, sourceLine, PackageUseDef(
         rawConstraint: toolName, packageSelector: toolName,
         executableName: toolName, depKind: DepKindNative)):
-      registerPackageDep(packageName, DepKindNative, toolName)
+      # ``registerGeneratedToolDep``, not ``registerPackageDep``: these are
+      # the commands the GENERATED fetch script runs, not a claim about the
+      # recipe's build system. The list starts with ``sh``, which the M9.R.6
+      # convention narrowing reads as "shell-driver recipe".
+      registerGeneratedToolDep(packageName, DepKindNative, toolName)
       registerSolverDependency(packageName, toolName, toolName,
         depKind = DepKindNative)
   finalizeVariants()

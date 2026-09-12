@@ -136,7 +136,17 @@ proc hasNativeBuildDep(packageName, token: string): bool =
   ## ``nativeBuildDeps:`` constraint string registered for
   ## ``packageName``. Case-sensitive — matches the registry's verbatim
   ## storage.
-  for raw in registeredNativeBuildDeps(packageName):
+  ##
+  ## Reads the AUTHORED list. ``registeredNativeBuildDeps`` also carries
+  ## the commands reprobuild's generated fetch and install-mirror scripts
+  ## run (``sh``, ``rm``, ``mkdir``, ``curl``, ``mv``, ``tar``, …), and
+  ## every recipe that declares ``fetch:`` gets them. Narrowing off that
+  ## list made the leading ``sh`` entry resolve EVERY fetch-bearing recipe
+  ## whose own toolset is not meson / cmake / autotools / make to
+  ## ``ConventionCustom``, which the M9.R.10b dispatch turns into a
+  ## ``raiseCustomBuildRequired`` at module init. The convention is a
+  ## statement about the recipe, so it must read what the recipe declared.
+  for raw in registeredAuthoredNativeBuildDeps(packageName):
     if firstToken(raw) == token:
       return true
   false
