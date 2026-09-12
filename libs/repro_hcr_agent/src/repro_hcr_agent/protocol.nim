@@ -42,6 +42,20 @@ const
   HcrReloadReasonUnsupportedEncoding* = "unsupported-content-encoding"
   HcrReloadReasonMultipleFilesUnsupported* = "multiple-changed-files-unsupported"
 
+  # GDH-M8. `writer-refused` means the TRACE WRITER refused and nothing else;
+  # the GDScript host used to answer it for six unrelated conditions, so a
+  # check on that one string could not tell them apart. Additive — no existing
+  # reason changes meaning. Kept in sync with the `REPRO_HCR_RELOAD_REASON_*`
+  # block in `libs/repro_hcr_agent/c/repro_hcr_agent.h`.
+  HcrReloadReasonScriptNotLoaded* = "script-not-loaded"
+  HcrReloadReasonHostBusy* = "host-busy"
+  HcrReloadReasonNoSafePoint* = "no-safe-point"
+  HcrReloadReasonTraceClosed* = "trace-closed"
+    ## Design §8.1's steps 4-6 failure: the trace had already committed to the
+    ## new version, so the recorder CLOSED it with a recorded reason and the
+    ## engine continues unreloaded. Unlike every other refusal here, the
+    ## session is degraded rather than untouched.
+
   HcrMacosArm64DirectSupportProfile* =
     "macos-arm64-direct-hcr-in-codetracer-v1"
     ## The Mach-O/arm64 direct-patch profile (M26-M28).
