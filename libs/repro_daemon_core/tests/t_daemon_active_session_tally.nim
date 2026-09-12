@@ -288,3 +288,62 @@ suite "abandoned sessions are reclaimed, and only provably dead ones":
     let body = readFile(root / "sessions" / "stuck.session")
     check "state=" & AbandonedSessionState in body
     check "writer process no longer exists" in body
+
+suite "which identity governs is encoded in the state":
+  test "an `accepted` record with a dead daemon is reclaimable":
+    # `accepted` means the worker has not stamped itself yet, so the DAEMON's
+    # identity governs -- and no work can have begun, which is what makes it
+    # safe to reclaim. This is the half of the rule that must stay
+    # reclaimable, or a daemon killed between accepting and forking leaks a
+    # record forever.
+    let root = createTempDir("repro-governs-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    check activeSessionTallyFor(config) == 0
+    var accepted = session("accepted-one", "accepted")
+    accepted.writer = deadWriter()
+    writeSessionRecord(config, accepted)
+    check countActiveSessionRecordsFromDisk(config) == 1
+    check reclaimAbandonedSessions(config) == 1
+    check countActiveSessionRecordsFromDisk(config) == 0
+
+  test "a `running` record with a live worker is never reclaimable":
+    # `running` means the worker stamped itself in the same write that left
+    # `accepted`, so the WORKER's identity governs. The daemon may be long
+    # gone; that must not make this reclaimable.
+    #
+    # Graded end to end by a mutation rather than only here: removing the
+    # worker's stamp makes a real `running` record carry the LISTENER's pid
+    # (measured: writer == listener), and with the stamp it carries the
+    # worker's (writer != listener). See the commit message.
+    let root = createTempDir("repro-governs-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    check activeSessionTallyFor(config) == 0
+    var running = session("running-one", "running")
+    running.writer = encodeWriterIdentity(currentWriterIdentity())
+    writeSessionRecord(config, running)
+    check reclaimAbandonedSessions(config) == 0
+    check countActiveSessionRecordsFromDisk(config) == 1
+
+  test "the record never carries `running` with a stale identity":
+    # The window the one-write stamp closes. A worker that stamped itself
+    # AFTER the transition would leave the record briefly `running` under the
+    # daemon's identity, and a new daemon reclaiming in that instant would
+    # kill a live session. Asserted on the FILE, because the file is what a
+    # concurrent daemon reads.
+    let root = createTempDir("repro-governs-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    check activeSessionTallyFor(config) == 0
+    var s = session("one-write", "accepted")
+    s.writer = deadWriter()
+    writeSessionRecord(config, s)
+    # The worker's first act: stamp, then transition -- one write.
+    s.writer = encodeWriterIdentity(currentWriterIdentity())
+    s.state = "running"
+    writeSessionRecord(config, s)
+    let body = readFile(root / "sessions" / "one-write.session")
+    check "state=running" in body
+    check ("writer=" & encodeWriterIdentity(currentWriterIdentity())) in body
+    check reclaimAbandonedSessions(config) == 0

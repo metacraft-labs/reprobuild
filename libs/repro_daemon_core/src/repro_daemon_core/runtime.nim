@@ -1457,6 +1457,32 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
   # consuming multi-GB RSS after the attached client was gone.
 
   try:
+    # THE WORKER STAMPS ITSELF, IN THE SAME WRITE THAT LEAVES `accepted`.
+    #
+    # `writer` must always name the process whose death orphans this record,
+    # and for a session that is `running` that process is THIS grandchild --
+    # not the daemon that accepted the request. `spawnDetachedDaemonWorker`
+    # double-forks and reparents, so the worker outlives the daemon
+    # routinely (a dev self-restart alone does it).
+    #
+    # Stamping the daemon's identity and leaving it was a real defect, caught
+    # before merge: daemon accepts (writer = daemon), forks, daemon dies, a
+    # new daemon sees an active record whose writer is gone and marks it
+    # `abandoned` -- while this worker is still building. A tally that drops
+    # while work continues can then let a dev self-restart proceed under a
+    # live build, which is worse than the lingering record it was fixing.
+    #
+    # WHICH IDENTITY GOVERNS IS ENCODED IN THE STATE, so there is no window
+    # rather than a short one:
+    #   * `accepted` -- the DAEMON's identity governs. The worker has not
+    #     stamped yet, and no work can have begun, so a dead daemon plus
+    #     `accepted` is safely reclaimable.
+    #   * `running` and beyond -- the WORKER's identity governs, because this
+    #     assignment and the transition out of `accepted` are ONE
+    #     `writeSessionRecord`. The record never exists in `running` carrying
+    #     the daemon's identity, so the guarantee is structural and not a
+    #     matter of how fast the stamp lands after the fork.
+    session.writer = encodeWriterIdentity(currentWriterIdentity())
     updateSessionState(config, session, "running",
       message = "daemon-hosted build running")
     if userDaemonBuildExecutor == nil:
@@ -1624,6 +1650,9 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
       socket.clientDisconnected()
 
   try:
+    # Same rule as the build worker: the worker owns `running`, and the stamp
+    # rides the same write that leaves `accepted`. See that comment.
+    sessionRef[].writer = encodeWriterIdentity(currentWriterIdentity())
     updateSessionState(config, sessionRef[], "running",
       message = "daemon-hosted watch running")
     if userDaemonWatchExecutor == nil:
@@ -1756,6 +1785,27 @@ proc handleWatchStart(socket: IpcConn; config: UserDaemonConfig;
 
 proc handleWatchAttach(socket: IpcConn; config: UserDaemonConfig;
                        request: UserDaemonWatchSessionRequest) =
+  ## ATTACH DELIBERATELY DOES NOT STAMP ITSELF AS THE WRITER, and this is the
+  ## one place the `accepted`/`running` rule does not apply -- attach joins a
+  ## session someone else created, so it has no `accepted` of its own.
+  ##
+  ## The rule the field encodes is "name the process whose death orphans the
+  ## record", and an attacher is a READER: it streams events a worker
+  ## produces and its departure ends nothing. `streamWatchSession` never
+  ## writes the session record at all, so the identity stays the worker's by
+  ## construction rather than by intent.
+  ##
+  ## Both alternatives are worse, in opposite directions. If attach stamped
+  ## itself, the original worker's death would stop being noticed -- a live
+  ## attacher would keep an orphaned session looking healthy forever, which
+  ## is the bug this whole change exists to remove. And an attacher that
+  ## died while the worker ran would make a LIVE session reclaimable, which
+  ## is the direction that corrupts builds.
+  ##
+  ## The residual oddity is accepted knowingly: if a worker dies while an
+  ## attacher is streaming, the record is reclaimed `abandoned` under the
+  ## attacher. That is honest -- the work really has stopped -- and it costs
+  ## a confusing stream rather than a wrong build.
   if request.sessionId.len == 0:
     socket.writeFrame(udkError, errorBody("watch attach requires a session id"))
     return
