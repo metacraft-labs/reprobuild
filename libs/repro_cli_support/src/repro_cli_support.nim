@@ -43232,7 +43232,8 @@ proc allowedSignerIdentity*(keyId: string): string =
 
 proc runFeedingStdin(exe: string;
                      args: openArray[string];
-                     payload: string): tuple[code: int; output: string] =
+                     payload: string;
+                     workingDir = ""): tuple[code: int; output: string] =
   ## Run ``exe`` with an ARGV and hand it ``payload`` on its stdin, capturing
   ## stdout+stderr. Returns the child's exit code.
   ##
@@ -43262,7 +43263,7 @@ proc runFeedingStdin(exe: string;
   ## second close of it is a no-op on both platforms.
   var process: Process
   try:
-    process = startProcess(exe, args = @args,
+    process = startProcess(exe, args = @args, workingDir = workingDir,
       options = {poStdErrToStdOut, poUsePath})
   except CatchableError:
     # Could not spawn at all. Fail closed with a non-zero code, exactly as a
@@ -59050,11 +59051,20 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       # emitted at top-level module scope), BEFORE any request is dispatched —
       # so the emission happens regardless of the request kind, and a manifest
       # request provisions no tools and builds nothing (no-build semantics).
-      discard runStableProviderProtocol(provider.outputBinaryPath, protocolRoot,
-        "solver-inputs", cwd, ProviderGraphRequest(
-          kind: prkManifest,
-          providerArtifactId: digestHex(provider.providerFingerprint),
-          reason: girExplicitUserRequest))
+      if moduleHasBuildBlock(modulePath) or moduleHasDevEnvBlock(modulePath):
+        discard runStableProviderProtocol(provider.outputBinaryPath, protocolRoot,
+          "solver-inputs", cwd, ProviderGraphRequest(
+            kind: prkManifest,
+            providerArtifactId: digestHex(provider.providerFingerprint),
+            reason: girExplicitUserRequest))
+      else:
+        # Declaration-only modules emit solver inputs during initialization,
+        # but buildCode generates no request/response dispatcher for them.
+        let initialized = runFeedingStdin(provider.outputBinaryPath, [], "", cwd)
+        if initialized.code != 0:
+          raise newException(OSError,
+            "solver metadata initializer exited with code " &
+              $initialized.code & ": " & initialized.output)
     finally:
       delEnv(SolverInputsEmitEnvVar)
     if not fileExists(extendedPath(emitPath)):
@@ -59196,40 +59206,44 @@ proc sourceProviderRecipeDirForSolverFold*(
   of rrSiblingMissing:
     ""
 
-proc foldFromSourceProviderSolverInputs(projectDir: string;
-                                        aggregate: var
-                                          CompiledProviderSolverInputs) =
-  ## Discover the same corpus recipes that from-source execution would select,
-  ## compile their metadata only, and merge their transitive constraints into
-  ## the root solve. No package build action is executed.
-  let recipeRoot = fromSourceRecipeRoot(projectDir)
-  if not dirExists(extendedPath(recipeRoot)):
-    return
-  seedBootstrapCycleBreakTools()
-  var pending = aggregate.toolUses
-  var seenRecipeDirs: seq[string] = @[]
+proc foldProviderSolverInputs(projectDir: string;
+                              aggregate: var CompiledProviderSolverInputs) =
+  ## Resource contracts cross repository boundaries without importing their
+  ## drivers, so the consumer's module initialization does not see the
+  ## producer's constraints. Fold sibling metadata as well as source-catalog
+  ## metadata into the governing solve, without executing package actions.
+  let root = absolutePath(projectDir)
+  let fromSource = aggregate.defaultToolProvisioning == "from-source"
+  let recipeRoot = if fromSource: fromSourceRecipeRoot(root) else: ""
+  if fromSource:
+    seedBootstrapCycleBreakTools()
+  var pending: seq[tuple[owner: string, useDef: InterfaceToolUse]] = @[]
+  for useDef in aggregate.toolUses:
+    pending.add((root, useDef))
+  var seenRecipeDirs = @[root]
   var cursor = 0
   while cursor < pending.len:
-    let useDef = pending[cursor]
+    let (owner, useDef) = pending[cursor]
     inc cursor
-    if useDef.executableName.len == 0:
-      continue
-    let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
-    var recipeDir = sourceProviderRecipeDirForSolverFold(outcome)
+    var recipeDir = discoverProducerSourceRoot(useDef.packageSelector, owner)
+    if recipeDir.len == 0 and fromSource and useDef.executableName.len > 0:
+      let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
+      recipeDir = sourceProviderRecipeDirForSolverFold(outcome)
     if recipeDir.len == 0:
       continue
     recipeDir = absolutePath(recipeDir)
     if recipeDir in seenRecipeDirs:
       continue
     seenRecipeDirs.add(recipeDir)
-    let provider = solverInputsFromCompiledProvider(recipeDir, strict = true)
+    let provider = solverInputsFromCompiledProvider(recipeDir,
+      requireSolverBinding = false, strict = true)
     if provider.isNone:
       continue
     let producerInputs = provider.get()
     for transitiveUse in producerInputs.toolUses:
-      pending.add(transitiveUse)
+      pending.add((recipeDir, transitiveUse))
     aggregate.mergeProviderSolverInputs(producerInputs)
-  aggregate.sourceRecipeRoots = seenRecipeDirs
+  aggregate.sourceRecipeRoots = seenRecipeDirs[1 .. ^1]
   aggregate.text = solver_variants.renderSolverInputsFixture(
     aggregate.variants, aggregate.packages)
 
@@ -59250,8 +59264,7 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     let fromProvider = solverInputsFromCompiledProvider(projectDir)
     if fromProvider.isSome:
       var p = fromProvider.get()
-      if p.defaultToolProvisioning == "from-source":
-        foldFromSourceProviderSolverInputs(projectDir, p)
+      foldProviderSolverInputs(projectDir, p)
       return (true, p.variants, p.packages, p.text, "provider",
         p.usesSelectors, p.sourceRecipeRoots)
   let inputsP =

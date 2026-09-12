@@ -25462,13 +25462,15 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_lock",
         "repro_project_dsl"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
