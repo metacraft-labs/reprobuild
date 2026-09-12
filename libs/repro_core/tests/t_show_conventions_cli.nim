@@ -11,29 +11,45 @@
 ##   * ``--target=NAME`` filters output to a single target.
 ##   * ``--json`` emits JSON instead of human-readable text.
 ##
-## We spawn the real ``build/bin/repro.exe`` and assert on its exit
-## codes + stdout content. The text-extractor of manual deps is unit-
-## tested in ``t_show_conventions_manual_deps.nim``; this test covers
-## the CLI plumbing.
+## We spawn the real ``build/bin/repro`` (``repro.exe`` on Windows) and
+## assert on its exit codes + stdout content. The text-extractor of
+## manual deps is unit-tested in ``t_show_conventions_manual_deps.nim``;
+## this test covers the CLI plumbing.
 
 import std/[json, os, osproc, strutils, tables, unittest]
 import repro_test_support
 
-const ReproBinaryRel = "build/bin/repro.exe"
+const
+  NoReproBinaryReason =
+    "engine-built CLI absent at " & reproBinaryPath() &
+    " — build it with `just bootstrap` (bash scripts/build_apps.sh)"
+    ## Passed to ``skip`` so the census says WHY. ``std/unittest`` on this
+    ## repo's compiler fork takes ``skip(reason = "")`` and writes the
+    ## reason into ``$NIMTEST_RESULT_FILE`` as ``skipReason``, which
+    ## ``tools/test-runner/repro_test_runner.nim`` republishes as
+    ## ``skip_reason`` in ``test-logs/parallel-run.json``. A bare
+    ## ``skip()`` leaves that key absent and the skip unauditable.
+  NoPilotFixtureReason =
+    "sibling checkout ../reprobuild-examples/nim/mode3-pilot not present" &
+    " in this workspace"
 
 proc findReproBinary(): string =
-  ## Walk up from the cwd until we find ``build/bin/repro.exe``. Same
-  ## heuristic as ``t_deps_refresh_check.nim``.
-  var dir = getCurrentDir()
-  while dir.len > 0:
-    let candidate = dir / ReproBinaryRel
-    if fileExists(candidate):
-      return candidate
-    let parent = parentDir(dir)
-    if parent == dir:
-      break
-    dir = parent
-  ""
+  ## Resolve the engine-built CLI through ``repro_test_support``'s
+  ## ``reproBinaryPath`` — the ONE spelling in this repo, source-anchored
+  ## to the checkout root and extension-correct on every host
+  ## (``addFileExt("repro", ExeExt)``: empty on POSIX, ``.exe`` on
+  ## Windows).
+  ##
+  ## This used to be a cwd walk-up for a hardcoded
+  ## ``build/bin/repro.exe``. The ``.exe`` never matched anything on
+  ## Linux or macOS, so every case in this file step-asided as a skip and
+  ## had never once executed off Windows.
+  ##
+  ## Returns "" when the binary is genuinely absent so the cases below
+  ## can skip with a reason rather than crash; under ``just test`` the
+  ## generated EXECUTE edge declares it as a typed input and it is there.
+  let candidate = reproBinaryPath()
+  if fileExists(candidate): candidate else: ""
 
 proc findPilotFixture(): string =
   ## Locate ``reprobuild-examples/nim/mode3-pilot`` from the workspace
@@ -89,15 +105,15 @@ let reproBin = findReproBinary()
 
 suite "repro show-conventions: CLI smoke":
 
-  test "build/bin/repro.exe is on disk":
+  test "build/bin/repro is on disk":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       check fileExists(reproBin)
 
   test "synthetic two-package workspace produces expected text shape":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       let dir = makeScratch("two-package-text")
       writeTwoPackageFixture(dir)
@@ -126,7 +142,7 @@ suite "repro show-conventions: CLI smoke":
 
   test "--json produces parseable JSON with the expected fields":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       let dir = makeScratch("two-package-json")
       writeTwoPackageFixture(dir)
@@ -231,7 +247,7 @@ suite "repro show-conventions: CLI smoke":
 
   test "--target=NAME filters to a single member":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       let dir = makeScratch("target-filter")
       writeTwoPackageFixture(dir)
@@ -245,7 +261,7 @@ suite "repro show-conventions: CLI smoke":
 
   test "missing workspace root returns non-zero":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       let nonexistent = getTempDir() / "repro-show-conv-nope-xyz-123"
       let (output, exitCode) = execCmdEx(quoteShellCommand(@[
@@ -256,11 +272,11 @@ suite "repro show-conventions: CLI smoke":
 
   test "mode3-pilot fixture: exits 0 and mentions packages":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       let pilot = findPilotFixture()
       if pilot.len == 0:
-        skip()
+        skip(NoPilotFixtureReason)
       else:
         let (output, exitCode) = execCmdEx(quoteShellCommand(@[
           reproBin, "show-conventions", pilot]))
@@ -290,9 +306,9 @@ suite "repro show-conventions: registry mirror sanity":
     ## updating the mirror fails here loudly.
     let reproBin = findReproBinary()
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
-      # Locate the reprobuild repo root (parent of build/bin/repro.exe).
+      # Locate the reprobuild repo root (parent of build/bin/repro).
       var repoRoot = reproBin
       while repoRoot.len > 0 and not fileExists(
           repoRoot / "apps" / "repro-standard-provider" /

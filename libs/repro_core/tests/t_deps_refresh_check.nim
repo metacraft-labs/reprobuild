@@ -11,28 +11,35 @@
 ##   * ``--dry-run`` prints the would-be content to stdout and never
 ##     writes.
 ##
-## We spawn the real ``build/bin/repro.exe`` and assert on its exit
-## codes — the in-process scanner is covered by ``t_nim_dep_scanner.nim``;
-## this test covers the CLI plumbing.
+## We spawn the real ``build/bin/repro`` (``repro.exe`` on Windows) and
+## assert on its exit codes — the in-process scanner is covered by
+## ``t_nim_dep_scanner.nim``; this test covers the CLI plumbing.
 
 import std/[os, osproc, strutils, unittest]
+import repro_test_support
 
-const ReproBinaryRel = "build/bin/repro.exe"
+const NoReproBinaryReason =
+  "engine-built CLI absent at " & reproBinaryPath() &
+  " — build it with `just bootstrap` (bash scripts/build_apps.sh)"
+  ## Passed to ``skip`` so the census says WHY. ``std/unittest`` on this
+  ## repo's compiler fork takes ``skip(reason = "")`` and writes the
+  ## reason into ``$NIMTEST_RESULT_FILE`` as ``skipReason``, which
+  ## ``tools/test-runner/repro_test_runner.nim`` republishes as
+  ## ``skip_reason`` in ``test-logs/parallel-run.json``. A bare
+  ## ``skip()`` leaves that key absent and the skip unauditable.
 
 proc findReproBinary(): string =
-  ## Walk up from the current dir to find ``build/bin/repro.exe``.
-  ## When run via ``run_tests.sh`` the cwd is the repo root, but for
-  ## ad-hoc invocations the test may be executed from a sub-directory.
-  var dir = getCurrentDir()
-  while dir.len > 0:
-    let candidate = dir / ReproBinaryRel
-    if fileExists(candidate):
-      return candidate
-    let parent = parentDir(dir)
-    if parent == dir:
-      break
-    dir = parent
-  ""
+  ## Resolve the engine-built CLI through ``repro_test_support``'s
+  ## ``reproBinaryPath`` — the ONE spelling in this repo, source-anchored
+  ## to the checkout root (never the directory the test process happened
+  ## to be launched from) and extension-correct on every host.
+  ##
+  ## This used to be a cwd walk-up for a hardcoded
+  ## ``build/bin/repro.exe``. The ``.exe`` never matched anything on
+  ## Linux or macOS, so every case in this file step-asided as a skip and
+  ## had never once executed off Windows.
+  let candidate = reproBinaryPath()
+  if fileExists(candidate): candidate else: ""
 
 proc makeScratch(name: string): string =
   result = getTempDir() / ("repro-deps-refresh-check-" & name)
@@ -69,15 +76,15 @@ let reproBin = findReproBinary()
 
 suite "repro deps refresh: CLI smoke":
 
-  test "build/bin/repro.exe is on disk":
+  test "build/bin/repro is on disk":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       check fileExists(reproBin)
 
   test "refresh writes the scanned-deps file and exits 0":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       let dir = makeScratch("refresh-writes")
       writeFixture(dir)
@@ -94,7 +101,7 @@ suite "repro deps refresh: CLI smoke":
 
   test "--check returns 0 when the file matches":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       let dir = makeScratch("check-match")
       writeFixture(dir)
@@ -107,7 +114,7 @@ suite "repro deps refresh: CLI smoke":
 
   test "--check returns 1 when the file is stale":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       let dir = makeScratch("check-stale")
       writeFixture(dir)
@@ -121,7 +128,7 @@ suite "repro deps refresh: CLI smoke":
 
   test "--dry-run never writes; prints the would-be content":
     if reproBin.len == 0:
-      skip()
+      skip(NoReproBinaryReason)
     else:
       let dir = makeScratch("dry-run")
       writeFixture(dir)
