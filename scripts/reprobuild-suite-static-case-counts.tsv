@@ -1128,7 +1128,7 @@ tests/integration/t_lock_from_a_v3_host_resolves_on_a_v2_host.nim	nim	6
 tests/integration/t_lock_is_checked_at_vcs_commit_rather_than_from_a_digest.nim	nim	1
 tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	nim	9
 tests/integration/t_lock_refresh_and_validate_without_building.nim	nim	5
-tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim	nim	1
+tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim	nim	2
 tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	nim	2
 tests/integration/t_lock_refresh_reuses_monitored_provider_metadata.nim	nim	1
 tests/integration/t_lock_store_backend_roundtrip_each_backend.nim	nim	1
