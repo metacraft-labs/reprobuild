@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1547,
+    "nimTestBinaries": 1548,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 562,
     "staticallyDetectedRuntimeCompilerFlowTests": 95,
-    "testEntries": 1555
+    "testEntries": 1556
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1055,7 +1055,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 705,
+      "integration": 706,
       "platform/destructive": 113,
       "pure unit": 562,
       "unclassified": 163
@@ -1182,9 +1182,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1547,
+    "nimTestBinaryCount": 1548,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1555
+    "testEntryCount": 1556
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7814,8 +7814,8 @@
       "owner": "libs/repro_daemon_core",
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -7867,6 +7867,23 @@
       "source": "libs/repro_daemon_core/tests/t_daemon_image_path.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_writer_identity",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_writer_identity.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

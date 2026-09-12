@@ -1,9 +1,10 @@
-import std/[algorithm, net, os, osproc, strtabs, strutils, tables, times]
+import std/[algorithm, net, options, os, osproc, strtabs, strutils, tables, times]
 
 import repro_core
 import blake3
 
 import ./client
+import ./writer_identity
 import ./protocol
 import ./stats_store
 import ./lease_registry
@@ -699,15 +700,64 @@ proc atomicWriteTextFile(path, content: string) =
     try: removeFile(tmpPath) except OSError: discard
     raise
 
-const ActiveSessionStates = ["accepted", "running", "cancelling", "watching",
-                            "idle"]
-  ## The states that make a session count as ACTIVE. Named once so the
-  ## from-disk count and the incremental count cannot drift apart; they used
-  ## to be the same literal list in one place because there was only one
-  ## counter.
+const AbandonedSessionState* = "abandoned"
+  ## A session whose WRITER PROVABLY NO LONGER EXISTS.
+  ##
+  ## Distinct from `cancelled` on purpose: a user cancelling a build and a
+  ## build process vanishing are different events, and a reader looking at
+  ## why a build stopped needs to tell them apart. Distinct from `failed`
+  ## too -- a failed build ran and lost; an abandoned one never reported.
+  ##
+  ## Making it REPRESENTABLE is the point. Before this state existed the
+  ## outcome had to be inferred later from a dead pid, by every reader
+  ## separately, and none of them did.
 
-proc sessionStateIsActive(state: string): bool {.inline.} =
-  state in ActiveSessionStates
+type
+  SessionLifecycle = enum
+    ## The session-state vocabulary, as an enum, so classifying it is
+    ## exhaustive. The records themselves still store strings -- there are
+    ## dozens of string literals across the codebase and converting them all
+    ## is a separate change -- but every CLASSIFICATION goes through the
+    ## `case` statements below, so a new member cannot be added without the
+    ## compiler demanding it be classified as active or terminal.
+    slAccepted, slRunning, slCancelling, slWatching, slIdle
+    slSucceeded, slFailed, slCancelled, slUnsupported, slCompleted
+    slAbandoned
+
+proc lifecycleToken(lifecycle: SessionLifecycle): string =
+  case lifecycle
+  of slAccepted: "accepted"
+  of slRunning: "running"
+  of slCancelling: "cancelling"
+  of slWatching: "watching"
+  of slIdle: "idle"
+  of slSucceeded: "succeeded"
+  of slFailed: "failed"
+  of slCancelled: "cancelled"
+  of slUnsupported: "unsupported"
+  of slCompleted: "completed"
+  of slAbandoned: AbandonedSessionState
+
+proc lifecycleIsActive(lifecycle: SessionLifecycle): bool =
+  case lifecycle
+  of slAccepted, slRunning, slCancelling, slWatching, slIdle: true
+  of slSucceeded, slFailed, slCancelled, slUnsupported, slCompleted,
+     slAbandoned: false
+
+proc parseLifecycle(state: string): Option[SessionLifecycle] =
+  for lifecycle in SessionLifecycle:
+    if lifecycleToken(lifecycle) == state:
+      return some(lifecycle)
+  none(SessionLifecycle)
+
+proc sessionStateIsActive(state: string): bool =
+  ## An UNRECOGNISED state is not active, which preserves the behaviour of
+  ## the string list this replaced. It is the direction that matters less
+  ## than it looks: an unknown state cannot arise from this binary, and the
+  ## reclamation below is gated on writer liveness rather than on the state
+  ## being understood.
+  let parsed = parseLifecycle(state)
+  parsed.isSome and lifecycleIsActive(parsed.get())
 
 proc noteSessionRecordWritten(config: UserDaemonConfig;
                               session: UserDaemonSession)
@@ -822,7 +872,8 @@ proc writeSessionRecord*(config: UserDaemonConfig; session: UserDaemonSession) =
     "debounceMs=" & $session.debounceMs & "\n" &
     "watchedPaths=" & flattenRecordSeq(session.watchedPaths) & "\n" &
     "tierState=" & flattenRecordValue(session.tierState) & "\n" &
-    "lastResult=" & flattenRecordValue(session.lastResult) & "\n")
+    "lastResult=" & flattenRecordValue(session.lastResult) & "\n" &
+    "writer=" & flattenRecordValue(session.writer) & "\n")
   noteSessionRecordWritten(config, session)
 
 proc readSessionRecord(path: string): UserDaemonSession =
@@ -863,6 +914,8 @@ proc readSessionRecord(path: string): UserDaemonSession =
       result.tierState = value
     of "lastResult":
       result.lastResult = value
+    of "writer":
+      result.writer = value
     else:
       discard
 
@@ -915,7 +968,60 @@ var activeSessionCacheDir = ""
 var activeSessionStateById = initTable[string, bool]()
 var activeSessionTally = 0
 
+proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
+  ## Rewrite every non-terminal record whose writer PROVABLY no longer exists
+  ## as `abandoned`. Returns how many were reclaimed.
+  ##
+  ## WHY THIS EXISTS. A `repro build` that is killed leaves its record
+  ## `running` forever, and nothing distinguished that from a build still in
+  ## flight. Measured on a developer machine: 19 such records, writers dead
+  ## for up to three weeks, which `restartCandidateReady` counted as live work
+  ## -- so the dev self-restart was permanently deferred and said so 949,394
+  ## times in an 82 MB log.
+  ##
+  ## WHERE IT IS CALLED FROM, AND WHERE IT MUST NOT BE. Daemon startup and the
+  ## active-tally prime, both of which happen ONCE per daemon process. NOT on
+  ## the status request path: a per-request scan is exactly the cost that was
+  ## just removed from it -- `sessions/` had grown to 2,177 records and
+  ## walking it cost 37.6 ms of every build. Reclamation reads the same
+  ## directory, so it has to be as rare as priming is.
+  ##
+  ## UNKNOWN IDENTITY IS TREATED AS LIVE. Records written before this field
+  ## existed carry no writer, and `writerLiveness` answers `wlUnknown` for
+  ## them and for anything it cannot parse or probe. Those are left alone.
+  ## That means the fix is not retroactive for pre-existing records -- which
+  ## is the correct trade: reclaiming a record whose writer might still be
+  ## running would let two builds believe they own one session, and a
+  ## lingering record only defers a restart.
+  if not dirExists(sessionRecordsDir(config)):
+    return 0
+  for kind, path in walkDir(sessionRecordsDir(config)):
+    if kind != pcFile or not path.endsWith(".session"):
+      continue
+    var session =
+      try: readSessionRecord(path)
+      except CatchableError: continue
+    if session.sessionId.len == 0 or not sessionStateIsActive(session.state):
+      continue
+    if writerLiveness(session.writer) != wlDead:
+      continue
+    session.state = AbandonedSessionState
+    session.endedAtUnix = getTime().toUnix
+    if session.message.len == 0:
+      session.message = "writer process no longer exists"
+    try:
+      writeSessionRecord(config, session)
+      inc result
+    except CatchableError:
+      # A record that cannot be rewritten stays as it was; the next daemon
+      # start tries again. Never fatal to startup.
+      discard
+
 proc primeActiveSessionTally(config: UserDaemonConfig) =
+  # Reclaim BEFORE counting, so the tally this produces already excludes
+  # records whose writers are gone. Counting first and reclaiming later would
+  # leave the first status answer of every daemon reporting phantom work.
+  discard reclaimAbandonedSessions(config)
   activeSessionStateById = initTable[string, bool]()
   activeSessionTally = 0
   for session in loadSessionRecords(config):
@@ -1210,6 +1316,7 @@ proc sessionStateAccepted(sessionId, projectRoot: string; started: Time):
     UserDaemonSession =
   UserDaemonSession(sessionId: sessionId,
     projectRoot: projectRoot, mode: "build", state: "accepted",
+    writer: encodeWriterIdentity(currentWriterIdentity()),
     startedAtUnix: started.toUnix,
     exitCode: -1,
     message: "build request accepted by repro-daemon")
@@ -1219,6 +1326,7 @@ proc watchSessionStateAccepted(sessionId, projectRoot: string; started: Time;
     UserDaemonSession =
   UserDaemonSession(sessionId: sessionId,
     projectRoot: projectRoot, mode: "watch", state: "accepted",
+    writer: encodeWriterIdentity(currentWriterIdentity()),
     startedAtUnix: started.toUnix,
     exitCode: -1,
     message: "watch request accepted by repro-daemon",
@@ -2060,6 +2168,15 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   let startedAt = getTime()
   let generation = generationFor(startedAt)
   var devRestart = initDevRestartState(config)
+  # Daemon startup: reclaim records whose writers died while no daemon was
+  # running to notice. `primeActiveSessionTally` also reclaims, but only when
+  # something first asks for the tally; doing it here means a daemon that is
+  # never asked still clears them, and means the startup log below reports a
+  # true active count.
+  let reclaimed = reclaimAbandonedSessions(config)
+  if reclaimed > 0:
+    logLine(config.logPath,
+      "reclaimed abandoned sessions count=" & $reclaimed)
   cleanupPreviousStagedGeneration(config)
   var sessions: seq[UserDaemonSession] = @[]
   writeStatusFile(config, statusFor(config, startedAt, generation,
