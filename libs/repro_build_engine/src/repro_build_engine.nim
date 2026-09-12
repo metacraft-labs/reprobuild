@@ -6041,6 +6041,24 @@ proc monitorObservedNoReads(col: EvidenceCollection): bool {.inline.} =
   ## action's own root image (`executedToolImagePath`). O(1) by construction:
   ## that entry is the FIRST thing added to the set, so a set with one element
   ## is the only one it can be alone in.
+  ##
+  ## ITS ONE BLIND SPOT, MEASURED RATHER THAN REASONED ABOUT, so that the next
+  ## reader inherits the number instead of the argument. The set is a set: when
+  ## a monitor really DID observe the action's own root image and nothing else
+  ## — a nested exec of the same image on a platform with no library-load floor
+  ## — `addUnique` collapses the observation and the reconstruction into one
+  ## entry, this returns true, and the edge is refused a publish although it
+  ## observed something. Measured on this host with a capture carrying one
+  ## `mrFileRead` of `/bin/sh` against an `argv[0]` of `/bin/sh`: no record
+  ## published, and the diagnostic told the operator to "suspect the monitor
+  ## backend", which in that case is the wrong place to look.
+  ##
+  ## It is the FAIL-CLOSED direction — a lost cache hit and a re-run, never a
+  ## stale artifact — so it is a cost, not a soundness hole, and it is not
+  ## reachable on Linux or macOS, where the loader floor puts other paths in
+  ## the set. Recorded here because a one-slot attribution cannot express "this
+  ## path is both", and the fix if it ever matters is to make the attribution
+  ## per-entry rather than to widen this predicate.
   case col.evidence.monitorReads.len
   of 0: true
   of 1:

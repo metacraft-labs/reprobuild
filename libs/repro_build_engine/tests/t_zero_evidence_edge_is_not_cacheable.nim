@@ -503,12 +503,20 @@ suite "an edge that observed nothing is not cacheable":
     # an assertion that only counted would keep passing if the observation
     # were dropped and a second engine-side entry took its place.
     #
-    # The image is FIRST, and that IS load-bearing under this design:
-    # `monitorObservedNoReads` is O(1) because it only ever has to compare
-    # `monitorReads[0]` against `engineSuppliedRootImage`, which is sound only
-    # while the fold at the head of `collectEvidence` stays the first
-    # contributor to the channel. A change that lets some other entry land
-    # ahead of it fails here.
+    # The image is FIRST, and what that pins is STRUCTURAL, not behavioural —
+    # measured, so nobody has to guess which. Moving the fold from the head of
+    # `collectEvidence` to its end, keeping `engineSuppliedRootImage`, reddens
+    # this equality and the six others like it in this file AND NOTHING ELSE:
+    # every publish, diagnostic and reuse assertion stays green, because the
+    # guard reads the attribution rather than the position. So the ordering is
+    # inert to the decision and these equalities are the only thing that says
+    # where the fold runs.
+    #
+    # They are kept for the other two things an equality says, both of which
+    # ARE load-bearing: that BOTH entries are named rather than counted, and
+    # that there is no THIRD. A second engine-side contribution to this
+    # channel is the whole defect class this file exists for, and it would sit
+    # inside a `len == 2` with room to spare.
     check r0.evidence.monitorReads == @[RootImage, f.observedPath]
     check f.runCount() == 1
     check f.hasRecord(act)
