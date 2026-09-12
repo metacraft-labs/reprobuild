@@ -10,7 +10,7 @@
 ## entirely, works everywhere it is tested and dies on the first machine
 ## that is not a developer's.
 
-import std/[os, strutils, unittest]
+import std/[strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/packaging
@@ -298,16 +298,36 @@ suite "packaging: reprobuild's own distribution":
     win.components = @[executableComponent("build/bin/repro.exe")]
     win.validate()
 
-  test "the wrapper-variable NAMES still match flake.nix":
+  test "the wrapper-variable NAMES still match the reprobuild derivation":
     # The drift guard one level up: ``ReprobuildWrapperVariables`` is
-    # already pinned against flake.nix by
+    # already pinned against the derivation by
     # t_packaging_wrapper_vars_match_flake, and this asserts the VALUES
     # list is keyed by exactly that list rather than by a second
     # transcription of it.
-    let flake = repoRootFromTest() & "/flake.nix"
-    doAssert fileExists(flake), "flake.nix not found at " & flake
-    let text = readFile(flake)
-    for (name, _) in reprobuildWrapperValues(reprobuildSample()):
+    #
+    # THE FILE IS ``package.nix``, NOT ``flake.nix``, and this case is
+    # why the reading of it is no longer written out here.
+    # Distribution-And-Packaging M4 moved the ``--set-default`` loop into
+    # the nixpkgs-format derivation; the sibling suite and
+    # ``scripts/check_repo_requirements.sh`` were repointed and this case
+    # was not, so it went red against a ``flake.nix`` that now mentions
+    # ``--set-default`` in two comments and nowhere else -- red on a
+    # contract that had not changed. Both Nim readers now go through
+    # ``packaging_test_support``, so a fourth move is one edit.
+    let text = packageNixText()
+    let values = reprobuildWrapperValues(reprobuildSample())
+    # NON-VACUITY, and it is the point rather than a nicety. What follows
+    # is a ``for`` loop over a sequence and a substring search in a file:
+    # an empty value list, or a derivation the extractor can no longer
+    # find the loop in, would make this case pass without comparing
+    # anything -- the same false green that let the missed repoint go
+    # unnoticed until the suite ran. ``packageNixWrapperVariables``
+    # asserts its own non-emptiness too; it is restated here because it
+    # is THIS case's precondition and a reader should not have to go and
+    # look somewhere else to find that out.
+    check values.len > 0
+    check packageNixWrapperVariables().len > 0
+    for (name, _) in values:
       check text.contains("--set-default " & name & " ")
 
   test "the reprobuild tree stages through the ordinary layer":

@@ -10,37 +10,106 @@
 # `compiler/nim.nim` directly. The fork compiler itself imports the CodeTracer
 # trace-writer + stew + results, so those three are vendored under `dist/`
 # exactly where `config/nim.cfg` expects them (`$nim/dist/...`).
+#
+# THIS IS A PRIVATE HELPER of `pkgs/by-name/re/reprobuild/package.nix`, not a
+# top-level nixpkgs attribute: nixpkgs' by-name resolver auto-exposes only
+# `package.nix`, and any other `.nix` file in the directory is reached through
+# an explicit `callPackage ./nim-fork.nix { }` from it.
+#
+# It is ALSO the file reprobuild's own `flake.nix` builds `packages.nim-fork`
+# from, with every `*Src` argument overridden by the corresponding flake input.
+# One derivation, two source-provisioning strategies — there is no second copy
+# of this build to drift against.
 {
-  pkgs,
-  forkSrc,
-  csourcesSrc,
-  traceFormatSrc,
-  stewSrc,
-  resultsSrc,
-  checksumsSrc,
-  nimonySrc,
+  lib,
+  stdenv,
+  fetchFromGitHub,
+  gcc,
+  gnumake,
+  which,
+  patchelf,
+  zstd,
+  pcre,
+  openssl,
+
+  # ── Source pins ────────────────────────────────────────────────────────────
+  # Defaults are ordinary nixpkgs fixed-output fetches, so a nixpkgs consumer
+  # needs no flake plumbing. reprobuild's flake passes its own inputs here.
+  # Keep every default in step with the corresponding `flake.lock` entry; the
+  # `hash` is the fetched tree's NAR hash (set it to `lib.fakeHash` and copy the
+  # `got:` line from the resulting build failure when bumping a rev).
+  forkSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "nim";
+    rev = "0b5b5ec507d2d9c731d222184c625851377a02c8";
+    hash = "sha256-0E1OGS2qRaKobiq2ZGi+nD2djgoLrqXApJzGmRGAFt0=";
+  },
+  csourcesSrc ? fetchFromGitHub {
+    owner = "nim-lang";
+    repo = "csources_v3";
+    rev = "eeab3ac46e93f10efda8e58c4db02b9438319d71";
+    hash = "sha256-pTcm2y+HDOuTol8DyoJMOMHsUA6QrgwGdfcOu1NX4PU=";
+  },
+  traceFormatSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "codetracer-trace-format-nim";
+    rev = "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
+    hash = "sha256-feW0vlgU6JTVkCLnZ1iyS2FwjXQuRCXHr3V+27oyDAw=";
+  },
+  stewSrc ? fetchFromGitHub {
+    owner = "status-im";
+    repo = "nim-stew";
+    rev = "83eb1157963b7f49351dbdd858355fa990bbe23c";
+    hash = "sha256-KcxneFNUxFRcJGgOIRIcMDPy/Z9JelKpvDSfhnkQ6IA=";
+  },
+  resultsSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "nim-result";
+    rev = "df8113dda4c2d74d460a8fa98252b0b771bf1f27";
+    hash = "sha256-KbNqt0FMuzDF4X+XM6JEaZJBypLDnvVPpnBpE7Sq6sA=";
+  },
+  checksumsSrc ? fetchFromGitHub {
+    owner = "nim-lang";
+    repo = "checksums";
+    rev = "0b8e46379c5bc1bf73d8b3011908389c60fb9b98";
+    hash = "sha256-xC11sD13OTMMUY4F5CrF1XxKSigLtIPt2XQCcQOFNdM=";
+  },
+  nimonySrc ? fetchFromGitHub {
+    owner = "nim-lang";
+    repo = "nimony";
+    rev = "bbfb21529845567c55b67d176354daef0e7d6c29";
+    hash = "sha256-x7dvzyVW+fA5QkDVrjpnjQB/A3lYekO8HqczrVBUxG8=";
+  },
 }:
-pkgs.stdenv.mkDerivation {
+let
+  runtimeLibs = [
+    zstd
+    pcre
+    openssl
+    stdenv.cc.cc.lib
+  ];
+in
+stdenv.mkDerivation {
   pname = "nim-fork";
   version = "2.3.1-codetracer";
   src = forkSrc;
 
   nativeBuildInputs = [
-    pkgs.gcc
-    pkgs.gnumake
-    pkgs.which
+    gcc
+    gnumake
+    which
   ]
   # patchelf is only used to fix up the ELF RUNPATH on Linux (see installPhase);
   # on Darwin the compiler is a Mach-O binary and stdenv's own install_name
   # fixup handles library references, so patchelf is neither available nor needed.
-  ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.patchelf];
+  ++ lib.optionals stdenv.hostPlatform.isLinux [ patchelf ];
   # zstd is a link-time requirement of the fork compiler (CTFS-M1 trace writer);
   # pcre/openssl are pulled in for the compiler's runtime dlopen safety.
   buildInputs = [
-    pkgs.zstd
-    pkgs.zstd.dev
-    pkgs.pcre
-    pkgs.openssl
+    zstd
+    zstd.dev
+    pcre
+    openssl
   ];
 
   dontConfigure = true;
@@ -56,7 +125,7 @@ pkgs.stdenv.mkDerivation {
   # installPhase (leaving `nim` unable to load libpcre). Disable the auto-patchelf
   # so our explicit --set-rpath survives. This is an ELF-only concern; on Darwin
   # the analogous fixup is stdenv's install_name pass, which we want to run.
-  dontPatchELF = pkgs.stdenv.hostPlatform.isLinux;
+  dontPatchELF = stdenv.hostPlatform.isLinux;
 
   buildPhase = ''
     runHook preBuild
@@ -120,8 +189,8 @@ pkgs.stdenv.mkDerivation {
     ./bin/nim c -d:release -d:nimKochBootstrap \
       --skipUserCfg --skipParentCfg --noNimblePath \
       --warning:BareExcept:off --warning:UnusedImport:off \
-      --passC:-I${pkgs.zstd.dev}/include \
-      --passL:-L${pkgs.zstd.out}/lib \
+      --passC:-I${zstd.dev}/include \
+      --passL:-L${zstd.out}/lib \
       -o:bin/nim compiler/nim.nim
     # NB: do not run the freshly-built `bin/nim` here — it dlopens libpcre at
     # startup and is not RPATH-wrapped until installPhase, so it would fail in
@@ -136,41 +205,27 @@ pkgs.stdenv.mkDerivation {
     # Ship a faithful Nim installation tree: the compiler + stdlib + config +
     # the vendored dist/ deps that config/nim.cfg references on every compile.
     cp -r bin lib config dist "$out/"
-    ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+    ${lib.optionalString stdenv.hostPlatform.isLinux ''
       # Linux: nim dlopens libpcre/libzstd by soname, so bake the store lib dirs
       # into the compiler's RUNPATH (dontPatchELF above keeps this from being
       # shrunk away).
-      patchelf --set-rpath "${
-        pkgs.lib.makeLibraryPath [
-          pkgs.zstd
-          pkgs.pcre
-          pkgs.openssl
-          pkgs.stdenv.cc.cc.lib
-        ]
-      }" "$out/bin/nim"
+      patchelf --set-rpath "${lib.makeLibraryPath runtimeLibs}" "$out/bin/nim"
       # Same treatment for the fork-built nimpretty: `dontPatchELF` is on for
       # Linux, so nothing else will give it a RUNPATH, and it links the same
       # compiler modules `nim` does.
-      patchelf --set-rpath "${
-        pkgs.lib.makeLibraryPath [
-          pkgs.zstd
-          pkgs.pcre
-          pkgs.openssl
-          pkgs.stdenv.cc.cc.lib
-        ]
-      }" "$out/bin/nimpretty"
+      patchelf --set-rpath "${lib.makeLibraryPath runtimeLibs}" "$out/bin/nimpretty"
     ''}
-    ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+    ${lib.optionalString stdenv.hostPlatform.isDarwin ''
       # Darwin: the Mach-O equivalent — add each dependency's store lib dir as an
       # LC_RPATH entry so any @rpath-relative dylib references resolve. (Bare
       # `dlopen("libpcre")` calls also consult these rpaths on macOS.) Use
       # `getLib` for the same output selection as the Linux makeLibraryPath above,
       # so we point at each package's `lib` output rather than its default one.
       for libdir in ${
-        pkgs.lib.concatMapStringsSep " " (p: "${pkgs.lib.getLib p}/lib") [
-          pkgs.zstd
-          pkgs.pcre
-          pkgs.openssl
+        lib.concatMapStringsSep " " (p: "${lib.getLib p}/lib") [
+          zstd
+          pcre
+          openssl
         ]
       }; do
         install_name_tool -add_rpath "$libdir" "$out/bin/nim" || true
@@ -184,10 +239,12 @@ pkgs.stdenv.mkDerivation {
 
   meta = {
     description = "metacraft-labs/nim fork (Nim 2.3.1 devel) — reprobuild toolchain";
+    homepage = "https://github.com/metacraft-labs/nim";
+    license = lib.licenses.mit;
     # Linux + Darwin: the build is portable (koch-boot-free), and the ELF-only
     # RUNPATH fixup in installPhase is guarded to Linux with a Mach-O rpath
     # equivalent on Darwin. Not BSD (untested), so this is narrower than
     # `platforms.unix`.
-    platforms = pkgs.lib.platforms.linux ++ pkgs.lib.platforms.darwin;
+    platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };
 }

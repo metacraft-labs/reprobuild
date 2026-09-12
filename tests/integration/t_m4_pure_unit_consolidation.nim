@@ -23,12 +23,24 @@
 ##     bundle without dropping it from the ledger turns this red; so does a
 ##     bundle whose binary is not smaller than the members it replaced.
 ##   * ``test_consolidation_preserves_selection_names`` — every ``suite::test``
-##     selector that addressed a case before the move still addresses it, with
-##     the same suite. Renaming a member's ``suite`` turns this red even though
-##     the case still runs, which is the whole point: the fork's
-##     ``std/unittest`` matches the full ``suite::test`` form only (verified
-##     below by the negative controls), so a changed suite name is a broken
-##     selector, not a cosmetic edit.
+##     selector that addressed a case before the move still addresses one now,
+##     under the suite it is written against. Renaming a member's ``suite``
+##     turns this red even though the case still runs, which is the whole
+##     point: the fork's ``std/unittest`` matches the full ``suite::test``
+##     form only (verified below by the negative controls), so a changed suite
+##     name is a broken selector, not a cosmetic edit.
+##
+##     A rename can be HONEST, though, and then putting the old name back is
+##     the wrong repair: it returns a false statement to the source to keep a
+##     checker quiet. ``compatibilityAliases`` in a ledger is the right one.
+##     It redirects one recorded ``suite::test`` selector to the
+##     ``suite::test`` selector that addresses the same case today — suite
+##     half included, so a suite rename, a case rename and a rename of both
+##     are one entry each. What it is NOT is an exemption. A rename with no
+##     entry is still red; an entry whose target names no case is red; an
+##     entry that matches no recorded selector is red. What this file asserts
+##     is that every selector a ledger recorded still resolves to a case that
+##     exists — not that names never change.
 ##
 ## The two sides of "no case was lost"
 ## -----------------------------------
@@ -179,6 +191,69 @@ proc ledgerMemberNames(bundle: JsonNode): seq[string] =
     for name in member["cases"]:
       result.add(name.getStr())
 
+# HISTORIC SELECTOR -> THE SELECTOR THAT ADDRESSES IT NOW, declared in the
+# ledgers and nowhere else.
+#
+# Both sides are full ``suite::test`` selectors, and that IS the schema — it
+# is why there is no second, suite-level table. The suite half is already in
+# the string on both sides, so a suite rename, a case rename, and a rename of
+# both are one entry each, spelled the same way. A parallel suite-alias map
+# could not express the third at all without being joined back to the case
+# map, which is to say without being this.
+#
+# Nothing about the shape changes here: the keys have always been matched
+# against the names a ledger recorded from a member's own standalone binary,
+# and the values have always been looked up in the bundle binary's
+# ``--list-json`` catalog, whose ``name`` field is the same ``suite::test``
+# form. Neither side ever held a bare case name. What changed is that the
+# suite the selector is checked against is now read off the EFFECTIVE
+# selector instead of the historic one; see the third case below.
+let compatibilityAliases = block:
+  var acc = initTable[string, string]()
+  for ledger in ledgers:
+    if not ledger.hasKey("compatibilityAliases"):
+      continue
+    for key, value in ledger["compatibilityAliases"]:
+      let target = value.getStr()
+      # WELL-FORMEDNESS, asserted where the entry is read rather than
+      # discovered later as a confusing miss. A bare case name on the key
+      # side would silently match nothing at all; on the value side it cannot
+      # name anything a binary catalogs.
+      doAssert key.contains("::"),
+        "compatibilityAliases key `" & key & "` is not a `suite::test` " &
+        "selector. An alias redirects a fully qualified selector, because " &
+        "the suite half is the half a move changes silently."
+      doAssert target.contains("::"),
+        "compatibilityAliases entry `" & key & "` points at `" & target &
+        "`, which is not a `suite::test` selector."
+      doAssert key != target,
+        "compatibilityAliases entry `" & key & "` redirects to itself. A " &
+        "no-op entry reads like a declared rename and declares nothing."
+      doAssert (not acc.hasKey(key)) or acc[key] == target,
+        "compatibilityAliases declares `" & key & "` twice, pointing at `" &
+        acc.getOrDefault(key) & "` and at `" & target & "`."
+      acc[key] = target
+  acc
+
+proc resolveSelector(historic: string): string =
+  ## The selector that addresses today what `historic` addressed when a
+  ## ledger recorded it. An unaliased selector resolves to ITSELF, which is
+  ## what keeps every assertion downstream exactly as strict as it was: a
+  ## rename nobody declared is compared against the name nobody changed, and
+  ## goes red.
+  if compatibilityAliases.hasKey(historic): compatibilityAliases[historic]
+  else: historic
+
+proc ledgerMemberSelectors(bundle: JsonNode):
+    seq[tuple[historic, current: string]] =
+  ## Every selector this bundle's ledger entry recorded, paired with the one
+  ## it resolves to now.
+  result = @[]
+  for member in bundle["members"]:
+    for name in member["cases"]:
+      let historic = name.getStr()
+      result.add((historic: historic, current: resolveSelector(historic)))
+
 proc staticCaseCounts(): Table[string, int] =
   ## source path -> case count, from the separately gated static table.
   result = initTable[string, int]()
@@ -219,7 +294,16 @@ suite "M4 pure-unit consolidation":
 
       let doc = listJson(binary)
       var enumerated = catalogNames(doc)
-      var expected = ledgerMemberNames(bundle)
+      # RESOLVED, not raw. A recorded selector whose suite or case was
+      # honestly renamed is redirected by an explicit `compatibilityAliases`
+      # entry; one that was not stays exactly as recorded, so an undeclared
+      # rename still lands in `missing` below and an alias buys nothing it
+      # did not say out loud.
+      let selectors = ledgerMemberSelectors(bundle)
+      var historicOf = initTable[string, string]()
+      for pair in selectors:
+        historicOf[pair.current] = pair.historic
+      var expected = selectors.mapIt(it.current)
       enumerated.sort()
       expected.sort()
 
@@ -227,11 +311,23 @@ suite "M4 pure-unit consolidation":
       let extra = enumerated.filterIt(it notin expected.toHashSet)
 
       # THE LOSS DETECTOR, and it is exact. Every case name the ledger read
-      # out of a member's own standalone binary must still enumerate here.
+      # out of a member's own standalone binary must still enumerate here —
+      # under that name, or under the one an alias explicitly redirects it
+      # to. An alias whose target the catalog does not carry lands here too,
+      # and is named as an alias: a redirection that points nowhere is as
+      # broken as the stale selector it was written to fix.
       check missing.len == 0
       if missing.len > 0:
+        var described: seq[string] = @[]
+        for name in missing:
+          let historic = historicOf.getOrDefault(name, name)
+          if historic == name:
+            described.add(name)
+          else:
+            described.add(name & " (the alias target of `" & historic &
+              "`; the ALIAS is stale — its target names no case here)")
         checkpoint(bundle["name"].getStr() & " lost " & $missing.len &
-          " case(s): " & missing.join(", "))
+          " case(s): " & described.join(", "))
 
       # EXTRA CASES ARE ATTRIBUTED, NOT FORBIDDEN.
       #
@@ -326,7 +422,7 @@ suite "M4 pure-unit consolidation":
     # NEGATIVE CONTROLS. Without these the exit-code assertions above prove
     # nothing: they would be satisfied by a `--run` that exits 0 for anything.
     let probe = bundleBinary(allBundles()[0])
-    let anchor = ledgerMemberNames(allBundles()[0])[0]
+    let anchor = ledgerMemberSelectors(allBundles()[0])[0].current
     check runOne(probe, "no such suite::no such test") != 0
     let bare = anchor[(anchor.find("::") + 2) .. ^1]
     check runOne(probe, bare) != 0
@@ -542,13 +638,8 @@ suite "M4 pure-unit consolidation":
     # Every selector that worked before the move still works, and still names
     # the same suite. The ledger's per-member case list is the "before": it was
     # read from that member's own binary while it still had one.
-    var aliases = initTable[string, string]()
-    for ledger in ledgers:
-      if ledger.hasKey("compatibilityAliases"):
-        for key, value in ledger["compatibilityAliases"]:
-          aliases[key] = value.getStr()
-
     var preserved = 0
+    var usedAliases = initHashSet[string]()
     for bundle in allBundles():
       let binary = bundleBinary(bundle)
       requireBuilt(binary)
@@ -558,26 +649,74 @@ suite "M4 pure-unit consolidation":
       for member in bundle["members"]:
         for entry in member["cases"]:
           let historic = entry.getStr()
-          let current =
-            if aliases.hasKey(historic): aliases[historic] else: historic
+          let current = resolveSelector(historic)
+          let aliased = current != historic
+          if aliased:
+            usedAliases.incl(historic)
           check suites.hasKey(current)
           if not suites.hasKey(current):
-            checkpoint("selector `" & historic & "` from " &
-              member["source"].getStr() & " no longer names a case in " &
-              bundle["name"].getStr() &
-              ". A renamed suite is a broken selector even when the case " &
-              "still runs; give it an explicit `compatibilityAliases` entry " &
-              "or restore the name.")
+            if aliased:
+              # A STALE ALIAS IS LOUDER THAN A STALE SELECTOR, not quieter.
+              # The entry claims a redirection the catalog does not honour,
+              # so the selector it was written to rescue is unprotected and
+              # was being reported as rescued.
+              checkpoint("the `compatibilityAliases` entry for `" & historic &
+                "` from " & member["source"].getStr() & " redirects to `" &
+                current & "`, which names no case in " &
+                bundle["name"].getStr() & ". An alias is a redirection, " &
+                "not an exemption: point it at the case that exists, or " &
+                "drop it and let the selector be checked as recorded.")
+            else:
+              checkpoint("selector `" & historic & "` from " &
+                member["source"].getStr() & " no longer names a case in " &
+                bundle["name"].getStr() &
+                ". A renamed suite is a broken selector even when the case " &
+                "still runs; give it an explicit `compatibilityAliases` " &
+                "entry naming the suite AND the case it moved to, or " &
+                "restore the name.")
             continue
           # The suite half of the selector is the half a move can silently
           # change, so it is asserted on its own rather than left implied by
           # the joined name.
-          let historicSuite = historic[0 ..< historic.find("::")]
-          check suites[current] == historicSuite
+          #
+          # AGAINST THE EFFECTIVE SELECTOR, and that is the whole of what
+          # makes an honest suite rename declarable. For an unaliased
+          # selector `current` IS `historic`, so this is byte-for-byte the
+          # assertion it always was, and an undeclared suite rename never
+          # even reaches it — `suites.hasKey(current)` above has already
+          # failed. For an aliased one it holds the entry to its own word:
+          # the suite the entry names must be the suite the binary reports
+          # for that case, so an entry cannot redirect a selector onto a real
+          # case while mis-stating where that case now lives.
+          let expectedSuite = current[0 ..< current.find("::")]
+          check suites[current] == expectedSuite
+          if suites[current] != expectedSuite:
+            checkpoint("`" & current & "` is catalogued under suite `" &
+              suites[current] & "`, not `" & expectedSuite &
+              "`, which is the suite half of the selector this file " &
+              "checked it under.")
           inc preserved
 
     check preserved >= 1
-    checkpoint("preserved " & $preserved & " suite::test selectors")
+    checkpoint("preserved " & $preserved & " suite::test selectors (" &
+      $usedAliases.len & " of them through an explicit alias)")
+
+    # AN ALIAS THAT REDIRECTS NOTHING IS ITSELF STALE. Entries are keyed by
+    # selectors the ledgers recorded, so an entry matching no recorded
+    # selector is either a typo — in which case the selector it was meant to
+    # rescue is going unchecked under its own name, and this file would
+    # otherwise report that as fine — or the residue of a member that left.
+    # Either way it is a claim about this tree that this tree does not bear
+    # out, and those go red here like everything else in this file.
+    var deadAliases: seq[string] = @[]
+    for key, target in compatibilityAliases:
+      if key notin usedAliases:
+        deadAliases.add("`" & key & "` -> `" & target & "`")
+    check deadAliases.len == 0
+    if deadAliases.len > 0:
+      checkpoint($deadAliases.len & " `compatibilityAliases` entries match " &
+        "no selector any ledger records: " & deadAliases.join(", ") &
+        ". A redirection nothing follows is not a redirection.")
 
     # The membership table is the human decision point; if it stops agreeing
     # with the ledger, the ledger is describing a batch that is no longer the

@@ -10,8 +10,9 @@
 #
 # THE NIM ARM USED TO BE A SILENT NO-OP. It was guarded by
 # `command -v nimpretty`, and no nimpretty was reachable: the dev shell's Nim
-# is the 2.3.1 fork built by nix/nim-fork.nix, whose `bin/` shipped `nim`,
-# `nim-gdb` and `nim-gdb.bat` and nothing else. So `just format` — a command
+# is the 2.3.1 fork built by nix/pkgs/by-name/re/reprobuild/nim-fork.nix,
+# whose `bin/` shipped `nim`, `nim-gdb` and `nim-gdb.bat` and nothing
+# else. So `just format` — a command
 # CLAUDE.md documents — formatted `flake.nix`, exited 0, and touched ZERO Nim
 # files. A formatter that reports success without running is worse than no
 # formatter, because the next reader concludes the tree is formatted.
@@ -44,8 +45,9 @@ cd "$REPO_ROOT"
 
 if ! command -v nimpretty >/dev/null 2>&1; then
   echo "format_sources.sh: nimpretty not found on PATH." >&2
-  echo "  It is part of reprobuild's Nim toolchain (nix/nim-fork.nix builds it" >&2
-  echo "  from the fork so the formatter and the compiler share a parser)." >&2
+  echo "  It is part of reprobuild's Nim toolchain" >&2
+  echo "  (nix/pkgs/by-name/re/reprobuild/nim-fork.nix builds it from the" >&2
+  echo "  fork so the formatter and the compiler share a parser)." >&2
   echo "  Enter the dev shell:  nix develop . -c just format" >&2
   exit 1
 fi
