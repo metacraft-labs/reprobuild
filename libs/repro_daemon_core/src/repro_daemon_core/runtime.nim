@@ -144,7 +144,11 @@ type
     when defined(windows):
       handle: Handle
 
-  DevRestartState = object
+  DevRestartState* = object
+    ## Exported, with `deferralLogDue`, for
+    ## `t_daemon_deferral_log_is_bounded.nim`: the invariant under test is
+    ## about how the window state evolves across polls, and the clock is a
+    ## parameter so the test needs no daemon and no filesystem.
     enabled: bool
     sourceImagePath: string
     runningImagePath: string
@@ -169,10 +173,13 @@ type
     # Backoff for the OTHER per-pass disk scan in ``restartCandidateReady``:
     # the active-session census that decides whether a ready restart may
     # proceed. Re-asked on the stability cadence rather than the poll
-    # cadence, with the last answer remembered so an unchanged deferral is
-    # logged once instead of every pass.
+    # cadence, and its LOGGING is bounded by a time window rather than by
+    # "did the answer change" -- see `deferralLogDue`.
     deferredUntilMs: int64
-    deferredActive: int
+    deferredLogAtMs*: int64
+      ## When the last deferral line was emitted. Zero means "not currently
+      ## deferring", which is what makes entry into deferral loggable.
+    deferralPollsSuppressed*: int
 
 const UserDaemonLockFileName = ".repro-daemon.lock"
 
@@ -1800,6 +1807,65 @@ proc devRestartStableMs(): int64 =
   except ValueError:
     750
 
+proc devRestartDeferralLogWindowMs*(): int64 =
+  ## How often a CONTINUING deferral may restate itself.
+  ##
+  ## 60 s, against a 250 ms poll, so a permanently deferred restart costs
+  ## about 60 lines an hour instead of 14,400.
+  try:
+    max(1_000, parseInt(getEnv("REPRO_DAEMON_DEFERRAL_LOG_MS", "60000")))
+  except ValueError:
+    60_000
+
+proc deferralLogDue*(state: var DevRestartState; nowMs: int64;
+                     windowMs: int64): bool =
+  ## Should this deferral poll emit a line? Maintains the window state.
+  ##
+  ## WHAT THIS REPLACED, AND AN UNEXPLAINED FLOOD IT DOES NOT EXPLAIN. The
+  ## previous guard logged only when the active count CHANGED. It is present
+  ## in the history, correct in isolation, and a developer machine still
+  ## accumulated 949,394 `dev restart deferred` lines -- 93% of an 82 MB
+  ## daemon log.
+  ##
+  ## Do not repeat either of the two stories that were offered for that and
+  ## withdrawn; both were checked and are false.
+  ##
+  ## * NOT oscillation. Collapsing consecutive runs gives ONE run of 948,900
+  ##   identical consecutive `active-sessions=4` lines. A change-detector
+  ##   would have suppressed 948,899 of them.
+  ## * NOT competing daemon generations. The flood is confined to
+  ##   2026-09-05..08 at ~280,000 lines a day, and the log records ZERO
+  ##   daemon starts on the 5th, 6th and 7th. It was one long-lived process.
+  ##
+  ## What the evidence does say, and where it stops: ~3.2 lines a second is
+  ## the 250 ms poll cadence, and it EXCEEDS what `deferredUntilMs` alone
+  ## should allow (one pass per 750 ms), so during that window neither the
+  ## change guard nor the stability throttle was taking effect -- consistent
+  ## with `DevRestartState` mutations not persisting across polls in that
+  ## process. No commit touched this library in that window, so it was not a
+  ## code change, and the mechanism is NOT identified. Before and after,
+  ## including now, the rate is 8-518 lines a day.
+  ##
+  ## SO BE HONEST ABOUT WHAT THIS WINDOW BUYS. It is a strictly tighter bound
+  ## than change-detection: it holds under oscillation, and it holds when
+  ## several writers share a log, neither of which a per-generation memory
+  ## survives. It does NOT help if the real cause is state that fails to
+  ## persist, because it keeps its own state the same way. That possibility
+  ## is open and is the more useful finding if it is ever confirmed.
+  ##
+  ## Entry into deferral always logs -- that transition is the event worth
+  ## seeing -- and a continuing deferral restates itself once per window
+  ## carrying the number of polls it stayed quiet for, so the suppression is
+  ## visible in the log rather than inferred from its absence.
+  ##
+  ## NOT ROTATION. Rotation would have bounded the file and hidden the cause:
+  ## the 82 MB was the symptom that made 19 session records stuck in
+  ## `state=running` findable at all.
+  if state.deferredLogAtMs == 0 or nowMs - state.deferredLogAtMs >= windowMs:
+    state.deferredLogAtMs = nowMs
+    return true
+  false
+
 proc restartCandidateReady(config: UserDaemonConfig;
                            state: var DevRestartState): bool =
   if not state.enabled or state.sourceImagePath.len == 0 or
@@ -1860,11 +1926,29 @@ proc restartCandidateReady(config: UserDaemonConfig;
     # answer changes, so a permanently-deferred restart is stated once
     # instead of flooding the log.
     state.deferredUntilMs = nowMs + devRestartStableMs()
-    if active != state.deferredActive:
-      state.deferredActive = active
-      logLine(config.logPath, "dev restart deferred active-sessions=" & $active)
+    if state.deferralLogDue(nowMs, devRestartDeferralLogWindowMs()):
+      let suppressed = state.deferralPollsSuppressed
+      state.deferralPollsSuppressed = 0
+      if suppressed == 0:
+        logLine(config.logPath,
+          "dev restart deferred active-sessions=" & $active)
+      else:
+        logLine(config.logPath,
+          "dev restart still deferred active-sessions=" & $active &
+            " (" & $suppressed & " polls suppressed)")
+    else:
+      inc state.deferralPollsSuppressed
     return false
-  state.deferredActive = 0
+  if state.deferredLogAtMs != 0:
+    # Log the RESOLUTION as well. Without it a bounded log shows a deferral
+    # starting and never ending, which reads worse than the flood did: the
+    # reader cannot tell an ongoing deferral from one that cleared.
+    logLine(config.logPath, "dev restart no longer deferred" &
+      (if state.deferralPollsSuppressed > 0:
+         " (" & $state.deferralPollsSuppressed & " polls suppressed)"
+       else: ""))
+  state.deferredLogAtMs = 0
+  state.deferralPollsSuppressed = 0
   true
 
 proc daemonProcessArgs(config: UserDaemonConfig): seq[string]
