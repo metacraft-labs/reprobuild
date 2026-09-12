@@ -406,21 +406,24 @@ const
     ## producer's evidence could be believed.
     ##
     ## WHAT IS UNTRUSTED. Starting 2026-09-02 03:44 the engine seeded an
-    ## observed-evidence channel from its own bookkeeping BEFORE asking whether
-    ## the monitor had observed anything: `foldLauncherRootImage` put the
-    ## action's own `argv[0]`, a path the launcher RECONSTRUCTS, into
-    ## `monitorReads`. That made the guard which refuses to publish a record
-    ## from an action that observed nothing unreachable for every action whose
-    ## image resolves -- which is the same set of actions the guard protects.
-    ## Measured: a capture holding one process-start record and nothing else
-    ## published, and the engine then took a cache hit on that record and did
-    ## not run the action.
+    ## observed-evidence channel from its own bookkeeping and then asked the
+    ## guard whether the monitor had observed anything WITHOUT distinguishing
+    ## the two: `collectEvidence`'s root-image fold put the action's own
+    ## `argv[0]`, a path the launcher RECONSTRUCTS, into `monitorReads`, and the
+    ## guard tested that set for emptiness. That made the check which refuses to
+    ## publish a record from an action that observed nothing unreachable for
+    ## every action whose image resolves -- which is the same set of actions the
+    ## check protects. Measured: a capture holding one process-start record and
+    ## nothing else published, and the engine then took a cache hit on that
+    ## record and did not run the action.
     ##
-    ## The commit that reorders the fold after the guard is the one introducing
-    ## this constant, so EVERY record version that existed before it -- 2, 3, 4
-    ## and 5 alike -- was written by a binary whose guard was dead. Version 5 is
-    ## not a safe floor merely because it is the newest: it landed 2026-09-09,
-    ## a week INTO the window, for an unrelated path-interning change. The first
+    ## The guard was re-armed by `engineSuppliedRootImage` /
+    ## `monitorObservedNoReads` (b43238d2), which record the engine's own
+    ## contribution separately so the guard can ask about observations alone.
+    ## EVERY record version that existed before that point -- 2, 3, 4 and 5
+    ## alike -- was written by a binary whose guard was dead. Version 5 is not a
+    ## safe floor merely because it is the newest: it landed 2026-09-09, a week
+    ## INTO the window, for an unrelated path-interning change. The first
     ## trustworthy version is this one.
     ##
     ## WHY AN EPOCH AND NOT A PREDICATE THAT RECOGNISES THE BAD RECORDS.

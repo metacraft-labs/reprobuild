@@ -123,7 +123,7 @@ suite "install mirror tool metadata":
     when defined(linux):
       for name in ["find", "head", "od", "tr", "sort", "grep",
                    "dirname", "basename", "wc", "patchelf", "readlink",
-                   "mktemp", "mv"]:
+                   "mktemp", "mv", "readelf"]:
         let uses = iface.toolUses.filterIt(it.executableName == name)
         check uses.len == 1
         if uses.len == 1:

@@ -111,13 +111,15 @@ const ReuseDecisions = {cdHit, cdHybridCutoff}
 const RootImage = "/bin/sh"
   ## The DEFAULT `argv[0]` for the edges below, and therefore the path the
   ## LAUNCHER contributes
-  ## through `foldLauncherRootImage` — the action's own root image, which no
-  ## monitor record can supply. It is in `monitorReads` of every edge here and
-  ## is named rather than counted, so that a change to what the engine folds
-  ## from its own bookkeeping fails on the IDENTITY of the extra entry instead
-  ## of being absorbed by moving a number. What must NOT change silently is
-  ## that this contribution cannot answer "did the monitor observe anything?";
-  ## the first test below is what holds that.
+  ## through `collectEvidence`'s root-image fold — the action's own root image,
+  ## which no monitor record can supply, and which the engine also records
+  ## under `EvidenceCollection.engineSuppliedRootImage` so that the guard can
+  ## tell it apart from an observation. It is in `monitorReads` of every
+  ## `MonitorPolicyKinds` edge here and is named rather than counted, so that a
+  ## change to what the engine folds from its own bookkeeping fails on the
+  ## IDENTITY of the extra entry instead of being absorbed by moving a number.
+  ## What must NOT change silently is that this contribution cannot answer "did
+  ## the monitor observe anything?"; the first test below is what holds that.
   ##
   ## It is `/bin/sh` rather than a `/nix/store` path for a second reason the
   ## final suite in this file depends on: `/bin/sh` lies under no
@@ -288,8 +290,8 @@ proc iomonReportEdge(f: Fixture; id: string;
   ## `IomonFormatName` report end to end — `iomonReportPolicy` has call sites
   ## in the DSL and none in any test that builds — so that arm's Level 0-3
   ## handling, the zero-evidence guard included, was graded by nothing at all.
-  ## The claim that the launcher's root-image fold runs after "every"
-  ## `applyMonitorEvidenceStatus` call was therefore only half checkable.
+  ## The claim that the guard is armed at "every" `applyMonitorEvidenceStatus`
+  ## call site was therefore only half checkable.
   ##
   ## The policy is spelled out here rather than imported because the
   ## constructor that builds it (`iomonReportGatheringPolicy`) is private to
@@ -297,9 +299,10 @@ proc iomonReportEdge(f: Fixture; id: string;
   ## same constant the engine routes on.
   ##
   ## Note also what this edge does NOT get: its policy is not in
-  ## `MonitorPolicyKinds`, so `foldLauncherRootImage` contributes nothing to
-  ## it. Its `monitorReads` is exactly what the capture said, which is what
-  ## makes the assertions below able to name the whole set.
+  ## `MonitorPolicyKinds`, so the root-image fold contributes nothing to it
+  ## and `engineSuppliedRootImage` stays empty. Its `monitorReads` is exactly
+  ## what the capture said, which is what makes the assertions below able to
+  ## name the whole set.
   result = action(id,
     [rootImage, "-c", "echo ran >> " & f.runLogPath],
     cwd = f.workRoot,
@@ -327,14 +330,14 @@ proc reportValidatedByMonitorEdge(f: Fixture; id: string;
   ##
   ## WHY THAT GAP WAS LOAD-BEARING RATHER THAN COSMETIC. `runEdge` above is
   ## `dgAutomaticMonitor`; the recognized-report suite is `dgRecognizedFormat`,
-  ## which is NOT in `MonitorPolicyKinds` at all, so `foldLauncherRootImage`
+  ## which is NOT in `MonitorPolicyKinds` at all, so the root-image fold
   ## contributes nothing to it. Between them they left both "validated by
   ## monitor" kinds — the two policies that carry a monitor capture AND an
   ## author-declared report — with the launcher fold ACTIVE and the guard
-  ## UNGRADED. Measured: re-seeding `monitorReads` with the root image before
-  ## `applyMonitorEvidenceStatus` for exactly these two kinds reopens the
-  ## defect this file is about for two thirds of the monitored policy set, and
-  ## every case in this file stayed green.
+  ## UNGRADED. Measured: making `monitorObservedNoReads` answer `false`
+  ## whenever the set is non-empty — the original defect, narrowed to exactly
+  ## these two kinds — reopens the hole this file is about for two thirds of
+  ## the monitored policy set, and every case in this file stayed green.
   ##
   ## The declared report is a make depfile naming a target and NO
   ## prerequisites, so `depfileInputs` stays empty and the only thing that can
@@ -439,17 +442,22 @@ suite "an edge that observed nothing is not cacheable":
     check r0.launched
     check f.runCount() == 1
 
-    # Denominator: the OBSERVED evidence really is empty, or the
-    # assertions below would be about something else entirely.
+    # Denominator: the MONITOR really observed nothing, or the assertions
+    # below would be about something else entirely.
     #
-    # `monitorReads` is not empty and must not be: it carries the one path
-    # the LAUNCHER contributes, the action's own root image. That entry is a
-    # reconstruction from `argv[0]`, not something the monitor saw, and it is
-    # present for every action whose image resolves — so it is named here,
-    # exactly, rather than budgeted for by a bumped count. If the engine ever
-    # answers "the monitor observed something" with an entry of its own again,
-    # this equality fails on the identity of the entry, and the publish
-    # assertions below fail with it.
+    # The read SET is not empty, and asserting that it is would be asserting
+    # the wrong property. `collectEvidence` folds exactly one entry no monitor
+    # reported — the action's own root image, which `executedToolImagePath`
+    # reconstructs from `argv` precisely because the launcher's exec precedes
+    # the shim's constructor and produces no record ("a reconstruction of the
+    # launcher's resolution, not an observation of the kernel's"). It is a
+    # correct cache input and it is NOT an observation; the guard under test
+    # turns on that distinction and `engineSuppliedRootImage` is what carries
+    # it, so this case is what holds the two apart.
+    #
+    # An equality on the IDENTITY of the entry rather than a length, so that
+    # a future engine-side contribution to this channel fails here — on what
+    # the extra entry IS — instead of being absorbed by bumping a number.
     check r0.evidence.monitorReads == @[RootImage]
     check r0.evidence.monitorWrites.len == 0
     check r0.evidence.monitorProbes.len == 0
@@ -490,16 +498,18 @@ suite "an edge that observed nothing is not cacheable":
     checkpoint("first: status=" & $r0.status &
       " reads=" & $r0.evidence.monitorReads.len)
     check r0.status == asSucceeded
-    # The one observed read PLUS the launcher's root image, named in both
+    # The engine's root image PLUS the one observed read, named in both
     # positions: what makes this edge publish has to be the OBSERVATION, and
     # an assertion that only counted would keep passing if the observation
     # were dropped and a second engine-side entry took its place.
     #
-    # The image is LAST, and that is the visible half of the fix: it is
-    # contributed after the evidence question is asked, so moving it back in
-    # front of `applyMonitorEvidenceStatus` reorders this seq and fails here
-    # as well as in the zero case above.
-    check r0.evidence.monitorReads == @[f.observedPath, RootImage]
+    # The image is FIRST, and that IS load-bearing under this design:
+    # `monitorObservedNoReads` is O(1) because it only ever has to compare
+    # `monitorReads[0]` against `engineSuppliedRootImage`, which is sound only
+    # while the fold at the head of `collectEvidence` stays the first
+    # contributor to the channel. A change that lets some other entry land
+    # ahead of it fails here.
+    check r0.evidence.monitorReads == @[RootImage, f.observedPath]
     check f.runCount() == 1
     check f.hasRecord(act)
 
@@ -613,19 +623,19 @@ suite "the same guard holds on the recognized-report evidence arm":
     check f.runCount() == 1
 
 suite "the guard holds for every monitored policy kind, not just the first":
-  ## `foldLauncherRootImage` is scoped to `MonitorPolicyKinds`, which has
-  ## THREE members. The suites above grade `dgAutomaticMonitor` (where the
-  ## fold is active) and `dgRecognizedFormat` (where it is not). These two
-  ## cases are the remaining members — the ones that carry BOTH a monitor
-  ## capture and an author-declared report — so "the launcher's contribution
-  ## cannot answer the monitor's question" is a statement about the scope of
-  ## the fold rather than about one policy that happens to be tested.
+  ## The root-image fold is scoped to `MonitorPolicyKinds`, which has THREE
+  ## members. The suites above grade `dgAutomaticMonitor` (where the fold is
+  ## active) and `dgRecognizedFormat` (where it is not). These two cases are
+  ## the remaining members — the ones that carry BOTH a monitor capture and an
+  ## author-declared report — so "the engine's contribution cannot answer the
+  ## monitor's question" is a statement about the scope of the fold rather
+  ## than about one policy that happens to be tested.
   ##
-  ## MEASURED, which is why they exist: re-seeding `monitorReads` before
-  ## `applyMonitorEvidenceStatus` for exactly `{dgRecognizedFormat` &
-  ## `ValidatedByMonitor, dgPostBuildConverterValidatedByMonitor}` — the
-  ## original defect, narrowed to the two kinds nothing covered — left every
-  ## other case in this file green.
+  ## MEASURED, which is why they exist: making `monitorObservedNoReads` answer
+  ## `false` for a non-empty set — the original defect — narrowed to exactly
+  ## `{dgRecognizedFormatValidatedByMonitor,`
+  ## `dgPostBuildConverterValidatedByMonitor}`, the two kinds nothing covered,
+  ## left every other case in this file green.
 
   test "recognized-format-validated-by-monitor: zero observations do not publish":
     let f = makeFixture("validated-report-zero")
@@ -675,10 +685,12 @@ suite "the guard holds for every monitored policy kind, not just the first":
     let r0 = first.byId(act.id)
     checkpoint("first: reads=" & $r0.evidence.monitorReads)
     check r0.status == asSucceeded
-    # Observation first, launcher reconstruction last — the same ordering the
+    # Launcher reconstruction first, observation after it — the same shape the
     # `dgAutomaticMonitor` case pins, asserted again on the policy kind where
-    # BOTH `applyMonitorEvidenceStatus` producers can run.
-    check r0.evidence.monitorReads == @[f.observedPath, RootImage]
+    # BOTH `applyMonitorEvidenceStatus` producers can run. What makes this edge
+    # publish is the OBSERVATION, and naming both entries is what stops that
+    # from being satisfied by a second engine-side one.
+    check r0.evidence.monitorReads == @[RootImage, f.observedPath]
     check f.hasRecord(act)
     check f.runCount() == 1
 
@@ -735,7 +747,7 @@ suite "the guard holds for every monitored policy kind, not just the first":
     # The converter's declared input lands in `monitorReads` BEFORE the
     # launcher's reconstruction, and it is what makes this edge publish while
     # the case above does not.
-    check r0.evidence.monitorReads == @[f.observedPath, RootImage]
+    check r0.evidence.monitorReads == @[RootImage, f.observedPath]
     check f.hasRecord(act)
     check f.runCount() == 1
 
@@ -875,7 +887,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       # NOT empty. Both entries are named, so a change that empties this set
       # for some other reason fails here rather than silently converting this
       # into a duplicate of the zero-observation case.
-      check r0.evidence.monitorReads == @[storeRootRead(sh), sh]
+      check r0.evidence.monitorReads == @[sh, storeRootRead(sh)]
       # ... and the set the record would be keyed on IS empty.
       check act.cacheInputPaths(r0.evidence).len == 0
 
@@ -913,7 +925,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       checkpoint("first: reads=" & $r0.evidence.monitorReads &
         " keyed=" & $act.cacheInputPaths(r0.evidence))
       check r0.status == asSucceeded
-      check r0.evidence.monitorReads == @[f.observedPath, sh]
+      check r0.evidence.monitorReads == @[sh, f.observedPath]
       # The root image is elided as class 1 and the workspace read is not:
       # this is the elision doing its job, named exactly.
       check act.cacheInputPaths(r0.evidence) == @[f.observedPath]
@@ -951,7 +963,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
         " keyed=" & $act.cacheInputPaths(r0.evidence) &
         " diagnostics=" & r0.evidence.diagnostics.join(" | "))
       check r0.status == asSucceeded
-      check r0.evidence.monitorReads == @[storeRootRead(sh), sh]
+      check r0.evidence.monitorReads == @[sh, storeRootRead(sh)]
       check r0.evidence.depfileInputs.len == 0
       check act.cacheInputPaths(r0.evidence).len == 0
       check r0.evidence.diagnostics.join(" ").contains("came out EMPTY")
@@ -1005,7 +1017,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
         " keyed=" & $act.cacheInputPaths(r0.evidence) &
         " diagnostics=" & r0.evidence.diagnostics.join(" | "))
       check r0.status == asSucceeded
-      check r0.evidence.monitorReads == @[storeRootRead(sh), sh]
+      check r0.evidence.monitorReads == @[sh, storeRootRead(sh)]
       check act.cacheInputPaths(r0.evidence).len == 0
       check r0.evidence.diagnostics.join(" ").contains("came out EMPTY")
       check not f.hasRecord(act)
@@ -1089,9 +1101,9 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       # later change that merely stops reaching this state from turning the
       # case into a tautology.
       #
-      # `foldLauncherRootImage` contributes nothing here (the policy is
-      # outside `MonitorPolicyKinds`), so `monitorReads` is exactly what the
-      # capture said — one entry, not the two the in-scope cases see.
+      # The root-image fold contributes nothing here (the policy is outside
+      # `MonitorPolicyKinds`), so `monitorReads` is exactly what the capture
+      # said — one entry, not the two the in-scope cases see.
       check r0.evidence.monitorReads == @[storeRootRead(sh)]
       check act.cacheInputPaths(r0.evidence).len == 0
 

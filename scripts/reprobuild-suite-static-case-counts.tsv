@@ -875,14 +875,18 @@ tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim	nim	2
 tests/e2e/watch/t_repro_watch_infers_tool_provisioning.nim	nim	2
 tests/e2e/watch/t_repro_watch_unknown_target_diagnostic.nim	nim	1
 tests/integration/t_a_behind_only_refusal_names_a_pasteable_command.nim	nim	1
+tests/integration/t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin.nim	nim	1
+tests/integration/t_a_behind_pin_skip_names_the_sibling_distance_and_remedy.nim	nim	1
 tests/integration/t_a_clean_workspace_pushes_without_a_diagnostic.nim	nim	1
 tests/integration/t_a_commit_that_moves_no_sibling_does_not_touch_the_lock.nim	nim	1
 tests/integration/t_a_dirty_sibling_leaves_the_lock_alone.nim	nim	1
 tests/integration/t_a_dirty_sibling_outside_the_closure_does_not_block.nim	nim	1
 tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim	nim	1
+tests/integration/t_a_mixed_workspace_records_only_the_ahead_inputs.nim	nim	1
 tests/integration/t_a_repo_not_in_develop_mode_is_not_substituted.nim	nim	1
 tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim	nim	1
 tests/integration/t_a_sibling_override_excludes_gitignored_build_output.nim	nim	1
+tests/integration/t_a_sibling_whose_pin_is_not_fetched_is_not_recorded.nim	nim	1
 tests/integration/t_a_worktree_sibling_is_not_invisible_to_the_refresh.nim	nim	1
 tests/integration/t_action_cache_concurrent_same_edge_converges_atomically.nim	nim	1
 tests/integration/t_action_cache_fingerprint_policies.nim	nim	1
@@ -901,6 +905,7 @@ tests/integration/t_agent_mock_roundtrip.nim	nim	12
 tests/integration/t_agent_replay_rejected.nim	nim	12
 tests/integration/t_agent_service_unit.nim	nim	8
 tests/integration/t_amend_and_rebase_are_idempotent.nim	nim	1
+tests/integration/t_an_ahead_sibling_is_still_recorded.nim	nim	1
 tests/integration/t_an_unobservable_sibling_is_not_substituted.nim	nim	1
 tests/integration/t_an_unresolvable_membership_is_not_read_as_no_overrides.nim	nim	1
 tests/integration/t_apply_if_binds_config_by_workspace_path.nim	nim	1
@@ -1050,7 +1055,7 @@ tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	1
 tests/integration/t_host_binary_format_is_proven_before_execution.nim	nim	7
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	6
-tests/integration/t_install_mirror_atomic_patching.nim	nim	3
+tests/integration/t_install_mirror_atomic_patching.nim	nim	5
 tests/integration/t_installed_engine_read_only_source_tree.nim	nim	2
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18
 tests/integration/t_integration_build_report_target_resolution_kind.nim	nim	5

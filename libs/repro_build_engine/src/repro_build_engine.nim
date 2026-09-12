@@ -979,6 +979,20 @@ type
       ## action's declared inputs (materialized to cwd) intersect the
       ## accumulator is skipped as ``cdMiss``. Empty for Levels 0/2/3.
     monitorStatus: MonitorEvidenceStatus
+    engineSuppliedRootImage: string
+      ## The one entry in ``evidence.monitorReads`` that no monitor reported:
+      ## the action's own root image, reconstructed from its argv by
+      ## ``executedToolImagePath`` and folded in because the launcher's exec
+      ## precedes the shim's constructor and so produces no record. Empty when
+      ## the image could not be identified without guessing, or when the
+      ## action's policy is not a monitor-gathering one.
+      ##
+      ## Recorded because the zero-evidence guard in
+      ## ``applyMonitorEvidenceStatus`` asks whether the MONITOR observed
+      ## anything, and this path is not an observation — see
+      ## ``executedToolImagePath``: "a reconstruction of the launcher's
+      ## resolution, not an observation of the kernel's". Without this field
+      ## the guard reads a set the engine itself seeded and can never fire.
 
   ActionResult* = object
     id*: string
@@ -2129,7 +2143,7 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   ## the mix does not happen: `contentAddressedRoot` returns `""` for every
   ## path outside a recognised store, `toolInputRoots` subtracts nothing
   ## there, and the image stays a content-fingerprinted recorded input via
-  ## `foldLauncherRootImage` — which is the case
+  ## `collectEvidence`'s root-image fold — which is the case
   ## `t_executed_binary_is_a_recorded_input` has always pinned.
   ##
   ## ## Applied in the CONSTRUCTOR, for `keyedOnGoverningLock`'s reason
@@ -3008,6 +3022,56 @@ proc cachedResultReusableInPlace(action: BuildAction;
   ## engine from asking for a restore it cannot perform, and what keeps an
   ## edge with nothing to restore from being treated as one that failed to.
   action.declaresNoOutputs() or declaredOutputsPresent
+
+proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
+                                          record: ActionResultRecord): bool =
+  ## "Is every declared output already exactly what this record describes?"
+  ##
+  ## Asked on a RESTORE-mode cache hit, immediately before
+  ## ``materializeActionCacheOutputs``. The restore path replaces each
+  ## declared output from the CAS unconditionally, and it cannot do that
+  ## without giving the file a new identity: ``applyPermissions`` excludes the
+  ## shared-inode (hardlink) arm, and the reflink/copy arms stage a fresh file
+  ## and rename it into place. The destination therefore comes back with a new
+  ## mtime and ctime on every build.
+  ##
+  ## That is invisible for the restored edge itself — nothing downstream of
+  ## the restore re-reads its own output metadata — and fatal one edge later.
+  ## A consumer of those outputs fingerprints them as INPUTS, and under
+  ## ``ffpTimestamp`` (the default policy) a new mtime is a changed input. So a
+  ## warm re-run in restore mode re-executed every edge above the leaves,
+  ## forever: measured on a four-compile + one-link graph, the four compiles
+  ## hit and restored, the link missed with "input changed" and relinked, on
+  ## every single build. That contradicts Incremental-Invalidation.md
+  ## §"Validation Criteria" — "a warm re-run of an unchanged graph still
+  ## executes zero actions" — which is unqualified by mode, and it is the same
+  ## clause ``cachedResultReusableInPlace`` above is written to satisfy.
+  ##
+  ## The mode's own name is what settles the fix. Caching-Architecture.md
+  ## §"What is on by default" calls the capability "**Restore an output you no
+  ## longer have**", and §"Memoization Layer" contrasts "rebuild missing
+  ## outputs" with "restore missing outputs". An output that is present and
+  ## matches the record is not missing, so restoring it is work the mode never
+  ## promised and whose only observable effect is the cascade above.
+  ##
+  ## THE COMPARISON IS THE PRODUCTION ONE, not a weaker existence probe.
+  ## ``outputStateMismatch`` is Incremental-Invalidation.md Step 3.3 — the
+  ## same revalidation the in-place (metadata-only) arm performs before
+  ## reusing a record — so an output that was truncated, rewritten, retargeted
+  ## or had its tree tampered with still fails this test and is restored. It
+  ## costs one ``lstat`` per declared output, on a path that has just paid for
+  ## a full CAS blob verification.
+  ##
+  ## ``allOutputsExist`` is asked first and is not redundant:
+  ## ``outputStateMismatch`` skips outputs recorded as ``ffkMissing``, so a
+  ## record that describes nothing would otherwise answer "matching"
+  ## vacuously. An edge that declares no outputs answers false and keeps the
+  ## restore path it has today.
+  if action.declaresNoOutputs():
+    return false
+  if not action.allOutputsExist():
+    return false
+  outputStateMismatch(record, action.cwd).len == 0
 
 proc addUnique(values: var seq[string]; value: string) =
   if value.len == 0:
@@ -5969,6 +6033,21 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       else:
         cirEntropyObservabilityUnknown)
 
+proc monitorObservedNoReads(col: EvidenceCollection): bool {.inline.} =
+  ## "Did the monitor report no read at all?" — as distinct from "is the read
+  ## set empty", which it is not required to be for the answer to be yes.
+  ##
+  ## `collectEvidence` folds exactly one read no monitor reported, the
+  ## action's own root image (`executedToolImagePath`). O(1) by construction:
+  ## that entry is the FIRST thing added to the set, so a set with one element
+  ## is the only one it can be alone in.
+  case col.evidence.monitorReads.len
+  of 0: true
+  of 1:
+    col.engineSuppliedRootImage.len > 0 and
+      col.evidence.monitorReads[0] == col.engineSuppliedRootImage
+  else: false
+
 proc applyMonitorEvidenceStatus(action: BuildAction;
                                 status: MonitorEvidenceStatus;
                                 col: var EvidenceCollection) =
@@ -6048,16 +6127,28 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     # `depfileInputs`. An action with one recorded probe has said
     # something about the world and keeps its record.
     #
-    # EVERY CHANNEL READ HERE MUST CARRY ONLY OBSERVATIONS. Anything the
-    # ENGINE contributes to these sets from its own bookkeeping answers
-    # this question on the monitor's behalf and silently retires the
-    # guard: `foldLauncherRootImage` seeded `monitorReads` with the
-    # action's own resolved `argv[0]` and made the whole branch
-    # unreachable for every action whose image resolves. It now runs
-    # after this point. A future contributor of the same shape must do
-    # the same.
+    # OBSERVED reads, not every read in the set. `collectEvidence` folds
+    # ONE entry nobody observed: the action's own root image, which
+    # `executedToolImagePath` reconstructs from argv precisely because
+    # the launcher's exec precedes the shim's constructor and leaves no
+    # record ("a reconstruction of the launcher's resolution, not an
+    # observation of the kernel's"). It is a correct cache input and a
+    # wrong answer to "did the monitor see anything": it resolves for
+    # essentially every monitored action, so counting it left this guard
+    # unable to fire at all from the day that fold landed.
+    # `engineSuppliedRootImage` is what distinguishes the two, and
+    # `t_zero_evidence_edge_is_not_cacheable` is what holds them apart.
+    #
+    # THE SAME QUESTION HAS TO BE ASKED OF EVERY CHANNEL BELOW. Any
+    # future path by which the ENGINE contributes to one of these sets
+    # from its own bookkeeping answers this question on the monitor's
+    # behalf and silently retires the guard, exactly as the root-image
+    # fold did. Record such a contribution the way
+    # `engineSuppliedRootImage` records this one — attribution, not a
+    # subtraction and not an ordering, per
+    # `../reprobuild-specs/Dependency-Observation-Attribution.md`.
     if action.cacheable and
-        col.evidence.monitorReads.len == 0 and
+        col.monitorObservedNoReads() and
         col.evidence.monitorWrites.len == 0 and
         col.evidence.monitorProbes.len == 0 and
         col.evidence.monitorDirectoryEnumerations.len == 0 and
@@ -6229,49 +6320,6 @@ proc executedToolImagePath(action: BuildAction;
       return os.normalizedPath(candidate)
   ""
 
-proc foldLauncherRootImage(action: BuildAction; config: ptr BuildEngineConfig;
-                           evidence: var PathSetEvidence;
-                           seen: var EvidenceSeenSets) =
-  ## The action's OWN root image, which no monitor record can supply — see
-  ## `executedToolImagePath`. Folded as a content read, beside `mrLibraryLoad`
-  ## and the `mrProcessExec` arm that covers this action's NESTED execs.
-  ##
-  ## SCOPED TO THE AUTOMATIC-MONITOR CLASS on purpose. That is the class where
-  ## the ENGINE promises to discover the input set, so a missing input is the
-  ## engine's defect. On an edge whose inputs are declared by its author, the
-  ## author owns that set and the engine adding an undeclared path to the key
-  ## behind their back is a different decision, with a different blast radius,
-  ## and it is not the one this makes.
-  ##
-  ## IT MUST RUN AFTER `applyMonitorEvidenceStatus`, AND THAT IS A CORRECTNESS
-  ## ORDERING, NOT A STYLE ONE. This path is a RECONSTRUCTION the launcher
-  ## performs from `argv[0]`; it is not something the monitor saw, and it is
-  ## available for essentially every action whether the monitor observed
-  ## anything or not. The `mesComplete` arm of `applyMonitorEvidenceStatus`
-  ## asks "did this capture record an observation of ANY kind?" and refuses to
-  ## publish when the answer is no (M17 / Compiles-Are-Normal-Edges.md:269-273).
-  ## Seeding `monitorReads` before that question is asked answers it with the
-  ## engine's own bookkeeping: measured on this host, a capture holding one
-  ## `mrProcessStart` and nothing else PUBLISHED and then took a `cdHit`, with
-  ## no diagnostic, because `monitorReads` was `@["/bin/sh"]`. The guard was
-  ## dead for every action whose `argv[0]` resolves — which is the same set of
-  ## actions the fold is scoped to. Contributing the image afterwards keeps it
-  ## in the cache key (`t_executed_binary_is_a_recorded_input.nim` still pins
-  ## all four exec shapes) while leaving the "what did the monitor see?"
-  ## predicate answerable only by the monitor.
-  ##
-  ## Ordering rather than a subtract-the-known-path filter, deliberately: if a
-  ## record HAD observed this same path (a nested exec of the action's own
-  ## image on a platform with no library-load floor), `addUnique` collapses the
-  ## two into one entry and no later filter can tell an observation from a
-  ## reconstruction. Asking the question before the reconstruction exists does
-  ## not have that blind spot.
-  if action.dependencyPolicy.kind notin MonitorPolicyKinds:
-    return
-  let rootImage = executedToolImagePath(action, config)
-  if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
-    evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
-
 proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
   ## The zero-evidence guard, applied to the set the RECORD IS KEYED ON.
   ##
@@ -6285,15 +6333,16 @@ proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
   ## satisfy the first question and still publish a record keyed on nothing —
   ## measured, and quantified in `emptyKeyedInputSetDiagnostic`.
   ##
-  ## IT MUST RUN AFTER `foldLauncherRootImage`, AND THAT IS THE SAME
-  ## CORRECTNESS ORDERING `832f5fa2` INTRODUCED, POINTED THE OTHER WAY.
-  ## There, a predicate over observed evidence had to run BEFORE the engine
-  ## contributed to that evidence (rule 6). Here, a predicate over the KEY has
-  ## to run AFTER every contributor to the key, or it grades a draft. The two
-  ## are not in tension: they are the same instruction — *ask each question of
-  ## the final state of the set that question is about* — and the sets are
-  ## different, which is exactly why the guard needs two call sites and not
-  ## one.
+  ## IT MUST RUN AFTER EVERY CONTRIBUTOR TO THE KEY, the root-image fold at
+  ## the head of `collectEvidence` included, or it grades a draft. That is not
+  ## in tension with the sibling guard's rule, which is that a predicate over
+  ## OBSERVED evidence must not read a channel the engine seeded: they are the
+  ## same instruction — *ask each question of the final state of the set that
+  ## question is about* — and the sets are different, which is exactly why the
+  ## guard needs two call sites and not one. The sibling guard resolves its
+  ## half by ATTRIBUTION rather than by ordering
+  ## (`EvidenceCollection.engineSuppliedRootImage`), so this one is free to sit
+  ## at the end without disarming it.
   ##
   ## SCOPED TO `monitorEvidenceRequired`, deliberately: that is the precondition
   ## of the guard this mirrors, so the two cover the same class of edge and a
@@ -6376,11 +6425,20 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # — so the arm that consumes such a file is the last one that may go
   # ungraded. See `monitorEvidenceRequirement`.
   let scopeRequirement = monitorEvidenceRequirement(action, config)
-  # The action's own root image is contributed by `foldLauncherRootImage` at
-  # the END of this proc, NOT here. It is a launcher-side reconstruction rather
-  # than an observation, and the zero-evidence guard in
-  # `applyMonitorEvidenceStatus` must not be able to mistake it for one — see
-  # that proc's own note before moving this back.
+  # SCOPED TO THE AUTOMATIC-MONITOR CLASS on purpose. That is the class where
+  # the ENGINE promises to discover the input set, so a missing input is the
+  # engine's defect. On an edge whose inputs are declared by its author, the
+  # author owns that set and the engine adding an undeclared path to the key
+  # behind their back is a different decision, with a different blast radius,
+  # and it is not the one this change makes.
+  if action.dependencyPolicy.kind in MonitorPolicyKinds:
+    let rootImage = executedToolImagePath(action, config)
+    if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
+      result.evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
+      # Remembered, not just added: the zero-evidence guard downstream asks
+      # what the MONITOR saw, and this entry is a reconstruction rather than
+      # an observation. See `EvidenceCollection.engineSuppliedRootImage`.
+      result.engineSuppliedRootImage = rootImage
   let reports = action.reportSpecsForPolicy()
   if action.dependencyPolicy.kind in RecognizedPolicyKinds and reports.len == 0:
     result.evidence.diagnostics.add(
@@ -6588,15 +6646,9 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "rewrites are errors'.")
     if offenders.len > 0:
       result.publishable = false
-  # LAST, and after every `applyMonitorEvidenceStatus` call above (the wrapped/
-  # hosted arm and the iomon-recognized-report arm both reach one). The image
-  # belongs in the cache key; it is not evidence that the monitor observed
-  # anything. See `foldLauncherRootImage`.
-  foldLauncherRootImage(action, config, result.evidence, seen)
-  # ... and LAST of all, after every contributor to the key including the fold
-  # immediately above, grade the set the key is actually built from. Rule 7.
-  # See `gradeKeyedInputSet` for why this ordering is the mirror image of the
-  # one on the line before it rather than a contradiction of it.
+  # LAST OF ALL, after every contributor to the key — the root-image fold at
+  # the head of this proc included — grade the set the key is actually built
+  # from. Rule 7. See `gradeKeyedInputSet`.
   gradeKeyedInputSet(action, result)
   if strict and not result.publishable:
     discard
@@ -13225,16 +13277,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 "missing-output"
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
-              let restoreStart = statStart()
-              cas.materializeActionCacheOutputs(lookup.record, action.cwd)
-              fileMetadataCache.clear()
-              finishStat("repro cache restore", restoreStart)
+              # Nothing to restore when the outputs are already the recorded
+              # ones — see `restoreWouldOverwriteMatchingOutputs`. Restoring
+              # them anyway gives every one a new mtime and re-runs every
+              # consumer of them on every warm build.
+              let alreadyInPlace =
+                restoreWouldOverwriteMatchingOutputs(action, lookup.record)
+              if not alreadyInPlace:
+                let restoreStart = statStart()
+                cas.materializeActionCacheOutputs(lookup.record, action.cwd)
+                fileMetadataCache.clear()
+                finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
-              completeSuccess(id, asCacheHit, cdHit, false, "restored")
+              completeSuccess(id, asCacheHit, cdHit, false,
+                if alreadyInPlace: "outputs-present" else: "restored")
               inc completed
               launchedAny = true
               continue
@@ -13257,16 +13317,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 "missing-output"
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
-              let restoreStart = statStart()
-              cas.materializeActionCacheOutputs(lookup.record, action.cwd)
-              fileMetadataCache.clear()
-              finishStat("repro cache restore", restoreStart)
+              # Same reasoning as the `aclHit` arm above.
+              let alreadyInPlace =
+                restoreWouldOverwriteMatchingOutputs(action, lookup.record)
+              if not alreadyInPlace:
+                let restoreStart = statStart()
+                cas.materializeActionCacheOutputs(lookup.record, action.cwd)
+                fileMetadataCache.clear()
+                finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
-              completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
+              completeSuccess(id, asCacheHit, cdHybridCutoff, false,
+                if alreadyInPlace: "outputs-present" else: "restored")
               inc completed
               launchedAny = true
               continue

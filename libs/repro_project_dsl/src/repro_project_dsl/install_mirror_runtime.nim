@@ -104,6 +104,12 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # executables (including patchelf itself) and loader symlinks remain valid.
   script.add("m9r14f_patch_elf() ( ")
   script.add("m9r14f_target=$(readlink -f -- \"$1\") || exit; shift; ")
+  # Fully static ELFs need no loader binding. Use program headers rather than
+  # treating every patchelf error as evidence that the file is static.
+  script.add("m9r14f_headers=$(LC_ALL=C readelf --program-headers --wide -- \"$m9r14f_target\") || exit; ")
+  script.add("m9r14f_header_status=0; printf '%s\\n' \"$m9r14f_headers\" | ")
+  script.add("grep -E '^[[:space:]]*(DYNAMIC|INTERP)[[:space:]]' >/dev/null || m9r14f_header_status=$?; ")
+  script.add("case \"$m9r14f_header_status\" in 0) ;; 1) exit 0;; *) exit \"$m9r14f_header_status\";; esac; ")
   script.add("m9r14f_temp=$(mktemp \"$m9r14f_target.repro-patch.XXXXXX\") || exit; ")
   script.add("trap 'rm -f -- \"$m9r14f_temp\"' 0; ")
   script.add("trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; ")

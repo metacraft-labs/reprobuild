@@ -96,6 +96,133 @@ proc rewindSibling*(fx: Nf2Fixture; name: string; steps: int): string =
   discard gitIn(fx, siblingDir(fx, name), "reset --hard HEAD~" & $steps)
   headOf(fx, siblingDir(fx, name))
 
+proc advanceOriginWithoutFetching*(fx: Nf2Fixture; name: string;
+    steps: int): string =
+  ## Add ``steps`` revisions to a sibling's ORIGIN, from a side clone, and leave
+  ## ``ws/<name>`` completely untouched. Returns the origin's new tip.
+  ##
+  ## This is the state `rewindSibling` deliberately cannot produce, and the one
+  ## the field kept producing: the checkout is genuinely BEHIND, but the pinned
+  ## revision is **not in its object store**, so no distance can be computed
+  ## from it and nothing local can say which direction the drift runs in. It
+  ## arises from the ordinary sequence — a colleague pushes, the lock is
+  ## refreshed on another machine or by CI, and this checkout has simply not
+  ## fetched since.
+  ##
+  ## Measured in this workspace during the landing that motivated the fix:
+  ## `io-mon` was really 5 commits behind its pin and was reported as `unknown`
+  ## purely because the pinned revision had never been fetched.
+  ##
+  ## The side clone is REAL and is reused across calls, so a case can advance
+  ## the same origin twice and get a linear history rather than two roots.
+  let side = fx.scratch / ("side-" & name)
+  if not dirExists(side):
+    discard requireCmd(q(fx.gitBin) & " clone -q " & q(originUrl(fx, name)) &
+      " " & q(side))
+    discard requireCmd(q(fx.gitBin) & " -C " & q(side) &
+      " config user.email tester@example.invalid")
+    discard requireCmd(q(fx.gitBin) & " -C " & q(side) &
+      " config user.name \"NF2 Tester\"")
+  for i in 1 .. steps:
+    # Distinct content per step, for the reason `seedOrigin` spells out: a
+    # commit SHA hashes the tree as well as the message, and two steps with
+    # identical content in the same clock second would collide.
+    writeFile(side / "marker.txt", name & " unfetched step-" & $i & "\n")
+    discard requireCmd(q(fx.gitBin) & " -C " & q(side) & " commit -q -a -m " &
+      q("unfetched step-" & $i))
+  discard requireCmd(q(fx.gitBin) & " -C " & q(side) & " push -q origin HEAD:main")
+  requireCmd(q(fx.gitBin) & " -C " & q(side) & " rev-parse HEAD").strip()
+
+proc pinIsFetched*(fx: Nf2Fixture; name, rev: string): bool =
+  ## Is ``rev`` in ``ws/<name>``'s object store? Asked with git's own
+  ## `cat-file -e`, which is the predicate the classifier uses, so a case can
+  ## assert that its "not fetched" arrangement really is one rather than
+  ## assuming it.
+  run(q(fx.gitBin) & " -C " & q(siblingDir(fx, name)) & " cat-file -e " &
+    rev & "^{commit}").code == 0
+
+proc fourInputFlakeLockText*(fx: Nf2Fixture;
+    alphaRev, betaRev, gammaRev, deltaRev: string): string =
+  ## `nf2FlakeLockText` plus a fourth sibling input, `delta-src`.
+  ##
+  ## A separate generator rather than a parameter on the shared one: every other
+  ## NF-2/NF-3 case asserts BYTE-identity against the three-input document, so a
+  ## shared generator that grew a node would move those assertions' subject.
+  ## `nixpkgs` keeps its deliberately odd member order and indent here too — it
+  ## is the witness that only overridden nodes are rewritten.
+  "{\n" &
+  "  \"nodes\": {\n" &
+  lockedNode("alpha-src", originUrl(fx, "alpha"), alphaRev,
+    "sha256-fv2PzTwKsfeBptF8u/G0w9eh6GDsib/62l5cyuKNGYM=", "    ") & ",\n" &
+  lockedNode("beta-src", originUrl(fx, "beta"), betaRev,
+    "sha256-EZvvEKnc/QXEXlosW7OiNDncXiBneXs4liR/64D3A90=", "    ") & ",\n" &
+  lockedNode("gamma-src", originUrl(fx, "gamma"), gammaRev,
+    "sha256-8CsSWf5teLoXzC7ay1QzNPN9tP204vk496y/wq+S/Lc=", "    ") & ",\n" &
+  lockedNode("delta-src", originUrl(fx, "delta"), deltaRev,
+    "sha256-Xk1hEBS0wWJRPBBTFy1TgP1kOaGMmnFdW1F5vUlN5UM=", "    ") & ",\n" &
+  "    \"flake-utils\": {\n" &
+  "      \"locked\": {\n" &
+  "        \"lastModified\": 1731533236,\n" &
+  "        \"narHash\": \"sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=\",\n" &
+  "        \"owner\": \"numtide\",\n" &
+  "        \"repo\": \"flake-utils\",\n" &
+  "        \"rev\": \"11707dc2f618dd54ca8739b309ec4fc024de578b\",\n" &
+  "        \"type\": \"github\"\n" &
+  "      },\n" &
+  "      \"original\": { \"owner\": \"numtide\", \"repo\": \"flake-utils\", \"type\": \"github\" }\n" &
+  "    },\n" &
+  "        \"nixpkgs\": {\n" &
+  "            \"locked\": {\n" &
+  "                \"type\": \"github\",\n" &
+  "                \"rev\": \"5e4fbfb6b3de1aa2872b76d49fafc942626e2add\",\n" &
+  "                \"owner\": \"NixOS\",\n" &
+  "                \"narHash\": \"sha256-OZiZ3m8SCMfh3B6bfGC/Bm4x3qc1m2SVEAlkV6iY7Yg=\",\n" &
+  "                \"repo\": \"nixpkgs\",\n" &
+  "                \"lastModified\": 1735563628\n" &
+  "            },\n" &
+  "            \"original\": {\n" &
+  "                \"id\": \"nixpkgs\",\n" &
+  "                \"type\": \"indirect\"\n" &
+  "            }\n" &
+  "        },\n" &
+  "    \"root\": {\n" &
+  "      \"inputs\": {\n" &
+  "        \"alpha-src\": \"alpha-src\",\n" &
+  "        \"beta-src\": \"beta-src\",\n" &
+  "        \"delta-src\": \"delta-src\",\n" &
+  "        \"flake-utils\": \"flake-utils\",\n" &
+  "        \"gamma-src\": \"gamma-src\",\n" &
+  "        \"nixpkgs\": \"nixpkgs\"\n" &
+  "      }\n" &
+  "    }\n" &
+  "  },\n" &
+  "  \"root\": \"root\",\n" &
+  "  \"version\": 7\n" &
+  "}\n"
+
+proc useFourInputFlake*(fx: Nf2Fixture;
+    alphaRev, betaRev, gammaRev, deltaRev: string) =
+  ## Re-declare `app`'s flake with FOUR sibling inputs and write the matching
+  ## lock, so one refresh can carry a sibling in each of the four states the
+  ## policy distinguishes. Opt-in: no other case sees it.
+  writeFile(fx.app / "flake.nix",
+    "{\n" &
+    "  description = \"NF-2 fixture consumer\";\n" &
+    "\n" &
+    "  inputs = {\n" &
+    "    alpha-src.url = \"git+" & originUrl(fx, "alpha") & "?ref=main\";\n" &
+    "    beta-src.url = \"git+" & originUrl(fx, "beta") & "?ref=main\";\n" &
+    "    gamma-src.url = \"git+" & originUrl(fx, "gamma") & "?ref=main\";\n" &
+    "    delta-src.url = \"git+" & originUrl(fx, "delta") & "?ref=main\";\n" &
+    "    nixpkgs.url = \"github:NixOS/nixpkgs\";\n" &
+    "    flake-utils.url = \"github:numtide/flake-utils\";\n" &
+    "  };\n" &
+    "\n" &
+    "  outputs = _: { };\n" &
+    "}\n")
+  writeFile(lockPath(fx),
+    fourInputFlakeLockText(fx, alphaRev, betaRev, gammaRev, deltaRev))
+
 proc pushedRefsFile*(fx: Nf2Fixture): string =
   ## The stdin stream git hands a `pre-push` hook for one ordinary outgoing
   ## update of `main`.

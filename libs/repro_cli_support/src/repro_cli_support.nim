@@ -58900,6 +58900,75 @@ type DurableSolverProviderArtifacts = object
   interfaceArtifact: ProjectInterfaceArtifact
   providerArtifact: ProviderCompileArtifact
 
+const
+  LockProviderInterfaceArtifactName = "project-interface.rbsz"
+  LockFileDeclarationsSidecarName = "lock-file-declarations.tsv"
+    ## Named-Lock-Files NLF-M8 — where a recipe's emitted `lockFile`
+    ## declarations are kept between runs. See
+    ## `carriedLockFileDeclarations`.
+
+proc lockProviderMetadataRoot(): string =
+  ## Root of the provider probe's own artifact tree under the user action
+  ## cache. One definition, because `repro lock list`'s declaration sidecar
+  ## has to agree with `solverInputsFromCompiledProvider` about where the
+  ## interface artifact it is judged against lives.
+  absolutePath(currentActionCacheRoot() / "lock-provider-metadata")
+
+proc lockProviderArtifactDir(modulePath, compileWorkDir: string): string =
+  ## Where ONE recipe's interface artifact, provider binary and declaration
+  ## sidecar live.
+  lockProviderMetadataRoot() / "providers" /
+    toHex(weakFingerprintFromText(
+      modulePath & "\x00" & compileWorkDir).bytes)
+
+proc carryForwardLockFileDeclarations(sidecarPath, emitPath: string) =
+  ## Keep the emission THIS run obtained, so a later run whose interface
+  ## extraction is warm still has it.
+  ##
+  ## Committed by atomic rename. Two `repro lock list` processes on the same
+  ## recipe address the same path, and a half-written TSV read back by the
+  ## other is precisely the listing-that-reports-confidently-about-the-
+  ## wrong-thing this surface exists to prevent.
+  if sidecarPath.len == 0:
+    return
+  try:
+    createDir(extendedPath(parentDir(sidecarPath)))
+    let staging = sidecarPath & ".tmp-" & $getCurrentProcessId()
+    copyFile(extendedPath(emitPath), extendedPath(staging))
+    moveFile(extendedPath(staging), extendedPath(sidecarPath))
+  except CatchableError:
+    discard
+
+proc carriedLockFileDeclarations(sidecarPath, interfacePath: string):
+    seq[LockFileDecl] =
+  ## The declarations a PREVIOUS run of this recipe emitted, when and only
+  ## when they still describe the interface artifact that is on disk now.
+  ##
+  ## CURRENCY IS JUDGED AGAINST THE ARTIFACT, not against the recipe, and
+  ## that is what makes this safe rather than a second stale-cache surface.
+  ## The sidecar is written immediately after the extraction that produced
+  ## `interfacePath`, so on a run that emitted it is newer than that file by
+  ## construction. An extraction that RE-RAN for a changed recipe rewrites
+  ## the artifact; if that run emitted nothing — a recipe that declares no
+  ## `lockFile` never calls `declareLockFile`, and nothing is written — the
+  ## sidecar is now OLDER than the artifact and is refused here. The answer
+  ## then falls back to the well-known set, which for a recipe declaring
+  ## nothing is the true answer rather than the previous recipe's names.
+  result = @[]
+  if sidecarPath.len == 0 or interfacePath.len == 0:
+    return
+  try:
+    if not fileExists(extendedPath(sidecarPath)):
+      return
+    if not fileExists(extendedPath(interfacePath)):
+      return
+    if getLastModificationTime(extendedPath(sidecarPath)) <
+        getLastModificationTime(extendedPath(interfacePath)):
+      return
+    result = parseLockFileDeclarations(readFile(sidecarPath))
+  except CatchableError:
+    result = @[]
+
 proc tryLoadDurableSolverProviderArtifacts(
     modulePath, compileWorkDir: string):
     Option[DurableSolverProviderArtifacts] =
@@ -59039,15 +59108,12 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       try: removeDir(extendedPath(scratchRoot))
       except CatchableError: discard
     let compileWorkDir = reprobuildLibraryWorkDir()
-    let metadataRoot = absolutePath(currentActionCacheRoot() /
-      "lock-provider-metadata")
-    let moduleKey = toHex(weakFingerprintFromText(
-      modulePath & "\x00" & compileWorkDir).bytes)
-    let artifactDir = metadataRoot / "providers" / moduleKey
+    let metadataRoot = lockProviderMetadataRoot()
+    let artifactDir = lockProviderArtifactDir(modulePath, compileWorkDir)
     # Share compiler scratch across recipes, not their output artifacts.
     # The existing compiler locks serialize writers to each Nim cache.
     let scratchDir = metadataRoot / "work"
-    let interfacePath = artifactDir / "project-interface.rbsz"
+    let interfacePath = artifactDir / LockProviderInterfaceArtifactName
     let stubPath = artifactDir / "project-interface.nim"
     let cacheRoot = artifactDir / "build-engine-cache"
     let publicCliPath = stablePublicCliPath()
@@ -59859,7 +59925,41 @@ proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
   ## declares nothing", which is exactly the two-things-look-the-same failure
   ## the campaign is about — and §4.2's own worked example, a `workspace.nim`
   ## whose entire content is two `lockFile` declarations, took that branch.
+  ##
+  ## AND NOT ONLY ON A COLD RUN, which is the second door the same fallback
+  ## came in by. The declarations reach this process as a SIDE EFFECT of the
+  ## recipe being COMPILED: `declareLockFile` writes the registry to
+  ## `LockFilesEmitEnvVar` as each declaration is made, at the recipe's
+  ## expansion / module-init time. So nothing is emitted on a run where no
+  ## recipe is compiled — and the interface extraction is cached, exactly as
+  ## it is supposed to be (`interfaceExtractionCacheProbe`, and the engine's
+  ## own action cache on the CLI's edge-driven path).
+  ##
+  ## Measured on three consecutive listings of ONE unchanged recipe: the
+  ## first emitted four declarations, the second and third emitted nothing
+  ## because the extraction short-circuited, and both printed the well-known
+  ## set as though it were the workspace's answer. That is NLF-M8's own exit
+  ## criterion — "a project WITH declarations and no qualifying `build:`
+  ## block still lists them" — failing for a different reason than the early
+  ## return it was written against, and §4.2 consumer (1), "a `repro lock
+  ## list` prints each declared name with its description", silently not
+  ## being served.
+  ##
+  ## So an emission is CARRIED FORWARD beside the interface artifact it was
+  ## produced with, and read back when a warm extraction means no recipe ran
+  ## this time. `carriedLockFileDeclarations` is where that is judged.
   result = predeclaredLockFiles()
+  var sidecarPath = ""
+  var interfacePath = ""
+  try:
+    let match = resolveProjectFile(projectDir)
+    if match.path.len > 0:
+      let artifactDir = lockProviderArtifactDir(absolutePath(match.path),
+        reprobuildLibraryWorkDir())
+      sidecarPath = artifactDir / LockFileDeclarationsSidecarName
+      interfacePath = artifactDir / LockProviderInterfaceArtifactName
+  except CatchableError:
+    discard
   let emitPath = getTempDir() /
     ("repro-lock-list-" & $getCurrentProcessId() & ".tsv")
   putEnv(LockFilesEmitEnvVar, emitPath)
@@ -59873,6 +59973,11 @@ proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
       let parsed = parseLockFileDeclarations(readFile(emitPath))
       if parsed.len > 0:
         result = parsed
+        carryForwardLockFileDeclarations(sidecarPath, emitPath)
+    else:
+      let carried = carriedLockFileDeclarations(sidecarPath, interfacePath)
+      if carried.len > 0:
+        result = carried
   except CatchableError:
     discard
   finally:
@@ -62636,6 +62741,7 @@ type
     fprAhead       ## the pin is an ancestor of HEAD — §3.1, you are developing
     fprBehind      ## HEAD is an ancestor of the pin — §3.2, the checkout is stale
     fprDiverged    ## neither is an ancestor of the other
+    fprUnfetched   ## the pin is not in the checkout — NOTHING can be concluded
     fprUnknown     ## HEAD is not the pin, but the DIRECTION is not computable
     fprUnpinned    ## the input carries no pin of its own to disagree with
 
@@ -62671,6 +62777,7 @@ proc flakePinRelationTag*(relation: FlakePinRelation): string =
   of fprAhead: "ahead"
   of fprBehind: "behind"
   of fprDiverged: "diverged"
+  of fprUnfetched: "unfetched"
   of fprUnknown: "unknown"
   of fprUnpinned: "unpinned"
 
@@ -62761,11 +62868,33 @@ proc flakeClassifyPin(identity: GitToolIdentity;
   ## Where the checkout at ``dir`` stands relative to ``pinnedRev``.
   ##
   ## The AT/not-at half is a string comparison and is therefore always
-  ## answerable. Only the DIRECTION needs git history, and when the pinned
-  ## revision is not in the checkout (never fetched, or rewritten away) the
-  ## direction is reported as `unknown` WITH ITS REASON rather than guessed —
-  ## "the lock and the sibling disagree" is still established, which is the
-  ## proposition the gate acts on.
+  ## answerable. Only the DIRECTION needs git history, and when it cannot be
+  ## computed the reason is reported rather than guessed — "the lock and the
+  ## sibling disagree" is still established, which is the proposition the gate
+  ## acts on.
+  ##
+  ## ## `unfetched` is its own answer, not a flavour of `unknown`
+  ##
+  ## One reason for an uncomputable direction is ordinary and has a remedy: the
+  ## pinned commit is simply not in this checkout's object store, because
+  ## somebody else pushed it and nothing here has fetched since. Every other
+  ## reason — an unreadable `HEAD`, a `git` that failed, a `rev-list` that
+  ## answered something unparseable — is a malfunction with no remedy but
+  ## investigation.
+  ##
+  ## They were the same verdict until the refresh had to act on it, and then the
+  ## difference became load-bearing in both directions:
+  ##
+  ##   * an unfetched pin is the ONE uncomputable case where the sibling is
+  ##     probably fine and probably BEHIND. Recording `HEAD` over it files a
+  ##     downgrade. Measured in this workspace: `io-mon` was 5 commits behind
+  ##     its pin and reported `unknown` purely because the pin had not been
+  ##     fetched;
+  ##   * and it is the one with a one-line fix, which a message can therefore
+  ##     name. `unknown` can only ask somebody to look.
+  ##
+  ## Both are NOT-RECORDABLE (`flakeRowIsRecordable`); they are told apart so
+  ## the operator is handed a fetch rather than a mystery.
   if headRev.len > 0 and headRev == pinnedRev:
     return (relation: fprAt, aheadBy: 0, behindBy: 0, detail: "")
   if headRev.len == 0:
@@ -62774,10 +62903,11 @@ proc flakeClassifyPin(identity: GitToolIdentity;
   let present = gitRunPlain(identity,
     ["-C", dir, "cat-file", "-e", pinnedRev & "^{commit}"])
   if present.code != 0:
-    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
+    return (relation: fprUnfetched, aheadBy: 0, behindBy: 0, detail:
       "the pinned revision " & shortRev(pinnedRev) & " is not present in " &
-      dir & ", so the DIRECTION of the drift could not be computed (run " &
-      "`git -C " & dir & " fetch --all` and re-run this to learn it)")
+      dir & ", so this sibling cannot be classified until it is fetched — " &
+      "nothing local can say where a checkout stands relative to a revision " &
+      "it does not have")
   let counts = gitRunPlain(identity,
     ["-C", dir, "rev-list", "--left-right", "--count",
      pinnedRev & "..." & headRev])
@@ -62806,7 +62936,8 @@ proc flakeClassifyPin(identity: GitToolIdentity;
 
 proc flakeOverrideStateReport*(flakeRoot: string;
     bindings: openArray[FlakeOverrideBinding];
-    identity: GitToolIdentity): FlakeOverrideState =
+    identity: GitToolIdentity;
+    lockTextOverride = ""): FlakeOverrideState =
   ## THE report of §5, and the single place at/ahead/behind is decided.
   ##
   ## ``bindings`` is the substitution set — the very list of
@@ -62842,14 +62973,20 @@ proc flakeOverrideStateReport*(flakeRoot: string;
     # "verified, and it agrees".
     result.ok = true
     return
-  var lockText = ""
-  try:
-    lockText = readFile(result.lockPath)
-  except CatchableError as err:
-    result.refusals.add(result.lockPath & " could not be read (" & err.msg &
-      "). Remedy: fix the file's permissions (`chmod +r " & result.lockPath &
-      "`).")
-    return
+  # ``lockTextOverride`` exists for ONE caller: the refresh, which has already
+  # read this file and is about to rewrite it. Re-reading it here would classify
+  # against one snapshot and rewrite another, and the window between them is
+  # exactly where a concurrent `git checkout` lands — so the refresh classifies
+  # and rewrites the SAME bytes by construction rather than by being quick.
+  var lockText = lockTextOverride
+  if lockText.len == 0:
+    try:
+      lockText = readFile(result.lockPath)
+    except CatchableError as err:
+      result.refusals.add(result.lockPath & " could not be read (" & err.msg &
+        "). Remedy: fix the file's permissions (`chmod +r " & result.lockPath &
+        "`).")
+      return
   let parsed = flakeLockPinnedRevisions(lockText)
   if not parsed.ok:
     result.refusals.add(result.lockPath & ": " & parsed.diagnostic &
@@ -62909,6 +63046,10 @@ proc flakeRowSentence(row: FlakeOverrideStateRow): string =
       $row.aheadBy & " commit(s) ahead and " & $row.behindBy &
       " behind (pin " & shortRev(row.pinnedRev) & ", HEAD " &
       shortRev(row.siblingRev) & ")"
+  of fprUnfetched:
+    who & " CANNOT BE CLASSIFIED against the revision flake.lock pins (pin " &
+      shortRev(row.pinnedRev) & ", HEAD " & shortRev(row.siblingRev) &
+      "): " & row.detail
   of fprUnknown:
     who & " does NOT match the revision flake.lock pins (pin " &
       shortRev(row.pinnedRev) & ", HEAD " & shortRev(row.siblingRev) &
@@ -62917,13 +63058,14 @@ proc flakeRowSentence(row: FlakeOverrideStateRow): string =
     who & " is substituted but carries no pin to compare: " & row.detail
 
 proc flakeStateCounts*(state: FlakeOverrideState):
-    tuple[at, ahead, behind, diverged, unknown, unpinned: int] =
+    tuple[at, ahead, behind, diverged, unfetched, unknown, unpinned: int] =
   for row in state.rows:
     case row.relation
     of fprAt: inc result.at
     of fprAhead: inc result.ahead
     of fprBehind: inc result.behind
     of fprDiverged: inc result.diverged
+    of fprUnfetched: inc result.unfetched
     of fprUnknown: inc result.unknown
     of fprUnpinned: inc result.unpinned
 
@@ -62931,8 +63073,39 @@ proc flakeStateSummaryLine(state: FlakeOverrideState): string =
   let c = flakeStateCounts(state)
   $state.rows.len & " substituted input(s) of " & state.lockPath & ": " &
     $c.at & " at pin, " & $c.ahead & " ahead, " & $c.behind & " behind, " &
-    $c.diverged & " diverged, " & $c.unknown & " unknown, " &
-    $c.unpinned & " unpinned"
+    $c.diverged & " diverged, " & $c.unfetched & " unfetched, " &
+    $c.unknown & " unknown, " & $c.unpinned & " unpinned"
+
+proc flakeRowIsRecordable*(row: FlakeOverrideStateRow): bool =
+  ## May this refresh write the sibling's `HEAD` into this input's pin?
+  ##
+  ## THE asymmetry of §3.2, in one predicate, so that every consumer answers it
+  ## the same way and no caller can grow a second opinion:
+  ##
+  ##   * AHEAD — yes. §3.1 IS this milestone: you are developing, the shell
+  ##     built the newer revision, and the commit must say so.
+  ##   * AT — yes, and it moves nothing: the pin already names that revision, so
+  ##     the rewrite is a no-op and the file is not opened for writing at all.
+  ##   * DIVERGED — yes. There are commits on this checkout that the pin does
+  ##     not have, which is the ahead case with a fork in it; the operator is
+  ##     developing on a branch that left the pin's line, and the lock has to
+  ##     name what was built.
+  ##   * BEHIND — **no.** Recording it files a downgrade nobody chose. A sibling
+  ##     behind its pin almost always means the checkout is stale rather than
+  ##     that anyone chose to go back (§3.2), and this refresh runs on the
+  ##     commit path where nobody is being asked. It stays available as an
+  ##     explicit request — `repro flake refresh-lock --record-downgrade` —
+  ##     because deliberately testing an older dependency is legitimate.
+  ##   * UNFETCHED / UNKNOWN — **no.** Not because the answer is bad but because
+  ##     there is no answer: recording `HEAD` here would file whichever
+  ##     direction happened to be true, unexamined. NF-1's rule that an empty
+  ##     result and a failure must not look alike, applied to a pin.
+  ##   * UNPINNED — nothing to write; the rewriter says so per input.
+  ##
+  ## Withholding is per INPUT and never per refresh: a workspace normally has
+  ## siblings drifting in different directions at once, and one behind-pin
+  ## sibling must not suppress the recording of an unrelated ahead one.
+  row.relation notin {fprBehind, fprUnfetched, fprUnknown}
 
 proc flakeReconcileCommand(row: FlakeOverrideStateRow;
     flakeRoot, workspaceRoot: string): string =
@@ -62955,6 +63128,12 @@ proc flakeReconcileCommand(row: FlakeOverrideStateRow;
     # The checkout is the stale half, so the FIRST remedy moves the checkout,
     # not the lock.
     "git -C " & row.path & " merge --ff-only " & row.pinnedRev
+  of fprUnfetched:
+    # Nothing can be reconciled before anything can be CONCLUDED, and the one
+    # thing missing is the object. This is the only remedy in this proc that
+    # answers a question rather than closing a gap, and it is first for that
+    # reason: after it, the row classifies and its real remedy is knowable.
+    "git -C " & row.path & " fetch --all"
   else:
     "repro flake refresh-lock --flake=" & flakeRoot &
       " --workspace-root=" & workspaceRoot
@@ -62966,9 +63145,16 @@ proc flakeReconcileAlternative(row: FlakeOverrideStateRow;
   ## older dependency is legitimate (§3.2) — it is named second because a
   ## checkout behind its pin almost always means the checkout is stale.
   ## Returned separately so each command is quoted, and pasteable, on its own.
+  ##
+  ## `--record-downgrade` is spelled out and is not decoration. A bare
+  ## `refresh-lock` no longer records a behind-pin sibling — that is the whole
+  ## of the fix this flag is the escape hatch for — so a message that kept
+  ## naming the bare form would print a command that exits 0 and changes
+  ## nothing, which is the failure mode §"the named command must RUN where the
+  ## message is printed" exists to forbid, in its quietest form.
   if row.relation == fprBehind:
     "repro flake refresh-lock --flake=" & flakeRoot &
-      " --workspace-root=" & workspaceRoot
+      " --workspace-root=" & workspaceRoot & " --record-downgrade"
   else:
     ""
 
@@ -62998,6 +63184,17 @@ proc flakeRenderDriftReport(state: FlakeOverrideState;
     of fprAhead:
       stderr.writeLine(label & ": " & flakeRowSentence(row) &
         " — you are developing; committing here records it in flake.lock.")
+    of fprUnfetched:
+      # WARNED rather than merely stated, because this row is silent about the
+      # thing that matters. A behind sibling announces its distance; this one
+      # announces nothing at all, and the measured case was a sibling five
+      # commits behind wearing exactly this label. It is also the only row here
+      # whose remedy costs nothing to run, so it is named.
+      stderr.writeLine(label & ": WARNING: " & flakeRowSentence(row) &
+        ". Nothing is recorded for an input in this state — a pin that cannot " &
+        "be classified must not be filed. Learn where it stands with: `" &
+        flakeReconcileCommand(row, flakeRoot, workspaceRoot) &
+        "`, then re-run this.")
     of fprDiverged, fprUnknown, fprUnpinned:
       stderr.writeLine(label & ": " & flakeRowSentence(row))
   stderr.writeLine(label & ": " & flakeStateSummaryLine(state))
@@ -63277,6 +63474,12 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 
 const
   flakeRefreshLockLabel = "repro flake refresh-lock"
+  flakePreCommitLabel = "repro pre-commit"
+    ## What the refresh calls itself when the COMMIT HOOK is driving it. The
+    ## same refresh prints the same sentences from both entry points, and the
+    ## label is the only difference — a developer reading a warning during
+    ## `git commit` is told which of their commands produced it, and grep for
+    ## either prefix finds every line that path can emit.
   flakeLockRevisionDerivedKeys = ["narHash", "lastModified", "revCount"]
     ## Fields of a `locked` node that describe the CONTENT of the revision
     ## named by `rev`. They cannot be recomputed without fetching the revision
@@ -63562,6 +63765,13 @@ type
     rewrites*: seq[FlakeLockRewrite]
     notices*: seq[string]
     blockedBy*: seq[string] ## dirty siblings that suppressed the refresh
+    withheld*: seq[string]
+      ## One sentence per input whose pin this refresh DECLINED to move, with
+      ## the reason and the remedy. Separate from `notices` because these are
+      ## the §3.2 decisions rather than incidental remarks: they are warned
+      ## about on stderr, they are named in the outcome's own diagnostic, and a
+      ## caller that wanted to know "did anything go unrecorded" would otherwise
+      ## have to grep prose.
     dirtyScope*: seq[string]
       ## The repos whose working trees were probed for uncommitted work.
       ## Reported on every outcome so the SCOPE of the inherited policy is
@@ -63642,9 +63852,49 @@ proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
     seen.incl(name)
     result.add((name: name, path: pathOf[name]))
 
+proc flakeWithheldNotice(row: FlakeOverrideStateRow;
+    flakeRoot, workspaceRoot: string): string =
+  ## The §3.2 announcement for ONE input whose pin the refresh declined to move.
+  ##
+  ## Naming the sibling, the DISTANCE and the reconciling command is the rule
+  ## verbatim, and the commands come from `flakeReconcileCommand` /
+  ## `flakeReconcileAlternative` — the same two the pre-push refusal prints —
+  ## rather than from a second generator here. There was very nearly one: the
+  ## first behind-pin remedy in this file quoted a command and a parenthesised
+  ## alternative inside ONE pair of backticks, which pastes as `bash: syntax
+  ## error near unexpected token '('`. Reusing the fixed generators means that
+  ## defect cannot be reintroduced on this path independently of that one.
+  ##
+  ## "From <dir> run:" is the same phrasing the gate uses, and it is load-
+  ## bearing rather than stylistic: it is the directory the message is being
+  ## printed in (the pre-commit hook `cd`s to the repository root before
+  ## dispatching), and the commands are spelled so they run unchanged there.
+  result = "flake.lock NOT refreshed for input '" & row.input & "': " &
+    flakeRowSentence(row) & ". "
+  case row.relation
+  of fprBehind:
+    result.add("Recording this checkout's HEAD would file a DOWNGRADE nobody " &
+      "chose — a sibling behind its pin almost always means the checkout is " &
+      "stale, not that anyone decided to go back — so the pin was LEFT " &
+      "ALONE. This is a warning, not an error: nothing was written and no " &
+      "operation was refused. From " & flakeRoot & " run: `" &
+      flakeReconcileCommand(row, flakeRoot, workspaceRoot) &
+      "` — or, to record the downgrade deliberately, `" &
+      flakeReconcileAlternative(row, flakeRoot, workspaceRoot) & "`")
+  else:
+    result.add("A pin that cannot be classified must not be filed: recording " &
+      "this checkout's HEAD would commit to whichever direction happened to " &
+      "be true, unexamined. The pin was LEFT ALONE. This is a warning, not " &
+      "an error: nothing was written and no operation was refused. From " &
+      flakeRoot & " run: `" &
+      flakeReconcileCommand(row, flakeRoot, workspaceRoot) &
+      "`, then re-run the refresh to learn where this sibling really stands.")
+
 proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     selectorArgs: openArray[string]; suffixes: openArray[string];
-    toolProvisioning: ToolProvisioningMode): FlakeLockRefreshOutcome =
+    toolProvisioning: ToolProvisioningMode;
+    recordDowngrade = false;
+    label = flakeRefreshLockLabel): FlakeLockRefreshOutcome =
   ## The whole NF-2 refresh, from "which inputs are overridden" to "the bytes
   ## on disk". Shared verbatim by the operator verb and the commit hook so the
   ## two cannot diverge.
@@ -63744,16 +63994,6 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       flakeRoot & "; dirt-scope: " & result.dirtyScope.join(",")
     return
 
-  # (3) Observe each overridden sibling's HEAD. This is the whole of the
-  # automation: an observation, never a decision (§13.2).
-  var revisions: seq[tuple[input, rev: string]]
-  for b in bound:
-    # ``b.rev`` was read by the binder, which refuses to bind an input whose
-    # revision it could not observe — so a bound input always has one, and the
-    # "could not read HEAD" arm that used to live here is now a NOT-substituted
-    # notice issued at the point the substitution was declined.
-    revisions.add((input: b.input, rev: b.rev))
-
   var lockText = ""
   try:
     lockText = readFile(result.lockPath)
@@ -63762,6 +64002,56 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     result.diagnostic = result.lockPath & " could not be read (" & err.msg & ")"
     result.exitCode = 2
     return
+
+  # (3) Classify each overridden sibling AGAINST THE PIN IT ALREADY CARRIES,
+  # and record only the inputs a classification permits.
+  #
+  # §3.2: "A sibling ahead means you are developing. A sibling behind almost
+  # always means your checkout is stale, not that you chose to downgrade — so
+  # the two warrant different treatment." Reading `HEAD` is an observation
+  # (§13.2), but deciding to FILE it is not, and this is where the difference
+  # lives: a refresh that recorded every observation would rewrite a behind-pin
+  # sibling's node downwards and commit a downgrade nobody asked for.
+  #
+  # That is not a hypothetical. Measured in this workspace: the hook rewrote
+  # `codetracer-src` and `io-mon-src` down to stale checkouts and contaminated
+  # two commits before anybody noticed — `codetracer` was 742 commits behind
+  # its pin, `io-mon` 4 — and the push gate then refused the push over a lock
+  # this very hook had written. One half wrote what the other half rejected.
+  #
+  # The shape is the DIRTY-SIBLING shape, deliberately, because the situation is
+  # the same one: the refresh is skipped, the lock stays as it was, the commit
+  # is unaffected, and NF-3's pre-push gate refuses the PUSH. Refusing the
+  # commit would be new behaviour the policy does not ask for.
+  #
+  # The classification is `flakeOverrideStateReport`'s — the same derivation the
+  # ambient §3.2 report and the pre-push gate use — over the SAME lock bytes
+  # this call is about to rewrite.
+  let state = flakeOverrideStateReport(flakeRoot, bound, identity, lockText)
+  if not state.ok:
+    result.tag = "refused-unreadable-lock"
+    result.diagnostic = state.refusals.join("; ")
+    result.exitCode = 2
+    return
+
+  var revisions: seq[tuple[input, rev: string]]
+  for row in state.rows:
+    # ``row.siblingRev`` is the revision the BINDER observed, in the pass that
+    # decided this input is substituted at all — so the pin filed here and the
+    # revision the dev shell was given cannot be two different answers.
+    let permitted = flakeRowIsRecordable(row) or
+      (recordDowngrade and row.relation == fprBehind)
+    if permitted:
+      revisions.add((input: row.input, rev: row.siblingRev))
+      continue
+    result.withheld.add(flakeWithheldNotice(row, flakeRoot, workspaceRoot))
+  # LOUD, on stderr, one line per withheld input. The log line below records
+  # the same sentences, but a developer watching a commit scroll past sees this
+  # channel and not that file — and a skip nobody can see is indistinguishable
+  # from a refresh that silently did nothing, which is the failure this whole
+  # milestone is about.
+  for w in result.withheld:
+    stderr.writeLine(label & ": WARNING: " & w)
 
   let refreshed = refreshFlakeLockText(lockText, revisions)
   for n in refreshed.notices: result.notices.add(n)
@@ -63777,6 +64067,15 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     # identical bytes — so its mtime is untouched and a rebase replaying a
     # hundred commits over an unchanged sibling set produces a hundred
     # byte-identical, untouched locks.
+    #
+    # "Nothing moved" and "nothing was ALLOWED to move" are the same bytes and
+    # must not be the same report: the first is the quiet majority of commits,
+    # the second is a sibling drifting unrecorded. They get different tags.
+    if result.withheld.len > 0:
+      result.tag = "skipped-unrecordable-sibling"
+      result.diagnostic = result.withheld.join(" | ") & "; dirt-scope: " &
+        result.dirtyScope.join(",")
+      return
     result.tag = "up-to-date"
     result.diagnostic = "flake.lock already names the observed sibling " &
       "revision(s) for all " & $bound.len &
@@ -63798,7 +64097,11 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     moved.add(r.input & ": " & r.oldRev & " -> " & r.newRev &
       (if r.dropped.len > 0: " (dropped " & r.dropped.join("/") & ")" else: ""))
   result.diagnostic = "flake.lock refreshed from observed sibling HEADs — " &
-    moved.join("; ") & "; dirt-scope: " & result.dirtyScope.join(",")
+    moved.join("; ") &
+    (if result.withheld.len > 0:
+       "; WITHHELD: " & result.withheld.join(" | ")
+     else: "") &
+    "; dirt-scope: " & result.dirtyScope.join(",")
 
 proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   ## ``repro flake refresh-lock [--all|--only=LIST|…every `repro develop`
@@ -63816,6 +64119,7 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
     asJson = false
     explicitRoot = ""
     currentRepo = ""
+    recordDowngrade = false
     toolProvisioning = tpmPathOnly
       ## NOT ``tpmUnspecified``, and the difference is the whole difference
       ## between a command that runs and one that only reads as though it
@@ -63842,6 +64146,14 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
       stripGiven = true
     elif arg == "--current-repo" or arg.startsWith("--current-repo="):
       currentRepo = valueFromFlag(args, i, "--current-repo")
+    elif arg == "--record-downgrade":
+      # The explicit opt-in of §3.2's "deliberately testing an older dependency
+      # is legitimate". Without it a behind-pin sibling's pin is left alone and
+      # named; with it, the downgrade is filed because somebody asked for it in
+      # so many words. NOT passed through to the develop-set selector — it is
+      # this verb's flag, and the composer would refuse an argument it does not
+      # know.
+      recordDowngrade = true
     elif arg == "--json":
       asJson = true
     elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
@@ -63861,7 +64173,7 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
     else: defaultFlakeInputStripSuffixes
   let workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
   let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo,
-    passthrough, suffixes, toolProvisioning)
+    passthrough, suffixes, toolProvisioning, recordDowngrade)
   if asJson:
     var rewrites = newJArray()
     for r in outcome.rewrites:
@@ -63880,6 +64192,8 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
       "changed": outcome.changed,
       "rewrites": rewrites,
       "blockedBy": blocked,
+      "withheld": %outcome.withheld,
+      "recordDowngrade": recordDowngrade,
       "dirtyScope": %outcome.dirtyScope,
       "notices": notices,
       "diagnostic": outcome.diagnostic}, indent = 2))
@@ -63991,7 +64305,8 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       # locate.
       let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
         currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
-        toolProvisioning)
+        toolProvisioning, recordDowngrade = false,
+        label = flakePreCommitLabel)
       result.line = "flake-lock " & outcome.tag &
         " (the workspace membership at " & workspaceRoot &
         " could not be resolved — " & membershipFailure &
@@ -64048,7 +64363,8 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       return
     let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
       currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
-      toolProvisioning)
+      toolProvisioning, recordDowngrade = false,
+      label = flakePreCommitLabel)
     result.line = "flake-lock " & outcome.tag & ": " & outcome.diagnostic
     result.changed = outcome.changed
   except CatchableError as err:
@@ -64434,6 +64750,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
                   "relation": flakePinRelationTag(row.relation),
                   "aheadBy": row.aheadBy, "behindBy": row.behindBy,
                   "detail": row.detail,
+                  "recordable": flakeRowIsRecordable(row),
                   "sentence": flakeRowSentence(row)})
     var noticeArr = newJArray()
     for n in notices: noticeArr.add(%n)
@@ -64445,8 +64762,8 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
       "lock": state.lockPath,
       "examined": state.examined,
       "counts": %*{"at": c.at, "ahead": c.ahead, "behind": c.behind,
-                   "diverged": c.diverged, "unknown": c.unknown,
-                   "unpinned": c.unpinned},
+                   "diverged": c.diverged, "unfetched": c.unfetched,
+                   "unknown": c.unknown, "unpinned": c.unpinned},
       "rows": rows,
       "notices": noticeArr,
       "summary": flakeStateSummaryLine(state)}, indent = 2))

@@ -514,7 +514,7 @@
       "flake": false,
       "locked": {
         "ref": "stable",
-        "rev": "4559dd741d05cb739e8bb2b7cc71a18894112a79",
+        "rev": "a407366dfe0ce875a104d916f499e8f347abb83d",
         "type": "git",
         "url": "https://github.com/metacraft-labs/codetracer-native-recorder"
       },
@@ -546,7 +546,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "4b2cb8270dc39bbe599b37c1b4865f591124b95a",
+        "rev": "f9b5edde846802ab5f0644217b2908d31f7c7cac",
         "type": "github"
       },
       "original": {
@@ -2522,7 +2522,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "0f9cf4eea7141c48c061f31863bc3f6018901f2a",
+        "rev": "65b190ba5704454dd33138a2dc82fac8fbc188d6",
         "type": "github"
       },
       "original": {
@@ -2934,7 +2934,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "75e38a8e9439b987f08e81de7b656d247881747b",
+        "rev": "41ab1b987aba67e8bcc34a5945ac33e17b6418ed",
         "type": "github"
       },
       "original": {
@@ -5107,11 +5107,9 @@
         ]
       },
       "locked": {
-        "lastModified": 1788976244,
-        "narHash": "sha256-7wTdJkutu2VDQFuKIzZgAzJ7X8J3pHXbr3dEcqcVH2Q=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "7a79877992908f64d3c8318bb7b20078ff5d1bf4",
+        "rev": "093f520dbe0177bf760585f1aea5064a986d5467",
         "type": "github"
       },
       "original": {
