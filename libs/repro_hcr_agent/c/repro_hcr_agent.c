@@ -2088,12 +2088,22 @@ static const char *repro_hcr_digest_algorithm_end(const char *digest) {
  *   `trace-closed` is `failed`, because the session IS degraded: the recorder
  *     closed its trace and the engine is running code the recording stops
  *     short of;
+ *   `compile-error` is `failed` for the same reason and it is the one reason in
+ *     §5.5 whose place here is NOT obvious, so it is stated. GDH-M8b: a v2 that
+ *     parses and analyzes and then fails `GDScriptCompiler` cannot be refused
+ *     before the swap — the compiler compiles INTO the live script — so by the
+ *     time the host knows, the trace has committed to the new version and the
+ *     engine has already taken the broken one. The recorder closes the trace and
+ *     puts the engine back; both of those are degradations a coordinator has to
+ *     act on. `refused` would say "nothing was touched", and something was;
+ *     (GDH-M8b);
  *   everything else in §5.5's vocabulary is `refused` — the notification was
  *     understood and declined, and nothing was touched.
  */
 static const char *repro_hcr_outcome_word(const char *reason) {
   if (reason != NULL &&
       (strcmp(reason, REPRO_HCR_RELOAD_REASON_CAPABILITY) == 0 ||
+       strcmp(reason, REPRO_HCR_RELOAD_REASON_COMPILE_ERROR) == 0 ||
        strcmp(reason, REPRO_HCR_RELOAD_REASON_TRACE_CLOSED) == 0)) {
     return "failed";
   }
@@ -2420,6 +2430,115 @@ static int repro_hcr_handle_source_changed(int fd, const char *body) {
       goto respond;
     }
     outcome.applied_line_count = counted;
+  }
+
+  /*
+   * And the LINE TABLE, GDH-M8b.
+   *
+   * `line-table-mismatch` has been in §5.5's vocabulary, in this header and in
+   * `protocol.nim`, since the wire was written, with NOTHING ANYWHERE EMITTING
+   * IT. `lineTableDigest` is a MANDATORY field — `parseSourceChangedFile`
+   * `requireStr`s it — so until now every notification carried a digest no
+   * implementation ever compared. That is the exact state `parse-error` was in
+   * before GDH-M8, and the consequence there was a wire vocabulary that promised
+   * a check nobody ran. It is wired rather than deleted because deleting it
+   * would leave the mandatory field behind with even less behind IT.
+   *
+   * WHAT IT CATCHES, STATED HONESTLY. `snapshotDigest` is verified first and
+   * over the same bytes, so this cannot fire on corrupted content — by the time
+   * it runs, the bytes are provably the ones the sender hashed. What it catches
+   * is a sender whose TWO fields disagree with EACH OTHER: a `lineTableDigest`
+   * computed over a different version's text than the `content` it travels with.
+   * That is not hypothetical bookkeeping — §4.3 gives the line table its own
+   * digest precisely because consumers map breakpoints and steps through it, so
+   * a stale one puts v1's line boundaries on v2's source while every other field
+   * agrees. This refuses it by name instead of applying it.
+   *
+   * The algorithm is `sourceLineStartOffsets` / `sourceLineTableDigest`
+   * (`src/repro_hcr_agent/source_digest.nim`): offset 0 opens line 1, every byte
+   * after a `\n` that is not past the end opens the next line, serialized as
+   * decimal offsets joined by `,` and hashed with sha256. Serialized that way
+   * exactly so a C host can reproduce it with no integer-encoding convention to
+   * get wrong. It is hashed INCREMENTALLY here rather than built into a buffer
+   * first: the string is ~11 bytes per line and a host that had to allocate it
+   * would have a size limit this check must not have.
+   */
+  {
+    const char *colon = repro_hcr_digest_algorithm_end(line_table_digest);
+    if (line_table_digest == NULL || colon == NULL) {
+      refusal = REPRO_HCR_RELOAD_REASON_DIGEST_ALGORITHM;
+      snprintf(detail, sizeof(detail),
+               "lineTableDigest carries no \"<alg>:<hex>\" tag");
+      goto respond;
+    }
+    if ((size_t)(colon - line_table_digest) != strlen("sha256") ||
+        strncmp(line_table_digest, "sha256", strlen("sha256")) != 0) {
+      refusal = REPRO_HCR_RELOAD_REASON_DIGEST_ALGORITHM;
+      snprintf(detail, sizeof(detail),
+               "this host implements sha256 only; it cannot verify %s",
+               line_table_digest);
+      goto respond;
+    }
+    if (!repro_hcr_sha256_selftest()) {
+      refusal = REPRO_HCR_RELOAD_REASON_DIGEST_ALGORITHM;
+      snprintf(detail, sizeof(detail),
+               "the host's sha256 failed its own FIPS self-test");
+      goto respond;
+    }
+    {
+      static const char hexdigits[] = "0123456789abcdef";
+      repro_hcr_sha256_ctx ctx;
+      uint8_t digest[REPRO_HCR_SHA256_DIGEST_BYTES];
+      char table_hex[2 * REPRO_HCR_SHA256_DIGEST_BYTES + 1];
+      char number[24];
+      size_t i;
+      int n;
+      repro_hcr_sha256_init(&ctx);
+      if (content_len > 0) {
+        repro_hcr_sha256_update(&ctx, "0", 1u);
+        for (i = 0; i < content_len; ++i) {
+          if (content[i] == '\n' && i + 1 < content_len) {
+            n = snprintf(number, sizeof(number), ",%llu",
+                         (unsigned long long)(i + 1));
+            if (n <= 0 || (size_t)n >= sizeof(number)) {
+              refusal = REPRO_HCR_RELOAD_REASON_LINE_TABLE;
+              snprintf(detail, sizeof(detail),
+                       "a line-start offset in these bytes does not fit this "
+                       "host's line-table serializer");
+              goto respond;
+            }
+            repro_hcr_sha256_update(&ctx, number, (size_t)n);
+          }
+        }
+      }
+      repro_hcr_sha256_final(&ctx, digest);
+      for (i = 0; i < (size_t)REPRO_HCR_SHA256_DIGEST_BYTES; ++i) {
+        table_hex[2 * i] = hexdigits[(digest[i] >> 4) & 0xF];
+        table_hex[2 * i + 1] = hexdigits[digest[i] & 0xF];
+      }
+      table_hex[2 * REPRO_HCR_SHA256_DIGEST_BYTES] = '\0';
+#if defined(REPRO_HCR_GDH8B_FALSIFY_SKIP_LINE_TABLE_CHECK)
+      /* FALSIFIER ARM (gdh8_a_stale_line_table_digest_is_refused_by_name):
+       * compute the line-table digest and DO NOT COMPARE IT — which is the
+       * state this whole block was written to leave. The notification still
+       * carries a `lineTableDigest` and the reply still carries an
+       * `appliedDigest`, so the table LOOKS verified, and the host applies a
+       * version whose line boundaries a consumer will read out of the wrong
+       * text. The gate must go red by observing the reload APPLY — i.e. by
+       * v2's own tokens in stdout — and not merely by a missing error
+       * string. */
+      (void)colon;
+      (void)table_hex;
+#else
+      if (strcmp(colon + 1, table_hex) != 0) {
+        refusal = REPRO_HCR_RELOAD_REASON_LINE_TABLE;
+        snprintf(detail, sizeof(detail),
+                 "expected %s, the bytes' line table hashes to sha256:%s",
+                 line_table_digest, table_hex);
+        goto respond;
+      }
+#endif
+    }
   }
 
   if (repro_hcr_source_reload_fn == NULL) {

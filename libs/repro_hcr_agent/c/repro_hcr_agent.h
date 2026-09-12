@@ -144,6 +144,28 @@ typedef struct repro_hcr_source_changed_file {
  * has to act on and it is the same for all three stages.
  */
 #define REPRO_HCR_RELOAD_REASON_TRACE_CLOSED "trace-closed"
+/*
+ * GDH-M8b. THE SECOND DOOR INTO THE SAME DEFECT.
+ *
+ * `parse-error` covers the content a host can refuse BEFORE it installs
+ * anything, because `GDScriptParser::parse` and `GDScriptAnalyzer::analyze` can
+ * both be run on a stack-local parser. `GDScriptCompiler` cannot: it compiles
+ * INTO a `GDScript`, and the only `GDScript` at the host's disposal is the live
+ * one. A v2 that parses and analyzes and then fails the compiler
+ * (`ERR_COMPILATION_FAILED`, gdscript.cpp:862) is therefore only detectable
+ * AFTER the swap, and until GDH-M8b it was minted, marked, written, swapped,
+ * left `valid == false`, and acknowledged `applied` — the same invariant
+ * violation GDH-M8 closed for `parse-error`, reached through a door the
+ * pre-check cannot stand in front of.
+ *
+ * It is its OWN reason and not `parse-error` because the two have different
+ * consequences and different fixes. `parse-error` is a CLEAN refusal: nothing
+ * was touched. `compile-error` is not: the trace had already committed to the
+ * new version, so the recorder closes it (exactly as for `trace-closed`), and
+ * the engine has already taken the broken script and has to be put back. What
+ * the host managed to put back is stated in `detail` — never implied.
+ */
+#define REPRO_HCR_RELOAD_REASON_COMPILE_ERROR "compile-error"
 #define REPRO_HCR_RELOAD_REASON_ENCODING "unsupported-content-encoding"
 #define REPRO_HCR_RELOAD_REASON_MULTIPLE_FILES "multiple-changed-files-unsupported"
 
