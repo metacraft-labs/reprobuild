@@ -546,7 +546,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "4b2cb8270dc39bbe599b37c1b4865f591124b95a",
+        "rev": "9c75631077d9de7f0a353856d4fb5a8590c1dbba",
         "type": "github"
       },
       "original": {
@@ -2522,7 +2522,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "0f9cf4eea7141c48c061f31863bc3f6018901f2a",
+        "rev": "ac3e5b9714e6c2fd3c501a69ec2be8ff2abe6fc4",
         "type": "github"
       },
       "original": {
@@ -2934,7 +2934,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "75e38a8e9439b987f08e81de7b656d247881747b",
+        "rev": "37234e9f353dd88fcb89e05b69e58d1fce89b6bb",
         "type": "github"
       },
       "original": {
