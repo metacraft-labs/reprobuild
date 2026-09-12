@@ -135,6 +135,7 @@ libs/repro_core/tests/t_nim_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_project_file_alias.nim	nim	9
 libs/repro_core/tests/t_python_dep_scanner.nim	nim	16
 libs/repro_core/tests/t_show_conventions_cli.nim	nim	7
+libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	4
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
