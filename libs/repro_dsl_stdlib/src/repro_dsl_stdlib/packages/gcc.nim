@@ -97,6 +97,7 @@ package gcc:
         boolFlag makeDepsMMD is bool, alias = "-MMD"
         boolFlag shared is bool, alias = "-shared"
         boolFlag staticLink is bool, alias = "-static"
+        boolFlag noStandardLibraries is bool, alias = "-nostdlib"
         flag depfileOut is string,
           alias = "-MF",
           format = separate,

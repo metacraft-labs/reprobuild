@@ -1,5 +1,6 @@
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_project_dsl/install_mirror_runtime
+import repro_test_support
 
 when defined(linux):
   proc cleanEnv(): StringTableRef =
@@ -25,6 +26,60 @@ when defined(linux):
     true
 
   suite "atomic install mirror ELF normalization":
+    test "static executables are left byte-identical without a runtime path":
+      let original = graphArtifactPath(
+        "build/test-fixtures/install-mirror-runtime/static-probe")
+      requireBinary(original, "reprobuild.test_fixtures.install_mirror_static_probe")
+      let scratch = createTempDir("repro-static-elf-", "")
+      defer: removeDir(scratch)
+      let mirror = scratch / "usr"
+      let executable = mirror / "bin" / "static-probe"
+      createDir(parentDir(executable))
+      copyFileWithPermissions(original, executable)
+      let originalBytes = readFile(executable)
+      let normalized = runTool("sh", @["-ec",
+        m9r14fEmitRpathPatchScript(mirror, @[])], cleanEnv())
+      checkpoint normalized.output
+      check normalized.exitCode == 0
+      let originalPreserved = readFile(executable) == originalBytes
+      check originalPreserved
+      check noPatchTemps(scratch)
+
+    test "ELF inspection errors fail before changing the original":
+      let original = findExe("patchelf")
+      require original.len > 0
+      let originalGrep = findExe("grep")
+      require originalGrep.len > 0
+      for tool in ["readelf", "grep"]:
+        checkpoint tool
+        let scratch = createTempDir("repro-elf-inspection-", "")
+        defer: removeDir(scratch)
+        let mirror = scratch / "usr"
+        let executable = mirror / "bin" / "sample"
+        let fakeBin = scratch / "tools"
+        createDir(parentDir(executable))
+        createDir(fakeBin)
+        copyFileWithPermissions(original, executable)
+        let originalBytes = readFile(executable)
+        let fakeTool = fakeBin / tool
+        let fakeScript = if tool == "readelf":
+          "printf '%s\\n' 'unreadable ELF program headers' >&2\nexit 42\n"
+        else:
+          "if [ \"${1-}\" = -E ] && " &
+          "[ \"${2-}\" = '^[[:space:]]*(DYNAMIC|INTERP)[[:space:]]' ]; then\n" &
+          "  exit 42\nfi\nexec " & quoteShell(originalGrep) & " \"$@\"\n"
+        writeFile(fakeTool, "#!/bin/sh\n" & fakeScript)
+        setFilePermissions(fakeTool, {fpUserRead, fpUserWrite, fpUserExec})
+        let fixtureEnv = cleanEnv()
+        fixtureEnv["PATH"] = fakeBin & ":" & fixtureEnv["PATH"]
+        let normalized = runTool("sh", @["-ec",
+          m9r14fEmitRpathPatchScript(mirror, @[])], fixtureEnv)
+        checkpoint normalized.output
+        check normalized.exitCode == 42
+        let originalPreserved = readFile(executable) == originalBytes
+        check originalPreserved
+        check noPatchTemps(scratch)
+
     test "a selected source patchelf can normalize its own mirror":
       let original = findExe("patchelf")
       require original.len > 0

@@ -1221,6 +1221,9 @@ package reprobuild:
           requiredBinaries.add(installMirrorFixtureRoot & "/librepro_mirror_fixture.so")
           executeDeps.add("reprobuild.test_fixtures.install_mirror_library")
           executeDeps.add("reprobuild.test_fixtures.install_mirror_probe")
+        if spec.source == "tests/integration/t_install_mirror_atomic_patching.nim":
+          requiredBinaries.add(installMirrorFixtureRoot & "/static-probe")
+          executeDeps.add("reprobuild.test_fixtures.install_mirror_static_probe")
       # NO TOOL REFS ON THE EXECUTE EDGE, AND THAT IS A DECISION.
       #
       # The BUILD edge above declares `gcc` because `nim c` shells out to
@@ -1977,6 +1980,12 @@ package reprobuild:
       let mirrorFixtureDir = dslfs.ensureDir(installMirrorFixtureRoot,
         actionId = "reprobuild.test_fixtures.install_mirror_dir")
       reprobuildTestFixturesActions.add(mirrorFixtureDir)
+      reprobuildTestFixturesActions.add(gcc(
+        source = "tests/fixtures/install-mirror-runtime/static.c",
+        output = installMirrorFixtureRoot & "/static-probe",
+        staticLink = true, noStandardLibraries = true,
+        after = @[mirrorFixtureDir],
+        actionId = "reprobuild.test_fixtures.install_mirror_static_probe"))
       let mirrorLibrary = gcc(
         source = "tests/fixtures/install-mirror-runtime/library.c",
         output = installMirrorFixtureRoot & "/librepro_mirror_fixture.so",
