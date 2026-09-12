@@ -1027,6 +1027,7 @@ type
 # they would need atomics or per-thread accumulation if that ever changes.
 var
   outputStateCheckCalls = 0
+  storeAbsenceSkips = 0
   outputStateCheckNanos = 0'i64
   revalidateDirWalks = 0
   revalidateDirEntries = 0'i64
@@ -1321,6 +1322,60 @@ proc isImmutablePackageStoreRoot*(path: string): bool =
     return false
   normalized == "/nix/store"
 
+proc immutableStoreOutputPath*(path: string): string =
+  ## The package-store OUTPUT PATH that `path` lies STRICTLY INSIDE, or `""`
+  ## when it lies inside none.
+  ##
+  ## `isImmutablePackageStoreRoot` answers a different question -- "is this
+  ## the store root itself" -- and the two must not be conflated, because
+  ## their guarantees point in opposite directions. The store root is
+  ## CONSTANTLY written: every new package appears as a fresh entry directly
+  ## inside it. An individual output path, once published, never gains an
+  ## entry.
+  ##
+  ## STRICTLY INSIDE is the load-bearing word, and dropping it would be
+  ## unsound. `/nix/store/<entry>` -- the output path itself -- CAN come into
+  ## existence, because that is precisely what building or substituting the
+  ## package does. Only a path with at least one component BELOW an output
+  ## path is covered by the never-gains-an-entry guarantee, so this returns
+  ## `""` for the store root, for a bare output path, and for anything
+  ## outside the store.
+  ##
+  ## NOT CONFIGURABLE FROM THE ENVIRONMENT, for the reason recorded on
+  ## `isImmutablePackageStoreRoot`: honouring an ambient `NIX_STORE_DIR` here
+  ## once let a transient value nominate an arbitrary directory as exempt and
+  ## PERMANENTLY poisoned the records written while it was set. The prefix
+  ## stays a constant; if the store location ever has to vary it must arrive
+  ## through a config field the engine controls.
+  ##
+  ## The same normalization cliff applies as there: `//nix/store/...` and
+  ## `/nix/./store/...` are not recognised. That is a performance cliff and
+  ## never a correctness one -- an unrecognised path is probed as before.
+  const prefix = "/nix/store/"
+  let normalized = path.replace('\\', '/')
+  if not normalized.startsWith(prefix):
+    return ""
+  let relative = normalized[prefix.len .. ^1]
+  let slash = relative.find('/')
+  if slash <= 0:
+    # Either the store root with a trailing slash, or a bare output path
+    # with nothing below it. Neither is covered.
+    return ""
+  prefix & relative[0 ..< slash]
+
+proc storeAbsenceSkipStats*(): int =
+  ## Recorded-input checks answered WITHOUT a syscall because the input was
+  ## absent inside a published store output path.
+  ##
+  ## This is the population the exclusion removes from `fs probe`. Reading it
+  ## beside `absent first touches` is how the mechanism is confirmed: the two
+  ## should move in opposite directions by the same amount, and a change that
+  ## reduced probes without this rising did so some other way.
+  ##
+  ## Reset by `resetOutputStateCheckStats`, so a reading after a build
+  ## describes THAT build.
+  storeAbsenceSkips
+
 proc fingerprintDirectoryMembership*(path: string): FileMetadata =
   ## `fingerprintMetadata` plus the membership digest, for a path the action
   ## ENUMERATED. Returns the plain existence fingerprint when the path is no
@@ -1431,6 +1486,56 @@ proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
   if cache[].entries.hasKey(path):
     inc cache[].stats.currentRunHits
     return cache[].entries[path]
+  # An input that was ABSENT inside a published store output path cannot
+  # become present, so re-probing it every build buys nothing. This is the
+  # largest single term in a warm no-op: on a zlib build 4,009 of 4,441
+  # first touches are absent paths and 98.9% of them are store paths, at
+  # ~4.1 us each.
+  #
+  # WHY THIS IS SOUND, and the two conditions it rests on:
+  #
+  #   1. The path lies STRICTLY INSIDE an output path. A bare output path
+  #      can appear -- see `immutableStoreOutputPath`.
+  #   2. That output path EXISTS NOW. If it does not, the package can still
+  #      be built or substituted and would bring this path with it, so the
+  #      absence is not stable and the probe must happen.
+  #
+  # Condition 2 costs one probe per distinct output path rather than one per
+  # absent input, and it goes through this same cache, so a store root
+  # shared by hundreds of probes is stat'd once. Garbage collection does not
+  # break it: a collected output path re-materializes with the same contents
+  # under the same name, because the name is derived from what produces it.
+  #
+  # Keyed on the root's CLASS, decided from the path with no syscall. The
+  # class-3 residue -- a PATH-resolved linker driver, `nim.cfg` searched up
+  # toward the home directory, `nimble.lock`, `config.nims`, other package
+  # managers' prefixes, transient parameter files -- is outside the store,
+  # so it keeps being probed AND keeps being recorded. That residue is
+  # genuine exposure and is exactly what a blanket evidence-scope narrowing
+  # would have discarded.
+  if recorded.kind == ffkMissing:
+    let outputPath = immutableStoreOutputPath(path)
+    if outputPath.len > 0 and
+        fingerprintMetadata(outputPath, cache).kind != ffkMissing:
+      # Deliberately NOT counted as a metadata-cache hit: it is not one, and
+      # folding it into `currentRunHits` would hide the skip inside a metric
+      # that already moves for other reasons. `storeAbsenceSkips` is the only
+      # place this shows up.
+      inc storeAbsenceSkips
+      # Cache the answer, or the REPEATS pay for the skip. A warm zlib no-op
+      # consults these paths 11,893 times across only ~4,000 distinct paths,
+      # and without this insert every repeat re-ran the prefix scan and the
+      # root lookup instead of being served by the `currentRunHits` branch
+      # above. Measured: the uncached version eliminated 87% of the probes
+      # and saved nothing.
+      #
+      # Sound to insert because it is the current truth, not a guess: the
+      # two conditions above establish that this path is absent and cannot
+      # become present. Deliberately NOT written to
+      # `processWarmFileMetadataEntries`, which records what a run actually
+      # OBSERVED; this run observed nothing here.
+      cache[].entries[path] = recorded
+      return recorded
   inc cache[].stats.warmEntries
   inc cache[].stats.warmRevalidated
   result = fingerprintMetadata(path)
@@ -1848,6 +1953,7 @@ proc resetOutputStateCheckStats*() =
   ## (the daemon, the test binaries, `repro watch`) would otherwise report
   ## each build's cost plus every earlier build's.
   outputStateCheckCalls = 0
+  storeAbsenceSkips = 0
   outputStateCheckNanos = 0'i64
   revalidateDirWalks = 0
   revalidateDirEntries = 0'i64

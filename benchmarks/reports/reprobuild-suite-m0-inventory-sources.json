@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1544,
+    "nimTestBinaries": 1545,
     "pureUnitConsolidationGroups": 46,
-    "pureUnitTests": 560,
+    "pureUnitTests": 561,
     "staticallyDetectedRuntimeCompilerFlowTests": 95,
-    "testEntries": 1552
+    "testEntries": 1553
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -272,7 +272,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_local_store"
@@ -280,6 +280,7 @@
       "owner": "libs/repro_local_store",
       "sources": [
         "libs/repro_local_store/tests/t_a4_p4_eviction.nim",
+        "libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim",
         "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim"
       ],
       "targetOs": "soAny"
@@ -1044,7 +1045,7 @@
       "graph-fixture": 12,
       "integration": 705,
       "platform/destructive": 113,
-      "pure unit": 560,
+      "pure unit": 561,
       "unclassified": 162
     },
     "graphOwnedTestArtifacts": [
@@ -1169,9 +1170,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1544,
+    "nimTestBinaryCount": 1545,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1552
+    "testEntryCount": 1553
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10011,6 +10012,23 @@
       "source": "libs/repro_local_store/tests/t_a4_p4_eviction.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_absent_store_inputs_skip_revalidation",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
