@@ -357,11 +357,30 @@ fi
 printf 'Building apps + test-helpers + test-builds via repro (%s cores, %s MiB available, REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${available_cores}" "${available_mem_mb:-unknown}" \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
-# A cold action cache has to compile every test binary from scratch, which
-# exceeds 90m on CI hardware (an observed cold run reached 969/1168 before
-# timing out). Match the runner's 4h backstop; a warm cache finishes far
-# sooner, so this only raises the ceiling for the cold case.
-BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-4h}"
+# A cold action cache has to compile every test binary from scratch. This
+# ceiling has now been raised twice by the SAME observation, because the graph
+# grows and the backstop does not: 90m cut a cold run at 969/1168, and 4h cut
+# one at 989/1538 (2026-09-12, 32-core shared host, REPROBUILD_MAX_PARALLELISM
+# =24). That the default is too small for this host is already RECORDED, in
+# reprobuild-specs ReproOS-Attestation-Execution.milestones.org:969 — "the
+# .#test-builds collection is roughly a *four-hour* cold run on this host ...
+# it sat at load average ~200 throughout ... restarted once with
+# REPROBUILD_TEST_WARM_REUSE=1 and a raised REPROBUILD_BUILD_TIMEOUT after the
+# default 4h collection timeout proved too short". Leaving the default where a
+# cold run cannot pass makes every cold run on a contended host a false
+# failure, which is the #56 shape one phase earlier.
+#
+# The evidence for the new value: the cold run of 2026-09-11 that DID complete
+# 1514 actions was still running 7h16m after its first action outcome landed,
+# so 4h could never have passed it.
+#
+# NOTE this does not, and cannot, lift a platform ceiling. GitHub-hosted jobs
+# are killed at 6h regardless of what this variable says; on those runners the
+# fix is a warm cache, not a bigger number here.
+#
+# A backstop is not a budget. It bounds an UNWEDGE, so exceeding it says
+# "nothing concluded", never "the build failed" -- see the 124 arm below.
+BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-8h}"
 
 # M3 accepts one fragment selector per invocation; loop over collections.
 repro_build_collection() {
@@ -373,6 +392,25 @@ repro_build_collection() {
     repro_exe="./build/bin/repro_run${exe_ext}"
   fi
   local build_status=0
+  local failure_report_path=".repro/build/repro/build-failure-report.json"
+  local report_path=".repro/build/repro/build-report.json"
+  # THE REPORTS ARE PER-BUILD AND THE PATHS ARE NOT. Every collection, and
+  # every previous run in this checkout, writes to the same two files, and a
+  # build that writes neither (the timeout below kills ``repro`` before
+  # ``persistFailureReport`` runs) leaves the PREVIOUS run's files exactly
+  # where the reader below looks for them.
+  #
+  # That is not hypothetical. On 2026-09-12 a ``.#test-builds`` build was cut
+  # by the backstop at 989/1538 and this block printed — and archived into
+  # ``test-logs/`` under this run's name — a 24-action failure report written
+  # by a DIFFERENT run on 2026-09-11. Two days of investigation went into
+  # twenty-four compile failures that had not happened; every one of those
+  # binaries was on disk, built by the very run whose "failures" they were.
+  #
+  # So the freshness of a report is established before it is read, not
+  # assumed from its existence. Anything older than this invocation is
+  # another run's evidence and is removed rather than reported.
+  rm -f "${failure_report_path}" "${report_path}"
   # ``--write-report`` keeps the full record for the CI artefact. The FAILURE
   # report below needs no flag: a failed build writes it unasked, which is the
   # whole point of the outcome-dependent persist default.
@@ -382,11 +420,12 @@ repro_build_collection() {
     || build_status=$?
   if (( build_status != 0 )); then
     if (( build_status == 124 )); then
-      printf 'Timed out building %s after %s\n' "${collection}" "${BUILD_TIMEOUT}" >&2
+      printf 'Timed out building %s after %s -- the build did NOT fail, it ran out of wall clock.\n' \
+        "${collection}" "${BUILD_TIMEOUT}" >&2
+      printf 'No action failed. Raise REPROBUILD_BUILD_TIMEOUT (a cold .#test-builds on a\n' >&2
+      printf 'contended host has been measured past 7h) or re-run with REPROBUILD_TEST_WARM_REUSE=1.\n' >&2
     fi
 
-    failure_report_path=".repro/build/repro/build-failure-report.json"
-    report_path=".repro/build/repro/build-report.json"
     if [[ -f "${failure_report_path}" ]]; then
       printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${failure_report_path}" >&2
       if command -v jq >/dev/null 2>&1; then
@@ -396,6 +435,11 @@ repro_build_collection() {
       fi
       mkdir -p test-logs
       cp "${failure_report_path}" "test-logs/build-failure-report-${collection//[^a-zA-Z0-9]/_}.json" 2>/dev/null || true
+    else
+      printf '\n=== No failure report for %s: this build produced no failed-action record. ===\n' \
+        "${collection}" >&2
+      printf 'A build killed by the backstop never writes one; do not read another run%ss report as this one%ss.\n' \
+        "'" "'" >&2
     fi
     if [[ -f "${report_path}" ]]; then
       mkdir -p test-logs
