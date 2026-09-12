@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1571,
-    "pureUnitConsolidationGroups": 47,
-    "pureUnitTests": 572,
+    "nimTestBinaries": 1572,
+    "pureUnitConsolidationGroups": 48,
+    "pureUnitTests": 573,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1579
+    "testEntries": 1580
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -116,6 +116,19 @@
         "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
         "libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim",
         "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "sources": [
+        "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
+        "libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1064,7 +1077,7 @@
       "graph-fixture": 12,
       "integration": 715,
       "platform/destructive": 115,
-      "pure unit": 572,
+      "pure unit": 573,
       "unclassified": 165
     },
     "graphOwnedTestArtifacts": [
@@ -1201,9 +1214,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1571,
+    "nimTestBinaryCount": 1572,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1579
+    "testEntryCount": 1580
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8004,6 +8017,23 @@
       "owner": "libs/repro_daemon_core",
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_deferral_log_is_bounded",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
