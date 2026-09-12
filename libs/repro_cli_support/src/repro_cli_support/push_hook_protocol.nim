@@ -313,6 +313,22 @@ const
   LegacyHookSentinelEnv* = "REPROBUILD_HOOK_ACTIVE"
   InternalHookContextEnv* = "REPROBUILD_INTERNAL_HOOK_CONTEXT"
   InternalLockCommitContext* = "reprobuild.lock-commit.v1"
+  InternalDrivenOperationContext* = "reprobuild.driven-operation.v1"
+    ## Invariant 15 — set on git processes REPROBUILD ITSELF drives as steps of
+    ## a larger operation: the rebase/merge inside `push --sync`, and (as the
+    ## call sites are converted) the fast-forwards inside `sync` and the
+    ## checkouts inside `switch`.
+    ##
+    ## Such intermediate states are transient by construction — the operation's
+    ## own later steps move them — so the per-step hook work is waste, and in a
+    ## hundred-repo workspace it is a hundred subprocess launches and store
+    ## writes for a result that is only meaningful at the end.
+    ##
+    ## Travels over the internal-context channel, NOT an environment marker
+    ## like the retired `REPROBUILD_HOOK_ACTIVE`: the managed body captures the
+    ## context and scrubs it before dispatching, so it cannot leak into a
+    ## preserved user hook (Invariant 9) and a caller outside Reprobuild cannot
+    ## forge it into an inherited environment and silently disable the gates.
   HookGitIndexFileEnv* = "REPROBUILD_HOOK_GIT_INDEX_FILE"
     ## NF-2 — the managed `pre-commit` body's private carrier for git's
     ## `GIT_INDEX_FILE`.

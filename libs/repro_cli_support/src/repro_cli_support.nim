@@ -14170,6 +14170,15 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
     # commit the tool itself is composing.
     result.add("if [ \"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\" = \"" &
       InternalLockCommitContext & "\" ]; then exit 0; fi\n")
+  if hookName in ["post-commit", "post-merge", "post-checkout"]:
+    # Invariant 15 — a git step Reprobuild drives itself does no per-step hook
+    # work. The operation records and validates ONCE, against its final state;
+    # anything this hook recorded mid-operation would describe a state the
+    # operation's own later steps invalidate. `pre-commit` and `pre-push` are
+    # deliberately NOT listed: they are gates, and a driven operation must not
+    # be able to wave its own push past them.
+    result.add("if [ \"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\" = \"" &
+      InternalDrivenOperationContext & "\" ]; then exit 0; fi\n")
   if hookName == "pre-push":
     result.add("REPROBUILD_CAPTURED_CAPABILITY=${" & HookCapabilityEnv & ":-}\n")
     result.add("REPROBUILD_CAPTURED_DISPATCH_PROTOCOL=${" &
@@ -30606,6 +30615,88 @@ proc gitRunPlain(identity: GitToolIdentity;
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
 
+template withDrivenOperationContext*(body: untyped) =
+  ## Invariant 15 — mark every git child spawned inside ``body`` as a step of
+  ## an operation Reprobuild drives itself, so the BOOKKEEPING hooks
+  ## (``post-commit`` / ``post-merge`` / ``post-checkout``) skip their per-step
+  ## work. The gates (``pre-commit`` / ``pre-push``) are deliberately not
+  ## suppressed: a driven operation must not wave its own push past them.
+  ##
+  ## This works by setting the internal-context variable in THIS process:
+  ## ``scrubbedGitRepositoryEnv`` strips only the ``GIT_*`` repository-local
+  ## names, so the context reaches git children — including those the build
+  ## engine spawns, whose payloads carry no env of their own. It is restored
+  ## exactly (including "was unset") on the way out, so a nested driven
+  ## operation cannot leak its context to whatever follows.
+  ##
+  ## Why this is worth doing: a workspace-wide ``switch`` or ``pull`` touches
+  ## every participating repo, and each checkout otherwise launches ``repro``
+  ## again to re-derive hook state that the operation's own later steps may
+  ## move anyway. In this workspace that is ~130 subprocess launches per
+  ## command for a result only meaningful once, at the end.
+  let reproDrivenHadPrev = existsEnv(InternalHookContextEnv)
+  let reproDrivenPrev =
+    if reproDrivenHadPrev: getEnv(InternalHookContextEnv) else: ""
+  putEnv(InternalHookContextEnv, InternalDrivenOperationContext)
+  try:
+    body
+  finally:
+    if reproDrivenHadPrev: putEnv(InternalHookContextEnv, reproDrivenPrev)
+    else: delEnv(InternalHookContextEnv)
+
+proc scrubbedGitChildEnv(capability = ""; internalContext = ""):
+    StringTableRef =
+  result = scrubbedGitRepositoryEnv()
+  result.del(HookCapabilityEnv)
+  result.del(LegacyHookSentinelEnv)
+  result.del(HookDispatcherProtocolEnv)
+  result.del(InternalHookContextEnv)
+  if capability.len > 0:
+    result[HookCapabilityEnv] = capability
+  if internalContext.len > 0:
+    result[InternalHookContextEnv] = internalContext
+
+proc gitRunPlainEnv(identity: GitToolIdentity; args: openArray[string];
+    capability = ""; internalContext = ""):
+    tuple[code: int; output: string] =
+  when defined(windows):
+    # Keep the capability-bearing push on the same structured Windows process
+    # boundary as ``gitRunPlain``. Command-string execution can lose or mangle
+    # the second non-fast-forward diagnostic in a retry sequence, causing a
+    # verified race to be misclassified as a generic transport failure.
+    let process = startProcess(identity.binaryPath, args = @args,
+      env = scrubbedGitChildEnv(capability, internalContext),
+      options = {poStdErrToStdOut, poUsePath})
+    defer: process.close()
+    const PollSleepMs = 25
+    let outHandle = Handle(process.outputHandle)
+    var buf {.noinit.}: array[4096, char]
+    while true:
+      var bytesAvail: int32 = 0
+      let peeked = peekNamedPipe(outHandle,
+        lpTotalBytesAvail = addr bytesAvail)
+      if peeked and bytesAvail > 0:
+        var bytesRead: int32 = 0
+        let toRead = min(int(bytesAvail), buf.len).int32
+        let ok = readFile(outHandle, addr buf[0], toRead,
+          addr bytesRead, nil)
+        if ok != 0 and bytesRead > 0:
+          let previousLen = result.output.len
+          result.output.setLen(previousLen + bytesRead)
+          copyMem(addr result.output[previousLen], addr buf[0], bytesRead)
+          continue
+      result.code = process.peekExitCode()
+      if result.code != -1:
+        break
+      sleep(PollSleepMs)
+  else:
+    var cmd = quoteShell(identity.binaryPath)
+    for arg in args:
+      cmd.add(" " & quoteShell(arg))
+    let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+      env = scrubbedGitChildEnv(capability, internalContext))
+    (res.exitCode, res.output)
+
 proc advertisedRemoteHeadBranch(identity: GitToolIdentity;
                                 remoteUrl: string): string =
   ## Best-effort diagnostic fact for a failed declared-branch clone. A remote
@@ -35524,8 +35615,11 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       if decision.syncCase != mscUpToDate:
         anyRefusal = true
     of msaFastForward:
-      let ff = gitRunPlain(identity,
-        ["-C", repoAbs, "merge", "--ff-only", remoteRef])
+      # Invariant 15 — Reprobuild drives this fast-forward, so the bookkeeping
+      # hooks skip it; the run reports the final state itself.
+      let ff = gitRunPlainEnv(identity,
+        ["-C", repoAbs, "merge", "--ff-only", remoteRef],
+        internalContext = InternalDrivenOperationContext)
       if ff.code != 0:
         entry.outcome = "fast_forward_failed"
         entry.diagnostic = "fast-forward to " & remoteRef & " failed: " &
@@ -35537,9 +35631,12 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       let isRebase = decision.action == msaRebase
       let run =
         if isRebase:
-          gitRunPlain(identity, ["-C", repoAbs, "rebase", remoteRef])
+          gitRunPlainEnv(identity, ["-C", repoAbs, "rebase", remoteRef],
+            internalContext = InternalDrivenOperationContext)
         else:
-          gitRunPlain(identity, ["-C", repoAbs, "merge", "--no-edit", remoteRef])
+          gitRunPlainEnv(identity,
+            ["-C", repoAbs, "merge", "--no-edit", remoteRef],
+            internalContext = InternalDrivenOperationContext)
       if run.code != 0:
         # The prediction was optimistic (it is an approximation for rebase).
         # Abort so the repo is left EXACTLY as it was — the per-repo atomicity
@@ -36276,8 +36373,14 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
           continue
 
     # Converge to the manifest revision on a local tracking branch.
-    let converged = convergeRepoToManifestRevision(
-      identity, absPath, repo.revision, remoteName = gitRemoteNameFor(repo))
+    # Invariant 15 — `pull` drives this checkout, so `post-checkout` does no
+    # per-repo work for it. Across a whole workspace that is one `repro`
+    # launch per repo saved, re-deriving hook state the converge itself is
+    # about to move.
+    var converged: tuple[ok: bool; branch, headSha, diag: string]
+    withDrivenOperationContext:
+      converged = convergeRepoToManifestRevision(
+        identity, absPath, repo.revision, remoteName = gitRemoteNameFor(repo))
     if not converged.ok:
       entry.outcome = pullOutcomeTag(ppoFailed)
       entry.diagnostic = converged.diag
@@ -37744,59 +37847,6 @@ proc resolveHookReproCli(repoRoot: string): string =
     if executableFile(candidate): return candidate
     return ""
   findExe("repro")
-
-proc scrubbedGitChildEnv(capability = ""; internalContext = ""):
-    StringTableRef =
-  result = scrubbedGitRepositoryEnv()
-  result.del(HookCapabilityEnv)
-  result.del(LegacyHookSentinelEnv)
-  result.del(HookDispatcherProtocolEnv)
-  result.del(InternalHookContextEnv)
-  if capability.len > 0:
-    result[HookCapabilityEnv] = capability
-  if internalContext.len > 0:
-    result[InternalHookContextEnv] = internalContext
-
-proc gitRunPlainEnv(identity: GitToolIdentity; args: openArray[string];
-    capability = ""; internalContext = ""):
-    tuple[code: int; output: string] =
-  when defined(windows):
-    # Keep the capability-bearing push on the same structured Windows process
-    # boundary as ``gitRunPlain``. Command-string execution can lose or mangle
-    # the second non-fast-forward diagnostic in a retry sequence, causing a
-    # verified race to be misclassified as a generic transport failure.
-    let process = startProcess(identity.binaryPath, args = @args,
-      env = scrubbedGitChildEnv(capability, internalContext),
-      options = {poStdErrToStdOut, poUsePath})
-    defer: process.close()
-    const PollSleepMs = 25
-    let outHandle = Handle(process.outputHandle)
-    var buf {.noinit.}: array[4096, char]
-    while true:
-      var bytesAvail: int32 = 0
-      let peeked = peekNamedPipe(outHandle,
-        lpTotalBytesAvail = addr bytesAvail)
-      if peeked and bytesAvail > 0:
-        var bytesRead: int32 = 0
-        let toRead = min(int(bytesAvail), buf.len).int32
-        let ok = readFile(outHandle, addr buf[0], toRead,
-          addr bytesRead, nil)
-        if ok != 0 and bytesRead > 0:
-          let previousLen = result.output.len
-          result.output.setLen(previousLen + bytesRead)
-          copyMem(addr result.output[previousLen], addr buf[0], bytesRead)
-          continue
-      result.code = process.peekExitCode()
-      if result.code != -1:
-        break
-      sleep(PollSleepMs)
-  else:
-    var cmd = quoteShell(identity.binaryPath)
-    for arg in args:
-      cmd.add(" " & quoteShell(arg))
-    let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-      env = scrubbedGitChildEnv(capability, internalContext))
-    (res.exitCode, res.output)
 
 proc configuredPushLocation(identity: GitToolIdentity; repoRoot,
     remote: string): tuple[ok: bool; value: string; diagnostic: string] =
@@ -47787,8 +47837,9 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
   let headInUpstream = gitRunPlain(identity,
     ["-C", repoAbs, "merge-base", "--is-ancestor", head, upstream])
   if headInUpstream.code == 0:
-    let ff = gitRunPlain(identity,
-      ["-C", repoAbs, "merge", "--ff-only", rName & "/" & branch])
+    let ff = gitRunPlainEnv(identity,
+      ["-C", repoAbs, "merge", "--ff-only", rName & "/" & branch],
+      internalContext = InternalDrivenOperationContext)
     if ff.code != 0:
       result.stopped = true
       result.diagnostic = "fast-forward of " & repo.path & " failed: " &
@@ -47810,8 +47861,12 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     result.remediation = "run 'repro push --sync --rebase' (or --merge) to " &
       "integrate " & rName & "/" & branch & " in " & repo.path
   of psmMerge:
-    let m = gitRunPlain(identity,
-      ["-C", repoAbs, "merge", "--no-edit", rName & "/" & branch])
+    # Invariant 15 — Reprobuild drives this merge as a step of `push --sync`,
+    # so the commit-path hooks do no per-step work for it: the push's own gate
+    # records and verifies the FINAL state a moment later.
+    let m = gitRunPlainEnv(identity,
+      ["-C", repoAbs, "merge", "--no-edit", rName & "/" & branch],
+      internalContext = InternalDrivenOperationContext)
     if m.code != 0:
       # Abort the half-applied merge so the tree is not left mid-conflict
       # for the operator to puzzle over an unexpected state.
@@ -47827,8 +47882,12 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     result.action = "merge"
     result.integrated = true
   of psmRebase:
-    let r = gitRunPlain(identity,
-      ["-C", repoAbs, "rebase", rName & "/" & branch])
+    # Invariant 15 — same reasoning as the merge arm above, and more sharply: a
+    # rebase replays N commits, so per-step hook work is paid N times for
+    # intermediate states the rebase itself discards.
+    let r = gitRunPlainEnv(identity,
+      ["-C", repoAbs, "rebase", rName & "/" & branch],
+      internalContext = InternalDrivenOperationContext)
     if r.code != 0:
       discard gitRunPlain(identity, ["-C", repoAbs, "rebase", "--abort"])
       result.stopped = true
@@ -52160,7 +52219,13 @@ proc executeBranchCreate(parsed: BranchArgs): BranchReport =
       "engine-cache"
     var config = defaultBuildEngineConfig(cacheRoot)
     config.suppressTrace = true
-    let res = runBuild(graph(actions), config)
+    # Invariant 15 — the switch actions are steps of an operation Reprobuild
+    # drives, so `post-checkout` does no per-repo work for them. In a
+    # hundred-repo workspace that is a hundred `repro` launches saved, for
+    # bookkeeping the switch itself reports at the end.
+    var res: BuildRunResult
+    withDrivenOperationContext:
+      res = runBuild(graph(actions), config)
     var outcomeById = initTable[string, ActionResult]()
     for outcome in res.results:
       outcomeById[outcome.id] = outcome
