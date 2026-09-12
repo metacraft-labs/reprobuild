@@ -880,8 +880,36 @@ suite "F2 filesystem-facts conformance — cloning":
         check true
       # The operation is its own fact: a filesystem that clones must be
       # declared to clone with the primitive this OS actually issued.
+      #
+      # It is a CONDITIONAL fact — "if this filesystem clones, it clones
+      # with X" — so it is only observable where a clone happened. When
+      # no clone succeeded there is no operation to name, and mapping
+      # that to `clNone` and contradicting the row produces a FALSE
+      # contradiction on every host whose `reflink` answer is legitimately
+      # no: ZFS with `feature@block_cloning` disabled on the pool answers
+      # EOPNOTSUPP to FICLONE, which its own `reflink = varies` row
+      # already accommodates. Reported UNTESTED HERE instead, in the same
+      # shape — and for the same reason — as `cloneIsCopyOnWrite` below.
+      # Nothing is weakened: a definite `reflink = yes` that produced no
+      # clone is already contradicted by the `reflink` fact just above.
+      #
+      # The guard is narrowed to the rows where the observation genuinely
+      # cannot discriminate. A row declaring `reflink = no` PREDICTED this
+      # outcome, so `clNone` is its own predicted value and the check
+      # stays live there — that is what keeps tmpfs's `cloneOperation`
+      # verified rather than excused.
       let observedOp = if bytesMatch: hostCloneOperation() else: clNone
-      if entry.cloneOperation.value.isDefinite:
+      let cloneUnobservable = not bytesMatch and entry.reflink.value != tnNo
+      if cloneUnobservable:
+        untestedHere(subject, "cloneOperation",
+                     "no clone succeeded on this host (attempt=" &
+                     $attempt.outcome & "), so there is no operation to " &
+                     "observe; the declared `" & $entry.cloneOperation.value &
+                     "` names what performs a clone WHERE one happens, and " &
+                     "this filesystem's `reflink` row (declared `" &
+                     $entry.reflink.value & "`) is where the absence is " &
+                     "judged")
+      elif entry.cloneOperation.value.isDefinite:
         expectFact(subject, "cloneOperation", entry.cloneOperation.value,
                    observedOp, "the OS table names " &
                    hostOsFacts().reflinkApi.value & " for this platform")
@@ -940,6 +968,47 @@ suite "F2 filesystem-facts conformance — cloning":
 # Timestamps
 # ---------------------------------------------------------------------------
 
+when defined(posix):
+  # `os.setLastModificationTime` is NOT the setter this measurement can
+  # use. Its POSIX arm converts through `Timeval` and issues `utimes(2)`
+  # — `lib/pure/os.nim`: `let micro = convert(Nanoseconds, Microseconds,
+  # t.nanosecond)` — so its unit is the MICROSECOND. A one-nanosecond
+  # difference is truncated by the SETTER and never reaches the
+  # filesystem, which makes the round trip a measurement of Nim's API
+  # rather than of the volume, and reports every row declaring 1 ns
+  # (ext4, XFS, Btrfs, ZFS, APFS, tmpfs) as "coarser than 1 ns". That is
+  # a FALSE contradiction: `utimensat(2)` stores the nanosecond on the
+  # same volumes. The Windows arm never saw this because `setFileTime`
+  # takes a FILETIME, whose 100 ns unit happens to equal the granularity
+  # NTFS and ReFS declare.
+  #
+  # `std/posix` does not bind `utimensat(2)`, so bind it directly — the
+  # same treatment, for the same reason, that
+  # `repro_build_engine/tests/t_action_cache_output_integrity.nim` gives
+  # it.
+  type CTimespec {.importc: "struct timespec", header: "<time.h>",
+                   bycopy.} = object
+    tv_sec: clong
+    tv_nsec: clong
+  let atFdCwd {.importc: "AT_FDCWD", header: "<fcntl.h>".}: cint
+  proc utimensatRaw(dirfd: cint; path: cstring; times: ptr CTimespec;
+                    flags: cint): cint
+    {.importc: "utimensat", header: "<sys/stat.h>".}
+
+proc setMtimeExact(path: string; t: times.Time) =
+  ## Set the last-write time with NANOSECOND resolution, so that what the
+  ## round trip below measures is the FILESYSTEM's storage granularity
+  ## and not the resolution of the API used to write it.
+  when defined(posix):
+    var ts: array[2, CTimespec]
+    for i in 0 .. 1:
+      ts[i].tv_sec = clong(t.toUnix)
+      ts[i].tv_nsec = clong(t.nanosecond)
+    if utimensatRaw(atFdCwd, path.cstring, addr ts[0], 0) != 0:
+      raiseOSError(osLastError(), path)
+  else:
+    setLastModificationTime(path, t)
+
 suite "F2 filesystem-facts conformance — timestamps":
   test "the stored last-write granularity matches the table":
     # Two-sided, which is what makes it a measurement rather than a
@@ -964,10 +1033,10 @@ suite "F2 filesystem-facts conformance — timestamps":
       let base = fromUnix(1_000_000)
       let g = declared.value
 
-      setLastModificationTime(extendedPath(f), base)
+      setMtimeExact(extendedPath(f), base)
       let readBase = getLastModificationTime(extendedPath(f))
-      setLastModificationTime(extendedPath(f),
-                              base + initDuration(nanoseconds = g))
+      setMtimeExact(extendedPath(f),
+                    base + initDuration(nanoseconds = g))
       let readUp = getLastModificationTime(extendedPath(f))
       let representable = readUp != readBase
 
@@ -987,8 +1056,8 @@ suite "F2 filesystem-facts conformance — timestamps":
           checkpoint(msg)
           fail()
       else:
-        setLastModificationTime(extendedPath(f),
-                                base + initDuration(nanoseconds = g - 1))
+        setMtimeExact(extendedPath(f),
+                      base + initDuration(nanoseconds = g - 1))
         let readDown = getLastModificationTime(extendedPath(f))
         let finerNotRepresentable = readDown == readBase
         checkpoint(subject & ": +" & $g & "ns distinct=" & $representable &
