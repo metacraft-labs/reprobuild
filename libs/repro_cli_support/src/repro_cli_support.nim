@@ -58667,6 +58667,75 @@ type DurableSolverProviderArtifacts = object
   interfaceArtifact: ProjectInterfaceArtifact
   providerArtifact: ProviderCompileArtifact
 
+const
+  LockProviderInterfaceArtifactName = "project-interface.rbsz"
+  LockFileDeclarationsSidecarName = "lock-file-declarations.tsv"
+    ## Named-Lock-Files NLF-M8 — where a recipe's emitted `lockFile`
+    ## declarations are kept between runs. See
+    ## `carriedLockFileDeclarations`.
+
+proc lockProviderMetadataRoot(): string =
+  ## Root of the provider probe's own artifact tree under the user action
+  ## cache. One definition, because `repro lock list`'s declaration sidecar
+  ## has to agree with `solverInputsFromCompiledProvider` about where the
+  ## interface artifact it is judged against lives.
+  absolutePath(currentActionCacheRoot() / "lock-provider-metadata")
+
+proc lockProviderArtifactDir(modulePath, compileWorkDir: string): string =
+  ## Where ONE recipe's interface artifact, provider binary and declaration
+  ## sidecar live.
+  lockProviderMetadataRoot() / "providers" /
+    toHex(weakFingerprintFromText(
+      modulePath & "\x00" & compileWorkDir).bytes)
+
+proc carryForwardLockFileDeclarations(sidecarPath, emitPath: string) =
+  ## Keep the emission THIS run obtained, so a later run whose interface
+  ## extraction is warm still has it.
+  ##
+  ## Committed by atomic rename. Two `repro lock list` processes on the same
+  ## recipe address the same path, and a half-written TSV read back by the
+  ## other is precisely the listing-that-reports-confidently-about-the-
+  ## wrong-thing this surface exists to prevent.
+  if sidecarPath.len == 0:
+    return
+  try:
+    createDir(extendedPath(parentDir(sidecarPath)))
+    let staging = sidecarPath & ".tmp-" & $getCurrentProcessId()
+    copyFile(extendedPath(emitPath), extendedPath(staging))
+    moveFile(extendedPath(staging), extendedPath(sidecarPath))
+  except CatchableError:
+    discard
+
+proc carriedLockFileDeclarations(sidecarPath, interfacePath: string):
+    seq[LockFileDecl] =
+  ## The declarations a PREVIOUS run of this recipe emitted, when and only
+  ## when they still describe the interface artifact that is on disk now.
+  ##
+  ## CURRENCY IS JUDGED AGAINST THE ARTIFACT, not against the recipe, and
+  ## that is what makes this safe rather than a second stale-cache surface.
+  ## The sidecar is written immediately after the extraction that produced
+  ## `interfacePath`, so on a run that emitted it is newer than that file by
+  ## construction. An extraction that RE-RAN for a changed recipe rewrites
+  ## the artifact; if that run emitted nothing — a recipe that declares no
+  ## `lockFile` never calls `declareLockFile`, and nothing is written — the
+  ## sidecar is now OLDER than the artifact and is refused here. The answer
+  ## then falls back to the well-known set, which for a recipe declaring
+  ## nothing is the true answer rather than the previous recipe's names.
+  result = @[]
+  if sidecarPath.len == 0 or interfacePath.len == 0:
+    return
+  try:
+    if not fileExists(extendedPath(sidecarPath)):
+      return
+    if not fileExists(extendedPath(interfacePath)):
+      return
+    if getLastModificationTime(extendedPath(sidecarPath)) <
+        getLastModificationTime(extendedPath(interfacePath)):
+      return
+    result = parseLockFileDeclarations(readFile(sidecarPath))
+  except CatchableError:
+    result = @[]
+
 proc tryLoadDurableSolverProviderArtifacts(
     modulePath, compileWorkDir: string):
     Option[DurableSolverProviderArtifacts] =
@@ -58806,15 +58875,12 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       try: removeDir(extendedPath(scratchRoot))
       except CatchableError: discard
     let compileWorkDir = reprobuildLibraryWorkDir()
-    let metadataRoot = absolutePath(currentActionCacheRoot() /
-      "lock-provider-metadata")
-    let moduleKey = toHex(weakFingerprintFromText(
-      modulePath & "\x00" & compileWorkDir).bytes)
-    let artifactDir = metadataRoot / "providers" / moduleKey
+    let metadataRoot = lockProviderMetadataRoot()
+    let artifactDir = lockProviderArtifactDir(modulePath, compileWorkDir)
     # Share compiler scratch across recipes, not their output artifacts.
     # The existing compiler locks serialize writers to each Nim cache.
     let scratchDir = metadataRoot / "work"
-    let interfacePath = artifactDir / "project-interface.rbsz"
+    let interfacePath = artifactDir / LockProviderInterfaceArtifactName
     let stubPath = artifactDir / "project-interface.nim"
     let cacheRoot = artifactDir / "build-engine-cache"
     let publicCliPath = stablePublicCliPath()
@@ -59626,7 +59692,41 @@ proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
   ## declares nothing", which is exactly the two-things-look-the-same failure
   ## the campaign is about — and §4.2's own worked example, a `workspace.nim`
   ## whose entire content is two `lockFile` declarations, took that branch.
+  ##
+  ## AND NOT ONLY ON A COLD RUN, which is the second door the same fallback
+  ## came in by. The declarations reach this process as a SIDE EFFECT of the
+  ## recipe being COMPILED: `declareLockFile` writes the registry to
+  ## `LockFilesEmitEnvVar` as each declaration is made, at the recipe's
+  ## expansion / module-init time. So nothing is emitted on a run where no
+  ## recipe is compiled — and the interface extraction is cached, exactly as
+  ## it is supposed to be (`interfaceExtractionCacheProbe`, and the engine's
+  ## own action cache on the CLI's edge-driven path).
+  ##
+  ## Measured on three consecutive listings of ONE unchanged recipe: the
+  ## first emitted four declarations, the second and third emitted nothing
+  ## because the extraction short-circuited, and both printed the well-known
+  ## set as though it were the workspace's answer. That is NLF-M8's own exit
+  ## criterion — "a project WITH declarations and no qualifying `build:`
+  ## block still lists them" — failing for a different reason than the early
+  ## return it was written against, and §4.2 consumer (1), "a `repro lock
+  ## list` prints each declared name with its description", silently not
+  ## being served.
+  ##
+  ## So an emission is CARRIED FORWARD beside the interface artifact it was
+  ## produced with, and read back when a warm extraction means no recipe ran
+  ## this time. `carriedLockFileDeclarations` is where that is judged.
   result = predeclaredLockFiles()
+  var sidecarPath = ""
+  var interfacePath = ""
+  try:
+    let match = resolveProjectFile(projectDir)
+    if match.path.len > 0:
+      let artifactDir = lockProviderArtifactDir(absolutePath(match.path),
+        reprobuildLibraryWorkDir())
+      sidecarPath = artifactDir / LockFileDeclarationsSidecarName
+      interfacePath = artifactDir / LockProviderInterfaceArtifactName
+  except CatchableError:
+    discard
   let emitPath = getTempDir() /
     ("repro-lock-list-" & $getCurrentProcessId() & ".tsv")
   putEnv(LockFilesEmitEnvVar, emitPath)
@@ -59640,6 +59740,11 @@ proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
       let parsed = parseLockFileDeclarations(readFile(emitPath))
       if parsed.len > 0:
         result = parsed
+        carryForwardLockFileDeclarations(sidecarPath, emitPath)
+    else:
+      let carried = carriedLockFileDeclarations(sidecarPath, interfacePath)
+      if carried.len > 0:
+        result = carried
   except CatchableError:
     discard
   finally:

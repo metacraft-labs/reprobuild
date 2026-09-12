@@ -658,6 +658,11 @@ proc scheduleMatchesDesired*(observed, desired: ScheduledTaskScheduleSpec): bool
   ## "empty desired string means leave at the driver default" convention
   ## that `scheduledTaskMatchesDesired` documents for every OTHER slot.
   ##
+  ## The exemption is `interval.startAt` and ONLY `interval.startAt`. It is
+  ## earned by a driver-synthesised value, not by the field being optional at
+  ## the template surface — see the `wstskOnLogon` branch below for the slot
+  ## that looks the same and is not.
+  ##
   ## It matters most for `interval`. A profile that says
   ## `scheduleInterval(everyMinutes = 10)` leaves `startAt` empty, but
   ## Windows always materialises a `StartBoundary` (observed:
@@ -672,8 +677,36 @@ proc scheduleMatchesDesired*(observed, desired: ScheduledTaskScheduleSpec): bool
   of wstskOnBoot:
     observed.delaySeconds == desired.delaySeconds
   of wstskOnLogon:
-    # Empty desired `forUser` is the documented "any user" case.
-    desired.forUser.len == 0 or observed.forUser == desired.forUser
+    # `forUser` IS load-bearing, empty included, and this is the one slot
+    # where "empty desired string" does NOT mean "leave at the driver
+    # default". Windows-System-Resources.md §"`ScheduleSpec` discriminated
+    # union" spells the empty case out as a VALUE:
+    #
+    #     forUser*: string          # empty ⇒ any user
+    #
+    # and the apply path honours it as one — `renderScheduledTaskScheduleXml`
+    # emits `<LogonTrigger></LogonTrigger>` and the cmdlet form emits a bare
+    # `New-ScheduledTaskTrigger -AtLogOn`, both of which register a trigger
+    # that fires for EVERY user. So a profile asking for `scheduleOnLogon()`
+    # is asking for an any-user trigger, and a live task pinned to
+    # `DOMAIN\runner` does not satisfy it: the task will not fire for anybody
+    # else, which is exactly the difference the profile exists to state.
+    #
+    # The `startAt` exemption below does not generalise to here, and the
+    # distinction is mechanical rather than a matter of taste. `startAt` is
+    # exempt because Windows SYNTHESISES `1970-01-01T00:00:00+00:00` for a
+    # repetition registered without one, so an observation can never come
+    # back empty and the resource could never converge. `forUser` has no
+    # such synthesis: the probe emits `'ScheduleForUser=' + $tr.UserId`,
+    # which is empty for an any-user trigger, so an any-user task observes
+    # back as `forUser == ""` and converges on the first apply.
+    #
+    # Exempting it instead made real drift undetectable in both directions —
+    # and inconsistently, because `digestScheduleToken` still renders
+    # `onLogon:<forUser>` in full. The planner's digest would report the task
+    # drifted while this post-apply gate reported it converged, so the driver
+    # would re-register forever and call each round a success.
+    observed.forUser == desired.forUser
   of wstskOnce:
     observed.runAt == desired.runAt
   of wstskDaily:
