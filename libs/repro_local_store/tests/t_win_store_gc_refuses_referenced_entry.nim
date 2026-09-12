@@ -156,6 +156,61 @@ suite "store GC refuses an entry a live root holds":
     check report.reclaimed.len >= 1
     check not dirExists(extendedPath(collected.quarantinedPath))
 
+  test "targeted collection starts the grace when an old prefix is quarantined":
+    var f = openFixture("old-target")
+    defer: closeFixture(f)
+
+    let entry = f.realizeEntry("zstd", "1.5.6", "old source-built payload")
+    setLastModificationTime(entry.path, getTime() - initDuration(days = 30))
+    let collected = f.store.gcPrefix(entry.id, graceSeconds = 5 * 60)
+
+    check collected.found
+    check not collected.refused
+    check not collected.reclaimed
+    check not f.store.lookupPrefix(entry.id).found
+    check not dirExists(extendedPath(entry.path))
+    check fileExists(extendedPath(collected.quarantinedPath / "bin" / "tool"))
+    check f.store.gc(graceSeconds = 5 * 60).reclaimed.len == 0
+
+  test "a sweep retains an old prefix for a full quarantine grace":
+    var f = openFixture("old-sweep")
+    defer: closeFixture(f)
+
+    let entry = f.realizeEntry("zstd", "1.5.6", "old source-built payload")
+    setLastModificationTime(entry.path, getTime() - initDuration(days = 30))
+    let report = f.store.gc(graceSeconds = 5 * 60)
+
+    check report.quarantined.len == 1
+    require report.quarantinedPaths.len == 1
+    check report.reclaimed.len == 0
+    check not f.store.lookupPrefix(entry.id).found
+    check not dirExists(extendedPath(entry.path))
+    check fileExists(extendedPath(report.quarantinedPaths[0] / "bin" / "tool"))
+    check f.store.gc(graceSeconds = 5 * 60).reclaimed.len == 0
+
+  when defined(posix):
+    test "quarantine refuses a symlink without stamping its external target":
+      var f = openFixture("symlink")
+      defer: closeFixture(f)
+
+      let entry = f.realizeEntry("zstd", "1.5.6", "external payload")
+      let outside = f.root / "external"
+      moveDir(entry.path, outside)
+      createSymlink(outside, entry.path)
+      setLastModificationTime(outside, getTime() - initDuration(days = 30))
+      let originalTime = getLastModificationTime(outside)
+
+      let collected = f.store.gcPrefix(entry.id, graceSeconds = 5 * 60)
+      check collected.found
+      check not collected.reclaimed
+      check collected.quarantinedPath.len == 0
+      check collected.reason.contains("refusing non-directory quarantine source")
+      check f.store.gc(graceSeconds = 5 * 60).quarantined.len == 0
+      check f.store.lookupPrefix(entry.id).found
+      check symlinkExists(entry.path)
+      check readFile(outside / "bin" / "tool") == "external payload"
+      check getLastModificationTime(outside) == originalTime
+
   test "a second root keeps the entry alive after the first releases":
     ## Reachability, not refcounting -- but the observable consequence has
     ## to be the same when two holders exist, or the model is only correct
