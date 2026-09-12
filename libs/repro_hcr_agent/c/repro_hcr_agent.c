@@ -2069,9 +2069,41 @@ static const char *repro_hcr_digest_algorithm_end(const char *digest) {
   return digest == NULL ? NULL : strchr(digest, ':');
 }
 
+/*
+ * `outcome` vs `failed` on the wire — GDH-M8.
+ *
+ * `HcrSourceReloadOutcome` has had three values since GDH-M4 (design §4.3:
+ * `"applied" | "refused" | "failed"`) and this agent only ever emitted two of
+ * them: every non-applied answer said `failed`. So a coordinator could not tell
+ * a deliberate, clean decline — nothing touched, session healthy — from a host
+ * that broke while trying, which is precisely the distinction design §8.1 draws
+ * between a failure at steps 1-3 and one at steps 4-6.
+ *
+ * The mapping is by reason and it is deliberately conservative:
+ *
+ *   `capability-not-negotiated` stays `failed`, because §4.4 says so in prose
+ *     ("the host answers sourceReloadResult{outcome: \"failed\", reason:
+ *     \"capability-not-negotiated\"}") — it is a coordinator defect, not a
+ *     decline;
+ *   `trace-closed` is `failed`, because the session IS degraded: the recorder
+ *     closed its trace and the engine is running code the recording stops
+ *     short of;
+ *   everything else in §5.5's vocabulary is `refused` — the notification was
+ *     understood and declined, and nothing was touched.
+ */
+static const char *repro_hcr_outcome_word(const char *reason) {
+  if (reason != NULL &&
+      (strcmp(reason, REPRO_HCR_RELOAD_REASON_CAPABILITY) == 0 ||
+       strcmp(reason, REPRO_HCR_RELOAD_REASON_TRACE_CLOSED) == 0)) {
+    return "failed";
+  }
+  return "refused";
+}
+
 static char *repro_hcr_source_reload_result_json(
     const char *reload_id, const char *source_path, unsigned int generation,
-    const repro_hcr_source_reload_outcome *outcome, const char *whole_reason) {
+    const repro_hcr_source_reload_outcome *outcome, const char *whole_reason,
+    const char *whole_detail) {
   char *json = (char *)malloc(4096);
   char reload_id_esc[256];
   char path_esc[1024];
@@ -2160,7 +2192,13 @@ static char *repro_hcr_source_reload_result_json(
 
   {
     const char *reason = whole_reason;
-    const char *detail = "";
+    /* GDH-M8: the agent's OWN refusals carry a detail too, and it used to be
+     * dropped here — a `digest-mismatch` reached the coordinator with the
+     * empty string where "expected sha256:…, the bytes hash to sha256:…" had
+     * already been composed. A refusal with no diagnostic attached is the
+     * failure shape this campaign keeps finding, so the detail is threaded
+     * through rather than recomputed. */
+    const char *detail = whole_detail == NULL ? "" : whole_detail;
     if (outcome != NULL && outcome->reason != NULL &&
         outcome->reason[0] != '\0') {
       reason = outcome->reason;
@@ -2180,12 +2218,13 @@ static char *repro_hcr_source_reload_result_json(
         "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
         "\"protocolVersion\":2,\"messageId\":\"agent-source-reload-%d\","
         "\"kind\":\"sourceReloadResult\",\"sourceReloadResult\":{"
-        "\"reloadId\":\"%s\",\"outcome\":\"failed\",\"reason\":\"%s\","
+        "\"reloadId\":\"%s\",\"outcome\":\"%s\",\"reason\":\"%s\","
         "\"appliedFiles\":[],\"refusedFiles\":[{"
         "\"sourcePath\":\"%s\",\"generation\":%u,\"reason\":\"%s\","
         "\"detail\":\"%s\"}]}}",
         REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE,
-        repro_hcr_poll_state.messages, reload_id_esc, reason_esc, path_esc,
+        repro_hcr_poll_state.messages, reload_id_esc,
+        repro_hcr_outcome_word(reason), reason_esc, path_esc,
         generation, reason_esc, detail_esc);
     if (written <= 0 || (size_t)written >= 4096) {
       free(json);
@@ -2338,12 +2377,26 @@ static int repro_hcr_handle_source_changed(int fd, const char *body) {
                "the host's sha256 failed its own FIPS self-test");
       goto respond;
     }
+#if defined(REPRO_HCR_GDH8_FALSIFY_SKIP_DIGEST_CHECK)
+    /* FALSIFIER ARM (gdh8_digest_mismatch_is_refused_before_anything_is_
+     * touched): compute the digest, report it, and DO NOT COMPARE IT. This is
+     * the shape that matters — the transcript still carries a `snapshotDigest`
+     * and an `appliedDigest`, so the bytes LOOK verified, and the host applies
+     * content nobody checked.
+     *
+     * The gate must go red by observing the wrong version's tokens in stdout,
+     * i.e. by the engine having reloaded, and not merely by the absence of an
+     * error message: an arm that only deleted the error string would still be
+     * killed by a harness that read the reply, which is the weaker test. */
+    (void)colon;
+#else
     if (strcmp(colon + 1, recomputed) != 0) {
       refusal = REPRO_HCR_RELOAD_REASON_DIGEST_MISMATCH;
       snprintf(detail, sizeof(detail), "expected %s, the bytes hash to sha256:%s",
                snapshot_digest, recomputed);
       goto respond;
     }
+#endif
     snprintf(tagged, sizeof(tagged), "sha256:%s", recomputed);
   }
 
@@ -2429,7 +2482,7 @@ static int repro_hcr_handle_source_changed(int fd, const char *body) {
 respond:
   json = repro_hcr_source_reload_result_json(
       reload_id, source_path == NULL ? "" : source_path, generation,
-      refusal == NULL ? &outcome : NULL, refusal);
+      refusal == NULL ? &outcome : NULL, refusal, detail);
   if (json != NULL) {
     rc = repro_hcr_send_json(fd, json);
     free(json);

@@ -117,6 +117,33 @@ typedef struct repro_hcr_source_changed_file {
 #define REPRO_HCR_RELOAD_REASON_LINE_TABLE "line-table-mismatch"
 #define REPRO_HCR_RELOAD_REASON_PARSE_ERROR "parse-error"
 #define REPRO_HCR_RELOAD_REASON_WRITER_REFUSED "writer-refused"
+/*
+ * `writer-refused` MEANS THE TRACE WRITER REFUSED, and nothing else.
+ *
+ * It did not. Before GDH-M8 the GDScript host answered `writer-refused` for six
+ * unrelated conditions — a failed disk open, a path the engine had never
+ * loaded, a reentrant safe point, an occupied queue, an unavailable emit lock,
+ * and a deferral timeout — none of which is a writer refusal, so a gate
+ * asserting `reason == "writer-refused"` was satisfied by any of them. The
+ * three names below split those causes apart. They are additive: no existing
+ * reason changes meaning, and a host that never had the ambiguity keeps
+ * spelling its refusals exactly as it did.
+ */
+#define REPRO_HCR_RELOAD_REASON_SCRIPT_NOT_LOADED "script-not-loaded"
+#define REPRO_HCR_RELOAD_REASON_HOST_BUSY "host-busy"
+#define REPRO_HCR_RELOAD_REASON_NO_SAFE_POINT "no-safe-point"
+/*
+ * The one refusal that is NOT a clean one. Design §8.1: a failure at steps 4-6
+ * — after the trace has committed to the new version and before or during the
+ * engine swap — "is not recoverable by continuing", so the recorder closes the
+ * trace with a recorded reason and the engine continues UNRELOADED. A
+ * coordinator seeing this must expect a degraded session with a coherent
+ * recording, which is a different thing from the clean refusals above: those
+ * leave the session untouched.  The failing STAGE is named in `detail`; the
+ * reason names the consequence, because the consequence is what a coordinator
+ * has to act on and it is the same for all three stages.
+ */
+#define REPRO_HCR_RELOAD_REASON_TRACE_CLOSED "trace-closed"
 #define REPRO_HCR_RELOAD_REASON_ENCODING "unsupported-content-encoding"
 #define REPRO_HCR_RELOAD_REASON_MULTIPLE_FILES "multiple-changed-files-unsupported"
 
