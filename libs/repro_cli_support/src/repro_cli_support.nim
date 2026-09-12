@@ -6494,18 +6494,29 @@ proc runQuotaSocketDiagnostic(): string =
   else:
     "default"
 
-proc buildMaxParallelism(): uint32 =
+proc buildMaxParallelismResolved*(): tuple[value: uint32; source: string] =
+  ## The scheduler's action concurrency, WITH where it came from.
+  ##
+  ## The provenance is not decoration. This setting was invisible, and being
+  ## invisible is what made a derated daemon cost two rounds of instrumented
+  ## measurement to attribute: the build ran every action serially, produced
+  ## byte-identical output, and reported nothing. Whatever the resolution rule
+  ## is, the effective value belongs somewhere a person debugging a slow build
+  ## will actually read it.
   let configured = getEnv("REPROBUILD_MAX_PARALLELISM", "")
   if configured.len == 0:
-    return 8'u32
+    return (value: 8'u32, source: "default")
   try:
     let parsed = parseInt(configured)
     if parsed < 1:
-      return 1'u32
-    uint32(parsed)
+      return (value: 1'u32, source: "REPROBUILD_MAX_PARALLELISM")
+    (value: uint32(parsed), source: "REPROBUILD_MAX_PARALLELISM")
   except ValueError:
     raise newException(ValueError,
       "REPROBUILD_MAX_PARALLELISM must be a positive integer")
+
+proc buildMaxParallelism(): uint32 =
+  buildMaxParallelismResolved().value
 
 proc stablePublicCliPath(): string =
   let configured = getEnv("REPRO_PUBLIC_CLI_PATH")
@@ -8690,7 +8701,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("selectedTarget: " & parsedTarget.selectedActionId)
     elif effectiveSelectDefaultAction and selectedActionId.len > 0:
       logSummary("selectedTarget: " & selectedActionId)
-    logSummary("scheduler: actions=" & $lowered.actions.len)
+    let resolvedParallelism = buildMaxParallelismResolved()
+    logSummary("scheduler: actions=" & $lowered.actions.len &
+      " parallelism=" & $resolvedParallelism.value &
+      " (" & resolvedParallelism.source & ")")
     if lowered.actions.len == 0:
       return 0
     var engineConfig = BuildEngineConfig(
@@ -10121,7 +10135,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("selectedTarget: " & parsedTarget.selectedActionId)
     elif effectiveSelectDefaultAction and selectedActionId.len > 0:
       logSummary("selectedTarget: " & selectedActionId)
-    logSummary("scheduler: actions=" & $lowered.actions.len)
+    let resolvedParallelism = buildMaxParallelismResolved()
+    logSummary("scheduler: actions=" & $lowered.actions.len &
+      " parallelism=" & $resolvedParallelism.value &
+      " (" & resolvedParallelism.source & ")")
     if lowered.actions.len == 0:
       result.exitCode = 0
       return
@@ -16325,6 +16342,82 @@ proc daemonCarriedEnvironment*(): seq[string] =
     seen.incl(key)
     result.add(key & "=" & value)
   result = sanitizeUserDaemonRequestEnvironment(result)
+
+const DaemonRequestAuthoritativeEnvPrefixes* = ["REPROBUILD_", "REPRO_"]
+  ## Reprobuild's own control namespace, over which a build REQUEST is
+  ## authoritative and the daemon's start environment is not.
+
+proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
+                            currentEnv: openArray[string]): seq[string] =
+  ## Variables the daemon process carries that the REQUEST does not, limited
+  ## to reprobuild's own control namespace. The worker must unset these before
+  ## running a hosted build.
+  ##
+  ## Without this the request environment was applied as an OVERLAY: every
+  ## `KEY=VALUE` the client sent was installed, but a variable the daemon had
+  ## and the client did not could not be represented in the request at all, so
+  ## it survived and governed the build. A daemon outlives the shell that
+  ## started it, so one `export` in one terminal silently reconfigured every
+  ## later build of every project, with no diagnostic and byte-identical
+  ## output. `REPROBUILD_MAX_PARALLELISM=1` in a daemon's start environment
+  ## derated an unrelated client's build to serial execution and cost 1.69x on
+  ## a dependency chain; the same hole reaches action fingerprints and cache
+  ## inputs, so the consequence is not only latency.
+  ##
+  ## Scoped to the prefixes rather than the whole environment because a
+  ## request cannot distinguish "the client had no PATH" from "PATH was not
+  ## forwarded", and clearing the ambient environment of a build is a much
+  ## larger claim than making reprobuild's own knobs request-scoped.
+  var carried = initHashSet[string]()
+  for item in requestEnv:
+    let split = item.find('=')
+    if split <= 0:
+      continue
+    carried.incl(item[0 ..< split])
+  for item in currentEnv:
+    let split = item.find('=')
+    if split <= 0:
+      continue
+    let key = item[0 ..< split]
+    if carried.contains(key):
+      continue
+    for prefix in DaemonRequestAuthoritativeEnvPrefixes:
+      if key.startsWith(prefix):
+        result.add(key)
+        break
+
+proc currentEnvironmentPairs*(): seq[string] =
+  for key, value in envPairs():
+    result.add(key & "=" & value)
+
+proc applyDaemonRequestEnvironment*(requestEnv: openArray[string]):
+    seq[tuple[key: string; value: string; present: bool]] =
+  ## Install a request's environment for the duration of one hosted session
+  ## and return the restore list, newest first is not required because every
+  ## entry names a distinct variable.
+  ##
+  ## The one funnel both the build and watch executors use, so the two cannot
+  ## drift: a hole fixed for builds but not for watch cycles would reappear on
+  ## the next `repro watch` that spawns the same actions.
+  for name in daemonWorkerEnvUnsets(requestEnv, currentEnvironmentPairs()):
+    result.add((key: name, value: getEnv(name), present: existsEnv(name)))
+    delEnv(name)
+  for item in requestEnv:
+    let split = item.find('=')
+    if split < 0:
+      continue
+    let key = item[0 ..< split]
+    let value = item[split + 1 .. ^1]
+    result.add((key: key, value: getEnv(key), present: existsEnv(key)))
+    putEnv(key, value)
+
+proc restoreDaemonRequestEnvironment*(
+    saved: openArray[tuple[key: string; value: string; present: bool]]) =
+  for item in saved:
+    if item.present:
+      putEnv(item.key, item.value)
+    else:
+      delEnv(item.key)
 
 const StandardRunquotadPoolCaps* = [
   ("compile", 8'u32),
@@ -27679,13 +27772,10 @@ proc installUserDaemonBuildPrewarmer() =
       # Defense in depth for direct/in-process callers that bypass protocol
       # serialization. Never install the runner-private ownership marker in
       # the build prewarmer's live environment.
-      for item in sanitizeUserDaemonRequestEnvironment(request.environment):
-        let split = item.find('=')
-        if split < 0:
-          continue
-        let key = item[0 ..< split]
-        let value = item[split + 1 .. ^1]
-        setRestorableEnv(key, value)
+      # Same funnel as the build and watch executors, so a re-enabled
+      # prewarm cannot reintroduce the overlay hole they no longer have.
+      previousEnv.add(applyDaemonRequestEnvironment(
+        sanitizeUserDaemonRequestEnvironment(request.environment)))
       # Prewarm is a daemon-internal cache-warming pass, not user-scheduled
       # work, so it must NOT contend for RunQuota leases. Forcing the documented
       # full-bypass switch makes the nested provider-compile `runBuild` here run
@@ -27716,11 +27806,7 @@ proc installUserDaemonBuildPrewarmer() =
         setCurrentDir(previousCwd)
       except CatchableError:
         discard
-      for item in previousEnv:
-        if item.present:
-          putEnv(item.key, item.value)
-        else:
-          delEnv(item.key))
+      restoreDaemonRequestEnvironment(previousEnv))
 
 proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
@@ -27732,14 +27818,12 @@ proc installUserDaemonBuildExecutor() =
       # Defense in depth for direct/in-process callers that bypass protocol
       # serialization. The executor environment feeds action fingerprints,
       # cache inputs, and every exec'd action child.
-      for item in sanitizeUserDaemonRequestEnvironment(request.environment):
-        let split = item.find('=')
-        if split < 0:
-          continue
-        let key = item[0 ..< split]
-        let value = item[split + 1 .. ^1]
-        previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
-        putEnv(key, value)
+      #
+      # The request is AUTHORITATIVE over reprobuild's own namespace, not
+      # merely overlaid on it -- see `daemonWorkerEnvUnsets` for what an
+      # overlay let through and what it cost.
+      previousEnv.add(applyDaemonRequestEnvironment(
+        sanitizeUserDaemonRequestEnvironment(request.environment)))
       previousEnv.add((key: ProviderNimcacheSessionEnv,
         value: getEnv(ProviderNimcacheSessionEnv),
         present: existsEnv(ProviderNimcacheSessionEnv)))
@@ -27803,11 +27887,7 @@ proc installUserDaemonBuildExecutor() =
         setCurrentDir(previousCwd)
       except CatchableError:
         discard
-      for item in previousEnv:
-        if item.present:
-          putEnv(item.key, item.value)
-        else:
-          delEnv(item.key))
+      restoreDaemonRequestEnvironment(previousEnv))
 
 proc installUserDaemonWatchExecutor() =
   setUserDaemonWatchExecutor(proc(request: UserDaemonWatchRequest;
@@ -27817,15 +27897,10 @@ proc installUserDaemonWatchExecutor() =
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
       # Match the build executor: watch cycles may spawn the same actions and
-      # must enforce the same private-environment boundary.
-      for item in sanitizeUserDaemonRequestEnvironment(request.environment):
-        let split = item.find('=')
-        if split < 0:
-          continue
-        let key = item[0 ..< split]
-        let value = item[split + 1 .. ^1]
-        previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
-        putEnv(key, value)
+      # must enforce the same private-environment boundary, including the
+      # request's authority over reprobuild's own namespace.
+      previousEnv.add(applyDaemonRequestEnvironment(
+        sanitizeUserDaemonRequestEnvironment(request.environment)))
       if request.workingDir.len > 0:
         setCurrentDir(request.workingDir)
       let cliPath =
@@ -27884,11 +27959,7 @@ proc installUserDaemonWatchExecutor() =
         setCurrentDir(previousCwd)
       except CatchableError:
         discard
-      for item in previousEnv:
-        if item.present:
-          putEnv(item.key, item.value)
-        else:
-          delEnv(item.key))
+      restoreDaemonRequestEnvironment(previousEnv))
 
 # ---- M9: `repro workspace init` -------------------------------------------
 #
