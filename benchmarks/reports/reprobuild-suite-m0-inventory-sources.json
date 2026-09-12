@@ -6546,7 +6546,8 @@
         "repro_binary_cache_server",
         "repro_build_engine",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
@@ -6619,7 +6620,8 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
@@ -9528,7 +9530,8 @@
         "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
-        "repro_home_intent"
+        "repro_home_intent",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -13026,7 +13029,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13688,7 +13691,8 @@
       ],
       "language": "nim",
       "localDependencyShape": [
-        "repro_standard_provider"
+        "repro_standard_provider",
+        "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
       "requiresReproBinary": false,

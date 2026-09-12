@@ -142,48 +142,26 @@ suite "project DSL build action payload":
     # cursor eight bytes short and misparse EVERY field after the policy —
     # target names, typed outputs, env, the cwd declaration — rather than fail.
     # So this pins that a v24 record on disk is still read correctly.
+    #
+    # The image comes from the real encoder running at v24. It used to be
+    # spliced together instead: find the depfile path in a current-version
+    # image, swap v25's ``suppressMonitorShimSeed`` byte for v24's two fields,
+    # rewrite the header. That handled the one MID-PAYLOAD difference it knew
+    # about and silently kept every LATER one — v26 appends the entropy
+    # blessing after the policy — so the splice carried five bytes no v24
+    # reader consumes and died on the decoder's trailing-bytes check. Asking
+    # the encoder for a v24 image cannot go stale that way: its gates and the
+    # decoder's are the same list, in the same file.
     let probe = "deps/v24-probe.d"
-    var encoded = encodeBuildActionPayload(
-      sampleAction(makeDepfilePolicy(probe)))
-
-    # Locate the policy's ``depfiles`` entry: its 4-byte length prefix
-    # followed by the path bytes. Unique in this payload — the sample action
-    # carries no legacy ``depfile`` and no argument with this value.
-    var probeBytes: seq[byte] = @[]
-    probeBytes.writeString(probe)
-    var found = -1
-    for start in 0 .. encoded.len - probeBytes.len:
-      var matches = true
-      for i in 0 ..< probeBytes.len:
-        if encoded[start + i] != probeBytes[i]:
-          matches = false
-          break
-      if matches:
-        check found == -1
-        found = start
-    check found >= 0
-
-    # After the path: the 4-byte ``ignoredInputPrefixes`` count, then the
-    # single v25 ``suppressMonitorShimSeed`` byte. Swap that byte for v24's
-    # empty input seq + empty reason string.
-    let flagAt = found + probeBytes.len + 4
-    check encoded[flagAt] == 0'u8
-    var legacyTail: seq[byte] = @[]
-    legacyTail.writeStringSeq([])
-    legacyTail.writeString("")
-    var v24: seq[byte] = @[]
-    for i in 0 ..< flagAt:
-      v24.add(encoded[i])
-    v24.add(legacyTail)
-    for i in flagAt + 1 ..< encoded.len:
-      v24.add(encoded[i])
-    # Header: version word at offset 4, payload length at offset 6.
-    v24[4] = 24'u8
-    v24[5] = 0'u8
-    var lengthBytes: seq[byte] = @[]
-    lengthBytes.writeU32Le(uint32(v24.len - 10))
-    for i in 0 ..< 4:
-      v24[6 + i] = lengthBytes[i]
+    let v24 = encodeBuildActionPayloadAtVersion(
+      sampleAction(makeDepfilePolicy(probe)), 24'u16)
+    check v24[4] == 24'u8
+    check v24[5] == 0'u8
+    # The v24 image really carries the two removed trusted-inputs fields: it
+    # is longer than a v25 one, which replaced them with a single byte, by
+    # exactly (u32 empty seq + u32 empty string) - 1.
+    check v24.len - encodeBuildActionPayloadAtVersion(
+      sampleAction(makeDepfilePolicy(probe)), 25'u16).len == 4 + 4 - 1
 
     let decoded = decodeBuildActionPayload(v24)
     check decoded.id == "compile"

@@ -41,6 +41,7 @@
 
 import std/[os, strutils, tables, unittest]
 from repro_core/paths import extendedPath
+from repro_test_support import testCaseScratchSlug
 
 import repro_home_intent
 import repro_home_apply/plan
@@ -48,7 +49,24 @@ import repro_home_apply/realize
 import repro_home_apply/package_catalog
 import repro_dsl_stdlib/packages_schema
 
-const FixtureRoot = "build/test-tmp/t-m25-adapter-pref-plumbed"
+# Per-case private scratch — the cases of one binary run as CONCURRENT
+# PROCESSES (``<binary> --run "<suite>::<case>"``, one process each), so a
+# fixed path here is shared mutable state between them. The concrete hazard
+# in this file: four cases call ``resetDir(FixtureRoot)``, which RECURSIVELY
+# deletes the whole tree, while ``test_m25_apply_plan_*`` write
+# ``FixtureRoot/apply-plan-*/home.nim`` and then read it back through
+# ``loadProfile``. A reset landing inside that write-then-read span removes
+# the profile the other case is about to load. Same treatment its sibling
+# ``t_adapter_chain`` already carries.
+#
+# UNLIKE the other three files fixed alongside this one, this hazard was NOT
+# reproduced: 65 runs of this binary under the per-case runner (40 at
+# ``--threads=12``, 25 more at ``--threads=16`` under 32 CPU spinners) came
+# back clean, because the vulnerable span is a few milliseconds wide. The
+# change is therefore prophylactic — justified by the structure above, not by
+# a red run.
+let FixtureRoot = "build/test-tmp/t-m25-adapter-pref-plumbed-" &
+  testCaseScratchSlug()
 
 # ---------------------------------------------------------------------------
 # Helpers
