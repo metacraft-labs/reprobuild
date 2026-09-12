@@ -31143,6 +31143,43 @@ type
     interrupting*: int
     informational*: int
 
+  CoherenceNode* = object
+    ## One participating repo as the coherence diff sees it.
+    ##
+    ## ``path`` is the repo's workspace-RELATIVE declared path, and it is
+    ## relative in the strong sense: it is the key a lock's ``dep.path`` is
+    ## normalized against, the key the manifests-DB claims are looked up by, the
+    ## label the advisory prints, AND (joined onto the workspace root) the
+    ## checkout that is observed. A caller that substitutes an absolute
+    ## directory here does not redirect the observation — it silently removes
+    ## the node from the diff, because `<workspaceRoot>/<absolute path>` names
+    ## nothing and no claim can key to it.
+    ##
+    ## The checkout observed is deliberately the DECLARED one even when the
+    ## caller is a pre-push gate handed some other worktree of the same repo: a
+    ## linked worktree is not a participating checkout, ``sync`` and ``status``
+    ## observe the declared location, and the advisory is specified as the one
+    ## SHARED finding all three commands surface (CLI/check.md §Notes,
+    ## CLI/workspace.md §`status`, CLI/sync.md §"Lock coherence").
+    ##
+    ## ``claimsOnly`` separates the two things a participating repo contributes,
+    ## because the pre-push gate needs exactly one of them and not the other. A
+    ## repo outside the pushed repo's dependency closure is OUT OF SCOPE for the
+    ## gate (Workspace-And-Develop-Mode.md §"VCS Hook Integration": "an
+    ## unrelated dirty repo elsewhere in the workspace MUST NOT block a push of
+    ## `R`"), so it is never reported as a node and never observed with a git
+    ## query. Its committed ``repro.lock`` is still READ, because a claim that
+    ## lock makes about an IN-SCOPE node is evidence about that node — and
+    ## "two locks claiming different revisions for one node is always reported"
+    ## (CLI/README.md §"Lock Coherence") is precisely the finding that no single
+    ## lock can produce on its own. Dropping those sources would make ``check``
+    ## report a DIFFERENT advisory from ``sync`` and ``status`` for the same
+    ## workspace, which is the opposite of the shared advisory the three
+    ## commands are specified to surface.
+    name*: string
+    path*: string
+    claimsOnly*: bool
+
 proc relationTag*(r: CoherenceRelation): string = $r
 
 proc sameRevision(a, b: string): bool =
@@ -31214,7 +31251,7 @@ proc coherenceRemedies(finding: CoherenceFinding): seq[string] =
 
 proc collectLockCoherence*(identity: GitToolIdentity;
                            workspaceRoot: string;
-                           repos: openArray[ResolvedRepo];
+                           repos: openArray[CoherenceNode];
                            recordStoreRoot, project: string):
                           CoherenceReport =
   ## The one shared read-only implementation behind ``sync`` / ``status`` /
@@ -31274,6 +31311,11 @@ proc collectLockCoherence*(identity: GitToolIdentity;
         source: (repo.path & "/" & CommittedLockFileName).replace('\\', '/')))
 
   for repo in repos:
+    # A claims-only repo contributed its lock above and nothing else: it is out
+    # of the caller's reporting scope, so it is neither reported nor observed
+    # (no git query runs against its checkout).
+    if repo.claimsOnly:
+      continue
     let repoAbs = workspaceRoot / repo.path
     var claims: seq[LockClaim]
     if repo.path in dbClaims:
@@ -31340,17 +31382,27 @@ proc resolveCoherenceLayerRoot(workspaceRoot, project: string): string =
 
 proc lockCoherenceFor*(identity: GitToolIdentity;
                        workspaceRoot, project: string;
-                       repos: openArray[tuple[name, path: string]]):
-                      CoherenceReport =
+                       repos: openArray[CoherenceNode]): CoherenceReport =
   ## The call shape the three host commands use. They each already know their
   ## participating repo set from their own report, so nothing is re-resolved
   ## just to run the check.
-  var resolved: seq[ResolvedRepo]
+  var nodes: seq[CoherenceNode]
   for repo in repos:
     if repo.path.len == 0: continue
-    resolved.add(ResolvedRepo(name: repo.name, path: repo.path))
-  collectLockCoherence(identity, workspaceRoot, resolved,
+    nodes.add(repo)
+  collectLockCoherence(identity, workspaceRoot, nodes,
     resolveCoherenceLayerRoot(workspaceRoot, project), project)
+
+proc lockCoherenceFor*(identity: GitToolIdentity;
+                       workspaceRoot, project: string;
+                       repos: openArray[tuple[name, path: string]]):
+                      CoherenceReport =
+  ## Convenience shape for callers whose participating repos are all at their
+  ## declared workspace-relative locations (``sync`` and ``status``).
+  var nodes: seq[CoherenceNode]
+  for repo in repos:
+    nodes.add(CoherenceNode(name: repo.name, path: repo.path))
+  lockCoherenceFor(identity, workspaceRoot, project, nodes)
 
 proc coherenceReportToJson*(report: CoherenceReport): JsonNode =
   result = %*{
@@ -45658,8 +45710,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # Build a name-keyed lookup of the pushed checkout before any repository
   # observation. A linked worktree is intentionally outside the declared
   # checkout path, but it still has the same authoritative Git common-dir
-  # identity. Every observer (including the advisory coherence pass) must use
-  # the actual worktree for that repo rather than its sibling primary checkout.
+  # identity. Every GATE stage must therefore observe the actual worktree for
+  # that repo rather than its sibling primary checkout — that is what is being
+  # pushed. The advisory coherence pass is deliberately NOT one of those
+  # observers: it is the shared workspace-level diff that `sync` and `status`
+  # also print, so it reads the DECLARED checkouts and would otherwise report a
+  # different answer than they do for the same workspace.
   var currentRepoPath = ""
   var currentRepoName = ""
   var currentRepoMatch: RepoWorktreeMatch
@@ -45851,17 +45907,26 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # inspected merely because they share an ambient workspace. Membership and
   # manifest-layer pushes retain their purpose-built scopes above.
   try:
-    var pairs: seq[tuple[name, path: string]]
+    var nodes: seq[CoherenceNode]
     for repo in resolved.repos:
-      if not repoInScope(repo.name):
-        continue
-      pairs.add((repo.name,
-        if repo.name == currentRepoName and parsed.currentRepo.len > 0:
-          parsed.currentRepo
-        else:
-          repo.path))
+      # Every node keeps its DECLARED workspace-relative path. Substituting
+      # ``parsed.currentRepo`` (absolute) here does not redirect the advisory to
+      # the pushed worktree — `<workspaceRoot>/<absolute path>` names nothing,
+      # so the repo's own committed lock is never read, no claim keys to it, and
+      # the finding disappears from `notices` entirely. That is the defect
+      # `t_lock_coherence_reports_the_diff_advisory_only` catches; observing the
+      # declared checkout is also what keeps this advisory identical to the one
+      # `sync` and `status` print for the same workspace.
+      #
+      # Out-of-scope repos are carried as CLAIMS-ONLY rather than dropped: they
+      # are never reported and never observed, but a lock of theirs that claims
+      # a revision for an IN-scope node is evidence about that node, and the
+      # "these locks contradict EACH OTHER" finding exists only when two locks
+      # are compared against one another.
+      nodes.add(CoherenceNode(name: repo.name, path: repo.path,
+        claimsOnly: not repoInScope(repo.name)))
     for line in renderCoherenceTextLines(lockCoherenceFor(identity,
-        parsed.workspaceRoot, resolved.projectName, pairs)):
+        parsed.workspaceRoot, resolved.projectName, nodes)):
       result.notices.add(line)
   except CatchableError:
     # An advisory diff must never be able to fail a gate run.
