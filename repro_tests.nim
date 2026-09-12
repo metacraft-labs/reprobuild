@@ -1683,6 +1683,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim",
+    binary: "build/test-bin/t_shell_entropy_is_not_blessed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim",
     binary: "build/test-bin/t_smoke_expand_archive",
     defines: @[],

@@ -193,6 +193,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
+libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim	nim	39
 libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7

@@ -1,6 +1,16 @@
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 
+## PROVISIONING ONLY -- there is no `executable bash:` / `cli:` block here,
+## so `bash` names no build edge and carries no dependency or non-determinism
+## policy. This matters when a `bash <script>` edge turns out to be
+## uncacheable and the instinct is to write `nonDeterminism entropyBlessed`
+## in this file: such a declaration would have nowhere to attach and would
+## reach no edge. The tool identity of a `bash <script>` edge is `sh`, via
+## `sh.nim`'s `shell()`, and the argument for leaving it UNBLESSED -- with
+## the io-mon measurement it rests on -- is written out there and guarded by
+## `tests/t_shell_entropy_is_not_blessed.nim`.
+
 package bash:
   provisioning:
     nixPackage "nixpkgs#bash", executablePath = "bin/bash",
