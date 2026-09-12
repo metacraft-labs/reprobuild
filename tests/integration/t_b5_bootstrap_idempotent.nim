@@ -14,9 +14,18 @@
 ## developer's pre-built ``./build/bin/repro``:
 ##
 ##   1. STRUCTURAL: assert the Justfile contains a ``bootstrap:``
-##      recipe whose body has the ``if [ ! -x ./build/bin/repro ]``
-##      guard. This catches a regression where someone removes the
-##      idempotency guard.
+##      recipe whose body consults the idempotency guard before
+##      rebuilding. This catches a regression where someone removes the
+##      guard. The guard used to be the inline test
+##      ``if [ ! -x ./build/bin/repro ]``; it now lives in
+##      ``scripts/bootstrap_guard.sh`` (the Justfile says why: the
+##      inline form named the LINUX artefact on every platform, so on
+##      Windows — where ``build/`` is shared with a WSL checkout of the
+##      same tree — it tested the wrong file for existence and compared
+##      source freshness against the wrong file's mtime). The recipe
+##      branches on the script's ``decide`` verdict, so THAT is what
+##      this arm pins now. The script's own behaviour has its own gate,
+##      ``t_bootstrap_guard_names_the_host_artefact.nim``.
 ##
 ##   2. BEHAVIOURAL: when ``./build/bin/repro`` exists, invoke ``just
 ##      bootstrap`` and assert the output reports the skip-path AND the
@@ -62,9 +71,15 @@ suite "Bootstrap-And-Self-Build B5: just bootstrap is idempotent":
 
     # The recipe header.
     check "\nbootstrap:" in text
-    # The idempotency guard — the recipe must check whether the binary
-    # already exists before rebuilding.
-    check "if [ ! -x ./build/bin/repro ]" in text
+    # The idempotency guard — the recipe must consult it before
+    # rebuilding, and must branch on the verdict rather than always
+    # taking the bootstrap arm. The guard moved out of the recipe body
+    # into scripts/bootstrap_guard.sh so it could name the HOST
+    # artefact (see this file's header and the Justfile's own comment);
+    # asking for the old inline ``if [ ! -x ./build/bin/repro ]`` text
+    # would now fail on a Justfile that is strictly more correct.
+    check "bootstrap_guard.sh decide" in text
+    check "bootstrap*)" in text
     # Must reference the underlying build_apps.sh (the bootstrap path
     # is the same code path B1's apps collection wraps).
     check "scripts/build_apps.sh" in text
@@ -83,7 +98,27 @@ suite "Bootstrap-And-Self-Build B5: just bootstrap is idempotent":
         "this test.")
       skip()
     else:
-      # Capture mtime before invoking bootstrap.
+      # Establish the precondition this case depends on, rather than hoping
+      # for it. The guard skips when the artefact is present, of this host's
+      # machine format, AND newer than the sources it reads — so "the binary
+      # exists" is not on its own a reason to expect a no-op. Any source edit
+      # since the last build legitimately makes the next `just bootstrap`
+      # rebuild, and asserting a no-op then tests nothing but whether someone
+      # happened to build recently. That is how this case reads green on a
+      # freshly built tree and red minutes later on the same commit.
+      #
+      # Idempotency is what the name claims, so prove it the way idempotency
+      # is proven: run it once to reach the settled state, then assert that
+      # running it AGAIN changes nothing. The first call is setup, and its
+      # cost is the rebuild the tree needed anyway.
+      let (seedOutput, seedExit) = execCmdEx("just bootstrap",
+        workingDir = repoRoot)
+      checkpoint("seeding invocation exit=" & $seedExit)
+      if seedExit != 0:
+        checkpoint(seedOutput)
+      check seedExit == 0
+
+      # Capture mtime before the invocation under test.
       let beforeMtime = getLastModificationTime(reproBin)
 
       # Run ``just bootstrap`` from the repo root.

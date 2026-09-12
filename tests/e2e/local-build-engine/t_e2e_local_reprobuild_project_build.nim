@@ -1290,8 +1290,19 @@ suite "e2e_local_reprobuild_project_build":
         "libs/repro_binary_cache_server/src",
         "libs/repro_core/src",
         # ``repro_project_dsl`` re-exports ``install_mirror_resolver``, which
-        # uses the local store's prefix-path helpers.
+        # uses the local store's prefix-path helpers and, since "Reject
+        # foreign source realizations", ``repro_platform``'s ``currentHost``
+        # to name the host a mirror was realized for. This list is
+        # hand-maintained, so an import added to anything in
+        # ``repro_project_dsl``'s closure has to be added here too —
+        # otherwise the arm below stops testing what it says it tests: the
+        # check fails with "cannot open file:" long before it can reach the
+        # ``m46Tool`` identifier this case is about.
         "libs/repro_local_store/src",
+        "libs/repro_platform/src",
+        # ``repro_project_dsl`` also re-exports ``repro_lock_files`` (and
+        # its ``ct_registry``) since "The DSL surface for named lock files".
+        "libs/repro_lock_files/src",
         "libs/blake3/src",
         "libs/nimcrypto",
         "libs/nim-faststreams/src",

@@ -1041,8 +1041,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 699,
-      "platform/destructive": 112,
+      "integration": 698,
+      "platform/destructive": 113,
       "pure unit": 559,
       "unclassified": 162
     },
@@ -21809,8 +21809,8 @@
     },
     {
       "binary": "build/test-bin/t_b5_bootstrap_idempotent",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [],

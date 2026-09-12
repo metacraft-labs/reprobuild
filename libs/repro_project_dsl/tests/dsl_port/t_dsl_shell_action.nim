@@ -114,8 +114,54 @@ suite "DSL-port M9.N Batch C.1 — shell() action registry":
       check r.outputs == emptyStrSeq
 
   test "custom shell actions inherit unique declared dependency identities":
-    check dslPortCustomShellToolIdentityRefs("shellActionPkg") ==
-      @["sh", "gcc", "pkg-config", "zlib"]
+    # This used to pin the whole seq to ``@["sh", "gcc", "pkg-config",
+    # "zlib"]``. That pin is no longer expressible as one literal, for
+    # two independent reasons, and neither is a regression:
+    #
+    #   * ``dslPortCustomShellToolIdentityRefs`` seeds the interpreter
+    #     identity plus the core utilities every generated shell action
+    #     runs, and it reads ``registeredNativeBuildDeps``, which is
+    #     documented (dsl_port_runtime.nim) as "the COMPLETE build-time
+    #     tool set: the recipe's own ``nativeBuildDeps:`` entries plus
+    #     whatever reprobuild's fetch and install-mirror emitters need in
+    #     order to run their generated scripts". Those emitters declare
+    #     their commands on purpose — install_mirror_resolver.nim: "Keep
+    #     these explicit so sealed action profiles never depend on
+    #     ambient PATH".
+    #   * That generated set is platform-conditional
+    #     (``typedInstallMirrorShellTools`` adds eleven more names under
+    #     ``when defined(linux)``), so any exact literal here would be
+    #     green on one host and red on another — the failure mode that
+    #     got the M2 env migration test retired.
+    #
+    # So this case pins what its NAME claims and what no other case
+    # covers: identities are inherited from both dep blocks, deduped,
+    # and stripped of their version constraints. The recipe above
+    # declares ``gcc`` twice (different constraints) and ``pkg-config``
+    # in both blocks precisely so those two collapses are observable.
+    let refs = dslPortCustomShellToolIdentityRefs("shellActionPkg")
+
+    # The shell stays the command interpreter identity.
+    check refs.len > 0
+    check refs[0] == "sh"
+
+    # Every declared dependency is inherited, by bare name.
+    for dep in ["gcc", "pkg-config", "zlib"]:
+      check dep in refs
+
+    # Constraints never survive into an identity ref.
+    for r in refs:
+      check ' ' notin r
+      check '>' notin r
+      check '<' notin r
+      check '=' notin r
+
+    # Unique: ``gcc`` (declared twice) and ``pkg-config`` (declared in
+    # both blocks) each appear once, and so does everything else.
+    var seen: seq[string] = @[]
+    for r in refs:
+      check r notin seen
+      seen.add(r)
 
   test "registry is empty for packages that never called shell()":
     let rows = registeredShellActions("noSuchPackage")
